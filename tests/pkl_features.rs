@@ -672,6 +672,48 @@ fn map_function() {
     assert_eq!(json["x"]["b"], 2);
 }
 
+#[test]
+fn new_mapping_with_generic_params() {
+    let json = eval(
+        r#"
+x = new Mapping<String, String> {
+    ["a"] = "hello"
+    ["b"] = "world"
+}
+"#,
+    );
+    assert_eq!(json["x"]["a"], "hello");
+    assert_eq!(json["x"]["b"], "world");
+}
+
+#[test]
+fn new_listing_with_generic_params() {
+    let json = eval(
+        r#"
+x = new Listing<String> {
+    "a"
+    "b"
+    "c"
+}
+"#,
+    );
+    assert_eq!(json["x"], serde_json::json!(["a", "b", "c"]));
+}
+
+#[test]
+fn new_mapping_nested_generic_params() {
+    let json = eval(
+        r#"
+x = new Mapping<String, Mapping<String, Int>> {
+    ["outer"] = new Mapping<String, Int> {
+        ["inner"] = 42
+    }
+}
+"#,
+    );
+    assert_eq!(json["x"]["outer"]["inner"], 42);
+}
+
 // ============================================================
 // Spread operator
 // ============================================================
