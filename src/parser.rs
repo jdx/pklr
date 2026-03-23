@@ -241,11 +241,84 @@ impl<'a> Parser<'a> {
         matches!(self.peek(), TokenKind::Eof)
     }
 
+    /// Skip annotation blocks: `@Ident` or `@Ident { ... }`
+    fn skip_annotations(&mut self) {
+        while matches!(self.peek(), TokenKind::At) {
+            self.advance(); // @
+            // Skip ident (and optional dotted path)
+            while matches!(self.peek(), TokenKind::Ident(_)) {
+                self.advance();
+                if matches!(self.peek(), TokenKind::Dot) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            // Skip annotation body if present
+            if matches!(self.peek(), TokenKind::LBrace) {
+                self.advance();
+                let mut depth = 1;
+                while depth > 0 && !self.at_eof() {
+                    match self.peek() {
+                        TokenKind::LBrace => {
+                            depth += 1;
+                            self.advance();
+                        }
+                        TokenKind::RBrace => {
+                            depth -= 1;
+                            self.advance();
+                        }
+                        _ => {
+                            self.advance();
+                        }
+                    }
+                }
+            }
+            // Skip annotation arguments if present
+            if matches!(self.peek(), TokenKind::LParen) {
+                self.advance();
+                let mut depth = 1;
+                while depth > 0 && !self.at_eof() {
+                    match self.peek() {
+                        TokenKind::LParen => {
+                            depth += 1;
+                            self.advance();
+                        }
+                        TokenKind::RParen => {
+                            depth -= 1;
+                            self.advance();
+                        }
+                        _ => {
+                            self.advance();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn parse_module(&mut self) -> Result<Module> {
         let mut amends = None;
         let mut imports = Vec::new();
 
-        // Parse header: amends + imports (can be interleaved)
+        // Skip annotations at module level (e.g. @ModuleInfo)
+        self.skip_annotations();
+
+        // Parse header: module declaration, amends, imports
+        // Skip `module <name>` declaration if present
+        if matches!(self.peek(), TokenKind::KwModule) {
+            self.advance();
+            // Skip module name (may be dotted like `hk.Config`)
+            while matches!(self.peek(), TokenKind::Ident(_)) {
+                self.advance();
+                if matches!(self.peek(), TokenKind::Dot) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+        }
+
         loop {
             match self.peek().clone() {
                 TokenKind::KwAmends => {
@@ -279,10 +352,75 @@ impl<'a> Parser<'a> {
     fn parse_entries(&mut self) -> Result<Vec<Entry>> {
         let mut entries = Vec::new();
         while !self.at_eof() && !matches!(self.peek(), TokenKind::RBrace) {
+            self.skip_annotations();
+            // Skip class/typealias/function declarations at top level
+            if matches!(
+                self.peek(),
+                TokenKind::KwClass | TokenKind::KwTypeAlias | TokenKind::KwFunction
+            ) {
+                self.skip_declaration();
+                continue;
+            }
+            if self.at_eof() || matches!(self.peek(), TokenKind::RBrace) {
+                break;
+            }
             let entry = self.parse_entry()?;
             entries.push(entry);
         }
         Ok(entries)
+    }
+
+    /// Skip a class, typealias, or function declaration.
+    fn skip_declaration(&mut self) {
+        self.advance(); // class/typealias/function keyword
+        // Skip until we find a balanced { } or = expr or next entry
+        let mut depth = 0;
+        loop {
+            if self.at_eof() {
+                break;
+            }
+            match self.peek() {
+                TokenKind::LBrace => {
+                    depth += 1;
+                    self.advance();
+                }
+                TokenKind::RBrace if depth > 0 => {
+                    depth -= 1;
+                    self.advance();
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                TokenKind::RBrace => break, // don't consume — belongs to parent
+                _ if depth == 0 => {
+                    // At top level of declaration: look for start of next entry
+                    // A declaration ends before annotations, keywords, or identifiers
+                    // that start new entries
+                    let next = self.peek().clone();
+                    if matches!(
+                        next,
+                        TokenKind::At
+                            | TokenKind::KwClass
+                            | TokenKind::KwTypeAlias
+                            | TokenKind::KwFunction
+                            | TokenKind::KwLocal
+                            | TokenKind::KwConst
+                            | TokenKind::KwFixed
+                            | TokenKind::KwHidden
+                            | TokenKind::KwAbstract
+                            | TokenKind::KwOpen
+                            | TokenKind::KwExternal
+                            | TokenKind::Ident(_)
+                    ) {
+                        break;
+                    }
+                    self.advance();
+                }
+                _ => {
+                    self.advance();
+                }
+            }
+        }
     }
 
     fn parse_entry(&mut self) -> Result<Entry> {

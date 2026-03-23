@@ -735,7 +735,6 @@ x = new Person {
 // ============================================================
 
 #[test]
-#[ignore = "object amendment syntax not yet implemented"]
 fn object_amendment() {
     let json = eval(
         r#"
@@ -775,4 +774,92 @@ result = x?.name ?? "default"
 "#,
     );
     assert_eq!(json["result"], "default");
+}
+
+// ============================================================
+// Module header
+// ============================================================
+
+#[test]
+fn module_header_skipped() {
+    let json = eval(
+        r#"
+module my.Config
+x = 42
+"#,
+    );
+    assert_eq!(json["x"], 42);
+}
+
+// ============================================================
+// Higher-order methods (map, filter, fold)
+// ============================================================
+
+#[test]
+fn list_map() {
+    let json = eval(
+        r#"
+local items = List(1, 2, 3)
+x = items.map((n) -> n * 2)
+"#,
+    );
+    assert_eq!(json["x"], serde_json::json!([2, 4, 6]));
+}
+
+#[test]
+fn list_filter() {
+    let json = eval(
+        r#"
+local items = List(1, 2, 3, 4, 5)
+x = items.filter((n) -> n > 2)
+"#,
+    );
+    assert_eq!(json["x"], serde_json::json!([3, 4, 5]));
+}
+
+#[test]
+fn list_fold() {
+    let json = eval(
+        r#"
+local items = List(1, 2, 3, 4)
+x = items.fold(0, (acc, n) -> acc + n)
+"#,
+    );
+    assert_eq!(json["x"], 10);
+}
+
+#[test]
+fn list_any_every() {
+    let json = eval(
+        r#"
+local items = List(1, 2, 3)
+has_even = items.any((n) -> n % 2 == 0)
+all_positive = items.every((n) -> n > 0)
+"#,
+    );
+    assert_eq!(json["has_even"], true);
+    assert_eq!(json["all_positive"], true);
+}
+
+#[test]
+fn object_amendment_with_named_property() {
+    let json = eval(
+        r#"
+local base = new Mapping {
+    ["a"] {
+        value = 1
+    }
+}
+x = (base) {
+    ["a"] {
+        value = 2
+    }
+    ["b"] {
+        value = 3
+    }
+}
+"#,
+    );
+    assert_eq!(json["x"]["a"]["value"], 2);
+    assert_eq!(json["x"]["b"]["value"], 3);
 }
