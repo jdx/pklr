@@ -1243,6 +1243,107 @@ data {
     assert_eq!(json["data"]["inner"]["name"], "test-data");
 }
 
+#[test]
+fn this_keyword_basic() {
+    // `this` refers to the current object
+    let json = eval(
+        r#"
+data {
+    x = 1
+    y = this.x + 1
+}
+"#,
+    );
+    assert_eq!(json["data"]["x"], 1);
+    assert_eq!(json["data"]["y"], 2);
+}
+
+#[test]
+fn this_keyword_nested() {
+    // `this` in a nested object refers to the inner object, not the outer
+    let json = eval(
+        r#"
+data {
+    x = 10
+    inner {
+        x = 20
+        y = this.x + 1
+    }
+}
+"#,
+    );
+    assert_eq!(json["data"]["x"], 10);
+    assert_eq!(json["data"]["inner"]["x"], 20);
+    assert_eq!(json["data"]["inner"]["y"], 21);
+}
+
+#[test]
+fn this_keyword_module_level() {
+    // `this` at module level refers to the module object
+    let json = eval(
+        r#"
+x = 42
+y = this.x + 1
+"#,
+    );
+    assert_eq!(json["x"], 42);
+    assert_eq!(json["y"], 43);
+}
+
+#[test]
+fn this_keyword_in_string_interpolation() {
+    let json = eval(
+        r#"
+data {
+    name = "world"
+    greeting = "Hello, \(this.name)!"
+}
+"#,
+    );
+    assert_eq!(json["data"]["greeting"], "Hello, world!");
+}
+
+#[test]
+fn this_keyword_with_hidden_property() {
+    let json = eval(
+        r#"
+data {
+    hidden base = "https://example.com"
+    url = this.base + "/api"
+}
+"#,
+    );
+    // base must not appear in output (hidden)
+    assert!(json["data"].get("base").is_none());
+    // but url must resolve via this.base
+    assert_eq!(json["data"]["url"], "https://example.com/api");
+}
+
+#[test]
+fn this_keyword_hidden_at_module_level() {
+    let json = eval(
+        r#"
+hidden secret = "abc123"
+derived = this.secret + "-derived"
+"#,
+    );
+    assert!(json.get("secret").is_none());
+    assert_eq!(json["derived"], "abc123-derived");
+}
+
+#[test]
+fn module_keyword_at_top_level() {
+    // `module` refers to the top-level module object
+    let json = eval(
+        r#"
+x = 1
+y = module.x + 10
+"#,
+    );
+    assert_eq!(json["x"], 1);
+    assert_eq!(json["y"], 11);
+}
+
 // ============================================================
 // Class definitions
 // ============================================================

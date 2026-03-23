@@ -276,6 +276,12 @@ impl Evaluator {
 
         // Second pass: evaluate non-local entries into output object
         let mut out = base_obj;
+        // all_props includes hidden properties — used for `this`/`module` snapshots
+        let mut all_props = out.clone();
+        // Bind `this` at module level so properties can reference the module object
+        scope.set("this".into(), Value::Object(all_props.clone(), None));
+        // Also bind `module` to the same value
+        scope.set("module".into(), Value::Object(all_props.clone(), None));
         for entry in &module.body {
             if let Entry::Property(prop) = entry {
                 let mods = &prop.modifiers;
@@ -323,9 +329,15 @@ impl Evaluator {
                     }
                     // Always add to scope so other properties can reference it
                     scope.set(prop.name.clone(), v.clone());
+                    // Track in all_props (including hidden) for `this`/`module`
+                    all_props.insert(prop.name.clone(), v.clone());
                     if !has_modifier(mods, Modifier::Hidden) {
                         out.insert(prop.name.clone(), v);
                     }
+                    // Update `this` and `module` with all properties (including hidden)
+                    let snapshot = Value::Object(all_props.clone(), None);
+                    scope.set("this".into(), snapshot.clone());
+                    scope.set("module".into(), snapshot);
                 }
             }
         }
@@ -385,6 +397,10 @@ impl Evaluator {
             .await?;
 
         let mut map: IndexMap<String, Value> = IndexMap::new();
+        // all_props includes hidden properties — used for `this` snapshot
+        let mut all_props: IndexMap<String, Value> = IndexMap::new();
+        // Bind `this` so properties can reference the object being built
+        child_scope.set("this".into(), Value::Object(all_props.clone(), None));
         for entry in entries {
             match entry {
                 Entry::Property(prop) => {
@@ -405,9 +421,12 @@ impl Evaluator {
                     }
                     if let Some(v) = self.eval_property(prop, &child_scope, depth).await? {
                         child_scope.set(prop.name.clone(), v.clone());
+                        all_props.insert(prop.name.clone(), v.clone());
                         if !has_modifier(mods, Modifier::Hidden) {
                             map.insert(prop.name.clone(), v);
                         }
+                        // Update `this` with all properties (including hidden)
+                        child_scope.set("this".into(), Value::Object(all_props.clone(), None));
                     }
                 }
                 Entry::DynProperty(key_expr, val_expr) => {
