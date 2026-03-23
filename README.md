@@ -77,7 +77,7 @@ pklr implements a subset of the [Pkl language](https://pkl-lang.org/main/current
 | `throw(msg)` | Supported |
 | `trace(expr)` | Supported |
 | `read(uri)` / `read?(uri)` | Supported (`file://`, `env:`, `http(s)://`, relative paths) |
-| `is` / `as` type operators | Parsed (type checks not enforced) |
+| `is` / `as` type operators | Supported |
 
 ### Variables & Scope
 
