@@ -85,7 +85,12 @@ pklr implements a subset of the [Pkl language](https://pkl-lang.org/main/current
 |---|---|
 | `local` variables | Supported |
 | Scope chain with parent lookup | Supported |
-| Property modifiers (`const`, `fixed`, `hidden`, `abstract`, `open`, `external`) | Parsed but not enforced |
+| `hidden` modifier (excluded from JSON output) | Supported |
+| `const` modifier (cannot override in amends) | Supported |
+| `abstract` modifier (must be overridden) | Supported |
+| `fixed` modifier (cannot override) | Supported |
+| `external` modifier (must be assigned) | Supported |
+| `open` modifier | Parsed (no-op at eval time) |
 
 ### Modules & Imports
 

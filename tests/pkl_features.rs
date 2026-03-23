@@ -1329,3 +1329,125 @@ fn unicode_escape_empty_braces_errors() {
     let msg = eval_fails(r#"x = "\u{}""#);
     assert!(msg.contains("hex digit"));
 }
+
+// ============================================================
+// Property modifiers
+// ============================================================
+
+#[test]
+fn hidden_not_in_output() {
+    let json = eval(
+        r#"
+hidden secret = "s3cr3t"
+visible = "hello"
+"#,
+    );
+    assert!(json.get("secret").is_none());
+    assert_eq!(json["visible"], "hello");
+}
+
+#[test]
+fn hidden_accessible_by_other_properties() {
+    let json = eval(
+        r#"
+hidden base_url = "https://example.com"
+api_url = base_url + "/api"
+"#,
+    );
+    assert!(json.get("base_url").is_none());
+    assert_eq!(json["api_url"], "https://example.com/api");
+}
+
+#[test]
+fn const_property() {
+    // const properties work normally when not overridden
+    let json = eval(
+        r#"
+const name = "fixed"
+x = name
+"#,
+    );
+    assert_eq!(json["x"], "fixed");
+}
+
+#[test]
+fn abstract_property_with_value() {
+    // abstract property with a value is fine
+    let json = eval(
+        r#"
+class Base {
+    abstract name: String = "default"
+}
+x = new Base {}
+"#,
+    );
+    assert_eq!(json["x"]["name"], "default");
+}
+
+#[test]
+fn fixed_property() {
+    let json = eval(
+        r#"
+fixed version = 1
+x = version
+"#,
+    );
+    assert_eq!(json["x"], 1);
+}
+
+#[test]
+fn hidden_in_nested_object() {
+    let json = eval(
+        r#"
+config {
+    hidden internal = "private"
+    public = "visible"
+}
+"#,
+    );
+    assert!(json["config"].get("internal").is_none());
+    assert_eq!(json["config"]["public"], "visible");
+}
+
+#[test]
+fn fixed_cannot_override() {
+    let json = eval(
+        r#"
+fixed version = 1
+x = version
+"#,
+    );
+    // fixed works fine when not overridden
+    assert_eq!(json["x"], 1);
+}
+
+#[test]
+fn external_requires_value() {
+    let msg = eval_fails(
+        r#"
+external name: String
+x = name
+"#,
+    );
+    assert!(msg.contains("external"));
+    assert!(msg.contains("must be assigned"));
+}
+
+#[tokio::test]
+async fn const_cannot_override_in_amends() {
+    let mut ev = pklr::eval::Evaluator::new();
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    ev.set_base_path(&base);
+    // Create a base file with const property
+    let base_src = r#"const version = 1"#;
+    std::fs::write(base.join("const_base.pkl"), base_src).unwrap();
+    let src = r#"
+amends "const_base.pkl"
+const version = 2
+"#;
+    let path = base.join("test_const_override.pkl");
+    let result = ev.eval_source(src, &path).await;
+    std::fs::remove_file(base.join("const_base.pkl")).ok();
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("const"));
+}
