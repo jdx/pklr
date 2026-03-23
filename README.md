@@ -131,14 +131,14 @@ pklr implements a subset of the [Pkl language](https://pkl-lang.org/main/current
 | Annotations (`@Deprecated`, `@ModuleInfo`, `@Since`, etc.) | Supported (parsed into AST, stored on properties) |
 | `@Deprecated` warnings | Supported (emits warning to stderr) |
 | Class declarations | Parsed and evaluated (defaults extracted) |
-| Type alias declarations | Parsed and skipped |
+| Type alias declarations (`typealias`) | Supported (aliases to classes work as constructors) |
 | Function declarations | Parsed and skipped |
 
 ### Not Yet Supported
 
 The following Pkl features are not currently implemented:
 
-- **Type aliases** and **type constraints** (declarations are skipped)
+- **Type constraints** (parsed but not enforced)
 - **Type annotations** (parsed but not validated)
 - **Member predicates** (`[[...]]`)
 - **Regular expressions** (`Regex`)

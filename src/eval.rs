@@ -340,11 +340,17 @@ impl Evaluator {
                     // Also evaluate the base module's scope (classes, locals) into our scope
                     // by re-processing its body entries
                     for entry in &ext_module.body {
-                        if let Entry::ClassDef(cls_name, parent, body) = entry {
-                            let defaults = self
-                                .eval_class_def(parent.as_deref(), body, &scope, depth)
-                                .await?;
-                            scope.set(cls_name.clone(), defaults);
+                        match entry {
+                            Entry::ClassDef(cls_name, parent, body) => {
+                                let defaults = self
+                                    .eval_class_def(parent.as_deref(), body, &scope, depth)
+                                    .await?;
+                                scope.set(cls_name.clone(), defaults);
+                            }
+                            Entry::TypeAlias(name, ty) => {
+                                self.eval_type_alias(name, ty, &mut scope);
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -380,13 +386,19 @@ impl Evaluator {
                 scope.set(prop.name.clone(), val);
             }
         }
-        // Collect class definitions into module scope (after locals so defaults can reference them)
+        // Collect class definitions and type aliases into module scope
         for entry in &module.body {
-            if let Entry::ClassDef(name, parent, body) = entry {
-                let defaults = self
-                    .eval_class_def(parent.as_deref(), body, &scope, depth)
-                    .await?;
-                scope.set(name.clone(), defaults);
+            match entry {
+                Entry::ClassDef(name, parent, body) => {
+                    let defaults = self
+                        .eval_class_def(parent.as_deref(), body, &scope, depth)
+                        .await?;
+                    scope.set(name.clone(), defaults);
+                }
+                Entry::TypeAlias(name, ty) => {
+                    self.eval_type_alias(name, ty, &mut scope);
+                }
+                _ => {}
             }
         }
 
@@ -500,13 +512,15 @@ impl Evaluator {
                 child_scope.set(prop.name.clone(), val);
             }
         }
-        // Collect class definitions into scope (after locals so defaults can reference them)
+        // Collect class definitions and type aliases into scope
         for entry in entries {
             if let Entry::ClassDef(name, parent, body) = entry {
                 let defaults = self
                     .eval_class_def(parent.as_deref(), body, &child_scope, depth)
                     .await?;
                 child_scope.set(name.clone(), defaults);
+            } else if let Entry::TypeAlias(name, ty) = entry {
+                self.eval_type_alias(name, ty, &mut child_scope);
             }
         }
 
@@ -595,7 +609,7 @@ impl Evaluator {
                     }
                 }
                 Entry::Elem(_) => {} // bare elements only valid in Listing bodies
-                Entry::ClassDef(..) => {} // handled in scope setup
+                Entry::ClassDef(..) | Entry::TypeAlias(..) => {} // handled in scope setup
             }
         }
         let source = ObjectSource {
@@ -668,6 +682,31 @@ impl Evaluator {
             }
         } else {
             Ok(child_defaults)
+        }
+    }
+
+    /// Evaluate a type alias declaration.
+    ///
+    /// If the aliased type is a named type that exists in scope (e.g. a class),
+    /// the alias name is bound to the same value so `new AliasName { ... }` works.
+    fn eval_type_alias(&self, name: &str, ty: &crate::parser::TypeExpr, scope: &mut Scope) {
+        match ty {
+            crate::parser::TypeExpr::Named(target) => {
+                // Alias to a class or another alias already in scope
+                if let Some(val) = scope.get(target) {
+                    scope.set(name.to_string(), val.clone());
+                }
+            }
+            crate::parser::TypeExpr::Nullable(inner) => {
+                // typealias Foo = Bar? -- alias to the inner type
+                if let crate::parser::TypeExpr::Named(target) = inner.as_ref()
+                    && let Some(val) = scope.get(target)
+                {
+                    scope.set(name.to_string(), val.clone());
+                }
+            }
+            // Union types, generics, etc. -- no runtime representation needed
+            _ => {}
         }
     }
 
