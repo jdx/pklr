@@ -300,14 +300,11 @@ impl Evaluator {
                                 Entry::ForGenerator(fgen) => {
                                     let collection =
                                         self.eval_expr(&fgen.collection, scope, depth + 1)?;
-                                    for (_k, v) in collection_to_items(collection) {
+                                    for (k, v) in collection_to_items(collection) {
                                         let mut iter_scope = scope.child();
                                         iter_scope.set(fgen.val_var.clone(), v);
                                         if let Some(key_var) = &fgen.key_var {
-                                            iter_scope.set(
-                                                key_var.clone(),
-                                                Value::Int(items.len() as i64),
-                                            );
+                                            iter_scope.set(key_var.clone(), k);
                                         }
                                         for sub in &fgen.body {
                                             if let Entry::Elem(e) = sub {
@@ -471,7 +468,7 @@ impl Evaluator {
                 .map(|a| self.eval_expr(a, scope, depth + 1))
                 .collect();
             let evaled_args = evaled_args?;
-            if let Some(result) = self.eval_method_call(&obj, method, &evaled_args)? {
+            if let Some(result) = self.eval_method_call(&obj, method, &evaled_args, depth)? {
                 return Ok(result);
             }
         }
@@ -546,28 +543,29 @@ impl Evaluator {
         obj: &Value,
         method: &str,
         args: &[Value],
+        depth: usize,
     ) -> Result<Option<Value>> {
         match (obj, method) {
             // String methods
             (Value::String(s), "contains") => {
-                let arg = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                let arg = require_str_arg(args, 0, "contains")?;
                 Ok(Some(Value::Bool(s.contains(arg))))
             }
             (Value::String(s), "startsWith") => {
-                let arg = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                let arg = require_str_arg(args, 0, "startsWith")?;
                 Ok(Some(Value::Bool(s.starts_with(arg))))
             }
             (Value::String(s), "endsWith") => {
-                let arg = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                let arg = require_str_arg(args, 0, "endsWith")?;
                 Ok(Some(Value::Bool(s.ends_with(arg))))
             }
             (Value::String(s), "replaceAll") => {
-                let from = args.first().and_then(|v| v.as_str()).unwrap_or("");
-                let to = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
+                let from = require_str_arg(args, 0, "replaceAll")?;
+                let to = require_str_arg(args, 1, "replaceAll")?;
                 Ok(Some(Value::String(s.replace(from, to))))
             }
             (Value::String(s), "split") => {
-                let sep = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                let sep = require_str_arg(args, 0, "split")?;
                 Ok(Some(Value::List(
                     s.split(sep).map(|p| Value::String(p.to_string())).collect(),
                 )))
@@ -630,7 +628,7 @@ impl Evaluator {
                 for (param, arg) in params.iter().zip(args.iter()) {
                     call_scope.set(param.clone(), arg.clone());
                 }
-                Ok(Some(self.eval_expr(body, &call_scope, 0)?))
+                Ok(Some(self.eval_expr(body, &call_scope, depth + 1)?))
             }
 
             _ => Ok(None), // not a known method
@@ -786,6 +784,20 @@ impl Scope {
 }
 
 // --- Helpers ---
+
+fn require_str_arg<'a>(args: &'a [Value], idx: usize, method: &str) -> Result<&'a str> {
+    match args.get(idx) {
+        Some(Value::String(s)) => Ok(s.as_str()),
+        Some(other) => Err(Error::Eval(format!(
+            "{method}() requires a String argument, got {}",
+            value_type_name(other)
+        ))),
+        None => Err(Error::Eval(format!(
+            "{method}() requires {} argument(s)",
+            idx + 1
+        ))),
+    }
+}
 
 fn value_type_name(v: &Value) -> &'static str {
     match v {
