@@ -1,7 +1,8 @@
 [package]
 name        = "pklr"
 version     = "0.1.0"
-edition     = "2024"
+edition      = "2024"
+rust-version = "1.88"
 description = "Pure Rust pkl configuration language parser and evaluator"
 license     = "MIT"
 repository  = "https://github.com/jdx/pklr"

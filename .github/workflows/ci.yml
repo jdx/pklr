@@ -23,15 +23,27 @@ jobs:
       - run: cargo test
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo fmt --check
+  msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          cargo install cargo-msrv --locked
+          cargo msrv verify
   final:
-    needs: test
+    needs: [test, msrv]
     runs-on: ubuntu-latest
     timeout-minutes: 1
     if: always()
     steps:
       - name: Check CI job results
         run: |
-          if [ "${{ needs.test.result }}" != "success" ]; then
-            echo "test failed or was skipped"
-            exit 1
-          fi
+          results=("${{ needs.test.result }}" "${{ needs.msrv.result }}")
+          for r in "${results[@]}"; do
+            if [ "$r" != "success" ]; then
+              echo "CI job failed or was skipped"
+              exit 1
+            fi
+          done
