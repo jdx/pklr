@@ -43,8 +43,9 @@ jobs:
         with:
           fetch-depth: 0
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
-      - run: communique generate "${{ needs.release-plz-release.outputs.tag }}" --github-release
+      - run: communique generate "$RELEASE_TAG" --github-release
         env:
+          RELEASE_TAG: ${{ needs.release-plz-release.outputs.tag }}
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
