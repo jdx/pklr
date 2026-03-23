@@ -36,6 +36,8 @@ pub enum Entry {
     Spread(Expr),
     /// Bare element expression (used in Listing bodies)
     Elem(Expr),
+    /// Class definition: `class Name { properties... }`
+    ClassDef(String, Vec<Entry>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -353,11 +355,25 @@ impl<'a> Parser<'a> {
         let mut entries = Vec::new();
         while !self.at_eof() && !matches!(self.peek(), TokenKind::RBrace) {
             self.skip_annotations();
-            // Skip class/typealias/function declarations at top level
-            if matches!(
-                self.peek(),
-                TokenKind::KwClass | TokenKind::KwTypeAlias | TokenKind::KwFunction
-            ) {
+            // Parse class definitions; skip typealias/function declarations
+            if matches!(self.peek(), TokenKind::KwClass) {
+                self.advance(); // consume 'class'
+                let name = self.expect_ident()?;
+                // Skip optional extends/type params
+                while !self.at_eof()
+                    && !matches!(self.peek(), TokenKind::LBrace | TokenKind::RBrace)
+                {
+                    self.advance();
+                }
+                if matches!(self.peek(), TokenKind::LBrace) {
+                    self.advance();
+                    let body = self.parse_entries()?;
+                    self.expect(&TokenKind::RBrace)?;
+                    entries.push(Entry::ClassDef(name, body));
+                }
+                continue;
+            }
+            if matches!(self.peek(), TokenKind::KwTypeAlias | TokenKind::KwFunction) {
                 self.skip_declaration();
                 continue;
             }
@@ -916,6 +932,14 @@ impl<'a> Parser<'a> {
             TokenKind::Ident(name) => {
                 self.advance();
                 Ok(Expr::Ident(name))
+            }
+            TokenKind::KwThis => {
+                self.advance();
+                Ok(Expr::Ident("this".into()))
+            }
+            TokenKind::KwModule => {
+                self.advance();
+                Ok(Expr::Ident("module".into()))
             }
             tok => Err(self.parse_error(format!("unexpected token in expression: {:?}", tok))),
         }
