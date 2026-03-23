@@ -1329,3 +1329,82 @@ fn unicode_escape_empty_braces_errors() {
     let msg = eval_fails(r#"x = "\u{}""#);
     assert!(msg.contains("hex digit"));
 }
+
+// ============================================================
+// Property modifiers
+// ============================================================
+
+#[test]
+fn hidden_not_in_output() {
+    let json = eval(
+        r#"
+hidden secret = "s3cr3t"
+visible = "hello"
+"#,
+    );
+    assert!(json.get("secret").is_none());
+    assert_eq!(json["visible"], "hello");
+}
+
+#[test]
+fn hidden_accessible_by_other_properties() {
+    let json = eval(
+        r#"
+hidden base_url = "https://example.com"
+api_url = base_url + "/api"
+"#,
+    );
+    assert!(json.get("base_url").is_none());
+    assert_eq!(json["api_url"], "https://example.com/api");
+}
+
+#[test]
+fn const_property() {
+    // const properties work normally when not overridden
+    let json = eval(
+        r#"
+const name = "fixed"
+x = name
+"#,
+    );
+    assert_eq!(json["x"], "fixed");
+}
+
+#[test]
+fn abstract_property_with_value() {
+    // abstract property with a value is fine
+    let json = eval(
+        r#"
+class Base {
+    abstract name: String = "default"
+}
+x = new Base {}
+"#,
+    );
+    assert_eq!(json["x"]["name"], "default");
+}
+
+#[test]
+fn fixed_property() {
+    let json = eval(
+        r#"
+fixed version = 1
+x = version
+"#,
+    );
+    assert_eq!(json["x"], 1);
+}
+
+#[test]
+fn hidden_in_nested_object() {
+    let json = eval(
+        r#"
+config {
+    hidden internal = "private"
+    public = "visible"
+}
+"#,
+    );
+    assert!(json["config"].get("internal").is_none());
+    assert_eq!(json["config"]["public"], "visible");
+}
