@@ -1451,3 +1451,116 @@ const version = 2
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("const"));
 }
+
+// ============================================================
+// Default elements/values
+// ============================================================
+
+#[test]
+fn default_value_in_object() {
+    let json = eval(
+        r#"
+config {
+    default {
+        enabled = true
+        port = 8080
+    }
+    ["api"] {
+        port = 9090
+    }
+    ["web"] {
+        port = 3000
+    }
+}
+"#,
+    );
+    // api: port overridden, enabled inherited from default
+    assert_eq!(json["config"]["api"]["port"], 9090);
+    assert_eq!(json["config"]["api"]["enabled"], true);
+    // web: port overridden, enabled inherited from default
+    assert_eq!(json["config"]["web"]["port"], 3000);
+    assert_eq!(json["config"]["web"]["enabled"], true);
+}
+
+#[test]
+fn default_not_in_output() {
+    let json = eval(
+        r#"
+services {
+    default {
+        replicas = 1
+    }
+    ["app"] {
+        replicas = 3
+    }
+}
+"#,
+    );
+    // default itself should not appear in output
+    assert!(json["services"].get("default").is_none());
+    assert_eq!(json["services"]["app"]["replicas"], 3);
+}
+
+#[test]
+fn default_in_mapping() {
+    let json = eval(
+        r#"
+x = new Mapping {
+    default {
+        active = true
+    }
+    ["a"] {
+        name = "alpha"
+    }
+    ["b"] {
+        name = "beta"
+        active = false
+    }
+}
+"#,
+    );
+    assert_eq!(json["x"]["a"]["name"], "alpha");
+    assert_eq!(json["x"]["a"]["active"], true);
+    assert_eq!(json["x"]["b"]["name"], "beta");
+    assert_eq!(json["x"]["b"]["active"], false);
+}
+
+#[test]
+fn no_default_no_merge() {
+    // Without a default, dynamic entries should not be merged
+    let json = eval(
+        r#"
+x {
+    ["a"] {
+        name = "alpha"
+    }
+}
+"#,
+    );
+    assert_eq!(json["x"]["a"]["name"], "alpha");
+    assert!(json["x"]["a"].get("enabled").is_none());
+}
+
+#[test]
+fn default_nested_merge() {
+    let json = eval(
+        r#"
+services {
+    default {
+        config {
+            timeout = 30
+            retries = 3
+        }
+    }
+    ["api"] {
+        config {
+            timeout = 60
+        }
+    }
+}
+"#,
+    );
+    // timeout overridden, retries inherited from default
+    assert_eq!(json["services"]["api"]["config"]["timeout"], 60);
+    assert_eq!(json["services"]["api"]["config"]["retries"], 3);
+}
