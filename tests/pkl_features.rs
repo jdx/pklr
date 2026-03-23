@@ -264,6 +264,18 @@ fn exp_precedence() {
     assert_eq!(json["x"], 18);
 }
 
+#[test]
+fn exp_negative_exponent_errors() {
+    let msg = eval_fails(r#"x = 2 ** -1"#);
+    assert!(msg.contains("negative exponent"));
+}
+
+#[test]
+fn exp_float_negative_exponent() {
+    let json = eval(r#"x = 2.0 ** -1.0"#);
+    assert_eq!(json["x"], 0.5);
+}
+
 // ============================================================
 // Non-null assertion
 // ============================================================
@@ -326,6 +338,17 @@ result = 5 |> double |> addOne
 "#,
     );
     assert_eq!(json["result"], 11);
+}
+
+#[test]
+fn pipe_multi_param_errors() {
+    let msg = eval_fails(
+        r#"
+local add = (a, b) -> a + b
+result = 5 |> add
+"#,
+    );
+    assert!(msg.contains("single-parameter"));
 }
 
 // ============================================================

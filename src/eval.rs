@@ -812,7 +812,20 @@ impl Evaluator {
                 },
                 |a, b| Ok((a / b).floor()),
             ),
-            BinOp::Pow => arithmetic(l, r, |a, b| Ok(a.pow(b as u32)), |a, b| Ok(a.powf(b))),
+            BinOp::Pow => arithmetic(
+                l,
+                r,
+                |a, b| {
+                    if b < 0 {
+                        Err(Error::Eval(
+                            "integer exponentiation with negative exponent is not supported".into(),
+                        ))
+                    } else {
+                        Ok(a.pow(b as u32))
+                    }
+                },
+                |a, b| Ok(a.powf(b)),
+            ),
             BinOp::NullCoalesce => {
                 if matches!(l, Value::Null) {
                     Ok(r)
@@ -824,13 +837,17 @@ impl Evaluator {
                 // x |> f  is equivalent to  f(x)
                 match r {
                     Value::Lambda(params, body, captured) => {
+                        if params.len() != 1 {
+                            return Err(Error::Eval(format!(
+                                "pipe operator requires a single-parameter function, got {}",
+                                params.len()
+                            )));
+                        }
                         let mut call_scope = Scope::default();
                         for (k, v) in captured {
                             call_scope.set(k, v);
                         }
-                        if let Some(param) = params.first() {
-                            call_scope.set(param.clone(), l);
-                        }
+                        call_scope.set(params[0].clone(), l);
                         self.eval_expr(&body, &call_scope, depth + 1)
                     }
                     _ => Err(Error::Eval(
