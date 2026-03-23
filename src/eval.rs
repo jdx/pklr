@@ -217,39 +217,26 @@ impl Evaluator {
             }
 
             if uri.starts_with("package://") {
-                // Convert package URI to GitHub release URL
-                // Format: package://pkg.pkl-lang.org/github.com/owner/repo@version#/path.pkl
-                // → https://github.com/owner/repo/releases/download/version/path.pkl
-                if let Some(rest) = uri.strip_prefix("package://pkg.pkl-lang.org/github.com/")
-                    && let Some((repo_ver, fragment)) = rest.split_once('#')
-                    && let Some((repo, version)) = repo_ver.split_once('@')
-                {
-                    let file_path = fragment.strip_prefix('/').unwrap_or(fragment);
-                    let url = format!(
-                        "https://github.com/{repo}/releases/download/{version}/{file_path}"
-                    );
-                    let source = self.fetch_source(&url).await?;
-                    let imported_val = {
-                        let tokens = lexer::lex_named(&source, &url)?;
-                        let imp_module = parser::parse_named(&tokens, &source, &url)?;
-                        self.eval_module(&imp_module, Path::new(&url), depth + 1)
-                            .await?
-                    };
-                    let alias = import.alias.clone().unwrap_or_else(|| {
-                        file_path
-                            .rsplit('/')
-                            .next()
-                            .unwrap_or(file_path)
-                            .strip_suffix(".pkl")
-                            .unwrap_or(file_path)
-                            .to_string()
-                    });
-                    scope.set(alias, imported_val);
-                } else {
-                    return Err(Error::Eval(format!(
-                        "unsupported package URI (only pkg.pkl-lang.org/github.com is supported): {uri}"
-                    )));
-                }
+                let url = package_uri_to_url(uri)?;
+                let fragment = uri.split_once('#').map(|(_, f)| f).unwrap_or("");
+                let file_path = fragment.strip_prefix('/').unwrap_or(fragment);
+                let source = self.fetch_source(&url).await?;
+                let imported_val = {
+                    let tokens = lexer::lex_named(&source, &url)?;
+                    let imp_module = parser::parse_named(&tokens, &source, &url)?;
+                    self.eval_module(&imp_module, Path::new(&url), depth + 1)
+                        .await?
+                };
+                let alias = import.alias.clone().unwrap_or_else(|| {
+                    file_path
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(file_path)
+                        .strip_suffix(".pkl")
+                        .unwrap_or(file_path)
+                        .to_string()
+                });
+                scope.set(alias, imported_val);
                 continue;
             }
 
@@ -308,27 +295,15 @@ impl Evaluator {
                 }
             } else if uri.starts_with("package://") {
                 // Convert package URI to GitHub release URL
-                if let Some(rest) = uri.strip_prefix("package://pkg.pkl-lang.org/github.com/")
-                    && let Some((repo_ver, fragment)) = rest.split_once('#')
-                    && let Some((repo, version)) = repo_ver.split_once('@')
-                {
-                    let file_path = fragment.strip_prefix('/').unwrap_or(fragment);
-                    let url = format!(
-                        "https://github.com/{repo}/releases/download/{version}/{file_path}"
-                    );
-                    let source = self.fetch_source(&url).await?;
-                    let tokens = lexer::lex_named(&source, &url)?;
-                    let base_module = parser::parse_named(&tokens, &source, &url)?;
-                    let base_val = self
-                        .eval_module(&base_module, Path::new(&url), depth + 1)
-                        .await?;
-                    if let Value::Object(m, _) = base_val {
-                        base_obj = m;
-                    }
-                } else {
-                    return Err(Error::Eval(format!(
-                        "unsupported package URI (only pkg.pkl-lang.org/github.com is supported): {uri}"
-                    )));
+                let url = package_uri_to_url(uri)?;
+                let source = self.fetch_source(&url).await?;
+                let tokens = lexer::lex_named(&source, &url)?;
+                let base_module = parser::parse_named(&tokens, &source, &url)?;
+                let base_val = self
+                    .eval_module(&base_module, Path::new(&url), depth + 1)
+                    .await?;
+                if let Value::Object(m, _) = base_val {
+                    base_obj = m;
                 }
             } else if !uri.starts_with("pkl:")
                 && (!uri.contains("://") || uri.starts_with("file://"))
@@ -343,6 +318,43 @@ impl Evaluator {
                     let base_val = self.eval_file(&amends_path, depth + 1).await?;
                     if let Value::Object(m, _) = base_val {
                         base_obj = m;
+                    }
+                }
+            }
+        }
+
+        // Inject class definitions from amends base into scope so the amending
+        // module can reference them (e.g., `new Step { ... }`), then remove
+        // them from base_obj so they don't appear in the final output.
+        if module.amends.is_some() {
+            // Parse the base module to find its class names
+            if let Some(uri) = &module.amends {
+                let base_source = if !uri.starts_with("pkl:")
+                    && (!uri.contains("://") || uri.starts_with("file://"))
+                {
+                    let amends_path = if let Some(rel) = uri.strip_prefix("file://") {
+                        PathBuf::from(rel)
+                    } else {
+                        let base = path.parent().unwrap_or(Path::new("."));
+                        base.join(uri)
+                    };
+                    std::fs::read_to_string(&amends_path).ok()
+                } else {
+                    None
+                };
+                if let Some(src) = base_source {
+                    if let Ok(tokens) = lexer::lex(&src)
+                        && let Ok(base_module) = parser::parse(&tokens)
+                    {
+                        for entry in &base_module.body {
+                            if let Entry::ClassDef(name, ..) = entry {
+                                if let Some(val) = base_obj.shift_remove(name) {
+                                    scope.set(name.clone(), val);
+                                }
+                            }
+                        }
+                        // Also remove function values from base output
+                        base_obj.retain(|_, v| !matches!(v, Value::Lambda(..)));
                     }
                 }
             }
@@ -415,19 +427,18 @@ impl Evaluator {
             }
         }
 
-        // First pass: collect all `local` variable definitions into scope
-        for entry in &module.body {
-            if let Entry::Property(prop) = entry
-                && has_modifier(&prop.modifiers, Modifier::Local)
-                && let Some(expr) = &prop.value
-            {
-                let val = self.eval_expr(expr, &scope, depth).await?;
-                scope.set(prop.name.clone(), val);
-            }
-        }
-        // Collect class definitions and type aliases into module scope
+        // First pass: collect locals, class definitions, and type aliases in
+        // declaration order so they can reference each other
         for entry in &module.body {
             match entry {
+                Entry::Property(prop)
+                    if has_modifier(&prop.modifiers, Modifier::Local) && prop.value.is_some() =>
+                {
+                    let val = self
+                        .eval_expr(prop.value.as_ref().unwrap(), &scope, depth)
+                        .await?;
+                    scope.set(prop.name.clone(), val);
+                }
                 Entry::ClassDef(name, class_mods, parent, body) => {
                     let defaults = self
                         .eval_class_def(class_mods, parent.as_deref(), body, &scope, depth)
@@ -438,6 +449,19 @@ impl Evaluator {
                     self.eval_type_alias(name, ty, &mut scope);
                 }
                 _ => {}
+            }
+        }
+
+        // Export class definitions so they're accessible via dotted paths
+        // (e.g., `import "helpers.pkl"` → `helpers.ClassName`).
+        // Track class names to exclude from serialized output.
+        let mut class_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for entry in &module.body {
+            if let Entry::ClassDef(name, ..) = entry {
+                if let Some(cls_val) = scope.get(name) {
+                    base_obj.insert(name.clone(), cls_val.clone());
+                    class_names.insert(name.clone());
+                }
             }
         }
 
@@ -456,6 +480,10 @@ impl Evaluator {
                     continue; // already collected
                 }
                 check_deprecated(&prop.annotations, &prop.name);
+                // Skip Pkl's `output` rendering block — pklr uses Value::to_json()
+                if prop.name == "output" {
+                    continue;
+                }
                 // abstract/external properties must have a value (or be overridden)
                 if (has_modifier(mods, Modifier::Abstract)
                     || has_modifier(mods, Modifier::External))
@@ -509,6 +537,14 @@ impl Evaluator {
             }
         }
 
+        // Remove class definitions and lambdas from output — they're schema/functions,
+        // not data. They remain accessible via scope for `new ClassName { ... }` and via
+        // imported module objects for dotted paths like `helpers.ClassName`.
+        for name in &class_names {
+            out.shift_remove(name);
+        }
+        // Also remove lambda values (function definitions) from output
+        out.retain(|_, v| !matches!(v, Value::Lambda(..)));
         Ok(Value::Object(out, None))
     }
 
@@ -584,6 +620,10 @@ impl Evaluator {
                     if prop.name == "default" && default_template.is_some() {
                         continue;
                     }
+                    // Skip Pkl's `output` rendering block — pklr uses Value::to_json()
+                    if prop.name == "output" {
+                        continue;
+                    }
                     if has_modifier(mods, Modifier::Abstract)
                         && prop.value.is_none()
                         && prop.body.is_none()
@@ -656,7 +696,7 @@ impl Evaluator {
             scope: child_scope.flatten(),
             is_open: true, // default: allow new properties
         };
-        Ok(Value::Object(map, Some(Box::new(source))))
+        Ok(Value::Object(map, Some(std::sync::Arc::new(source))))
     }
 
     /// Evaluate a class definition, optionally inheriting from a parent class.
@@ -691,7 +731,8 @@ impl Evaluator {
                 }
                 // Preserve the child's ObjectSource for late binding,
                 // but prepend parent entries so inherited props are available
-                let source = if let Some(mut src) = child_src.map(|s| *s) {
+                let source = if let Some(child_arc) = child_src {
+                    let mut src = (*child_arc).clone();
                     // Collect child property names (including dynamic string-key entries)
                     let child_names: std::collections::HashSet<String> = body
                         .iter()
@@ -713,7 +754,7 @@ impl Evaluator {
                         combined_entries.extend(src.entries);
                         src.entries = combined_entries;
                     }
-                    Some(Box::new(src))
+                    Some(std::sync::Arc::new(src))
                 } else {
                     None
                 };
@@ -727,9 +768,10 @@ impl Evaluator {
         .map(|val| {
             // Set is_open flag on the result's ObjectSource
             let is_open = has_modifier(class_mods, Modifier::Open);
-            if let Value::Object(map, Some(mut src)) = val {
-                src.is_open = is_open;
-                Value::Object(map, Some(src))
+            if let Value::Object(map, Some(src)) = val {
+                let mut new_src = (*src).clone();
+                new_src.is_open = is_open;
+                Value::Object(map, Some(std::sync::Arc::new(new_src)))
             } else {
                 val
             }
@@ -987,6 +1029,7 @@ impl Evaluator {
                             .await?;
                         Ok(Value::Object(map, None))
                     }
+                    Some("Dynamic") => self.eval_entries(entries, scope, depth + 1).await,
                     _ => {
                         // Check if type name matches a class in scope (supports dotted names)
                         let base = type_name.as_ref().and_then(|name| {
@@ -1053,8 +1096,14 @@ impl Evaluator {
                                 .await?;
                             // Preserve the base class's is_open flag so further amendments
                             // of non-open classes continue to enforce the constraint.
-                            if let Value::Object(_, Some(ref mut src)) = result {
-                                src.is_open = is_open;
+                            if let Value::Object(_, Some(ref src)) = result {
+                                if src.is_open != is_open {
+                                    let mut new_src = (**src).clone();
+                                    new_src.is_open = is_open;
+                                    if let Value::Object(_, ref mut src_slot) = result {
+                                        *src_slot = Some(std::sync::Arc::new(new_src));
+                                    }
+                                }
                             }
                             Ok(result)
                         } else if let Some(Value::Object(base_map, _)) = base {
@@ -1820,6 +1869,28 @@ impl Scope {
 }
 
 // --- Helpers ---
+
+/// Convert a `package://` URI to an HTTPS download URL.
+fn package_uri_to_url(uri: &str) -> Result<String> {
+    // Format 1: package://pkg.pkl-lang.org/github.com/owner/repo@version#/path.pkl
+    if let Some(rest) = uri.strip_prefix("package://pkg.pkl-lang.org/github.com/")
+        && let Some((repo_ver, fragment)) = rest.split_once('#')
+        && let Some((repo, version)) = repo_ver.split_once('@')
+    {
+        let file_path = fragment.strip_prefix('/').unwrap_or(fragment);
+        return Ok(format!(
+            "https://github.com/{repo}/releases/download/{version}/{file_path}"
+        ));
+    }
+    // Format 2: package://github.com/owner/repo/releases/download/v1.0/name@1.0#/path.pkl
+    if let Some(rest) = uri.strip_prefix("package://github.com/")
+        && let Some((base, fragment)) = rest.split_once('#')
+    {
+        let file_path = fragment.strip_prefix('/').unwrap_or(fragment);
+        return Ok(format!("https://github.com/{base}/{file_path}"));
+    }
+    Err(Error::Eval(format!("unsupported package URI: {uri}")))
+}
 
 fn check_deprecated(annotations: &[Annotation], prop_name: &str) {
     for ann in annotations {

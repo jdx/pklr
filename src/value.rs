@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use indexmap::IndexMap;
 use serde_json::json;
 
@@ -31,7 +33,7 @@ pub enum Value {
     /// Object (ordered string-keyed map). Represents both pkl objects and
     /// string-keyed Mappings.  The optional [`ObjectSource`] stores the
     /// original entry definitions so late binding works on amendment.
-    Object(IndexMap<String, Value>, Option<Box<ObjectSource>>),
+    Object(IndexMap<String, Value>, Option<Arc<ObjectSource>>),
     /// Listing (ordered list).
     List(Vec<Value>),
     /// Lambda function: param names + body expression + captured scope values
