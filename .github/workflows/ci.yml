@@ -29,9 +29,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
-      - run: |
-          cargo install cargo-msrv --locked
-          cargo msrv verify
+      - uses: jdx/mise-action@v2
+      - run: cargo msrv verify
   final:
     needs: [test, msrv]
     runs-on: ubuntu-latest
