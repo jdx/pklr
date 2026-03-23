@@ -1,3 +1,7 @@
+// The Lex/Parse variant fields are read by miette's Diagnostic derive macro,
+// but rustc can't see through the proc-macro expansion.
+#![allow(unused_assignments)]
+
 use std::path::PathBuf;
 
 use miette::NamedSource;

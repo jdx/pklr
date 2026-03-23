@@ -430,13 +430,22 @@ impl<'a> Parser<'a> {
                 continue;
             }
             if matches!(self.peek(), TokenKind::KwFunction) {
-                self.skip_declaration();
+                if let Some(entry) = self.try_parse_function_def(Vec::new())? {
+                    entries.push(entry);
+                }
                 continue;
             }
-            // Also skip modifier-prefixed function/typealias declarations
+            // Also handle modifier-prefixed function/typealias declarations
             if self.peek_is_modifier() && self.peek_past_modifiers_is_decl() {
-                self.skip_modifiers();
-                self.skip_declaration();
+                let mods = self.collect_modifiers();
+                if matches!(self.peek(), TokenKind::KwFunction) {
+                    if let Some(entry) = self.try_parse_function_def(mods)? {
+                        entries.push(entry);
+                    }
+                } else {
+                    // typealias — skip as before
+                    self.skip_declaration();
+                }
                 continue;
             }
             if self.at_eof() || matches!(self.peek(), TokenKind::RBrace) {
@@ -571,10 +580,67 @@ impl<'a> Parser<'a> {
         false
     }
 
-    fn skip_modifiers(&mut self) {
-        while self.peek_is_modifier() {
-            self.advance();
+    /// Parse `function name(params...): ReturnType = body` into a Property with Lambda value.
+    /// Returns None if the function body can't be parsed (falls back to skip).
+    fn try_parse_function_def(&mut self, modifiers: Vec<Modifier>) -> Result<Option<Entry>> {
+        let saved_pos = self.pos;
+        let saved_last_line = self.last_line;
+        self.advance(); // consume `function`
+        let name = match self.peek() {
+            TokenKind::Ident(_) => self.expect_ident()?,
+            _ => {
+                // Not a named function — restore and skip
+                self.pos = saved_pos;
+                self.last_line = saved_last_line;
+                self.skip_declaration();
+                return Ok(None);
+            }
+        };
+        // Parse parameter list: (param1: Type, param2: Type, ...)
+        if !matches!(self.peek(), TokenKind::LParen) {
+            self.pos = saved_pos;
+            self.last_line = saved_last_line;
+            self.skip_declaration();
+            return Ok(None);
         }
+        self.advance(); // consume (
+        let mut params = Vec::new();
+        while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
+            let param_name = self.expect_ident()?;
+            params.push(param_name);
+            // Skip optional type annotation: `: Type`
+            if matches!(self.peek(), TokenKind::Colon) {
+                self.advance();
+                let _ = self.parse_type()?;
+            }
+            if matches!(self.peek(), TokenKind::Comma) {
+                self.advance();
+            }
+        }
+        self.expect(&TokenKind::RParen)?;
+        // Skip optional return type annotation: `: ReturnType`
+        if matches!(self.peek(), TokenKind::Colon) {
+            self.advance();
+            let _ = self.parse_type()?;
+        }
+        // Parse body: `= expr`
+        if !matches!(self.peek(), TokenKind::Equals) {
+            // No body — skip rest
+            self.pos = saved_pos;
+            self.last_line = saved_last_line;
+            self.skip_declaration();
+            return Ok(None);
+        }
+        self.advance(); // consume =
+        let body = self.parse_expr()?;
+        Ok(Some(Entry::Property(Property {
+            name,
+            type_ann: None,
+            value: Some(Expr::Lambda(params, Box::new(body))),
+            body: None,
+            modifiers,
+            annotations: Vec::new(),
+        })))
     }
 
     /// Skip a class, typealias, or function declaration.
