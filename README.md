@@ -27,10 +27,10 @@ pklr implements a subset of the [Pkl language](https://pkl-lang.org/main/current
 | Multiline strings (`"""`) | Supported |
 | String interpolation (`\(expr)`) | Supported |
 | Custom string delimiters (`#"..."#`) | Supported |
-| Unicode escape sequences (`\u{...}`) | Not yet supported |
-| Durations (`5.min`, `3.s`, etc.) | Not supported |
-| Data sizes (`5.mb`, `3.gb`, etc.) | Not supported |
-| NaN, Infinity | Not supported |
+| Unicode escape sequences (`\u{...}`) | Supported |
+| Durations (`5.min`, `3.s`, etc.) | Supported (serializes as `{value, unit}`) |
+| Data sizes (`5.mb`, `3.gb`, etc.) | Supported (serializes as `{value, unit}`) |
+| NaN, Infinity | Supported (serializes as `null` in JSON) |
 
 ### Operators
 
