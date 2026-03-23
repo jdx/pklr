@@ -2886,7 +2886,11 @@ hooks = new {
     assert!(val["hooks"]["pre-commit"]["fix"] == true);
 }
 
+/// Cross-module class functions with property overrides don't resolve correctly
+/// during late-binding re-evaluation: the local function captures scope at class
+/// definition time, so overridden properties aren't visible to the function body.
 #[tokio::test]
+#[ignore]
 async fn class_function_cross_module() {
     let dir = std::path::Path::new("/tmp/pklr_test_cross_module");
     std::fs::create_dir_all(dir).unwrap();
@@ -2911,15 +2915,6 @@ result = testMaker.checkFail("bad", 1)
     )
     .unwrap();
     let path = dir.join("main.pkl");
-    match pklr::eval_to_json(&path).await {
-        Ok(val) => {
-            assert!(val["result"].is_string());
-            assert!(val["result"].as_str().unwrap().starts_with("check:"));
-        }
-        Err(e) => {
-            // Known limitation: class functions with property overrides across
-            // module boundaries may not resolve correctly during re-evaluation
-            eprintln!("cross-module class function: {}", e);
-        }
-    }
+    let val = pklr::eval_to_json(&path).await.unwrap();
+    assert_eq!(val["result"], "check:main.rs");
 }

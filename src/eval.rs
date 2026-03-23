@@ -324,39 +324,39 @@ impl Evaluator {
         }
 
         // Inject class definitions from amends base into scope so the amending
-        // module can reference them (e.g., `new Step { ... }`), then remove
-        // them from base_obj so they don't appear in the final output.
-        if module.amends.is_some() {
-            // Parse the base module to find its class names
-            if let Some(uri) = &module.amends {
-                let base_source = if !uri.starts_with("pkl:")
-                    && (!uri.contains("://") || uri.starts_with("file://"))
-                {
-                    let amends_path = if let Some(rel) = uri.strip_prefix("file://") {
-                        PathBuf::from(rel)
-                    } else {
-                        let base = path.parent().unwrap_or(Path::new("."));
-                        base.join(uri)
-                    };
-                    std::fs::read_to_string(&amends_path).ok()
+        // module can reference them (e.g., `new Step { ... }`).
+        // We re-parse the base module to find ClassDef entries, then evaluate
+        // them directly (similar to extends handling), because eval_module strips
+        // class definitions from its return value.
+        if let Some(uri) = &module.amends {
+            let base_source = if !uri.starts_with("pkl:")
+                && (!uri.contains("://") || uri.starts_with("file://"))
+            {
+                let amends_path = if let Some(rel) = uri.strip_prefix("file://") {
+                    PathBuf::from(rel)
                 } else {
-                    None
+                    let base = path.parent().unwrap_or(Path::new("."));
+                    base.join(uri)
                 };
-                if let Some(src) = base_source
-                    && let Ok(tokens) = lexer::lex(&src)
-                    && let Ok(base_module) = parser::parse(&tokens)
-                {
-                    for entry in &base_module.body {
-                        if let Entry::ClassDef(name, ..) = entry
-                            && let Some(val) = base_obj.shift_remove(name)
-                        {
-                            scope.set(name.clone(), val);
-                        }
+                std::fs::read_to_string(&amends_path).ok()
+            } else {
+                None
+            };
+            if let Some(src) = base_source
+                && let Ok(tokens) = lexer::lex(&src)
+                && let Ok(base_module) = parser::parse(&tokens)
+            {
+                for entry in &base_module.body {
+                    if let Entry::ClassDef(name, class_mods, parent, body) = entry {
+                        let defaults = self
+                            .eval_class_def(class_mods, parent.as_deref(), body, &scope, depth)
+                            .await?;
+                        scope.set(name.clone(), defaults);
                     }
-                    // Also remove function values from base output
-                    base_obj.retain(|_, v| !matches!(v, Value::Lambda(..)));
                 }
             }
+            // Remove function values from base output (not data)
+            base_obj.retain(|_, v| !matches!(v, Value::Lambda(..)));
         }
 
         // Process extends: load base module, inherit all members and scope
@@ -617,10 +617,6 @@ impl Evaluator {
                     check_deprecated(&prop.annotations, &prop.name);
                     // Skip the `default` property — it's a template, not an output entry
                     if prop.name == "default" && default_template.is_some() {
-                        continue;
-                    }
-                    // Skip Pkl's `output` rendering block — pklr uses Value::to_json()
-                    if prop.name == "output" {
                         continue;
                     }
                     if has_modifier(mods, Modifier::Abstract)
