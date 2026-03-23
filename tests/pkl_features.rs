@@ -2206,6 +2206,121 @@ result = if (x is Int) "integer" else "other"
 }
 
 // ============================================================
+// Type constraints
+// ============================================================
+
+#[test]
+fn constraint_is_check_pass() {
+    let json = eval(
+        r#"
+local x = 42
+result = x is Int(this >= 0)
+"#,
+    );
+    assert_eq!(json["result"], true);
+}
+
+#[test]
+fn constraint_is_check_fail() {
+    let json = eval(
+        r#"
+local x = -1
+result = x is Int(this >= 0)
+"#,
+    );
+    assert_eq!(json["result"], false);
+}
+
+#[test]
+fn constraint_is_wrong_base_type() {
+    let json = eval(
+        r#"
+local x = "hello"
+result = x is Int(this >= 0)
+"#,
+    );
+    assert_eq!(json["result"], false);
+}
+
+#[test]
+fn constraint_as_pass() {
+    let json = eval(
+        r#"
+local x = 42
+result = x as Int(this > 0)
+"#,
+    );
+    assert_eq!(json["result"], 42);
+}
+
+#[test]
+fn constraint_as_fail() {
+    let msg = eval_fails(
+        r#"
+local x = -1
+result = x as Int(this > 0)
+"#,
+    );
+    assert!(msg.contains("cannot cast"));
+}
+
+#[test]
+fn constraint_string_not_empty() {
+    let json = eval(
+        r#"
+local a = "hello"
+local b = ""
+x = a is String(!isEmpty)
+y = b is String(!isEmpty)
+"#,
+    );
+    assert_eq!(json["x"], true);
+    assert_eq!(json["y"], false);
+}
+
+#[test]
+fn constraint_string_length() {
+    let json = eval(
+        r#"
+local x = "hi"
+a = x is String(length <= 5)
+b = x is String(length > 10)
+"#,
+    );
+    assert_eq!(json["a"], true);
+    assert_eq!(json["b"], false);
+}
+
+#[test]
+fn constraint_comparison() {
+    let json = eval(
+        r#"
+local x = 8080
+a = x is Int(this >= 1 && this <= 65535)
+b = x is Int(this < 0)
+"#,
+    );
+    assert_eq!(json["a"], true);
+    assert_eq!(json["b"], false);
+}
+
+#[test]
+fn typealias_with_constraint_enforced() {
+    // typealias with constraint, checked via is
+    let json = eval(
+        r#"
+typealias PositiveInt = Int(this > 0)
+local x = 42
+local y = -1
+a = x is PositiveInt
+b = y is PositiveInt
+"#,
+    );
+    assert_eq!(json["a"], true);
+    assert_eq!(json["b"], false);
+}
+
+// ============================================================
 // Annotations
 // ============================================================
 

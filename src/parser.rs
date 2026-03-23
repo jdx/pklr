@@ -83,6 +83,8 @@ pub enum TypeExpr {
     Nullable(Box<TypeExpr>),
     Union(Vec<TypeExpr>),
     Generic(String, Vec<TypeExpr>),
+    /// Constrained type: `Type(predicate)` e.g. `Int(this >= 0)`
+    Constrained(String, Box<Expr>),
 }
 
 /// An expression.
@@ -774,27 +776,15 @@ impl<'a> Parser<'a> {
                     self.expect(&TokenKind::Gt)?;
                     TypeExpr::Generic(name, args)
                 } else {
-                    // Skip optional type constraint: Type(predicate)
+                    // Parse optional type constraint: Type(predicate)
                     if matches!(self.peek(), TokenKind::LParen) {
                         self.advance();
-                        let mut depth = 1;
-                        while depth > 0 && !self.at_eof() {
-                            match self.peek() {
-                                TokenKind::LParen => {
-                                    depth += 1;
-                                    self.advance();
-                                }
-                                TokenKind::RParen => {
-                                    depth -= 1;
-                                    self.advance();
-                                }
-                                _ => {
-                                    self.advance();
-                                }
-                            }
-                        }
+                        let constraint = self.parse_expr()?;
+                        self.expect(&TokenKind::RParen)?;
+                        TypeExpr::Constrained(name, Box::new(constraint))
+                    } else {
+                        TypeExpr::Named(name)
                     }
-                    TypeExpr::Named(name)
                 }
             }
             tok => {

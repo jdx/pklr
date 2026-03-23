@@ -723,6 +723,8 @@ impl Evaluator {
     /// If the aliased type is a named type that exists in scope (e.g. a class),
     /// the alias name is bound to the same value so `new AliasName { ... }` works.
     fn eval_type_alias(&self, name: &str, ty: &crate::parser::TypeExpr, scope: &mut Scope) {
+        // Store the TypeExpr so `is`/`as` can resolve alias names to their definitions
+        scope.set_type_alias(name.to_string(), ty.clone());
         match ty {
             crate::parser::TypeExpr::Named(target) => {
                 // Alias to a class or another alias already in scope
@@ -738,8 +740,84 @@ impl Evaluator {
                     scope.set(name.to_string(), val.clone());
                 }
             }
+            crate::parser::TypeExpr::Constrained(base, _) => {
+                // Alias to a constrained type -- also bind as the base class if available
+                if let Some(val) = scope.get(base) {
+                    scope.set(name.to_string(), val.clone());
+                }
+            }
             // Union types, generics, etc. -- no runtime representation needed
             _ => {}
+        }
+    }
+
+    /// Check if a value matches a type expression, including constraint evaluation.
+    #[async_recursion(?Send)]
+    async fn eval_type_check(
+        &mut self,
+        val: &Value,
+        ty: &crate::parser::TypeExpr,
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<bool> {
+        use crate::parser::TypeExpr;
+        match ty {
+            TypeExpr::Named(name) => {
+                // Check if name is a type alias; if so, resolve to the aliased type
+                if let Some(resolved) = scope.get_type_alias(name) {
+                    let resolved = resolved.clone();
+                    return self.eval_type_check(val, &resolved, scope, depth).await;
+                }
+                // Otherwise, plain type check
+                Ok(value_is_type(val, ty))
+            }
+            TypeExpr::Constrained(base_name, constraint) => {
+                // First check the base type
+                if !value_is_type(val, &TypeExpr::Named(base_name.clone())) {
+                    return Ok(false);
+                }
+                // Evaluate the constraint with `this` bound to the value
+                let mut constraint_scope = scope.child();
+                constraint_scope.set("this".into(), val.clone());
+                // Also bind common properties directly so `length`, `isEmpty` etc. work
+                match val {
+                    Value::String(s) => {
+                        constraint_scope.set("length".into(), Value::Int(s.chars().count() as i64));
+                        constraint_scope.set("isEmpty".into(), Value::Bool(s.is_empty()));
+                    }
+                    Value::Int(n) => {
+                        constraint_scope.set("this".into(), Value::Int(*n));
+                    }
+                    Value::Float(f) => {
+                        constraint_scope.set("this".into(), Value::Float(*f));
+                    }
+                    Value::List(items) => {
+                        constraint_scope.set("length".into(), Value::Int(items.len() as i64));
+                        constraint_scope.set("isEmpty".into(), Value::Bool(items.is_empty()));
+                    }
+                    _ => {}
+                }
+                let result = self
+                    .eval_expr(constraint, &constraint_scope, depth + 1)
+                    .await?;
+                Ok(is_truthy(&result))
+            }
+            TypeExpr::Nullable(inner) => {
+                if matches!(val, Value::Null) {
+                    return Ok(true);
+                }
+                self.eval_type_check(val, inner, scope, depth).await
+            }
+            TypeExpr::Union(variants) => {
+                for v in variants {
+                    if self.eval_type_check(val, v, scope, depth).await? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            // Non-constrained types: delegate to the simple check
+            _ => Ok(value_is_type(val, ty)),
         }
     }
 
@@ -1044,11 +1122,13 @@ impl Evaluator {
             }
             Expr::Is(expr, ty) => {
                 let val = self.eval_expr(expr, scope, depth + 1).await?;
-                Ok(Value::Bool(value_is_type(&val, ty)))
+                let matches = self.eval_type_check(&val, ty, scope, depth).await?;
+                Ok(Value::Bool(matches))
             }
             Expr::As(expr, ty) => {
                 let val = self.eval_expr(expr, scope, depth + 1).await?;
-                if value_is_type(&val, ty) {
+                let matches = self.eval_type_check(&val, ty, scope, depth).await?;
+                if matches {
                     Ok(val)
                 } else {
                     Err(Error::Eval(format!(
@@ -1621,6 +1701,7 @@ impl Evaluator {
 #[derive(Debug, Default, Clone)]
 struct Scope {
     vars: IndexMap<String, Value>,
+    type_aliases: IndexMap<String, crate::parser::TypeExpr>,
     parent: Option<Box<Scope>>,
 }
 
@@ -1628,12 +1709,23 @@ impl Scope {
     fn child(&self) -> Self {
         Self {
             vars: IndexMap::new(),
+            type_aliases: IndexMap::new(),
             parent: Some(Box::new(self.clone())),
         }
     }
 
     fn set(&mut self, name: String, val: Value) {
         self.vars.insert(name, val);
+    }
+
+    fn set_type_alias(&mut self, name: String, ty: crate::parser::TypeExpr) {
+        self.type_aliases.insert(name, ty);
+    }
+
+    fn get_type_alias(&self, name: &str) -> Option<&crate::parser::TypeExpr> {
+        self.type_aliases
+            .get(name)
+            .or_else(|| self.parent.as_ref().and_then(|p| p.get_type_alias(name)))
     }
 
     fn get(&self, name: &str) -> Option<&Value> {
@@ -1759,10 +1851,12 @@ fn display_type_expr(ty: &crate::parser::TypeExpr) -> String {
             let args_str: Vec<_> = args.iter().map(display_type_expr).collect();
             format!("{}<{}>", name, args_str.join(", "))
         }
+        TypeExpr::Constrained(name, _) => format!("{name}(...)"),
     }
 }
 
-/// Check if a value matches a Pkl type expression.
+/// Check if a value matches a Pkl type expression (non-constrained types only).
+/// For constrained types, use `Evaluator::eval_type_check` instead.
 fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
     use crate::parser::TypeExpr;
     match ty {
@@ -1791,6 +1885,10 @@ fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
                 "Map" | "Mapping" => matches!(val, Value::Object(..)),
                 _ => matches!(val, Value::Object(..)),
             }
+        }
+        TypeExpr::Constrained(base_name, _) => {
+            // Just check the base type; constraint requires async eval
+            value_is_type(val, &TypeExpr::Named(base_name.clone()))
         }
     }
 }
