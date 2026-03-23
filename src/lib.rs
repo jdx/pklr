@@ -26,16 +26,20 @@ pub fn analyze_imports(path: &Path) -> Result<Vec<std::path::PathBuf>> {
     let tokens = lexer::lex_named(&source, &path.display().to_string())?;
     let imports = parser::collect_imports(&tokens);
     let base = path.parent().unwrap_or(Path::new("."));
-    Ok(imports
-        .into_iter()
-        .filter_map(|uri| {
-            if let Some(rel) = uri.strip_prefix("file://") {
-                Some(std::path::PathBuf::from(rel))
-            } else if !uri.contains("://") {
-                Some(base.join(&uri))
+    let mut results = Vec::new();
+    for uri in imports {
+        if let Some(rel) = uri.strip_prefix("file://") {
+            results.push(std::path::PathBuf::from(rel));
+        } else if !uri.contains("://") {
+            if uri.contains('*') {
+                // Expand glob patterns to actual files
+                if let Ok(expanded) = eval::expand_glob(base, &uri) {
+                    results.extend(expanded);
+                }
             } else {
-                None
+                results.push(base.join(&uri));
             }
-        })
-        .collect())
+        }
+    }
+    Ok(results)
 }

@@ -698,7 +698,13 @@ impl<'a> Lexer<'a> {
                     self.advance();
                 }
                 let ident = &self.source[start..self.pos];
-                keyword_or_ident(ident)
+                // Handle `import*` as a single token
+                if ident == "import" && self.peek() == Some('*') {
+                    self.advance();
+                    TokenKind::KwImportStar
+                } else {
+                    keyword_or_ident(ident)
+                }
             }
             c => {
                 return Err(self.lex_error(format!("unexpected character: {c:?}")));
@@ -746,7 +752,6 @@ fn keyword_or_ident(s: &str) -> TokenKind {
         "function" => TokenKind::KwFunction,
         "this" => TokenKind::KwThis,
         "module" => TokenKind::KwModule,
-        "import*" => TokenKind::KwImportStar,
         "if" => TokenKind::KwIf,
         "else" => TokenKind::KwElse,
         "when" => TokenKind::KwWhen,

@@ -19,6 +19,8 @@ pub struct Module {
 pub struct Import {
     pub uri: String,
     pub alias: Option<String>,
+    /// `import*` glob import — result is a Mapping<String, Module>
+    pub is_glob: bool,
 }
 
 /// A top-level or object entry.
@@ -163,7 +165,7 @@ pub fn collect_imports(tokens: &[Token]) -> Vec<String> {
     let mut i = 0;
     while i < tokens.len() {
         match &tokens[i].kind {
-            TokenKind::KwAmends | TokenKind::KwImport => {
+            TokenKind::KwAmends | TokenKind::KwImport | TokenKind::KwImportStar => {
                 if let Some(TokenKind::StringLit(uri)) = tokens.get(i + 1).map(|t| &t.kind) {
                     imports.push(uri.clone());
                 }
@@ -332,7 +334,8 @@ impl<'a> Parser<'a> {
                     let uri = self.expect_string()?;
                     amends = Some(uri);
                 }
-                TokenKind::KwImport => {
+                TokenKind::KwImport | TokenKind::KwImportStar => {
+                    let is_glob = matches!(self.peek(), TokenKind::KwImportStar);
                     self.advance();
                     let uri = self.expect_string()?;
                     let alias = if matches!(self.peek(), TokenKind::KwAs) {
@@ -341,7 +344,11 @@ impl<'a> Parser<'a> {
                     } else {
                         None
                     };
-                    imports.push(Import { uri, alias });
+                    imports.push(Import {
+                        uri,
+                        alias,
+                        is_glob,
+                    });
                 }
                 _ => break,
             }
