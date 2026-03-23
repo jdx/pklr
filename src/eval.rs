@@ -941,26 +941,45 @@ impl Evaluator {
                                     .chain(base_map.keys().cloned())
                                     .collect();
                                 for entry in entries {
-                                    if let Entry::Property(p) = entry
-                                        && !has_modifier(&p.modifiers, Modifier::Local)
-                                        && !base_names.contains(&p.name)
-                                    {
-                                        return Err(Error::Eval(format!(
-                                            "cannot add property '{}' to non-open class",
-                                            p.name
-                                        )));
+                                    match entry {
+                                        Entry::Property(p)
+                                            if !has_modifier(&p.modifiers, Modifier::Local)
+                                                && !base_names.contains(&p.name) =>
+                                        {
+                                            return Err(Error::Eval(format!(
+                                                "cannot add property '{}' to non-open class",
+                                                p.name
+                                            )));
+                                        }
+                                        Entry::DynProperty(Expr::String(key), _)
+                                            if !base_names.contains(key) =>
+                                        {
+                                            return Err(Error::Eval(format!(
+                                                "cannot add property '{}' to non-open class",
+                                                key
+                                            )));
+                                        }
+                                        _ => {}
                                     }
                                 }
                             }
+                            let is_open = base_src.is_open;
                             // Late binding: re-evaluate merged base + overlay entries
-                            self.eval_amended_object(
-                                &base_src.entries.clone(),
-                                &base_src.scope.clone(),
-                                entries,
-                                scope,
-                                depth,
-                            )
-                            .await
+                            let mut result = self
+                                .eval_amended_object(
+                                    &base_src.entries.clone(),
+                                    &base_src.scope.clone(),
+                                    entries,
+                                    scope,
+                                    depth,
+                                )
+                                .await?;
+                            // Preserve the base class's is_open flag so further amendments
+                            // of non-open classes continue to enforce the constraint.
+                            if let Value::Object(_, Some(ref mut src)) = result {
+                                src.is_open = is_open;
+                            }
+                            Ok(result)
                         } else if let Some(Value::Object(base_map, _)) = base {
                             // Fallback: eager merge
                             let overlay = self.eval_entries(entries, scope, depth + 1).await?;
