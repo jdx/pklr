@@ -1,0 +1,743 @@
+//! Tests for pkl language features, organized by category.
+//!
+//! Tests marked `#[ignore]` document features not yet implemented.
+//! As features are added, remove the `#[ignore]` attribute.
+
+use pklr::eval::Evaluator;
+
+fn eval(src: &str) -> serde_json::Value {
+    let mut ev = Evaluator::new();
+    let path = std::path::Path::new("test.pkl");
+    let val = ev.eval_source(src, path).unwrap();
+    val.to_json()
+}
+
+fn eval_fails(src: &str) -> String {
+    let mut ev = Evaluator::new();
+    let path = std::path::Path::new("test.pkl");
+    match ev.eval_source(src, path) {
+        Err(e) => e.to_string(),
+        Ok(v) => panic!("expected error, got: {:?}", v.to_json()),
+    }
+}
+
+// ============================================================
+// Primitives
+// ============================================================
+
+#[test]
+fn primitives_int() {
+    let json = eval(r#"x = 42"#);
+    assert_eq!(json["x"], 42);
+}
+
+#[test]
+fn primitives_negative_int() {
+    let json = eval(r#"x = -7"#);
+    assert_eq!(json["x"], -7);
+}
+
+#[test]
+fn primitives_hex() {
+    let json = eval(r#"x = 0xFF"#);
+    assert_eq!(json["x"], 255);
+}
+
+#[test]
+fn primitives_octal() {
+    let json = eval(r#"x = 0o77"#);
+    assert_eq!(json["x"], 63);
+}
+
+#[test]
+fn primitives_binary() {
+    let json = eval(r#"x = 0b1010"#);
+    assert_eq!(json["x"], 10);
+}
+
+#[test]
+fn primitives_float() {
+    let json = eval(r#"x = 1.5"#);
+    assert_eq!(json["x"], 1.5);
+}
+
+#[test]
+fn primitives_float_exponent() {
+    let json = eval(r#"x = 1e3"#);
+    assert_eq!(json["x"], 1000.0);
+}
+
+#[test]
+fn primitives_bool_true() {
+    let json = eval(r#"x = true"#);
+    assert_eq!(json["x"], true);
+}
+
+#[test]
+fn primitives_bool_false() {
+    let json = eval(r#"x = false"#);
+    assert_eq!(json["x"], false);
+}
+
+#[test]
+fn primitives_null() {
+    let json = eval(r#"x = null"#);
+    assert!(json["x"].is_null());
+}
+
+#[test]
+fn primitives_underscored_int() {
+    let json = eval(r#"x = 1_000_000"#);
+    assert_eq!(json["x"], 1_000_000);
+}
+
+// ============================================================
+// Strings
+// ============================================================
+
+#[test]
+fn string_basic() {
+    let json = eval(r#"x = "hello world""#);
+    assert_eq!(json["x"], "hello world");
+}
+
+#[test]
+fn string_escapes() {
+    let json = eval(r#"x = "a\nb\tc""#);
+    assert_eq!(json["x"], "a\nb\tc");
+}
+
+#[test]
+fn string_multiline() {
+    let src = "x = \"\"\"\n  hello\n  world\n  \"\"\"";
+    let json = eval(src);
+    assert_eq!(json["x"], "hello\nworld\n");
+}
+
+#[test]
+fn string_concatenation() {
+    let json = eval(r#"x = "hello" + " " + "world""#);
+    assert_eq!(json["x"], "hello world");
+}
+
+#[test]
+#[ignore = "string interpolation not yet implemented"]
+fn string_interpolation() {
+    let json = eval(
+        r#"
+local name = "world"
+x = "hello \(name)"
+"#,
+    );
+    assert_eq!(json["x"], "hello world");
+}
+
+#[test]
+#[ignore = "string interpolation not yet implemented"]
+fn string_interpolation_expr() {
+    let json = eval(
+        r#"
+x = "2 + 2 = \(2 + 2)"
+"#,
+    );
+    assert_eq!(json["x"], "2 + 2 = 4");
+}
+
+// ============================================================
+// Arithmetic
+// ============================================================
+
+#[test]
+fn arithmetic_add() {
+    let json = eval(r#"x = 2 + 3"#);
+    assert_eq!(json["x"], 5);
+}
+
+#[test]
+fn arithmetic_sub() {
+    let json = eval(r#"x = 10 - 3"#);
+    assert_eq!(json["x"], 7);
+}
+
+#[test]
+fn arithmetic_mul() {
+    let json = eval(r#"x = 4 * 5"#);
+    assert_eq!(json["x"], 20);
+}
+
+#[test]
+fn arithmetic_div() {
+    let json = eval(r#"x = 10 / 3"#);
+    assert_eq!(json["x"], 3);
+}
+
+#[test]
+fn arithmetic_mod() {
+    let json = eval(r#"x = 10 % 3"#);
+    assert_eq!(json["x"], 1);
+}
+
+#[test]
+fn arithmetic_float_div() {
+    let json = eval(r#"x = 10.0 / 3.0"#);
+    let v = json["x"].as_f64().unwrap();
+    assert!((v - 3.333333).abs() < 0.001);
+}
+
+#[test]
+fn arithmetic_precedence() {
+    let json = eval(r#"x = 2 + 3 * 4"#);
+    assert_eq!(json["x"], 14);
+}
+
+#[test]
+fn arithmetic_parens() {
+    let json = eval(r#"x = (2 + 3) * 4"#);
+    assert_eq!(json["x"], 20);
+}
+
+#[test]
+fn arithmetic_div_by_zero() {
+    let msg = eval_fails(r#"x = 1 / 0"#);
+    assert!(msg.contains("division by zero") || msg.contains("divide by zero"));
+}
+
+#[test]
+fn arithmetic_mod_by_zero() {
+    let msg = eval_fails(r#"x = 1 % 0"#);
+    assert!(msg.contains("zero"));
+}
+
+// ============================================================
+// Comparison and logical operators
+// ============================================================
+
+#[test]
+fn comparison_eq() {
+    let json = eval(r#"x = 1 == 1"#);
+    assert_eq!(json["x"], true);
+}
+
+#[test]
+fn comparison_ne() {
+    let json = eval(r#"x = 1 != 2"#);
+    assert_eq!(json["x"], true);
+}
+
+#[test]
+fn comparison_lt() {
+    let json = eval(r#"x = 1 < 2"#);
+    assert_eq!(json["x"], true);
+}
+
+#[test]
+fn comparison_gt() {
+    let json = eval(r#"x = 2 > 1"#);
+    assert_eq!(json["x"], true);
+}
+
+#[test]
+fn logical_and() {
+    let json = eval(r#"x = true && false"#);
+    assert_eq!(json["x"], false);
+}
+
+#[test]
+fn logical_or() {
+    let json = eval(r#"x = true || false"#);
+    assert_eq!(json["x"], true);
+}
+
+#[test]
+fn logical_not() {
+    let json = eval(r#"x = !false"#);
+    assert_eq!(json["x"], true);
+}
+
+// ============================================================
+// Null coalescing
+// ============================================================
+
+#[test]
+#[ignore = "null coalesce (??) not yet parsed in expressions"]
+fn null_coalesce_non_null() {
+    let json = eval(r#"x = "hello" ?? "default""#);
+    assert_eq!(json["x"], "hello");
+}
+
+#[test]
+#[ignore = "null coalesce (??) not yet parsed in expressions"]
+fn null_coalesce_null() {
+    let json = eval(r#"x = null ?? "default""#);
+    assert_eq!(json["x"], "default");
+}
+
+// ============================================================
+// If/else expressions
+// ============================================================
+
+#[test]
+fn if_else_true() {
+    let json = eval(r#"x = if (true) "yes" else "no""#);
+    assert_eq!(json["x"], "yes");
+}
+
+#[test]
+fn if_else_false() {
+    let json = eval(r#"x = if (false) "yes" else "no""#);
+    assert_eq!(json["x"], "no");
+}
+
+#[test]
+fn if_else_complex_condition() {
+    let json = eval(
+        r#"
+local n = 10
+x = if (n > 5) "big" else "small"
+"#,
+    );
+    assert_eq!(json["x"], "big");
+}
+
+// ============================================================
+// Let expressions
+// ============================================================
+
+#[test]
+fn let_basic() {
+    let json = eval(
+        r#"
+x = let (a = 1) let (b = 2) a + b
+"#,
+    );
+    assert_eq!(json["x"], 3);
+}
+
+// ============================================================
+// Local variables
+// ============================================================
+
+#[test]
+fn local_basic() {
+    let json = eval(
+        r#"
+local greeting = "hello"
+x = greeting
+"#,
+    );
+    assert_eq!(json["x"], "hello");
+}
+
+#[test]
+fn local_not_in_output() {
+    let json = eval(
+        r#"
+local secret = "hidden"
+visible = "shown"
+"#,
+    );
+    assert!(json.get("secret").is_none() || json["secret"].is_null());
+    assert_eq!(json["visible"], "shown");
+}
+
+#[test]
+fn local_reference_other_local() {
+    let json = eval(
+        r#"
+local a = "hello"
+local b = a + " world"
+x = b
+"#,
+    );
+    assert_eq!(json["x"], "hello world");
+}
+
+// ============================================================
+// Objects
+// ============================================================
+
+#[test]
+fn object_nested() {
+    let json = eval(
+        r#"
+outer {
+    inner {
+        value = 42
+    }
+}
+"#,
+    );
+    assert_eq!(json["outer"]["inner"]["value"], 42);
+}
+
+#[test]
+fn object_dynamic_key() {
+    let json = eval(
+        r#"
+data {
+    ["my-key"] = "value"
+}
+"#,
+    );
+    assert_eq!(json["data"]["my-key"], "value");
+}
+
+#[test]
+fn object_dynamic_key_with_body() {
+    let json = eval(
+        r#"
+data {
+    ["my-key"] {
+        nested = true
+    }
+}
+"#,
+    );
+    assert_eq!(json["data"]["my-key"]["nested"], true);
+}
+
+// ============================================================
+// Listings (List)
+// ============================================================
+
+#[test]
+fn list_function() {
+    let json = eval(r#"x = List(1, 2, 3)"#);
+    assert_eq!(json["x"], serde_json::json!([1, 2, 3]));
+}
+
+#[test]
+fn list_strings() {
+    let json = eval(r#"x = List("a", "b", "c")"#);
+    assert_eq!(json["x"], serde_json::json!(["a", "b", "c"]));
+}
+
+#[test]
+fn list_empty() {
+    let json = eval(r#"x = List()"#);
+    assert_eq!(json["x"], serde_json::json!([]));
+}
+
+#[test]
+fn list_concatenation() {
+    let json = eval(r#"x = List(1, 2) + List(3, 4)"#);
+    assert_eq!(json["x"], serde_json::json!([1, 2, 3, 4]));
+}
+
+#[test]
+#[ignore = "new Listing body syntax not yet implemented"]
+fn listing_body() {
+    let json = eval(
+        r#"
+x = new Listing {
+    "a"
+    "b"
+    "c"
+}
+"#,
+    );
+    assert_eq!(json["x"], serde_json::json!(["a", "b", "c"]));
+}
+
+// ============================================================
+// Mappings
+// ============================================================
+
+#[test]
+#[ignore = "dynamic key with = assignment not yet parsed in new Mapping body"]
+fn mapping_basic() {
+    let json = eval(
+        r#"
+x = new Mapping {
+    ["a"] = 1
+    ["b"] = 2
+}
+"#,
+    );
+    assert_eq!(json["x"]["a"], 1);
+    assert_eq!(json["x"]["b"], 2);
+}
+
+#[test]
+fn mapping_with_body() {
+    let json = eval(
+        r#"
+x = new Mapping {
+    ["key"] {
+        nested = true
+    }
+}
+"#,
+    );
+    assert_eq!(json["x"]["key"]["nested"], true);
+}
+
+#[test]
+fn map_function() {
+    let json = eval(r#"x = Map("a", 1, "b", 2)"#);
+    assert_eq!(json["x"]["a"], 1);
+    assert_eq!(json["x"]["b"], 2);
+}
+
+// ============================================================
+// Spread operator
+// ============================================================
+
+#[test]
+#[ignore = "dynamic key with = assignment not yet parsed"]
+fn spread_into_object() {
+    let json = eval(
+        r#"
+local base = new Mapping {
+    ["a"] = 1
+    ["b"] = 2
+}
+x {
+    ...base
+    ["c"] = 3
+}
+"#,
+    );
+    assert_eq!(json["x"]["a"], 1);
+    assert_eq!(json["x"]["b"], 2);
+    assert_eq!(json["x"]["c"], 3);
+}
+
+// ============================================================
+// For generators
+// ============================================================
+
+#[test]
+fn for_generator_list() {
+    let json = eval(
+        r#"
+local items = List("a", "b")
+x {
+    for (_i, v in items) {
+        [v] = true
+    }
+}
+"#,
+    );
+    assert_eq!(json["x"]["a"], true);
+    assert_eq!(json["x"]["b"], true);
+}
+
+#[test]
+#[ignore = "dynamic key with = assignment not yet parsed in new Mapping body"]
+fn for_generator_object() {
+    let json = eval(
+        r#"
+local src = new Mapping {
+    ["x"] = 1
+    ["y"] = 2
+}
+out {
+    for (k, v in src) {
+        [k] = v
+    }
+}
+"#,
+    );
+    assert_eq!(json["out"]["x"], 1);
+    assert_eq!(json["out"]["y"], 2);
+}
+
+// ============================================================
+// When generators
+// ============================================================
+
+#[test]
+fn when_true() {
+    let json = eval(
+        r#"
+local enabled = true
+x {
+    when (enabled) {
+        feature = "on"
+    }
+}
+"#,
+    );
+    assert_eq!(json["x"]["feature"], "on");
+}
+
+#[test]
+fn when_false() {
+    let json = eval(
+        r#"
+local enabled = false
+x {
+    when (enabled) {
+        feature = "on"
+    }
+}
+"#,
+    );
+    assert!(json["x"]["feature"].is_null());
+}
+
+#[test]
+#[ignore = "when/else not yet implemented"]
+fn when_else() {
+    let json = eval(
+        r#"
+local enabled = false
+x {
+    when (enabled) {
+        mode = "fast"
+    } else {
+        mode = "slow"
+    }
+}
+"#,
+    );
+    assert_eq!(json["x"]["mode"], "slow");
+}
+
+// ============================================================
+// String interpolation (future)
+// ============================================================
+
+#[test]
+#[ignore = "string interpolation not yet implemented"]
+fn interpolation_in_key() {
+    let json = eval(
+        r#"
+local prefix = "my"
+x {
+    ["\(prefix)-key"] = "value"
+}
+"#,
+    );
+    assert_eq!(json["x"]["my-key"], "value");
+}
+
+// ============================================================
+// Lambdas / function expressions (future)
+// ============================================================
+
+#[test]
+#[ignore = "lambda expressions not yet implemented"]
+fn lambda_basic() {
+    let json = eval(
+        r#"
+local double = (x) -> x * 2
+result = double.apply(5)
+"#,
+    );
+    assert_eq!(json["result"], 10);
+}
+
+// ============================================================
+// Method calls on values (future)
+// ============================================================
+
+#[test]
+#[ignore = "method calls not yet implemented"]
+fn method_length() {
+    let json = eval(
+        r#"
+x = List(1, 2, 3).length
+"#,
+    );
+    assert_eq!(json["x"], 3);
+}
+
+#[test]
+#[ignore = "method calls not yet implemented"]
+fn method_is_empty() {
+    let json = eval(
+        r#"
+x = List().isEmpty
+"#,
+    );
+    assert_eq!(json["x"], true);
+}
+
+// ============================================================
+// Import resolution (future)
+// ============================================================
+
+#[test]
+#[ignore = "import resolution not yet implemented"]
+fn import_local_file() {
+    // This would require a fixture file setup
+    let json = eval(
+        r#"
+import "tests/fixtures/helper.pkl"
+x = helper.value
+"#,
+    );
+    assert_eq!(json["x"], 42);
+}
+
+// ============================================================
+// Class instantiation (future)
+// ============================================================
+
+#[test]
+#[ignore = "class definitions not yet implemented"]
+fn class_new_with_defaults() {
+    let json = eval(
+        r#"
+class Person {
+    name: String
+    age: Int = 0
+}
+x = new Person {
+    name = "Alice"
+}
+"#,
+    );
+    assert_eq!(json["x"]["name"], "Alice");
+    assert_eq!(json["x"]["age"], 0);
+}
+
+// ============================================================
+// Object amendment (future)
+// ============================================================
+
+#[test]
+#[ignore = "object amendment syntax not yet implemented"]
+fn object_amendment() {
+    let json = eval(
+        r#"
+local base = new Mapping {
+    ["check"] = "echo hello"
+    ["fix"] = "echo fix"
+}
+x = (base) {
+    ["check"] = "echo override"
+}
+"#,
+    );
+    assert_eq!(json["x"]["check"], "echo override");
+    assert_eq!(json["x"]["fix"], "echo fix");
+}
+
+// ============================================================
+// Throw and trace
+// ============================================================
+
+#[test]
+fn throw_produces_error() {
+    let msg = eval_fails(r#"x = throw("boom")"#);
+    assert!(msg.contains("boom"));
+}
+
+// ============================================================
+// Null-safe access (future)
+// ============================================================
+
+#[test]
+#[ignore = "null-safe access not yet implemented"]
+fn null_safe_access() {
+    let json = eval(
+        r#"
+local x = null
+result = x?.name ?? "default"
+"#,
+    );
+    assert_eq!(json["result"], "default");
+}
