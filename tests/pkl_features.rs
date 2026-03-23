@@ -950,6 +950,23 @@ name = "override"
 }
 
 // ============================================================
+// Circular imports
+// ============================================================
+
+#[tokio::test]
+async fn circular_import_does_not_loop() {
+    let mut ev = pklr::eval::Evaluator::new();
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    ev.set_base_path(&base);
+    let path = base.join("circular_a.pkl");
+    let val = ev.eval_file_pub(&path).await.unwrap();
+    let json = val.to_json();
+    assert_eq!(json["a_value"], "from_a");
+    // b_ref resolves to from_b via circular_b.pkl
+    assert_eq!(json["b_ref"], "from_b");
+}
+
+// ============================================================
 // Glob imports (import*)
 // ============================================================
 
