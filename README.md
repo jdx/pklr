@@ -100,7 +100,7 @@ pklr implements a subset of the [Pkl language](https://pkl-lang.org/main/current
 | Import resolution & evaluation | Supported (local files) |
 | `module` keyword | Supported (parsed and skipped) |
 | `import*` (globbed imports) | Supported (local files) |
-| `extends` | Not supported |
+| `extends` (module and class) | Supported |
 
 ### Functions & Methods
 
@@ -119,7 +119,7 @@ pklr implements a subset of the [Pkl language](https://pkl-lang.org/main/current
 | `.toMap()`, `.toList()`, `.toDynamic()`, `.mapValues()` | Supported |
 | `.toString()`, `.toInt()` | Supported |
 | Class definitions with defaults | Supported |
-| Class inheritance | Not supported |
+| Class inheritance (`extends`) | Supported |
 | `outer` keyword | Supported |
 | `this` keyword | Supported |
 | `super` keyword | Not supported |
@@ -153,7 +153,6 @@ The following Pkl features are not currently implemented:
 Planned features:
 
 1. Package URI imports (`package://...`)
-2. Class inheritance (`extends`)
 
 ## Usage
 
