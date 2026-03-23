@@ -1948,6 +1948,112 @@ services {
 }
 
 // ============================================================
+// Type aliases
+// ============================================================
+
+#[test]
+fn typealias_to_class() {
+    // typealias acts as an alternative constructor for a class
+    let json = eval(
+        r#"
+class Server {
+    host: String = "localhost"
+    port: Int = 8080
+}
+typealias Srv = Server
+x = new Srv {
+    port = 3000
+}
+"#,
+    );
+    assert_eq!(json["x"]["host"], "localhost");
+    assert_eq!(json["x"]["port"], 3000);
+}
+
+#[test]
+fn typealias_chain() {
+    // Alias of an alias
+    let json = eval(
+        r#"
+class Base {
+    value: Int = 1
+}
+typealias A = Base
+typealias B = A
+x = new B {}
+"#,
+    );
+    assert_eq!(json["x"]["value"], 1);
+}
+
+#[test]
+fn typealias_simple_type_ignored() {
+    // typealias to a simple type (not a class) is a no-op, shouldn't error
+    let json = eval(
+        r#"
+typealias Name = String
+x = "hello"
+"#,
+    );
+    assert_eq!(json["x"], "hello");
+}
+
+#[test]
+fn typealias_with_constraint() {
+    // typealias with type constraint -- constraint is skipped but should parse
+    let json = eval(
+        r#"
+typealias Port = Int(isBetween(1, 65535))
+x = 8080
+"#,
+    );
+    assert_eq!(json["x"], 8080);
+}
+
+#[test]
+fn typealias_union_parses() {
+    // Union type alias should parse without error
+    let json = eval(
+        r#"
+typealias StringOrInt = String|Int
+x = 42
+"#,
+    );
+    assert_eq!(json["x"], 42);
+}
+
+#[test]
+fn typealias_nullable_class() {
+    // typealias Foo = Bar? should still work as constructor
+    let json = eval(
+        r#"
+class Config {
+    debug: Boolean = false
+}
+typealias MaybeConfig = Config?
+x = new MaybeConfig {
+    debug = true
+}
+"#,
+    );
+    assert_eq!(json["x"]["debug"], true);
+}
+
+#[test]
+fn typealias_generic_parses() {
+    // Generic type alias should parse without error
+    let json = eval(
+        r#"
+typealias StringMap = Mapping<String, String>
+x = new Mapping {
+    ["a"] = "b"
+}
+"#,
+    );
+    assert_eq!(json["x"]["a"], "b");
+}
+
+// ============================================================
 // Annotations
 // ============================================================
 
