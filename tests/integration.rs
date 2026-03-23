@@ -59,10 +59,13 @@ import "pkl/Builtins.pkl"
 // --- Evaluator tests ---
 
 fn eval_src(src: &str) -> serde_json::Value {
-    let mut ev = Evaluator::new();
-    let path = std::path::Path::new("test.pkl");
-    let val = ev.eval_source(src, path).unwrap();
-    val.to_json()
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut ev = Evaluator::new();
+        let path = std::path::Path::new("test.pkl");
+        let val = ev.eval_source(src, path).await.unwrap();
+        val.to_json()
+    })
 }
 
 #[test]
