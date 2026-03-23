@@ -6,19 +6,25 @@
 use pklr::eval::Evaluator;
 
 fn eval(src: &str) -> serde_json::Value {
-    let mut ev = Evaluator::new();
-    let path = std::path::Path::new("test.pkl");
-    let val = ev.eval_source(src, path).unwrap();
-    val.to_json()
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut ev = Evaluator::new();
+        let path = std::path::Path::new("test.pkl");
+        let val = ev.eval_source(src, path).await.unwrap();
+        val.to_json()
+    })
 }
 
 fn eval_fails(src: &str) -> String {
-    let mut ev = Evaluator::new();
-    let path = std::path::Path::new("test.pkl");
-    match ev.eval_source(src, path) {
-        Err(e) => e.to_string(),
-        Ok(v) => panic!("expected error, got: {:?}", v.to_json()),
-    }
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut ev = Evaluator::new();
+        let path = std::path::Path::new("test.pkl");
+        match ev.eval_source(src, path).await {
+            Err(e) => e.to_string(),
+            Ok(v) => panic!("expected error, got: {:?}", v.to_json()),
+        }
+    })
 }
 
 // ============================================================
@@ -862,8 +868,8 @@ x = List().isEmpty
 // Import resolution (future)
 // ============================================================
 
-#[test]
-fn import_local_file() {
+#[tokio::test]
+async fn import_local_file() {
     let mut ev = pklr::eval::Evaluator::new();
     // Set base path so relative imports resolve correctly
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
@@ -873,7 +879,7 @@ import "helper.pkl"
 x = helper.value
 "#;
     let path = base.join("test_import.pkl");
-    let val = ev.eval_source(src, &path).unwrap();
+    let val = ev.eval_source(src, &path).await.unwrap();
     let json = val.to_json();
     assert_eq!(json["x"], 42);
 }
@@ -882,8 +888,8 @@ x = helper.value
 // Amends resolution
 // ============================================================
 
-#[test]
-fn amends_local_file() {
+#[tokio::test]
+async fn amends_local_file() {
     let mut ev = pklr::eval::Evaluator::new();
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     ev.set_base_path(&base);
@@ -892,7 +898,7 @@ amends "base.pkl"
 name = "override"
 "#;
     let path = base.join("test_amends.pkl");
-    let val = ev.eval_source(src, &path).unwrap();
+    let val = ev.eval_source(src, &path).await.unwrap();
     let json = val.to_json();
     // name is overridden
     assert_eq!(json["name"], "override");

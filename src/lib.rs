@@ -12,11 +12,11 @@ use std::path::Path;
 
 /// Evaluate a pkl file and return its contents as a JSON value.
 /// This is the primary entry point for use in tools like hk.
-pub fn eval_to_json(path: &Path) -> Result<serde_json::Value> {
+pub async fn eval_to_json(path: &Path) -> Result<serde_json::Value> {
     let source = std::fs::read_to_string(path).map_err(|e| Error::Io(path.to_path_buf(), e))?;
     let mut evaluator = Evaluator::new();
     evaluator.set_base_path(path.parent().unwrap_or(Path::new(".")));
-    let value = evaluator.eval_source(&source, path)?;
+    let value = evaluator.eval_source(&source, path).await?;
     Ok(value.to_json())
 }
 

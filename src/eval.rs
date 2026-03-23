@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+
+use async_recursion::async_recursion;
 use indexmap::IndexMap;
 use std::path::{Path, PathBuf};
 
@@ -11,6 +14,10 @@ pub struct Evaluator {
     base_path: PathBuf,
     /// Maximum import depth to prevent infinite recursion
     max_depth: usize,
+    /// Cache for fetched HTTP sources (URL → source text)
+    http_cache: HashMap<String, String>,
+    /// Reusable HTTP client for connection pooling
+    http_client: reqwest::Client,
 }
 
 impl Default for Evaluator {
@@ -18,6 +25,8 @@ impl Default for Evaluator {
         Self {
             base_path: PathBuf::from("."),
             max_depth: 32,
+            http_cache: HashMap::new(),
+            http_client: reqwest::Client::new(),
         }
     }
 }
@@ -31,14 +40,34 @@ impl Evaluator {
         self.base_path = path.to_path_buf();
     }
 
-    pub fn eval_source(&mut self, source: &str, path: &Path) -> Result<Value> {
+    async fn fetch_source(&mut self, url: &str) -> Result<String> {
+        if let Some(cached) = self.http_cache.get(url) {
+            return Ok(cached.clone());
+        }
+        let body = self
+            .http_client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| Error::Eval(format!("HTTP fetch failed for {url}: {e}")))?
+            .error_for_status()
+            .map_err(|e| Error::Eval(format!("HTTP error for {url}: {e}")))?
+            .text()
+            .await
+            .map_err(|e| Error::Eval(format!("HTTP read failed for {url}: {e}")))?;
+        self.http_cache.insert(url.to_string(), body.clone());
+        Ok(body)
+    }
+
+    pub async fn eval_source(&mut self, source: &str, path: &Path) -> Result<Value> {
         let name = path.display().to_string();
         let tokens = lexer::lex_named(source, &name)?;
         let module = parser::parse_named(&tokens, source, &name)?;
-        self.eval_module(&module, path, 0)
+        self.eval_module(&module, path, 0).await
     }
 
-    fn eval_module(&mut self, module: &Module, path: &Path, depth: usize) -> Result<Value> {
+    #[async_recursion(?Send)]
+    async fn eval_module(&mut self, module: &Module, path: &Path, depth: usize) -> Result<Value> {
         if depth > self.max_depth {
             return Err(Error::Eval(format!(
                 "max import depth {} exceeded",
@@ -50,10 +79,70 @@ impl Evaluator {
         // Process imports
         for import in &module.imports {
             let uri = &import.uri;
-            // Skip package URIs and non-local imports
+
+            if uri.starts_with("https://") || uri.starts_with("http://") {
+                // HTTP import
+                let source = self.fetch_source(uri).await?;
+                let imported_val = {
+                    let tokens = lexer::lex_named(&source, uri)?;
+                    let imp_module = parser::parse_named(&tokens, &source, uri)?;
+                    self.eval_module(&imp_module, Path::new(uri), depth + 1)
+                        .await?
+                };
+                let alias = import.alias.clone().unwrap_or_else(|| {
+                    uri.rsplit('/')
+                        .next()
+                        .unwrap_or(uri)
+                        .strip_suffix(".pkl")
+                        .unwrap_or(uri)
+                        .to_string()
+                });
+                scope.set(alias, imported_val);
+                continue;
+            }
+
+            if uri.starts_with("package://") {
+                // Convert package URI to GitHub release URL
+                // Format: package://pkg.pkl-lang.org/github.com/owner/repo@version#/path.pkl
+                // → https://github.com/owner/repo/releases/download/version/path.pkl
+                if let Some(rest) = uri.strip_prefix("package://pkg.pkl-lang.org/github.com/")
+                    && let Some((repo_ver, fragment)) = rest.split_once('#')
+                    && let Some((repo, version)) = repo_ver.split_once('@')
+                {
+                    let file_path = fragment.strip_prefix('/').unwrap_or(fragment);
+                    let url = format!(
+                        "https://github.com/{repo}/releases/download/{version}/{file_path}"
+                    );
+                    let source = self.fetch_source(&url).await?;
+                    let imported_val = {
+                        let tokens = lexer::lex_named(&source, &url)?;
+                        let imp_module = parser::parse_named(&tokens, &source, &url)?;
+                        self.eval_module(&imp_module, Path::new(&url), depth + 1)
+                            .await?
+                    };
+                    let alias = import.alias.clone().unwrap_or_else(|| {
+                        file_path
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or(file_path)
+                            .strip_suffix(".pkl")
+                            .unwrap_or(file_path)
+                            .to_string()
+                    });
+                    scope.set(alias, imported_val);
+                } else {
+                    return Err(Error::Eval(format!(
+                        "unsupported package URI (only pkg.pkl-lang.org/github.com is supported): {uri}"
+                    )));
+                }
+                continue;
+            }
+
+            // Skip other non-local imports
             if uri.contains("://") && !uri.starts_with("file://") {
                 continue;
             }
+
             let import_path = if let Some(rel) = uri.strip_prefix("file://") {
                 PathBuf::from(rel)
             } else {
@@ -70,7 +159,8 @@ impl Evaluator {
                     let name = import_path.display().to_string();
                     let tokens = lexer::lex_named(&source, &name)?;
                     let imp_module = parser::parse_named(&tokens, &source, &name)?;
-                    self.eval_module(&imp_module, &import_path, depth + 1)?
+                    self.eval_module(&imp_module, &import_path, depth + 1)
+                        .await?
                 };
                 // Determine the binding name: alias or filename stem
                 let alias = import.alias.clone().unwrap_or_else(|| {
@@ -87,23 +177,57 @@ impl Evaluator {
         // Process amends: load base module as starting values
         let mut base_obj = IndexMap::new();
         if let Some(uri) = &module.amends {
-            // Skip package URIs
-            if !uri.contains("://") || uri.starts_with("file://") {
+            if uri.starts_with("https://") || uri.starts_with("http://") {
+                // HTTP amends
+                let source = self.fetch_source(uri).await?;
+                let tokens = lexer::lex_named(&source, uri)?;
+                let base_module = parser::parse_named(&tokens, &source, uri)?;
+                let base_val = self
+                    .eval_module(&base_module, Path::new(uri), depth + 1)
+                    .await?;
+                if let Value::Object(m) = base_val {
+                    base_obj = m;
+                }
+            } else if uri.starts_with("package://") {
+                // Convert package URI to GitHub release URL
+                if let Some(rest) = uri.strip_prefix("package://pkg.pkl-lang.org/github.com/")
+                    && let Some((repo_ver, fragment)) = rest.split_once('#')
+                    && let Some((repo, version)) = repo_ver.split_once('@')
+                {
+                    let file_path = fragment.strip_prefix('/').unwrap_or(fragment);
+                    let url = format!(
+                        "https://github.com/{repo}/releases/download/{version}/{file_path}"
+                    );
+                    let source = self.fetch_source(&url).await?;
+                    let tokens = lexer::lex_named(&source, &url)?;
+                    let base_module = parser::parse_named(&tokens, &source, &url)?;
+                    let base_val = self
+                        .eval_module(&base_module, Path::new(&url), depth + 1)
+                        .await?;
+                    if let Value::Object(m) = base_val {
+                        base_obj = m;
+                    }
+                } else {
+                    return Err(Error::Eval(format!(
+                        "unsupported package URI (only pkg.pkl-lang.org/github.com is supported): {uri}"
+                    )));
+                }
+            } else if !uri.contains("://") || uri.starts_with("file://") {
                 let amends_path = if let Some(rel) = uri.strip_prefix("file://") {
                     PathBuf::from(rel)
                 } else {
                     let base = path.parent().unwrap_or(Path::new("."));
                     base.join(uri)
                 };
-                if !amends_path.exists() {
-                    // Amends file may be a schema reference that doesn't exist locally — skip
-                } else {
+                if amends_path.exists() {
                     let source = std::fs::read_to_string(&amends_path)
                         .map_err(|e| Error::Io(amends_path.clone(), e))?;
                     let name = amends_path.display().to_string();
                     let tokens = lexer::lex_named(&source, &name)?;
                     let base_module = parser::parse_named(&tokens, &source, &name)?;
-                    let base_val = self.eval_module(&base_module, &amends_path, depth + 1)?;
+                    let base_val = self
+                        .eval_module(&base_module, &amends_path, depth + 1)
+                        .await?;
                     if let Value::Object(m) = base_val {
                         base_obj = m;
                     }
@@ -120,14 +244,14 @@ impl Evaluator {
                     .any(|m| matches!(m, crate::parser::Modifier::Local))
                 && let Some(expr) = &prop.value
             {
-                let val = self.eval_expr(expr, &scope, depth)?;
+                let val = self.eval_expr(expr, &scope, depth).await?;
                 scope.set(prop.name.clone(), val);
             }
         }
         // Collect class definitions into module scope (after locals so defaults can reference them)
         for entry in &module.body {
             if let Entry::ClassDef(name, body) = entry {
-                let defaults = self.eval_entries(body, &scope, depth + 1)?;
+                let defaults = self.eval_entries(body, &scope, depth + 1).await?;
                 scope.set(name.clone(), defaults);
             }
         }
@@ -143,7 +267,7 @@ impl Evaluator {
                 {
                     continue; // already collected
                 }
-                let val = self.eval_property(prop, &scope, depth)?;
+                let val = self.eval_property(prop, &scope, depth).await?;
                 if let Some(v) = val {
                     out.insert(prop.name.clone(), v);
                 }
@@ -153,24 +277,31 @@ impl Evaluator {
         Ok(Value::Object(out))
     }
 
-    fn eval_property(
+    #[async_recursion(?Send)]
+    async fn eval_property(
         &mut self,
         prop: &Property,
         scope: &Scope,
         depth: usize,
     ) -> Result<Option<Value>> {
         if let Some(expr) = &prop.value {
-            return Ok(Some(self.eval_expr(expr, scope, depth)?));
+            return Ok(Some(self.eval_expr(expr, scope, depth).await?));
         }
         if let Some(body) = &prop.body {
             // `foo { ... }` — object body amendment
-            let val = self.eval_entries(body, scope, depth)?;
+            let val = self.eval_entries(body, scope, depth).await?;
             return Ok(Some(val));
         }
         Ok(None) // bare type-only declaration
     }
 
-    fn eval_entries(&mut self, entries: &[Entry], scope: &Scope, depth: usize) -> Result<Value> {
+    #[async_recursion(?Send)]
+    async fn eval_entries(
+        &mut self,
+        entries: &[Entry],
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<Value> {
         let mut child_scope = scope.child();
         // Set `outer` to a snapshot of the parent scope's variables as an object
         let outer_obj = Value::Object(scope.flatten());
@@ -184,14 +315,14 @@ impl Evaluator {
                     .any(|m| matches!(m, crate::parser::Modifier::Local))
                 && let Some(expr) = &prop.value
             {
-                let val = self.eval_expr(expr, &child_scope, depth)?;
+                let val = self.eval_expr(expr, &child_scope, depth).await?;
                 child_scope.set(prop.name.clone(), val);
             }
         }
         // Collect class definitions into scope (after locals so defaults can reference them)
         for entry in entries {
             if let Entry::ClassDef(name, body) = entry {
-                let defaults = self.eval_entries(body, &child_scope, depth + 1)?;
+                let defaults = self.eval_entries(body, &child_scope, depth + 1).await?;
                 child_scope.set(name.clone(), defaults);
             }
         }
@@ -207,24 +338,26 @@ impl Evaluator {
                     {
                         continue;
                     }
-                    if let Some(v) = self.eval_property(prop, &child_scope, depth)? {
+                    if let Some(v) = self.eval_property(prop, &child_scope, depth).await? {
                         map.insert(prop.name.clone(), v);
                     }
                 }
                 Entry::DynProperty(key_expr, val_expr) => {
-                    let key = self.eval_expr(key_expr, &child_scope, depth)?;
-                    let val = self.eval_expr(val_expr, &child_scope, depth)?;
+                    let key = self.eval_expr(key_expr, &child_scope, depth).await?;
+                    let val = self.eval_expr(val_expr, &child_scope, depth).await?;
                     let key_str = value_to_key(&key)?;
                     map.insert(key_str, val);
                 }
                 Entry::Spread(expr) => {
-                    let val = self.eval_expr(expr, &child_scope, depth)?;
+                    let val = self.eval_expr(expr, &child_scope, depth).await?;
                     if let Value::Object(m) = val {
                         map.extend(m);
                     }
                 }
                 Entry::ForGenerator(fgen) => {
-                    let collection = self.eval_expr(&fgen.collection, &child_scope, depth)?;
+                    let collection = self
+                        .eval_expr(&fgen.collection, &child_scope, depth)
+                        .await?;
                     let items = collection_to_items(collection);
                     for (k, v) in items {
                         let mut iter_scope = child_scope.child();
@@ -232,21 +365,21 @@ impl Evaluator {
                         if let Some(key_var) = &fgen.key_var {
                             iter_scope.set(key_var.clone(), k);
                         }
-                        let body_val = self.eval_entries(&fgen.body, &iter_scope, depth)?;
+                        let body_val = self.eval_entries(&fgen.body, &iter_scope, depth).await?;
                         if let Value::Object(m) = body_val {
                             map.extend(m);
                         }
                     }
                 }
                 Entry::WhenGenerator(wgen) => {
-                    let cond = self.eval_expr(&wgen.condition, &child_scope, depth)?;
+                    let cond = self.eval_expr(&wgen.condition, &child_scope, depth).await?;
                     if is_truthy(&cond) {
-                        let body_val = self.eval_entries(&wgen.body, &child_scope, depth)?;
+                        let body_val = self.eval_entries(&wgen.body, &child_scope, depth).await?;
                         if let Value::Object(m) = body_val {
                             map.extend(m);
                         }
                     } else if let Some(else_body) = &wgen.else_body {
-                        let else_val = self.eval_entries(else_body, &child_scope, depth)?;
+                        let else_val = self.eval_entries(else_body, &child_scope, depth).await?;
                         if let Value::Object(m) = else_val {
                             map.extend(m);
                         }
@@ -259,7 +392,8 @@ impl Evaluator {
         Ok(Value::Object(map))
     }
 
-    fn eval_expr(&mut self, expr: &Expr, scope: &Scope, depth: usize) -> Result<Value> {
+    #[async_recursion(?Send)]
+    async fn eval_expr(&mut self, expr: &Expr, scope: &Scope, depth: usize) -> Result<Value> {
         if depth > self.max_depth {
             return Err(Error::Eval("maximum recursion depth exceeded".into()));
         }
@@ -275,7 +409,7 @@ impl Evaluator {
                     match part {
                         StringInterpPart::Literal(s) => result.push_str(s),
                         StringInterpPart::Expr(e) => {
-                            let val = self.eval_expr(e, scope, depth + 1)?;
+                            let val = self.eval_expr(e, scope, depth + 1).await?;
                             result.push_str(&value_to_display(&val));
                         }
                     }
@@ -298,17 +432,16 @@ impl Evaluator {
                         for entry in entries {
                             match entry {
                                 Entry::Elem(e) => {
-                                    items.push(self.eval_expr(e, scope, depth + 1)?);
+                                    items.push(self.eval_expr(e, scope, depth + 1).await?);
                                 }
                                 Entry::Property(p) if p.value.is_some() => {
-                                    items.push(self.eval_expr(
-                                        p.value.as_ref().unwrap(),
-                                        scope,
-                                        depth + 1,
-                                    )?);
+                                    items.push(
+                                        self.eval_expr(p.value.as_ref().unwrap(), scope, depth + 1)
+                                            .await?,
+                                    );
                                 }
                                 Entry::Spread(e) => {
-                                    let v = self.eval_expr(e, scope, depth + 1)?;
+                                    let v = self.eval_expr(e, scope, depth + 1).await?;
                                     match v {
                                         Value::List(l) => items.extend(l),
                                         Value::Object(m) => items.extend(m.into_values()),
@@ -317,7 +450,7 @@ impl Evaluator {
                                 }
                                 Entry::ForGenerator(fgen) => {
                                     let collection =
-                                        self.eval_expr(&fgen.collection, scope, depth + 1)?;
+                                        self.eval_expr(&fgen.collection, scope, depth + 1).await?;
                                     for (k, v) in collection_to_items(collection) {
                                         let mut iter_scope = scope.child();
                                         iter_scope.set(fgen.val_var.clone(), v);
@@ -326,11 +459,10 @@ impl Evaluator {
                                         }
                                         for sub in &fgen.body {
                                             if let Entry::Elem(e) = sub {
-                                                items.push(self.eval_expr(
-                                                    e,
-                                                    &iter_scope,
-                                                    depth + 1,
-                                                )?);
+                                                items.push(
+                                                    self.eval_expr(e, &iter_scope, depth + 1)
+                                                        .await?,
+                                                );
                                             }
                                         }
                                     }
@@ -342,13 +474,14 @@ impl Evaluator {
                     }
                     Some("Mapping") | Some("Map") => {
                         let mut map = IndexMap::new();
-                        self.eval_mapping_entries(entries, scope, depth, &mut map)?;
+                        self.eval_mapping_entries(entries, scope, depth, &mut map)
+                            .await?;
                         Ok(Value::Object(map))
                     }
                     _ => {
                         // Check if type name matches a class in scope
                         let base = type_name.as_ref().and_then(|name| scope.get(name)).cloned();
-                        let overlay = self.eval_entries(entries, scope, depth + 1)?;
+                        let overlay = self.eval_entries(entries, scope, depth + 1).await?;
                         if let Some(Value::Object(base_map)) = base {
                             let mut merged = base_map;
                             if let Value::Object(overlay_map) = overlay {
@@ -361,9 +494,9 @@ impl Evaluator {
                     }
                 }
             }
-            Expr::ObjectBody(entries) => self.eval_entries(entries, scope, depth + 1),
+            Expr::ObjectBody(entries) => self.eval_entries(entries, scope, depth + 1).await,
             Expr::Field(obj_expr, field) => {
-                let obj = self.eval_expr(obj_expr, scope, depth + 1)?;
+                let obj = self.eval_expr(obj_expr, scope, depth + 1).await?;
                 // Built-in properties
                 match (&obj, field.as_str()) {
                     (Value::List(items), "length") => return Ok(Value::Int(items.len() as i64)),
@@ -416,7 +549,7 @@ impl Evaluator {
                 }
             }
             Expr::NullSafeField(obj_expr, field) => {
-                let obj = self.eval_expr(obj_expr, scope, depth + 1)?;
+                let obj = self.eval_expr(obj_expr, scope, depth + 1).await?;
                 match &obj {
                     Value::Null => Ok(Value::Null),
                     Value::Object(map) => Ok(map.get(field).cloned().unwrap_or(Value::Null)),
@@ -427,8 +560,8 @@ impl Evaluator {
                 }
             }
             Expr::Index(obj_expr, key_expr) => {
-                let obj = self.eval_expr(obj_expr, scope, depth + 1)?;
-                let key = self.eval_expr(key_expr, scope, depth + 1)?;
+                let obj = self.eval_expr(obj_expr, scope, depth + 1).await?;
+                let key = self.eval_expr(key_expr, scope, depth + 1).await?;
                 let key_str = value_to_key(&key)?;
                 match obj {
                     Value::Object(map) => map
@@ -438,24 +571,24 @@ impl Evaluator {
                     _ => Err(Error::Eval("cannot index non-object".into())),
                 }
             }
-            Expr::Call(func_expr, args) => self.eval_call(func_expr, args, scope, depth),
+            Expr::Call(func_expr, args) => self.eval_call(func_expr, args, scope, depth).await,
             Expr::If(cond, then_expr, else_expr) => {
-                let c = self.eval_expr(cond, scope, depth + 1)?;
+                let c = self.eval_expr(cond, scope, depth + 1).await?;
                 if is_truthy(&c) {
-                    self.eval_expr(then_expr, scope, depth + 1)
+                    self.eval_expr(then_expr, scope, depth + 1).await
                 } else {
-                    self.eval_expr(else_expr, scope, depth + 1)
+                    self.eval_expr(else_expr, scope, depth + 1).await
                 }
             }
             Expr::Let(name, val_expr, body_expr) => {
-                let val = self.eval_expr(val_expr, scope, depth + 1)?;
+                let val = self.eval_expr(val_expr, scope, depth + 1).await?;
                 let mut child = scope.child();
                 child.set(name.clone(), val);
-                self.eval_expr(body_expr, &child, depth + 1)
+                self.eval_expr(body_expr, &child, depth + 1).await
             }
-            Expr::Binop(op, left, right) => self.eval_binop(*op, left, right, scope, depth),
+            Expr::Binop(op, left, right) => self.eval_binop(*op, left, right, scope, depth).await,
             Expr::Unop(op, operand) => {
-                let v = self.eval_expr(operand, scope, depth + 1)?;
+                let v = self.eval_expr(operand, scope, depth + 1).await?;
                 match op {
                     UnOp::Neg => match v {
                         Value::Int(n) => Ok(Value::Int(-n)),
@@ -476,20 +609,20 @@ impl Evaluator {
             }
             Expr::Is(expr, _ty) => {
                 // Simplified: just evaluate the expression, ignore type check
-                self.eval_expr(expr, scope, depth + 1)
+                self.eval_expr(expr, scope, depth + 1).await
             }
-            Expr::As(expr, _ty) => self.eval_expr(expr, scope, depth + 1),
+            Expr::As(expr, _ty) => self.eval_expr(expr, scope, depth + 1).await,
             Expr::Throw(msg_expr) => {
-                let msg = self.eval_expr(msg_expr, scope, depth + 1)?;
+                let msg = self.eval_expr(msg_expr, scope, depth + 1).await?;
                 Err(Error::Eval(format!("throw: {}", value_to_display(&msg))))
             }
             Expr::Trace(expr) => {
-                let v = self.eval_expr(expr, scope, depth + 1)?;
+                let v = self.eval_expr(expr, scope, depth + 1).await?;
                 eprintln!("[pklr trace] {}", value_to_display(&v));
                 Ok(v)
             }
             Expr::Read(uri_expr) => {
-                let uri = self.eval_expr(uri_expr, scope, depth + 1)?;
+                let uri = self.eval_expr(uri_expr, scope, depth + 1).await?;
                 Err(Error::Unsupported(format!(
                     "read() not supported: {}",
                     value_to_display(&uri)
@@ -498,7 +631,8 @@ impl Evaluator {
         }
     }
 
-    fn eval_call(
+    #[async_recursion(?Send)]
+    async fn eval_call(
         &mut self,
         func_expr: &Expr,
         args: &[Expr],
@@ -507,13 +641,15 @@ impl Evaluator {
     ) -> Result<Value> {
         // Handle method calls: obj.method(args)
         if let Expr::Field(obj_expr, method) = func_expr {
-            let obj = self.eval_expr(obj_expr, scope, depth + 1)?;
-            let evaled_args: Result<Vec<_>> = args
-                .iter()
-                .map(|a| self.eval_expr(a, scope, depth + 1))
-                .collect();
-            let evaled_args = evaled_args?;
-            if let Some(result) = self.eval_method_call(&obj, method, &evaled_args, depth)? {
+            let obj = self.eval_expr(obj_expr, scope, depth + 1).await?;
+            let mut evaled_args = Vec::new();
+            for a in args {
+                evaled_args.push(self.eval_expr(a, scope, depth + 1).await?);
+            }
+            if let Some(result) = self
+                .eval_method_call(&obj, method, &evaled_args, depth)
+                .await?
+            {
                 return Ok(result);
             }
         }
@@ -522,27 +658,26 @@ impl Evaluator {
         if let Expr::Ident(name) = func_expr {
             match name.as_str() {
                 "List" | "Listing" => {
-                    let items: Result<Vec<_>> = args
-                        .iter()
-                        .map(|a| self.eval_expr(a, scope, depth + 1))
-                        .collect();
-                    return Ok(Value::List(items?));
+                    let mut items = Vec::new();
+                    for a in args {
+                        items.push(self.eval_expr(a, scope, depth + 1).await?);
+                    }
+                    return Ok(Value::List(items));
                 }
                 "Set" => {
-                    let items: Result<Vec<_>> = args
-                        .iter()
-                        .map(|a| self.eval_expr(a, scope, depth + 1))
-                        .collect();
-                    return Ok(Value::List(items?)); // treat Set as List
+                    let mut items = Vec::new();
+                    for a in args {
+                        items.push(self.eval_expr(a, scope, depth + 1).await?);
+                    }
+                    return Ok(Value::List(items)); // treat Set as List
                 }
                 "Map" => {
                     // Map(k1, v1, k2, v2, ...)
                     let mut map = IndexMap::new();
-                    let evaled: Result<Vec<_>> = args
-                        .iter()
-                        .map(|a| self.eval_expr(a, scope, depth + 1))
-                        .collect();
-                    let evaled = evaled?;
+                    let mut evaled = Vec::new();
+                    for a in args {
+                        evaled.push(self.eval_expr(a, scope, depth + 1).await?);
+                    }
                     for pair in evaled.chunks(2) {
                         if let [k, v] = pair {
                             map.insert(value_to_key(k)?, v.clone());
@@ -555,7 +690,7 @@ impl Evaluator {
         }
 
         // Evaluate the function expression
-        let func_val = self.eval_expr(func_expr, scope, depth + 1)?;
+        let func_val = self.eval_expr(func_expr, scope, depth + 1).await?;
 
         // Lambda call
         if let Value::Lambda(params, body, captured) = func_val {
@@ -565,15 +700,14 @@ impl Evaluator {
                 call_scope.set(k, v);
             }
             // Bind arguments to parameters
-            let evaled_args: Result<Vec<_>> = args
-                .iter()
-                .map(|a| self.eval_expr(a, scope, depth + 1))
-                .collect();
-            let evaled_args = evaled_args?;
+            let mut evaled_args = Vec::new();
+            for a in args {
+                evaled_args.push(self.eval_expr(a, scope, depth + 1).await?);
+            }
             for (param, arg) in params.iter().zip(evaled_args) {
                 call_scope.set(param.clone(), arg);
             }
-            return self.eval_expr(&body, &call_scope, depth + 1);
+            return self.eval_expr(&body, &call_scope, depth + 1).await;
         }
 
         // Plain call with no args on an object — return the object
@@ -583,7 +717,8 @@ impl Evaluator {
         Err(Error::Eval("cannot call non-function".into()))
     }
 
-    fn eval_method_call(
+    #[async_recursion(?Send)]
+    async fn eval_method_call(
         &mut self,
         obj: &Value,
         method: &str,
@@ -646,7 +781,10 @@ impl Evaluator {
                     .ok_or_else(|| Error::Eval("map requires a function argument".into()))?;
                 let mut result = Vec::new();
                 for item in items {
-                    result.push(self.invoke_lambda(lambda, std::slice::from_ref(item), depth)?);
+                    result.push(
+                        self.invoke_lambda(lambda, std::slice::from_ref(item), depth)
+                            .await?,
+                    );
                 }
                 Ok(Some(Value::List(result)))
             }
@@ -656,7 +794,9 @@ impl Evaluator {
                     .ok_or_else(|| Error::Eval("flatMap requires a function argument".into()))?;
                 let mut result = Vec::new();
                 for item in items {
-                    let val = self.invoke_lambda(lambda, std::slice::from_ref(item), depth)?;
+                    let val = self
+                        .invoke_lambda(lambda, std::slice::from_ref(item), depth)
+                        .await?;
                     if let Value::List(inner) = val {
                         result.extend(inner);
                     } else {
@@ -671,7 +811,9 @@ impl Evaluator {
                     .ok_or_else(|| Error::Eval("filter requires a function argument".into()))?;
                 let mut result = Vec::new();
                 for item in items {
-                    let cond = self.invoke_lambda(lambda, std::slice::from_ref(item), depth)?;
+                    let cond = self
+                        .invoke_lambda(lambda, std::slice::from_ref(item), depth)
+                        .await?;
                     if is_truthy(&cond) {
                         result.push(item.clone());
                     }
@@ -688,7 +830,9 @@ impl Evaluator {
                     .ok_or_else(|| Error::Eval("fold requires a function argument".into()))?;
                 let mut acc = init;
                 for item in items {
-                    acc = self.invoke_lambda(lambda, &[acc, item.clone()], depth)?;
+                    acc = self
+                        .invoke_lambda(lambda, &[acc, item.clone()], depth)
+                        .await?;
                 }
                 Ok(Some(acc))
             }
@@ -697,7 +841,11 @@ impl Evaluator {
                     .first()
                     .ok_or_else(|| Error::Eval("any requires a function argument".into()))?;
                 for item in items {
-                    if is_truthy(&self.invoke_lambda(lambda, std::slice::from_ref(item), depth)?) {
+                    if is_truthy(
+                        &self
+                            .invoke_lambda(lambda, std::slice::from_ref(item), depth)
+                            .await?,
+                    ) {
                         return Ok(Some(Value::Bool(true)));
                     }
                 }
@@ -708,7 +856,11 @@ impl Evaluator {
                     .first()
                     .ok_or_else(|| Error::Eval("every requires a function argument".into()))?;
                 for item in items {
-                    if !is_truthy(&self.invoke_lambda(lambda, std::slice::from_ref(item), depth)?) {
+                    if !is_truthy(
+                        &self
+                            .invoke_lambda(lambda, std::slice::from_ref(item), depth)
+                            .await?,
+                    ) {
                         return Ok(Some(Value::Bool(false)));
                     }
                 }
@@ -737,8 +889,9 @@ impl Evaluator {
                     .ok_or_else(|| Error::Eval("mapValues requires a function".into()))?;
                 let mut result = IndexMap::new();
                 for (k, v) in map {
-                    let new_v =
-                        self.invoke_lambda(lambda, &[Value::String(k.clone()), v.clone()], depth)?;
+                    let new_v = self
+                        .invoke_lambda(lambda, &[Value::String(k.clone()), v.clone()], depth)
+                        .await?;
                     result.insert(k.clone(), new_v);
                 }
                 Ok(Some(Value::Object(result)))
@@ -759,14 +912,20 @@ impl Evaluator {
                 for (param, arg) in params.iter().zip(args.iter()) {
                     call_scope.set(param.clone(), arg.clone());
                 }
-                Ok(Some(self.eval_expr(body, &call_scope, depth + 1)?))
+                Ok(Some(self.eval_expr(body, &call_scope, depth + 1).await?))
             }
 
             _ => Ok(None), // not a known method
         }
     }
 
-    fn invoke_lambda(&mut self, lambda: &Value, args: &[Value], depth: usize) -> Result<Value> {
+    #[async_recursion(?Send)]
+    async fn invoke_lambda(
+        &mut self,
+        lambda: &Value,
+        args: &[Value],
+        depth: usize,
+    ) -> Result<Value> {
         if let Value::Lambda(params, body, captured) = lambda {
             let mut scope = Scope::default();
             for (k, v) in captured {
@@ -775,13 +934,14 @@ impl Evaluator {
             for (param, arg) in params.iter().zip(args.iter()) {
                 scope.set(param.clone(), arg.clone());
             }
-            self.eval_expr(body, &scope, depth + 1)
+            self.eval_expr(body, &scope, depth + 1).await
         } else {
             Err(Error::Eval("expected a function".into()))
         }
     }
 
-    fn eval_binop(
+    #[async_recursion(?Send)]
+    async fn eval_binop(
         &mut self,
         op: BinOp,
         left: &Expr,
@@ -793,13 +953,13 @@ impl Evaluator {
         if let BinOp::Add = op
             && let Expr::ObjectBody(entries) = right
         {
-            let base = self.eval_expr(left, scope, depth + 1)?;
-            let overlay = self.eval_entries(entries, scope, depth + 1)?;
+            let base = self.eval_expr(left, scope, depth + 1).await?;
+            let overlay = self.eval_entries(entries, scope, depth + 1).await?;
             return Ok(merge_values(base, overlay));
         }
 
-        let l = self.eval_expr(left, scope, depth + 1)?;
-        let r = self.eval_expr(right, scope, depth + 1)?;
+        let l = self.eval_expr(left, scope, depth + 1).await?;
+        let r = self.eval_expr(right, scope, depth + 1).await?;
         match op {
             BinOp::Add => add_values(l, r),
             BinOp::Sub => arithmetic(l, r, |a, b| Ok(a - b), |a, b| Ok(a - b)),
@@ -884,7 +1044,7 @@ impl Evaluator {
                             call_scope.set(k, v);
                         }
                         call_scope.set(params[0].clone(), l);
-                        self.eval_expr(&body, &call_scope, depth + 1)
+                        self.eval_expr(&body, &call_scope, depth + 1).await
                     }
                     _ => Err(Error::Eval(
                         "pipe operator requires a function on the right side".into(),
@@ -894,7 +1054,8 @@ impl Evaluator {
         }
     }
 
-    fn eval_mapping_entries(
+    #[async_recursion(?Send)]
+    async fn eval_mapping_entries(
         &mut self,
         entries: &[crate::parser::Entry],
         scope: &Scope,
@@ -904,8 +1065,8 @@ impl Evaluator {
         for entry in entries {
             match entry {
                 Entry::DynProperty(key_expr, val_expr) => {
-                    let key = self.eval_expr(key_expr, scope, depth + 1)?;
-                    let val = self.eval_expr(val_expr, scope, depth + 1)?;
+                    let key = self.eval_expr(key_expr, scope, depth + 1).await?;
+                    let val = self.eval_expr(val_expr, scope, depth + 1).await?;
                     map.insert(value_to_key(&key)?, val);
                 }
                 Entry::Property(prop)
@@ -917,20 +1078,21 @@ impl Evaluator {
                     // skip locals in mapping
                 }
                 Entry::Spread(e) => {
-                    let v = self.eval_expr(e, scope, depth + 1)?;
+                    let v = self.eval_expr(e, scope, depth + 1).await?;
                     if let Value::Object(m) = v {
                         map.extend(m);
                     }
                 }
                 Entry::ForGenerator(fgen) => {
-                    let collection = self.eval_expr(&fgen.collection, scope, depth + 1)?;
+                    let collection = self.eval_expr(&fgen.collection, scope, depth + 1).await?;
                     for (k, v) in collection_to_items(collection) {
                         let mut iter_scope = scope.child();
                         iter_scope.set(fgen.val_var.clone(), v);
                         if let Some(kv) = &fgen.key_var {
                             iter_scope.set(kv.clone(), k);
                         }
-                        self.eval_mapping_entries(&fgen.body, &iter_scope, depth + 1, map)?;
+                        self.eval_mapping_entries(&fgen.body, &iter_scope, depth + 1, map)
+                            .await?;
                     }
                 }
                 _ => {}
