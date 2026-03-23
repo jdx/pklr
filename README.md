@@ -64,7 +64,7 @@ pklr implements a subset of the [Pkl language](https://pkl-lang.org/main/current
 | Object amendment (`(base) { overrides }`) | Supported |
 | Spread operator (`...expr`) | Supported |
 | Default elements/values (`default { ... }`) | Supported |
-| Late binding | Not supported |
+| Late binding | Supported |
 
 ### Control Flow & Expressions
 
