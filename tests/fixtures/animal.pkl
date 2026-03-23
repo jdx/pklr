@@ -1,9 +1,0 @@
-class Animal {
-    name: String = "unknown"
-    legs: Int = 4
-}
-
-class Dog extends Animal {
-    legs: Int = 4
-    breed: String = "mixed"
-}

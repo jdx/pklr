@@ -344,6 +344,15 @@ impl Evaluator {
                 if let Value::Object(m, _) = ext_val {
                     base_obj = m;
                 }
+                // Inject class definitions from HTTP base into scope
+                for entry in &ext_module.body {
+                    if let Entry::ClassDef(cls_name, parent, body) = entry {
+                        let defaults = self
+                            .eval_class_def(parent.as_deref(), body, &scope, depth)
+                            .await?;
+                        scope.set(cls_name.clone(), defaults);
+                    }
+                }
             }
         }
 
@@ -595,7 +604,7 @@ impl Evaluator {
         scope: &Scope,
         depth: usize,
     ) -> Result<Value> {
-        let parent_val = parent_name.and_then(|name| scope.get(name)).cloned();
+        let parent_val = parent_name.and_then(|name| resolve_dotted(scope, name));
 
         let mut child_scope = scope.child();
         if let Some(ref pv) = parent_val {
@@ -1540,6 +1549,19 @@ fn check_deprecated(annotations: &[Annotation], prop_name: &str) {
             }
         }
     }
+}
+
+/// Resolve a potentially dotted name (e.g. "Foo.Bar") in scope.
+fn resolve_dotted(scope: &Scope, name: &str) -> Option<Value> {
+    let parts: Vec<&str> = name.split('.').collect();
+    let mut val = scope.get(parts[0])?.clone();
+    for part in &parts[1..] {
+        val = match val {
+            Value::Object(ref map, _) => map.get(*part)?.clone(),
+            _ => return None,
+        };
+    }
+    Some(val)
 }
 
 fn has_modifier(mods: &[Modifier], target: Modifier) -> bool {
