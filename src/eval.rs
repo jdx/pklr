@@ -614,8 +614,18 @@ impl Evaluator {
                         Ok(Value::Object(map, None))
                     }
                     _ => {
-                        // Check if type name matches a class in scope
-                        let base = type_name.as_ref().and_then(|name| scope.get(name)).cloned();
+                        // Check if type name matches a class in scope (supports dotted names)
+                        let base = type_name.as_ref().and_then(|name| {
+                            let parts: Vec<&str> = name.split('.').collect();
+                            let mut val = scope.get(parts[0])?.clone();
+                            for part in &parts[1..] {
+                                val = match val {
+                                    Value::Object(ref map, _) => map.get(*part)?.clone(),
+                                    _ => return None,
+                                };
+                            }
+                            Some(val)
+                        });
                         if let Some(Value::Object(_, Some(base_src))) = &base {
                             // Late binding: re-evaluate merged base + overlay entries
                             self.eval_amended_object(
