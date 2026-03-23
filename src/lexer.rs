@@ -699,10 +699,13 @@ impl<'a> Lexer<'a> {
                     self.advance();
                 }
                 let ident = &self.source[start..self.pos];
-                // Handle `import*` as a single token
+                // Handle `import*` and `read?` as single tokens
                 if ident == "import" && self.peek() == Some('*') {
                     self.advance();
                     TokenKind::KwImportStar
+                } else if ident == "read" && self.peek() == Some('?') {
+                    self.advance();
+                    TokenKind::KwReadOrNull
                 } else {
                     keyword_or_ident(ident)
                 }

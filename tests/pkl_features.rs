@@ -2103,3 +2103,83 @@ x = new Config {
     assert_eq!(json["x"]["debug"], true);
     assert_eq!(json["x"]["port"], 8080);
 }
+
+// ============================================================
+// read() and read?()
+// ============================================================
+
+#[test]
+fn read_env_variable() {
+    unsafe { std::env::set_var("PKLR_TEST_VAR", "hello_pklr") };
+    let json = eval(
+        r#"
+x = read("env:PKLR_TEST_VAR")
+"#,
+    );
+    assert_eq!(json["x"], "hello_pklr");
+    unsafe { std::env::remove_var("PKLR_TEST_VAR") };
+}
+
+#[test]
+fn read_or_null_missing_env() {
+    let json = eval(
+        r#"
+x = read?("env:DEFINITELY_NOT_SET_12345")
+"#,
+    );
+    assert!(json["x"].is_null());
+}
+
+#[tokio::test]
+async fn read_local_file() {
+    let mut ev = pklr::eval::Evaluator::new();
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    ev.set_base_path(&base);
+    let src = r#"
+x = read("readme.txt")
+"#;
+    let path = base.join("test_read.pkl");
+    let val = ev.eval_source(src, &path).await.unwrap();
+    let json = val.to_json();
+    assert_eq!(json["x"], "Hello from pklr!\n");
+}
+
+#[tokio::test]
+async fn read_file_uri() {
+    let mut ev = pklr::eval::Evaluator::new();
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    ev.set_base_path(&base);
+    let file_path = base.join("readme.txt");
+    let src = format!(
+        r#"
+x = read("file://{}")
+"#,
+        file_path.display()
+    );
+    let path = base.join("test_read_file.pkl");
+    let val = ev.eval_source(&src, &path).await.unwrap();
+    let json = val.to_json();
+    assert_eq!(json["x"], "Hello from pklr!\n");
+}
+
+#[test]
+fn read_or_null_missing_file() {
+    let json = eval(
+        r#"
+x = read?("file:///nonexistent/path/to/file.txt")
+"#,
+    );
+    assert!(json["x"].is_null());
+}
+
+#[test]
+fn read_env_in_interpolation() {
+    unsafe { std::env::set_var("PKLR_NAME", "world") };
+    let json = eval(
+        r#"
+x = "hello \(read("env:PKLR_NAME"))"
+"#,
+    );
+    assert_eq!(json["x"], "hello world");
+    unsafe { std::env::remove_var("PKLR_NAME") };
+}

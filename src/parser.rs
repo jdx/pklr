@@ -126,6 +126,8 @@ pub enum Expr {
     Trace(Box<Expr>),
     /// `read("uri")`
     Read(Box<Expr>),
+    /// `read?("uri")` — returns null on failure
+    ReadOrNull(Box<Expr>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1034,6 +1036,13 @@ impl<'a> Parser<'a> {
                 let e = self.parse_expr()?;
                 self.expect(&TokenKind::RParen)?;
                 Ok(Expr::Read(Box::new(e)))
+            }
+            TokenKind::KwReadOrNull => {
+                self.advance();
+                self.expect(&TokenKind::LParen)?;
+                let e = self.parse_expr()?;
+                self.expect(&TokenKind::RParen)?;
+                Ok(Expr::ReadOrNull(Box::new(e)))
             }
             TokenKind::Ident(name) => {
                 self.advance();
