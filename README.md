@@ -19,12 +19,6 @@ let json = eval_to_json(std::path::Path::new("config.pkl"))?;
 println!("{}", json);
 ```
 
-## Status
-
-Early development. The goal is to cover the subset of Pkl used for configuration
-files (particularly [hk](https://github.com/jdx/hk) configs), with broader
-language support added over time.
-
 ## License
 
 MIT
