@@ -37,13 +37,12 @@ impl Evaluator {
 
         // First pass: collect all `local` variable definitions into scope
         for entry in &module.body {
-            if let Entry::Property(prop) = entry {
-                if prop.modifiers.iter().any(|m| matches!(m, crate::parser::Modifier::Local)) {
-                    if let Some(expr) = &prop.value {
-                        let val = self.eval_expr(expr, &scope, depth)?;
-                        scope.set(prop.name.clone(), val);
-                    }
-                }
+            if let Entry::Property(prop) = entry
+                && prop.modifiers.iter().any(|m| matches!(m, crate::parser::Modifier::Local))
+                && let Some(expr) = &prop.value
+            {
+                let val = self.eval_expr(expr, &scope, depth)?;
+                scope.set(prop.name.clone(), val);
             }
         }
 
@@ -80,13 +79,12 @@ impl Evaluator {
         let mut child_scope = scope.child();
         // First pass: collect locals
         for entry in entries {
-            if let Entry::Property(prop) = entry {
-                if prop.modifiers.iter().any(|m| matches!(m, crate::parser::Modifier::Local)) {
-                    if let Some(expr) = &prop.value {
-                        let val = self.eval_expr(expr, &child_scope, depth)?;
-                        child_scope.set(prop.name.clone(), val);
-                    }
-                }
+            if let Entry::Property(prop) = entry
+                && prop.modifiers.iter().any(|m| matches!(m, crate::parser::Modifier::Local))
+                && let Some(expr) = &prop.value
+            {
+                let val = self.eval_expr(expr, &child_scope, depth)?;
+                child_scope.set(prop.name.clone(), val);
             }
         }
 
@@ -109,9 +107,8 @@ impl Evaluator {
                 }
                 Entry::Spread(expr) => {
                     let val = self.eval_expr(expr, &child_scope, depth)?;
-                    match val {
-                        Value::Object(m) => map.extend(m),
-                        _ => {}
+                    if let Value::Object(m) = val {
+                        map.extend(m);
                     }
                 }
                 Entry::ForGenerator(fgen) => {
@@ -275,39 +272,36 @@ impl Evaluator {
 
     fn eval_call(&mut self, func_expr: &Expr, args: &[Expr], scope: &Scope, depth: usize) -> Result<Value> {
         // Handle built-in functions: List(), Listing(), Map()
-        match func_expr {
-            Expr::Ident(name) => {
-                match name.as_str() {
-                    "List" | "Listing" => {
-                        let items: Result<Vec<_>> = args.iter()
-                            .map(|a| self.eval_expr(a, scope, depth + 1))
-                            .collect();
-                        return Ok(Value::List(items?));
-                    }
-                    "Set" => {
-                        let items: Result<Vec<_>> = args.iter()
-                            .map(|a| self.eval_expr(a, scope, depth + 1))
-                            .collect();
-                        return Ok(Value::List(items?)); // treat Set as List
-                    }
-                    "Map" => {
-                        // Map(k1, v1, k2, v2, ...)
-                        let mut map = IndexMap::new();
-                        let evaled: Result<Vec<_>> = args.iter()
-                            .map(|a| self.eval_expr(a, scope, depth + 1))
-                            .collect();
-                        let evaled = evaled?;
-                        for pair in evaled.chunks(2) {
-                            if let [k, v] = pair {
-                                map.insert(value_to_key(k)?, v.clone());
-                            }
-                        }
-                        return Ok(Value::Object(map));
-                    }
-                    _ => {}
+        if let Expr::Ident(name) = func_expr {
+            match name.as_str() {
+                "List" | "Listing" => {
+                    let items: Result<Vec<_>> = args.iter()
+                        .map(|a| self.eval_expr(a, scope, depth + 1))
+                        .collect();
+                    return Ok(Value::List(items?));
                 }
+                "Set" => {
+                    let items: Result<Vec<_>> = args.iter()
+                        .map(|a| self.eval_expr(a, scope, depth + 1))
+                        .collect();
+                    return Ok(Value::List(items?)); // treat Set as List
+                }
+                "Map" => {
+                    // Map(k1, v1, k2, v2, ...)
+                    let mut map = IndexMap::new();
+                    let evaled: Result<Vec<_>> = args.iter()
+                        .map(|a| self.eval_expr(a, scope, depth + 1))
+                        .collect();
+                    let evaled = evaled?;
+                    for pair in evaled.chunks(2) {
+                        if let [k, v] = pair {
+                            map.insert(value_to_key(k)?, v.clone());
+                        }
+                    }
+                    return Ok(Value::Object(map));
+                }
+                _ => {}
             }
-            _ => {}
         }
 
         // Object amendment: `(Base) { overrides }` is parsed as Binop(Add, base, ObjectBody)
@@ -317,17 +311,17 @@ impl Evaluator {
         if args.is_empty() {
             return Ok(func_val);
         }
-        Err(Error::Eval(format!("cannot call non-function")))
+        Err(Error::Eval("cannot call non-function".into()))
     }
 
     fn eval_binop(&mut self, op: BinOp, left: &Expr, right: &Expr, scope: &Scope, depth: usize) -> Result<Value> {
         // Special case: object amendment `base + ObjectBody(entries)`
-        if let BinOp::Add = op {
-            if let Expr::ObjectBody(entries) = right {
-                let base = self.eval_expr(left, scope, depth + 1)?;
-                let overlay = self.eval_entries(entries, scope, depth + 1)?;
-                return Ok(merge_values(base, overlay));
-            }
+        if let BinOp::Add = op
+            && let Expr::ObjectBody(entries) = right
+        {
+            let base = self.eval_expr(left, scope, depth + 1)?;
+            let overlay = self.eval_entries(entries, scope, depth + 1)?;
+            return Ok(merge_values(base, overlay));
         }
 
         let l = self.eval_expr(left, scope, depth + 1)?;

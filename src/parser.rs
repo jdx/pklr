@@ -336,7 +336,7 @@ impl<'a> Parser<'a> {
         let base = match self.peek().clone() {
             TokenKind::Ident(name) => {
                 self.advance();
-                let generics = if matches!(self.peek(), TokenKind::Lt) {
+                if matches!(self.peek(), TokenKind::Lt) {
                     self.advance();
                     let mut args = vec![self.parse_type()?];
                     while matches!(self.peek(), TokenKind::Comma) {
@@ -347,8 +347,7 @@ impl<'a> Parser<'a> {
                     TypeExpr::Generic(name, args)
                 } else {
                     TypeExpr::Named(name)
-                };
-                generics
+                }
             }
             tok => {
                 let t = self.peek_tok();

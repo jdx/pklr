@@ -6,8 +6,9 @@ use serde_json::json;
 /// Pkl's `Mapping` type (arbitrary key→value) is represented as `Object` when
 /// keys are strings — which is the only case supported by JSON output. All
 /// `new Mapping { ["key"] = ... }` expressions therefore produce `Object`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum Value {
+    #[default]
     Null,
     Bool(bool),
     Int(i64),
@@ -62,9 +63,6 @@ impl Value {
     }
 }
 
-impl Default for Value {
-    fn default() -> Self { Value::Null }
-}
 
 impl From<serde_json::Value> for Value {
     fn from(v: serde_json::Value) -> Self {

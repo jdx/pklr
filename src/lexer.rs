@@ -108,12 +108,6 @@ impl<'a> Lexer<'a> {
         self.source[self.pos..].chars().next()
     }
 
-    fn peek2(&self) -> Option<char> {
-        let mut chars = self.source[self.pos..].chars();
-        chars.next();
-        chars.next()
-    }
-
     fn advance(&mut self) -> Option<char> {
         let ch = self.peek()?;
         self.pos += ch.len_utf8();
@@ -544,10 +538,10 @@ mod tests {
 
     #[test]
     fn test_numbers() {
-        let toks = kinds("42 3.14 0xFF");
+        let toks = kinds("42 1.23 0xFF");
         assert_eq!(toks, vec![
             TokenKind::IntLit(42),
-            TokenKind::FloatLit(3.14),
+            TokenKind::FloatLit(1.23),
             TokenKind::IntLit(255),
             TokenKind::Eof,
         ]);
