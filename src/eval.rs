@@ -784,7 +784,7 @@ impl Evaluator {
                 // Check if name is a type alias; if so, resolve to the aliased type
                 if let Some(resolved) = scope.get_type_alias(name) {
                     let resolved = resolved.clone();
-                    return self.eval_type_check(val, &resolved, scope, depth).await;
+                    return self.eval_type_check(val, &resolved, scope, depth + 1).await;
                 }
                 // Otherwise, plain type check
                 Ok(value_is_type(val, ty))
@@ -803,12 +803,7 @@ impl Evaluator {
                         constraint_scope.set("length".into(), Value::Int(s.chars().count() as i64));
                         constraint_scope.set("isEmpty".into(), Value::Bool(s.is_empty()));
                     }
-                    Value::Int(n) => {
-                        constraint_scope.set("this".into(), Value::Int(*n));
-                    }
-                    Value::Float(f) => {
-                        constraint_scope.set("this".into(), Value::Float(*f));
-                    }
+                    Value::Int(_) | Value::Float(_) => {}
                     Value::List(items) => {
                         constraint_scope.set("length".into(), Value::Int(items.len() as i64));
                         constraint_scope.set("isEmpty".into(), Value::Bool(items.is_empty()));
@@ -895,6 +890,10 @@ impl Evaluator {
         // Layer in current scope values (imports, module-level locals, etc.)
         for (k, v) in current_scope.flatten() {
             eval_scope.set(k, v);
+        }
+        // Propagate type aliases so `is`/`as` constraints work inside amended objects
+        for (k, ty) in current_scope.flatten_type_aliases() {
+            eval_scope.set_type_alias(k, ty);
         }
 
         // Evaluate the merged entries (eval_entries handles locals, classes,
@@ -1806,6 +1805,16 @@ impl Scope {
             .map(|p| p.flatten())
             .unwrap_or_default();
         result.extend(self.vars.clone());
+        result
+    }
+
+    fn flatten_type_aliases(&self) -> IndexMap<String, crate::parser::TypeExpr> {
+        let mut result = self
+            .parent
+            .as_ref()
+            .map(|p| p.flatten_type_aliases())
+            .unwrap_or_default();
+        result.extend(self.type_aliases.clone());
         result
     }
 }
