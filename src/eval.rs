@@ -22,6 +22,8 @@ pub struct Evaluator {
     import_cache: HashMap<PathBuf, Value>,
     /// Reusable HTTP client for connection pooling
     http_client: reqwest::Client,
+    /// Extracted package zip directories (zip URL → temp dir path)
+    package_dirs: HashMap<String, PathBuf>,
 }
 
 impl Default for Evaluator {
@@ -32,6 +34,7 @@ impl Default for Evaluator {
             http_cache: HashMap::new(),
             import_cache: HashMap::new(),
             http_client: reqwest::Client::new(),
+            package_dirs: HashMap::new(),
         }
     }
 }
@@ -95,6 +98,36 @@ impl Evaluator {
             .map_err(|e| Error::Eval(format!("HTTP read failed for {url}: {e}")))?;
         self.http_cache.insert(url.to_string(), body.clone());
         Ok(body)
+    }
+
+    /// Download a package zip and extract it to a temp directory.
+    /// Returns the path to the extracted directory. Caches by zip URL.
+    async fn extract_package_zip(&mut self, zip_url: &str) -> Result<PathBuf> {
+        // Check if already extracted
+        if let Some(dir) = self.package_dirs.get(zip_url) {
+            return Ok(dir.clone());
+        }
+        let bytes = self
+            .http_client
+            .get(zip_url)
+            .send()
+            .await
+            .map_err(|e| Error::Eval(format!("HTTP fetch failed for {zip_url}: {e}")))?
+            .error_for_status()
+            .map_err(|e| Error::Eval(format!("HTTP error for {zip_url}: {e}")))?
+            .bytes()
+            .await
+            .map_err(|e| Error::Eval(format!("HTTP read failed for {zip_url}: {e}")))?;
+        let cursor = std::io::Cursor::new(bytes);
+        let mut archive =
+            zip::ZipArchive::new(cursor).map_err(|e| Error::Eval(format!("zip error: {e}")))?;
+        let dir = std::env::temp_dir().join(format!("pklr-pkg-{}", self.package_dirs.len()));
+        std::fs::create_dir_all(&dir).map_err(|e| Error::Eval(format!("mkdir error: {e}")))?;
+        archive
+            .extract(&dir)
+            .map_err(|e| Error::Eval(format!("zip extract error: {e}")))?;
+        self.package_dirs.insert(zip_url.to_string(), dir.clone());
+        Ok(dir)
     }
 
     pub async fn eval_source(&mut self, source: &str, path: &Path) -> Result<Value> {
@@ -217,9 +250,30 @@ impl Evaluator {
             }
 
             if uri.starts_with("package://") {
-                let url = package_uri_to_url(uri)?;
+                let pkg = resolve_package_uri(uri)?;
                 let fragment = uri.split_once('#').map(|(_, f)| f).unwrap_or("");
                 let file_path = fragment.strip_prefix('/').unwrap_or(fragment);
+                // For zip packages, extract to temp dir and eval as local file
+                if let PackageSource::Zip(zip_url, _) = &pkg {
+                    let pkg_dir = self.extract_package_zip(zip_url).await?;
+                    let local_path = pkg_dir.join(file_path);
+                    let imported_val = self.eval_file(&local_path, depth + 1).await?;
+                    let alias = import.alias.clone().unwrap_or_else(|| {
+                        file_path
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or(file_path)
+                            .strip_suffix(".pkl")
+                            .unwrap_or(file_path)
+                            .to_string()
+                    });
+                    scope.set(alias, imported_val);
+                    continue;
+                }
+                let url = match &pkg {
+                    PackageSource::Direct(url) => url.clone(),
+                    PackageSource::Zip(..) => unreachable!(),
+                };
                 let source = self.fetch_source(&url).await?;
                 let imported_val = {
                     let tokens = lexer::lex_named(&source, &url)?;
@@ -294,16 +348,24 @@ impl Evaluator {
                     base_obj = m;
                 }
             } else if uri.starts_with("package://") {
-                // Convert package URI to GitHub release URL
-                let url = package_uri_to_url(uri)?;
-                let source = self.fetch_source(&url).await?;
-                let tokens = lexer::lex_named(&source, &url)?;
-                let base_module = parser::parse_named(&tokens, &source, &url)?;
-                let base_val = self
-                    .eval_module(&base_module, Path::new(&url), depth + 1)
-                    .await?;
-                if let Value::Object(m, _) = base_val {
-                    base_obj = m;
+                let pkg = resolve_package_uri(uri)?;
+                if let PackageSource::Zip(zip_url, entry) = &pkg {
+                    let pkg_dir = self.extract_package_zip(zip_url).await?;
+                    let local_path = pkg_dir.join(entry);
+                    let base_val = self.eval_file(&local_path, depth + 1).await?;
+                    if let Value::Object(m, _) = base_val {
+                        base_obj = m;
+                    }
+                } else if let PackageSource::Direct(url) = &pkg {
+                    let source = self.fetch_source(url).await?;
+                    let tokens = lexer::lex_named(&source, url)?;
+                    let base_module = parser::parse_named(&tokens, &source, url)?;
+                    let base_val = self
+                        .eval_module(&base_module, Path::new(url.as_str()), depth + 1)
+                        .await?;
+                    if let Value::Object(m, _) = base_val {
+                        base_obj = m;
+                    }
                 }
             } else if !uri.starts_with("pkl:")
                 && (!uri.contains("://") || uri.starts_with("file://"))
@@ -1865,24 +1927,35 @@ impl Scope {
 
 // --- Helpers ---
 
-/// Convert a `package://` URI to an HTTPS download URL.
-fn package_uri_to_url(uri: &str) -> Result<String> {
+/// Resolved package info: either a direct file URL or a zip archive + entry path.
+enum PackageSource {
+    /// Direct file download (pkg.pkl-lang.org format)
+    Direct(String),
+    /// Zip archive URL + path within the archive
+    Zip(String, String),
+}
+
+/// Resolve a `package://` URI to a download source.
+fn resolve_package_uri(uri: &str) -> Result<PackageSource> {
     // Format 1: package://pkg.pkl-lang.org/github.com/owner/repo@version#/path.pkl
+    // These resolve to direct file downloads from GitHub releases
     if let Some(rest) = uri.strip_prefix("package://pkg.pkl-lang.org/github.com/")
         && let Some((repo_ver, fragment)) = rest.split_once('#')
         && let Some((repo, version)) = repo_ver.split_once('@')
     {
         let file_path = fragment.strip_prefix('/').unwrap_or(fragment);
-        return Ok(format!(
+        return Ok(PackageSource::Direct(format!(
             "https://github.com/{repo}/releases/download/{version}/{file_path}"
-        ));
+        )));
     }
     // Format 2: package://github.com/owner/repo/releases/download/v1.0/name@1.0#/path.pkl
+    // These are zip archives; the fragment is a path within the zip
     if let Some(rest) = uri.strip_prefix("package://github.com/")
         && let Some((base, fragment)) = rest.split_once('#')
     {
         let file_path = fragment.strip_prefix('/').unwrap_or(fragment);
-        return Ok(format!("https://github.com/{base}/{file_path}"));
+        let zip_url = format!("https://github.com/{base}.zip");
+        return Ok(PackageSource::Zip(zip_url, file_path.to_string()));
     }
     Err(Error::Eval(format!("unsupported package URI: {uri}")))
 }
