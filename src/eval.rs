@@ -1042,11 +1042,22 @@ impl Evaluator {
                     }
                 }
             }
-            Expr::Is(expr, _ty) => {
-                // Simplified: just evaluate the expression, ignore type check
-                self.eval_expr(expr, scope, depth + 1).await
+            Expr::Is(expr, ty) => {
+                let val = self.eval_expr(expr, scope, depth + 1).await?;
+                Ok(Value::Bool(value_is_type(&val, ty)))
             }
-            Expr::As(expr, _ty) => self.eval_expr(expr, scope, depth + 1).await,
+            Expr::As(expr, ty) => {
+                let val = self.eval_expr(expr, scope, depth + 1).await?;
+                if value_is_type(&val, ty) {
+                    Ok(val)
+                } else {
+                    Err(Error::Eval(format!(
+                        "cannot cast {} to {}",
+                        value_type_name(&val),
+                        display_type_expr(ty)
+                    )))
+                }
+            }
             Expr::Throw(msg_expr) => {
                 let msg = self.eval_expr(msg_expr, scope, depth + 1).await?;
                 Err(Error::Eval(format!("throw: {}", value_to_display(&msg))))
@@ -1727,6 +1738,57 @@ fn value_to_display(v: &Value) -> String {
         Value::Float(f) => f.to_string(),
         Value::String(s) => s.clone(),
         _ => format!("{v:?}"),
+    }
+}
+
+/// Format a TypeExpr for user-facing error messages.
+fn display_type_expr(ty: &crate::parser::TypeExpr) -> String {
+    use crate::parser::TypeExpr;
+    match ty {
+        TypeExpr::Named(name) => name.clone(),
+        TypeExpr::Nullable(inner) => format!("{}?", display_type_expr(inner)),
+        TypeExpr::Union(variants) => variants
+            .iter()
+            .map(display_type_expr)
+            .collect::<Vec<_>>()
+            .join("|"),
+        TypeExpr::Generic(name, args) => {
+            let args_str: Vec<_> = args.iter().map(display_type_expr).collect();
+            format!("{}<{}>", name, args_str.join(", "))
+        }
+    }
+}
+
+/// Check if a value matches a Pkl type expression.
+fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
+    use crate::parser::TypeExpr;
+    match ty {
+        TypeExpr::Named(name) => match name.as_str() {
+            "Null" => matches!(val, Value::Null),
+            "Boolean" | "Bool" => matches!(val, Value::Bool(_)),
+            "Int" => matches!(val, Value::Int(_)),
+            "Float" => matches!(val, Value::Float(_)),
+            "Number" => matches!(val, Value::Int(_) | Value::Float(_)),
+            "String" => matches!(val, Value::String(_)),
+            "List" | "Listing" | "Set" => matches!(val, Value::List(_)),
+            "Map" | "Mapping" | "Object" | "Dynamic" => matches!(val, Value::Object(..)),
+            "Function" => matches!(val, Value::Lambda(..)),
+            "Any" => true,
+            _ => {
+                // Unknown type name -- could be a class; treat objects as matching
+                matches!(val, Value::Object(..))
+            }
+        },
+        TypeExpr::Nullable(inner) => matches!(val, Value::Null) || value_is_type(val, inner),
+        TypeExpr::Union(variants) => variants.iter().any(|v| value_is_type(val, v)),
+        TypeExpr::Generic(name, _) => {
+            // Check the base type, ignore type parameters
+            match name.as_str() {
+                "List" | "Listing" | "Set" => matches!(val, Value::List(_)),
+                "Map" | "Mapping" => matches!(val, Value::Object(..)),
+                _ => matches!(val, Value::Object(..)),
+            }
+        }
     }
 }
 

@@ -2054,6 +2054,158 @@ x = new Mapping {
 }
 
 // ============================================================
+// is / as type operators
+// ============================================================
+
+#[test]
+fn is_operator_string() {
+    let json = eval(
+        r#"
+local x = "hello"
+a = x is String
+b = x is Int
+"#,
+    );
+    assert_eq!(json["a"], true);
+    assert_eq!(json["b"], false);
+}
+
+#[test]
+fn is_operator_int() {
+    let json = eval(
+        r#"
+local x = 42
+a = x is Int
+b = x is Number
+c = x is String
+"#,
+    );
+    assert_eq!(json["a"], true);
+    assert_eq!(json["b"], true);
+    assert_eq!(json["c"], false);
+}
+
+#[test]
+fn is_operator_null() {
+    let json = eval(
+        r#"
+local x = null
+a = x is Null
+b = x is String?
+c = x is String
+"#,
+    );
+    assert_eq!(json["a"], true);
+    assert_eq!(json["b"], true);
+    assert_eq!(json["c"], false);
+}
+
+#[test]
+fn is_operator_nullable() {
+    let json = eval(
+        r#"
+local x = "hello"
+a = x is String?
+b = x is Int?
+"#,
+    );
+    assert_eq!(json["a"], true);
+    assert_eq!(json["b"], false);
+}
+
+#[test]
+fn is_operator_union() {
+    let json = eval(
+        r#"
+local x = 42
+local y = "hello"
+a = x is String|Int
+b = y is String|Int
+c = x is String|Boolean
+"#,
+    );
+    assert_eq!(json["a"], true);
+    assert_eq!(json["b"], true);
+    assert_eq!(json["c"], false);
+}
+
+#[test]
+fn is_operator_object_and_list() {
+    let json = eval(
+        r#"
+local obj = new { x = 1 }
+local lst = List(1, 2, 3)
+a = obj is Object
+b = lst is List
+c = obj is List
+d = lst is Object
+"#,
+    );
+    assert_eq!(json["a"], true);
+    assert_eq!(json["b"], true);
+    assert_eq!(json["c"], false);
+    assert_eq!(json["d"], false);
+}
+
+#[test]
+fn is_operator_any() {
+    let json = eval(
+        r#"
+a = 42 is Any
+b = "hello" is Any
+c = null is Any
+"#,
+    );
+    assert_eq!(json["a"], true);
+    assert_eq!(json["b"], true);
+    assert_eq!(json["c"], true);
+}
+
+#[test]
+fn as_operator_success() {
+    let json = eval(
+        r#"
+local x = 42
+result = x as Int
+"#,
+    );
+    assert_eq!(json["result"], 42);
+}
+
+#[test]
+fn as_operator_failure() {
+    let msg = eval_fails(
+        r#"
+local x = "hello"
+result = x as Int
+"#,
+    );
+    assert!(msg.contains("cannot cast"));
+}
+
+#[test]
+fn as_operator_nullable() {
+    let json = eval(
+        r#"
+local x = null
+result = x as String?
+"#,
+    );
+    assert_eq!(json["result"], serde_json::Value::Null);
+}
+
+#[test]
+fn is_in_conditional() {
+    let json = eval(
+        r#"
+local x = 42
+result = if (x is Int) "integer" else "other"
+"#,
+    );
+    assert_eq!(json["result"], "integer");
+}
+
+// ============================================================
 // Annotations
 // ============================================================
 
