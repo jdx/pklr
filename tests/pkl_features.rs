@@ -121,7 +121,6 @@ fn string_concatenation() {
 }
 
 #[test]
-#[ignore = "string interpolation not yet implemented"]
 fn string_interpolation() {
     let json = eval(
         r#"
@@ -133,7 +132,6 @@ x = "hello \(name)"
 }
 
 #[test]
-#[ignore = "string interpolation not yet implemented"]
 fn string_interpolation_expr() {
     let json = eval(
         r#"
@@ -423,7 +421,6 @@ fn list_concatenation() {
 }
 
 #[test]
-#[ignore = "new Listing body syntax not yet implemented"]
 fn listing_body() {
     let json = eval(
         r#"
@@ -594,7 +591,6 @@ x {
 // ============================================================
 
 #[test]
-#[ignore = "string interpolation not yet implemented"]
 fn interpolation_in_key() {
     let json = eval(
         r#"
@@ -612,7 +608,6 @@ x {
 // ============================================================
 
 #[test]
-#[ignore = "lambda expressions not yet implemented"]
 fn lambda_basic() {
     let json = eval(
         r#"
@@ -623,12 +618,34 @@ result = double.apply(5)
     assert_eq!(json["result"], 10);
 }
 
+#[test]
+fn lambda_two_params() {
+    let json = eval(
+        r#"
+local add = (a, b) -> a + b
+result = add.apply(3, 4)
+"#,
+    );
+    assert_eq!(json["result"], 7);
+}
+
+#[test]
+fn lambda_captures_scope() {
+    let json = eval(
+        r#"
+local multiplier = 3
+local mul = (x) -> x * multiplier
+result = mul.apply(5)
+"#,
+    );
+    assert_eq!(json["result"], 15);
+}
+
 // ============================================================
 // Method calls on values (future)
 // ============================================================
 
 #[test]
-#[ignore = "method calls not yet implemented"]
 fn method_length() {
     let json = eval(
         r#"
@@ -639,7 +656,6 @@ x = List(1, 2, 3).length
 }
 
 #[test]
-#[ignore = "method calls not yet implemented"]
 fn method_is_empty() {
     let json = eval(
         r#"
@@ -654,16 +670,42 @@ x = List().isEmpty
 // ============================================================
 
 #[test]
-#[ignore = "import resolution not yet implemented"]
 fn import_local_file() {
-    // This would require a fixture file setup
-    let json = eval(
-        r#"
-import "tests/fixtures/helper.pkl"
+    let mut ev = pklr::eval::Evaluator::new();
+    // Set base path so relative imports resolve correctly
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    ev.set_base_path(&base);
+    let src = r#"
+import "helper.pkl"
 x = helper.value
-"#,
-    );
+"#;
+    let path = base.join("test_import.pkl");
+    let val = ev.eval_source(src, &path).unwrap();
+    let json = val.to_json();
     assert_eq!(json["x"], 42);
+}
+
+// ============================================================
+// Amends resolution
+// ============================================================
+
+#[test]
+fn amends_local_file() {
+    let mut ev = pklr::eval::Evaluator::new();
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    ev.set_base_path(&base);
+    let src = r#"
+amends "base.pkl"
+name = "override"
+"#;
+    let path = base.join("test_amends.pkl");
+    let val = ev.eval_source(src, &path).unwrap();
+    let json = val.to_json();
+    // name is overridden
+    assert_eq!(json["name"], "override");
+    // version and enabled are inherited from base
+    assert_eq!(json["version"], 1);
+    assert_eq!(json["enabled"], true);
 }
 
 // ============================================================
@@ -725,7 +767,6 @@ fn throw_produces_error() {
 // ============================================================
 
 #[test]
-#[ignore = "null-safe access not yet implemented"]
 fn null_safe_access() {
     let json = eval(
         r#"

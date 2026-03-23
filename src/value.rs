@@ -1,6 +1,8 @@
 use indexmap::IndexMap;
 use serde_json::json;
 
+use crate::parser::Expr;
+
 /// A pkl runtime value.
 ///
 /// Pkl's `Mapping` type (arbitrary key→value) is represented as `Object` when
@@ -19,6 +21,8 @@ pub enum Value {
     Object(IndexMap<String, Value>),
     /// Listing (ordered list).
     List(Vec<Value>),
+    /// Lambda function: param names + body expression + captured scope values
+    Lambda(Vec<String>, Expr, IndexMap<String, Value>),
 }
 
 impl Value {
@@ -39,6 +43,7 @@ impl Value {
             Value::List(items) => {
                 serde_json::Value::Array(items.iter().map(|v| v.to_json()).collect())
             }
+            Value::Lambda(..) => json!("<lambda>"),
         }
     }
 

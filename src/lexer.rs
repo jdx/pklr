@@ -1,10 +1,19 @@
 use crate::error::{Error, Result};
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum StringPart {
+    Literal(String),
+    Tokens(Vec<Token>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     // Literals
     Ident(String),
     StringLit(String),
+    /// Interpolated string: alternating literal parts and expression-token groups.
+    /// Parts[0] is always a literal (possibly empty), Parts[1] is tokens for first \(...), etc.
+    InterpolatedString(Vec<StringPart>),
     IntLit(i64),
     FloatLit(f64),
     BoolLit(bool),
@@ -82,7 +91,7 @@ pub enum TokenKind {
     Eof,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Token {
     pub kind: TokenKind,
     pub line: usize,
@@ -180,9 +189,11 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn read_string(&mut self) -> Result<String> {
+    fn read_string_token(&mut self) -> Result<TokenKind> {
         // Assumes opening quote already consumed
-        let mut s = String::new();
+        let mut current = String::new();
+        let mut parts: Vec<StringPart> = Vec::new();
+        let mut has_interpolation = false;
         loop {
             match self.advance() {
                 None => {
@@ -191,28 +202,73 @@ impl<'a> Lexer<'a> {
                 Some('"') => break,
                 Some('\\') => {
                     match self.advance() {
-                        Some('n') => s.push('\n'),
-                        Some('t') => s.push('\t'),
-                        Some('r') => s.push('\r'),
-                        Some('"') => s.push('"'),
-                        Some('\\') => s.push('\\'),
+                        Some('n') => current.push('\n'),
+                        Some('t') => current.push('\t'),
+                        Some('r') => current.push('\r'),
+                        Some('"') => current.push('"'),
+                        Some('\\') => current.push('\\'),
                         Some('(') => {
-                            // String interpolation \( ... ) - not fully supported yet
-                            s.push_str("\\(");
+                            has_interpolation = true;
+                            parts.push(StringPart::Literal(std::mem::take(&mut current)));
+                            // Lex tokens until matching ')'
+                            let mut depth = 1;
+                            let mut expr_tokens = Vec::new();
+                            loop {
+                                self.skip_whitespace_and_comments();
+                                if self.peek().is_none() {
+                                    return Err(self.lex_error("unterminated string interpolation"));
+                                }
+                                if self.peek() == Some(')') && depth == 1 {
+                                    self.advance();
+                                    break;
+                                }
+                                // Use the main tokenizer to get one token
+                                let line = self.line;
+                                let col = self.col;
+                                let offset = self.pos;
+                                let kind = self.read_one_token()?;
+                                if matches!(kind, TokenKind::LParen) {
+                                    depth += 1;
+                                } else if matches!(kind, TokenKind::RParen) {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        break;
+                                    }
+                                }
+                                expr_tokens.push(Token {
+                                    kind,
+                                    line,
+                                    col,
+                                    offset,
+                                });
+                            }
+                            // Add Eof token so the parser knows when to stop
+                            expr_tokens.push(Token {
+                                kind: TokenKind::Eof,
+                                line: self.line,
+                                col: self.col,
+                                offset: self.pos,
+                            });
+                            parts.push(StringPart::Tokens(expr_tokens));
                         }
                         Some(c) => {
-                            s.push('\\');
-                            s.push(c);
+                            current.push('\\');
+                            current.push(c);
                         }
                         None => {
                             return Err(self.lex_error("unterminated escape"));
                         }
                     }
                 }
-                Some(c) => s.push(c),
+                Some(c) => current.push(c),
             }
         }
-        Ok(s)
+        if has_interpolation {
+            parts.push(StringPart::Literal(current));
+            Ok(TokenKind::InterpolatedString(parts))
+        } else {
+            Ok(TokenKind::StringLit(current))
+        }
     }
 
     fn read_multiline_string(&mut self) -> Result<String> {
@@ -357,200 +413,7 @@ impl<'a> Lexer<'a> {
                 Some(c) => c,
             };
 
-            let kind = match ch {
-                '{' => {
-                    self.advance();
-                    TokenKind::LBrace
-                }
-                '}' => {
-                    self.advance();
-                    TokenKind::RBrace
-                }
-                '(' => {
-                    self.advance();
-                    TokenKind::LParen
-                }
-                ')' => {
-                    self.advance();
-                    TokenKind::RParen
-                }
-                '[' => {
-                    self.advance();
-                    TokenKind::LBracket
-                }
-                ']' => {
-                    self.advance();
-                    TokenKind::RBracket
-                }
-                ',' => {
-                    self.advance();
-                    TokenKind::Comma
-                }
-                '.' => {
-                    self.advance();
-                    if self.source[self.pos..].starts_with("..") {
-                        self.advance();
-                        self.advance();
-                        TokenKind::DotDotDot
-                    } else {
-                        TokenKind::Dot
-                    }
-                }
-                '=' => {
-                    self.advance();
-                    if self.peek() == Some('=') {
-                        self.advance();
-                        TokenKind::EqEq
-                    } else if self.peek() == Some('>') {
-                        self.advance();
-                        TokenKind::ThinArrow
-                    } else {
-                        TokenKind::Equals
-                    }
-                }
-                ':' => {
-                    self.advance();
-                    TokenKind::Colon
-                }
-                '?' => {
-                    self.advance();
-                    if self.peek() == Some('?') {
-                        self.advance();
-                        TokenKind::QuestionQuestion
-                    } else if self.peek() == Some('.') {
-                        self.advance();
-                        TokenKind::QuestionDot
-                    } else {
-                        TokenKind::QuestionMark
-                    }
-                }
-                '!' => {
-                    self.advance();
-                    if self.peek() == Some('=') {
-                        self.advance();
-                        TokenKind::BangEq
-                    } else {
-                        TokenKind::Bang
-                    }
-                }
-                '|' => {
-                    self.advance();
-                    if self.peek() == Some('|') {
-                        self.advance();
-                        TokenKind::PipePipe
-                    } else {
-                        TokenKind::Pipe
-                    }
-                }
-                '^' => {
-                    self.advance();
-                    TokenKind::Caret
-                }
-                '@' => {
-                    self.advance();
-                    TokenKind::At
-                }
-                '+' => {
-                    self.advance();
-                    TokenKind::Plus
-                }
-                '-' => {
-                    self.advance();
-                    if self.peek() == Some('>') {
-                        self.advance();
-                        TokenKind::Arrow
-                    } else {
-                        TokenKind::Minus
-                    }
-                }
-                '*' => {
-                    self.advance();
-                    TokenKind::Star
-                }
-                '/' => {
-                    self.advance();
-                    TokenKind::Slash
-                }
-                '%' => {
-                    self.advance();
-                    TokenKind::Percent
-                }
-                '<' => {
-                    self.advance();
-                    if self.peek() == Some('=') {
-                        self.advance();
-                        TokenKind::LtEq
-                    } else {
-                        TokenKind::Lt
-                    }
-                }
-                '>' => {
-                    self.advance();
-                    if self.peek() == Some('=') {
-                        self.advance();
-                        TokenKind::GtEq
-                    } else {
-                        TokenKind::Gt
-                    }
-                }
-                '&' => {
-                    self.advance();
-                    if self.peek() == Some('&') {
-                        self.advance();
-                        TokenKind::AmpAmp
-                    } else {
-                        return Err(self.lex_error("unexpected '&'"));
-                    }
-                }
-                '"' => {
-                    self.advance();
-                    // Check for multiline string `"""`
-                    if self.source[self.pos..].starts_with("\"\"") {
-                        self.advance();
-                        self.advance();
-                        let s = self.read_multiline_string()?;
-                        TokenKind::StringLit(s)
-                    } else {
-                        let s = self.read_string()?;
-                        TokenKind::StringLit(s)
-                    }
-                }
-                '#' => {
-                    // #"..."# raw strings
-                    self.advance();
-                    if self.peek() == Some('"') {
-                        self.advance();
-                        let s = self.read_raw_string('#')?;
-                        TokenKind::StringLit(s)
-                    } else {
-                        // Could be a shebang line or annotation
-                        while self.peek().map(|c| c != '\n').unwrap_or(false) {
-                            self.advance();
-                        }
-                        continue;
-                    }
-                }
-                c if c.is_ascii_digit() => {
-                    self.advance();
-                    self.read_number(c)?
-                }
-                c if c.is_alphabetic() || c == '_' => {
-                    let start = self.pos; // pos points TO current char before advance
-                    self.advance();
-                    while self
-                        .peek()
-                        .map(|c| c.is_alphanumeric() || c == '_')
-                        .unwrap_or(false)
-                    {
-                        self.advance();
-                    }
-                    let ident = &self.source[start..self.pos];
-                    keyword_or_ident(ident)
-                }
-                c => {
-                    return Err(self.lex_error(format!("unexpected character: {c:?}")));
-                }
-            };
+            let kind = self.read_one_token_from(ch)?;
 
             tokens.push(Token {
                 kind,
@@ -560,6 +423,211 @@ impl<'a> Lexer<'a> {
             });
         }
         Ok(tokens)
+    }
+
+    fn read_one_token(&mut self) -> Result<TokenKind> {
+        self.skip_whitespace_and_comments();
+        let ch = self
+            .peek()
+            .ok_or_else(|| self.lex_error("unexpected end of input"))?;
+        self.read_one_token_from(ch)
+    }
+
+    fn read_one_token_from(&mut self, ch: char) -> Result<TokenKind> {
+        let kind = match ch {
+            '{' => {
+                self.advance();
+                TokenKind::LBrace
+            }
+            '}' => {
+                self.advance();
+                TokenKind::RBrace
+            }
+            '(' => {
+                self.advance();
+                TokenKind::LParen
+            }
+            ')' => {
+                self.advance();
+                TokenKind::RParen
+            }
+            '[' => {
+                self.advance();
+                TokenKind::LBracket
+            }
+            ']' => {
+                self.advance();
+                TokenKind::RBracket
+            }
+            ',' => {
+                self.advance();
+                TokenKind::Comma
+            }
+            '.' => {
+                self.advance();
+                if self.source[self.pos..].starts_with("..") {
+                    self.advance();
+                    self.advance();
+                    TokenKind::DotDotDot
+                } else {
+                    TokenKind::Dot
+                }
+            }
+            '=' => {
+                self.advance();
+                if self.peek() == Some('=') {
+                    self.advance();
+                    TokenKind::EqEq
+                } else if self.peek() == Some('>') {
+                    self.advance();
+                    TokenKind::ThinArrow
+                } else {
+                    TokenKind::Equals
+                }
+            }
+            ':' => {
+                self.advance();
+                TokenKind::Colon
+            }
+            '?' => {
+                self.advance();
+                if self.peek() == Some('?') {
+                    self.advance();
+                    TokenKind::QuestionQuestion
+                } else if self.peek() == Some('.') {
+                    self.advance();
+                    TokenKind::QuestionDot
+                } else {
+                    TokenKind::QuestionMark
+                }
+            }
+            '!' => {
+                self.advance();
+                if self.peek() == Some('=') {
+                    self.advance();
+                    TokenKind::BangEq
+                } else {
+                    TokenKind::Bang
+                }
+            }
+            '|' => {
+                self.advance();
+                if self.peek() == Some('|') {
+                    self.advance();
+                    TokenKind::PipePipe
+                } else {
+                    TokenKind::Pipe
+                }
+            }
+            '^' => {
+                self.advance();
+                TokenKind::Caret
+            }
+            '@' => {
+                self.advance();
+                TokenKind::At
+            }
+            '+' => {
+                self.advance();
+                TokenKind::Plus
+            }
+            '-' => {
+                self.advance();
+                if self.peek() == Some('>') {
+                    self.advance();
+                    TokenKind::Arrow
+                } else {
+                    TokenKind::Minus
+                }
+            }
+            '*' => {
+                self.advance();
+                TokenKind::Star
+            }
+            '/' => {
+                self.advance();
+                TokenKind::Slash
+            }
+            '%' => {
+                self.advance();
+                TokenKind::Percent
+            }
+            '<' => {
+                self.advance();
+                if self.peek() == Some('=') {
+                    self.advance();
+                    TokenKind::LtEq
+                } else {
+                    TokenKind::Lt
+                }
+            }
+            '>' => {
+                self.advance();
+                if self.peek() == Some('=') {
+                    self.advance();
+                    TokenKind::GtEq
+                } else {
+                    TokenKind::Gt
+                }
+            }
+            '&' => {
+                self.advance();
+                if self.peek() == Some('&') {
+                    self.advance();
+                    TokenKind::AmpAmp
+                } else {
+                    return Err(self.lex_error("unexpected '&'"));
+                }
+            }
+            '"' => {
+                self.advance();
+                // Check for multiline string `"""`
+                if self.source[self.pos..].starts_with("\"\"") {
+                    self.advance();
+                    self.advance();
+                    let s = self.read_multiline_string()?;
+                    TokenKind::StringLit(s)
+                } else {
+                    self.read_string_token()?
+                }
+            }
+            '#' => {
+                // #"..."# raw strings
+                self.advance();
+                if self.peek() == Some('"') {
+                    self.advance();
+                    let s = self.read_raw_string('#')?;
+                    TokenKind::StringLit(s)
+                } else {
+                    // Could be a shebang line or annotation — skip line
+                    while self.peek().map(|c| c != '\n').unwrap_or(false) {
+                        self.advance();
+                    }
+                    return self.read_one_token();
+                }
+            }
+            c if c.is_ascii_digit() => {
+                self.advance();
+                self.read_number(c)?
+            }
+            c if c.is_alphabetic() || c == '_' => {
+                let start = self.pos; // pos points TO current char before advance
+                self.advance();
+                while self
+                    .peek()
+                    .map(|c| c.is_alphanumeric() || c == '_')
+                    .unwrap_or(false)
+                {
+                    self.advance();
+                }
+                let ident = &self.source[start..self.pos];
+                keyword_or_ident(ident)
+            }
+            c => {
+                return Err(self.lex_error(format!("unexpected character: {c:?}")));
+            }
+        };
+        Ok(kind)
     }
 
     fn read_raw_string(&mut self, _delimiter: char) -> Result<String> {
