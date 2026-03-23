@@ -377,7 +377,8 @@ impl Evaluator {
                         .cloned()
                         .ok_or_else(|| Error::Eval(format!("field not found: {field}"))),
                     _ => Err(Error::Eval(format!(
-                        "cannot access field '{field}' on non-object"
+                        "cannot access field '{field}' on {}",
+                        value_type_name(&obj)
                     ))),
                 }
             }
@@ -387,7 +388,8 @@ impl Evaluator {
                     Value::Null => Ok(Value::Null),
                     Value::Object(map) => Ok(map.get(field).cloned().unwrap_or(Value::Null)),
                     _ => Err(Error::Eval(format!(
-                        "cannot access field '{field}' on non-object"
+                        "cannot access field '{field}' on {}",
+                        value_type_name(&obj)
                     ))),
                 }
             }
@@ -784,6 +786,19 @@ impl Scope {
 }
 
 // --- Helpers ---
+
+fn value_type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "Null",
+        Value::Bool(_) => "Boolean",
+        Value::Int(_) => "Int",
+        Value::Float(_) => "Float",
+        Value::String(_) => "String",
+        Value::Object(_) => "Object",
+        Value::List(_) => "List",
+        Value::Lambda(..) => "Function",
+    }
+}
 
 fn value_to_key(v: &Value) -> Result<String> {
     match v {
