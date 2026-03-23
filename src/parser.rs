@@ -49,6 +49,7 @@ pub enum Entry {
     /// Bare element expression (used in Listing bodies)
     Elem(Expr),
     /// Class definition: `class Name [extends Parent] { properties... }`
+    /// Fields: (name, optional_parent, body)
     ClassDef(String, Option<String>, Vec<Entry>),
 }
 
@@ -1041,6 +1042,10 @@ impl<'a> Parser<'a> {
             TokenKind::KwThis => {
                 self.advance();
                 Ok(Expr::Ident("this".into()))
+            }
+            TokenKind::KwSuper => {
+                self.advance();
+                Ok(Expr::Ident("super".into()))
             }
             TokenKind::KwModule => {
                 self.advance();

@@ -327,12 +327,9 @@ impl Evaluator {
                     // by re-processing its body entries
                     for entry in &ext_module.body {
                         if let Entry::ClassDef(cls_name, parent, body) = entry {
-                            let mut defaults = self.eval_entries(body, &scope, depth + 1).await?;
-                            if let Some(parent_name) = parent
-                                && let Some(parent_val) = scope.get(parent_name)
-                            {
-                                defaults = merge_values(parent_val.clone(), defaults);
-                            }
+                            let defaults = self
+                                .eval_class_def(parent.as_deref(), body, &scope, depth)
+                                .await?;
                             scope.set(cls_name.clone(), defaults);
                         }
                     }
@@ -363,13 +360,9 @@ impl Evaluator {
         // Collect class definitions into module scope (after locals so defaults can reference them)
         for entry in &module.body {
             if let Entry::ClassDef(name, parent, body) = entry {
-                let mut defaults = self.eval_entries(body, &scope, depth + 1).await?;
-                // If class extends a parent, merge parent defaults as base
-                if let Some(parent_name) = parent
-                    && let Some(parent_val) = scope.get(parent_name)
-                {
-                    defaults = merge_values(parent_val.clone(), defaults);
-                }
+                let defaults = self
+                    .eval_class_def(parent.as_deref(), body, &scope, depth)
+                    .await?;
                 scope.set(name.clone(), defaults);
             }
         }
@@ -487,12 +480,9 @@ impl Evaluator {
         // Collect class definitions into scope (after locals so defaults can reference them)
         for entry in entries {
             if let Entry::ClassDef(name, parent, body) = entry {
-                let mut defaults = self.eval_entries(body, &child_scope, depth + 1).await?;
-                if let Some(parent_name) = parent
-                    && let Some(parent_val) = child_scope.get(parent_name)
-                {
-                    defaults = merge_values(parent_val.clone(), defaults);
-                }
+                let defaults = self
+                    .eval_class_def(parent.as_deref(), body, &child_scope, depth)
+                    .await?;
                 child_scope.set(name.clone(), defaults);
             }
         }
@@ -590,6 +580,72 @@ impl Evaluator {
             scope: child_scope.flatten(),
         };
         Ok(Value::Object(map, Some(Box::new(source))))
+    }
+
+    /// Evaluate a class definition, optionally inheriting from a parent class.
+    ///
+    /// If `parent_name` is provided, the parent class is looked up in scope,
+    /// its defaults are used as a base, and `super` is bound to the parent
+    /// value so the child class body can reference it.
+    #[async_recursion(?Send)]
+    async fn eval_class_def(
+        &mut self,
+        parent_name: Option<&str>,
+        body: &[Entry],
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<Value> {
+        let parent_val = parent_name.and_then(|name| scope.get(name)).cloned();
+
+        let mut child_scope = scope.child();
+        if let Some(ref pv) = parent_val {
+            child_scope.set("super".into(), pv.clone());
+        }
+
+        let child_defaults = self.eval_entries(body, &child_scope, depth + 1).await?;
+
+        if let Some(Value::Object(parent_map, parent_src)) = parent_val {
+            // Merge: parent defaults first, child overrides on top
+            let mut merged = parent_map;
+            if let Value::Object(child_map, child_src) = child_defaults {
+                for (k, v) in &child_map {
+                    merged.insert(k.clone(), v.clone());
+                }
+                // Preserve the child's ObjectSource for late binding,
+                // but prepend parent entries so inherited props are available
+                let source = if let Some(mut src) = child_src.map(|s| *s) {
+                    // Collect child property names (including dynamic string-key entries)
+                    let child_names: std::collections::HashSet<String> = body
+                        .iter()
+                        .filter_map(|e| match e {
+                            Entry::Property(p) => Some(p.name.clone()),
+                            Entry::DynProperty(Expr::String(s), _) => Some(s.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    if let Some(psrc) = parent_src {
+                        let mut combined_entries = Vec::new();
+                        for pe in &psrc.entries {
+                            if let Entry::Property(p) = pe
+                                && !child_names.contains(&p.name)
+                            {
+                                combined_entries.push(pe.clone());
+                            }
+                        }
+                        combined_entries.extend(src.entries);
+                        src.entries = combined_entries;
+                    }
+                    Some(Box::new(src))
+                } else {
+                    None
+                };
+                Ok(Value::Object(merged, source))
+            } else {
+                Ok(Value::Object(merged, None))
+            }
+        } else {
+            Ok(child_defaults)
+        }
     }
 
     /// Evaluate an amended object with late binding.
