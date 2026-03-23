@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 use crate::lexer;
-use crate::parser::{self, BinOp, Entry, Expr, Module, Property, UnOp};
+use crate::parser::{self, BinOp, Entry, Expr, Module, Property, StringInterpPart, UnOp};
 use crate::value::Value;
 
 /// Evaluates pkl source files to [`Value`].
@@ -180,6 +180,19 @@ impl Evaluator {
             Expr::Int(n) => Ok(Value::Int(*n)),
             Expr::Float(f) => Ok(Value::Float(*f)),
             Expr::String(s) => Ok(Value::String(s.clone())),
+            Expr::StringInterpolation(parts) => {
+                let mut result = String::new();
+                for part in parts {
+                    match part {
+                        StringInterpPart::Literal(s) => result.push_str(s),
+                        StringInterpPart::Expr(e) => {
+                            let val = self.eval_expr(e, scope, depth + 1)?;
+                            result.push_str(&value_to_display(&val));
+                        }
+                    }
+                }
+                Ok(Value::String(result))
+            }
             Expr::Ident(name) => scope
                 .get(name)
                 .cloned()

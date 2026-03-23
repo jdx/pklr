@@ -1,6 +1,12 @@
 use crate::error::{Error, Result};
 use crate::lexer::{Token, TokenKind};
 
+#[derive(Debug, Clone)]
+pub enum StringInterpPart {
+    Literal(String),
+    Expr(Expr),
+}
+
 /// A pkl module (top-level file).
 #[derive(Debug, Clone)]
 pub struct Module {
@@ -90,6 +96,8 @@ pub enum Expr {
     Unop(UnOp, Box<Expr>),
     /// Object/listing literal — anonymous `{ ... }`
     ObjectBody(Vec<Entry>),
+    /// String interpolation: alternating literal strings and expressions
+    StringInterpolation(Vec<StringInterpPart>),
     /// `throw("msg")`
     Throw(Box<Expr>),
     /// `trace(expr)`
@@ -162,6 +170,11 @@ pub fn parse(tokens: &[Token]) -> Result<Module> {
 pub fn parse_named(tokens: &[Token], source: &str, name: &str) -> Result<Module> {
     let mut p = Parser::new(tokens, source, name);
     p.parse_module()
+}
+
+pub fn parse_expr_tokens(tokens: &[Token], source: &str, name: &str) -> Result<Expr> {
+    let mut p = Parser::new(tokens, source, name);
+    p.parse_expr()
 }
 
 struct Parser<'a> {
@@ -632,6 +645,22 @@ impl<'a> Parser<'a> {
             TokenKind::StringLit(s) => {
                 self.advance();
                 Ok(Expr::String(s))
+            }
+            TokenKind::InterpolatedString(parts) => {
+                self.advance();
+                let mut interp_parts = Vec::new();
+                for part in parts {
+                    match part {
+                        crate::lexer::StringPart::Literal(s) => {
+                            interp_parts.push(StringInterpPart::Literal(s));
+                        }
+                        crate::lexer::StringPart::Tokens(tokens) => {
+                            let expr = parse_expr_tokens(&tokens, &self.source, &self.name)?;
+                            interp_parts.push(StringInterpPart::Expr(expr));
+                        }
+                    }
+                }
+                Ok(Expr::StringInterpolation(interp_parts))
             }
             TokenKind::LParen => {
                 self.advance();

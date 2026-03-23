@@ -121,7 +121,6 @@ fn string_concatenation() {
 }
 
 #[test]
-#[ignore = "string interpolation not yet implemented"]
 fn string_interpolation() {
     let json = eval(
         r#"
@@ -133,7 +132,6 @@ x = "hello \(name)"
 }
 
 #[test]
-#[ignore = "string interpolation not yet implemented"]
 fn string_interpolation_expr() {
     let json = eval(
         r#"
@@ -594,7 +592,6 @@ x {
 // ============================================================
 
 #[test]
-#[ignore = "string interpolation not yet implemented"]
 fn interpolation_in_key() {
     let json = eval(
         r#"
