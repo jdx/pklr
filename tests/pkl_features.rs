@@ -259,14 +259,12 @@ fn logical_not() {
 // ============================================================
 
 #[test]
-#[ignore = "null coalesce (??) not yet parsed in expressions"]
 fn null_coalesce_non_null() {
     let json = eval(r#"x = "hello" ?? "default""#);
     assert_eq!(json["x"], "hello");
 }
 
 #[test]
-#[ignore = "null coalesce (??) not yet parsed in expressions"]
 fn null_coalesce_null() {
     let json = eval(r#"x = null ?? "default""#);
     assert_eq!(json["x"], "default");
@@ -444,7 +442,6 @@ x = new Listing {
 // ============================================================
 
 #[test]
-#[ignore = "dynamic key with = assignment not yet parsed in new Mapping body"]
 fn mapping_basic() {
     let json = eval(
         r#"
@@ -484,7 +481,6 @@ fn map_function() {
 // ============================================================
 
 #[test]
-#[ignore = "dynamic key with = assignment not yet parsed"]
 fn spread_into_object() {
     let json = eval(
         r#"
@@ -524,7 +520,6 @@ x {
 }
 
 #[test]
-#[ignore = "dynamic key with = assignment not yet parsed in new Mapping body"]
 fn for_generator_object() {
     let json = eval(
         r#"
