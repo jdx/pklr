@@ -24,3 +24,15 @@ jobs:
       - run: cargo test
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo fmt --check
+  final:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    if: always()
+    steps:
+      - name: Check CI job results
+        run: |
+          if [ "${{ needs.test.result }}" != "success" ]; then
+            echo "test failed or was skipped"
+            exit 1
+          fi
