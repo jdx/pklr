@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use miette::NamedSource;
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, miette::Diagnostic, thiserror::Error)]
@@ -7,17 +9,23 @@ pub enum Error {
     #[error("IO error reading {0}: {1}")]
     Io(PathBuf, #[source] std::io::Error),
 
-    #[error("Lex error at line {line}, col {col}: {message}")]
+    #[error("{message}")]
+    #[diagnostic()]
     Lex {
-        line: usize,
-        col: usize,
+        #[source_code]
+        src: NamedSource<String>,
+        #[label("{message}")]
+        span: miette::SourceOffset,
         message: String,
     },
 
-    #[error("Parse error at line {line}, col {col}: {message}")]
+    #[error("{message}")]
+    #[diagnostic()]
     Parse {
-        line: usize,
-        col: usize,
+        #[source_code]
+        src: NamedSource<String>,
+        #[label("{message}")]
+        span: miette::SourceOffset,
         message: String,
     },
 

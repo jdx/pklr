@@ -23,7 +23,7 @@ pub fn eval_to_json(path: &Path) -> Result<serde_json::Value> {
 /// Analyze imports of a pkl file, returning all transitive local file dependencies.
 pub fn analyze_imports(path: &Path) -> Result<Vec<std::path::PathBuf>> {
     let source = std::fs::read_to_string(path).map_err(|e| Error::Io(path.to_path_buf(), e))?;
-    let tokens = lexer::lex(&source)?;
+    let tokens = lexer::lex_named(&source, &path.display().to_string())?;
     let imports = parser::collect_imports(&tokens);
     let base = path.parent().unwrap_or(Path::new("."));
     Ok(imports

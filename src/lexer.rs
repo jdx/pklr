@@ -85,27 +85,43 @@ pub struct Token {
     pub kind: TokenKind,
     pub line: usize,
     pub col: usize,
+    /// Byte offset in the source string where this token starts.
+    pub offset: usize,
 }
 
 pub fn lex(source: &str) -> Result<Vec<Token>> {
-    let mut lexer = Lexer::new(source);
+    lex_named(source, "<input>")
+}
+
+pub fn lex_named(source: &str, name: &str) -> Result<Vec<Token>> {
+    let mut lexer = Lexer::new(source, name);
     lexer.tokenize()
 }
 
 struct Lexer<'a> {
     source: &'a str,
+    name: String,
     pos: usize,
     line: usize,
     col: usize,
 }
 
 impl<'a> Lexer<'a> {
-    fn new(source: &'a str) -> Self {
+    fn new(source: &'a str, name: &str) -> Self {
         Self {
             source,
+            name: name.to_string(),
             pos: 0,
             line: 1,
             col: 1,
+        }
+    }
+
+    fn lex_error(&self, message: impl Into<String>) -> Error {
+        Error::Lex {
+            src: miette::NamedSource::new(&self.name, self.source.to_string()),
+            span: miette::SourceOffset::from(self.pos),
+            message: message.into(),
         }
     }
 
@@ -168,11 +184,7 @@ impl<'a> Lexer<'a> {
         loop {
             match self.advance() {
                 None => {
-                    return Err(Error::Lex {
-                        line: self.line,
-                        col: self.col,
-                        message: "unterminated string".into(),
-                    });
+                    return Err(self.lex_error("unterminated string"));
                 }
                 Some('"') => break,
                 Some('\\') => {
@@ -191,11 +203,7 @@ impl<'a> Lexer<'a> {
                             s.push(c);
                         }
                         None => {
-                            return Err(Error::Lex {
-                                line: self.line,
-                                col: self.col,
-                                message: "unterminated escape".into(),
-                            });
+                            return Err(self.lex_error("unterminated escape"));
                         }
                     }
                 }
@@ -218,11 +226,7 @@ impl<'a> Lexer<'a> {
             }
             match self.advance() {
                 None => {
-                    return Err(Error::Lex {
-                        line: self.line,
-                        col: self.col,
-                        message: "unterminated multiline string".into(),
-                    });
+                    return Err(self.lex_error("unterminated multiline string"));
                 }
                 Some(c) => s.push(c),
             }
@@ -250,11 +254,8 @@ impl<'a> Lexer<'a> {
                         self.advance();
                     }
                     let raw = self.source[start..self.pos].replace('_', "");
-                    let v = i64::from_str_radix(&raw[2..], 16).map_err(|_| Error::Lex {
-                        line: self.line,
-                        col: self.col,
-                        message: format!("invalid hex literal: {raw}"),
-                    })?;
+                    let v = i64::from_str_radix(&raw[2..], 16)
+                        .map_err(|_| self.lex_error(format!("invalid hex literal: {raw}")))?;
                     return Ok(TokenKind::IntLit(v));
                 }
                 Some('b') | Some('B') => {
@@ -267,11 +268,8 @@ impl<'a> Lexer<'a> {
                         self.advance();
                     }
                     let raw = self.source[start..self.pos].replace('_', "");
-                    let v = i64::from_str_radix(&raw[2..], 2).map_err(|_| Error::Lex {
-                        line: self.line,
-                        col: self.col,
-                        message: format!("invalid binary literal: {raw}"),
-                    })?;
+                    let v = i64::from_str_radix(&raw[2..], 2)
+                        .map_err(|_| self.lex_error(format!("invalid binary literal: {raw}")))?;
                     return Ok(TokenKind::IntLit(v));
                 }
                 Some('o') | Some('O') => {
@@ -284,11 +282,8 @@ impl<'a> Lexer<'a> {
                         self.advance();
                     }
                     let raw = self.source[start..self.pos].replace('_', "");
-                    let v = i64::from_str_radix(&raw[2..], 8).map_err(|_| Error::Lex {
-                        line: self.line,
-                        col: self.col,
-                        message: format!("invalid octal literal: {raw}"),
-                    })?;
+                    let v = i64::from_str_radix(&raw[2..], 8)
+                        .map_err(|_| self.lex_error(format!("invalid octal literal: {raw}")))?;
                     return Ok(TokenKind::IntLit(v));
                 }
                 _ => {}
@@ -327,18 +322,14 @@ impl<'a> Lexer<'a> {
         let raw = &self.source[start..self.pos];
         let cleaned = raw.replace('_', "");
         if is_float || cleaned.contains('e') || cleaned.contains('E') {
-            let v: f64 = cleaned.parse().map_err(|_| Error::Lex {
-                line: self.line,
-                col: self.col,
-                message: format!("invalid float: {raw}"),
-            })?;
+            let v: f64 = cleaned
+                .parse()
+                .map_err(|_| self.lex_error(format!("invalid float: {raw}")))?;
             Ok(TokenKind::FloatLit(v))
         } else {
-            let v = cleaned.parse::<i64>().map_err(|_| Error::Lex {
-                line: self.line,
-                col: self.col,
-                message: format!("invalid integer: {raw}"),
-            })?;
+            let v = cleaned
+                .parse::<i64>()
+                .map_err(|_| self.lex_error(format!("invalid integer: {raw}")))?;
             Ok(TokenKind::IntLit(v))
         }
     }
@@ -349,6 +340,7 @@ impl<'a> Lexer<'a> {
             self.skip_whitespace_and_comments();
             let line = self.line;
             let col = self.col;
+            let offset = self.pos;
 
             let ch = match self.peek() {
                 None => {
@@ -356,6 +348,7 @@ impl<'a> Lexer<'a> {
                         kind: TokenKind::Eof,
                         line,
                         col,
+                        offset,
                     });
                     break;
                 }
@@ -496,11 +489,7 @@ impl<'a> Lexer<'a> {
                         self.advance();
                         TokenKind::AmpAmp
                     } else {
-                        return Err(Error::Lex {
-                            line,
-                            col,
-                            message: "unexpected '&'".into(),
-                        });
+                        return Err(self.lex_error("unexpected '&'"));
                     }
                 }
                 '"' => {
@@ -549,15 +538,16 @@ impl<'a> Lexer<'a> {
                     keyword_or_ident(ident)
                 }
                 c => {
-                    return Err(Error::Lex {
-                        line,
-                        col,
-                        message: format!("unexpected character: {c:?}"),
-                    });
+                    return Err(self.lex_error(format!("unexpected character: {c:?}")));
                 }
             };
 
-            tokens.push(Token { kind, line, col });
+            tokens.push(Token {
+                kind,
+                line,
+                col,
+                offset,
+            });
         }
         Ok(tokens)
     }
@@ -573,11 +563,7 @@ impl<'a> Lexer<'a> {
             }
             match self.advance() {
                 None => {
-                    return Err(Error::Lex {
-                        line: self.line,
-                        col: self.col,
-                        message: "unterminated raw string".into(),
-                    });
+                    return Err(self.lex_error("unterminated raw string"));
                 }
                 Some(c) => s.push(c),
             }
