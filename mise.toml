@@ -1,4 +1,4 @@
 [tools]
 communique = "latest"
-"cargo:cargo-binstall" = "latest"
+cargo-binstall = "latest"
 "cargo:cargo-msrv" = "latest"
