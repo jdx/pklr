@@ -122,7 +122,7 @@ pklr implements a subset of the [Pkl language](https://pkl-lang.org/main/current
 | Class inheritance (`extends`) | Supported |
 | `outer` keyword | Supported |
 | `this` keyword | Supported |
-| `super` keyword | Not supported |
+| `super` keyword | Supported |
 
 ### Annotations & Declarations
 
