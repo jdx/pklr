@@ -1,0 +1,9 @@
+[workspace]
+# Create git tags for releases
+git_tag_enable = true
+# Create GitHub releases
+git_release_enable = true
+# Create as draft so release notes can be enhanced before publishing
+git_release_draft = true
+# pklr is a library — keep semver check enabled
+semver_check = true
