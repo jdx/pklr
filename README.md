@@ -63,8 +63,8 @@ pklr implements a subset of the [Pkl language](https://pkl-lang.org/main/current
 | `Set(...)` | Parsed (treated as List) |
 | Object amendment (`(base) { overrides }`) | Supported |
 | Spread operator (`...expr`) | Supported |
+| Default elements/values (`default { ... }`) | Supported |
 | Late binding | Not supported |
-| Default elements/values | Not supported |
 
 ### Control Flow & Expressions
 
