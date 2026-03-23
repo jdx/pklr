@@ -95,16 +95,25 @@ pklr implements a subset of the [Pkl language](https://pkl-lang.org/main/current
 | `extends` | Not supported |
 | `module` keyword | Not supported |
 
+### Classes & Methods
+
+| Feature | Status |
+|---|---|
+| Class definitions (`class Foo { ... }`) | Not yet supported |
+| Class inheritance | Not supported |
+| Methods and member access (`.length`, `.isEmpty`) | Not yet supported |
+| Anonymous functions / lambdas (`(x) -> x * 2`) | Not yet supported |
+| `this` / `outer` keywords | Not yet supported |
+| `super` keyword | Not supported |
+
 ### Not Yet Supported
 
 The following Pkl features are not currently implemented:
 
-- **Methods** and method calls on values (e.g., `"foo".length`, `list.isEmpty`)
-- **Anonymous functions / lambdas** (`(x) -> x * 2`)
 - **Type aliases** and **type constraints**
 - **Type annotations** (parsed but not validated)
 - **Member predicates** (`[[...]]`)
-- **`super`** keyword
+- **Annotations** (`@Deprecated`, `@ModuleInfo`, etc.)
 - **Regular expressions** (`Regex`)
 - **Packages** and **projects**
 - **Standard library** modules
@@ -120,13 +129,17 @@ Planned features, roughly in priority order:
 2. Import resolution and evaluation
 3. `new Listing { ... }` body syntax
 4. Object amendment (`(base) { overrides }`)
-5. `this` / `outer` references
-6. Class definitions with defaults (`class Foo { name: String = "default" }`)
-7. Module header — parse and skip gracefully
-8. Annotations (`@Foo`) — parse and skip
+5. Method calls on values (`.length`, `.isEmpty`, etc.)
+6. `this` / `outer` keywords
+7. Class definitions with defaults (`class Foo { name: String = "default" }`)
+8. Null-safe access (`?.`)
+9. Module header — parse and skip gracefully
+10. Annotations (`@Foo`) — parse and skip
 
 Nice-to-have:
 
+- Anonymous functions / lambdas (`(x) -> x * 2`)
+- Custom string delimiters (`#"..."#`)
 - More stdlib methods (`.map()`, `.filter()`, `.fold()`, etc.)
 - `import*` glob imports
 - Type checking / validation
