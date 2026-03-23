@@ -60,7 +60,7 @@ pklr implements a subset of the [Pkl language](https://pkl-lang.org/main/current
 | `Map(k1, v1, k2, v2)` | Supported |
 | `List(...)` / `Listing(...)` | Supported |
 | `new Listing { ... }` body syntax | Supported |
-| `Set(...)` | Parsed (treated as List) |
+| `Set(...)` | Supported (deduplicated, serialized as List) |
 | Object amendment (`(base) { overrides }`) | Supported |
 | Spread operator (`...expr`) | Supported |
 | Default elements/values (`default { ... }`) | Supported |
