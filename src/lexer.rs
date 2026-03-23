@@ -11,22 +11,22 @@ pub enum TokenKind {
     Null,
 
     // Punctuation
-    LBrace,    // {
-    RBrace,    // }
-    LParen,    // (
-    RParen,    // )
-    LBracket,  // [
-    RBracket,  // ]
-    Comma,     // ,
-    Dot,       // .
-    DotDotDot, // ...
-    Equals,    // =
-    Colon,     // :
+    LBrace,       // {
+    RBrace,       // }
+    LParen,       // (
+    RParen,       // )
+    LBracket,     // [
+    RBracket,     // ]
+    Comma,        // ,
+    Dot,          // .
+    DotDotDot,    // ...
+    Equals,       // =
+    Colon,        // :
     QuestionMark, // ?
-    Bang,      // !
-    Pipe,      // |
-    Caret,     // ^
-    At,        // @
+    Bang,         // !
+    Pipe,         // |
+    Caret,        // ^
+    At,           // @
 
     // Operators
     Plus,
@@ -101,17 +101,16 @@ struct Lexer<'a> {
 
 impl<'a> Lexer<'a> {
     fn new(source: &'a str) -> Self {
-        Self { source, pos: 0, line: 1, col: 1 }
+        Self {
+            source,
+            pos: 0,
+            line: 1,
+            col: 1,
+        }
     }
 
     fn peek(&self) -> Option<char> {
         self.source[self.pos..].chars().next()
-    }
-
-    fn peek2(&self) -> Option<char> {
-        let mut chars = self.source[self.pos..].chars();
-        chars.next();
-        chars.next()
     }
 
     fn advance(&mut self) -> Option<char> {
@@ -129,7 +128,11 @@ impl<'a> Lexer<'a> {
     fn skip_whitespace_and_comments(&mut self) {
         loop {
             // Skip whitespace
-            while self.peek().map(|c| c.is_ascii_whitespace()).unwrap_or(false) {
+            while self
+                .peek()
+                .map(|c| c.is_ascii_whitespace())
+                .unwrap_or(false)
+            {
                 self.advance();
             }
             // Skip line comments
@@ -141,10 +144,12 @@ impl<'a> Lexer<'a> {
             }
             // Skip block comments /* ... */
             if self.source[self.pos..].starts_with("/*") {
-                self.advance(); self.advance(); // consume /*
+                self.advance();
+                self.advance(); // consume /*
                 loop {
                     if self.source[self.pos..].starts_with("*/") {
-                        self.advance(); self.advance();
+                        self.advance();
+                        self.advance();
                         break;
                     }
                     if self.advance().is_none() {
@@ -162,7 +167,13 @@ impl<'a> Lexer<'a> {
         let mut s = String::new();
         loop {
             match self.advance() {
-                None => return Err(Error::Lex { line: self.line, col: self.col, message: "unterminated string".into() }),
+                None => {
+                    return Err(Error::Lex {
+                        line: self.line,
+                        col: self.col,
+                        message: "unterminated string".into(),
+                    });
+                }
                 Some('"') => break,
                 Some('\\') => {
                     match self.advance() {
@@ -175,8 +186,17 @@ impl<'a> Lexer<'a> {
                             // String interpolation \( ... ) - not fully supported yet
                             s.push_str("\\(");
                         }
-                        Some(c) => { s.push('\\'); s.push(c); }
-                        None => return Err(Error::Lex { line: self.line, col: self.col, message: "unterminated escape".into() }),
+                        Some(c) => {
+                            s.push('\\');
+                            s.push(c);
+                        }
+                        None => {
+                            return Err(Error::Lex {
+                                line: self.line,
+                                col: self.col,
+                                message: "unterminated escape".into(),
+                            });
+                        }
                     }
                 }
                 Some(c) => s.push(c),
@@ -191,11 +211,19 @@ impl<'a> Lexer<'a> {
         let mut s = String::new();
         loop {
             if self.source[self.pos..].starts_with("\"\"\"") {
-                self.advance(); self.advance(); self.advance();
+                self.advance();
+                self.advance();
+                self.advance();
                 break;
             }
             match self.advance() {
-                None => return Err(Error::Lex { line: self.line, col: self.col, message: "unterminated multiline string".into() }),
+                None => {
+                    return Err(Error::Lex {
+                        line: self.line,
+                        col: self.col,
+                        message: "unterminated multiline string".into(),
+                    });
+                }
                 Some(c) => s.push(c),
             }
         }
@@ -214,36 +242,51 @@ impl<'a> Lexer<'a> {
             match self.peek() {
                 Some('x') | Some('X') => {
                     self.advance(); // consume 'x'
-                    while self.peek().map(|c| c.is_ascii_hexdigit() || c == '_').unwrap_or(false) {
+                    while self
+                        .peek()
+                        .map(|c| c.is_ascii_hexdigit() || c == '_')
+                        .unwrap_or(false)
+                    {
                         self.advance();
                     }
                     let raw = self.source[start..self.pos].replace('_', "");
                     let v = i64::from_str_radix(&raw[2..], 16).map_err(|_| Error::Lex {
-                        line: self.line, col: self.col,
+                        line: self.line,
+                        col: self.col,
                         message: format!("invalid hex literal: {raw}"),
                     })?;
                     return Ok(TokenKind::IntLit(v));
                 }
                 Some('b') | Some('B') => {
                     self.advance();
-                    while self.peek().map(|c| c == '0' || c == '1' || c == '_').unwrap_or(false) {
+                    while self
+                        .peek()
+                        .map(|c| c == '0' || c == '1' || c == '_')
+                        .unwrap_or(false)
+                    {
                         self.advance();
                     }
                     let raw = self.source[start..self.pos].replace('_', "");
                     let v = i64::from_str_radix(&raw[2..], 2).map_err(|_| Error::Lex {
-                        line: self.line, col: self.col,
+                        line: self.line,
+                        col: self.col,
                         message: format!("invalid binary literal: {raw}"),
                     })?;
                     return Ok(TokenKind::IntLit(v));
                 }
                 Some('o') | Some('O') => {
                     self.advance();
-                    while self.peek().map(|c| matches!(c, '0'..='7') || c == '_').unwrap_or(false) {
+                    while self
+                        .peek()
+                        .map(|c| matches!(c, '0'..='7') || c == '_')
+                        .unwrap_or(false)
+                    {
                         self.advance();
                     }
                     let raw = self.source[start..self.pos].replace('_', "");
                     let v = i64::from_str_radix(&raw[2..], 8).map_err(|_| Error::Lex {
-                        line: self.line, col: self.col,
+                        line: self.line,
+                        col: self.col,
                         message: format!("invalid octal literal: {raw}"),
                     })?;
                     return Ok(TokenKind::IntLit(v));
@@ -253,13 +296,21 @@ impl<'a> Lexer<'a> {
         }
 
         // Consume remaining decimal digits
-        while self.peek().map(|c| c.is_ascii_digit() || c == '_').unwrap_or(false) {
+        while self
+            .peek()
+            .map(|c| c.is_ascii_digit() || c == '_')
+            .unwrap_or(false)
+        {
             self.advance();
         }
         let is_float = self.peek() == Some('.');
         if is_float {
             self.advance(); // consume '.'
-            while self.peek().map(|c| c.is_ascii_digit() || c == '_').unwrap_or(false) {
+            while self
+                .peek()
+                .map(|c| c.is_ascii_digit() || c == '_')
+                .unwrap_or(false)
+            {
                 self.advance();
             }
         }
@@ -277,13 +328,15 @@ impl<'a> Lexer<'a> {
         let cleaned = raw.replace('_', "");
         if is_float || cleaned.contains('e') || cleaned.contains('E') {
             let v: f64 = cleaned.parse().map_err(|_| Error::Lex {
-                line: self.line, col: self.col,
+                line: self.line,
+                col: self.col,
                 message: format!("invalid float: {raw}"),
             })?;
             Ok(TokenKind::FloatLit(v))
         } else {
             let v = cleaned.parse::<i64>().map_err(|_| Error::Lex {
-                line: self.line, col: self.col,
+                line: self.line,
+                col: self.col,
                 message: format!("invalid integer: {raw}"),
             })?;
             Ok(TokenKind::IntLit(v))
@@ -299,24 +352,50 @@ impl<'a> Lexer<'a> {
 
             let ch = match self.peek() {
                 None => {
-                    tokens.push(Token { kind: TokenKind::Eof, line, col });
+                    tokens.push(Token {
+                        kind: TokenKind::Eof,
+                        line,
+                        col,
+                    });
                     break;
                 }
                 Some(c) => c,
             };
 
             let kind = match ch {
-                '{' => { self.advance(); TokenKind::LBrace }
-                '}' => { self.advance(); TokenKind::RBrace }
-                '(' => { self.advance(); TokenKind::LParen }
-                ')' => { self.advance(); TokenKind::RParen }
-                '[' => { self.advance(); TokenKind::LBracket }
-                ']' => { self.advance(); TokenKind::RBracket }
-                ',' => { self.advance(); TokenKind::Comma }
+                '{' => {
+                    self.advance();
+                    TokenKind::LBrace
+                }
+                '}' => {
+                    self.advance();
+                    TokenKind::RBrace
+                }
+                '(' => {
+                    self.advance();
+                    TokenKind::LParen
+                }
+                ')' => {
+                    self.advance();
+                    TokenKind::RParen
+                }
+                '[' => {
+                    self.advance();
+                    TokenKind::LBracket
+                }
+                ']' => {
+                    self.advance();
+                    TokenKind::RBracket
+                }
+                ',' => {
+                    self.advance();
+                    TokenKind::Comma
+                }
                 '.' => {
                     self.advance();
                     if self.source[self.pos..].starts_with("..") {
-                        self.advance(); self.advance();
+                        self.advance();
+                        self.advance();
                         TokenKind::DotDotDot
                     } else {
                         TokenKind::Dot
@@ -325,19 +404,28 @@ impl<'a> Lexer<'a> {
                 '=' => {
                     self.advance();
                     if self.peek() == Some('=') {
-                        self.advance(); TokenKind::EqEq
+                        self.advance();
+                        TokenKind::EqEq
                     } else if self.peek() == Some('>') {
-                        self.advance(); TokenKind::ThinArrow
+                        self.advance();
+                        TokenKind::ThinArrow
                     } else {
                         TokenKind::Equals
                     }
                 }
-                ':' => { self.advance(); TokenKind::Colon }
-                '?' => { self.advance(); TokenKind::QuestionMark }
+                ':' => {
+                    self.advance();
+                    TokenKind::Colon
+                }
+                '?' => {
+                    self.advance();
+                    TokenKind::QuestionMark
+                }
                 '!' => {
                     self.advance();
                     if self.peek() == Some('=') {
-                        self.advance(); TokenKind::BangEq
+                        self.advance();
+                        TokenKind::BangEq
                     } else {
                         TokenKind::Bang
                     }
@@ -345,29 +433,50 @@ impl<'a> Lexer<'a> {
                 '|' => {
                     self.advance();
                     if self.peek() == Some('|') {
-                        self.advance(); TokenKind::PipePipe
+                        self.advance();
+                        TokenKind::PipePipe
                     } else {
                         TokenKind::Pipe
                     }
                 }
-                '^' => { self.advance(); TokenKind::Caret }
-                '@' => { self.advance(); TokenKind::At }
-                '+' => { self.advance(); TokenKind::Plus }
+                '^' => {
+                    self.advance();
+                    TokenKind::Caret
+                }
+                '@' => {
+                    self.advance();
+                    TokenKind::At
+                }
+                '+' => {
+                    self.advance();
+                    TokenKind::Plus
+                }
                 '-' => {
                     self.advance();
                     if self.peek() == Some('>') {
-                        self.advance(); TokenKind::Arrow
+                        self.advance();
+                        TokenKind::Arrow
                     } else {
                         TokenKind::Minus
                     }
                 }
-                '*' => { self.advance(); TokenKind::Star }
-                '/' => { self.advance(); TokenKind::Slash }
-                '%' => { self.advance(); TokenKind::Percent }
+                '*' => {
+                    self.advance();
+                    TokenKind::Star
+                }
+                '/' => {
+                    self.advance();
+                    TokenKind::Slash
+                }
+                '%' => {
+                    self.advance();
+                    TokenKind::Percent
+                }
                 '<' => {
                     self.advance();
                     if self.peek() == Some('=') {
-                        self.advance(); TokenKind::LtEq
+                        self.advance();
+                        TokenKind::LtEq
                     } else {
                         TokenKind::Lt
                     }
@@ -375,7 +484,8 @@ impl<'a> Lexer<'a> {
                 '>' => {
                     self.advance();
                     if self.peek() == Some('=') {
-                        self.advance(); TokenKind::GtEq
+                        self.advance();
+                        TokenKind::GtEq
                     } else {
                         TokenKind::Gt
                     }
@@ -383,16 +493,22 @@ impl<'a> Lexer<'a> {
                 '&' => {
                     self.advance();
                     if self.peek() == Some('&') {
-                        self.advance(); TokenKind::AmpAmp
+                        self.advance();
+                        TokenKind::AmpAmp
                     } else {
-                        return Err(Error::Lex { line, col, message: "unexpected '&'".into() });
+                        return Err(Error::Lex {
+                            line,
+                            col,
+                            message: "unexpected '&'".into(),
+                        });
                     }
                 }
                 '"' => {
                     self.advance();
                     // Check for multiline string `"""`
                     if self.source[self.pos..].starts_with("\"\"") {
-                        self.advance(); self.advance();
+                        self.advance();
+                        self.advance();
                         let s = self.read_multiline_string()?;
                         TokenKind::StringLit(s)
                     } else {
@@ -422,7 +538,11 @@ impl<'a> Lexer<'a> {
                 c if c.is_alphabetic() || c == '_' => {
                     let start = self.pos; // pos points TO current char before advance
                     self.advance();
-                    while self.peek().map(|c| c.is_alphanumeric() || c == '_').unwrap_or(false) {
+                    while self
+                        .peek()
+                        .map(|c| c.is_alphanumeric() || c == '_')
+                        .unwrap_or(false)
+                    {
                         self.advance();
                     }
                     let ident = &self.source[start..self.pos];
@@ -430,7 +550,8 @@ impl<'a> Lexer<'a> {
                 }
                 c => {
                     return Err(Error::Lex {
-                        line, col,
+                        line,
+                        col,
                         message: format!("unexpected character: {c:?}"),
                     });
                 }
@@ -446,11 +567,18 @@ impl<'a> Lexer<'a> {
         let mut s = String::new();
         loop {
             if self.source[self.pos..].starts_with("\"#") {
-                self.advance(); self.advance();
+                self.advance();
+                self.advance();
                 break;
             }
             match self.advance() {
-                None => return Err(Error::Lex { line: self.line, col: self.col, message: "unterminated raw string".into() }),
+                None => {
+                    return Err(Error::Lex {
+                        line: self.line,
+                        col: self.col,
+                        message: "unterminated raw string".into(),
+                    });
+                }
                 Some(c) => s.push(c),
             }
         }
@@ -460,39 +588,39 @@ impl<'a> Lexer<'a> {
 
 fn keyword_or_ident(s: &str) -> TokenKind {
     match s {
-        "amends"     => TokenKind::KwAmends,
-        "import"     => TokenKind::KwImport,
-        "as"         => TokenKind::KwAs,
-        "local"      => TokenKind::KwLocal,
-        "const"      => TokenKind::KwConst,
-        "fixed"      => TokenKind::KwFixed,
-        "hidden"     => TokenKind::KwHidden,
-        "new"        => TokenKind::KwNew,
-        "extends"    => TokenKind::KwExtends,
-        "abstract"   => TokenKind::KwAbstract,
-        "open"       => TokenKind::KwOpen,
-        "external"   => TokenKind::KwExternal,
-        "class"      => TokenKind::KwClass,
-        "typealias"  => TokenKind::KwTypeAlias,
-        "function"   => TokenKind::KwFunction,
-        "this"       => TokenKind::KwThis,
-        "module"     => TokenKind::KwModule,
-        "import*"    => TokenKind::KwImportStar,
-        "if"         => TokenKind::KwIf,
-        "else"       => TokenKind::KwElse,
-        "when"       => TokenKind::KwWhen,
-        "is"         => TokenKind::KwIs,
-        "let"        => TokenKind::KwLet,
-        "throw"      => TokenKind::KwThrow,
-        "trace"      => TokenKind::KwTrace,
-        "read"       => TokenKind::KwRead,
-        "read?"      => TokenKind::KwReadOrNull,
-        "for"        => TokenKind::KwFor,
-        "in"         => TokenKind::KwIn,
-        "true"       => TokenKind::BoolLit(true),
-        "false"      => TokenKind::BoolLit(false),
-        "null"       => TokenKind::Null,
-        _            => TokenKind::Ident(s.to_string()),
+        "amends" => TokenKind::KwAmends,
+        "import" => TokenKind::KwImport,
+        "as" => TokenKind::KwAs,
+        "local" => TokenKind::KwLocal,
+        "const" => TokenKind::KwConst,
+        "fixed" => TokenKind::KwFixed,
+        "hidden" => TokenKind::KwHidden,
+        "new" => TokenKind::KwNew,
+        "extends" => TokenKind::KwExtends,
+        "abstract" => TokenKind::KwAbstract,
+        "open" => TokenKind::KwOpen,
+        "external" => TokenKind::KwExternal,
+        "class" => TokenKind::KwClass,
+        "typealias" => TokenKind::KwTypeAlias,
+        "function" => TokenKind::KwFunction,
+        "this" => TokenKind::KwThis,
+        "module" => TokenKind::KwModule,
+        "import*" => TokenKind::KwImportStar,
+        "if" => TokenKind::KwIf,
+        "else" => TokenKind::KwElse,
+        "when" => TokenKind::KwWhen,
+        "is" => TokenKind::KwIs,
+        "let" => TokenKind::KwLet,
+        "throw" => TokenKind::KwThrow,
+        "trace" => TokenKind::KwTrace,
+        "read" => TokenKind::KwRead,
+        "read?" => TokenKind::KwReadOrNull,
+        "for" => TokenKind::KwFor,
+        "in" => TokenKind::KwIn,
+        "true" => TokenKind::BoolLit(true),
+        "false" => TokenKind::BoolLit(false),
+        "null" => TokenKind::Null,
+        _ => TokenKind::Ident(s.to_string()),
     }
 }
 
@@ -502,13 +630,21 @@ fn dedent(s: &str) -> Result<String> {
         return Ok(String::new());
     }
     // Find minimum indentation (ignoring empty lines)
-    let min_indent = lines.iter()
+    let min_indent = lines
+        .iter()
         .filter(|l| !l.trim().is_empty())
         .map(|l| l.len() - l.trim_start().len())
         .min()
         .unwrap_or(0);
-    let dedented: Vec<&str> = lines.iter()
-        .map(|l| if l.len() >= min_indent { &l[min_indent..] } else { l.trim_start() })
+    let dedented: Vec<&str> = lines
+        .iter()
+        .map(|l| {
+            if l.len() >= min_indent {
+                &l[min_indent..]
+            } else {
+                l.trim_start()
+            }
+        })
         .collect();
     Ok(dedented.join("\n"))
 }
@@ -524,44 +660,56 @@ mod tests {
     #[test]
     fn test_basic() {
         let toks = kinds(r#"foo = "hello""#);
-        assert_eq!(toks, vec![
-            TokenKind::Ident("foo".into()),
-            TokenKind::Equals,
-            TokenKind::StringLit("hello".into()),
-            TokenKind::Eof,
-        ]);
+        assert_eq!(
+            toks,
+            vec![
+                TokenKind::Ident("foo".into()),
+                TokenKind::Equals,
+                TokenKind::StringLit("hello".into()),
+                TokenKind::Eof,
+            ]
+        );
     }
 
     #[test]
     fn test_amends() {
         let toks = kinds(r#"amends "pkl/Config.pkl""#);
-        assert_eq!(toks, vec![
-            TokenKind::KwAmends,
-            TokenKind::StringLit("pkl/Config.pkl".into()),
-            TokenKind::Eof,
-        ]);
+        assert_eq!(
+            toks,
+            vec![
+                TokenKind::KwAmends,
+                TokenKind::StringLit("pkl/Config.pkl".into()),
+                TokenKind::Eof,
+            ]
+        );
     }
 
     #[test]
     fn test_numbers() {
-        let toks = kinds("42 3.14 0xFF");
-        assert_eq!(toks, vec![
-            TokenKind::IntLit(42),
-            TokenKind::FloatLit(3.14),
-            TokenKind::IntLit(255),
-            TokenKind::Eof,
-        ]);
+        let toks = kinds("42 1.23 0xFF");
+        assert_eq!(
+            toks,
+            vec![
+                TokenKind::IntLit(42),
+                TokenKind::FloatLit(1.23),
+                TokenKind::IntLit(255),
+                TokenKind::Eof,
+            ]
+        );
     }
 
     #[test]
     fn test_booleans() {
         let toks = kinds("true false null");
-        assert_eq!(toks, vec![
-            TokenKind::BoolLit(true),
-            TokenKind::BoolLit(false),
-            TokenKind::Null,
-            TokenKind::Eof,
-        ]);
+        assert_eq!(
+            toks,
+            vec![
+                TokenKind::BoolLit(true),
+                TokenKind::BoolLit(false),
+                TokenKind::Null,
+                TokenKind::Eof,
+            ]
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
-use pklr::lexer::{lex, TokenKind};
-use pklr::parser::{parse, collect_imports};
 use pklr::eval::Evaluator;
+use pklr::lexer::{TokenKind, lex};
+use pklr::parser::{collect_imports, parse};
 
 fn lex_kinds(src: &str) -> Vec<TokenKind> {
     lex(src).unwrap().into_iter().map(|t| t.kind).collect()
@@ -20,7 +20,10 @@ fn lex_amends_line() {
 fn lex_multiline_string() {
     let src = "x = \"\"\"\n  hello\n  world\n\"\"\"";
     let tokens = lex(src).unwrap();
-    let str_tok = tokens.iter().find(|t| matches!(&t.kind, TokenKind::StringLit(_))).unwrap();
+    let str_tok = tokens
+        .iter()
+        .find(|t| matches!(&t.kind, TokenKind::StringLit(_)))
+        .unwrap();
     if let TokenKind::StringLit(s) = &str_tok.kind {
         assert!(s.contains("hello"));
         assert!(s.contains("world"));
@@ -89,7 +92,10 @@ amends "pkl/Config.pkl"
 warnings = List("missing-profiles", "no-steps")
 "#;
     let json = eval_src(src);
-    assert_eq!(json["warnings"], serde_json::json!(["missing-profiles", "no-steps"]));
+    assert_eq!(
+        json["warnings"],
+        serde_json::json!(["missing-profiles", "no-steps"])
+    );
 }
 
 #[test]
@@ -135,7 +141,10 @@ hooks {
 }
 "#;
     let json = eval_src(src);
-    assert_eq!(json["hooks"]["pre-commit"]["steps"]["cargo-fmt"]["glob"], "**/*.rs");
+    assert_eq!(
+        json["hooks"]["pre-commit"]["steps"]["cargo-fmt"]["glob"],
+        "**/*.rs"
+    );
 }
 
 #[test]
