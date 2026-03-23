@@ -19,6 +19,7 @@ pub struct Annotation {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Module {
     pub amends: Option<String>,
+    pub extends: Option<String>,
     pub imports: Vec<Import>,
     pub annotations: Vec<Annotation>,
     pub body: Vec<Entry>,
@@ -47,8 +48,8 @@ pub enum Entry {
     Spread(Expr),
     /// Bare element expression (used in Listing bodies)
     Elem(Expr),
-    /// Class definition: `class Name { properties... }`
-    ClassDef(String, Vec<Entry>),
+    /// Class definition: `class Name [extends Parent] { properties... }`
+    ClassDef(String, Option<String>, Vec<Entry>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -320,12 +321,19 @@ impl<'a> Parser<'a> {
             }
         }
 
+        let mut extends = None;
+
         loop {
             match self.peek().clone() {
                 TokenKind::KwAmends => {
                     self.advance();
                     let uri = self.expect_string()?;
                     amends = Some(uri);
+                }
+                TokenKind::KwExtends => {
+                    self.advance();
+                    let uri = self.expect_string()?;
+                    extends = Some(uri);
                 }
                 TokenKind::KwImport | TokenKind::KwImportStar => {
                     let is_glob = matches!(self.peek(), TokenKind::KwImportStar);
@@ -350,6 +358,7 @@ impl<'a> Parser<'a> {
         let body = self.parse_entries()?;
         Ok(Module {
             amends,
+            extends,
             imports,
             annotations,
             body,
@@ -368,21 +377,30 @@ impl<'a> Parser<'a> {
                 if matches!(self.peek(), TokenKind::Lt) {
                     self.skip_generic_params()?;
                 }
-                // Skip optional extends clause
-                if matches!(self.peek(), TokenKind::KwExtends) {
+                // Parse optional extends clause
+                let parent = if matches!(self.peek(), TokenKind::KwExtends) {
                     self.advance();
-                    // Skip the parent type name and optional type params
-                    while !self.at_eof()
-                        && !matches!(self.peek(), TokenKind::LBrace | TokenKind::RBrace)
-                    {
+                    let mut parent_name = self.expect_ident()?;
+                    // Handle dotted parent names: extends Foo.Bar
+                    while matches!(self.peek(), TokenKind::Dot) {
                         self.advance();
+                        let part = self.expect_ident()?;
+                        parent_name.push('.');
+                        parent_name.push_str(&part);
                     }
-                }
+                    // Skip optional type params on parent
+                    if matches!(self.peek(), TokenKind::Lt) {
+                        self.skip_generic_params()?;
+                    }
+                    Some(parent_name)
+                } else {
+                    None
+                };
                 if matches!(self.peek(), TokenKind::LBrace) {
                     self.advance();
                     let body = self.parse_entries()?;
                     self.expect(&TokenKind::RBrace)?;
-                    entries.push(Entry::ClassDef(name, body));
+                    entries.push(Entry::ClassDef(name, parent, body));
                 }
                 continue;
             }

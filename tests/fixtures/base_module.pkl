@@ -1,0 +1,7 @@
+class Config {
+    debug: Boolean = false
+    port: Int = 8080
+}
+
+default_name = "base"
+version = 1

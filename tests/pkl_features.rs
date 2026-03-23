@@ -1892,3 +1892,89 @@ feature = true
     );
     assert_eq!(json["feature"], true);
 }
+
+// ============================================================
+// Class extends
+// ============================================================
+
+#[test]
+fn class_extends_inherits_defaults() {
+    let json = eval(
+        r#"
+class Animal {
+    name: String = "unknown"
+    legs: Int = 4
+}
+class Dog extends Animal {
+    breed: String = "mixed"
+}
+x = new Dog {
+    name = "Rex"
+}
+"#,
+    );
+    assert_eq!(json["x"]["name"], "Rex");
+    assert_eq!(json["x"]["legs"], 4);
+    assert_eq!(json["x"]["breed"], "mixed");
+}
+
+#[test]
+fn class_extends_override_parent() {
+    let json = eval(
+        r#"
+class Base {
+    value: Int = 1
+}
+class Child extends Base {
+    value: Int = 2
+    extra: String = "new"
+}
+x = new Child {}
+"#,
+    );
+    assert_eq!(json["x"]["value"], 2);
+    assert_eq!(json["x"]["extra"], "new");
+}
+
+// ============================================================
+// Module extends
+// ============================================================
+
+#[tokio::test]
+async fn module_extends_inherits_properties() {
+    let mut ev = pklr::eval::Evaluator::new();
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    ev.set_base_path(&base);
+    let src = r#"
+extends "base_module.pkl"
+default_name = "extended"
+extra = "new property"
+"#;
+    let path = base.join("test_extends.pkl");
+    let val = ev.eval_source(src, &path).await.unwrap();
+    let json = val.to_json();
+    // default_name overridden
+    assert_eq!(json["default_name"], "extended");
+    // version inherited from base
+    assert_eq!(json["version"], 1);
+    // new property added
+    assert_eq!(json["extra"], "new property");
+}
+
+#[tokio::test]
+async fn module_extends_inherits_classes() {
+    let mut ev = pklr::eval::Evaluator::new();
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    ev.set_base_path(&base);
+    let src = r#"
+extends "base_module.pkl"
+x = new Config {
+    debug = true
+}
+"#;
+    let path = base.join("test_extends_classes.pkl");
+    let val = ev.eval_source(src, &path).await.unwrap();
+    let json = val.to_json();
+    assert_eq!(json["x"]["debug"], true);
+    assert_eq!(json["x"]["port"], 8080);
+}
