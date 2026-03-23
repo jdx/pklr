@@ -11,10 +11,7 @@ categories  = ["config", "parsing"]
 include     = ["/src/**/*", "/tests/**/*", "/Cargo.toml", "/README.md", "/LICENSE"]
 
 [dependencies]
-indexmap   = { version = "2", features = ["serde"] }
-serde      = { version = "1", features = ["derive"] }
+indexmap    = "2"
+miette     = { version = "7", features = ["derive"] }
 serde_json = "1"
 thiserror  = "2"
-
-[dev-dependencies]
-serde_json = "1"

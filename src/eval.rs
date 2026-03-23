@@ -32,8 +32,9 @@ impl Evaluator {
     }
 
     pub fn eval_source(&mut self, source: &str, path: &Path) -> Result<Value> {
-        let tokens = lexer::lex(source)?;
-        let module = parser::parse(&tokens)?;
+        let name = path.display().to_string();
+        let tokens = lexer::lex_named(source, &name)?;
+        let module = parser::parse_named(&tokens, source, &name)?;
         self.eval_module(&module, path, 0)
     }
 
