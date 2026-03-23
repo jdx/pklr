@@ -144,6 +144,10 @@ impl<'a> Lexer<'a> {
         self.source[self.pos..].chars().next()
     }
 
+    fn peek_nth(&self, n: usize) -> Option<char> {
+        self.source[self.pos..].chars().nth(n)
+    }
+
     fn advance(&mut self) -> Option<char> {
         let ch = self.peek()?;
         self.pos += ch.len_utf8();
@@ -233,6 +237,11 @@ impl<'a> Lexer<'a> {
                                         }
                                     }
                                 }
+                                if hex.is_empty() {
+                                    return Err(self.lex_error(
+                                        "unicode escape must have at least one hex digit: \\u{XXXX}",
+                                    ));
+                                }
                                 let code_point = u32::from_str_radix(&hex, 16).map_err(|_| {
                                     self.lex_error(format!(
                                         "invalid unicode code point: \\u{{{hex}}}"
@@ -245,8 +254,9 @@ impl<'a> Lexer<'a> {
                                 })?;
                                 current.push(ch);
                             } else {
-                                current.push('\\');
-                                current.push('u');
+                                return Err(
+                                    self.lex_error("invalid unicode escape: expected \\u{XXXX}")
+                                );
                             }
                         }
                         Some('(') => {
@@ -400,9 +410,8 @@ impl<'a> Lexer<'a> {
         }
         // Only treat '.' as decimal point if followed by a digit
         let is_float = self.peek() == Some('.')
-            && self.source[self.pos + 1..]
-                .chars()
-                .next()
+            && self
+                .peek_nth(1)
                 .map(|c| c.is_ascii_digit())
                 .unwrap_or(false);
         if is_float {

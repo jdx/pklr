@@ -1229,8 +1229,55 @@ fn datasize_terabytes() {
 }
 
 #[test]
-fn datasize_binary_units() {
+fn datasize_petabytes() {
+    let json = eval(r#"x = 2.pb"#);
+    assert_eq!(json["x"]["value"], 2);
+    assert_eq!(json["x"]["unit"], "pb");
+}
+
+#[test]
+fn datasize_gibibytes() {
     let json = eval(r#"x = 8.gib"#);
     assert_eq!(json["x"]["value"], 8);
     assert_eq!(json["x"]["unit"], "gib");
+}
+
+#[test]
+fn datasize_mebibytes() {
+    let json = eval(r#"x = 16.mib"#);
+    assert_eq!(json["x"]["value"], 16);
+    assert_eq!(json["x"]["unit"], "mib");
+}
+
+#[test]
+fn datasize_tebibytes() {
+    let json = eval(r#"x = 1.tib"#);
+    assert_eq!(json["x"]["value"], 1);
+    assert_eq!(json["x"]["unit"], "tib");
+}
+
+#[test]
+fn datasize_pebibytes() {
+    let json = eval(r#"x = 1.pib"#);
+    assert_eq!(json["x"]["value"], 1);
+    assert_eq!(json["x"]["unit"], "pib");
+}
+
+#[test]
+fn datasize_kibibytes() {
+    let json = eval(r#"x = 64.kib"#);
+    assert_eq!(json["x"]["value"], 64);
+    assert_eq!(json["x"]["unit"], "kib");
+}
+
+#[test]
+fn unicode_escape_without_braces_errors() {
+    let msg = eval_fails(r#"x = "\u0041""#);
+    assert!(msg.contains("unicode escape"));
+}
+
+#[test]
+fn unicode_escape_empty_braces_errors() {
+    let msg = eval_fails(r#"x = "\u{}""#);
+    assert!(msg.contains("hex digit"));
 }

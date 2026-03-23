@@ -394,18 +394,11 @@ impl Evaluator {
                     (Value::Object(map), "values") => {
                         return Ok(Value::List(map.values().cloned().collect()));
                     }
-                    // Duration units on numbers
+                    // Duration and DataSize units on numbers
                     (
                         Value::Int(_) | Value::Float(_),
-                        "ns" | "us" | "ms" | "s" | "min" | "h" | "d",
-                    ) => {
-                        return Ok(make_unit_object(obj, field));
-                    }
-                    // DataSize units on numbers
-                    (
-                        Value::Int(_) | Value::Float(_),
-                        "b" | "kb" | "mb" | "gb" | "tb" | "pb" | "kib" | "mib" | "gib" | "tib"
-                        | "pib",
+                        "ns" | "us" | "ms" | "s" | "min" | "h" | "d" | "b" | "kb" | "mb" | "gb"
+                        | "tb" | "pb" | "kib" | "mib" | "gib" | "tib" | "pib",
                     ) => {
                         return Ok(make_unit_object(obj, field));
                     }
