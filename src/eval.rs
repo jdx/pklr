@@ -358,12 +358,28 @@ impl Evaluator {
             }
         }
 
+        // Look for a `default` property to use as template for dynamic entries
+        let mut default_template: Option<Value> = None;
+        for entry in entries {
+            if let Entry::Property(prop) = entry
+                && prop.name == "default"
+                && !has_modifier(&prop.modifiers, Modifier::Local)
+            {
+                default_template = self.eval_property(prop, &child_scope, depth).await?;
+                break;
+            }
+        }
+
         let mut map: IndexMap<String, Value> = IndexMap::new();
         for entry in entries {
             match entry {
                 Entry::Property(prop) => {
                     let mods = &prop.modifiers;
                     if has_modifier(mods, Modifier::Local) {
+                        continue;
+                    }
+                    // Skip the `default` property — it's a template, not an output entry
+                    if prop.name == "default" && default_template.is_some() {
                         continue;
                     }
                     if has_modifier(mods, Modifier::Abstract)
@@ -381,7 +397,11 @@ impl Evaluator {
                 }
                 Entry::DynProperty(key_expr, val_expr) => {
                     let key = self.eval_expr(key_expr, &child_scope, depth).await?;
-                    let val = self.eval_expr(val_expr, &child_scope, depth).await?;
+                    let mut val = self.eval_expr(val_expr, &child_scope, depth).await?;
+                    // Merge with default template if available
+                    if let Some(ref tpl) = default_template {
+                        val = merge_values(tpl.clone(), val);
+                    }
                     let key_str = value_to_key(&key)?;
                     map.insert(key_str, val);
                 }
@@ -1099,15 +1119,33 @@ impl Evaluator {
         depth: usize,
         map: &mut IndexMap<String, Value>,
     ) -> Result<()> {
+        // Look for a `default` property to use as template
+        let mut default_template: Option<Value> = None;
+        for entry in entries {
+            if let Entry::Property(prop) = entry
+                && prop.name == "default"
+                && !has_modifier(&prop.modifiers, Modifier::Local)
+            {
+                default_template = self.eval_property(prop, scope, depth).await?;
+                break;
+            }
+        }
+
         for entry in entries {
             match entry {
                 Entry::DynProperty(key_expr, val_expr) => {
                     let key = self.eval_expr(key_expr, scope, depth + 1).await?;
-                    let val = self.eval_expr(val_expr, scope, depth + 1).await?;
+                    let mut val = self.eval_expr(val_expr, scope, depth + 1).await?;
+                    if let Some(ref tpl) = default_template {
+                        val = merge_values(tpl.clone(), val);
+                    }
                     map.insert(value_to_key(&key)?, val);
                 }
                 Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {
                     // skip locals in mapping
+                }
+                Entry::Property(prop) if prop.name == "default" && default_template.is_some() => {
+                    // skip default — it's a template
                 }
                 Entry::Spread(e) => {
                     let v = self.eval_expr(e, scope, depth + 1).await?;
