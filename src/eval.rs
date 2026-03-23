@@ -111,13 +111,6 @@ impl Evaluator {
             }
         }
 
-        // Collect class definitions into module scope
-        for entry in &module.body {
-            if let Entry::ClassDef(name, body) = entry {
-                let defaults = self.eval_entries(body, &scope, depth + 1)?;
-                scope.set(name.clone(), defaults);
-            }
-        }
         // First pass: collect all `local` variable definitions into scope
         for entry in &module.body {
             if let Entry::Property(prop) = entry
@@ -129,6 +122,13 @@ impl Evaluator {
             {
                 let val = self.eval_expr(expr, &scope, depth)?;
                 scope.set(prop.name.clone(), val);
+            }
+        }
+        // Collect class definitions into module scope (after locals so defaults can reference them)
+        for entry in &module.body {
+            if let Entry::ClassDef(name, body) = entry {
+                let defaults = self.eval_entries(body, &scope, depth + 1)?;
+                scope.set(name.clone(), defaults);
             }
         }
 
@@ -175,13 +175,6 @@ impl Evaluator {
         // Set `outer` to a snapshot of the parent scope's variables as an object
         let outer_obj = Value::Object(scope.flatten());
         child_scope.set("outer".into(), outer_obj);
-        // Collect class definitions into scope
-        for entry in entries {
-            if let Entry::ClassDef(name, body) = entry {
-                let defaults = self.eval_entries(body, &child_scope, depth + 1)?;
-                child_scope.set(name.clone(), defaults);
-            }
-        }
         // First pass: collect locals
         for entry in entries {
             if let Entry::Property(prop) = entry
@@ -193,6 +186,13 @@ impl Evaluator {
             {
                 let val = self.eval_expr(expr, &child_scope, depth)?;
                 child_scope.set(prop.name.clone(), val);
+            }
+        }
+        // Collect class definitions into scope (after locals so defaults can reference them)
+        for entry in entries {
+            if let Entry::ClassDef(name, body) = entry {
+                let defaults = self.eval_entries(body, &child_scope, depth + 1)?;
+                child_scope.set(name.clone(), defaults);
             }
         }
 

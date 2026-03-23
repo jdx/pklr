@@ -359,11 +359,38 @@ impl<'a> Parser<'a> {
             if matches!(self.peek(), TokenKind::KwClass) {
                 self.advance(); // consume 'class'
                 let name = self.expect_ident()?;
-                // Skip optional extends/type params
-                while !self.at_eof()
-                    && !matches!(self.peek(), TokenKind::LBrace | TokenKind::RBrace)
-                {
+                // Skip optional type params <...>
+                if matches!(self.peek(), TokenKind::Lt) {
+                    let mut angle_depth = 0;
+                    loop {
+                        match self.peek() {
+                            TokenKind::Lt => {
+                                angle_depth += 1;
+                                self.advance();
+                            }
+                            TokenKind::Gt | TokenKind::GtEq => {
+                                angle_depth -= 1;
+                                self.advance();
+                                if angle_depth == 0 {
+                                    break;
+                                }
+                            }
+                            TokenKind::Eof => break,
+                            _ => {
+                                self.advance();
+                            }
+                        }
+                    }
+                }
+                // Skip optional extends clause
+                if matches!(self.peek(), TokenKind::KwExtends) {
                     self.advance();
+                    // Skip the parent type name and optional type params
+                    while !self.at_eof()
+                        && !matches!(self.peek(), TokenKind::LBrace | TokenKind::RBrace)
+                    {
+                        self.advance();
+                    }
                 }
                 if matches!(self.peek(), TokenKind::LBrace) {
                     self.advance();

@@ -905,3 +905,33 @@ x = new Config {
     assert_eq!(json["x"]["port"], 8080);
     assert_eq!(json["x"]["host"], "localhost");
 }
+
+#[test]
+fn class_defaults_reference_locals() {
+    let json = eval(
+        r#"
+local DEFAULT_PORT = 8080
+
+class Config {
+    port: Int = DEFAULT_PORT
+}
+x = new Config {}
+"#,
+    );
+    assert_eq!(json["x"]["port"], 8080);
+}
+
+#[test]
+fn class_with_type_params() {
+    let json = eval(
+        r#"
+class Container<T> {
+    value: T = "default"
+}
+x = new Container {
+    value = "custom"
+}
+"#,
+    );
+    assert_eq!(json["x"]["value"], "custom");
+}
