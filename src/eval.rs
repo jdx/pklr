@@ -601,7 +601,7 @@ impl Evaluator {
                     .ok_or_else(|| Error::Eval("map requires a function argument".into()))?;
                 let mut result = Vec::new();
                 for item in items {
-                    result.push(self.invoke_lambda(lambda, std::slice::from_ref(item))?);
+                    result.push(self.invoke_lambda(lambda, std::slice::from_ref(item), depth)?);
                 }
                 Ok(Some(Value::List(result)))
             }
@@ -611,7 +611,7 @@ impl Evaluator {
                     .ok_or_else(|| Error::Eval("flatMap requires a function argument".into()))?;
                 let mut result = Vec::new();
                 for item in items {
-                    let val = self.invoke_lambda(lambda, std::slice::from_ref(item))?;
+                    let val = self.invoke_lambda(lambda, std::slice::from_ref(item), depth)?;
                     if let Value::List(inner) = val {
                         result.extend(inner);
                     } else {
@@ -626,7 +626,7 @@ impl Evaluator {
                     .ok_or_else(|| Error::Eval("filter requires a function argument".into()))?;
                 let mut result = Vec::new();
                 for item in items {
-                    let cond = self.invoke_lambda(lambda, std::slice::from_ref(item))?;
+                    let cond = self.invoke_lambda(lambda, std::slice::from_ref(item), depth)?;
                     if is_truthy(&cond) {
                         result.push(item.clone());
                     }
@@ -643,7 +643,7 @@ impl Evaluator {
                     .ok_or_else(|| Error::Eval("fold requires a function argument".into()))?;
                 let mut acc = init;
                 for item in items {
-                    acc = self.invoke_lambda(lambda, &[acc, item.clone()])?;
+                    acc = self.invoke_lambda(lambda, &[acc, item.clone()], depth)?;
                 }
                 Ok(Some(acc))
             }
@@ -652,7 +652,7 @@ impl Evaluator {
                     .first()
                     .ok_or_else(|| Error::Eval("any requires a function argument".into()))?;
                 for item in items {
-                    if is_truthy(&self.invoke_lambda(lambda, std::slice::from_ref(item))?) {
+                    if is_truthy(&self.invoke_lambda(lambda, std::slice::from_ref(item), depth)?) {
                         return Ok(Some(Value::Bool(true)));
                     }
                 }
@@ -663,7 +663,7 @@ impl Evaluator {
                     .first()
                     .ok_or_else(|| Error::Eval("every requires a function argument".into()))?;
                 for item in items {
-                    if !is_truthy(&self.invoke_lambda(lambda, std::slice::from_ref(item))?) {
+                    if !is_truthy(&self.invoke_lambda(lambda, std::slice::from_ref(item), depth)?) {
                         return Ok(Some(Value::Bool(false)));
                     }
                 }
@@ -693,7 +693,7 @@ impl Evaluator {
                 let mut result = IndexMap::new();
                 for (k, v) in map {
                     let new_v =
-                        self.invoke_lambda(lambda, &[Value::String(k.clone()), v.clone()])?;
+                        self.invoke_lambda(lambda, &[Value::String(k.clone()), v.clone()], depth)?;
                     result.insert(k.clone(), new_v);
                 }
                 Ok(Some(Value::Object(result)))
@@ -721,7 +721,7 @@ impl Evaluator {
         }
     }
 
-    fn invoke_lambda(&mut self, lambda: &Value, args: &[Value]) -> Result<Value> {
+    fn invoke_lambda(&mut self, lambda: &Value, args: &[Value], depth: usize) -> Result<Value> {
         if let Value::Lambda(params, body, captured) = lambda {
             let mut scope = Scope::default();
             for (k, v) in captured {
@@ -730,7 +730,7 @@ impl Evaluator {
             for (param, arg) in params.iter().zip(args.iter()) {
                 scope.set(param.clone(), arg.clone());
             }
-            self.eval_expr(body, &scope, 0)
+            self.eval_expr(body, &scope, depth + 1)
         } else {
             Err(Error::Eval("expected a function".into()))
         }

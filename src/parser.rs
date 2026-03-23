@@ -410,6 +410,7 @@ impl<'a> Parser<'a> {
                             | TokenKind::KwAbstract
                             | TokenKind::KwOpen
                             | TokenKind::KwExternal
+                            | TokenKind::Ident(_)
                     ) {
                         break;
                     }
