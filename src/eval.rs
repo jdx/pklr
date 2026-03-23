@@ -261,15 +261,20 @@ impl Evaluator {
                 if has_modifier(mods, Modifier::Local) {
                     continue; // already collected
                 }
-                // abstract properties must have a value (or be overridden)
-                if has_modifier(mods, Modifier::Abstract)
+                // abstract/external properties must have a value (or be overridden)
+                if (has_modifier(mods, Modifier::Abstract)
+                    || has_modifier(mods, Modifier::External))
                     && prop.value.is_none()
                     && prop.body.is_none()
                 {
-                    // Allow if already provided by base (amends)
                     if !out.contains_key(&prop.name) {
+                        let kind = if has_modifier(mods, Modifier::Abstract) {
+                            "abstract"
+                        } else {
+                            "external"
+                        };
                         return Err(Error::Eval(format!(
-                            "abstract property '{}' must be assigned a value",
+                            "{kind} property '{}' must be assigned a value",
                             prop.name
                         )));
                     }
@@ -277,10 +282,17 @@ impl Evaluator {
                 }
                 let val = self.eval_property(prop, &scope, depth).await?;
                 if let Some(v) = val {
-                    // const: error if overriding a const property from base
-                    if has_modifier(mods, Modifier::Const) && out.contains_key(&prop.name) {
+                    // const/fixed: error if overriding an immutable property from base
+                    if (has_modifier(mods, Modifier::Const) || has_modifier(mods, Modifier::Fixed))
+                        && out.contains_key(&prop.name)
+                    {
+                        let kind = if has_modifier(mods, Modifier::Const) {
+                            "const"
+                        } else {
+                            "fixed"
+                        };
                         return Err(Error::Eval(format!(
-                            "cannot override const property '{}'",
+                            "cannot override {kind} property '{}'",
                             prop.name
                         )));
                     }

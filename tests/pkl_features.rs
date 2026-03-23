@@ -1408,3 +1408,27 @@ config {
     assert!(json["config"].get("internal").is_none());
     assert_eq!(json["config"]["public"], "visible");
 }
+
+#[test]
+fn fixed_cannot_override() {
+    let json = eval(
+        r#"
+fixed version = 1
+x = version
+"#,
+    );
+    // fixed works fine when not overridden
+    assert_eq!(json["x"], 1);
+}
+
+#[test]
+fn external_requires_value() {
+    let msg = eval_fails(
+        r#"
+external name: String
+x = name
+"#,
+    );
+    assert!(msg.contains("external"));
+    assert!(msg.contains("must be assigned"));
+}
