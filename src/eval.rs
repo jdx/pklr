@@ -111,11 +111,6 @@ impl Evaluator {
                     let val = self.eval_expr(expr, &child_scope, depth)?;
                     match val {
                         Value::Object(m) => map.extend(m),
-                        Value::Mapping(pairs) => {
-                            for (k, v) in pairs {
-                                map.insert(value_to_key(&k)?, v);
-                            }
-                        }
                         _ => {}
                     }
                 }
@@ -339,10 +334,14 @@ impl Evaluator {
         let r = self.eval_expr(right, scope, depth + 1)?;
         match op {
             BinOp::Add => add_values(l, r),
-            BinOp::Sub => arithmetic(l, r, |a, b| a - b, |a, b| a - b),
-            BinOp::Mul => arithmetic(l, r, |a, b| a * b, |a, b| a * b),
-            BinOp::Div => arithmetic(l, r, |a, b| a / b, |a, b| a / b),
-            BinOp::Mod => arithmetic(l, r, |a, b| a % b, |a, b| a % b),
+            BinOp::Sub => arithmetic(l, r, |a, b| Ok(a - b), |a, b| Ok(a - b)),
+            BinOp::Mul => arithmetic(l, r, |a, b| Ok(a * b), |a, b| Ok(a * b)),
+            BinOp::Div => arithmetic(l, r,
+                |a, b| if b == 0 { Err(Error::Eval("division by zero".into())) } else { Ok(a / b) },
+                |a, b| Ok(a / b)),
+            BinOp::Mod => arithmetic(l, r,
+                |a, b| if b == 0 { Err(Error::Eval("modulo by zero".into())) } else { Ok(a % b) },
+                |a, b| Ok(a % b)),
             BinOp::Eq  => Ok(Value::Bool(values_eq(&l, &r))),
             BinOp::Ne  => Ok(Value::Bool(!values_eq(&l, &r))),
             BinOp::Lt  => compare(l, r, std::cmp::Ordering::Less),
@@ -473,12 +472,12 @@ fn add_values(l: Value, r: Value) -> Result<Value> {
     }
 }
 
-fn arithmetic(l: Value, r: Value, fi: impl Fn(i64, i64) -> i64, ff: impl Fn(f64, f64) -> f64) -> Result<Value> {
+fn arithmetic(l: Value, r: Value, fi: impl Fn(i64, i64) -> Result<i64>, ff: impl Fn(f64, f64) -> Result<f64>) -> Result<Value> {
     match (l, r) {
-        (Value::Int(a), Value::Int(b))     => Ok(Value::Int(fi(a, b))),
-        (Value::Float(a), Value::Float(b)) => Ok(Value::Float(ff(a, b))),
-        (Value::Int(a), Value::Float(b))   => Ok(Value::Float(ff(a as f64, b))),
-        (Value::Float(a), Value::Int(b))   => Ok(Value::Float(ff(a, b as f64))),
+        (Value::Int(a), Value::Int(b))     => Ok(Value::Int(fi(a, b)?)),
+        (Value::Float(a), Value::Float(b)) => Ok(Value::Float(ff(a, b)?)),
+        (Value::Int(a), Value::Float(b))   => Ok(Value::Float(ff(a as f64, b)?)),
+        (Value::Float(a), Value::Int(b))   => Ok(Value::Float(ff(a, b as f64)?)),
         (l, r) => Err(Error::Eval(format!("arithmetic type mismatch: {:?} vs {:?}", l, r))),
     }
 }
@@ -521,7 +520,6 @@ fn collection_to_items(v: Value) -> Vec<(Value, Value)> {
         Value::Object(map) => map.into_iter()
             .map(|(k, v)| (Value::String(k), v))
             .collect(),
-        Value::Mapping(pairs) => pairs,
         _ => vec![],
     }
 }
