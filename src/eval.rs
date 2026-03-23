@@ -66,6 +66,15 @@ impl Evaluator {
         self.eval_module(&module, path, 0).await
     }
 
+    /// Read, lex, parse, and evaluate a local file.
+    async fn eval_file(&mut self, path: &Path, depth: usize) -> Result<Value> {
+        let source = std::fs::read_to_string(path).map_err(|e| Error::Io(path.to_path_buf(), e))?;
+        let name = path.display().to_string();
+        let tokens = lexer::lex_named(&source, &name)?;
+        let module = parser::parse_named(&tokens, &source, &name)?;
+        self.eval_module(&module, path, depth).await
+    }
+
     #[async_recursion(?Send)]
     async fn eval_module(&mut self, module: &Module, path: &Path, depth: usize) -> Result<Value> {
         if depth > self.max_depth {
@@ -79,6 +88,31 @@ impl Evaluator {
         // Process imports
         for import in &module.imports {
             let uri = &import.uri;
+
+            // Handle glob imports: import* "dir/*.pkl" as Alias
+            if import.is_glob {
+                let alias = import
+                    .alias
+                    .clone()
+                    .ok_or_else(|| Error::Eval("import* requires an alias".into()))?;
+
+                // Non-local glob imports bind an empty mapping
+                if uri.contains("://") {
+                    scope.set(alias, Value::Object(IndexMap::new()));
+                    continue;
+                }
+
+                let base_dir = path.parent().unwrap_or(Path::new("."));
+                let matched = expand_glob(base_dir, uri)?;
+                let mut mapping = IndexMap::new();
+                for matched_path in matched {
+                    let rel_key = pathdiff_or_full(&matched_path, base_dir);
+                    let val = self.eval_file(&matched_path, depth + 1).await?;
+                    mapping.insert(rel_key, val);
+                }
+                scope.set(alias, Value::Object(mapping));
+                continue;
+            }
 
             if uri.starts_with("https://") || uri.starts_with("http://") {
                 // HTTP import
@@ -153,15 +187,7 @@ impl Evaluator {
                 return Err(Error::ImportNotFound(import_path.display().to_string()));
             }
             {
-                let source = std::fs::read_to_string(&import_path)
-                    .map_err(|e| Error::Io(import_path.clone(), e))?;
-                let imported_val = {
-                    let name = import_path.display().to_string();
-                    let tokens = lexer::lex_named(&source, &name)?;
-                    let imp_module = parser::parse_named(&tokens, &source, &name)?;
-                    self.eval_module(&imp_module, &import_path, depth + 1)
-                        .await?
-                };
+                let imported_val = self.eval_file(&import_path, depth + 1).await?;
                 // Determine the binding name: alias or filename stem
                 let alias = import.alias.clone().unwrap_or_else(|| {
                     import_path
@@ -220,14 +246,7 @@ impl Evaluator {
                     base.join(uri)
                 };
                 if amends_path.exists() {
-                    let source = std::fs::read_to_string(&amends_path)
-                        .map_err(|e| Error::Io(amends_path.clone(), e))?;
-                    let name = amends_path.display().to_string();
-                    let tokens = lexer::lex_named(&source, &name)?;
-                    let base_module = parser::parse_named(&tokens, &source, &name)?;
-                    let base_val = self
-                        .eval_module(&base_module, &amends_path, depth + 1)
-                        .await?;
+                    let base_val = self.eval_file(&amends_path, depth + 1).await?;
                     if let Value::Object(m) = base_val {
                         base_obj = m;
                     }
@@ -1371,6 +1390,60 @@ fn make_unit_object(value: Value, unit: &str) -> Value {
     map.insert("value".to_string(), value);
     map.insert("unit".to_string(), Value::String(unit.to_string()));
     Value::Object(map)
+}
+
+/// Expand a simple glob pattern relative to a base directory.
+/// Supports `dir/*.ext` and `*.ext` patterns (single `*` only).
+/// Expand a simple glob pattern relative to a base directory.
+/// Supports `dir/*.ext` and `*.ext` patterns (single `*` only).
+pub fn expand_glob(base: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
+    let full = base.join(pattern);
+    let dir = full.parent().unwrap_or(base).to_path_buf();
+    let file_pattern = full
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    if !dir.is_dir() {
+        return Ok(vec![]);
+    }
+
+    // Convert simple glob to prefix/suffix matching
+    let (prefix, suffix) = if let Some(star_pos) = file_pattern.find('*') {
+        (
+            file_pattern[..star_pos].to_string(),
+            file_pattern[star_pos + 1..].to_string(),
+        )
+    } else {
+        // No wildcard — exact match
+        let p = dir.join(&file_pattern);
+        return if p.exists() { Ok(vec![p]) } else { Ok(vec![]) };
+    };
+
+    let min_len = prefix.len() + suffix.len();
+    let mut results = Vec::new();
+    let entries = std::fs::read_dir(&dir).map_err(|e| Error::Io(dir.to_path_buf(), e))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| Error::Io(dir.to_path_buf(), e))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.len() >= min_len
+            && name.starts_with(&prefix)
+            && name.ends_with(&suffix)
+            && entry.path().is_file()
+        {
+            results.push(entry.path());
+        }
+    }
+    results.sort();
+    Ok(results)
+}
+
+/// Get a relative path string from `path` relative to `base`, or the full path if not a prefix.
+fn pathdiff_or_full(path: &Path, base: &Path) -> String {
+    path.strip_prefix(base)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .to_string()
 }
 
 fn collection_to_items(v: Value) -> Vec<(Value, Value)> {

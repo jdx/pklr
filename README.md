@@ -99,7 +99,7 @@ pklr implements a subset of the [Pkl language](https://pkl-lang.org/main/current
 | `import` / `amends` | Supported (local files) |
 | Import resolution & evaluation | Supported (local files) |
 | `module` keyword | Supported (parsed and skipped) |
-| `import*` (globbed imports) | Not supported |
+| `import*` (globbed imports) | Supported (local files) |
 | `extends` | Not supported |
 
 ### Functions & Methods
@@ -152,9 +152,8 @@ The following Pkl features are not currently implemented:
 Planned features:
 
 1. `this` keyword (self-referencing within objects)
-2. `import*` glob imports
-3. Package URI imports (`package://...`)
-4. Class inheritance (`extends`)
+2. Package URI imports (`package://...`)
+3. Class inheritance (`extends`)
 
 ## Usage
 
