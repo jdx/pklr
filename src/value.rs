@@ -1,7 +1,17 @@
 use indexmap::IndexMap;
 use serde_json::json;
 
-use crate::parser::Expr;
+use crate::parser::{Entry, Expr};
+
+/// Captures the original AST entries and scope for an object, enabling
+/// late binding: when this object is amended, its entries can be merged
+/// with the overlay's entries and re-evaluated so that dependent
+/// properties pick up overridden values.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObjectSource {
+    pub entries: Vec<Entry>,
+    pub scope: IndexMap<String, Value>,
+}
 
 /// A pkl runtime value.
 ///
@@ -17,8 +27,9 @@ pub enum Value {
     Float(f64),
     String(String),
     /// Object (ordered string-keyed map). Represents both pkl objects and
-    /// string-keyed Mappings.
-    Object(IndexMap<String, Value>),
+    /// string-keyed Mappings.  The optional [`ObjectSource`] stores the
+    /// original entry definitions so late binding works on amendment.
+    Object(IndexMap<String, Value>, Option<Box<ObjectSource>>),
     /// Listing (ordered list).
     List(Vec<Value>),
     /// Lambda function: param names + body expression + captured scope values
@@ -33,7 +44,7 @@ impl Value {
             Value::Int(n) => json!(n),
             Value::Float(f) => json!(f),
             Value::String(s) => json!(s),
-            Value::Object(map) => {
+            Value::Object(map, _) => {
                 let mut obj = serde_json::Map::new();
                 for (k, v) in map {
                     obj.insert(k.clone(), v.to_json());
@@ -56,7 +67,7 @@ impl Value {
     }
 
     pub fn as_object_mut(&mut self) -> Option<&mut IndexMap<String, Value>> {
-        if let Value::Object(m) = self {
+        if let Value::Object(m, _) = self {
             Some(m)
         } else {
             None
@@ -66,7 +77,7 @@ impl Value {
     /// Merge `other` into `self`. For objects, other's keys win.
     pub fn merge(&mut self, other: Value) {
         match (self, other) {
-            (Value::Object(base), Value::Object(overlay)) => {
+            (Value::Object(base, _), Value::Object(overlay, _)) => {
                 for (k, v) in overlay {
                     base.insert(k, v);
                 }
@@ -95,7 +106,7 @@ impl From<serde_json::Value> for Value {
                 for (k, v) in o {
                     map.insert(k, Value::from(v));
                 }
-                Value::Object(map)
+                Value::Object(map, None)
             }
         }
     }
