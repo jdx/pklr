@@ -138,7 +138,7 @@ pklr implements a subset of the [Pkl language](https://pkl-lang.org/main/current
 
 The following Pkl features are not currently implemented:
 
-- **Type constraints** (parsed but not enforced)
+- **Type constraints** on property annotations (constraints enforced only via `is`/`as`, not on assignment)
 - **Type annotations** (parsed but not validated)
 - **Member predicates** (`[[...]]`)
 - **Regular expressions** (`Regex`)
