@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 use crate::lexer;
-use crate::parser::{self, BinOp, Entry, Expr, Module, Property, StringInterpPart, UnOp};
+use crate::parser::{self, BinOp, Entry, Expr, Modifier, Module, Property, StringInterpPart, UnOp};
 use crate::value::Value;
 
 /// Evaluates pkl source files to [`Value`].
@@ -238,10 +238,7 @@ impl Evaluator {
         // First pass: collect all `local` variable definitions into scope
         for entry in &module.body {
             if let Entry::Property(prop) = entry
-                && prop
-                    .modifiers
-                    .iter()
-                    .any(|m| matches!(m, crate::parser::Modifier::Local))
+                && has_modifier(&prop.modifiers, Modifier::Local)
                 && let Some(expr) = &prop.value
             {
                 let val = self.eval_expr(expr, &scope, depth).await?;
@@ -260,16 +257,53 @@ impl Evaluator {
         let mut out = base_obj;
         for entry in &module.body {
             if let Entry::Property(prop) = entry {
-                if prop
-                    .modifiers
-                    .iter()
-                    .any(|m| matches!(m, crate::parser::Modifier::Local))
-                {
+                let mods = &prop.modifiers;
+                if has_modifier(mods, Modifier::Local) {
                     continue; // already collected
+                }
+                // abstract/external properties must have a value (or be overridden)
+                if (has_modifier(mods, Modifier::Abstract)
+                    || has_modifier(mods, Modifier::External))
+                    && prop.value.is_none()
+                    && prop.body.is_none()
+                {
+                    if let Some(v) = out.get(&prop.name) {
+                        // Satisfied by base — add to scope so other properties can reference it
+                        scope.set(prop.name.clone(), v.clone());
+                    } else {
+                        let kind = if has_modifier(mods, Modifier::Abstract) {
+                            "abstract"
+                        } else {
+                            "external"
+                        };
+                        return Err(Error::Eval(format!(
+                            "{kind} property '{}' must be assigned a value",
+                            prop.name
+                        )));
+                    }
+                    continue;
                 }
                 let val = self.eval_property(prop, &scope, depth).await?;
                 if let Some(v) = val {
-                    out.insert(prop.name.clone(), v);
+                    // const/fixed: error if overriding an immutable property from base
+                    if (has_modifier(mods, Modifier::Const) || has_modifier(mods, Modifier::Fixed))
+                        && out.contains_key(&prop.name)
+                    {
+                        let kind = if has_modifier(mods, Modifier::Const) {
+                            "const"
+                        } else {
+                            "fixed"
+                        };
+                        return Err(Error::Eval(format!(
+                            "cannot override {kind} property '{}'",
+                            prop.name
+                        )));
+                    }
+                    // Always add to scope so other properties can reference it
+                    scope.set(prop.name.clone(), v.clone());
+                    if !has_modifier(mods, Modifier::Hidden) {
+                        out.insert(prop.name.clone(), v);
+                    }
                 }
             }
         }
@@ -309,10 +343,7 @@ impl Evaluator {
         // First pass: collect locals
         for entry in entries {
             if let Entry::Property(prop) = entry
-                && prop
-                    .modifiers
-                    .iter()
-                    .any(|m| matches!(m, crate::parser::Modifier::Local))
+                && has_modifier(&prop.modifiers, Modifier::Local)
                 && let Some(expr) = &prop.value
             {
                 let val = self.eval_expr(expr, &child_scope, depth).await?;
@@ -331,15 +362,21 @@ impl Evaluator {
         for entry in entries {
             match entry {
                 Entry::Property(prop) => {
-                    if prop
-                        .modifiers
-                        .iter()
-                        .any(|m| matches!(m, crate::parser::Modifier::Local))
-                    {
+                    let mods = &prop.modifiers;
+                    if has_modifier(mods, Modifier::Local) {
                         continue;
                     }
+                    if has_modifier(mods, Modifier::Abstract)
+                        && prop.value.is_none()
+                        && prop.body.is_none()
+                    {
+                        continue; // abstract without value — skip (must be overridden)
+                    }
                     if let Some(v) = self.eval_property(prop, &child_scope, depth).await? {
-                        map.insert(prop.name.clone(), v);
+                        child_scope.set(prop.name.clone(), v.clone());
+                        if !has_modifier(mods, Modifier::Hidden) {
+                            map.insert(prop.name.clone(), v);
+                        }
                     }
                 }
                 Entry::DynProperty(key_expr, val_expr) => {
@@ -1069,12 +1106,7 @@ impl Evaluator {
                     let val = self.eval_expr(val_expr, scope, depth + 1).await?;
                     map.insert(value_to_key(&key)?, val);
                 }
-                Entry::Property(prop)
-                    if prop
-                        .modifiers
-                        .iter()
-                        .any(|m| matches!(m, crate::parser::Modifier::Local)) =>
-                {
+                Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {
                     // skip locals in mapping
                 }
                 Entry::Spread(e) => {
@@ -1140,6 +1172,10 @@ impl Scope {
 }
 
 // --- Helpers ---
+
+fn has_modifier(mods: &[Modifier], target: Modifier) -> bool {
+    mods.contains(&target)
+}
 
 fn require_str_arg<'a>(args: &'a [Value], idx: usize, method: &str) -> Result<&'a str> {
     match args.get(idx) {
