@@ -76,7 +76,7 @@ pklr implements a subset of the [Pkl language](https://pkl-lang.org/main/current
 | `when (cond) { ... } else { ... }` | Supported |
 | `throw(msg)` | Supported |
 | `trace(expr)` | Supported |
-| `read(uri)` | Parsed (returns error at runtime) |
+| `read(uri)` / `read?(uri)` | Supported (`file://`, `env:`, `http(s)://`, relative paths) |
 | `is` / `as` type operators | Parsed (type checks not enforced) |
 
 ### Variables & Scope
@@ -144,7 +144,7 @@ The following Pkl features are not currently implemented:
 - **Regular expressions** (`Regex`)
 - **Packages** and **projects**
 - **Standard library** modules
-- **Resource readers** (`read()`)
+- **`prop:` resource scheme** (system properties not available in Rust)
 - **Doc comments** (`///`)
 - **Quoted identifiers** (`` `my-name` ``)
 

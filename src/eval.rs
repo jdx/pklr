@@ -45,6 +45,39 @@ impl Evaluator {
         self.base_path = path.to_path_buf();
     }
 
+    /// Read a resource by URI scheme.
+    async fn read_resource(&mut self, uri: &str) -> Result<Value> {
+        if let Some(path) = uri.strip_prefix("file://") {
+            // file:// — read local file
+            let content = std::fs::read_to_string(path)
+                .map_err(|e| Error::Eval(format!("read() failed for {uri}: {e}")))?;
+            Ok(Value::String(content))
+        } else if let Some(var_name) = uri.strip_prefix("env:") {
+            // env: — read environment variable
+            match std::env::var(var_name) {
+                Ok(val) => Ok(Value::String(val)),
+                Err(_) => Err(Error::Eval(format!(
+                    "environment variable not found: {var_name}"
+                ))),
+            }
+        } else if let Some(prop_name) = uri.strip_prefix("prop:") {
+            // prop: — system properties (not standard in Rust, return empty)
+            Err(Error::Eval(format!(
+                "system property not available: {prop_name}"
+            )))
+        } else if uri.starts_with("https://") || uri.starts_with("http://") {
+            // HTTP/HTTPS
+            let content = self.fetch_source(uri).await?;
+            Ok(Value::String(content))
+        } else {
+            // Bare path — treat as file relative to base_path
+            let file_path = self.base_path.join(uri);
+            let content = std::fs::read_to_string(&file_path)
+                .map_err(|e| Error::Eval(format!("read() failed for {uri}: {e}")))?;
+            Ok(Value::String(content))
+        }
+    }
+
     async fn fetch_source(&mut self, url: &str) -> Result<String> {
         if let Some(cached) = self.http_cache.get(url) {
             return Ok(cached.clone());
@@ -963,10 +996,16 @@ impl Evaluator {
             }
             Expr::Read(uri_expr) => {
                 let uri = self.eval_expr(uri_expr, scope, depth + 1).await?;
-                Err(Error::Unsupported(format!(
-                    "read() not supported: {}",
-                    value_to_display(&uri)
-                )))
+                let uri_str = value_to_display(&uri);
+                self.read_resource(&uri_str).await
+            }
+            Expr::ReadOrNull(uri_expr) => {
+                let uri = self.eval_expr(uri_expr, scope, depth + 1).await?;
+                let uri_str = value_to_display(&uri);
+                match self.read_resource(&uri_str).await {
+                    Ok(v) => Ok(v),
+                    Err(_) => Ok(Value::Null),
+                }
             }
         }
     }
