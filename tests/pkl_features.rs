@@ -207,6 +207,128 @@ fn arithmetic_mod_by_zero() {
 }
 
 // ============================================================
+// Integer division
+// ============================================================
+
+#[test]
+fn int_div_basic() {
+    let json = eval(r#"x = 7 ~/ 2"#);
+    assert_eq!(json["x"], 3);
+}
+
+#[test]
+fn int_div_negative() {
+    let json = eval(r#"x = -7 ~/ 2"#);
+    assert_eq!(json["x"], -3);
+}
+
+#[test]
+fn int_div_float() {
+    let json = eval(r#"x = 7.5 ~/ 2.0"#);
+    assert_eq!(json["x"], 3.0);
+}
+
+#[test]
+fn int_div_by_zero() {
+    let msg = eval_fails(r#"x = 7 ~/ 0"#);
+    assert!(msg.contains("division by zero"));
+}
+
+// ============================================================
+// Exponentiation
+// ============================================================
+
+#[test]
+fn exp_basic() {
+    let json = eval(r#"x = 2 ** 10"#);
+    assert_eq!(json["x"], 1024);
+}
+
+#[test]
+fn exp_float() {
+    let json = eval(r#"x = 2.0 ** 3.0"#);
+    assert_eq!(json["x"], 8.0);
+}
+
+#[test]
+fn exp_right_associative() {
+    // 2 ** 3 ** 2 should be 2 ** (3 ** 2) = 2 ** 9 = 512
+    let json = eval(r#"x = 2 ** 3 ** 2"#);
+    assert_eq!(json["x"], 512);
+}
+
+#[test]
+fn exp_precedence() {
+    // 2 * 3 ** 2 should be 2 * (3 ** 2) = 2 * 9 = 18
+    let json = eval(r#"x = 2 * 3 ** 2"#);
+    assert_eq!(json["x"], 18);
+}
+
+// ============================================================
+// Non-null assertion
+// ============================================================
+
+#[test]
+fn non_null_assertion_pass() {
+    let json = eval(
+        r#"
+local x = 42
+y = x!!
+"#,
+    );
+    assert_eq!(json["y"], 42);
+}
+
+#[test]
+fn non_null_assertion_fail() {
+    let msg = eval_fails(
+        r#"
+local x = null
+y = x!!
+"#,
+    );
+    assert!(msg.contains("non-null assertion failed"));
+}
+
+#[test]
+fn non_null_assertion_string() {
+    let json = eval(
+        r#"
+local x = "hello"
+y = x!!
+"#,
+    );
+    assert_eq!(json["y"], "hello");
+}
+
+// ============================================================
+// Pipe operator
+// ============================================================
+
+#[test]
+fn pipe_basic() {
+    let json = eval(
+        r#"
+local double = (x) -> x * 2
+result = 5 |> double
+"#,
+    );
+    assert_eq!(json["result"], 10);
+}
+
+#[test]
+fn pipe_chain() {
+    let json = eval(
+        r#"
+local double = (x) -> x * 2
+local addOne = (x) -> x + 1
+result = 5 |> double |> addOne
+"#,
+    );
+    assert_eq!(json["result"], 11);
+}
+
+// ============================================================
 // Comparison and logical operators
 // ============================================================
 
