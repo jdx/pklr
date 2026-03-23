@@ -18,6 +18,8 @@ pub struct Evaluator {
     max_depth: usize,
     /// Cache for fetched HTTP sources (URL → source text)
     http_cache: HashMap<String, String>,
+    /// Cache for evaluated local imports (canonical path → Value)
+    import_cache: HashMap<PathBuf, Value>,
     /// Reusable HTTP client for connection pooling
     http_client: reqwest::Client,
 }
@@ -28,6 +30,7 @@ impl Default for Evaluator {
             base_path: PathBuf::from("."),
             max_depth: 32,
             http_cache: HashMap::new(),
+            import_cache: HashMap::new(),
             http_client: reqwest::Client::new(),
         }
     }
@@ -62,19 +65,61 @@ impl Evaluator {
     }
 
     pub async fn eval_source(&mut self, source: &str, path: &Path) -> Result<Value> {
+        // Seed import cache for the entry file so circular back-references work
+        if let Ok(canonical) = path.canonicalize() {
+            self.import_cache
+                .insert(canonical, Value::Object(IndexMap::new(), None));
+        }
         let name = path.display().to_string();
         let tokens = lexer::lex_named(source, &name)?;
         let module = parser::parse_named(&tokens, source, &name)?;
-        self.eval_module(&module, path, 0).await
+        let val = self.eval_module(&module, path, 0).await?;
+        // Update cache with real value
+        if let Ok(canonical) = path.canonicalize() {
+            self.import_cache.insert(canonical, val.clone());
+        }
+        Ok(val)
     }
 
-    /// Read, lex, parse, and evaluate a local file.
+    /// Evaluate a local pkl file by path (public entry point).
+    pub async fn eval_file_pub(&mut self, path: &Path) -> Result<Value> {
+        self.eval_file(path, 0).await
+    }
+
+    /// Read, lex, parse, and evaluate a local file (with caching).
+    /// Inserts a placeholder before evaluation to break circular imports.
     async fn eval_file(&mut self, path: &Path, depth: usize) -> Result<Value> {
+        let canonical = path
+            .canonicalize()
+            .map_err(|e| Error::Io(path.to_path_buf(), e))?;
+        if let Some(cached) = self.import_cache.get(&canonical) {
+            return Ok(cached.clone());
+        }
+        // Insert empty placeholder to break circular imports
+        self.import_cache
+            .insert(canonical.clone(), Value::Object(IndexMap::new(), None));
+        let result = self.eval_file_inner(path, &canonical, depth).await;
+        if result.is_err() {
+            // Remove stale placeholder on failure so retries can re-evaluate
+            self.import_cache.remove(&canonical);
+        }
+        result
+    }
+
+    async fn eval_file_inner(
+        &mut self,
+        path: &Path,
+        canonical: &Path,
+        depth: usize,
+    ) -> Result<Value> {
         let source = std::fs::read_to_string(path).map_err(|e| Error::Io(path.to_path_buf(), e))?;
         let name = path.display().to_string();
         let tokens = lexer::lex_named(&source, &name)?;
         let module = parser::parse_named(&tokens, &source, &name)?;
-        self.eval_module(&module, path, depth).await
+        let val = self.eval_module(&module, path, depth).await?;
+        self.import_cache
+            .insert(canonical.to_path_buf(), val.clone());
+        Ok(val)
     }
 
     #[async_recursion(?Send)]
