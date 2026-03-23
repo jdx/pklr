@@ -156,18 +156,38 @@ pub fn collect_imports(tokens: &[Token]) -> Vec<String> {
 }
 
 pub fn parse(tokens: &[Token]) -> Result<Module> {
-    let mut p = Parser::new(tokens);
+    parse_named(tokens, "", "<input>")
+}
+
+pub fn parse_named(tokens: &[Token], source: &str, name: &str) -> Result<Module> {
+    let mut p = Parser::new(tokens, source, name);
     p.parse_module()
 }
 
 struct Parser<'a> {
     tokens: &'a [Token],
+    source: String,
+    name: String,
     pos: usize,
 }
 
 impl<'a> Parser<'a> {
-    fn new(tokens: &'a [Token]) -> Self {
-        Self { tokens, pos: 0 }
+    fn new(tokens: &'a [Token], source: &str, name: &str) -> Self {
+        Self {
+            tokens,
+            source: source.to_string(),
+            name: name.to_string(),
+            pos: 0,
+        }
+    }
+
+    fn parse_error(&self, message: impl Into<String>) -> Error {
+        let tok = self.peek_tok();
+        Error::Parse {
+            src: miette::NamedSource::new(&self.name, self.source.clone()),
+            span: miette::SourceOffset::from(tok.offset),
+            message: message.into(),
+        }
     }
 
     fn peek(&self) -> &TokenKind {
@@ -190,12 +210,7 @@ impl<'a> Parser<'a> {
         if std::mem::discriminant(self.peek()) == std::mem::discriminant(kind) {
             Ok(self.advance())
         } else {
-            let tok = self.peek_tok();
-            Err(Error::Parse {
-                line: tok.line,
-                col: tok.col,
-                message: format!("expected {:?}, got {:?}", kind, self.peek()),
-            })
+            Err(self.parse_error(format!("expected {:?}, got {:?}", kind, self.peek())))
         }
     }
 
@@ -408,12 +423,7 @@ impl<'a> Parser<'a> {
                 }
             }
             tok => {
-                let t = self.peek_tok();
-                return Err(Error::Parse {
-                    line: t.line,
-                    col: t.col,
-                    message: format!("expected type, got {:?}", tok),
-                });
+                return Err(self.parse_error(format!("expected type, got {:?}", tok)));
             }
         };
 
@@ -673,33 +683,30 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Expr::Ident(name))
             }
-            tok => {
-                let t = self.peek_tok();
-                Err(Error::Parse {
-                    line: t.line,
-                    col: t.col,
-                    message: format!("unexpected token in expression: {:?}", tok),
-                })
-            }
+            tok => Err(self.parse_error(format!("unexpected token in expression: {:?}", tok))),
         }
     }
 
     fn expect_string(&mut self) -> Result<String> {
         let tok = self.advance();
-        if let TokenKind::StringLit(s) = &tok.kind {
-            Ok(s.clone())
+        let offset = tok.offset;
+        let kind = tok.kind.clone();
+        if let TokenKind::StringLit(s) = kind {
+            Ok(s)
         } else {
             Err(Error::Parse {
-                line: tok.line,
-                col: tok.col,
-                message: format!("expected string, got {:?}", tok.kind),
+                src: miette::NamedSource::new(&self.name, self.source.clone()),
+                span: miette::SourceOffset::from(offset),
+                message: format!("expected string, got {:?}", kind),
             })
         }
     }
 
     fn expect_ident(&mut self) -> Result<String> {
         let tok = self.advance();
-        match &tok.kind {
+        let offset = tok.offset;
+        let kind = tok.kind.clone();
+        match &kind {
             TokenKind::Ident(s) => Ok(s.clone()),
             // Allow keywords as identifiers in property name position
             TokenKind::KwLocal => Ok("local".into()),
@@ -708,8 +715,8 @@ impl<'a> Parser<'a> {
             TokenKind::KwNew => Ok("new".into()),
             TokenKind::KwModule => Ok("module".into()),
             other => Err(Error::Parse {
-                line: tok.line,
-                col: tok.col,
+                src: miette::NamedSource::new(&self.name, self.source.clone()),
+                span: miette::SourceOffset::from(offset),
                 message: format!("expected identifier, got {:?}", other),
             }),
         }
