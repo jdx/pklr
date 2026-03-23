@@ -2320,6 +2320,41 @@ b = y is PositiveInt
     assert_eq!(json["b"], false);
 }
 
+#[test]
+fn typealias_constraint_works_inside_amended_object() {
+    // type aliases must be available inside amended/extended objects
+    // (regression: flatten() used to drop type_aliases)
+    let json = eval(
+        r#"
+typealias PositiveInt = Int(this > 0)
+base {
+    port = 8080
+}
+result = (base) {
+    check = 42 is PositiveInt
+}
+"#,
+    );
+    assert_eq!(json["result"]["check"], true);
+}
+
+#[test]
+fn typealias_constraint_inside_amended_object_rejects_invalid() {
+    let json = eval(
+        r#"
+typealias PositiveInt = Int(this > 0)
+local neg = 0 - 5
+base {
+    port = 8080
+}
+result = (base) {
+    check = neg is PositiveInt
+}
+"#,
+    );
+    assert_eq!(json["result"]["check"], false);
+}
+
 // ============================================================
 // Annotations
 // ============================================================
