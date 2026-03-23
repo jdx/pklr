@@ -950,6 +950,27 @@ name = "override"
 }
 
 // ============================================================
+// Glob imports (import*)
+// ============================================================
+
+#[tokio::test]
+async fn import_glob() {
+    let mut ev = pklr::eval::Evaluator::new();
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    ev.set_base_path(&base);
+    let src = r#"
+import* "items/*.pkl" as Items
+alpha_val = Items["items/alpha.pkl"].value
+beta_val = Items["items/beta.pkl"].value
+"#;
+    let path = base.join("test_glob.pkl");
+    let val = ev.eval_source(src, &path).await.unwrap();
+    let json = val.to_json();
+    assert_eq!(json["alpha_val"], "alpha");
+    assert_eq!(json["beta_val"], "beta");
+}
+
+// ============================================================
 // Class instantiation (future)
 // ============================================================
 
