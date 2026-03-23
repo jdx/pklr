@@ -92,6 +92,42 @@ fn primitives_underscored_int() {
 }
 
 // ============================================================
+// NaN and Infinity
+// ============================================================
+
+#[test]
+fn nan_literal() {
+    // NaN serializes to null in JSON (JSON has no NaN)
+    let json = eval(r#"x = NaN"#);
+    assert!(json["x"].is_null());
+}
+
+#[test]
+fn infinity_literal() {
+    // Infinity serializes to null in JSON (JSON has no Infinity)
+    let json = eval(r#"x = Infinity"#);
+    assert!(json["x"].is_null());
+}
+
+#[test]
+fn negative_infinity() {
+    let json = eval(r#"x = -Infinity"#);
+    assert!(json["x"].is_null());
+}
+
+#[test]
+fn nan_is_not_equal_to_itself() {
+    let json = eval(r#"x = NaN == NaN"#);
+    assert_eq!(json["x"], false);
+}
+
+#[test]
+fn nan_comparison() {
+    let json = eval(r#"x = NaN != NaN"#);
+    assert_eq!(json["x"], true);
+}
+
+// ============================================================
 // Strings
 // ============================================================
 
@@ -112,6 +148,18 @@ fn string_multiline() {
     let src = "x = \"\"\"\n  hello\n  world\n  \"\"\"";
     let json = eval(src);
     assert_eq!(json["x"], "hello\nworld\n");
+}
+
+#[test]
+fn string_unicode_escape() {
+    let json = eval(r#"x = "\u{26} \u{E9} \u{1F600}""#);
+    assert_eq!(json["x"], "& \u{E9} \u{1F600}");
+}
+
+#[test]
+fn string_unicode_escape_simple() {
+    let json = eval(r#"x = "\u{41}""#);
+    assert_eq!(json["x"], "A");
 }
 
 #[test]
@@ -1079,4 +1127,110 @@ x = new Container {
 "#,
     );
     assert_eq!(json["x"]["value"], "custom");
+}
+
+// ============================================================
+// Durations
+// ============================================================
+
+#[test]
+fn duration_minutes() {
+    let json = eval(r#"x = 5.min"#);
+    assert_eq!(json["x"]["value"], 5);
+    assert_eq!(json["x"]["unit"], "min");
+}
+
+#[test]
+fn duration_seconds() {
+    let json = eval(r#"x = 3.s"#);
+    assert_eq!(json["x"]["value"], 3);
+    assert_eq!(json["x"]["unit"], "s");
+}
+
+#[test]
+fn duration_hours() {
+    let json = eval(r#"x = 2.h"#);
+    assert_eq!(json["x"]["value"], 2);
+    assert_eq!(json["x"]["unit"], "h");
+}
+
+#[test]
+fn duration_days() {
+    let json = eval(r#"x = 7.d"#);
+    assert_eq!(json["x"]["value"], 7);
+    assert_eq!(json["x"]["unit"], "d");
+}
+
+#[test]
+fn duration_milliseconds() {
+    let json = eval(r#"x = 100.ms"#);
+    assert_eq!(json["x"]["value"], 100);
+    assert_eq!(json["x"]["unit"], "ms");
+}
+
+#[test]
+fn duration_nanoseconds() {
+    let json = eval(r#"x = 50.ns"#);
+    assert_eq!(json["x"]["value"], 50);
+    assert_eq!(json["x"]["unit"], "ns");
+}
+
+#[test]
+fn duration_microseconds() {
+    let json = eval(r#"x = 10.us"#);
+    assert_eq!(json["x"]["value"], 10);
+    assert_eq!(json["x"]["unit"], "us");
+}
+
+#[test]
+fn duration_float_value() {
+    let json = eval(r#"x = 5.5.min"#);
+    assert_eq!(json["x"]["value"], 5.5);
+    assert_eq!(json["x"]["unit"], "min");
+}
+
+// ============================================================
+// Data sizes
+// ============================================================
+
+#[test]
+fn datasize_bytes() {
+    let json = eval(r#"x = 512.b"#);
+    assert_eq!(json["x"]["value"], 512);
+    assert_eq!(json["x"]["unit"], "b");
+}
+
+#[test]
+fn datasize_kilobytes() {
+    let json = eval(r#"x = 10.kb"#);
+    assert_eq!(json["x"]["value"], 10);
+    assert_eq!(json["x"]["unit"], "kb");
+}
+
+#[test]
+fn datasize_megabytes() {
+    let json = eval(r#"x = 256.mb"#);
+    assert_eq!(json["x"]["value"], 256);
+    assert_eq!(json["x"]["unit"], "mb");
+}
+
+#[test]
+fn datasize_gigabytes() {
+    let json = eval(r#"x = 4.gb"#);
+    assert_eq!(json["x"]["value"], 4);
+    assert_eq!(json["x"]["unit"], "gb");
+}
+
+#[test]
+fn datasize_terabytes() {
+    let json = eval(r#"x = 1.tb"#);
+    assert_eq!(json["x"]["value"], 1);
+    assert_eq!(json["x"]["unit"], "tb");
+}
+
+#[test]
+fn datasize_binary_units() {
+    let json = eval(r#"x = 8.gib"#);
+    assert_eq!(json["x"]["value"], 8);
+    assert_eq!(json["x"]["unit"], "gib");
 }

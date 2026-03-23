@@ -211,6 +211,44 @@ impl<'a> Lexer<'a> {
                         Some('r') => current.push('\r'),
                         Some('"') => current.push('"'),
                         Some('\\') => current.push('\\'),
+                        Some('u') => {
+                            // Unicode escape: \u{XXXX}
+                            if self.peek() == Some('{') {
+                                self.advance(); // consume '{'
+                                let mut hex = String::new();
+                                loop {
+                                    match self.peek() {
+                                        Some('}') => {
+                                            self.advance();
+                                            break;
+                                        }
+                                        Some(c) if c.is_ascii_hexdigit() => {
+                                            hex.push(c);
+                                            self.advance();
+                                        }
+                                        _ => {
+                                            return Err(
+                                                self.lex_error("invalid unicode escape sequence")
+                                            );
+                                        }
+                                    }
+                                }
+                                let code_point = u32::from_str_radix(&hex, 16).map_err(|_| {
+                                    self.lex_error(format!(
+                                        "invalid unicode code point: \\u{{{hex}}}"
+                                    ))
+                                })?;
+                                let ch = char::from_u32(code_point).ok_or_else(|| {
+                                    self.lex_error(format!(
+                                        "invalid unicode code point: \\u{{{hex}}}"
+                                    ))
+                                })?;
+                                current.push(ch);
+                            } else {
+                                current.push('\\');
+                                current.push('u');
+                            }
+                        }
                         Some('(') => {
                             has_interpolation = true;
                             parts.push(StringPart::Literal(std::mem::take(&mut current)));
@@ -360,7 +398,13 @@ impl<'a> Lexer<'a> {
         {
             self.advance();
         }
-        let is_float = self.peek() == Some('.');
+        // Only treat '.' as decimal point if followed by a digit
+        let is_float = self.peek() == Some('.')
+            && self.source[self.pos + 1..]
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_digit())
+                .unwrap_or(false);
         if is_float {
             self.advance(); // consume '.'
             while self
@@ -708,6 +752,8 @@ fn keyword_or_ident(s: &str) -> TokenKind {
         "true" => TokenKind::BoolLit(true),
         "false" => TokenKind::BoolLit(false),
         "null" => TokenKind::Null,
+        "NaN" => TokenKind::FloatLit(f64::NAN),
+        "Infinity" => TokenKind::FloatLit(f64::INFINITY),
         _ => TokenKind::Ident(s.to_string()),
     }
 }
