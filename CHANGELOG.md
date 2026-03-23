@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/jdx/pklr/compare/v0.2.0...v0.2.1) - 2026-03-23
+
+### Added
+
+- expose set_http_client and eval_to_json_with_client ([#43](https://github.com/jdx/pklr/pull/43))
+
 ## [0.2.0](https://github.com/jdx/pklr/compare/v0.1.0...v0.2.0) - 2026-03-23
 
 ### Added
