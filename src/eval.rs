@@ -342,20 +342,19 @@ impl Evaluator {
                 } else {
                     None
                 };
-                if let Some(src) = base_source {
-                    if let Ok(tokens) = lexer::lex(&src)
-                        && let Ok(base_module) = parser::parse(&tokens)
-                    {
-                        for entry in &base_module.body {
-                            if let Entry::ClassDef(name, ..) = entry {
-                                if let Some(val) = base_obj.shift_remove(name) {
-                                    scope.set(name.clone(), val);
-                                }
-                            }
+                if let Some(src) = base_source
+                    && let Ok(tokens) = lexer::lex(&src)
+                    && let Ok(base_module) = parser::parse(&tokens)
+                {
+                    for entry in &base_module.body {
+                        if let Entry::ClassDef(name, ..) = entry
+                            && let Some(val) = base_obj.shift_remove(name)
+                        {
+                            scope.set(name.clone(), val);
                         }
-                        // Also remove function values from base output
-                        base_obj.retain(|_, v| !matches!(v, Value::Lambda(..)));
                     }
+                    // Also remove function values from base output
+                    base_obj.retain(|_, v| !matches!(v, Value::Lambda(..)));
                 }
             }
         }
@@ -457,11 +456,11 @@ impl Evaluator {
         // Track class names to exclude from serialized output.
         let mut class_names: std::collections::HashSet<String> = std::collections::HashSet::new();
         for entry in &module.body {
-            if let Entry::ClassDef(name, ..) = entry {
-                if let Some(cls_val) = scope.get(name) {
-                    base_obj.insert(name.clone(), cls_val.clone());
-                    class_names.insert(name.clone());
-                }
+            if let Entry::ClassDef(name, ..) = entry
+                && let Some(cls_val) = scope.get(name)
+            {
+                base_obj.insert(name.clone(), cls_val.clone());
+                class_names.insert(name.clone());
             }
         }
 
@@ -1096,13 +1095,13 @@ impl Evaluator {
                                 .await?;
                             // Preserve the base class's is_open flag so further amendments
                             // of non-open classes continue to enforce the constraint.
-                            if let Value::Object(_, Some(ref src)) = result {
-                                if src.is_open != is_open {
-                                    let mut new_src = (**src).clone();
-                                    new_src.is_open = is_open;
-                                    if let Value::Object(_, ref mut src_slot) = result {
-                                        *src_slot = Some(std::sync::Arc::new(new_src));
-                                    }
+                            if let Value::Object(_, Some(ref src)) = result
+                                && src.is_open != is_open
+                            {
+                                let mut new_src = (**src).clone();
+                                new_src.is_open = is_open;
+                                if let Value::Object(_, ref mut src_slot) = result {
+                                    *src_slot = Some(std::sync::Arc::new(new_src));
                                 }
                             }
                             Ok(result)
