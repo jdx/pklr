@@ -51,6 +51,8 @@ pub enum Entry {
     /// Class definition: `class Name [extends Parent] { properties... }`
     /// Fields: (name, optional_parent, body)
     ClassDef(String, Option<String>, Vec<Entry>),
+    /// Type alias: `typealias Name = Type`
+    TypeAlias(String, TypeExpr),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -405,7 +407,19 @@ impl<'a> Parser<'a> {
                 }
                 continue;
             }
-            if matches!(self.peek(), TokenKind::KwTypeAlias | TokenKind::KwFunction) {
+            if matches!(self.peek(), TokenKind::KwTypeAlias) {
+                self.advance(); // consume 'typealias'
+                let name = self.expect_ident()?;
+                // Skip optional generic params
+                if matches!(self.peek(), TokenKind::Lt) {
+                    self.skip_generic_params()?;
+                }
+                self.expect(&TokenKind::Equals)?;
+                let ty = self.parse_type()?;
+                entries.push(Entry::TypeAlias(name, ty));
+                continue;
+            }
+            if matches!(self.peek(), TokenKind::KwFunction) {
                 self.skip_declaration();
                 continue;
             }
@@ -686,6 +700,26 @@ impl<'a> Parser<'a> {
                     self.expect(&TokenKind::Gt)?;
                     TypeExpr::Generic(name, args)
                 } else {
+                    // Skip optional type constraint: Type(predicate)
+                    if matches!(self.peek(), TokenKind::LParen) {
+                        self.advance();
+                        let mut depth = 1;
+                        while depth > 0 && !self.at_eof() {
+                            match self.peek() {
+                                TokenKind::LParen => {
+                                    depth += 1;
+                                    self.advance();
+                                }
+                                TokenKind::RParen => {
+                                    depth -= 1;
+                                    self.advance();
+                                }
+                                _ => {
+                                    self.advance();
+                                }
+                            }
+                        }
+                    }
                     TypeExpr::Named(name)
                 }
             }
