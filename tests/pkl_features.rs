@@ -1703,3 +1703,74 @@ services {
     assert_eq!(json["services"]["api"]["config"]["timeout"], 60);
     assert_eq!(json["services"]["api"]["config"]["retries"], 3);
 }
+
+// ============================================================
+// Annotations
+// ============================================================
+
+#[test]
+fn annotation_module_info_parsed() {
+    // @ModuleInfo should be parsed without error
+    let json = eval(
+        r#"
+@ModuleInfo { minPklVersion = "0.25.0" }
+module my.Config
+x = 42
+"#,
+    );
+    assert_eq!(json["x"], 42);
+}
+
+#[test]
+fn annotation_deprecated_property() {
+    // @Deprecated annotation should not prevent evaluation
+    let json = eval(
+        r#"
+@Deprecated { message = "use newName instead" }
+oldName = "value"
+result = oldName
+"#,
+    );
+    assert_eq!(json["oldName"], "value");
+    assert_eq!(json["result"], "value");
+}
+
+#[test]
+fn annotation_multiple() {
+    let json = eval(
+        r#"
+@Since { version = "1.0" }
+@Deprecated { message = "removed in 2.0" }
+legacy = true
+current = false
+"#,
+    );
+    assert_eq!(json["legacy"], true);
+    assert_eq!(json["current"], false);
+}
+
+#[test]
+fn annotation_on_class() {
+    let json = eval(
+        r#"
+@Deprecated { message = "use NewConfig" }
+class OldConfig {
+    name: String = "old"
+}
+x = new OldConfig {}
+"#,
+    );
+    assert_eq!(json["x"]["name"], "old");
+}
+
+#[test]
+fn annotation_empty() {
+    // @Foo with no body
+    let json = eval(
+        r#"
+@Experimental
+feature = true
+"#,
+    );
+    assert_eq!(json["feature"], true);
+}
