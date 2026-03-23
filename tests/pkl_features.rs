@@ -1540,3 +1540,27 @@ x {
     assert_eq!(json["x"]["a"]["name"], "alpha");
     assert!(json["x"]["a"].get("enabled").is_none());
 }
+
+#[test]
+fn default_nested_merge() {
+    let json = eval(
+        r#"
+services {
+    default {
+        config {
+            timeout = 30
+            retries = 3
+        }
+    }
+    ["api"] {
+        config {
+            timeout = 60
+        }
+    }
+}
+"#,
+    );
+    // timeout overridden, retries inherited from default
+    assert_eq!(json["services"]["api"]["config"]["timeout"], 60);
+    assert_eq!(json["services"]["api"]["config"]["retries"], 3);
+}

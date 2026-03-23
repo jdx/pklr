@@ -358,17 +358,9 @@ impl Evaluator {
             }
         }
 
-        // Look for a `default` property to use as template for dynamic entries
-        let mut default_template: Option<Value> = None;
-        for entry in entries {
-            if let Entry::Property(prop) = entry
-                && prop.name == "default"
-                && !has_modifier(&prop.modifiers, Modifier::Local)
-            {
-                default_template = self.eval_property(prop, &child_scope, depth).await?;
-                break;
-            }
-        }
+        let default_template = self
+            .find_default_template(entries, &child_scope, depth)
+            .await?;
 
         let mut map: IndexMap<String, Value> = IndexMap::new();
         for entry in entries {
@@ -1111,6 +1103,25 @@ impl Evaluator {
         }
     }
 
+    /// Find and evaluate a `default { ... }` property in an entry list.
+    #[async_recursion(?Send)]
+    async fn find_default_template(
+        &mut self,
+        entries: &[Entry],
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<Option<Value>> {
+        for entry in entries {
+            if let Entry::Property(prop) = entry
+                && prop.name == "default"
+                && !has_modifier(&prop.modifiers, Modifier::Local)
+            {
+                return self.eval_property(prop, scope, depth).await;
+            }
+        }
+        Ok(None)
+    }
+
     #[async_recursion(?Send)]
     async fn eval_mapping_entries(
         &mut self,
@@ -1119,17 +1130,7 @@ impl Evaluator {
         depth: usize,
         map: &mut IndexMap<String, Value>,
     ) -> Result<()> {
-        // Look for a `default` property to use as template
-        let mut default_template: Option<Value> = None;
-        for entry in entries {
-            if let Entry::Property(prop) = entry
-                && prop.name == "default"
-                && !has_modifier(&prop.modifiers, Modifier::Local)
-            {
-                default_template = self.eval_property(prop, scope, depth).await?;
-                break;
-            }
-        }
+        let default_template = self.find_default_template(entries, scope, depth).await?;
 
         for entry in entries {
             match entry {
@@ -1352,7 +1353,13 @@ fn value_cmp(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
 fn merge_values(base: Value, overlay: Value) -> Value {
     match (base, overlay) {
         (Value::Object(mut b), Value::Object(o)) => {
-            b.extend(o);
+            for (k, v) in o {
+                if let Some(existing) = b.shift_remove(&k) {
+                    b.insert(k, merge_values(existing, v));
+                } else {
+                    b.insert(k, v);
+                }
+            }
             Value::Object(b)
         }
         (_, overlay) => overlay,
