@@ -128,7 +128,8 @@ pklr implements a subset of the [Pkl language](https://pkl-lang.org/main/current
 
 | Feature | Status |
 |---|---|
-| Annotations (`@Deprecated`, `@ModuleInfo`, etc.) | Parsed and skipped |
+| Annotations (`@Deprecated`, `@ModuleInfo`, `@Since`, etc.) | Supported (parsed into AST, stored on properties) |
+| `@Deprecated` warnings | Supported (emits warning to stderr) |
 | Class declarations | Parsed and evaluated (defaults extracted) |
 | Type alias declarations | Parsed and skipped |
 | Function declarations | Parsed and skipped |

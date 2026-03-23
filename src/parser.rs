@@ -8,10 +8,18 @@ pub enum StringInterpPart {
 }
 
 /// A pkl module (top-level file).
+/// An annotation: `@Name { body }` or `@Name`
+#[derive(Debug, Clone, PartialEq)]
+pub struct Annotation {
+    pub name: String,
+    pub body: Vec<Entry>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Module {
     pub amends: Option<String>,
     pub imports: Vec<Import>,
+    pub annotations: Vec<Annotation>,
     pub body: Vec<Entry>,
 }
 
@@ -44,6 +52,7 @@ pub enum Entry {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Property {
+    pub annotations: Vec<Annotation>,
     pub modifiers: Vec<Modifier>,
     pub name: String,
     pub type_ann: Option<TypeExpr>,
@@ -249,68 +258,51 @@ impl<'a> Parser<'a> {
         matches!(self.peek(), TokenKind::Eof)
     }
 
-    /// Skip annotation blocks: `@Ident` or `@Ident { ... }`
-    fn skip_annotations(&mut self) {
+    /// Parse annotations: `@Name { body }` or `@Name`
+    fn parse_annotations(&mut self) -> Result<Vec<Annotation>> {
+        let mut annotations = Vec::new();
         while matches!(self.peek(), TokenKind::At) {
             self.advance(); // @
-            // Skip ident (and optional dotted path)
-            while matches!(self.peek(), TokenKind::Ident(_)) {
+            // Parse annotation name (possibly dotted: @Foo.Bar)
+            let mut name = self.expect_ident()?;
+            while matches!(self.peek(), TokenKind::Dot) {
                 self.advance();
-                if matches!(self.peek(), TokenKind::Dot) {
-                    self.advance();
-                } else {
-                    break;
-                }
+                let part = self.expect_ident()?;
+                name = format!("{name}.{part}");
             }
-            // Skip annotation body if present
-            if matches!(self.peek(), TokenKind::LBrace) {
+            // Parse annotation body if present
+            let body = if matches!(self.peek(), TokenKind::LBrace) {
                 self.advance();
-                let mut depth = 1;
-                while depth > 0 && !self.at_eof() {
-                    match self.peek() {
-                        TokenKind::LBrace => {
-                            depth += 1;
-                            self.advance();
-                        }
-                        TokenKind::RBrace => {
-                            depth -= 1;
-                            self.advance();
-                        }
-                        _ => {
-                            self.advance();
-                        }
+                let entries = self.parse_entries()?;
+                self.expect(&TokenKind::RBrace)?;
+                entries
+            } else if matches!(self.peek(), TokenKind::LParen) {
+                // Annotation with parens: @Foo("arg") — parse as a single-element body
+                self.advance();
+                let mut entries = Vec::new();
+                while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
+                    let expr = self.parse_expr()?;
+                    entries.push(Entry::Elem(expr));
+                    if matches!(self.peek(), TokenKind::Comma) {
+                        self.advance();
                     }
                 }
-            }
-            // Skip annotation arguments if present
-            if matches!(self.peek(), TokenKind::LParen) {
-                self.advance();
-                let mut depth = 1;
-                while depth > 0 && !self.at_eof() {
-                    match self.peek() {
-                        TokenKind::LParen => {
-                            depth += 1;
-                            self.advance();
-                        }
-                        TokenKind::RParen => {
-                            depth -= 1;
-                            self.advance();
-                        }
-                        _ => {
-                            self.advance();
-                        }
-                    }
-                }
-            }
+                self.expect(&TokenKind::RParen)?;
+                entries
+            } else {
+                Vec::new()
+            };
+            annotations.push(Annotation { name, body });
         }
+        Ok(annotations)
     }
 
     fn parse_module(&mut self) -> Result<Module> {
         let mut amends = None;
         let mut imports = Vec::new();
 
-        // Skip annotations at module level (e.g. @ModuleInfo)
-        self.skip_annotations();
+        // Parse module-level annotations (e.g. @ModuleInfo)
+        let annotations = self.parse_annotations()?;
 
         // Parse header: module declaration, amends, imports
         // Skip `module <name>` declaration if present
@@ -358,6 +350,7 @@ impl<'a> Parser<'a> {
         Ok(Module {
             amends,
             imports,
+            annotations,
             body,
         })
     }
@@ -365,7 +358,7 @@ impl<'a> Parser<'a> {
     fn parse_entries(&mut self) -> Result<Vec<Entry>> {
         let mut entries = Vec::new();
         while !self.at_eof() && !matches!(self.peek(), TokenKind::RBrace) {
-            self.skip_annotations();
+            let entry_annotations = self.parse_annotations()?;
             // Parse class definitions; skip typealias/function declarations
             if matches!(self.peek(), TokenKind::KwClass) {
                 self.advance(); // consume 'class'
@@ -399,7 +392,13 @@ impl<'a> Parser<'a> {
             if self.at_eof() || matches!(self.peek(), TokenKind::RBrace) {
                 break;
             }
-            let entry = self.parse_entry()?;
+            let mut entry = self.parse_entry()?;
+            // Attach annotations to the parsed property
+            if !entry_annotations.is_empty()
+                && let Entry::Property(ref mut prop) = entry
+            {
+                prop.annotations = entry_annotations;
+            }
             entries.push(entry);
         }
         Ok(entries)
@@ -642,6 +641,7 @@ impl<'a> Parser<'a> {
                 };
 
                 Ok(Entry::Property(Property {
+                    annotations: Vec::new(), // filled by parse_entries if present
                     modifiers,
                     name,
                     type_ann,

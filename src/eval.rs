@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 use crate::lexer;
-use crate::parser::{self, BinOp, Entry, Expr, Modifier, Module, Property, StringInterpPart, UnOp};
+use crate::parser::{
+    self, Annotation, BinOp, Entry, Expr, Modifier, Module, Property, StringInterpPart, UnOp,
+};
 use crate::value::{ObjectSource, Value};
 
 /// Evaluates pkl source files to [`Value`].
@@ -280,6 +282,7 @@ impl Evaluator {
                 if has_modifier(mods, Modifier::Local) {
                     continue; // already collected
                 }
+                check_deprecated(&prop.annotations, &prop.name);
                 // abstract/external properties must have a value (or be overridden)
                 if (has_modifier(mods, Modifier::Abstract)
                     || has_modifier(mods, Modifier::External))
@@ -389,6 +392,7 @@ impl Evaluator {
                     if has_modifier(mods, Modifier::Local) {
                         continue;
                     }
+                    check_deprecated(&prop.annotations, &prop.name);
                     // Skip the `default` property — it's a template, not an output entry
                     if prop.name == "default" && default_template.is_some() {
                         continue;
@@ -1325,6 +1329,28 @@ impl Scope {
 }
 
 // --- Helpers ---
+
+fn check_deprecated(annotations: &[Annotation], prop_name: &str) {
+    for ann in annotations {
+        if ann.name == "Deprecated" {
+            // Look for a "message" property in the annotation body
+            let mut message = None;
+            for entry in &ann.body {
+                if let Entry::Property(p) = entry
+                    && p.name == "message"
+                    && let Some(Expr::String(s)) = &p.value
+                {
+                    message = Some(s.clone());
+                }
+            }
+            if let Some(msg) = message {
+                eprintln!("[pklr] WARNING: property '{prop_name}' is deprecated: {msg}");
+            } else {
+                eprintln!("[pklr] WARNING: property '{prop_name}' is deprecated");
+            }
+        }
+    }
+}
 
 fn has_modifier(mods: &[Modifier], target: Modifier) -> bool {
     mods.contains(&target)
