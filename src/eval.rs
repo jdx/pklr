@@ -60,7 +60,10 @@ impl Evaluator {
                 let base = path.parent().unwrap_or(Path::new("."));
                 base.join(uri)
             };
-            if import_path.exists() {
+            if !import_path.exists() {
+                return Err(Error::ImportNotFound(import_path.display().to_string()));
+            }
+            {
                 let source = std::fs::read_to_string(&import_path)
                     .map_err(|e| Error::Io(import_path.clone(), e))?;
                 let imported_val = {
@@ -92,7 +95,9 @@ impl Evaluator {
                     let base = path.parent().unwrap_or(Path::new("."));
                     base.join(uri)
                 };
-                if amends_path.exists() {
+                if !amends_path.exists() {
+                    // Amends file may be a schema reference that doesn't exist locally — skip
+                } else {
                     let source = std::fs::read_to_string(&amends_path)
                         .map_err(|e| Error::Io(amends_path.clone(), e))?;
                     let name = amends_path.display().to_string();
@@ -350,7 +355,9 @@ impl Evaluator {
                             .cloned()
                             .ok_or_else(|| Error::Eval("empty list".into()));
                     }
-                    (Value::String(s), "length") => return Ok(Value::Int(s.len() as i64)),
+                    (Value::String(s), "length") => {
+                        return Ok(Value::Int(s.chars().count() as i64));
+                    }
                     (Value::String(s), "isEmpty") => return Ok(Value::Bool(s.is_empty())),
                     (Value::Object(map), "length") => return Ok(Value::Int(map.len() as i64)),
                     (Value::Object(map), "isEmpty") => return Ok(Value::Bool(map.is_empty())),
@@ -611,6 +618,18 @@ impl Evaluator {
             (Value::Int(n), "toString") => Ok(Some(Value::String(n.to_string()))),
             (Value::Float(f), "toString") => Ok(Some(Value::String(f.to_string()))),
             (Value::Bool(b), "toString") => Ok(Some(Value::String(b.to_string()))),
+
+            // Lambda.apply()
+            (Value::Lambda(params, body, captured), "apply") => {
+                let mut call_scope = Scope::default();
+                for (k, v) in captured {
+                    call_scope.set(k.clone(), v.clone());
+                }
+                for (param, arg) in params.iter().zip(args.iter()) {
+                    call_scope.set(param.clone(), arg.clone());
+                }
+                Ok(Some(self.eval_expr(body, &call_scope, 0)?))
+            }
 
             _ => Ok(None), // not a known method
         }

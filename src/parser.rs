@@ -359,9 +359,9 @@ impl<'a> Parser<'a> {
                 Ok(Entry::Spread(expr))
             }
             _ => {
-                // Check for bare element (used in Listing bodies): literal values
-                // not followed by = or { or :
-                if matches!(
+                // Check for bare element (used in Listing bodies): literal values,
+                // or identifiers not followed by = or { or : (which would be properties)
+                let is_bare_literal = matches!(
                     self.peek(),
                     TokenKind::StringLit(_)
                         | TokenKind::InterpolatedString(_)
@@ -370,7 +370,14 @@ impl<'a> Parser<'a> {
                         | TokenKind::BoolLit(_)
                         | TokenKind::Null
                         | TokenKind::KwNew
-                ) {
+                );
+                let is_bare_ident = matches!(self.peek(), TokenKind::Ident(_))
+                    && self.pos + 1 < self.tokens.len()
+                    && !matches!(
+                        self.tokens[self.pos + 1].kind,
+                        TokenKind::Equals | TokenKind::LBrace | TokenKind::Colon
+                    );
+                if is_bare_literal || is_bare_ident {
                     let expr = self.parse_expr()?;
                     return Ok(Entry::Elem(expr));
                 }
