@@ -954,7 +954,15 @@ impl<'a> Parser<'a> {
             TokenKind::KwNew => {
                 self.advance();
                 let type_name = if let TokenKind::Ident(_) = self.peek() {
-                    Some(self.expect_ident()?)
+                    let mut name = self.expect_ident()?;
+                    // Handle dotted type names: new Config.Step { ... }
+                    while matches!(self.peek(), TokenKind::Dot) {
+                        self.advance();
+                        let part = self.expect_ident()?;
+                        name.push('.');
+                        name.push_str(&part);
+                    }
+                    Some(name)
                 } else {
                     None
                 };

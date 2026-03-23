@@ -1296,6 +1296,26 @@ x = new Container {
     assert_eq!(json["x"]["value"], "custom");
 }
 
+#[test]
+fn new_with_dotted_type_name() {
+    // Dotted type names in new: resolves Config then .Step
+    let json = eval(
+        r#"
+local Config = new {
+    Step = new {
+        check = "default"
+        glob = "*.rs"
+    }
+}
+x = new Config.Step {
+    check = "custom"
+}
+"#,
+    );
+    assert_eq!(json["x"]["check"], "custom");
+    assert_eq!(json["x"]["glob"], "*.rs");
+}
+
 // ============================================================
 // Durations
 // ============================================================
