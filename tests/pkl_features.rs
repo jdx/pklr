@@ -1126,6 +1126,104 @@ x = (base) {
 }
 
 // ============================================================
+// Late binding
+// ============================================================
+
+#[test]
+fn late_binding_basic() {
+    // Overriding x should cause y to re-evaluate
+    let json = eval(
+        r#"
+local base = new {
+    x = 1
+    y = x + 1
+}
+result = (base) {
+    x = 10
+}
+"#,
+    );
+    assert_eq!(json["result"]["x"], 10);
+    assert_eq!(json["result"]["y"], 11);
+}
+
+#[test]
+fn late_binding_chained() {
+    // Chained dependency: x -> y -> z
+    let json = eval(
+        r#"
+local base = new {
+    x = 1
+    y = x + 1
+    z = y + 1
+}
+result = (base) {
+    x = 10
+}
+"#,
+    );
+    assert_eq!(json["result"]["x"], 10);
+    assert_eq!(json["result"]["y"], 11);
+    assert_eq!(json["result"]["z"], 12);
+}
+
+#[test]
+fn late_binding_unrelated_preserved() {
+    // Properties not depending on overridden ones stay the same
+    let json = eval(
+        r#"
+local base = new {
+    x = 1
+    y = x + 1
+    name = "hello"
+}
+result = (base) {
+    x = 10
+}
+"#,
+    );
+    assert_eq!(json["result"]["x"], 10);
+    assert_eq!(json["result"]["y"], 11);
+    assert_eq!(json["result"]["name"], "hello");
+}
+
+#[test]
+fn late_binding_class_new() {
+    // Late binding with class defaults
+    let json = eval(
+        r#"
+class Config {
+    port: Int = 8080
+    url: String = "http://localhost:\(port)"
+}
+result = new Config {
+    port = 3000
+}
+"#,
+    );
+    assert_eq!(json["result"]["port"], 3000);
+    assert_eq!(json["result"]["url"], "http://localhost:3000");
+}
+
+#[test]
+fn late_binding_string_interpolation() {
+    // Late binding with string interpolation
+    let json = eval(
+        r#"
+local base = new {
+    name = "world"
+    greeting = "Hello, \(name)!"
+}
+result = (base) {
+    name = "Pkl"
+}
+"#,
+    );
+    assert_eq!(json["result"]["name"], "Pkl");
+    assert_eq!(json["result"]["greeting"], "Hello, Pkl!");
+}
+
+// ============================================================
 // this / outer keywords
 // ============================================================
 
