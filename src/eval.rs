@@ -38,8 +38,73 @@ impl Evaluator {
         self.eval_module(&module, path, 0)
     }
 
-    fn eval_module(&mut self, module: &Module, _path: &Path, depth: usize) -> Result<Value> {
+    fn eval_module(&mut self, module: &Module, path: &Path, depth: usize) -> Result<Value> {
+        if depth > self.max_depth {
+            return Err(Error::Eval(format!(
+                "max import depth {} exceeded",
+                self.max_depth
+            )));
+        }
         let mut scope = Scope::default();
+
+        // Process imports
+        for import in &module.imports {
+            let uri = &import.uri;
+            // Skip package URIs and non-local imports
+            if uri.contains("://") && !uri.starts_with("file://") {
+                continue;
+            }
+            let import_path = if let Some(rel) = uri.strip_prefix("file://") {
+                PathBuf::from(rel)
+            } else {
+                let base = path.parent().unwrap_or(Path::new("."));
+                base.join(uri)
+            };
+            if import_path.exists() {
+                let source = std::fs::read_to_string(&import_path)
+                    .map_err(|e| Error::Io(import_path.clone(), e))?;
+                let imported_val = {
+                    let name = import_path.display().to_string();
+                    let tokens = lexer::lex_named(&source, &name)?;
+                    let imp_module = parser::parse_named(&tokens, &source, &name)?;
+                    self.eval_module(&imp_module, &import_path, depth + 1)?
+                };
+                // Determine the binding name: alias or filename stem
+                let alias = import.alias.clone().unwrap_or_else(|| {
+                    import_path
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string()
+                });
+                scope.set(alias, imported_val);
+            }
+        }
+
+        // Process amends: load base module as starting values
+        let mut base_obj = IndexMap::new();
+        if let Some(uri) = &module.amends {
+            // Skip package URIs
+            if !uri.contains("://") || uri.starts_with("file://") {
+                let amends_path = if let Some(rel) = uri.strip_prefix("file://") {
+                    PathBuf::from(rel)
+                } else {
+                    let base = path.parent().unwrap_or(Path::new("."));
+                    base.join(uri)
+                };
+                if amends_path.exists() {
+                    let source = std::fs::read_to_string(&amends_path)
+                        .map_err(|e| Error::Io(amends_path.clone(), e))?;
+                    let name = amends_path.display().to_string();
+                    let tokens = lexer::lex_named(&source, &name)?;
+                    let base_module = parser::parse_named(&tokens, &source, &name)?;
+                    let base_val = self.eval_module(&base_module, &amends_path, depth + 1)?;
+                    if let Value::Object(m) = base_val {
+                        base_obj = m;
+                    }
+                }
+            }
+        }
 
         // First pass: collect all `local` variable definitions into scope
         for entry in &module.body {
@@ -56,7 +121,7 @@ impl Evaluator {
         }
 
         // Second pass: evaluate non-local entries into output object
-        let mut out = IndexMap::new();
+        let mut out = base_obj;
         for entry in &module.body {
             if let Entry::Property(prop) = entry {
                 if prop
@@ -165,6 +230,7 @@ impl Evaluator {
                         }
                     }
                 }
+                Entry::Elem(_) => {} // bare elements only valid in Listing bodies
             }
         }
         Ok(Value::Object(map))
@@ -197,12 +263,20 @@ impl Evaluator {
                 .get(name)
                 .cloned()
                 .ok_or_else(|| Error::Eval(format!("undefined variable: {name}"))),
+            Expr::Lambda(params, body) => {
+                // Capture current scope values
+                let captured = scope.flatten();
+                Ok(Value::Lambda(params.clone(), (**body).clone(), captured))
+            }
             Expr::New(type_name, entries) => {
                 match type_name.as_deref() {
                     Some("Listing") => {
                         let mut items = Vec::new();
                         for entry in entries {
                             match entry {
+                                Entry::Elem(e) => {
+                                    items.push(self.eval_expr(e, scope, depth + 1)?);
+                                }
                                 Entry::Property(p) if p.value.is_some() => {
                                     items.push(self.eval_expr(
                                         p.value.as_ref().unwrap(),
@@ -216,6 +290,29 @@ impl Evaluator {
                                         Value::List(l) => items.extend(l),
                                         Value::Object(m) => items.extend(m.into_values()),
                                         other => items.push(other),
+                                    }
+                                }
+                                Entry::ForGenerator(fgen) => {
+                                    let collection =
+                                        self.eval_expr(&fgen.collection, scope, depth + 1)?;
+                                    for (_k, v) in collection_to_items(collection) {
+                                        let mut iter_scope = scope.child();
+                                        iter_scope.set(fgen.val_var.clone(), v);
+                                        if let Some(key_var) = &fgen.key_var {
+                                            iter_scope.set(
+                                                key_var.clone(),
+                                                Value::Int(items.len() as i64),
+                                            );
+                                        }
+                                        for sub in &fgen.body {
+                                            if let Entry::Elem(e) = sub {
+                                                items.push(self.eval_expr(
+                                                    e,
+                                                    &iter_scope,
+                                                    depth + 1,
+                                                )?);
+                                            }
+                                        }
                                     }
                                 }
                                 _ => {}
@@ -237,11 +334,51 @@ impl Evaluator {
             Expr::ObjectBody(entries) => self.eval_entries(entries, scope, depth + 1),
             Expr::Field(obj_expr, field) => {
                 let obj = self.eval_expr(obj_expr, scope, depth + 1)?;
+                // Built-in properties
+                match (&obj, field.as_str()) {
+                    (Value::List(items), "length") => return Ok(Value::Int(items.len() as i64)),
+                    (Value::List(items), "isEmpty") => return Ok(Value::Bool(items.is_empty())),
+                    (Value::List(items), "first") => {
+                        return items
+                            .first()
+                            .cloned()
+                            .ok_or_else(|| Error::Eval("empty list".into()));
+                    }
+                    (Value::List(items), "last") => {
+                        return items
+                            .last()
+                            .cloned()
+                            .ok_or_else(|| Error::Eval("empty list".into()));
+                    }
+                    (Value::String(s), "length") => return Ok(Value::Int(s.len() as i64)),
+                    (Value::String(s), "isEmpty") => return Ok(Value::Bool(s.is_empty())),
+                    (Value::Object(map), "length") => return Ok(Value::Int(map.len() as i64)),
+                    (Value::Object(map), "isEmpty") => return Ok(Value::Bool(map.is_empty())),
+                    (Value::Object(map), "keys") => {
+                        return Ok(Value::List(
+                            map.keys().map(|k| Value::String(k.clone())).collect(),
+                        ));
+                    }
+                    (Value::Object(map), "values") => {
+                        return Ok(Value::List(map.values().cloned().collect()));
+                    }
+                    _ => {}
+                }
                 match &obj {
                     Value::Object(map) => map
                         .get(field)
                         .cloned()
                         .ok_or_else(|| Error::Eval(format!("field not found: {field}"))),
+                    _ => Err(Error::Eval(format!(
+                        "cannot access field '{field}' on non-object"
+                    ))),
+                }
+            }
+            Expr::NullSafeField(obj_expr, field) => {
+                let obj = self.eval_expr(obj_expr, scope, depth + 1)?;
+                match &obj {
+                    Value::Null => Ok(Value::Null),
+                    Value::Object(map) => Ok(map.get(field).cloned().unwrap_or(Value::Null)),
                     _ => Err(Error::Eval(format!(
                         "cannot access field '{field}' on non-object"
                     ))),
@@ -317,6 +454,19 @@ impl Evaluator {
         scope: &Scope,
         depth: usize,
     ) -> Result<Value> {
+        // Handle method calls: obj.method(args)
+        if let Expr::Field(obj_expr, method) = func_expr {
+            let obj = self.eval_expr(obj_expr, scope, depth + 1)?;
+            let evaled_args: Result<Vec<_>> = args
+                .iter()
+                .map(|a| self.eval_expr(a, scope, depth + 1))
+                .collect();
+            let evaled_args = evaled_args?;
+            if let Some(result) = self.eval_method_call(&obj, method, &evaled_args)? {
+                return Ok(result);
+            }
+        }
+
         // Handle built-in functions: List(), Listing(), Map()
         if let Expr::Ident(name) = func_expr {
             match name.as_str() {
@@ -353,14 +503,117 @@ impl Evaluator {
             }
         }
 
-        // Object amendment: `(Base) { overrides }` is parsed as Binop(Add, base, ObjectBody)
-        // Handle as a call on an object-returning expression
+        // Evaluate the function expression
         let func_val = self.eval_expr(func_expr, scope, depth + 1)?;
-        // If it's a plain call with no args on an object, return the object
+
+        // Lambda call
+        if let Value::Lambda(params, body, captured) = func_val {
+            let mut call_scope = Scope::default();
+            // Restore captured scope
+            for (k, v) in captured {
+                call_scope.set(k, v);
+            }
+            // Bind arguments to parameters
+            let evaled_args: Result<Vec<_>> = args
+                .iter()
+                .map(|a| self.eval_expr(a, scope, depth + 1))
+                .collect();
+            let evaled_args = evaled_args?;
+            for (param, arg) in params.iter().zip(evaled_args) {
+                call_scope.set(param.clone(), arg);
+            }
+            return self.eval_expr(&body, &call_scope, depth + 1);
+        }
+
+        // Plain call with no args on an object — return the object
         if args.is_empty() {
             return Ok(func_val);
         }
         Err(Error::Eval("cannot call non-function".into()))
+    }
+
+    fn eval_method_call(
+        &mut self,
+        obj: &Value,
+        method: &str,
+        args: &[Value],
+    ) -> Result<Option<Value>> {
+        match (obj, method) {
+            // String methods
+            (Value::String(s), "contains") => {
+                let arg = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                Ok(Some(Value::Bool(s.contains(arg))))
+            }
+            (Value::String(s), "startsWith") => {
+                let arg = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                Ok(Some(Value::Bool(s.starts_with(arg))))
+            }
+            (Value::String(s), "endsWith") => {
+                let arg = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                Ok(Some(Value::Bool(s.ends_with(arg))))
+            }
+            (Value::String(s), "replaceAll") => {
+                let from = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                let to = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
+                Ok(Some(Value::String(s.replace(from, to))))
+            }
+            (Value::String(s), "split") => {
+                let sep = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                Ok(Some(Value::List(
+                    s.split(sep).map(|p| Value::String(p.to_string())).collect(),
+                )))
+            }
+            (Value::String(s), "trim") => Ok(Some(Value::String(s.trim().to_string()))),
+            (Value::String(s), "trimStart") => Ok(Some(Value::String(s.trim_start().to_string()))),
+            (Value::String(s), "trimEnd") => Ok(Some(Value::String(s.trim_end().to_string()))),
+            (Value::String(s), "toUpperCase") => Ok(Some(Value::String(s.to_uppercase()))),
+            (Value::String(s), "toLowerCase") => Ok(Some(Value::String(s.to_lowercase()))),
+            (Value::String(s), "toInt") => s
+                .parse::<i64>()
+                .map(|n| Some(Value::Int(n)))
+                .map_err(|_| Error::Eval(format!("cannot convert '{s}' to Int"))),
+
+            // List methods
+            (Value::List(items), "contains") => {
+                let arg = args.first().cloned().unwrap_or(Value::Null);
+                Ok(Some(Value::Bool(items.contains(&arg))))
+            }
+            (Value::List(items), "toList") => Ok(Some(Value::List(items.clone()))),
+            (Value::List(items), "toSet") => {
+                let mut seen = Vec::new();
+                for item in items {
+                    if !seen.contains(item) {
+                        seen.push(item.clone());
+                    }
+                }
+                Ok(Some(Value::List(seen)))
+            }
+            (Value::List(items), "join") => {
+                let sep = args.first().and_then(|v| v.as_str()).unwrap_or(",");
+                let s: Vec<String> = items.iter().map(value_to_display).collect();
+                Ok(Some(Value::String(s.join(sep))))
+            }
+            (Value::List(items), "reverse") => {
+                let mut rev = items.clone();
+                rev.reverse();
+                Ok(Some(Value::List(rev)))
+            }
+
+            // Object/Mapping methods
+            (Value::Object(map), "containsKey") => {
+                let key = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                Ok(Some(Value::Bool(map.contains_key(key))))
+            }
+            (Value::Object(map), "toMap") => Ok(Some(Value::Object(map.clone()))),
+            (Value::Object(_), "toList") | (Value::Object(_), "toDynamic") => Ok(Some(obj.clone())),
+
+            // Int/Float methods
+            (Value::Int(n), "toString") => Ok(Some(Value::String(n.to_string()))),
+            (Value::Float(f), "toString") => Ok(Some(Value::String(f.to_string()))),
+            (Value::Bool(b), "toString") => Ok(Some(Value::String(b.to_string()))),
+
+            _ => Ok(None), // not a known method
+        }
     }
 
     fn eval_binop(
@@ -498,6 +751,16 @@ impl Scope {
         self.vars
             .get(name)
             .or_else(|| self.parent.as_ref().and_then(|p| p.get(name)))
+    }
+
+    fn flatten(&self) -> IndexMap<String, Value> {
+        let mut result = self
+            .parent
+            .as_ref()
+            .map(|p| p.flatten())
+            .unwrap_or_default();
+        result.extend(self.vars.clone());
+        result
     }
 }
 
