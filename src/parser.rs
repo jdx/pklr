@@ -411,6 +411,12 @@ impl<'a> Parser<'a> {
                 self.skip_declaration();
                 continue;
             }
+            // Also skip modifier-prefixed function/typealias declarations
+            if self.peek_is_modifier() && self.peek_past_modifiers_is_decl() {
+                self.skip_modifiers();
+                self.skip_declaration();
+                continue;
+            }
             if self.at_eof() || matches!(self.peek(), TokenKind::RBrace) {
                 break;
             }
@@ -454,49 +460,97 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    fn peek_is_modifier(&self) -> bool {
+        matches!(
+            self.peek(),
+            TokenKind::KwLocal
+                | TokenKind::KwConst
+                | TokenKind::KwFixed
+                | TokenKind::KwHidden
+                | TokenKind::KwAbstract
+                | TokenKind::KwOpen
+                | TokenKind::KwExternal
+        )
+    }
+
+    fn peek_past_modifiers_is_decl(&self) -> bool {
+        let mut i = self.pos;
+        while i < self.tokens.len() {
+            match &self.tokens[i].kind {
+                TokenKind::KwLocal
+                | TokenKind::KwConst
+                | TokenKind::KwFixed
+                | TokenKind::KwHidden
+                | TokenKind::KwAbstract
+                | TokenKind::KwOpen
+                | TokenKind::KwExternal => i += 1,
+                TokenKind::KwFunction | TokenKind::KwTypeAlias => return true,
+                _ => return false,
+            }
+        }
+        false
+    }
+
+    fn skip_modifiers(&mut self) {
+        while self.peek_is_modifier() {
+            self.advance();
+        }
+    }
+
     /// Skip a class, typealias, or function declaration.
     fn skip_declaration(&mut self) {
+        let start_line = self.peek_tok().line;
         self.advance(); // class/typealias/function keyword
-        // Skip until we find a balanced { } or = expr or next entry
-        let mut depth = 0;
+        let mut brace_depth = 0;
+        let mut paren_depth = 0;
         loop {
             if self.at_eof() {
                 break;
             }
             match self.peek() {
-                TokenKind::LBrace => {
-                    depth += 1;
+                TokenKind::LParen => {
+                    paren_depth += 1;
                     self.advance();
                 }
-                TokenKind::RBrace if depth > 0 => {
-                    depth -= 1;
+                TokenKind::RParen => {
+                    paren_depth -= 1;
                     self.advance();
-                    if depth == 0 {
+                }
+                TokenKind::LBrace => {
+                    brace_depth += 1;
+                    self.advance();
+                }
+                TokenKind::RBrace if brace_depth > 0 => {
+                    brace_depth -= 1;
+                    self.advance();
+                    if brace_depth == 0 {
                         break;
                     }
                 }
-                TokenKind::RBrace => break, // don't consume — belongs to parent
-                _ if depth == 0 => {
-                    // At top level of declaration: look for start of next entry
-                    // A declaration ends before annotations, keywords, or identifiers
-                    // that start new entries
-                    let next = self.peek().clone();
-                    if matches!(
-                        next,
-                        TokenKind::At
-                            | TokenKind::KwClass
-                            | TokenKind::KwTypeAlias
-                            | TokenKind::KwFunction
-                            | TokenKind::KwLocal
-                            | TokenKind::KwConst
-                            | TokenKind::KwFixed
-                            | TokenKind::KwHidden
-                            | TokenKind::KwAbstract
-                            | TokenKind::KwOpen
-                            | TokenKind::KwExternal
-                            | TokenKind::Ident(_)
-                    ) {
-                        break;
+                TokenKind::RBrace => break,
+                _ if brace_depth == 0 && paren_depth == 0 => {
+                    let tok = self.peek_tok();
+                    let on_new_line = tok.line > start_line && tok.line > self.last_line;
+                    if on_new_line {
+                        let next = self.peek().clone();
+                        if matches!(
+                            next,
+                            TokenKind::At
+                                | TokenKind::KwClass
+                                | TokenKind::KwTypeAlias
+                                | TokenKind::KwFunction
+                                | TokenKind::KwLocal
+                                | TokenKind::KwConst
+                                | TokenKind::KwFixed
+                                | TokenKind::KwHidden
+                                | TokenKind::KwAbstract
+                                | TokenKind::KwOpen
+                                | TokenKind::KwExternal
+                                | TokenKind::Ident(_)
+                                | TokenKind::LBracket
+                        ) {
+                            break;
+                        }
                     }
                     self.advance();
                 }
@@ -676,6 +730,24 @@ impl<'a> Parser<'a> {
 
     fn parse_type(&mut self) -> Result<TypeExpr> {
         let base = match self.peek().clone() {
+            TokenKind::LParen => {
+                self.advance();
+                let inner = self.parse_type()?;
+                self.expect(&TokenKind::RParen)?;
+                inner
+            }
+            TokenKind::StringLit(s) => {
+                self.advance();
+                TypeExpr::Named(s)
+            }
+            TokenKind::Null => {
+                self.advance();
+                TypeExpr::Named("Null".to_string())
+            }
+            TokenKind::KwModule => {
+                self.advance();
+                TypeExpr::Named("module".to_string())
+            }
             TokenKind::Ident(name) => {
                 self.advance();
                 if matches!(self.peek(), TokenKind::Lt) {

@@ -164,6 +164,7 @@ impl Evaluator {
             )));
         }
         let mut scope = Scope::default();
+        seed_builtins(&mut scope);
 
         // Process imports
         for import in &module.imports {
@@ -252,6 +253,17 @@ impl Evaluator {
                 continue;
             }
 
+            // Handle pkl: standard library imports
+            if let Some(module_name) = uri.strip_prefix("pkl:") {
+                let stdlib_val = stdlib_module(module_name);
+                let alias = import
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| module_name.to_string());
+                scope.set(alias, stdlib_val);
+                continue;
+            }
+
             // Skip other non-local imports
             if uri.contains("://") && !uri.starts_with("file://") {
                 continue;
@@ -318,7 +330,9 @@ impl Evaluator {
                         "unsupported package URI (only pkg.pkl-lang.org/github.com is supported): {uri}"
                     )));
                 }
-            } else if !uri.contains("://") || uri.starts_with("file://") {
+            } else if !uri.starts_with("pkl:")
+                && (!uri.contains("://") || uri.starts_with("file://"))
+            {
                 let amends_path = if let Some(rel) = uri.strip_prefix("file://") {
                     PathBuf::from(rel)
                 } else {
@@ -1050,6 +1064,15 @@ impl Evaluator {
                     }
                     return Ok(Value::List(items)); // treat Set as List
                 }
+                "Regex" => {
+                    if let Some(arg) = args.first() {
+                        let val = self.eval_expr(arg, scope, depth + 1).await?;
+                        let mut map = IndexMap::new();
+                        map.insert("pattern".to_string(), val);
+                        return Ok(Value::Object(map, None));
+                    }
+                    return Err(Error::Eval("Regex() requires a pattern argument".into()));
+                }
                 "Map" => {
                     // Map(k1, v1, k2, v2, ...)
                     let mut map = IndexMap::new();
@@ -1087,6 +1110,17 @@ impl Evaluator {
                 call_scope.set(param.clone(), arg);
             }
             return self.eval_expr(&body, &call_scope, depth + 1).await;
+        }
+
+        // Built-in type constructors resolved from scope (e.g. base.Regex)
+        if let Value::String(ref name) = func_val
+            && name == "Regex"
+            && let Some(arg) = args.first()
+        {
+            let val = self.eval_expr(arg, scope, depth + 1).await?;
+            let mut map = IndexMap::new();
+            map.insert("pattern".to_string(), val);
+            return Ok(Value::Object(map, None));
         }
 
         // Plain call with no args on an object — return the object
@@ -1617,7 +1651,10 @@ fn value_to_key(v: &Value) -> Result<String> {
         Value::String(s) => Ok(s.clone()),
         Value::Int(n) => Ok(n.to_string()),
         Value::Bool(b) => Ok(b.to_string()),
-        _ => Err(Error::Eval("mapping key must be a string or int".into())),
+        Value::Float(f) => Ok(f.to_string()),
+        Value::Object(_, _) | Value::List(_) | Value::Lambda(..) | Value::Null => {
+            Ok(value_to_display(v))
+        }
     }
 }
 
@@ -1794,6 +1831,28 @@ fn pathdiff_or_full(path: &Path, base: &Path) -> String {
         .unwrap_or(path)
         .to_string_lossy()
         .to_string()
+}
+
+fn stdlib_module(name: &str) -> Value {
+    let mut map = IndexMap::new();
+    if name == "base" {
+        map.insert("Regex".to_string(), Value::String("Regex".to_string()));
+    }
+    Value::Object(map, None)
+}
+
+fn seed_builtins(scope: &mut Scope) {
+    for name in [
+        "Regex",
+        "Dynamic",
+        "Annotation",
+        "Duration",
+        "DataSize",
+        "IntSeq",
+        "Pair",
+    ] {
+        scope.set(name.to_string(), Value::String(name.to_string()));
+    }
 }
 
 fn collection_to_items(v: Value) -> Vec<(Value, Value)> {
