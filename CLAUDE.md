@@ -30,7 +30,7 @@ Source (.pkl) → lexer.rs (tokens) → parser.rs (AST) → eval.rs (Value) → 
 ```
 
 - **`src/lib.rs`** — Public API: `eval_to_json(path)` and `analyze_imports(path)`
-- **`src/lexer.rs`** — Tokenizer. `TokenKind` enum with 80+ variants. Handles string literals (single-quote, triple-quote multiline), number formats (decimal, hex, octal, binary), comments, all Pkl operators
+- **`src/lexer.rs`** — Tokenizer. `TokenKind` enum with 80+ variants. Handles string literals (double-quoted, triple-quote multiline, custom delimiters `#"..."#`), number formats (decimal, hex, octal, binary), comments, all Pkl operators
 - **`src/parser.rs`** — Builds AST from tokens. Key types: `Module` (top-level file), `Entry` (property/generator/spread), `Expr` (all expression types), `Property` (named field with modifiers). Also has `collect_imports()` for fast import extraction without full parse
 - **`src/eval.rs`** — Runtime evaluator with scope chain. Two-pass evaluation: collects `local` variables first, then evaluates non-local entries. Max recursion depth of 32. Built-in functions: `List()`, `Map()`, `Set()`. Supports string interpolation, lambda expressions, method calls on values, import/amends resolution, and null-safe access
 - **`src/value.rs`** — `Value` enum (Null, Bool, Int, Float, String, Object, List). Uses `IndexMap` for ordered object keys. Converts to/from `serde_json::Value`

@@ -24,7 +24,7 @@ pklr implements a subset of the [Pkl language](https://pkl-lang.org/main/current
 | Strings (double-quoted, escape sequences `\t \n \r \" \\`) | Supported |
 | Multiline strings (`"""`) | Supported |
 | String interpolation (`\(expr)`) | Supported |
-| Custom string delimiters (`#"..."#`) | Not yet supported |
+| Custom string delimiters (`#"..."#`) | Supported |
 | Unicode escape sequences (`\u{...}`) | Not yet supported |
 | Durations (`5.min`, `3.s`, etc.) | Not supported |
 | Data sizes (`5.mb`, `3.gb`, etc.) | Not supported |
@@ -133,7 +133,6 @@ Planned features, roughly in priority order:
 
 Nice-to-have:
 
-- Custom string delimiters (`#"..."#`)
 - More stdlib methods (`.map()`, `.filter()`, `.fold()`, etc.)
 - `import*` glob imports
 - Package URI imports (`package://...`)
