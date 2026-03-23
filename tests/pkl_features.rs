@@ -1435,6 +1435,131 @@ x = new Config.Step {
 }
 
 // ============================================================
+// Class inheritance (extends) and super keyword
+// ============================================================
+
+#[test]
+fn class_extends_basic() {
+    let json = eval(
+        r#"
+class Animal {
+    name: String = "unknown"
+    legs: Int = 4
+}
+class Dog extends Animal {
+    breed: String = "mixed"
+}
+x = new Dog {
+    name = "Rex"
+}
+"#,
+    );
+    assert_eq!(json["x"]["name"], "Rex");
+    assert_eq!(json["x"]["legs"], 4);
+    assert_eq!(json["x"]["breed"], "mixed");
+}
+
+#[test]
+fn class_extends_override_parent_default() {
+    let json = eval(
+        r#"
+class Base {
+    port: Int = 8080
+    host: String = "localhost"
+}
+class Production extends Base {
+    port: Int = 443
+    tls: Boolean = true
+}
+x = new Production {}
+"#,
+    );
+    assert_eq!(json["x"]["port"], 443);
+    assert_eq!(json["x"]["host"], "localhost");
+    assert_eq!(json["x"]["tls"], true);
+}
+
+#[test]
+fn class_extends_instance_override() {
+    // Instance overrides both parent and child defaults
+    let json = eval(
+        r#"
+class Base {
+    x: Int = 1
+    y: Int = 2
+}
+class Child extends Base {
+    z: Int = 3
+}
+result = new Child {
+    x = 10
+    z = 30
+}
+"#,
+    );
+    assert_eq!(json["result"]["x"], 10);
+    assert_eq!(json["result"]["y"], 2);
+    assert_eq!(json["result"]["z"], 30);
+}
+
+#[test]
+fn super_keyword_basic() {
+    let json = eval(
+        r#"
+class Base {
+    greeting: String = "hello"
+}
+class Child extends Base {
+    greeting: String = super.greeting + " world"
+}
+x = new Child {}
+"#,
+    );
+    assert_eq!(json["x"]["greeting"], "hello world");
+}
+
+#[test]
+fn super_keyword_field_access() {
+    let json = eval(
+        r#"
+class Config {
+    port: Int = 8080
+    url: String = "http://localhost"
+}
+class AppConfig extends Config {
+    port: Int = 3000
+    url: String = super.url + ":\(port)"
+}
+x = new AppConfig {}
+"#,
+    );
+    assert_eq!(json["x"]["port"], 3000);
+    assert_eq!(json["x"]["url"], "http://localhost:3000");
+}
+
+#[test]
+fn class_extends_chain() {
+    // Three-level inheritance chain
+    let json = eval(
+        r#"
+class A {
+    x: Int = 1
+}
+class B extends A {
+    y: Int = 2
+}
+class C extends B {
+    z: Int = 3
+}
+result = new C {}
+"#,
+    );
+    assert_eq!(json["result"]["x"], 1);
+    assert_eq!(json["result"]["y"], 2);
+    assert_eq!(json["result"]["z"], 3);
+}
+
+// ============================================================
 // Durations
 // ============================================================
 
