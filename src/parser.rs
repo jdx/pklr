@@ -121,6 +121,8 @@ pub enum BinOp {
     Mul,
     Div,
     Mod,
+    IntDiv,
+    Pow,
     Eq,
     Ne,
     Lt,
@@ -130,12 +132,14 @@ pub enum BinOp {
     And,
     Or,
     NullCoalesce,
+    Pipe,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum UnOp {
     Neg,
     Not,
+    NonNull,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -676,7 +680,17 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_expr(&mut self) -> Result<Expr> {
-        self.parse_null_coalesce()
+        self.parse_pipe()
+    }
+
+    fn parse_pipe(&mut self) -> Result<Expr> {
+        let mut left = self.parse_null_coalesce()?;
+        while matches!(self.peek(), TokenKind::PipeGt) {
+            self.advance();
+            let right = self.parse_null_coalesce()?;
+            left = Expr::Binop(BinOp::Pipe, Box::new(left), Box::new(right));
+        }
+        Ok(left)
     }
 
     fn parse_null_coalesce(&mut self) -> Result<Expr> {
@@ -744,19 +758,32 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_mul(&mut self) -> Result<Expr> {
-        let mut left = self.parse_unary()?;
+        let mut left = self.parse_exp()?;
         loop {
             let op = match self.peek() {
                 TokenKind::Star => BinOp::Mul,
                 TokenKind::Slash => BinOp::Div,
                 TokenKind::Percent => BinOp::Mod,
+                TokenKind::TildeSlash => BinOp::IntDiv,
                 _ => break,
             };
             self.advance();
-            let right = self.parse_unary()?;
+            let right = self.parse_exp()?;
             left = Expr::Binop(op, Box::new(left), Box::new(right));
         }
         Ok(left)
+    }
+
+    fn parse_exp(&mut self) -> Result<Expr> {
+        let base = self.parse_unary()?;
+        if matches!(self.peek(), TokenKind::StarStar) {
+            self.advance();
+            // Right-associative: recurse into parse_exp
+            let exp = self.parse_exp()?;
+            Ok(Expr::Binop(BinOp::Pow, Box::new(base), Box::new(exp)))
+        } else {
+            Ok(base)
+        }
     }
 
     fn parse_unary(&mut self) -> Result<Expr> {
@@ -832,6 +859,10 @@ impl<'a> Parser<'a> {
                     self.advance();
                     let ty = self.parse_type()?;
                     expr = Expr::As(Box::new(expr), ty);
+                }
+                TokenKind::BangBang => {
+                    self.advance();
+                    expr = Expr::Unop(UnOp::NonNull, Box::new(expr));
                 }
                 _ => break,
             }

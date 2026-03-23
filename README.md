@@ -37,8 +37,8 @@ pklr implements a subset of the [Pkl language](https://pkl-lang.org/main/current
 | Feature | Status |
 |---|---|
 | Arithmetic (`+`, `-`, `*`, `/`, `%`) | Supported |
-| Integer division (`~/`) | Not supported |
-| Exponentiation (`**`) | Not supported |
+| Integer division (`~/`) | Supported |
+| Exponentiation (`**`) | Supported |
 | Comparison (`==`, `!=`, `<`, `>`, `<=`, `>=`) | Supported |
 | Logical (`&&`, `\|\|`, `!`) | Supported |
 | Null coalescing (`??`) | Supported |
@@ -46,8 +46,8 @@ pklr implements a subset of the [Pkl language](https://pkl-lang.org/main/current
 | List concatenation (`+`) | Supported |
 | Object merging (`+`) | Supported |
 | Null propagation (`?.`) | Supported |
-| Non-null assertion (`!!`) | Not supported |
-| Pipe operator (`\|>`) | Not supported |
+| Non-null assertion (`!!`) | Supported |
+| Pipe operator (`\|>`) | Supported |
 
 ### Objects, Listings & Mappings
 

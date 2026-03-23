@@ -35,7 +35,9 @@ pub enum TokenKind {
     QuestionQuestion, // ??
     QuestionDot,      // ?.
     Bang,             // !
+    BangBang,         // !!
     Pipe,             // |
+    PipeGt,           // |>
     Caret,            // ^
     At,               // @
 
@@ -51,6 +53,8 @@ pub enum TokenKind {
     Gt,
     LtEq,
     GtEq,
+    TildeSlash, // ~/
+    StarStar,   // **
     AmpAmp,
     PipePipe,
     Arrow,     // ->
@@ -506,6 +510,9 @@ impl<'a> Lexer<'a> {
                 if self.peek() == Some('=') {
                     self.advance();
                     TokenKind::BangEq
+                } else if self.peek() == Some('!') {
+                    self.advance();
+                    TokenKind::BangBang
                 } else {
                     TokenKind::Bang
                 }
@@ -515,6 +522,9 @@ impl<'a> Lexer<'a> {
                 if self.peek() == Some('|') {
                     self.advance();
                     TokenKind::PipePipe
+                } else if self.peek() == Some('>') {
+                    self.advance();
+                    TokenKind::PipeGt
                 } else {
                     TokenKind::Pipe
                 }
@@ -542,7 +552,12 @@ impl<'a> Lexer<'a> {
             }
             '*' => {
                 self.advance();
-                TokenKind::Star
+                if self.peek() == Some('*') {
+                    self.advance();
+                    TokenKind::StarStar
+                } else {
+                    TokenKind::Star
+                }
             }
             '/' => {
                 self.advance();
@@ -604,6 +619,15 @@ impl<'a> Lexer<'a> {
                         self.advance();
                     }
                     return self.read_one_token();
+                }
+            }
+            '~' => {
+                self.advance();
+                if self.peek() == Some('/') {
+                    self.advance();
+                    TokenKind::TildeSlash
+                } else {
+                    return Err(self.lex_error("unexpected '~'"));
                 }
             }
             c if c.is_ascii_digit() => {

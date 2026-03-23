@@ -455,6 +455,15 @@ impl Evaluator {
                         _ => Err(Error::Eval("cannot negate non-number".into())),
                     },
                     UnOp::Not => Ok(Value::Bool(!is_truthy(&v))),
+                    UnOp::NonNull => {
+                        if matches!(v, Value::Null) {
+                            Err(Error::Eval(
+                                "non-null assertion failed: value is null".into(),
+                            ))
+                        } else {
+                            Ok(v)
+                        }
+                    }
                 }
             }
             Expr::Is(expr, _ty) => {
@@ -819,11 +828,59 @@ impl Evaluator {
             BinOp::Ge => compare_or_eq(l, r, std::cmp::Ordering::Greater),
             BinOp::And => Ok(Value::Bool(is_truthy(&l) && is_truthy(&r))),
             BinOp::Or => Ok(Value::Bool(is_truthy(&l) || is_truthy(&r))),
+            BinOp::IntDiv => arithmetic(
+                l,
+                r,
+                |a, b| {
+                    if b == 0 {
+                        Err(Error::Eval("division by zero".into()))
+                    } else {
+                        Ok(a / b)
+                    }
+                },
+                |a, b| Ok((a / b).floor()),
+            ),
+            BinOp::Pow => arithmetic(
+                l,
+                r,
+                |a, b| {
+                    if b < 0 {
+                        Err(Error::Eval(
+                            "integer exponentiation with negative exponent is not supported".into(),
+                        ))
+                    } else {
+                        Ok(a.pow(b as u32))
+                    }
+                },
+                |a, b| Ok(a.powf(b)),
+            ),
             BinOp::NullCoalesce => {
                 if matches!(l, Value::Null) {
                     Ok(r)
                 } else {
                     Ok(l)
+                }
+            }
+            BinOp::Pipe => {
+                // x |> f  is equivalent to  f(x)
+                match r {
+                    Value::Lambda(params, body, captured) => {
+                        if params.len() != 1 {
+                            return Err(Error::Eval(format!(
+                                "pipe operator requires a single-parameter function, got {}",
+                                params.len()
+                            )));
+                        }
+                        let mut call_scope = Scope::default();
+                        for (k, v) in captured {
+                            call_scope.set(k, v);
+                        }
+                        call_scope.set(params[0].clone(), l);
+                        self.eval_expr(&body, &call_scope, depth + 1)
+                    }
+                    _ => Err(Error::Eval(
+                        "pipe operator requires a function on the right side".into(),
+                    )),
                 }
             }
         }
