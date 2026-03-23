@@ -23,7 +23,7 @@ pklr implements a subset of the [Pkl language](https://pkl-lang.org/main/current
 | Null | Supported |
 | Strings (double-quoted, escape sequences `\t \n \r \" \\`) | Supported |
 | Multiline strings (`"""`) | Supported |
-| String interpolation (`\(expr)`) | Not yet supported |
+| String interpolation (`\(expr)`) | Supported |
 | Custom string delimiters (`#"..."#`) | Not yet supported |
 | Unicode escape sequences (`\u{...}`) | Not yet supported |
 | Durations (`5.min`, `3.s`, etc.) | Not supported |
@@ -43,7 +43,7 @@ pklr implements a subset of the [Pkl language](https://pkl-lang.org/main/current
 | String concatenation (`+`) | Supported |
 | List concatenation (`+`) | Supported |
 | Object merging (`+`) | Supported |
-| Null propagation (`?.`) | Not yet supported |
+| Null propagation (`?.`) | Supported |
 | Non-null assertion (`!!`) | Not supported |
 | Pipe operator (`\|>`) | Not supported |
 
@@ -57,7 +57,7 @@ pklr implements a subset of the [Pkl language](https://pkl-lang.org/main/current
 | `new Mapping { ... }` | Supported |
 | `Map(k1, v1, k2, v2)` | Supported |
 | `List(...)` / `Listing(...)` | Supported |
-| `new Listing { ... }` body syntax | Not yet supported |
+| `new Listing { ... }` body syntax | Supported |
 | `Set(...)` | Parsed (treated as List) |
 | Object amendment (`(base) { overrides }`) | Not yet supported |
 | Spread operator (`...expr`) | Supported |
@@ -89,8 +89,8 @@ pklr implements a subset of the [Pkl language](https://pkl-lang.org/main/current
 
 | Feature | Status |
 |---|---|
-| `import` / `amends` parsing | Parsed |
-| Import resolution & evaluation | Not yet supported |
+| `import` / `amends` | Supported (local files) |
+| Import resolution & evaluation | Supported (local files) |
 | `import*` (globbed imports) | Not supported |
 | `extends` | Not supported |
 | `module` keyword | Not supported |
@@ -101,8 +101,8 @@ pklr implements a subset of the [Pkl language](https://pkl-lang.org/main/current
 |---|---|
 | Class definitions (`class Foo { ... }`) | Not yet supported |
 | Class inheritance | Not supported |
-| Methods and member access (`.length`, `.isEmpty`) | Not yet supported |
-| Anonymous functions / lambdas (`(x) -> x * 2`) | Not yet supported |
+| Methods and member access (`.length`, `.isEmpty`, `.contains()`, etc.) | Supported |
+| Anonymous functions / lambdas (`(x) -> x * 2`) | Supported |
 | `this` / `outer` keywords | Not yet supported |
 | `super` keyword | Not supported |
 
@@ -125,23 +125,18 @@ The following Pkl features are not currently implemented:
 
 Planned features, roughly in priority order:
 
-1. String interpolation (`\(expr)`)
-2. Import resolution and evaluation
-3. `new Listing { ... }` body syntax
-4. Object amendment (`(base) { overrides }`)
-5. Method calls on values (`.length`, `.isEmpty`, etc.)
-6. `this` / `outer` keywords
-7. Class definitions with defaults (`class Foo { name: String = "default" }`)
-8. Null-safe access (`?.`)
-9. Module header — parse and skip gracefully
-10. Annotations (`@Foo`) — parse and skip
+1. Object amendment (`(base) { overrides }`)
+2. `this` / `outer` keywords
+3. Class definitions with defaults (`class Foo { name: String = "default" }`)
+4. Module header — parse and skip gracefully
+5. Annotations (`@Foo`) — parse and skip
 
 Nice-to-have:
 
-- Anonymous functions / lambdas (`(x) -> x * 2`)
 - Custom string delimiters (`#"..."#`)
 - More stdlib methods (`.map()`, `.filter()`, `.fold()`, etc.)
 - `import*` glob imports
+- Package URI imports (`package://...`)
 - Type checking / validation
 
 ## Usage
