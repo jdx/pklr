@@ -394,6 +394,14 @@ impl Evaluator {
                     (Value::Object(map), "values") => {
                         return Ok(Value::List(map.values().cloned().collect()));
                     }
+                    // Duration and DataSize units on numbers
+                    (
+                        Value::Int(_) | Value::Float(_),
+                        "ns" | "us" | "ms" | "s" | "min" | "h" | "d" | "b" | "kb" | "mb" | "gb"
+                        | "tb" | "pb" | "kib" | "mib" | "gib" | "tib" | "pib",
+                    ) => {
+                        return Ok(make_unit_object(obj, field));
+                    }
                     _ => {}
                 }
                 match &obj {
@@ -1113,6 +1121,13 @@ fn merge_values(base: Value, overlay: Value) -> Value {
         }
         (_, overlay) => overlay,
     }
+}
+
+fn make_unit_object(value: Value, unit: &str) -> Value {
+    let mut map = IndexMap::new();
+    map.insert("value".to_string(), value);
+    map.insert("unit".to_string(), Value::String(unit.to_string()));
+    Value::Object(map)
 }
 
 fn collection_to_items(v: Value) -> Vec<(Value, Value)> {
