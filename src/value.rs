@@ -2,6 +2,10 @@ use indexmap::IndexMap;
 use serde_json::json;
 
 /// A pkl runtime value.
+///
+/// Pkl's `Mapping` type (arbitrary key→value) is represented as `Object` when
+/// keys are strings — which is the only case supported by JSON output. All
+/// `new Mapping { ["key"] = ... }` expressions therefore produce `Object`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Null,
@@ -9,39 +13,30 @@ pub enum Value {
     Int(i64),
     Float(f64),
     String(String),
-    /// Object (mapping of string keys to values), ordered
+    /// Object (ordered string-keyed map). Represents both pkl objects and
+    /// string-keyed Mappings.
     Object(IndexMap<String, Value>),
-    /// Listing (ordered list)
+    /// Listing (ordered list).
     List(Vec<Value>),
-    /// Mapping (arbitrary key->value)
-    Mapping(Vec<(Value, Value)>),
 }
 
 impl Value {
     pub fn to_json(&self) -> serde_json::Value {
         match self {
-            Value::Null           => serde_json::Value::Null,
-            Value::Bool(b)        => json!(b),
-            Value::Int(n)         => json!(n),
-            Value::Float(f)       => json!(f),
-            Value::String(s)      => json!(s),
-            Value::Object(map)    => {
+            Value::Null        => serde_json::Value::Null,
+            Value::Bool(b)     => json!(b),
+            Value::Int(n)      => json!(n),
+            Value::Float(f)    => json!(f),
+            Value::String(s)   => json!(s),
+            Value::Object(map) => {
                 let mut obj = serde_json::Map::new();
                 for (k, v) in map {
                     obj.insert(k.clone(), v.to_json());
                 }
                 serde_json::Value::Object(obj)
             }
-            Value::List(items)    => {
+            Value::List(items) => {
                 serde_json::Value::Array(items.iter().map(|v| v.to_json()).collect())
-            }
-            Value::Mapping(pairs) => {
-                // Mapping with non-string keys: serialize as array of [k, v] pairs
-                serde_json::Value::Array(
-                    pairs.iter()
-                        .map(|(k, v)| json!([k.to_json(), v.to_json()]))
-                        .collect()
-                )
             }
         }
     }
