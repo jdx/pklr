@@ -612,7 +612,7 @@ fn lambda_basic() {
     let json = eval(
         r#"
 local double = (x) -> x * 2
-result = double(5)
+result = double.apply(5)
 "#,
     );
     assert_eq!(json["result"], 10);
@@ -623,7 +623,7 @@ fn lambda_two_params() {
     let json = eval(
         r#"
 local add = (a, b) -> a + b
-result = add(3, 4)
+result = add.apply(3, 4)
 "#,
     );
     assert_eq!(json["result"], 7);
@@ -635,7 +635,7 @@ fn lambda_captures_scope() {
         r#"
 local multiplier = 3
 local mul = (x) -> x * multiplier
-result = mul(5)
+result = mul.apply(5)
 "#,
     );
     assert_eq!(json["result"], 15);
