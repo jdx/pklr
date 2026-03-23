@@ -713,7 +713,6 @@ name = "override"
 // ============================================================
 
 #[test]
-#[ignore = "class definitions not yet implemented"]
 fn class_new_with_defaults() {
     let json = eval(
         r#"
@@ -862,4 +861,77 @@ x = (base) {
     );
     assert_eq!(json["x"]["a"]["value"], 2);
     assert_eq!(json["x"]["b"]["value"], 3);
+}
+
+// ============================================================
+// this / outer keywords
+// ============================================================
+
+#[test]
+fn outer_keyword() {
+    let json = eval(
+        r#"
+local prefix = "test"
+data {
+    local before = "\(prefix)-data"
+    inner {
+        name = outer.before
+    }
+}
+"#,
+    );
+    assert_eq!(json["data"]["inner"]["name"], "test-data");
+}
+
+// ============================================================
+// Class definitions
+// ============================================================
+
+#[test]
+fn class_multiple_defaults() {
+    let json = eval(
+        r#"
+class Config {
+    debug: Boolean = false
+    port: Int = 8080
+    host: String = "localhost"
+}
+x = new Config {
+    debug = true
+}
+"#,
+    );
+    assert_eq!(json["x"]["debug"], true);
+    assert_eq!(json["x"]["port"], 8080);
+    assert_eq!(json["x"]["host"], "localhost");
+}
+
+#[test]
+fn class_defaults_reference_locals() {
+    let json = eval(
+        r#"
+local DEFAULT_PORT = 8080
+
+class Config {
+    port: Int = DEFAULT_PORT
+}
+x = new Config {}
+"#,
+    );
+    assert_eq!(json["x"]["port"], 8080);
+}
+
+#[test]
+fn class_with_type_params() {
+    let json = eval(
+        r#"
+class Container<T> {
+    value: T = "default"
+}
+x = new Container {
+    value = "custom"
+}
+"#,
+    );
+    assert_eq!(json["x"]["value"], "custom");
 }
