@@ -113,9 +113,10 @@ pklr implements a subset of the [Pkl language](https://pkl-lang.org/main/current
 | `.startsWith()`, `.endsWith()`, `.replaceAll()` | Supported |
 | `.toMap()`, `.toList()`, `.toDynamic()`, `.mapValues()` | Supported |
 | `.toString()`, `.toInt()` | Supported |
-| Class definitions (`class Foo { ... }`) | Not yet supported |
+| Class definitions with defaults | Supported |
 | Class inheritance | Not supported |
-| `this` / `outer` keywords | Not yet supported |
+| `outer` keyword | Supported |
+| `this` keyword | Not yet supported |
 | `super` keyword | Not supported |
 
 ### Annotations & Declarations
@@ -123,7 +124,7 @@ pklr implements a subset of the [Pkl language](https://pkl-lang.org/main/current
 | Feature | Status |
 |---|---|
 | Annotations (`@Deprecated`, `@ModuleInfo`, etc.) | Parsed and skipped |
-| Class declarations | Parsed and skipped |
+| Class declarations | Parsed and evaluated (defaults extracted) |
 | Type alias declarations | Parsed and skipped |
 | Function declarations | Parsed and skipped |
 
@@ -145,10 +146,10 @@ The following Pkl features are not currently implemented:
 
 Planned features:
 
-1. `this` / `outer` keywords
-2. Class definitions with defaults (`class Foo { name: String = "default" }`)
-3. `import*` glob imports
-4. Package URI imports (`package://...`)
+1. `this` keyword (self-referencing within objects)
+2. `import*` glob imports
+3. Package URI imports (`package://...`)
+4. Class inheritance (`extends`)
 
 ## Usage
 

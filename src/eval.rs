@@ -124,6 +124,13 @@ impl Evaluator {
                 scope.set(prop.name.clone(), val);
             }
         }
+        // Collect class definitions into module scope (after locals so defaults can reference them)
+        for entry in &module.body {
+            if let Entry::ClassDef(name, body) = entry {
+                let defaults = self.eval_entries(body, &scope, depth + 1)?;
+                scope.set(name.clone(), defaults);
+            }
+        }
 
         // Second pass: evaluate non-local entries into output object
         let mut out = base_obj;
@@ -165,6 +172,9 @@ impl Evaluator {
 
     fn eval_entries(&mut self, entries: &[Entry], scope: &Scope, depth: usize) -> Result<Value> {
         let mut child_scope = scope.child();
+        // Set `outer` to a snapshot of the parent scope's variables as an object
+        let outer_obj = Value::Object(scope.flatten());
+        child_scope.set("outer".into(), outer_obj);
         // First pass: collect locals
         for entry in entries {
             if let Entry::Property(prop) = entry
@@ -176,6 +186,13 @@ impl Evaluator {
             {
                 let val = self.eval_expr(expr, &child_scope, depth)?;
                 child_scope.set(prop.name.clone(), val);
+            }
+        }
+        // Collect class definitions into scope (after locals so defaults can reference them)
+        for entry in entries {
+            if let Entry::ClassDef(name, body) = entry {
+                let defaults = self.eval_entries(body, &child_scope, depth + 1)?;
+                child_scope.set(name.clone(), defaults);
             }
         }
 
@@ -236,6 +253,7 @@ impl Evaluator {
                     }
                 }
                 Entry::Elem(_) => {} // bare elements only valid in Listing bodies
+                Entry::ClassDef(..) => {} // handled in scope setup
             }
         }
         Ok(Value::Object(map))
@@ -328,8 +346,18 @@ impl Evaluator {
                         Ok(Value::Object(map))
                     }
                     _ => {
-                        // Generic new: treat as object
-                        self.eval_entries(entries, scope, depth + 1)
+                        // Check if type name matches a class in scope
+                        let base = type_name.as_ref().and_then(|name| scope.get(name)).cloned();
+                        let overlay = self.eval_entries(entries, scope, depth + 1)?;
+                        if let Some(Value::Object(base_map)) = base {
+                            let mut merged = base_map;
+                            if let Value::Object(overlay_map) = overlay {
+                                merged.extend(overlay_map);
+                            }
+                            Ok(Value::Object(merged))
+                        } else {
+                            Ok(overlay)
+                        }
                     }
                 }
             }
