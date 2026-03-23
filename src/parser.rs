@@ -1,22 +1,28 @@
 use crate::error::{Error, Result};
 use crate::lexer::{Token, TokenKind};
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum StringInterpPart {
+    Literal(String),
+    Expr(Expr),
+}
+
 /// A pkl module (top-level file).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Module {
     pub amends: Option<String>,
     pub imports: Vec<Import>,
     pub body: Vec<Entry>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Import {
     pub uri: String,
     pub alias: Option<String>,
 }
 
 /// A top-level or object entry.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Entry {
     /// `key = expr` or `key: Type = expr`
     Property(Property),
@@ -28,9 +34,11 @@ pub enum Entry {
     WhenGenerator(WhenGenerator),
     /// `...spread`
     Spread(Expr),
+    /// Bare element expression (used in Listing bodies)
+    Elem(Expr),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Property {
     pub modifiers: Vec<Modifier>,
     pub name: String,
@@ -40,7 +48,7 @@ pub struct Property {
     pub body: Option<Vec<Entry>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Modifier {
     Local,
     Const,
@@ -51,7 +59,7 @@ pub enum Modifier {
     External,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TypeExpr {
     Named(String),
     Nullable(Box<TypeExpr>),
@@ -60,7 +68,7 @@ pub enum TypeExpr {
 }
 
 /// An expression.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Null,
     Bool(bool),
@@ -90,6 +98,12 @@ pub enum Expr {
     Unop(UnOp, Box<Expr>),
     /// Object/listing literal — anonymous `{ ... }`
     ObjectBody(Vec<Entry>),
+    /// String interpolation: alternating literal strings and expressions
+    StringInterpolation(Vec<StringInterpPart>),
+    /// Null-safe field access: `expr?.field`
+    NullSafeField(Box<Expr>, String),
+    /// Lambda: `(params) -> body`
+    Lambda(Vec<String>, Box<Expr>),
     /// `throw("msg")`
     Throw(Box<Expr>),
     /// `trace(expr)`
@@ -98,7 +112,7 @@ pub enum Expr {
     Read(Box<Expr>),
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BinOp {
     Add,
     Sub,
@@ -116,13 +130,13 @@ pub enum BinOp {
     NullCoalesce,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum UnOp {
     Neg,
     Not,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ForGenerator {
     pub key_var: Option<String>,
     pub val_var: String,
@@ -130,7 +144,7 @@ pub struct ForGenerator {
     pub body: Vec<Entry>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WhenGenerator {
     pub condition: Expr,
     pub body: Vec<Entry>,
@@ -162,6 +176,11 @@ pub fn parse(tokens: &[Token]) -> Result<Module> {
 pub fn parse_named(tokens: &[Token], source: &str, name: &str) -> Result<Module> {
     let mut p = Parser::new(tokens, source, name);
     p.parse_module()
+}
+
+pub fn parse_expr_tokens(tokens: &[Token], source: &str, name: &str) -> Result<Expr> {
+    let mut p = Parser::new(tokens, source, name);
+    p.parse_expr()
 }
 
 struct Parser<'a> {
@@ -340,6 +359,29 @@ impl<'a> Parser<'a> {
                 Ok(Entry::Spread(expr))
             }
             _ => {
+                // Check for bare element (used in Listing bodies): literal values,
+                // or identifiers not followed by = or { or : (which would be properties)
+                let is_bare_literal = matches!(
+                    self.peek(),
+                    TokenKind::StringLit(_)
+                        | TokenKind::InterpolatedString(_)
+                        | TokenKind::IntLit(_)
+                        | TokenKind::FloatLit(_)
+                        | TokenKind::BoolLit(_)
+                        | TokenKind::Null
+                        | TokenKind::KwNew
+                );
+                let is_bare_ident = matches!(self.peek(), TokenKind::Ident(_))
+                    && self.pos + 1 < self.tokens.len()
+                    && !matches!(
+                        self.tokens[self.pos + 1].kind,
+                        TokenKind::Equals | TokenKind::LBrace | TokenKind::Colon
+                    );
+                if is_bare_literal || is_bare_ident {
+                    let expr = self.parse_expr()?;
+                    return Ok(Entry::Elem(expr));
+                }
+
                 // Property: [modifiers] name [: Type] [= expr | { body }]
                 let mut modifiers = Vec::new();
                 loop {
@@ -559,6 +601,11 @@ impl<'a> Parser<'a> {
                     let field = self.expect_ident()?;
                     expr = Expr::Field(Box::new(expr), field);
                 }
+                TokenKind::QuestionDot => {
+                    self.advance();
+                    let field = self.expect_ident()?;
+                    expr = Expr::NullSafeField(Box::new(expr), field);
+                }
                 TokenKind::LBracket => {
                     // Only treat as indexing if on the same line as the expression.
                     // A `[` on a new line is a new dynamic entry, not indexing.
@@ -633,8 +680,38 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Expr::String(s))
             }
-            TokenKind::LParen => {
+            TokenKind::InterpolatedString(parts) => {
                 self.advance();
+                let mut interp_parts = Vec::new();
+                for part in parts {
+                    match part {
+                        crate::lexer::StringPart::Literal(s) => {
+                            interp_parts.push(StringInterpPart::Literal(s));
+                        }
+                        crate::lexer::StringPart::Tokens(tokens) => {
+                            let expr = parse_expr_tokens(&tokens, &self.source, &self.name)?;
+                            interp_parts.push(StringInterpPart::Expr(expr));
+                        }
+                    }
+                }
+                Ok(Expr::StringInterpolation(interp_parts))
+            }
+            TokenKind::LParen => {
+                // Try to parse as lambda: (params) -> body
+                let saved_pos = self.pos;
+                let saved_last_line = self.last_line;
+                self.advance(); // consume (
+                if let Some(params) = self.try_parse_lambda_params()
+                    && matches!(self.peek(), TokenKind::Arrow)
+                {
+                    self.advance(); // consume ->
+                    let body = self.parse_expr()?;
+                    return Ok(Expr::Lambda(params, Box::new(body)));
+                }
+                // Not a lambda — restore and parse as parenthesized expression
+                self.pos = saved_pos;
+                self.last_line = saved_last_line;
+                self.advance(); // consume (
                 let e = self.parse_expr()?;
                 self.expect(&TokenKind::RParen)?;
                 Ok(e)
@@ -703,6 +780,39 @@ impl<'a> Parser<'a> {
                 Ok(Expr::Ident(name))
             }
             tok => Err(self.parse_error(format!("unexpected token in expression: {:?}", tok))),
+        }
+    }
+
+    /// Try to parse `ident, ident, ...) ` — returns None if not a valid lambda param list.
+    fn try_parse_lambda_params(&mut self) -> Option<Vec<String>> {
+        let mut params = Vec::new();
+        // Handle () -> expr (no params)
+        if matches!(self.peek(), TokenKind::RParen) {
+            self.advance();
+            return Some(params);
+        }
+        // First param
+        if let TokenKind::Ident(name) = self.peek().clone() {
+            self.advance();
+            params.push(name);
+        } else {
+            return None;
+        }
+        // Remaining params
+        while matches!(self.peek(), TokenKind::Comma) {
+            self.advance();
+            if let TokenKind::Ident(name) = self.peek().clone() {
+                self.advance();
+                params.push(name);
+            } else {
+                return None;
+            }
+        }
+        if matches!(self.peek(), TokenKind::RParen) {
+            self.advance();
+            Some(params)
+        } else {
+            None
         }
     }
 
