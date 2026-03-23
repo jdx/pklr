@@ -90,7 +90,7 @@ pklr implements a subset of the [Pkl language](https://pkl-lang.org/main/current
 | `abstract` modifier (must be overridden) | Supported |
 | `fixed` modifier (cannot override) | Supported |
 | `external` modifier (must be assigned) | Supported |
-| `open` modifier | Parsed (no-op at eval time) |
+| `open` modifier (allows new properties in subclasses) | Supported |
 
 ### Modules & Imports
 

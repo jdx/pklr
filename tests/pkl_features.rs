@@ -2578,3 +2578,95 @@ fn set_empty() {
     let json = eval(r#"x = Set()"#);
     assert_eq!(json["x"], serde_json::json!([]));
 }
+
+// ============================================================
+// open modifier
+// ============================================================
+
+#[test]
+fn open_class_allows_new_properties() {
+    let json = eval(
+        r#"
+open class Config {
+    port: Int = 8080
+}
+x = new Config {
+    port = 9090
+    host = "localhost"
+}
+"#,
+    );
+    assert_eq!(json["x"]["port"], 9090);
+    assert_eq!(json["x"]["host"], "localhost");
+}
+
+#[test]
+fn non_open_class_rejects_new_properties() {
+    let msg = eval_fails(
+        r#"
+class Config {
+    port: Int = 8080
+}
+x = new Config {
+    port = 9090
+    host = "localhost"
+}
+"#,
+    );
+    assert!(msg.contains("non-open"));
+    assert!(msg.contains("host"));
+}
+
+#[test]
+fn non_open_class_rejects_dyn_property() {
+    let msg = eval_fails(
+        r#"
+class Config {
+    port: Int = 8080
+}
+x = new Config {
+    ["host"] = "localhost"
+}
+"#,
+    );
+    assert!(msg.contains("non-open"));
+    assert!(msg.contains("host"));
+}
+
+#[test]
+fn non_open_class_preserves_constraint_on_re_instantiation() {
+    // After instantiating a non-open class, the is_open=false flag must be
+    // preserved so that re-using the result as a base still enforces the constraint.
+    let msg = eval_fails(
+        r#"
+class Config {
+    port: Int = 8080
+}
+base = new Config { port = 9090 }
+x = new Config {
+    port = base.port
+    host = "bad"
+}
+"#,
+    );
+    assert!(msg.contains("non-open"));
+    assert!(msg.contains("host"));
+}
+
+#[test]
+fn non_open_class_allows_overrides() {
+    let json = eval(
+        r#"
+class Config {
+    port: Int = 8080
+    debug: Boolean = false
+}
+x = new Config {
+    port = 9090
+    debug = true
+}
+"#,
+    );
+    assert_eq!(json["x"]["port"], 9090);
+    assert_eq!(json["x"]["debug"], true);
+}
