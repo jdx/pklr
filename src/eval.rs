@@ -595,6 +595,80 @@ impl Evaluator {
                 }
                 Ok(Some(Value::List(seen)))
             }
+            (Value::List(items), "map") => {
+                let lambda = args
+                    .first()
+                    .ok_or_else(|| Error::Eval("map requires a function argument".into()))?;
+                let mut result = Vec::new();
+                for item in items {
+                    result.push(self.invoke_lambda(lambda, std::slice::from_ref(item))?);
+                }
+                Ok(Some(Value::List(result)))
+            }
+            (Value::List(items), "flatMap") => {
+                let lambda = args
+                    .first()
+                    .ok_or_else(|| Error::Eval("flatMap requires a function argument".into()))?;
+                let mut result = Vec::new();
+                for item in items {
+                    let val = self.invoke_lambda(lambda, std::slice::from_ref(item))?;
+                    if let Value::List(inner) = val {
+                        result.extend(inner);
+                    } else {
+                        result.push(val);
+                    }
+                }
+                Ok(Some(Value::List(result)))
+            }
+            (Value::List(items), "filter") => {
+                let lambda = args
+                    .first()
+                    .ok_or_else(|| Error::Eval("filter requires a function argument".into()))?;
+                let mut result = Vec::new();
+                for item in items {
+                    let cond = self.invoke_lambda(lambda, std::slice::from_ref(item))?;
+                    if is_truthy(&cond) {
+                        result.push(item.clone());
+                    }
+                }
+                Ok(Some(Value::List(result)))
+            }
+            (Value::List(items), "fold") => {
+                let init = args
+                    .first()
+                    .ok_or_else(|| Error::Eval("fold requires initial value".into()))?
+                    .clone();
+                let lambda = args
+                    .get(1)
+                    .ok_or_else(|| Error::Eval("fold requires a function argument".into()))?;
+                let mut acc = init;
+                for item in items {
+                    acc = self.invoke_lambda(lambda, &[acc, item.clone()])?;
+                }
+                Ok(Some(acc))
+            }
+            (Value::List(items), "any") => {
+                let lambda = args
+                    .first()
+                    .ok_or_else(|| Error::Eval("any requires a function argument".into()))?;
+                for item in items {
+                    if is_truthy(&self.invoke_lambda(lambda, std::slice::from_ref(item))?) {
+                        return Ok(Some(Value::Bool(true)));
+                    }
+                }
+                Ok(Some(Value::Bool(false)))
+            }
+            (Value::List(items), "every") => {
+                let lambda = args
+                    .first()
+                    .ok_or_else(|| Error::Eval("every requires a function argument".into()))?;
+                for item in items {
+                    if !is_truthy(&self.invoke_lambda(lambda, std::slice::from_ref(item))?) {
+                        return Ok(Some(Value::Bool(false)));
+                    }
+                }
+                Ok(Some(Value::Bool(true)))
+            }
             (Value::List(items), "join") => {
                 let sep = args.first().and_then(|v| v.as_str()).unwrap_or(",");
                 let s: Vec<String> = items.iter().map(value_to_display).collect();
@@ -612,6 +686,18 @@ impl Evaluator {
                 Ok(Some(Value::Bool(map.contains_key(key))))
             }
             (Value::Object(map), "toMap") => Ok(Some(Value::Object(map.clone()))),
+            (Value::Object(map), "mapValues") => {
+                let lambda = args
+                    .first()
+                    .ok_or_else(|| Error::Eval("mapValues requires a function".into()))?;
+                let mut result = IndexMap::new();
+                for (k, v) in map {
+                    let new_v =
+                        self.invoke_lambda(lambda, &[Value::String(k.clone()), v.clone()])?;
+                    result.insert(k.clone(), new_v);
+                }
+                Ok(Some(Value::Object(result)))
+            }
             (Value::Object(_), "toList") | (Value::Object(_), "toDynamic") => Ok(Some(obj.clone())),
 
             // Int/Float methods
@@ -632,6 +718,21 @@ impl Evaluator {
             }
 
             _ => Ok(None), // not a known method
+        }
+    }
+
+    fn invoke_lambda(&mut self, lambda: &Value, args: &[Value]) -> Result<Value> {
+        if let Value::Lambda(params, body, captured) = lambda {
+            let mut scope = Scope::default();
+            for (k, v) in captured {
+                scope.set(k.clone(), v.clone());
+            }
+            for (param, arg) in params.iter().zip(args.iter()) {
+                scope.set(param.clone(), arg.clone());
+            }
+            self.eval_expr(body, &scope, 0)
+        } else {
+            Err(Error::Eval("expected a function".into()))
         }
     }
 

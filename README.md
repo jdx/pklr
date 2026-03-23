@@ -7,7 +7,9 @@ No external binary or CLI required.
 
 - Lexer, parser, and evaluator written entirely in Rust
 - Evaluates `.pkl` files to `serde_json::Value`
-- Import analysis for cache invalidation
+- Import and amends resolution for local files
+- String interpolation, lambdas, higher-order methods
+- Rich error diagnostics via [miette](https://crates.io/crates/miette)
 
 ## Supported Pkl Subset
 
@@ -59,7 +61,7 @@ pklr implements a subset of the [Pkl language](https://pkl-lang.org/main/current
 | `List(...)` / `Listing(...)` | Supported |
 | `new Listing { ... }` body syntax | Supported |
 | `Set(...)` | Parsed (treated as List) |
-| Object amendment (`(base) { overrides }`) | Not yet supported |
+| Object amendment (`(base) { overrides }`) | Supported |
 | Spread operator (`...expr`) | Supported |
 | Late binding | Not supported |
 | Default elements/values | Not supported |
@@ -91,29 +93,47 @@ pklr implements a subset of the [Pkl language](https://pkl-lang.org/main/current
 |---|---|
 | `import` / `amends` | Supported (local files) |
 | Import resolution & evaluation | Supported (local files) |
+| `module` keyword | Supported (parsed and skipped) |
 | `import*` (globbed imports) | Not supported |
 | `extends` | Not supported |
-| `module` keyword | Not supported |
 
-### Classes & Methods
+### Functions & Methods
 
 | Feature | Status |
 |---|---|
+| Anonymous functions / lambdas (`(x) -> x * 2`) | Supported |
+| Lambda invocation via `.apply()` | Supported |
+| `.length`, `.isEmpty`, `.first`, `.last` | Supported |
+| `.contains()`, `.containsKey()` | Supported |
+| `.keys`, `.values` | Supported |
+| `.map()`, `.filter()`, `.fold()` | Supported |
+| `.flatMap()`, `.any()`, `.every()` | Supported |
+| `.join()`, `.reverse()`, `.toSet()` | Supported |
+| `.split()`, `.trim()`, `.toUpperCase()`, `.toLowerCase()` | Supported |
+| `.startsWith()`, `.endsWith()`, `.replaceAll()` | Supported |
+| `.toMap()`, `.toList()`, `.toDynamic()`, `.mapValues()` | Supported |
+| `.toString()`, `.toInt()` | Supported |
 | Class definitions (`class Foo { ... }`) | Not yet supported |
 | Class inheritance | Not supported |
-| Methods and member access (`.length`, `.isEmpty`, `.contains()`, etc.) | Supported |
-| Anonymous functions / lambdas (`(x) -> x * 2`) | Supported |
 | `this` / `outer` keywords | Not yet supported |
 | `super` keyword | Not supported |
+
+### Annotations & Declarations
+
+| Feature | Status |
+|---|---|
+| Annotations (`@Deprecated`, `@ModuleInfo`, etc.) | Parsed and skipped |
+| Class declarations | Parsed and skipped |
+| Type alias declarations | Parsed and skipped |
+| Function declarations | Parsed and skipped |
 
 ### Not Yet Supported
 
 The following Pkl features are not currently implemented:
 
-- **Type aliases** and **type constraints**
+- **Type aliases** and **type constraints** (declarations are skipped)
 - **Type annotations** (parsed but not validated)
 - **Member predicates** (`[[...]]`)
-- **Annotations** (`@Deprecated`, `@ModuleInfo`, etc.)
 - **Regular expressions** (`Regex`)
 - **Packages** and **projects**
 - **Standard library** modules
@@ -123,20 +143,12 @@ The following Pkl features are not currently implemented:
 
 ### Roadmap
 
-Planned features, roughly in priority order:
+Planned features:
 
-1. Object amendment (`(base) { overrides }`)
-2. `this` / `outer` keywords
-3. Class definitions with defaults (`class Foo { name: String = "default" }`)
-4. Module header — parse and skip gracefully
-5. Annotations (`@Foo`) — parse and skip
-
-Nice-to-have:
-
-- More stdlib methods (`.map()`, `.filter()`, `.fold()`, etc.)
-- `import*` glob imports
-- Package URI imports (`package://...`)
-- Type checking / validation
+1. `this` / `outer` keywords
+2. Class definitions with defaults (`class Foo { name: String = "default" }`)
+3. `import*` glob imports
+4. Package URI imports (`package://...`)
 
 ## Usage
 
