@@ -267,7 +267,10 @@ impl Evaluator {
                     && prop.value.is_none()
                     && prop.body.is_none()
                 {
-                    if !out.contains_key(&prop.name) {
+                    if let Some(v) = out.get(&prop.name) {
+                        // Satisfied by base — add to scope so other properties can reference it
+                        scope.set(prop.name.clone(), v.clone());
+                    } else {
                         let kind = if has_modifier(mods, Modifier::Abstract) {
                             "abstract"
                         } else {

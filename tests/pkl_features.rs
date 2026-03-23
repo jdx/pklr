@@ -1432,3 +1432,22 @@ x = name
     assert!(msg.contains("external"));
     assert!(msg.contains("must be assigned"));
 }
+
+#[tokio::test]
+async fn const_cannot_override_in_amends() {
+    let mut ev = pklr::eval::Evaluator::new();
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    ev.set_base_path(&base);
+    // Create a base file with const property
+    let base_src = r#"const version = 1"#;
+    std::fs::write(base.join("const_base.pkl"), base_src).unwrap();
+    let src = r#"
+amends "const_base.pkl"
+const version = 2
+"#;
+    let path = base.join("test_const_override.pkl");
+    let result = ev.eval_source(src, &path).await;
+    std::fs::remove_file(base.join("const_base.pkl")).ok();
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("const"));
+}
