@@ -181,7 +181,7 @@ fn arithmetic_mod() {
 fn arithmetic_float_div() {
     let json = eval(r#"x = 10.0 / 3.0"#);
     let v = json["x"].as_f64().unwrap();
-    assert!((v - 3.333333).abs() < 0.001);
+    assert!((v - (10.0 / 3.0)).abs() < 1e-9);
 }
 
 #[test]
@@ -205,7 +205,7 @@ fn arithmetic_div_by_zero() {
 #[test]
 fn arithmetic_mod_by_zero() {
     let msg = eval_fails(r#"x = 1 % 0"#);
-    assert!(msg.contains("zero"));
+    assert!(msg.contains("modulo by zero"));
 }
 
 // ============================================================
@@ -259,14 +259,12 @@ fn logical_not() {
 // ============================================================
 
 #[test]
-#[ignore = "null coalesce (??) not yet parsed in expressions"]
 fn null_coalesce_non_null() {
     let json = eval(r#"x = "hello" ?? "default""#);
     assert_eq!(json["x"], "hello");
 }
 
 #[test]
-#[ignore = "null coalesce (??) not yet parsed in expressions"]
 fn null_coalesce_null() {
     let json = eval(r#"x = null ?? "default""#);
     assert_eq!(json["x"], "default");
@@ -336,7 +334,7 @@ local secret = "hidden"
 visible = "shown"
 "#,
     );
-    assert!(json.get("secret").is_none() || json["secret"].is_null());
+    assert!(json.get("secret").is_none());
     assert_eq!(json["visible"], "shown");
 }
 
@@ -444,7 +442,6 @@ x = new Listing {
 // ============================================================
 
 #[test]
-#[ignore = "dynamic key with = assignment not yet parsed in new Mapping body"]
 fn mapping_basic() {
     let json = eval(
         r#"
@@ -484,7 +481,6 @@ fn map_function() {
 // ============================================================
 
 #[test]
-#[ignore = "dynamic key with = assignment not yet parsed"]
 fn spread_into_object() {
     let json = eval(
         r#"
@@ -524,7 +520,6 @@ x {
 }
 
 #[test]
-#[ignore = "dynamic key with = assignment not yet parsed in new Mapping body"]
 fn for_generator_object() {
     let json = eval(
         r#"
@@ -574,11 +569,10 @@ x {
 }
 "#,
     );
-    assert!(json["x"]["feature"].is_null());
+    assert!(json["x"].get("feature").is_none());
 }
 
 #[test]
-#[ignore = "when/else not yet implemented"]
 fn when_else() {
     let json = eval(
         r#"

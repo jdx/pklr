@@ -11,22 +11,24 @@ pub enum TokenKind {
     Null,
 
     // Punctuation
-    LBrace,       // {
-    RBrace,       // }
-    LParen,       // (
-    RParen,       // )
-    LBracket,     // [
-    RBracket,     // ]
-    Comma,        // ,
-    Dot,          // .
-    DotDotDot,    // ...
-    Equals,       // =
-    Colon,        // :
-    QuestionMark, // ?
-    Bang,         // !
-    Pipe,         // |
-    Caret,        // ^
-    At,           // @
+    LBrace,           // {
+    RBrace,           // }
+    LParen,           // (
+    RParen,           // )
+    LBracket,         // [
+    RBracket,         // ]
+    Comma,            // ,
+    Dot,              // .
+    DotDotDot,        // ...
+    Equals,           // =
+    Colon,            // :
+    QuestionMark,     // ?
+    QuestionQuestion, // ??
+    QuestionDot,      // ?.
+    Bang,             // !
+    Pipe,             // |
+    Caret,            // ^
+    At,               // @
 
     // Operators
     Plus,
@@ -412,7 +414,15 @@ impl<'a> Lexer<'a> {
                 }
                 '?' => {
                     self.advance();
-                    TokenKind::QuestionMark
+                    if self.peek() == Some('?') {
+                        self.advance();
+                        TokenKind::QuestionQuestion
+                    } else if self.peek() == Some('.') {
+                        self.advance();
+                        TokenKind::QuestionDot
+                    } else {
+                        TokenKind::QuestionMark
+                    }
                 }
                 '!' => {
                     self.advance();

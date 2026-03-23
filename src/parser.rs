@@ -169,6 +169,8 @@ struct Parser<'a> {
     source: String,
     name: String,
     pos: usize,
+    /// Line of the last consumed token (used for newline-sensitive parsing).
+    last_line: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -178,6 +180,7 @@ impl<'a> Parser<'a> {
             source: source.to_string(),
             name: name.to_string(),
             pos: 0,
+            last_line: 1,
         }
     }
 
@@ -200,6 +203,7 @@ impl<'a> Parser<'a> {
 
     fn advance(&mut self) -> &Token {
         let tok = &self.tokens[self.pos];
+        self.last_line = tok.line;
         if self.pos + 1 < self.tokens.len() {
             self.pos += 1;
         }
@@ -449,7 +453,17 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_expr(&mut self) -> Result<Expr> {
-        self.parse_or()
+        self.parse_null_coalesce()
+    }
+
+    fn parse_null_coalesce(&mut self) -> Result<Expr> {
+        let mut left = self.parse_or()?;
+        while matches!(self.peek(), TokenKind::QuestionQuestion) {
+            self.advance();
+            let right = self.parse_or()?;
+            left = Expr::Binop(BinOp::NullCoalesce, Box::new(left), Box::new(right));
+        }
+        Ok(left)
     }
 
     fn parse_or(&mut self) -> Result<Expr> {
@@ -546,6 +560,11 @@ impl<'a> Parser<'a> {
                     expr = Expr::Field(Box::new(expr), field);
                 }
                 TokenKind::LBracket => {
+                    // Only treat as indexing if on the same line as the expression.
+                    // A `[` on a new line is a new dynamic entry, not indexing.
+                    if self.peek_tok().line != self.last_line {
+                        break;
+                    }
                     self.advance();
                     let idx = self.parse_expr()?;
                     self.expect(&TokenKind::RBracket)?;
