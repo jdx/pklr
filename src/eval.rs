@@ -48,6 +48,12 @@ impl Evaluator {
         self.base_path = path.to_path_buf();
     }
 
+    /// Set a custom HTTP client for fetching remote imports and packages.
+    /// Use this to configure proxy settings, CA certificates, timeouts, etc.
+    pub fn set_http_client(&mut self, client: reqwest::Client) {
+        self.http_client = client;
+    }
+
     /// Read a resource by URI scheme.
     async fn read_resource(&mut self, uri: &str) -> Result<Value> {
         if let Some(path) = uri.strip_prefix("file://") {
