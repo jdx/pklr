@@ -301,6 +301,55 @@ impl Evaluator {
             }
         }
 
+        // Process extends: load base module, inherit all members and scope
+        if let Some(uri) = &module.extends {
+            if !uri.contains("://") || uri.starts_with("file://") {
+                let extends_path = if let Some(rel) = uri.strip_prefix("file://") {
+                    PathBuf::from(rel)
+                } else {
+                    let base = path.parent().unwrap_or(Path::new("."));
+                    base.join(uri)
+                };
+                if extends_path.exists() {
+                    let source = std::fs::read_to_string(&extends_path)
+                        .map_err(|e| Error::Io(extends_path.clone(), e))?;
+                    let name = extends_path.display().to_string();
+                    let tokens = lexer::lex_named(&source, &name)?;
+                    let ext_module = parser::parse_named(&tokens, &source, &name)?;
+                    // Evaluate the base module to get its properties
+                    let ext_val = self
+                        .eval_module(&ext_module, &extends_path, depth + 1)
+                        .await?;
+                    if let Value::Object(m, _) = ext_val {
+                        base_obj = m;
+                    }
+                    // Also evaluate the base module's scope (classes, locals) into our scope
+                    // by re-processing its body entries
+                    for entry in &ext_module.body {
+                        if let Entry::ClassDef(cls_name, parent, body) = entry {
+                            let mut defaults = self.eval_entries(body, &scope, depth + 1).await?;
+                            if let Some(parent_name) = parent
+                                && let Some(parent_val) = scope.get(parent_name)
+                            {
+                                defaults = merge_values(parent_val.clone(), defaults);
+                            }
+                            scope.set(cls_name.clone(), defaults);
+                        }
+                    }
+                }
+            } else if uri.starts_with("https://") || uri.starts_with("http://") {
+                let source = self.fetch_source(uri).await?;
+                let tokens = lexer::lex_named(&source, uri)?;
+                let ext_module = parser::parse_named(&tokens, &source, uri)?;
+                let ext_val = self
+                    .eval_module(&ext_module, Path::new(uri), depth + 1)
+                    .await?;
+                if let Value::Object(m, _) = ext_val {
+                    base_obj = m;
+                }
+            }
+        }
+
         // First pass: collect all `local` variable definitions into scope
         for entry in &module.body {
             if let Entry::Property(prop) = entry
@@ -313,8 +362,14 @@ impl Evaluator {
         }
         // Collect class definitions into module scope (after locals so defaults can reference them)
         for entry in &module.body {
-            if let Entry::ClassDef(name, body) = entry {
-                let defaults = self.eval_entries(body, &scope, depth + 1).await?;
+            if let Entry::ClassDef(name, parent, body) = entry {
+                let mut defaults = self.eval_entries(body, &scope, depth + 1).await?;
+                // If class extends a parent, merge parent defaults as base
+                if let Some(parent_name) = parent
+                    && let Some(parent_val) = scope.get(parent_name)
+                {
+                    defaults = merge_values(parent_val.clone(), defaults);
+                }
                 scope.set(name.clone(), defaults);
             }
         }
@@ -431,8 +486,13 @@ impl Evaluator {
         }
         // Collect class definitions into scope (after locals so defaults can reference them)
         for entry in entries {
-            if let Entry::ClassDef(name, body) = entry {
-                let defaults = self.eval_entries(body, &child_scope, depth + 1).await?;
+            if let Entry::ClassDef(name, parent, body) = entry {
+                let mut defaults = self.eval_entries(body, &child_scope, depth + 1).await?;
+                if let Some(parent_name) = parent
+                    && let Some(parent_val) = child_scope.get(parent_name)
+                {
+                    defaults = merge_values(parent_val.clone(), defaults);
+                }
                 child_scope.set(name.clone(), defaults);
             }
         }
