@@ -1544,8 +1544,6 @@ fn make_unit_object(value: Value, unit: &str) -> Value {
 
 /// Expand a simple glob pattern relative to a base directory.
 /// Supports `dir/*.ext` and `*.ext` patterns (single `*` only).
-/// Expand a simple glob pattern relative to a base directory.
-/// Supports `dir/*.ext` and `*.ext` patterns (single `*` only).
 pub fn expand_glob(base: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
     let full = base.join(pattern);
     let dir = full.parent().unwrap_or(base).to_path_buf();
