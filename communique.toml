@@ -1,0 +1,4 @@
+context = "pklr is a pure Rust parser and evaluator for Apple's Pkl configuration language. It requires no external binary or CLI."
+
+[defaults]
+emoji = false
