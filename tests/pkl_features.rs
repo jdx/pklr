@@ -2289,3 +2289,25 @@ x = "hello \(read("env:PKLR_NAME"))"
     assert_eq!(json["x"], "hello world");
     unsafe { std::env::remove_var("PKLR_NAME") };
 }
+
+// ============================================================
+// Set() deduplication
+// ============================================================
+
+#[test]
+fn set_deduplicates() {
+    let json = eval(r#"x = Set(1, 2, 3, 2, 1)"#);
+    assert_eq!(json["x"], serde_json::json!([1, 2, 3]));
+}
+
+#[test]
+fn set_preserves_order() {
+    let json = eval(r#"x = Set("b", "a", "c", "a")"#);
+    assert_eq!(json["x"], serde_json::json!(["b", "a", "c"]));
+}
+
+#[test]
+fn set_empty() {
+    let json = eval(r#"x = Set()"#);
+    assert_eq!(json["x"], serde_json::json!([]));
+}

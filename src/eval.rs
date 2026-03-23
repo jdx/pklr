@@ -1108,9 +1108,12 @@ impl Evaluator {
                 "Set" => {
                     let mut items = Vec::new();
                     for a in args {
-                        items.push(self.eval_expr(a, scope, depth + 1).await?);
+                        let val = self.eval_expr(a, scope, depth + 1).await?;
+                        if !items.contains(&val) {
+                            items.push(val);
+                        }
                     }
-                    return Ok(Value::List(items)); // treat Set as List
+                    return Ok(Value::List(items)); // deduplicated
                 }
                 "Regex" => {
                     if let Some(arg) = args.first() {
