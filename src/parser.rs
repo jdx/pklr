@@ -365,26 +365,7 @@ impl<'a> Parser<'a> {
                 let name = self.expect_ident()?;
                 // Skip optional type params <...>
                 if matches!(self.peek(), TokenKind::Lt) {
-                    let mut angle_depth = 0;
-                    loop {
-                        match self.peek() {
-                            TokenKind::Lt => {
-                                angle_depth += 1;
-                                self.advance();
-                            }
-                            TokenKind::Gt | TokenKind::GtEq => {
-                                angle_depth -= 1;
-                                self.advance();
-                                if angle_depth == 0 {
-                                    break;
-                                }
-                            }
-                            TokenKind::Eof => break,
-                            _ => {
-                                self.advance();
-                            }
-                        }
-                    }
+                    self.skip_generic_params()?;
                 }
                 // Skip optional extends clause
                 if matches!(self.peek(), TokenKind::KwExtends) {
@@ -415,6 +396,34 @@ impl<'a> Parser<'a> {
             entries.push(entry);
         }
         Ok(entries)
+    }
+
+    /// Skip generic type parameters: `<Type, Type<Nested>, ...>`
+    /// Assumes the current token is `<`. Consumes through the matching `>`.
+    fn skip_generic_params(&mut self) -> Result<()> {
+        let mut depth = 0;
+        loop {
+            match self.peek() {
+                TokenKind::Lt => {
+                    depth += 1;
+                    self.advance();
+                }
+                TokenKind::Gt => {
+                    depth -= 1;
+                    self.advance();
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                TokenKind::Eof => {
+                    return Err(self.parse_error("unclosed generic type parameters"));
+                }
+                _ => {
+                    self.advance();
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Skip a class, typealias, or function declaration.
@@ -941,6 +950,10 @@ impl<'a> Parser<'a> {
                 } else {
                     None
                 };
+                // Skip optional generic type params: <Type, Type, ...>
+                if matches!(self.peek(), TokenKind::Lt) {
+                    self.skip_generic_params()?;
+                }
                 self.expect(&TokenKind::LBrace)?;
                 let entries = self.parse_entries()?;
                 self.expect(&TokenKind::RBrace)?;
