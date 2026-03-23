@@ -1020,6 +1020,14 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Expr::Ident(name))
             }
+            TokenKind::KwThis => {
+                self.advance();
+                Ok(Expr::Ident("this".into()))
+            }
+            TokenKind::KwModule => {
+                self.advance();
+                Ok(Expr::Ident("module".into()))
+            }
             tok => Err(self.parse_error(format!("unexpected token in expression: {:?}", tok))),
         }
     }

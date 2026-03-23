@@ -121,7 +121,7 @@ pklr implements a subset of the [Pkl language](https://pkl-lang.org/main/current
 | Class definitions with defaults | Supported |
 | Class inheritance | Not supported |
 | `outer` keyword | Supported |
-| `this` keyword | Not yet supported |
+| `this` keyword | Supported |
 | `super` keyword | Not supported |
 
 ### Annotations & Declarations
@@ -152,9 +152,8 @@ The following Pkl features are not currently implemented:
 
 Planned features:
 
-1. `this` keyword (self-referencing within objects)
-2. Package URI imports (`package://...`)
-3. Class inheritance (`extends`)
+1. Package URI imports (`package://...`)
+2. Class inheritance (`extends`)
 
 ## Usage
 
