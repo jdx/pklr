@@ -598,14 +598,16 @@ impl Evaluator {
             }
         }
 
-        // Remove class definitions and lambdas from output — they're schema/functions,
-        // not data. They remain accessible via scope for `new ClassName { ... }` and via
-        // imported module objects for dotted paths like `helpers.ClassName`.
-        for name in &class_names {
-            out.shift_remove(name);
+        // At the top level (depth 0), strip class definitions and lambdas from
+        // the serialized output — they're schema/functions, not data.
+        // Imported modules (depth > 0) keep them so dotted access works
+        // (e.g., `helpers.ClassName`).
+        if depth == 0 {
+            for name in &class_names {
+                out.shift_remove(name);
+            }
+            out.retain(|_, v| !matches!(v, Value::Lambda(..)));
         }
-        // Also remove lambda values (function definitions) from output
-        out.retain(|_, v| !matches!(v, Value::Lambda(..)));
         Ok(Value::Object(out, None))
     }
 
@@ -638,25 +640,35 @@ impl Evaluator {
         // Set `outer` to a snapshot of the parent scope's variables as an object
         let outer_obj = Value::Object(scope.flatten(), None);
         child_scope.set("outer".into(), outer_obj);
-        // First pass: collect locals
+        // First pass: collect locals, class definitions, and type aliases in
+        // declaration order so they can reference each other correctly.
+        // Non-lambda locals are evaluated eagerly; lambda locals are deferred
+        // to a second pass so they capture the fully-populated scope.
+        let mut deferred_lambdas: Vec<(String, &crate::parser::Expr)> = Vec::new();
         for entry in entries {
-            if let Entry::Property(prop) = entry
-                && has_modifier(&prop.modifiers, Modifier::Local)
-                && let Some(expr) = &prop.value
-            {
-                let val = self.eval_expr(expr, &child_scope, depth).await?;
-                child_scope.set(prop.name.clone(), val);
-            }
-        }
-        // Collect class definitions and type aliases into scope
-        for entry in entries {
-            if let Entry::ClassDef(name, class_mods, parent, body) = entry {
-                let defaults = self
-                    .eval_class_def(class_mods, parent.as_deref(), body, &child_scope, depth)
-                    .await?;
-                child_scope.set(name.clone(), defaults);
-            } else if let Entry::TypeAlias(name, ty) = entry {
-                self.eval_type_alias(name, ty, &mut child_scope);
+            match entry {
+                Entry::Property(prop)
+                    if has_modifier(&prop.modifiers, Modifier::Local) && prop.value.is_some() =>
+                {
+                    let expr = prop.value.as_ref().unwrap();
+                    if matches!(expr, crate::parser::Expr::Lambda(..)) {
+                        // Defer lambda locals so they capture the final scope
+                        deferred_lambdas.push((prop.name.clone(), expr));
+                    } else {
+                        let val = self.eval_expr(expr, &child_scope, depth).await?;
+                        child_scope.set(prop.name.clone(), val);
+                    }
+                }
+                Entry::ClassDef(name, class_mods, parent, body) => {
+                    let defaults = self
+                        .eval_class_def(class_mods, parent.as_deref(), body, &child_scope, depth)
+                        .await?;
+                    child_scope.set(name.clone(), defaults);
+                }
+                Entry::TypeAlias(name, ty) => {
+                    self.eval_type_alias(name, ty, &mut child_scope);
+                }
+                _ => {}
             }
         }
 
@@ -747,6 +759,12 @@ impl Evaluator {
                 Entry::Elem(_) => {} // bare elements only valid in Listing bodies
                 Entry::ClassDef(..) | Entry::TypeAlias(..) => {} // handled in scope setup
             }
+        }
+        // Evaluate deferred local lambdas (function definitions) AFTER all
+        // properties so they capture overridden values (late binding).
+        for (name, expr) in deferred_lambdas {
+            let val = self.eval_expr(expr, &child_scope, depth).await?;
+            child_scope.set(name, val);
         }
         let source = ObjectSource {
             entries: entries.to_vec(),
@@ -1354,6 +1372,30 @@ impl Evaluator {
             {
                 return Ok(result);
             }
+            // If the field is a Lambda on an Object (class method), invoke it
+            // with the object's properties layered into the call scope so that
+            // overridden properties are visible to the function body and any
+            // local functions it calls.
+            if let Value::Object(ref map, _) = obj
+                && let Some(Value::Lambda(params, body, captured)) = map.get(method)
+            {
+                let mut call_scope = Scope::default();
+                for (k, v) in captured {
+                    call_scope.set(k.clone(), v.clone());
+                }
+                // Layer in ALL of the instance's properties including lambdas,
+                // so local functions called by this method also see overrides
+                for (k, v) in map {
+                    call_scope.set(k.clone(), v.clone());
+                }
+                call_scope.set("this".into(), obj.clone());
+                for (i, param) in params.iter().enumerate() {
+                    if let Some(arg) = evaled_args.get(i) {
+                        call_scope.set(param.clone(), arg.clone());
+                    }
+                }
+                return self.eval_expr(body, &call_scope, depth + 1).await;
+            }
         }
 
         // Handle built-in functions: List(), Listing(), Map()
@@ -1412,6 +1454,13 @@ impl Evaluator {
             // Restore captured scope
             for (k, v) in captured {
                 call_scope.set(k, v);
+            }
+            // If we're inside a method call context (scope has `this` as an Object),
+            // layer the instance's properties so local functions see overridden values
+            if let Some(Value::Object(this_map, _)) = scope.get("this") {
+                for (k, v) in this_map {
+                    call_scope.set(k.clone(), v.clone());
+                }
             }
             // Bind arguments to parameters
             let mut evaled_args = Vec::new();

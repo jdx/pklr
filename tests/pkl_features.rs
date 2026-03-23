@@ -2886,11 +2886,41 @@ hooks = new {
     assert!(val["hooks"]["pre-commit"]["fix"] == true);
 }
 
-/// Cross-module class functions with property overrides don't resolve correctly
-/// during late-binding re-evaluation: the local function captures scope at class
-/// definition time, so overridden properties aren't visible to the function body.
 #[tokio::test]
-#[ignore]
+async fn class_function_nested_in_new() {
+    // Matches the hk builtin pattern: testMaker.checkFail() inside new Config.Step { tests { ... } }
+    let dir = std::path::Path::new("/tmp/pklr_test_nested");
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(
+        dir.join("helpers.pkl"),
+        r#"
+class TestMaker {
+    filename: String = "file.txt"
+    local function makeTest(runType: String, code: Int): String = runType + ":" + filename
+    function checkFail(contents: String, code: Int): String = makeTest("check", code)
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "helpers.pkl"
+local const testMaker = new helpers.TestMaker { filename = "src/main.rs" }
+x {
+    tests {
+        ["check bad file"] = testMaker.checkFail("bad", 1)
+    }
+}
+"#,
+    )
+    .unwrap();
+    let path = dir.join("main.pkl");
+    let val = pklr::eval_to_json(&path).await.unwrap();
+    assert_eq!(val["x"]["tests"]["check bad file"], "check:src/main.rs");
+}
+
+#[tokio::test]
 async fn class_function_cross_module() {
     let dir = std::path::Path::new("/tmp/pklr_test_cross_module");
     std::fs::create_dir_all(dir).unwrap();
