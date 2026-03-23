@@ -2463,3 +2463,59 @@ fn set_empty() {
     let json = eval(r#"x = Set()"#);
     assert_eq!(json["x"], serde_json::json!([]));
 }
+
+// ============================================================
+// open modifier
+// ============================================================
+
+#[test]
+fn open_class_allows_new_properties() {
+    let json = eval(
+        r#"
+open class Config {
+    port: Int = 8080
+}
+x = new Config {
+    port = 9090
+    host = "localhost"
+}
+"#,
+    );
+    assert_eq!(json["x"]["port"], 9090);
+    assert_eq!(json["x"]["host"], "localhost");
+}
+
+#[test]
+fn non_open_class_rejects_new_properties() {
+    let msg = eval_fails(
+        r#"
+class Config {
+    port: Int = 8080
+}
+x = new Config {
+    port = 9090
+    host = "localhost"
+}
+"#,
+    );
+    assert!(msg.contains("non-open"));
+    assert!(msg.contains("host"));
+}
+
+#[test]
+fn non_open_class_allows_overrides() {
+    let json = eval(
+        r#"
+class Config {
+    port: Int = 8080
+    debug: Boolean = false
+}
+x = new Config {
+    port = 9090
+    debug = true
+}
+"#,
+    );
+    assert_eq!(json["x"]["port"], 9090);
+    assert_eq!(json["x"]["debug"], true);
+}

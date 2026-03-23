@@ -374,9 +374,15 @@ impl Evaluator {
                     // by re-processing its body entries
                     for entry in &ext_module.body {
                         match entry {
-                            Entry::ClassDef(cls_name, parent, body) => {
+                            Entry::ClassDef(cls_name, cls_mods, parent, body) => {
                                 let defaults = self
-                                    .eval_class_def(parent.as_deref(), body, &scope, depth)
+                                    .eval_class_def(
+                                        cls_mods,
+                                        parent.as_deref(),
+                                        body,
+                                        &scope,
+                                        depth,
+                                    )
                                     .await?;
                                 scope.set(cls_name.clone(), defaults);
                             }
@@ -399,9 +405,9 @@ impl Evaluator {
                 }
                 // Inject class definitions from HTTP base into scope
                 for entry in &ext_module.body {
-                    if let Entry::ClassDef(cls_name, parent, body) = entry {
+                    if let Entry::ClassDef(cls_name, cls_mods, parent, body) = entry {
                         let defaults = self
-                            .eval_class_def(parent.as_deref(), body, &scope, depth)
+                            .eval_class_def(cls_mods, parent.as_deref(), body, &scope, depth)
                             .await?;
                         scope.set(cls_name.clone(), defaults);
                     }
@@ -422,9 +428,9 @@ impl Evaluator {
         // Collect class definitions and type aliases into module scope
         for entry in &module.body {
             match entry {
-                Entry::ClassDef(name, parent, body) => {
+                Entry::ClassDef(name, class_mods, parent, body) => {
                     let defaults = self
-                        .eval_class_def(parent.as_deref(), body, &scope, depth)
+                        .eval_class_def(class_mods, parent.as_deref(), body, &scope, depth)
                         .await?;
                     scope.set(name.clone(), defaults);
                 }
@@ -547,9 +553,9 @@ impl Evaluator {
         }
         // Collect class definitions and type aliases into scope
         for entry in entries {
-            if let Entry::ClassDef(name, parent, body) = entry {
+            if let Entry::ClassDef(name, class_mods, parent, body) = entry {
                 let defaults = self
-                    .eval_class_def(parent.as_deref(), body, &child_scope, depth)
+                    .eval_class_def(class_mods, parent.as_deref(), body, &child_scope, depth)
                     .await?;
                 child_scope.set(name.clone(), defaults);
             } else if let Entry::TypeAlias(name, ty) = entry {
@@ -648,6 +654,7 @@ impl Evaluator {
         let source = ObjectSource {
             entries: entries.to_vec(),
             scope: child_scope.flatten(),
+            is_open: true, // default: allow new properties
         };
         Ok(Value::Object(map, Some(Box::new(source))))
     }
@@ -660,6 +667,7 @@ impl Evaluator {
     #[async_recursion(?Send)]
     async fn eval_class_def(
         &mut self,
+        class_mods: &[Modifier],
         parent_name: Option<&str>,
         body: &[Entry],
         scope: &Scope,
@@ -716,6 +724,16 @@ impl Evaluator {
         } else {
             Ok(child_defaults)
         }
+        .map(|val| {
+            // Set is_open flag on the result's ObjectSource
+            let is_open = has_modifier(class_mods, Modifier::Open);
+            if let Value::Object(map, Some(mut src)) = val {
+                src.is_open = is_open;
+                Value::Object(map, Some(src))
+            } else {
+                val
+            }
+        })
     }
 
     /// Evaluate a type alias declaration.
@@ -905,7 +923,35 @@ impl Evaluator {
                             }
                             Some(val)
                         });
-                        if let Some(Value::Object(_, Some(base_src))) = &base {
+                        if let Some(Value::Object(ref base_map, Some(ref base_src))) = base {
+                            // Enforce open modifier: non-open classes reject new properties
+                            if !base_src.is_open {
+                                // Collect all declared property names from the base class
+                                // (includes those with no default value)
+                                let base_names: std::collections::HashSet<String> = base_src
+                                    .entries
+                                    .iter()
+                                    .filter_map(|e| {
+                                        if let Entry::Property(p) = e {
+                                            Some(p.name.clone())
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .chain(base_map.keys().cloned())
+                                    .collect();
+                                for entry in entries {
+                                    if let Entry::Property(p) = entry
+                                        && !has_modifier(&p.modifiers, Modifier::Local)
+                                        && !base_names.contains(&p.name)
+                                    {
+                                        return Err(Error::Eval(format!(
+                                            "cannot add property '{}' to non-open class",
+                                            p.name
+                                        )));
+                                    }
+                                }
+                            }
                             // Late binding: re-evaluate merged base + overlay entries
                             self.eval_amended_object(
                                 &base_src.entries.clone(),

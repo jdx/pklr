@@ -48,9 +48,9 @@ pub enum Entry {
     Spread(Expr),
     /// Bare element expression (used in Listing bodies)
     Elem(Expr),
-    /// Class definition: `class Name [extends Parent] { properties... }`
-    /// Fields: (name, optional_parent, body)
-    ClassDef(String, Option<String>, Vec<Entry>),
+    /// Class definition: `[modifiers] class Name [extends Parent] { properties... }`
+    /// Fields: (name, modifiers, optional_parent, body)
+    ClassDef(String, Vec<Modifier>, Option<String>, Vec<Entry>),
     /// Type alias: `typealias Name = Type`
     TypeAlias(String, TypeExpr),
 }
@@ -374,7 +374,13 @@ impl<'a> Parser<'a> {
         let mut entries = Vec::new();
         while !self.at_eof() && !matches!(self.peek(), TokenKind::RBrace) {
             let entry_annotations = self.parse_annotations()?;
-            // Parse class definitions; skip typealias/function declarations
+            // Parse class definitions (with optional modifiers); skip typealias/function declarations
+            let class_modifiers =
+                if self.peek_is_modifier() && self.peek_past_modifiers_is(TokenKind::KwClass) {
+                    self.collect_modifiers()
+                } else {
+                    Vec::new()
+                };
             if matches!(self.peek(), TokenKind::KwClass) {
                 self.advance(); // consume 'class'
                 let name = self.expect_ident()?;
@@ -405,7 +411,7 @@ impl<'a> Parser<'a> {
                     self.advance();
                     let body = self.parse_entries()?;
                     self.expect(&TokenKind::RBrace)?;
-                    entries.push(Entry::ClassDef(name, parent, body));
+                    entries.push(Entry::ClassDef(name, class_modifiers, parent, body));
                 }
                 continue;
             }
@@ -485,6 +491,64 @@ impl<'a> Parser<'a> {
                 | TokenKind::KwOpen
                 | TokenKind::KwExternal
         )
+    }
+
+    fn peek_past_modifiers_is(&self, target: TokenKind) -> bool {
+        let mut i = self.pos;
+        while i < self.tokens.len() {
+            match &self.tokens[i].kind {
+                TokenKind::KwLocal
+                | TokenKind::KwConst
+                | TokenKind::KwFixed
+                | TokenKind::KwHidden
+                | TokenKind::KwAbstract
+                | TokenKind::KwOpen
+                | TokenKind::KwExternal => i += 1,
+                tok if std::mem::discriminant(tok) == std::mem::discriminant(&target) => {
+                    return true;
+                }
+                _ => return false,
+            }
+        }
+        false
+    }
+
+    fn collect_modifiers(&mut self) -> Vec<Modifier> {
+        let mut mods = Vec::new();
+        loop {
+            match self.peek() {
+                TokenKind::KwLocal => {
+                    self.advance();
+                    mods.push(Modifier::Local);
+                }
+                TokenKind::KwConst => {
+                    self.advance();
+                    mods.push(Modifier::Const);
+                }
+                TokenKind::KwFixed => {
+                    self.advance();
+                    mods.push(Modifier::Fixed);
+                }
+                TokenKind::KwHidden => {
+                    self.advance();
+                    mods.push(Modifier::Hidden);
+                }
+                TokenKind::KwAbstract => {
+                    self.advance();
+                    mods.push(Modifier::Abstract);
+                }
+                TokenKind::KwOpen => {
+                    self.advance();
+                    mods.push(Modifier::Open);
+                }
+                TokenKind::KwExternal => {
+                    self.advance();
+                    mods.push(Modifier::External);
+                }
+                _ => break,
+            }
+        }
+        mods
     }
 
     fn peek_past_modifiers_is_decl(&self) -> bool {

@@ -11,6 +11,8 @@ use crate::parser::{Entry, Expr};
 pub struct ObjectSource {
     pub entries: Vec<Entry>,
     pub scope: IndexMap<String, Value>,
+    /// Whether the class was declared `open` (allows adding new properties)
+    pub is_open: bool,
 }
 
 /// A pkl runtime value.
