@@ -99,10 +99,28 @@ pub enum Expr {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum BinOp { Add, Sub, Mul, Div, Mod, Eq, Ne, Lt, Le, Gt, Ge, And, Or, NullCoalesce }
+pub enum BinOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    And,
+    Or,
+    NullCoalesce,
+}
 
 #[derive(Debug, Clone, Copy)]
-pub enum UnOp { Neg, Not }
+pub enum UnOp {
+    Neg,
+    Not,
+}
 
 #[derive(Debug, Clone)]
 pub struct ForGenerator {
@@ -213,7 +231,11 @@ impl<'a> Parser<'a> {
         }
 
         let body = self.parse_entries()?;
-        Ok(Module { amends, imports, body })
+        Ok(Module {
+            amends,
+            imports,
+            body,
+        })
     }
 
     fn parse_entries(&mut self) -> Result<Vec<Entry>> {
@@ -263,7 +285,12 @@ impl<'a> Parser<'a> {
                 self.expect(&TokenKind::LBrace)?;
                 let body = self.parse_entries()?;
                 self.expect(&TokenKind::RBrace)?;
-                Ok(Entry::ForGenerator(ForGenerator { key_var, val_var, collection, body }))
+                Ok(Entry::ForGenerator(ForGenerator {
+                    key_var,
+                    val_var,
+                    collection,
+                    body,
+                }))
             }
             TokenKind::KwWhen => {
                 self.advance();
@@ -282,7 +309,11 @@ impl<'a> Parser<'a> {
                 } else {
                     None
                 };
-                Ok(Entry::WhenGenerator(WhenGenerator { condition: cond, body, else_body }))
+                Ok(Entry::WhenGenerator(WhenGenerator {
+                    condition: cond,
+                    body,
+                    else_body,
+                }))
             }
             TokenKind::DotDotDot => {
                 self.advance();
@@ -294,13 +325,34 @@ impl<'a> Parser<'a> {
                 let mut modifiers = Vec::new();
                 loop {
                     match self.peek() {
-                        TokenKind::KwLocal    => { self.advance(); modifiers.push(Modifier::Local); }
-                        TokenKind::KwConst    => { self.advance(); modifiers.push(Modifier::Const); }
-                        TokenKind::KwFixed    => { self.advance(); modifiers.push(Modifier::Fixed); }
-                        TokenKind::KwHidden   => { self.advance(); modifiers.push(Modifier::Hidden); }
-                        TokenKind::KwAbstract => { self.advance(); modifiers.push(Modifier::Abstract); }
-                        TokenKind::KwOpen     => { self.advance(); modifiers.push(Modifier::Open); }
-                        TokenKind::KwExternal => { self.advance(); modifiers.push(Modifier::External); }
+                        TokenKind::KwLocal => {
+                            self.advance();
+                            modifiers.push(Modifier::Local);
+                        }
+                        TokenKind::KwConst => {
+                            self.advance();
+                            modifiers.push(Modifier::Const);
+                        }
+                        TokenKind::KwFixed => {
+                            self.advance();
+                            modifiers.push(Modifier::Fixed);
+                        }
+                        TokenKind::KwHidden => {
+                            self.advance();
+                            modifiers.push(Modifier::Hidden);
+                        }
+                        TokenKind::KwAbstract => {
+                            self.advance();
+                            modifiers.push(Modifier::Abstract);
+                        }
+                        TokenKind::KwOpen => {
+                            self.advance();
+                            modifiers.push(Modifier::Open);
+                        }
+                        TokenKind::KwExternal => {
+                            self.advance();
+                            modifiers.push(Modifier::External);
+                        }
                         _ => break,
                     }
                 }
@@ -327,7 +379,13 @@ impl<'a> Parser<'a> {
                     (None, None)
                 };
 
-                Ok(Entry::Property(Property { modifiers, name, type_ann, value, body }))
+                Ok(Entry::Property(Property {
+                    modifiers,
+                    name,
+                    type_ann,
+                    value,
+                    body,
+                }))
             }
         }
     }
@@ -351,7 +409,11 @@ impl<'a> Parser<'a> {
             }
             tok => {
                 let t = self.peek_tok();
-                return Err(Error::Parse { line: t.line, col: t.col, message: format!("expected type, got {:?}", tok) });
+                return Err(Error::Parse {
+                    line: t.line,
+                    col: t.col,
+                    message: format!("expected type, got {:?}", tok),
+                });
             }
         };
 
@@ -404,12 +466,12 @@ impl<'a> Parser<'a> {
         let mut left = self.parse_add()?;
         loop {
             let op = match self.peek() {
-                TokenKind::EqEq  => BinOp::Eq,
+                TokenKind::EqEq => BinOp::Eq,
                 TokenKind::BangEq => BinOp::Ne,
-                TokenKind::Lt    => BinOp::Lt,
-                TokenKind::LtEq  => BinOp::Le,
-                TokenKind::Gt    => BinOp::Gt,
-                TokenKind::GtEq  => BinOp::Ge,
+                TokenKind::Lt => BinOp::Lt,
+                TokenKind::LtEq => BinOp::Le,
+                TokenKind::Gt => BinOp::Gt,
+                TokenKind::GtEq => BinOp::Ge,
                 _ => break,
             };
             self.advance();
@@ -423,7 +485,7 @@ impl<'a> Parser<'a> {
         let mut left = self.parse_mul()?;
         loop {
             let op = match self.peek() {
-                TokenKind::Plus  => BinOp::Add,
+                TokenKind::Plus => BinOp::Add,
                 TokenKind::Minus => BinOp::Sub,
                 _ => break,
             };
@@ -438,8 +500,8 @@ impl<'a> Parser<'a> {
         let mut left = self.parse_unary()?;
         loop {
             let op = match self.peek() {
-                TokenKind::Star    => BinOp::Mul,
-                TokenKind::Slash   => BinOp::Div,
+                TokenKind::Star => BinOp::Mul,
+                TokenKind::Slash => BinOp::Div,
                 TokenKind::Percent => BinOp::Mod,
                 _ => break,
             };
@@ -452,9 +514,15 @@ impl<'a> Parser<'a> {
 
     fn parse_unary(&mut self) -> Result<Expr> {
         match self.peek() {
-            TokenKind::Minus => { self.advance(); Ok(Expr::Unop(UnOp::Neg, Box::new(self.parse_postfix()?))) }
-            TokenKind::Bang  => { self.advance(); Ok(Expr::Unop(UnOp::Not, Box::new(self.parse_postfix()?))) }
-            _                => self.parse_postfix(),
+            TokenKind::Minus => {
+                self.advance();
+                Ok(Expr::Unop(UnOp::Neg, Box::new(self.parse_postfix()?)))
+            }
+            TokenKind::Bang => {
+                self.advance();
+                Ok(Expr::Unop(UnOp::Not, Box::new(self.parse_postfix()?)))
+            }
+            _ => self.parse_postfix(),
         }
     }
 
@@ -478,7 +546,9 @@ impl<'a> Parser<'a> {
                     let mut args = Vec::new();
                     while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
                         args.push(self.parse_expr()?);
-                        if matches!(self.peek(), TokenKind::Comma) { self.advance(); }
+                        if matches!(self.peek(), TokenKind::Comma) {
+                            self.advance();
+                        }
                     }
                     self.expect(&TokenKind::RParen)?;
                     expr = Expr::Call(Box::new(expr), args);
@@ -490,7 +560,11 @@ impl<'a> Parser<'a> {
                     self.expect(&TokenKind::RBrace)?;
                     // Treat as: New with the base expr being amended
                     // For now represent as a field access + body
-                    expr = Expr::Binop(BinOp::Add, Box::new(expr), Box::new(Expr::ObjectBody(entries)));
+                    expr = Expr::Binop(
+                        BinOp::Add,
+                        Box::new(expr),
+                        Box::new(Expr::ObjectBody(entries)),
+                    );
                 }
                 TokenKind::KwIs => {
                     self.advance();
@@ -510,11 +584,26 @@ impl<'a> Parser<'a> {
 
     fn parse_primary(&mut self) -> Result<Expr> {
         match self.peek().clone() {
-            TokenKind::Null         => { self.advance(); Ok(Expr::Null) }
-            TokenKind::BoolLit(b)   => { self.advance(); Ok(Expr::Bool(b)) }
-            TokenKind::IntLit(n)    => { self.advance(); Ok(Expr::Int(n)) }
-            TokenKind::FloatLit(f)  => { self.advance(); Ok(Expr::Float(f)) }
-            TokenKind::StringLit(s) => { self.advance(); Ok(Expr::String(s)) }
+            TokenKind::Null => {
+                self.advance();
+                Ok(Expr::Null)
+            }
+            TokenKind::BoolLit(b) => {
+                self.advance();
+                Ok(Expr::Bool(b))
+            }
+            TokenKind::IntLit(n) => {
+                self.advance();
+                Ok(Expr::Int(n))
+            }
+            TokenKind::FloatLit(f) => {
+                self.advance();
+                Ok(Expr::Float(f))
+            }
+            TokenKind::StringLit(s) => {
+                self.advance();
+                Ok(Expr::String(s))
+            }
             TokenKind::LParen => {
                 self.advance();
                 let e = self.parse_expr()?;
@@ -587,7 +676,8 @@ impl<'a> Parser<'a> {
             tok => {
                 let t = self.peek_tok();
                 Err(Error::Parse {
-                    line: t.line, col: t.col,
+                    line: t.line,
+                    col: t.col,
                     message: format!("unexpected token in expression: {:?}", tok),
                 })
             }
@@ -600,7 +690,8 @@ impl<'a> Parser<'a> {
             Ok(s.clone())
         } else {
             Err(Error::Parse {
-                line: tok.line, col: tok.col,
+                line: tok.line,
+                col: tok.col,
                 message: format!("expected string, got {:?}", tok.kind),
             })
         }
@@ -611,13 +702,14 @@ impl<'a> Parser<'a> {
         match &tok.kind {
             TokenKind::Ident(s) => Ok(s.clone()),
             // Allow keywords as identifiers in property name position
-            TokenKind::KwLocal    => Ok("local".into()),
-            TokenKind::KwFixed    => Ok("fixed".into()),
-            TokenKind::KwHidden   => Ok("hidden".into()),
-            TokenKind::KwNew      => Ok("new".into()),
-            TokenKind::KwModule   => Ok("module".into()),
+            TokenKind::KwLocal => Ok("local".into()),
+            TokenKind::KwFixed => Ok("fixed".into()),
+            TokenKind::KwHidden => Ok("hidden".into()),
+            TokenKind::KwNew => Ok("new".into()),
+            TokenKind::KwModule => Ok("module".into()),
             other => Err(Error::Parse {
-                line: tok.line, col: tok.col,
+                line: tok.line,
+                col: tok.col,
                 message: format!("expected identifier, got {:?}", other),
             }),
         }
