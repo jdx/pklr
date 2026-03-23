@@ -15,6 +15,7 @@ pub struct Annotation {
     pub body: Vec<Entry>,
 }
 
+/// A pkl module (top-level file).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Module {
     pub amends: Option<String>,
