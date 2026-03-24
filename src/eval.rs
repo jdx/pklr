@@ -407,11 +407,11 @@ impl Evaluator {
                 if let Ok(pkg) = resolve_package_uri(uri) {
                     match &pkg {
                         PackageSource::Direct(url) => self.http_cache.get(url).cloned(),
-                        PackageSource::Zip(_, entry) => {
+                        PackageSource::Zip(zip_url, entry) => {
                             // For zip packages, read from the extracted directory
                             self.package_dirs
-                                .values()
-                                .find_map(|dir| std::fs::read_to_string(dir.join(entry)).ok())
+                                .get(zip_url.as_str())
+                                .and_then(|dir| std::fs::read_to_string(dir.join(entry)).ok())
                         }
                     }
                 } else {
