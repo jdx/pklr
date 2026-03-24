@@ -90,9 +90,7 @@ impl Evaluator {
             .filter(|(src, _)| url.starts_with(src.as_str()))
             .max_by_key(|(src, _)| src.len());
         match best {
-            Some((src, tgt)) => {
-                std::borrow::Cow::Owned(format!("{}{}", tgt, &url[src.len()..]))
-            }
+            Some((src, tgt)) => std::borrow::Cow::Owned(format!("{}{}", tgt, &url[src.len()..])),
             None => std::borrow::Cow::Borrowed(url),
         }
     }
