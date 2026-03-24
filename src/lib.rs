@@ -59,6 +59,7 @@ pub async fn eval_to_json_with_options(
         evaluator.set_http_rewrites(&options.http_rewrites);
     }
     let value = evaluator.eval_source(&source, path).await?;
+    let value = evaluator.apply_converters(value).await?;
     Ok(value.to_json())
 }
 

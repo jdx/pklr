@@ -15,6 +15,18 @@ fn eval(src: &str) -> serde_json::Value {
     })
 }
 
+/// Like eval(), but also applies output.renderer.converters (full pipeline).
+fn eval_with_converters(src: &str) -> serde_json::Value {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut ev = Evaluator::new();
+        let path = std::path::Path::new("test.pkl");
+        let val = ev.eval_source(src, path).await.unwrap();
+        let val = ev.apply_converters(val).await.unwrap();
+        val.to_json()
+    })
+}
+
 fn eval_fails(src: &str) -> String {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
@@ -3022,4 +3034,157 @@ fn rewrite_url_no_rules_is_identity() {
         ev.rewrite_url("https://example.com/foo.pkl"),
         "https://example.com/foo.pkl"
     );
+}
+
+// ============================================================
+// output.renderer.converters
+// ============================================================
+
+#[test]
+fn converter_injects_type_tag() {
+    let json = eval_with_converters(
+        r#"
+class Step {
+    check: String = ""
+}
+
+output {
+    renderer {
+        converters {
+            [Step] = (s) -> new Dynamic {
+                _type = "step"
+                ...s.toMap().toDynamic()
+            }
+        }
+    }
+}
+
+myStep = new Step {
+    check = "cargo test"
+}
+"#,
+    );
+    assert_eq!(json["myStep"]["_type"], "step");
+    assert_eq!(json["myStep"]["check"], "cargo test");
+}
+
+#[test]
+fn converter_coerces_values() {
+    let json = eval_with_converters(
+        r#"
+class Step {
+    depends: String|List<String> = ""
+    stash: Boolean|String = false
+}
+
+output {
+    renderer {
+        converters {
+            [Step] = (s) -> new Dynamic {
+                _type = "step"
+                ...s
+                    .toMap()
+                    .mapValues((k, v) ->
+                        if (k == "depends" && v is String)
+                            List(v)
+                        else if (k == "stash" && v is Boolean)
+                            if (v) "git" else "none"
+                        else
+                            v
+                    )
+                    .toDynamic()
+            }
+        }
+    }
+}
+
+myStep = new Step {
+    depends = "other"
+    stash = true
+}
+"#,
+    );
+    assert_eq!(json["myStep"]["_type"], "step");
+    assert_eq!(json["myStep"]["depends"], serde_json::json!(["other"]));
+    assert_eq!(json["myStep"]["stash"], "git");
+}
+
+#[test]
+fn converter_multiple_types() {
+    let json = eval_with_converters(
+        r#"
+class Group {
+    steps: Mapping<String, Step> = new Mapping<String, Step> {}
+}
+
+class Step {
+    check: String = ""
+}
+
+output {
+    renderer {
+        converters {
+            [Group] = (g) -> new Dynamic {
+                _type = "group"
+                ...g.toDynamic()
+            }
+            [Step] = (s) -> new Dynamic {
+                _type = "step"
+                ...s.toDynamic()
+            }
+        }
+    }
+}
+
+myGroup = new Group {
+    steps {
+        ["lint"] = new Step {
+            check = "eslint"
+        }
+    }
+}
+"#,
+    );
+    assert_eq!(json["myGroup"]["_type"], "group");
+    assert_eq!(json["myGroup"]["steps"]["lint"]["_type"], "step");
+    assert_eq!(json["myGroup"]["steps"]["lint"]["check"], "eslint");
+}
+
+#[test]
+fn converter_no_converters_is_noop() {
+    let json = eval_with_converters(
+        r#"
+x = 1
+y = "hello"
+"#,
+    );
+    assert_eq!(json["x"], 1);
+    assert_eq!(json["y"], "hello");
+}
+
+#[test]
+fn converter_output_not_in_result() {
+    let json = eval_with_converters(
+        r#"
+class Foo {
+    x: Int = 0
+}
+
+output {
+    renderer {
+        converters {
+            [Foo] = (f) -> new Dynamic {
+                _type = "foo"
+                ...f.toDynamic()
+            }
+        }
+    }
+}
+
+item = new Foo { x = 42 }
+"#,
+    );
+    assert!(json.get("output").is_none());
+    assert_eq!(json["item"]["_type"], "foo");
+    assert_eq!(json["item"]["x"], 42);
 }
