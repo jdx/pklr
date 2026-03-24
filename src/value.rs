@@ -15,6 +15,9 @@ pub struct ObjectSource {
     pub scope: IndexMap<String, Value>,
     /// Whether the class was declared `open` (allows adding new properties)
     pub is_open: bool,
+    /// The pkl class name this object was instantiated from (e.g., "Step", "Group").
+    /// Used by `output.renderer.converters` to apply type-specific transforms.
+    pub type_name: Option<String>,
 }
 
 /// A pkl runtime value.

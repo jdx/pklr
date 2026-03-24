@@ -27,6 +27,9 @@ pub struct Evaluator {
     /// HTTP URL rewrite rules (source_prefix → target_prefix).
     /// Longest matching prefix wins.
     http_rewrites: Vec<(String, String)>,
+    /// Converters extracted from `output.renderer.converters`.
+    /// Each entry maps a class name to a converter lambda.
+    converters: Vec<(String, Value)>,
 }
 
 impl Default for Evaluator {
@@ -39,6 +42,7 @@ impl Default for Evaluator {
             http_client: reqwest::Client::new(),
             package_dirs: HashMap::new(),
             http_rewrites: Vec::new(),
+            converters: Vec::new(),
         }
     }
 }
@@ -628,8 +632,13 @@ impl Evaluator {
                     continue; // already collected
                 }
                 check_deprecated(&prop.annotations, &prop.name);
-                // Skip Pkl's `output` rendering block — pklr uses Value::to_json()
+                // Extract renderer converters from the `output` block AST,
+                // then skip it (it's not included in the output).
                 if prop.name == "output" {
+                    if depth == 0 {
+                        self.extract_converters_from_ast(prop, &scope, depth)
+                            .await;
+                    }
                     continue;
                 }
                 // abstract/external properties must have a value (or be overridden)
@@ -857,6 +866,7 @@ impl Evaluator {
             entries: entries.to_vec(),
             scope: child_scope.flatten(),
             is_open: true, // default: allow new properties
+            type_name: None,
         };
         Ok(Value::Object(map, Some(std::sync::Arc::new(source))))
     }
@@ -1256,16 +1266,26 @@ impl Evaluator {
                                     depth,
                                 )
                                 .await?;
-                            // Preserve the base class's is_open flag so further amendments
-                            // of non-open classes continue to enforce the constraint.
-                            if let Value::Object(_, Some(ref src)) = result
-                                && src.is_open != is_open
-                            {
-                                let mut new_src = (**src).clone();
-                                new_src.is_open = is_open;
-                                if let Value::Object(_, ref mut src_slot) = result {
-                                    *src_slot = Some(std::sync::Arc::new(new_src));
-                                }
+                            // Preserve the base class's is_open flag and tag the
+                            // type_name so output.renderer.converters can match it.
+                            if let Value::Object(_, ref mut src_slot) = result {
+                                let tn = type_name.clone();
+                                let new_src = if let Some(src) = src_slot.as_ref() {
+                                    let mut s = (**src).clone();
+                                    if s.is_open != is_open {
+                                        s.is_open = is_open;
+                                    }
+                                    s.type_name = tn;
+                                    s
+                                } else {
+                                    ObjectSource {
+                                        entries: Vec::new(),
+                                        scope: IndexMap::new(),
+                                        is_open,
+                                        type_name: tn,
+                                    }
+                                };
+                                *src_slot = Some(std::sync::Arc::new(new_src));
                             }
                             Ok(result)
                         } else if let Some(Value::Object(base_map, _)) = base {
@@ -1275,7 +1295,13 @@ impl Evaluator {
                             if let Value::Object(overlay_map, _) = overlay {
                                 merged.extend(overlay_map);
                             }
-                            Ok(Value::Object(merged, None))
+                            let src = ObjectSource {
+                                entries: Vec::new(),
+                                scope: IndexMap::new(),
+                                is_open: true,
+                                type_name: type_name.clone(),
+                            };
+                            Ok(Value::Object(merged, Some(std::sync::Arc::new(src))))
                         } else {
                             self.eval_entries(entries, scope, depth + 1).await
                         }
@@ -1999,6 +2025,141 @@ impl Evaluator {
             }
         }
         Ok(())
+    }
+
+    /// Walk the AST of the `output` property to extract converter lambdas.
+    /// Looks for the structure: `output { renderer { converters { [Type] = (x) -> ... } } }`.
+    /// Converter keys are type identifiers (e.g., `[Regex]`), which we preserve as
+    /// strings for matching against `ObjectSource.type_name`.
+    #[async_recursion(?Send)]
+    async fn extract_converters_from_ast(
+        &mut self,
+        output_prop: &Property,
+        scope: &Scope,
+        depth: usize,
+    ) {
+        let Some(output_body) = &output_prop.body else {
+            return;
+        };
+        // Find `renderer { ... }` inside output
+        for entry in output_body {
+            let Entry::Property(renderer_prop) = entry else {
+                continue;
+            };
+            if renderer_prop.name != "renderer" {
+                continue;
+            }
+            let Some(renderer_body) = &renderer_prop.body else {
+                continue;
+            };
+            // Find `converters { ... }` inside renderer
+            for rentry in renderer_body {
+                let Entry::Property(converters_prop) = rentry else {
+                    continue;
+                };
+                if converters_prop.name != "converters" {
+                    continue;
+                }
+                let Some(converters_body) = &converters_prop.body else {
+                    continue;
+                };
+                // Each converter is a DynProperty: [ClassName] = (x) -> expr
+                for centry in converters_body {
+                    if let Entry::DynProperty(key_expr, val_expr) = centry {
+                        // Extract the class name from the key expression
+                        let class_name = match key_expr {
+                            Expr::Ident(name) => name.clone(),
+                            Expr::Field(_, name) => name.clone(),
+                            Expr::String(s) => s.clone(),
+                            _ => continue,
+                        };
+                        // Evaluate the lambda value
+                        if let Ok(lambda) = self.eval_expr(val_expr, scope, depth).await {
+                            if matches!(lambda, Value::Lambda(..)) {
+                                self.converters.push((class_name, lambda));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Apply `output.renderer.converters` to a value tree.
+    /// Walks recursively, replacing typed objects with their converter output.
+    pub async fn apply_converters(&mut self, value: Value) -> Result<Value> {
+        if self.converters.is_empty() {
+            return Ok(value);
+        }
+        let converters = self.converters.clone();
+        self.apply_converters_recursive(value, &converters).await
+    }
+
+    #[async_recursion(?Send)]
+    async fn apply_converters_recursive(
+        &mut self,
+        value: Value,
+        converters: &[(String, Value)],
+    ) -> Result<Value> {
+        match value {
+            Value::Object(map, ref src) => {
+                // Check if this object has a type_name that matches a converter
+                let type_name = src
+                    .as_ref()
+                    .and_then(|s| s.type_name.as_deref());
+
+                if let Some(tn) = type_name {
+                    for (conv_name, lambda) in converters {
+                        // Match against the last component of the type name
+                        // (e.g., "Step" matches both "Step" and "Config.Step")
+                        let matches = conv_name == tn
+                            || tn.ends_with(&format!(".{conv_name}"))
+                            || conv_name.ends_with(&format!(".{tn}"));
+                        if matches {
+                            if let Value::Lambda(params, body, captured) = lambda {
+                                let mut call_scope = Scope::default();
+                                for (k, v) in captured {
+                                    call_scope.set(k.clone(), v.clone());
+                                }
+                                // Bind the object as the first parameter
+                                if let Some(param) = params.first() {
+                                    call_scope.set(
+                                        param.clone(),
+                                        Value::Object(map.clone(), src.clone()),
+                                    );
+                                }
+                                let result =
+                                    self.eval_expr(body, &call_scope, 0).await?;
+                                // Recursively apply converters to the result
+                                return self
+                                    .apply_converters_recursive(result, converters)
+                                    .await;
+                            }
+                        }
+                    }
+                }
+
+                // No converter matched — recurse into children
+                let mut new_map = IndexMap::new();
+                for (k, v) in map {
+                    new_map.insert(
+                        k,
+                        self.apply_converters_recursive(v, converters).await?,
+                    );
+                }
+                Ok(Value::Object(new_map, src.clone()))
+            }
+            Value::List(items) => {
+                let mut new_items = Vec::with_capacity(items.len());
+                for item in items {
+                    new_items.push(
+                        self.apply_converters_recursive(item, converters).await?,
+                    );
+                }
+                Ok(Value::List(new_items))
+            }
+            other => Ok(other),
+        }
     }
 }
 
