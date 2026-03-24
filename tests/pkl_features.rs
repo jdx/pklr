@@ -2968,3 +2968,40 @@ result = testMaker.checkFail("bad", 1)
     let val = pklr::eval_to_json(&path).await.unwrap();
     assert_eq!(val["result"], "check:main.rs");
 }
+
+// ============================================================
+// HTTP URL rewriting
+// ============================================================
+
+#[test]
+fn rewrite_url_longest_prefix_wins() {
+    let mut ev = Evaluator::new();
+    ev.set_http_rewrites(&[
+        "https://example.com/=https://mirror.local/".to_string(),
+        "https://example.com/special/=https://special.local/".to_string(),
+    ]);
+    // Longest prefix should win
+    assert_eq!(
+        ev.rewrite_url("https://example.com/special/foo.pkl"),
+        "https://special.local/foo.pkl"
+    );
+    // Shorter prefix matches the rest
+    assert_eq!(
+        ev.rewrite_url("https://example.com/other/bar.pkl"),
+        "https://mirror.local/other/bar.pkl"
+    );
+    // No match returns original
+    assert_eq!(
+        ev.rewrite_url("https://other.com/foo.pkl"),
+        "https://other.com/foo.pkl"
+    );
+}
+
+#[test]
+fn rewrite_url_no_rules_is_identity() {
+    let ev = Evaluator::new();
+    assert_eq!(
+        ev.rewrite_url("https://example.com/foo.pkl"),
+        "https://example.com/foo.pkl"
+    );
+}

@@ -19,16 +19,44 @@ pub async fn eval_to_json(path: &Path) -> Result<serde_json::Value> {
     eval_to_json_with_client(path, None).await
 }
 
+/// Options for configuring the pkl evaluator.
+#[derive(Default)]
+pub struct EvalOptions {
+    /// Custom HTTP client for proxy/CA configuration.
+    pub client: Option<reqwest::Client>,
+    /// HTTP URL rewrite rules in `"source_prefix=target_prefix"` format.
+    /// Matches pkl CLI's `--http-rewrite` behavior: longest matching prefix wins.
+    pub http_rewrites: Vec<String>,
+}
+
 /// Evaluate a pkl file with a custom HTTP client for proxy/CA configuration.
 pub async fn eval_to_json_with_client(
     path: &Path,
     client: Option<reqwest::Client>,
 ) -> Result<serde_json::Value> {
+    eval_to_json_with_options(
+        path,
+        EvalOptions {
+            client,
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+/// Evaluate a pkl file with full configuration options.
+pub async fn eval_to_json_with_options(
+    path: &Path,
+    options: EvalOptions,
+) -> Result<serde_json::Value> {
     let source = std::fs::read_to_string(path).map_err(|e| Error::Io(path.to_path_buf(), e))?;
     let mut evaluator = Evaluator::new();
     evaluator.set_base_path(path.parent().unwrap_or(Path::new(".")));
-    if let Some(client) = client {
+    if let Some(client) = options.client {
         evaluator.set_http_client(client);
+    }
+    if !options.http_rewrites.is_empty() {
+        evaluator.set_http_rewrites(&options.http_rewrites);
     }
     let value = evaluator.eval_source(&source, path).await?;
     Ok(value.to_json())
