@@ -24,6 +24,9 @@ pub struct Evaluator {
     http_client: reqwest::Client,
     /// Extracted package zip directories (zip URL → temp dir path)
     package_dirs: HashMap<String, PathBuf>,
+    /// HTTP URL rewrite rules (source_prefix → target_prefix).
+    /// Longest matching prefix wins.
+    http_rewrites: Vec<(String, String)>,
 }
 
 impl Default for Evaluator {
@@ -35,6 +38,7 @@ impl Default for Evaluator {
             import_cache: HashMap::new(),
             http_client: reqwest::Client::new(),
             package_dirs: HashMap::new(),
+            http_rewrites: Vec::new(),
         }
     }
 }
@@ -52,6 +56,45 @@ impl Evaluator {
     /// Use this to configure proxy settings, CA certificates, timeouts, etc.
     pub fn set_http_client(&mut self, client: reqwest::Client) {
         self.http_client = client;
+    }
+
+    /// Add HTTP URL rewrite rules. Each rule is a `"source_prefix=target_prefix"` string
+    /// (matching pkl CLI's `--http-rewrite` format). When a URL matches a source prefix,
+    /// the prefix is replaced with the target. Longest matching prefix wins.
+    pub fn set_http_rewrites(&mut self, rules: &[String]) {
+        self.http_rewrites = rules
+            .iter()
+            .filter_map(|rule| {
+                let Some((src, tgt)) = rule.split_once('=') else {
+                    eprintln!("pklr: ignoring malformed rewrite rule (missing '='): {rule}");
+                    return None;
+                };
+                if src.is_empty() {
+                    eprintln!("pklr: ignoring rewrite rule with empty source prefix: {rule}");
+                    return None;
+                }
+                Some((src.to_string(), tgt.to_string()))
+            })
+            .collect();
+    }
+
+    /// Apply rewrite rules to a URL. Returns the rewritten URL or the original.
+    pub fn rewrite_url<'a>(&self, url: &'a str) -> std::borrow::Cow<'a, str> {
+        if self.http_rewrites.is_empty() {
+            return std::borrow::Cow::Borrowed(url);
+        }
+        // Find the longest matching prefix
+        let best = self
+            .http_rewrites
+            .iter()
+            .filter(|(src, _)| url.starts_with(src.as_str()))
+            .max_by_key(|(src, _)| src.len());
+        match best {
+            Some((src, tgt)) => {
+                std::borrow::Cow::Owned(format!("{}{}", tgt, &url[src.len()..]))
+            }
+            None => std::borrow::Cow::Borrowed(url),
+        }
     }
 
     /// Read a resource by URI scheme.
@@ -88,42 +131,56 @@ impl Evaluator {
     }
 
     async fn fetch_source(&mut self, url: &str) -> Result<String> {
-        if let Some(cached) = self.http_cache.get(url) {
+        let rewritten = self.rewrite_url(url);
+        let fetch_url = rewritten.as_ref();
+        if let Some(cached) = self.http_cache.get(fetch_url) {
             return Ok(cached.clone());
         }
+        let err_ctx = if fetch_url != url {
+            format!("{url} (rewritten to {fetch_url})")
+        } else {
+            fetch_url.to_string()
+        };
         let body = self
             .http_client
-            .get(url)
+            .get(fetch_url)
             .send()
             .await
-            .map_err(|e| Error::Eval(format!("HTTP fetch failed for {url}: {e}")))?
+            .map_err(|e| Error::Eval(format!("HTTP fetch failed for {err_ctx}: {e}")))?
             .error_for_status()
-            .map_err(|e| Error::Eval(format!("HTTP error for {url}: {e}")))?
+            .map_err(|e| Error::Eval(format!("HTTP error for {err_ctx}: {e}")))?
             .text()
             .await
-            .map_err(|e| Error::Eval(format!("HTTP read failed for {url}: {e}")))?;
-        self.http_cache.insert(url.to_string(), body.clone());
+            .map_err(|e| Error::Eval(format!("HTTP read failed for {err_ctx}: {e}")))?;
+        self.http_cache.insert(fetch_url.to_string(), body.clone());
         Ok(body)
     }
 
     /// Download a package zip and extract it to a temp directory.
     /// Returns the path to the extracted directory. Caches by zip URL.
     async fn extract_package_zip(&mut self, zip_url: &str) -> Result<PathBuf> {
+        let rewritten = self.rewrite_url(zip_url);
+        let fetch_url = rewritten.as_ref();
         // Check if already extracted
-        if let Some(dir) = self.package_dirs.get(zip_url) {
+        if let Some(dir) = self.package_dirs.get(fetch_url) {
             return Ok(dir.clone());
         }
+        let err_ctx = if fetch_url != zip_url {
+            format!("{zip_url} (rewritten to {fetch_url})")
+        } else {
+            fetch_url.to_string()
+        };
         let bytes = self
             .http_client
-            .get(zip_url)
+            .get(fetch_url)
             .send()
             .await
-            .map_err(|e| Error::Eval(format!("HTTP fetch failed for {zip_url}: {e}")))?
+            .map_err(|e| Error::Eval(format!("HTTP fetch failed for {err_ctx}: {e}")))?
             .error_for_status()
-            .map_err(|e| Error::Eval(format!("HTTP error for {zip_url}: {e}")))?
+            .map_err(|e| Error::Eval(format!("HTTP error for {err_ctx}: {e}")))?
             .bytes()
             .await
-            .map_err(|e| Error::Eval(format!("HTTP read failed for {zip_url}: {e}")))?;
+            .map_err(|e| Error::Eval(format!("HTTP read failed for {err_ctx}: {e}")))?;
         let cursor = std::io::Cursor::new(bytes);
         let mut archive =
             zip::ZipArchive::new(cursor).map_err(|e| Error::Eval(format!("zip error: {e}")))?;
@@ -132,7 +189,7 @@ impl Evaluator {
         archive
             .extract(&dir)
             .map_err(|e| Error::Eval(format!("zip extract error: {e}")))?;
-        self.package_dirs.insert(zip_url.to_string(), dir.clone());
+        self.package_dirs.insert(fetch_url.to_string(), dir.clone());
         Ok(dir)
     }
 
