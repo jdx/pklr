@@ -1,0 +1,6 @@
+class Script {
+  linux: String?
+  macos: String?
+}
+
+name = "default"

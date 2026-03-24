@@ -420,6 +420,10 @@ impl Evaluator {
                             .eval_class_def(class_mods, parent.as_deref(), body, &scope, depth)
                             .await?;
                         scope.set(name.clone(), defaults);
+                        // Remove inherited class definitions from base output —
+                        // they were included at depth > 0 for dotted access but
+                        // should not appear in the amending module's data output.
+                        base_obj.shift_remove(name);
                     }
                 }
             }
