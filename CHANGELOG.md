@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2](https://github.com/jdx/pklr/compare/v0.2.1...v0.2.2) - 2026-03-24
+
+### Added
+
+- add HTTP URL rewrite support ([#46](https://github.com/jdx/pklr/pull/46))
+
+### Fixed
+
+- strip inherited class definitions from extends and remote amends ([#48](https://github.com/jdx/pklr/pull/48))
+- strip inherited class definitions from amends output ([#45](https://github.com/jdx/pklr/pull/45))
+
 ## [0.2.1](https://github.com/jdx/pklr/compare/v0.2.0...v0.2.1) - 2026-03-23
 
 ### Added
