@@ -409,9 +409,9 @@ impl Evaluator {
                         PackageSource::Direct(url) => self.http_cache.get(url).cloned(),
                         PackageSource::Zip(_, entry) => {
                             // For zip packages, read from the extracted directory
-                            self.package_dirs.values().find_map(|dir| {
-                                std::fs::read_to_string(dir.join(entry)).ok()
-                            })
+                            self.package_dirs
+                                .values()
+                                .find_map(|dir| std::fs::read_to_string(dir.join(entry)).ok())
                         }
                     }
                 } else {
