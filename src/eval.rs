@@ -637,8 +637,7 @@ impl Evaluator {
                 // then skip it (it's not included in the output).
                 if prop.name == "output" {
                     if depth == 0 {
-                        self.extract_converters_from_ast(prop, &scope, depth)
-                            .await;
+                        self.extract_converters_from_ast(prop, &scope, depth).await;
                     }
                     continue;
                 }
@@ -2075,10 +2074,10 @@ impl Evaluator {
                     _ => continue,
                 };
                 // Evaluate the lambda value
-                if let Ok(lambda) = self.eval_expr(val_expr, scope, depth).await {
-                    if matches!(lambda, Value::Lambda(..)) {
-                        self.converters.push((class_name, lambda));
-                    }
+                if let Ok(lambda) = self.eval_expr(val_expr, scope, depth).await
+                    && matches!(lambda, Value::Lambda(..))
+                {
+                    self.converters.push((class_name, lambda));
                 }
             }
         }
@@ -2103,9 +2102,7 @@ impl Evaluator {
         match value {
             Value::Object(map, ref src) => {
                 // Check if this object has a type_name that matches a converter
-                let type_name = src
-                    .as_ref()
-                    .and_then(|s| s.type_name.as_deref());
+                let type_name = src.as_ref().and_then(|s| s.type_name.as_deref());
 
                 if let Some(tn) = type_name {
                     for (conv_name, lambda) in converters {
@@ -2118,26 +2115,19 @@ impl Evaluator {
                             || (conv_name.len() > tn.len()
                                 && conv_name.ends_with(tn)
                                 && conv_name.as_bytes()[conv_name.len() - tn.len() - 1] == b'.');
-                        if matches {
-                            if let Value::Lambda(params, body, captured) = lambda {
-                                let mut call_scope = Scope::default();
-                                for (k, v) in captured {
-                                    call_scope.set(k.clone(), v.clone());
-                                }
-                                // Bind the object as the first parameter
-                                if let Some(param) = params.first() {
-                                    call_scope.set(
-                                        param.clone(),
-                                        Value::Object(map.clone(), src.clone()),
-                                    );
-                                }
-                                let result =
-                                    self.eval_expr(body, &call_scope, 0).await?;
-                                // Recursively apply converters to the result
-                                return self
-                                    .apply_converters_recursive(result, converters)
-                                    .await;
+                        if matches && let Value::Lambda(params, body, captured) = lambda {
+                            let mut call_scope = Scope::default();
+                            for (k, v) in captured {
+                                call_scope.set(k.clone(), v.clone());
                             }
+                            // Bind the object as the first parameter
+                            if let Some(param) = params.first() {
+                                call_scope
+                                    .set(param.clone(), Value::Object(map.clone(), src.clone()));
+                            }
+                            let result = self.eval_expr(body, &call_scope, 0).await?;
+                            // Recursively apply converters to the result
+                            return self.apply_converters_recursive(result, converters).await;
                         }
                     }
                 }
@@ -2145,19 +2135,14 @@ impl Evaluator {
                 // No converter matched — recurse into children
                 let mut new_map = IndexMap::new();
                 for (k, v) in map {
-                    new_map.insert(
-                        k,
-                        self.apply_converters_recursive(v, converters).await?,
-                    );
+                    new_map.insert(k, self.apply_converters_recursive(v, converters).await?);
                 }
                 Ok(Value::Object(new_map, src.clone()))
             }
             Value::List(items) => {
                 let mut new_items = Vec::with_capacity(items.len());
                 for item in items {
-                    new_items.push(
-                        self.apply_converters_recursive(item, converters).await?,
-                    );
+                    new_items.push(self.apply_converters_recursive(item, converters).await?);
                 }
                 Ok(Value::List(new_items))
             }
