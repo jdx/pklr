@@ -451,8 +451,28 @@ impl Evaluator {
         // We re-parse the base module to find ClassDef entries, then evaluate
         // them directly (similar to extends handling), because eval_module strips
         // class definitions from its return value.
+        // Also remove inherited class definitions from base_obj so they don't
+        // appear in the amending module's data output.
         if let Some(uri) = &module.amends {
-            let base_source = if !uri.starts_with("pkl:")
+            let base_source = if uri.starts_with("https://") || uri.starts_with("http://") {
+                // HTTP source was already fetched and cached
+                self.http_cache.get(uri).cloned()
+            } else if uri.starts_with("package://") {
+                // For package:// URIs with Direct source, the source was cached
+                if let Ok(pkg) = resolve_package_uri(uri) {
+                    match &pkg {
+                        PackageSource::Direct(url) => self.http_cache.get(url).cloned(),
+                        PackageSource::Zip(zip_url, entry) => {
+                            // For zip packages, read from the extracted directory
+                            self.package_dirs
+                                .get(zip_url.as_str())
+                                .and_then(|dir| std::fs::read_to_string(dir.join(entry)).ok())
+                        }
+                    }
+                } else {
+                    None
+                }
+            } else if !uri.starts_with("pkl:")
                 && (!uri.contains("://") || uri.starts_with("file://"))
             {
                 let amends_path = if let Some(rel) = uri.strip_prefix("file://") {
@@ -523,6 +543,7 @@ impl Evaluator {
                                     )
                                     .await?;
                                 scope.set(cls_name.clone(), defaults);
+                                base_obj.shift_remove(cls_name);
                             }
                             Entry::TypeAlias(name, ty) => {
                                 self.eval_type_alias(name, ty, &mut scope);
@@ -548,6 +569,7 @@ impl Evaluator {
                             .eval_class_def(cls_mods, parent.as_deref(), body, &scope, depth)
                             .await?;
                         scope.set(cls_name.clone(), defaults);
+                        base_obj.shift_remove(cls_name);
                     }
                 }
             }

@@ -962,10 +962,28 @@ name = "override"
     let val = ev.eval_source(src, &path).await.unwrap();
     let json = val.to_json();
     assert_eq!(json["name"], "override");
-    // Class definitions from the amended base should NOT appear in the output
     assert!(
         json.get("Script").is_none(),
-        "inherited class 'Script' should be stripped from output, got: {json}"
+        "inherited class 'Script' should be stripped from amends output, got: {json}"
+    );
+}
+
+#[tokio::test]
+async fn extends_strips_inherited_class_definitions() {
+    let mut ev = pklr::eval::Evaluator::new();
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    ev.set_base_path(&base);
+    let src = r#"
+extends "base_with_class.pkl"
+name = "child"
+"#;
+    let path = base.join("test_extends_class.pkl");
+    let val = ev.eval_source(src, &path).await.unwrap();
+    let json = val.to_json();
+    assert_eq!(json["name"], "child");
+    assert!(
+        json.get("Script").is_none(),
+        "inherited class 'Script' should be stripped from extends output, got: {json}"
     );
 }
 
