@@ -196,6 +196,7 @@ impl Evaluator {
     }
 
     pub async fn eval_source(&mut self, source: &str, path: &Path) -> Result<Value> {
+        self.converters.clear();
         // Seed import cache for the entry file so circular back-references work
         if let Ok(canonical) = path.canonicalize() {
             self.import_cache
@@ -2031,7 +2032,6 @@ impl Evaluator {
     /// Looks for the structure: `output { renderer { converters { [Type] = (x) -> ... } } }`.
     /// Converter keys are type identifiers (e.g., `[Regex]`), which we preserve as
     /// strings for matching against `ObjectSource.type_name`.
-    #[async_recursion(?Send)]
     async fn extract_converters_from_ast(
         &mut self,
         output_prop: &Property,
@@ -2041,44 +2041,43 @@ impl Evaluator {
         let Some(output_body) = &output_prop.body else {
             return;
         };
-        // Find `renderer { ... }` inside output
-        for entry in output_body {
-            let Entry::Property(renderer_prop) = entry else {
-                continue;
-            };
-            if renderer_prop.name != "renderer" {
-                continue;
+        // Find `renderer { converters { ... } }` inside output
+        let Some(renderer_body) = output_body.iter().find_map(|entry| {
+            if let Entry::Property(p) = entry
+                && p.name == "renderer"
+            {
+                p.body.as_ref()
+            } else {
+                None
             }
-            let Some(renderer_body) = &renderer_prop.body else {
-                continue;
-            };
-            // Find `converters { ... }` inside renderer
-            for rentry in renderer_body {
-                let Entry::Property(converters_prop) = rentry else {
-                    continue;
+        }) else {
+            return;
+        };
+        let Some(converters_body) = renderer_body.iter().find_map(|entry| {
+            if let Entry::Property(p) = entry
+                && p.name == "converters"
+            {
+                p.body.as_ref()
+            } else {
+                None
+            }
+        }) else {
+            return;
+        };
+        // Each converter is a DynProperty: [ClassName] = (x) -> expr
+        for centry in converters_body {
+            if let Entry::DynProperty(key_expr, val_expr) = centry {
+                // Extract the class name from the key expression
+                let class_name = match key_expr {
+                    Expr::Ident(name) => name.clone(),
+                    Expr::Field(_, name) => name.clone(),
+                    Expr::String(s) => s.clone(),
+                    _ => continue,
                 };
-                if converters_prop.name != "converters" {
-                    continue;
-                }
-                let Some(converters_body) = &converters_prop.body else {
-                    continue;
-                };
-                // Each converter is a DynProperty: [ClassName] = (x) -> expr
-                for centry in converters_body {
-                    if let Entry::DynProperty(key_expr, val_expr) = centry {
-                        // Extract the class name from the key expression
-                        let class_name = match key_expr {
-                            Expr::Ident(name) => name.clone(),
-                            Expr::Field(_, name) => name.clone(),
-                            Expr::String(s) => s.clone(),
-                            _ => continue,
-                        };
-                        // Evaluate the lambda value
-                        if let Ok(lambda) = self.eval_expr(val_expr, scope, depth).await {
-                            if matches!(lambda, Value::Lambda(..)) {
-                                self.converters.push((class_name, lambda));
-                            }
-                        }
+                // Evaluate the lambda value
+                if let Ok(lambda) = self.eval_expr(val_expr, scope, depth).await {
+                    if matches!(lambda, Value::Lambda(..)) {
+                        self.converters.push((class_name, lambda));
                     }
                 }
             }
@@ -2110,11 +2109,15 @@ impl Evaluator {
 
                 if let Some(tn) = type_name {
                     for (conv_name, lambda) in converters {
-                        // Match against the last component of the type name
-                        // (e.g., "Step" matches both "Step" and "Config.Step")
+                        // Match exact name, or as a dotted suffix
+                        // (e.g., converter "Step" matches type "Step" or "Config.Step")
                         let matches = conv_name == tn
-                            || tn.ends_with(&format!(".{conv_name}"))
-                            || conv_name.ends_with(&format!(".{tn}"));
+                            || (tn.len() > conv_name.len()
+                                && tn.ends_with(conv_name.as_str())
+                                && tn.as_bytes()[tn.len() - conv_name.len() - 1] == b'.')
+                            || (conv_name.len() > tn.len()
+                                && conv_name.ends_with(tn)
+                                && conv_name.as_bytes()[conv_name.len() - tn.len() - 1] == b'.');
                         if matches {
                             if let Value::Lambda(params, body, captured) = lambda {
                                 let mut call_scope = Scope::default();
