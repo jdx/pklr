@@ -505,6 +505,16 @@ impl Evaluator {
                         // should not appear in the amending module's data output.
                         base_obj.shift_remove(name);
                     }
+                    // Extract converters from the base module's output block
+                    // (the amending module inherits them).
+                    if let Entry::Property(prop) = entry
+                        && prop.name == "output"
+                        && depth == 0
+                        && self.converters.is_empty()
+                    {
+                        self.extract_converters_from_ast(prop, &scope, depth)
+                            .await;
+                    }
                 }
             }
             // Remove function values from base output (not data)
@@ -552,6 +562,14 @@ impl Evaluator {
                             }
                             Entry::TypeAlias(name, ty) => {
                                 self.eval_type_alias(name, ty, &mut scope);
+                            }
+                            Entry::Property(prop)
+                                if prop.name == "output"
+                                    && depth == 0
+                                    && self.converters.is_empty() =>
+                            {
+                                self.extract_converters_from_ast(prop, &scope, depth)
+                                    .await;
                             }
                             _ => {}
                         }

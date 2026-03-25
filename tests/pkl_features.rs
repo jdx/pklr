@@ -3188,3 +3188,62 @@ item = new Foo { x = 42 }
     assert_eq!(json["item"]["_type"], "foo");
     assert_eq!(json["item"]["x"], 42);
 }
+
+#[test]
+fn converter_inherited_from_amends_base() {
+    use std::io::Write;
+    let dir = std::env::temp_dir().join("pklr_test_amends_converter");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // Base module with class + converter
+    let base_path = dir.join("Base.pkl");
+    let mut base_file = std::fs::File::create(&base_path).unwrap();
+    write!(
+        base_file,
+        r#"
+class Step {{
+    check: String = ""
+}}
+
+output {{
+    renderer {{
+        converters {{
+            [Step] = (s) -> new Dynamic {{
+                _type = "step"
+                ...s.toDynamic()
+            }}
+        }}
+    }}
+}}
+"#
+    )
+    .unwrap();
+
+    // Amending module
+    let child_path = dir.join("child.pkl");
+    let mut child_file = std::fs::File::create(&child_path).unwrap();
+    write!(
+        child_file,
+        r#"amends "Base.pkl"
+
+myStep = new Step {{
+    check = "cargo test"
+}}
+"#
+    )
+    .unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let json = rt.block_on(async {
+        let mut ev = Evaluator::new();
+        let val = ev.eval_source(
+            &std::fs::read_to_string(&child_path).unwrap(),
+            &child_path,
+        ).await.unwrap();
+        let val = ev.apply_converters(val).await.unwrap();
+        val.to_json()
+    });
+    assert_eq!(json["myStep"]["_type"], "step");
+    assert_eq!(json["myStep"]["check"], "cargo test");
+}
