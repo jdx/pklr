@@ -3192,10 +3192,8 @@ item = new Foo { x = 42 }
 #[test]
 fn converter_inherited_from_amends_base() {
     use std::io::Write;
-    let dir = std::env::temp_dir().join(format!(
-        "pklr_test_amends_converter_{}",
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("pklr_test_amends_converter_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -3240,10 +3238,10 @@ myStep = new Step {{
     let rt = tokio::runtime::Runtime::new().unwrap();
     let json = rt.block_on(async {
         let mut ev = Evaluator::new();
-        let val = ev.eval_source(
-            &std::fs::read_to_string(&child_path).unwrap(),
-            &child_path,
-        ).await.unwrap();
+        let val = ev
+            .eval_source(&std::fs::read_to_string(&child_path).unwrap(), &child_path)
+            .await
+            .unwrap();
         let val = ev.apply_converters(val).await.unwrap();
         val.to_json()
     });
@@ -3300,10 +3298,10 @@ myStep = new Step {{
     let rt = tokio::runtime::Runtime::new().unwrap();
     let json = rt.block_on(async {
         let mut ev = Evaluator::new();
-        let val = ev.eval_source(
-            &std::fs::read_to_string(&child_path).unwrap(),
-            &child_path,
-        ).await.unwrap();
+        let val = ev
+            .eval_source(&std::fs::read_to_string(&child_path).unwrap(), &child_path)
+            .await
+            .unwrap();
         let val = ev.apply_converters(val).await.unwrap();
         val.to_json()
     });
@@ -3314,7 +3312,8 @@ myStep = new Step {{
 /// Simple: amends with bare object in a typed Mapping property
 #[test]
 fn converter_amends_simple_typed_mapping() {
-    let json = eval_with_converters(r#"
+    let json = eval_with_converters(
+        r#"
 open class Step {
     check: String = ""
 }
@@ -3337,8 +3336,12 @@ steps {
         check = "echo ok"
     }
 }
-"#);
-    eprintln!("simple JSON: {}", serde_json::to_string_pretty(&json).unwrap());
+"#,
+    );
+    eprintln!(
+        "simple JSON: {}",
+        serde_json::to_string_pretty(&json).unwrap()
+    );
     assert_eq!(json["steps"]["echo"]["_type"], "step");
     assert_eq!(json["steps"]["echo"]["check"], "echo ok");
 }
@@ -3348,16 +3351,15 @@ steps {
 #[test]
 fn converter_amends_bare_object_in_mapping() {
     use std::io::Write;
-    let dir = std::env::temp_dir().join(format!(
-        "pklr_test_bare_mapping_{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("pklr_test_bare_mapping_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
     let base_path = dir.join("Config.pkl");
     let mut f = std::fs::File::create(&base_path).unwrap();
-    write!(f, r#"
+    write!(
+        f,
+        r#"
 open class Step {{
     check: String = ""
     fix: String = ""
@@ -3379,11 +3381,15 @@ output {{
         }}
     }}
 }}
-"#).unwrap();
+"#
+    )
+    .unwrap();
 
     let child_path = dir.join("hk.pkl");
     let mut f = std::fs::File::create(&child_path).unwrap();
-    write!(f, r#"amends "Config.pkl"
+    write!(
+        f,
+        r#"amends "Config.pkl"
 
 hooks {{
     ["check"] {{
@@ -3394,15 +3400,17 @@ hooks {{
         }}
     }}
 }}
-"#).unwrap();
+"#
+    )
+    .unwrap();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let json = rt.block_on(async {
         let mut ev = Evaluator::new();
-        let val = ev.eval_source(
-            &std::fs::read_to_string(&child_path).unwrap(),
-            &child_path,
-        ).await.unwrap();
+        let val = ev
+            .eval_source(&std::fs::read_to_string(&child_path).unwrap(), &child_path)
+            .await
+            .unwrap();
         let val = ev.apply_converters(val).await.unwrap();
         val.to_json()
     });

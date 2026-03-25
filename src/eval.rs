@@ -497,7 +497,14 @@ impl Evaluator {
                 for entry in &base_module.body {
                     if let Entry::ClassDef(name, class_mods, parent, body) = entry {
                         let defaults = self
-                            .eval_class_def(name, class_mods, parent.as_deref(), body, &scope, depth)
+                            .eval_class_def(
+                                name,
+                                class_mods,
+                                parent.as_deref(),
+                                body,
+                                &scope,
+                                depth,
+                            )
                             .await?;
                         scope.set(name.clone(), defaults);
                         // Remove inherited class definitions from base output —
@@ -511,8 +518,7 @@ impl Evaluator {
                         && prop.name == "output"
                         && depth == 0
                     {
-                        self.extract_converters_from_ast(prop, &scope, depth)
-                            .await;
+                        self.extract_converters_from_ast(prop, &scope, depth).await;
                     }
                 }
             }
@@ -563,11 +569,8 @@ impl Evaluator {
                             Entry::TypeAlias(name, ty) => {
                                 self.eval_type_alias(name, ty, &mut scope);
                             }
-                            Entry::Property(prop)
-                                if prop.name == "output" && depth == 0 =>
-                            {
-                                self.extract_converters_from_ast(prop, &scope, depth)
-                                    .await;
+                            Entry::Property(prop) if prop.name == "output" && depth == 0 => {
+                                self.extract_converters_from_ast(prop, &scope, depth).await;
                             }
                             _ => {}
                         }
@@ -587,7 +590,14 @@ impl Evaluator {
                 for entry in &ext_module.body {
                     if let Entry::ClassDef(cls_name, cls_mods, parent, body) = entry {
                         let defaults = self
-                            .eval_class_def(cls_name, cls_mods, parent.as_deref(), body, &scope, depth)
+                            .eval_class_def(
+                                cls_name,
+                                cls_mods,
+                                parent.as_deref(),
+                                body,
+                                &scope,
+                                depth,
+                            )
                             .await?;
                         scope.set(cls_name.clone(), defaults);
                         base_obj.shift_remove(cls_name);
@@ -791,7 +801,14 @@ impl Evaluator {
                 }
                 Entry::ClassDef(name, class_mods, parent, body) => {
                     let defaults = self
-                        .eval_class_def(name, class_mods, parent.as_deref(), body, &child_scope, depth)
+                        .eval_class_def(
+                            name,
+                            class_mods,
+                            parent.as_deref(),
+                            body,
+                            &child_scope,
+                            depth,
+                        )
                         .await?;
                     child_scope.set(name.clone(), defaults);
                 }
@@ -846,27 +863,33 @@ impl Evaluator {
                     {
                         // Default template has ObjectSource — use eval_amended_object
                         // so nested property amendments work properly.
-                        let mut result = self.eval_amended_object(
-                            &src.entries, &src.scope, body, &child_scope, depth,
-                        ).await?;
+                        let mut result = self
+                            .eval_amended_object(
+                                &src.entries,
+                                &src.scope,
+                                body,
+                                &child_scope,
+                                depth,
+                            )
+                            .await?;
                         // Propagate the template's type_name so converters can match.
-                        if let Some(ref tn) = src.type_name {
-                            if let Value::Object(_, ref mut result_src) = result {
-                                let new_src = match result_src.as_ref() {
-                                    Some(s) => {
-                                        let mut ns = (**s).clone();
-                                        ns.type_name = Some(tn.clone());
-                                        ns
-                                    }
-                                    None => ObjectSource {
-                                        entries: vec![],
-                                        scope: IndexMap::new(),
-                                        is_open: true,
-                                        type_name: Some(tn.clone()),
-                                    },
-                                };
-                                *result_src = Some(std::sync::Arc::new(new_src));
-                            }
+                        if let Some(ref tn) = src.type_name
+                            && let Value::Object(_, ref mut result_src) = result
+                        {
+                            let new_src = match result_src.as_ref() {
+                                Some(s) => {
+                                    let mut ns = (**s).clone();
+                                    ns.type_name = Some(tn.clone());
+                                    ns
+                                }
+                                None => ObjectSource {
+                                    entries: vec![],
+                                    scope: IndexMap::new(),
+                                    is_open: true,
+                                    type_name: Some(tn.clone()),
+                                },
+                            };
+                            *result_src = Some(std::sync::Arc::new(new_src));
                         }
                         result
                     } else {
@@ -1276,12 +1299,16 @@ impl Evaluator {
                     Some("Mapping") | Some("Map") => {
                         // If the Mapping has a value type param (e.g., Mapping<String, Step>),
                         // resolve it as a default template so entries inherit the class type.
-                        let value_type_default = generic_params.get(1).and_then(|name| {
-                            resolve_dotted(scope, name)
-                        });
+                        let value_type_default = generic_params
+                            .get(1)
+                            .and_then(|name| resolve_dotted(scope, name));
                         let mut map = IndexMap::new();
                         self.eval_mapping_entries_with_type_default(
-                            entries, scope, depth, &mut map, value_type_default.as_ref(),
+                            entries,
+                            scope,
+                            depth,
+                            &mut map,
+                            value_type_default.as_ref(),
                         )
                         .await?;
                         // Build ObjectSource with a synthetic `default` entry so that
@@ -1289,7 +1316,9 @@ impl Evaluator {
                         // with the value type class, preserving type_name for converters.
                         let mut src_entries = entries.to_vec();
                         if value_type_default.is_some()
-                            && !entries.iter().any(|e| matches!(e, Entry::Property(p) if p.name == "default"))
+                            && !entries
+                                .iter()
+                                .any(|e| matches!(e, Entry::Property(p) if p.name == "default"))
                         {
                             // Inject a synthetic default property referencing the value type
                             let vt_name = generic_params[1].clone();
@@ -1298,11 +1327,7 @@ impl Evaluator {
                                 modifiers: vec![],
                                 name: "default".into(),
                                 type_ann: None,
-                                value: Some(Expr::New(
-                                    Some(vt_name),
-                                    vec![],
-                                    vec![],
-                                )),
+                                value: Some(Expr::New(Some(vt_name), vec![], vec![])),
                                 body: None,
                             }));
                         }
@@ -2112,26 +2137,26 @@ impl Evaluator {
                     let val = if let Some(Value::Object(_, Some(src))) = default_template
                         && let Expr::ObjectBody(body) = val_expr
                     {
-                        let mut result = self.eval_amended_object(
-                            &src.entries, &src.scope, body, scope, depth,
-                        ).await?;
-                        if let Some(ref tn) = src.type_name {
-                            if let Value::Object(_, ref mut result_src) = result {
-                                let new_src = match result_src.as_ref() {
-                                    Some(s) => {
-                                        let mut ns = (**s).clone();
-                                        ns.type_name = Some(tn.clone());
-                                        ns
-                                    }
-                                    None => ObjectSource {
-                                        entries: vec![],
-                                        scope: IndexMap::new(),
-                                        is_open: true,
-                                        type_name: Some(tn.clone()),
-                                    },
-                                };
-                                *result_src = Some(std::sync::Arc::new(new_src));
-                            }
+                        let mut result = self
+                            .eval_amended_object(&src.entries, &src.scope, body, scope, depth)
+                            .await?;
+                        if let Some(ref tn) = src.type_name
+                            && let Value::Object(_, ref mut result_src) = result
+                        {
+                            let new_src = match result_src.as_ref() {
+                                Some(s) => {
+                                    let mut ns = (**s).clone();
+                                    ns.type_name = Some(tn.clone());
+                                    ns
+                                }
+                                None => ObjectSource {
+                                    entries: vec![],
+                                    scope: IndexMap::new(),
+                                    is_open: true,
+                                    type_name: Some(tn.clone()),
+                                },
+                            };
+                            *result_src = Some(std::sync::Arc::new(new_src));
                         }
                         result
                     } else {
