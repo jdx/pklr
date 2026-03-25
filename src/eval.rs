@@ -2185,7 +2185,11 @@ impl Evaluator {
                             iter_scope.set(kv.clone(), k);
                         }
                         self.eval_mapping_entries_with_type_default(
-                            &fgen.body, &iter_scope, depth + 1, map, type_default,
+                            &fgen.body,
+                            &iter_scope,
+                            depth + 1,
+                            map,
+                            type_default,
                         )
                         .await?;
                     }
