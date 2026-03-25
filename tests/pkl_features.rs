@@ -3418,3 +3418,159 @@ hooks {{
     assert_eq!(json["hooks"]["check"]["steps"]["echo"]["_type"], "step");
     assert_eq!(json["hooks"]["check"]["steps"]["echo"]["check"], "echo ok");
 }
+
+#[test]
+fn method_call_on_class_instance() {
+    let json = eval(r#"
+class TestMaker {
+  filename: String = "file.txt"
+  function checkFail(contents: String, code: Int): String = "fail:" + contents + ":" + code.toString()
+}
+
+local testMaker = new TestMaker {}
+result = testMaker.checkFail("bad", 1)
+"#);
+    eprintln!("method_call JSON: {}", serde_json::to_string_pretty(&json).unwrap());
+    assert_eq!(json["result"], "fail:bad:1");
+}
+
+#[test]
+fn method_call_on_imported_class_instance() {
+    use std::io::Write;
+    let dir = std::env::temp_dir().join(format!(
+        "pklr_test_method_import_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // helpers.pkl defines TestMaker with a method
+    let helpers_path = dir.join("helpers.pkl");
+    let mut f = std::fs::File::create(&helpers_path).unwrap();
+    write!(f, r#"
+class TestMaker {{
+  filename: String = "file.txt"
+  function checkFail(contents: String, code: Int): String = "fail:" + contents + ":" + code.toString()
+}}
+"#).unwrap();
+
+    // builtin.pkl imports helpers and uses testMaker.checkFail
+    let builtin_path = dir.join("builtin.pkl");
+    let mut f = std::fs::File::create(&builtin_path).unwrap();
+    write!(f, r#"
+import "helpers.pkl"
+local testMaker = new helpers.TestMaker {{}}
+result = testMaker.checkFail("bad", 1)
+"#).unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let json = rt.block_on(async {
+        let mut ev = Evaluator::new();
+        let val = ev.eval_source(
+            &std::fs::read_to_string(&builtin_path).unwrap(),
+            &builtin_path,
+        ).await.unwrap();
+        val.to_json()
+    });
+    eprintln!("imported method JSON: {}", serde_json::to_string_pretty(&json).unwrap());
+    assert_eq!(json["result"], "fail:bad:1");
+}
+
+#[test]
+fn method_call_through_glob_import() {
+    let dir = std::path::Path::new("/tmp/pklr_builtin_test");
+    let main_path = dir.join("main.pkl");
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let json = rt.block_on(async {
+        let mut ev = Evaluator::new();
+        let src = std::fs::read_to_string(&main_path).unwrap();
+        match ev.eval_source(&src, &main_path).await {
+            Ok(val) => val.to_json(),
+            Err(e) => panic!("eval failed: {e}"),
+        }
+    });
+    eprintln!("glob import JSON: {}", serde_json::to_string_pretty(&json).unwrap());
+    assert_eq!(json["result"], "echo check");
+}
+
+#[test]
+fn import_star_basic() {
+    use std::io::Write;
+    let dir = std::env::temp_dir().join(format!("pklr_import_star_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("items")).unwrap();
+
+    let mut f = std::fs::File::create(dir.join("items/a.pkl")).unwrap();
+    write!(f, "x = 1\n").unwrap();
+
+    let mut f = std::fs::File::create(dir.join("items/b.pkl")).unwrap();
+    write!(f, "x = 2\n").unwrap();
+
+    let mut f = std::fs::File::create(dir.join("main.pkl")).unwrap();
+    write!(f, "import* \"items/*.pkl\" as Items\nresult_a = Items.a.x\nresult_b = Items.b.x\n").unwrap();
+
+    let main_path = dir.join("main.pkl");
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let json = rt.block_on(async {
+        let mut ev = Evaluator::new();
+        let src = std::fs::read_to_string(&main_path).unwrap();
+        match ev.eval_source(&src, &main_path).await {
+            Ok(val) => val.to_json(),
+            Err(e) => panic!("eval failed: {e}"),
+        }
+    });
+    eprintln!("import* JSON: {}", serde_json::to_string_pretty(&json).unwrap());
+    assert_eq!(json["result_a"], 1);
+    assert_eq!(json["result_b"], 2);
+}
+
+#[test]
+fn local_const_method_call_in_nested_body() {
+    let json = eval(r#"
+class TestMaker {
+  filename: String = "file.txt"
+  function checkFail(contents: String, code: Int): String = "fail:" + contents + ":" + code.toString()
+}
+
+result {
+  local const testMaker = new TestMaker {
+    filename = "test.yml"
+  }
+  ["check bad"] = testMaker.checkFail("bad", 1)
+}
+"#);
+    eprintln!("local const JSON: {}", serde_json::to_string_pretty(&json).unwrap());
+    assert_eq!(json["result"]["check bad"], "fail:bad:1");
+}
+
+#[test]
+fn cross_module_local_const_method() {
+    let path = std::path::Path::new("/tmp/pklr_cross_test/actionlint.pkl");
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let json = rt.block_on(async {
+        let mut ev = Evaluator::new();
+        let src = std::fs::read_to_string(path).unwrap();
+        match ev.eval_source(&src, path).await {
+            Ok(val) => val.to_json(),
+            Err(e) => panic!("eval failed: {e}"),
+        }
+    });
+    eprintln!("cross module JSON: {}", serde_json::to_string_pretty(&json).unwrap());
+    assert_eq!(json["actionlint"]["tests"]["check bad"], "fail:bad:1");
+}
+
+#[test]
+fn class_instance_with_nested_method_call() {
+    let path = std::path::Path::new("/tmp/pklr_cross_test/actionlint2.pkl");
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let json = rt.block_on(async {
+        let mut ev = Evaluator::new();
+        let src = std::fs::read_to_string(path).unwrap();
+        match ev.eval_source(&src, path).await {
+            Ok(val) => val.to_json(),
+            Err(e) => panic!("eval failed: {e}"),
+        }
+    });
+    eprintln!("class instance JSON: {}", serde_json::to_string_pretty(&json).unwrap());
+    assert_eq!(json["actionlint"]["check"], "actionlint");
+}

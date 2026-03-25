@@ -286,9 +286,11 @@ impl Evaluator {
                 let matched = expand_glob(base_dir, uri)?;
                 let mut mapping = IndexMap::new();
                 for matched_path in matched {
-                    let rel_key = pathdiff_or_full(&matched_path, base_dir);
+                    // pkl uses the glob-relative path as the key
+                    // (e.g., "builtins/actionlint.pkl" for glob "builtins/*.pkl")
+                    let key = pathdiff_or_full(&matched_path, base_dir);
                     let val = self.eval_file(&matched_path, depth + 1).await?;
-                    mapping.insert(rel_key, val);
+                    mapping.insert(key, val);
                 }
                 scope.set(alias, Value::Object(mapping, None));
                 continue;
@@ -641,6 +643,18 @@ impl Evaluator {
             {
                 base_obj.insert(name.clone(), cls_val.clone());
                 class_names.insert(name.clone());
+            }
+        }
+
+        // Add glob import aliases (import* ... as X) to output so they're
+        // accessible when this module is imported by another module.
+        for import in &module.imports {
+            if import.is_glob {
+                if let Some(alias) = &import.alias {
+                    if let Some(val) = scope.get(alias) {
+                        base_obj.insert(alias.clone(), val.clone());
+                    }
+                }
             }
         }
 
