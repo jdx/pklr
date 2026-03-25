@@ -15,6 +15,9 @@ pub struct ObjectSource {
     pub scope: IndexMap<String, Value>,
     /// Whether the class was declared `open` (allows adding new properties)
     pub is_open: bool,
+    /// The class name this object was instantiated from (e.g., "Step", "Group").
+    /// Used to inject `_type` in JSON output, matching pkl's output converter behavior.
+    pub class_name: Option<String>,
 }
 
 /// A pkl runtime value.
@@ -48,8 +51,19 @@ impl Value {
             Value::Int(n) => json!(n),
             Value::Float(f) => json!(f),
             Value::String(s) => json!(s),
-            Value::Object(map, _) => {
+            Value::Object(map, src) => {
                 let mut obj = serde_json::Map::new();
+                // Inject _type for typed objects (instances of user-defined classes),
+                // matching pkl's output converter convention.
+                if let Some(s) = src
+                    && let Some(ref name) = s.class_name
+                    && !map.contains_key("_type")
+                {
+                    obj.insert(
+                        "_type".to_string(),
+                        json!(name.to_ascii_lowercase()),
+                    );
+                }
                 for (k, v) in map {
                     obj.insert(k.clone(), v.to_json());
                 }

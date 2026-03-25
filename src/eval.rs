@@ -492,7 +492,7 @@ impl Evaluator {
                 for entry in &base_module.body {
                     if let Entry::ClassDef(name, class_mods, parent, body) = entry {
                         let defaults = self
-                            .eval_class_def(class_mods, parent.as_deref(), body, &scope, depth)
+                            .eval_class_def(name, class_mods, parent.as_deref(), body, &scope, depth)
                             .await?;
                         scope.set(name.clone(), defaults);
                         // Remove inherited class definitions from base output —
@@ -535,6 +535,7 @@ impl Evaluator {
                             Entry::ClassDef(cls_name, cls_mods, parent, body) => {
                                 let defaults = self
                                     .eval_class_def(
+                                        cls_name,
                                         cls_mods,
                                         parent.as_deref(),
                                         body,
@@ -566,7 +567,7 @@ impl Evaluator {
                 for entry in &ext_module.body {
                     if let Entry::ClassDef(cls_name, cls_mods, parent, body) = entry {
                         let defaults = self
-                            .eval_class_def(cls_mods, parent.as_deref(), body, &scope, depth)
+                            .eval_class_def(cls_name, cls_mods, parent.as_deref(), body, &scope, depth)
                             .await?;
                         scope.set(cls_name.clone(), defaults);
                         base_obj.shift_remove(cls_name);
@@ -589,7 +590,7 @@ impl Evaluator {
                 }
                 Entry::ClassDef(name, class_mods, parent, body) => {
                     let defaults = self
-                        .eval_class_def(class_mods, parent.as_deref(), body, &scope, depth)
+                        .eval_class_def(name, class_mods, parent.as_deref(), body, &scope, depth)
                         .await?;
                     scope.set(name.clone(), defaults);
                 }
@@ -748,7 +749,7 @@ impl Evaluator {
                 }
                 Entry::ClassDef(name, class_mods, parent, body) => {
                     let defaults = self
-                        .eval_class_def(class_mods, parent.as_deref(), body, &child_scope, depth)
+                        .eval_class_def(name, class_mods, parent.as_deref(), body, &child_scope, depth)
                         .await?;
                     child_scope.set(name.clone(), defaults);
                 }
@@ -857,6 +858,7 @@ impl Evaluator {
             entries: entries.to_vec(),
             scope: child_scope.flatten(),
             is_open: true, // default: allow new properties
+            class_name: None,
         };
         Ok(Value::Object(map, Some(std::sync::Arc::new(source))))
     }
@@ -869,6 +871,7 @@ impl Evaluator {
     #[async_recursion(?Send)]
     async fn eval_class_def(
         &mut self,
+        class_name: &str,
         class_mods: &[Modifier],
         parent_name: Option<&str>,
         body: &[Entry],
@@ -928,12 +931,21 @@ impl Evaluator {
             Ok(child_defaults)
         }
         .map(|val| {
-            // Set is_open flag on the result's ObjectSource
+            // Set is_open flag and class_name on the result's ObjectSource
             let is_open = has_modifier(class_mods, Modifier::Open);
             if let Value::Object(map, Some(src)) = val {
                 let mut new_src = (*src).clone();
                 new_src.is_open = is_open;
+                new_src.class_name = Some(class_name.to_string());
                 Value::Object(map, Some(std::sync::Arc::new(new_src)))
+            } else if let Value::Object(map, None) = val {
+                let src = ObjectSource {
+                    entries: vec![],
+                    scope: IndexMap::new(),
+                    is_open,
+                    class_name: Some(class_name.to_string()),
+                };
+                Value::Object(map, Some(std::sync::Arc::new(src)))
             } else {
                 val
             }
@@ -1246,6 +1258,7 @@ impl Evaluator {
                                 }
                             }
                             let is_open = base_src.is_open;
+                            let class_name = base_src.class_name.clone();
                             // Late binding: re-evaluate merged base + overlay entries
                             let mut result = self
                                 .eval_amended_object(
@@ -1256,15 +1269,17 @@ impl Evaluator {
                                     depth,
                                 )
                                 .await?;
-                            // Preserve the base class's is_open flag so further amendments
-                            // of non-open classes continue to enforce the constraint.
-                            if let Value::Object(_, Some(ref src)) = result
-                                && src.is_open != is_open
-                            {
-                                let mut new_src = (**src).clone();
-                                new_src.is_open = is_open;
-                                if let Value::Object(_, ref mut src_slot) = result {
-                                    *src_slot = Some(std::sync::Arc::new(new_src));
+                            // Preserve the base class's is_open flag and class_name
+                            // so further amendments continue to enforce constraints
+                            // and typed objects get _type in JSON output.
+                            if let Value::Object(_, Some(ref src)) = result {
+                                if src.is_open != is_open || src.class_name != class_name {
+                                    let mut new_src = (**src).clone();
+                                    new_src.is_open = is_open;
+                                    new_src.class_name = class_name;
+                                    if let Value::Object(_, ref mut src_slot) = result {
+                                        *src_slot = Some(std::sync::Arc::new(new_src));
+                                    }
                                 }
                             }
                             Ok(result)

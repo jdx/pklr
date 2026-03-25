@@ -2806,6 +2806,62 @@ x = new Dynamic {
 }
 
 // ============================================================
+// Class _type injection
+// ============================================================
+
+#[test]
+fn class_instance_gets_type_in_json() {
+    let json = eval(
+        r#"
+class Step {
+    check: String = ""
+}
+x = new Step {
+    check = "echo ok"
+}
+"#,
+    );
+    assert_eq!(json["x"]["_type"], "step");
+    assert_eq!(json["x"]["check"], "echo ok");
+}
+
+#[test]
+fn class_instance_explicit_type_not_overwritten() {
+    let json = eval(
+        r#"
+class MyClass {
+    _type: String = "custom"
+    name: String = ""
+}
+x = new MyClass {
+    name = "test"
+}
+"#,
+    );
+    assert_eq!(json["x"]["_type"], "custom");
+}
+
+#[test]
+fn class_extends_gets_child_type() {
+    let json = eval(
+        r#"
+class Base {
+    name: String = ""
+}
+class Child extends Base {
+    extra: String = ""
+}
+x = new Child {
+    name = "test"
+    extra = "val"
+}
+"#,
+    );
+    assert_eq!(json["x"]["_type"], "child");
+    assert_eq!(json["x"]["name"], "test");
+}
+
+// ============================================================
 // Class functions
 // ============================================================
 
