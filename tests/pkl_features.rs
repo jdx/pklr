@@ -3192,7 +3192,10 @@ item = new Foo { x = 42 }
 #[test]
 fn converter_inherited_from_amends_base() {
     use std::io::Write;
-    let dir = std::env::temp_dir().join("pklr_test_amends_converter");
+    let dir = std::env::temp_dir().join(format!(
+        "pklr_test_amends_converter_{}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -3246,4 +3249,64 @@ myStep = new Step {{
     });
     assert_eq!(json["myStep"]["_type"], "step");
     assert_eq!(json["myStep"]["check"], "cargo test");
+}
+
+#[test]
+fn converter_inherited_from_extends_base() {
+    use std::io::Write;
+    let dir = std::env::temp_dir().join(format!(
+        "pklr_test_extends_converter_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let base_path = dir.join("Base.pkl");
+    let mut base_file = std::fs::File::create(&base_path).unwrap();
+    write!(
+        base_file,
+        r#"
+open class Step {{
+    check: String = ""
+}}
+
+output {{
+    renderer {{
+        converters {{
+            [Step] = (s) -> new Dynamic {{
+                _type = "step"
+                ...s.toDynamic()
+            }}
+        }}
+    }}
+}}
+"#
+    )
+    .unwrap();
+
+    let child_path = dir.join("child.pkl");
+    let mut child_file = std::fs::File::create(&child_path).unwrap();
+    write!(
+        child_file,
+        r#"extends "Base.pkl"
+
+myStep = new Step {{
+    check = "make test"
+}}
+"#
+    )
+    .unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let json = rt.block_on(async {
+        let mut ev = Evaluator::new();
+        let val = ev.eval_source(
+            &std::fs::read_to_string(&child_path).unwrap(),
+            &child_path,
+        ).await.unwrap();
+        let val = ev.apply_converters(val).await.unwrap();
+        val.to_json()
+    });
+    assert_eq!(json["myStep"]["_type"], "step");
+    assert_eq!(json["myStep"]["check"], "make test");
 }

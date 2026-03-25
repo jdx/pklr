@@ -506,11 +506,10 @@ impl Evaluator {
                         base_obj.shift_remove(name);
                     }
                     // Extract converters from the base module's output block
-                    // (the amending module inherits them).
+                    // (the amending module inherits them; child overrides if present).
                     if let Entry::Property(prop) = entry
                         && prop.name == "output"
                         && depth == 0
-                        && self.converters.is_empty()
                     {
                         self.extract_converters_from_ast(prop, &scope, depth)
                             .await;
@@ -564,9 +563,7 @@ impl Evaluator {
                                 self.eval_type_alias(name, ty, &mut scope);
                             }
                             Entry::Property(prop)
-                                if prop.name == "output"
-                                    && depth == 0
-                                    && self.converters.is_empty() =>
+                                if prop.name == "output" && depth == 0 =>
                             {
                                 self.extract_converters_from_ast(prop, &scope, depth)
                                     .await;
@@ -653,8 +650,10 @@ impl Evaluator {
                 check_deprecated(&prop.annotations, &prop.name);
                 // Extract renderer converters from the `output` block AST,
                 // then skip it (it's not included in the output).
+                // Clear any base-inherited converters so child overrides take precedence.
                 if prop.name == "output" {
                     if depth == 0 {
+                        self.converters.clear();
                         self.extract_converters_from_ast(prop, &scope, depth).await;
                     }
                     continue;
