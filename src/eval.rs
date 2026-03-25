@@ -497,7 +497,7 @@ impl Evaluator {
                 for entry in &base_module.body {
                     if let Entry::ClassDef(name, class_mods, parent, body) = entry {
                         let defaults = self
-                            .eval_class_def(class_mods, parent.as_deref(), body, &scope, depth)
+                            .eval_class_def(name, class_mods, parent.as_deref(), body, &scope, depth)
                             .await?;
                         scope.set(name.clone(), defaults);
                         // Remove inherited class definitions from base output —
@@ -549,6 +549,7 @@ impl Evaluator {
                             Entry::ClassDef(cls_name, cls_mods, parent, body) => {
                                 let defaults = self
                                     .eval_class_def(
+                                        cls_name,
                                         cls_mods,
                                         parent.as_deref(),
                                         body,
@@ -586,7 +587,7 @@ impl Evaluator {
                 for entry in &ext_module.body {
                     if let Entry::ClassDef(cls_name, cls_mods, parent, body) = entry {
                         let defaults = self
-                            .eval_class_def(cls_mods, parent.as_deref(), body, &scope, depth)
+                            .eval_class_def(cls_name, cls_mods, parent.as_deref(), body, &scope, depth)
                             .await?;
                         scope.set(cls_name.clone(), defaults);
                         base_obj.shift_remove(cls_name);
@@ -609,7 +610,7 @@ impl Evaluator {
                 }
                 Entry::ClassDef(name, class_mods, parent, body) => {
                     let defaults = self
-                        .eval_class_def(class_mods, parent.as_deref(), body, &scope, depth)
+                        .eval_class_def(name, class_mods, parent.as_deref(), body, &scope, depth)
                         .await?;
                     scope.set(name.clone(), defaults);
                 }
@@ -774,7 +775,7 @@ impl Evaluator {
                 }
                 Entry::ClassDef(name, class_mods, parent, body) => {
                     let defaults = self
-                        .eval_class_def(class_mods, parent.as_deref(), body, &child_scope, depth)
+                        .eval_class_def(name, class_mods, parent.as_deref(), body, &child_scope, depth)
                         .await?;
                     child_scope.set(name.clone(), defaults);
                 }
@@ -896,6 +897,7 @@ impl Evaluator {
     #[async_recursion(?Send)]
     async fn eval_class_def(
         &mut self,
+        class_name: &str,
         class_mods: &[Modifier],
         parent_name: Option<&str>,
         body: &[Entry],
@@ -955,11 +957,12 @@ impl Evaluator {
             Ok(child_defaults)
         }
         .map(|val| {
-            // Set is_open flag on the result's ObjectSource
+            // Set is_open flag and class_name on the result's ObjectSource
             let is_open = has_modifier(class_mods, Modifier::Open);
             if let Value::Object(map, Some(src)) = val {
                 let mut new_src = (*src).clone();
                 new_src.is_open = is_open;
+                new_src.type_name = Some(class_name.to_string());
                 Value::Object(map, Some(std::sync::Arc::new(new_src)))
             } else {
                 val
@@ -1165,7 +1168,7 @@ impl Evaluator {
                 let captured = scope.flatten();
                 Ok(Value::Lambda(params.clone(), (**body).clone(), captured))
             }
-            Expr::New(type_name, entries) => {
+            Expr::New(type_name, entries, generic_params) => {
                 match type_name.as_deref() {
                     Some("Listing") => {
                         let mut items = Vec::new();
@@ -1213,9 +1216,16 @@ impl Evaluator {
                         Ok(Value::List(items))
                     }
                     Some("Mapping") | Some("Map") => {
+                        // If the Mapping has a value type param (e.g., Mapping<String, Step>),
+                        // resolve it as a default template so entries inherit the class type.
+                        let value_type_default = generic_params.get(1).and_then(|name| {
+                            resolve_dotted(scope, name)
+                        });
                         let mut map = IndexMap::new();
-                        self.eval_mapping_entries(entries, scope, depth, &mut map)
-                            .await?;
+                        self.eval_mapping_entries_with_type_default(
+                            entries, scope, depth, &mut map, value_type_default.as_ref(),
+                        )
+                        .await?;
                         Ok(Value::Object(map, None))
                     }
                     Some("Dynamic") => self.eval_entries(entries, scope, depth + 1).await,
@@ -1995,6 +2005,42 @@ impl Evaluator {
     }
 
     #[async_recursion(?Send)]
+    async fn eval_mapping_entries_with_type_default(
+        &mut self,
+        entries: &[crate::parser::Entry],
+        scope: &Scope,
+        depth: usize,
+        map: &mut IndexMap<String, Value>,
+        type_default: Option<&Value>,
+    ) -> Result<()> {
+        let explicit_default = self.find_default_template(entries, scope, depth).await?;
+        let default_template = explicit_default.as_ref().or(type_default);
+
+        for entry in entries {
+            match entry {
+                Entry::DynProperty(key_expr, val_expr) => {
+                    let key = self.eval_expr(key_expr, scope, depth + 1).await?;
+                    let mut val = self.eval_expr(val_expr, scope, depth + 1).await?;
+                    if let Some(tpl) = default_template {
+                        val = merge_values(tpl.clone(), val);
+                    }
+                    map.insert(value_to_key(&key)?, val);
+                }
+                Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {}
+                Entry::Property(prop) if prop.name == "default" && default_template.is_some() => {}
+                Entry::Spread(e) => {
+                    let val = self.eval_expr(e, scope, depth + 1).await?;
+                    if let Value::Object(m, _) = val {
+                        map.extend(m);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    #[async_recursion(?Send)]
     async fn eval_mapping_entries(
         &mut self,
         entries: &[crate::parser::Entry],
@@ -2497,7 +2543,7 @@ fn value_cmp(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
 
 fn merge_values(base: Value, overlay: Value) -> Value {
     match (base, overlay) {
-        (Value::Object(mut b, _), Value::Object(o, _)) => {
+        (Value::Object(mut b, base_src), Value::Object(o, _)) => {
             for (k, v) in o {
                 if let Some(existing) = b.shift_remove(&k) {
                     b.insert(k, merge_values(existing, v));
@@ -2505,7 +2551,7 @@ fn merge_values(base: Value, overlay: Value) -> Value {
                     b.insert(k, v);
                 }
             }
-            Value::Object(b, None)
+            Value::Object(b, base_src)
         }
         (_, overlay) => overlay,
     }

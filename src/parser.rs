@@ -97,7 +97,8 @@ pub enum Expr {
     String(String),
     Ident(String),
     /// `new TypeName? { entries... }`
-    New(Option<String>, Vec<Entry>),
+    /// The third field holds optional generic type parameter names (e.g., `<String, Step>`).
+    New(Option<String>, Vec<Entry>, Vec<String>),
     /// `expr.field`
     Field(Box<Expr>, String),
     /// `expr[key]`
@@ -461,6 +462,42 @@ impl<'a> Parser<'a> {
             entries.push(entry);
         }
         Ok(entries)
+    }
+
+    /// Collect top-level generic type parameter names: `<Type, Type<Nested>, ...>`
+    /// Returns the simple names of each top-level param (e.g., `["String", "Step"]`).
+    fn collect_generic_params(&mut self) -> Result<Vec<String>> {
+        let mut params = Vec::new();
+        let mut depth = 0;
+        loop {
+            match self.peek() {
+                TokenKind::Lt => {
+                    depth += 1;
+                    self.advance();
+                }
+                TokenKind::Gt => {
+                    depth -= 1;
+                    self.advance();
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                TokenKind::Comma if depth == 1 => {
+                    self.advance();
+                }
+                TokenKind::Ident(name) if depth == 1 => {
+                    params.push(name.clone());
+                    self.advance();
+                }
+                TokenKind::Eof => {
+                    return Err(self.parse_error("unclosed generic type parameters"));
+                }
+                _ => {
+                    self.advance();
+                }
+            }
+        }
+        Ok(params)
     }
 
     /// Skip generic type parameters: `<Type, Type<Nested>, ...>`
@@ -1213,14 +1250,16 @@ impl<'a> Parser<'a> {
                 } else {
                     None
                 };
-                // Skip optional generic type params: <Type, Type, ...>
-                if matches!(self.peek(), TokenKind::Lt) {
-                    self.skip_generic_params()?;
-                }
+                // Collect optional generic type params: <Type, Type, ...>
+                let generic_params = if matches!(self.peek(), TokenKind::Lt) {
+                    self.collect_generic_params()?
+                } else {
+                    Vec::new()
+                };
                 self.expect(&TokenKind::LBrace)?;
                 let entries = self.parse_entries()?;
                 self.expect(&TokenKind::RBrace)?;
-                Ok(Expr::New(type_name, entries))
+                Ok(Expr::New(type_name, entries, generic_params))
             }
             TokenKind::KwIf => {
                 self.advance();
