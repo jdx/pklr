@@ -3310,3 +3310,103 @@ myStep = new Step {{
     assert_eq!(json["myStep"]["_type"], "step");
     assert_eq!(json["myStep"]["check"], "make test");
 }
+
+/// Simple: amends with bare object in a typed Mapping property
+#[test]
+fn converter_amends_simple_typed_mapping() {
+    let json = eval_with_converters(r#"
+open class Step {
+    check: String = ""
+}
+
+steps: Mapping<String, Step> = new Mapping<String, Step> {}
+
+output {
+    renderer {
+        converters {
+            [Step] = (s) -> new Dynamic {
+                _type = "step"
+                ...s.toDynamic()
+            }
+        }
+    }
+}
+
+steps {
+    ["echo"] {
+        check = "echo ok"
+    }
+}
+"#);
+    eprintln!("simple JSON: {}", serde_json::to_string_pretty(&json).unwrap());
+    assert_eq!(json["steps"]["echo"]["_type"], "step");
+    assert_eq!(json["steps"]["echo"]["check"], "echo ok");
+}
+
+/// Reproduces the hk pattern: base defines classes + typed Mappings + converters,
+/// child amends with bare object bodies (no `new Step`).
+#[test]
+fn converter_amends_bare_object_in_mapping() {
+    use std::io::Write;
+    let dir = std::env::temp_dir().join(format!(
+        "pklr_test_bare_mapping_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let base_path = dir.join("Config.pkl");
+    let mut f = std::fs::File::create(&base_path).unwrap();
+    write!(f, r#"
+open class Step {{
+    check: String = ""
+    fix: String = ""
+}}
+
+open class Hook {{
+    steps: Mapping<String, Step> = new Mapping<String, Step> {{}}
+}}
+
+hooks: Mapping<String, Hook> = new Mapping<String, Hook> {{}}
+
+output {{
+    renderer {{
+        converters {{
+            [Step] = (s) -> new Dynamic {{
+                _type = "step"
+                ...s.toDynamic()
+            }}
+        }}
+    }}
+}}
+"#).unwrap();
+
+    let child_path = dir.join("hk.pkl");
+    let mut f = std::fs::File::create(&child_path).unwrap();
+    write!(f, r#"amends "Config.pkl"
+
+hooks {{
+    ["check"] {{
+        steps {{
+            ["echo"] {{
+                check = "echo ok"
+            }}
+        }}
+    }}
+}}
+"#).unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let json = rt.block_on(async {
+        let mut ev = Evaluator::new();
+        let val = ev.eval_source(
+            &std::fs::read_to_string(&child_path).unwrap(),
+            &child_path,
+        ).await.unwrap();
+        let val = ev.apply_converters(val).await.unwrap();
+        val.to_json()
+    });
+    eprintln!("JSON: {}", serde_json::to_string_pretty(&json).unwrap());
+    assert_eq!(json["hooks"]["check"]["steps"]["echo"]["_type"], "step");
+    assert_eq!(json["hooks"]["check"]["steps"]["echo"]["check"], "echo ok");
+}

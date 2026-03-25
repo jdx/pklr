@@ -638,6 +638,12 @@ impl Evaluator {
         let mut out = base_obj;
         // all_props includes hidden properties — used for `this`/`module` snapshots
         let mut all_props = out.clone();
+        // Seed scope with base properties so body amendments can find them
+        // (e.g., `hooks { ... }` needs to find the base hooks Mapping in scope
+        // to properly amend it with type-aware merging).
+        for (k, v) in &out {
+            scope.set(k.clone(), v.clone());
+        }
         // Bind `this` at module level so properties can reference the module object
         scope.set("this".into(), Value::Object(all_props.clone(), None));
         // Also bind `module` to the same value
@@ -736,7 +742,17 @@ impl Evaluator {
             return Ok(Some(self.eval_expr(expr, scope, depth).await?));
         }
         if let Some(body) = &prop.body {
-            // `foo { ... }` — object body amendment
+            // `foo { ... }` — object body amendment.
+            // If the property already has a value in scope (e.g., from a base class),
+            // amend that value so its ObjectSource (type info, default template) is preserved.
+            if let Some(Value::Object(_, Some(src))) = scope.get(&prop.name) {
+                let base_entries = src.entries.clone();
+                let base_scope = src.scope.clone();
+                return Ok(Some(
+                    self.eval_amended_object(&base_entries, &base_scope, body, scope, depth)
+                        .await?,
+                ));
+            }
             let val = self.eval_entries(body, scope, depth).await?;
             return Ok(Some(val));
         }
@@ -825,11 +841,41 @@ impl Evaluator {
                 }
                 Entry::DynProperty(key_expr, val_expr) => {
                     let key = self.eval_expr(key_expr, &child_scope, depth).await?;
-                    let mut val = self.eval_expr(val_expr, &child_scope, depth).await?;
-                    // Merge with default template if available
-                    if let Some(ref tpl) = default_template {
-                        val = merge_values(tpl.clone(), val);
-                    }
+                    let val = if let Some(Value::Object(_, Some(src))) = &default_template
+                        && let Expr::ObjectBody(body) = val_expr
+                    {
+                        // Default template has ObjectSource — use eval_amended_object
+                        // so nested property amendments work properly.
+                        let mut result = self.eval_amended_object(
+                            &src.entries, &src.scope, body, &child_scope, depth,
+                        ).await?;
+                        // Propagate the template's type_name so converters can match.
+                        if let Some(ref tn) = src.type_name {
+                            if let Value::Object(_, ref mut result_src) = result {
+                                let new_src = match result_src.as_ref() {
+                                    Some(s) => {
+                                        let mut ns = (**s).clone();
+                                        ns.type_name = Some(tn.clone());
+                                        ns
+                                    }
+                                    None => ObjectSource {
+                                        entries: vec![],
+                                        scope: IndexMap::new(),
+                                        is_open: true,
+                                        type_name: Some(tn.clone()),
+                                    },
+                                };
+                                *result_src = Some(std::sync::Arc::new(new_src));
+                            }
+                        }
+                        result
+                    } else {
+                        let mut val = self.eval_expr(val_expr, &child_scope, depth).await?;
+                        if let Some(ref tpl) = default_template {
+                            val = merge_values(tpl.clone(), val);
+                        }
+                        val
+                    };
                     let key_str = value_to_key(&key)?;
                     map.insert(key_str, val);
                 }
@@ -1093,12 +1139,24 @@ impl Evaluator {
             }
         }
 
-        // Walk base entries: substitute overridden properties in-place
+        // Walk base entries: substitute overridden properties in-place.
+        // If the overlay has a body amendment (no `=`), keep the base entry first
+        // so its value is in scope, then add the overlay body entry after.
         let mut used_overlay: std::collections::HashSet<String> = std::collections::HashSet::new();
         for entry in base_entries {
             if let Entry::Property(prop) = entry
                 && let Some(replacement) = overlay_by_name.get(&prop.name)
             {
+                if let Entry::Property(overlay_prop) = replacement
+                    && overlay_prop.body.is_some()
+                    && overlay_prop.value.is_none()
+                    && (prop.value.is_some() || prop.body.is_some())
+                {
+                    // Body amendment: keep base entry (for its value) AND overlay
+                    // entry (for body amendment). eval_property will see the base
+                    // value in scope and amend it.
+                    merged.push(entry.clone());
+                }
                 merged.push((*replacement).clone());
                 used_overlay.insert(prop.name.clone());
                 continue;
@@ -1226,7 +1284,35 @@ impl Evaluator {
                             entries, scope, depth, &mut map, value_type_default.as_ref(),
                         )
                         .await?;
-                        Ok(Value::Object(map, None))
+                        // Build ObjectSource with a synthetic `default` entry so that
+                        // body amendments (`steps { ["x"] { ... } }`) merge new entries
+                        // with the value type class, preserving type_name for converters.
+                        let mut src_entries = entries.to_vec();
+                        if value_type_default.is_some()
+                            && !entries.iter().any(|e| matches!(e, Entry::Property(p) if p.name == "default"))
+                        {
+                            // Inject a synthetic default property referencing the value type
+                            let vt_name = generic_params[1].clone();
+                            src_entries.push(Entry::Property(Property {
+                                annotations: vec![],
+                                modifiers: vec![],
+                                name: "default".into(),
+                                type_ann: None,
+                                value: Some(Expr::New(
+                                    Some(vt_name),
+                                    vec![],
+                                    vec![],
+                                )),
+                                body: None,
+                            }));
+                        }
+                        let source = ObjectSource {
+                            entries: src_entries,
+                            scope: scope.flatten(),
+                            is_open: true,
+                            type_name: None,
+                        };
+                        Ok(Value::Object(map, Some(std::sync::Arc::new(source))))
                     }
                     Some("Dynamic") => self.eval_entries(entries, scope, depth + 1).await,
                     _ => {
@@ -2020,10 +2106,41 @@ impl Evaluator {
             match entry {
                 Entry::DynProperty(key_expr, val_expr) => {
                     let key = self.eval_expr(key_expr, scope, depth + 1).await?;
-                    let mut val = self.eval_expr(val_expr, scope, depth + 1).await?;
-                    if let Some(tpl) = default_template {
-                        val = merge_values(tpl.clone(), val);
-                    }
+                    // If the default template has ObjectSource, use eval_amended_object
+                    // so nested property amendments work (e.g., `steps { ["x"] { ... } }`
+                    // inside a Hook default properly amends the Hook's steps Mapping).
+                    let val = if let Some(Value::Object(_, Some(src))) = default_template
+                        && let Expr::ObjectBody(body) = val_expr
+                    {
+                        let mut result = self.eval_amended_object(
+                            &src.entries, &src.scope, body, scope, depth,
+                        ).await?;
+                        if let Some(ref tn) = src.type_name {
+                            if let Value::Object(_, ref mut result_src) = result {
+                                let new_src = match result_src.as_ref() {
+                                    Some(s) => {
+                                        let mut ns = (**s).clone();
+                                        ns.type_name = Some(tn.clone());
+                                        ns
+                                    }
+                                    None => ObjectSource {
+                                        entries: vec![],
+                                        scope: IndexMap::new(),
+                                        is_open: true,
+                                        type_name: Some(tn.clone()),
+                                    },
+                                };
+                                *result_src = Some(std::sync::Arc::new(new_src));
+                            }
+                        }
+                        result
+                    } else {
+                        let mut val = self.eval_expr(val_expr, scope, depth + 1).await?;
+                        if let Some(tpl) = default_template {
+                            val = merge_values(tpl.clone(), val);
+                        }
+                        val
+                    };
                     map.insert(value_to_key(&key)?, val);
                 }
                 Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {}
