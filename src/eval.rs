@@ -2176,44 +2176,6 @@ impl Evaluator {
                         map.extend(m);
                     }
                 }
-                _ => {}
-            }
-        }
-        Ok(())
-    }
-
-    #[async_recursion(?Send)]
-    async fn eval_mapping_entries(
-        &mut self,
-        entries: &[crate::parser::Entry],
-        scope: &Scope,
-        depth: usize,
-        map: &mut IndexMap<String, Value>,
-    ) -> Result<()> {
-        let default_template = self.find_default_template(entries, scope, depth).await?;
-
-        for entry in entries {
-            match entry {
-                Entry::DynProperty(key_expr, val_expr) => {
-                    let key = self.eval_expr(key_expr, scope, depth + 1).await?;
-                    let mut val = self.eval_expr(val_expr, scope, depth + 1).await?;
-                    if let Some(ref tpl) = default_template {
-                        val = merge_values(tpl.clone(), val);
-                    }
-                    map.insert(value_to_key(&key)?, val);
-                }
-                Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {
-                    // skip locals in mapping
-                }
-                Entry::Property(prop) if prop.name == "default" && default_template.is_some() => {
-                    // skip default — it's a template
-                }
-                Entry::Spread(e) => {
-                    let v = self.eval_expr(e, scope, depth + 1).await?;
-                    if let Value::Object(m, _) = v {
-                        map.extend(m);
-                    }
-                }
                 Entry::ForGenerator(fgen) => {
                     let collection = self.eval_expr(&fgen.collection, scope, depth + 1).await?;
                     for (k, v) in collection_to_items(collection) {
@@ -2222,8 +2184,10 @@ impl Evaluator {
                         if let Some(kv) = &fgen.key_var {
                             iter_scope.set(kv.clone(), k);
                         }
-                        self.eval_mapping_entries(&fgen.body, &iter_scope, depth + 1, map)
-                            .await?;
+                        self.eval_mapping_entries_with_type_default(
+                            &fgen.body, &iter_scope, depth + 1, map, type_default,
+                        )
+                        .await?;
                     }
                 }
                 _ => {}
