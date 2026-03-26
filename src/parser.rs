@@ -933,6 +933,13 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Ident(name) => {
                 self.advance();
+                // Handle dotted type names: Module.ClassName
+                let mut name = name;
+                while matches!(self.peek(), TokenKind::Dot) {
+                    self.advance();
+                    let part = self.expect_ident()?;
+                    name = format!("{name}.{part}");
+                }
                 if matches!(self.peek(), TokenKind::Lt) {
                     self.advance();
                     let mut args = vec![self.parse_type()?];
