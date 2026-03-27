@@ -12,7 +12,7 @@ use crate::parser::{Entry, Expr};
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObjectSource {
     pub entries: Vec<Entry>,
-    pub scope: IndexMap<String, Value>,
+    pub scope: Arc<IndexMap<String, Value>>,
     /// Whether the class was declared `open` (allows adding new properties)
     pub is_open: bool,
     /// The pkl class name this object was instantiated from (e.g., "Step", "Group").
@@ -40,7 +40,7 @@ pub enum Value {
     /// Listing (ordered list).
     List(Vec<Value>),
     /// Lambda function: param names + body expression + captured scope values
-    Lambda(Vec<String>, Expr, IndexMap<String, Value>),
+    Lambda(Vec<String>, Expr, Arc<IndexMap<String, Value>>),
 }
 
 impl Value {

@@ -3700,3 +3700,4 @@ result = testMaker.checkFail("bad", 1)
     assert_eq!(json["result"]["run"], "check");
     assert_eq!(json["result"]["code"], 1);
 }
+

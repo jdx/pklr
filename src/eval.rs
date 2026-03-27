@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_recursion::async_recursion;
 use indexmap::IndexMap;
@@ -18,8 +19,9 @@ pub struct Evaluator {
     max_depth: usize,
     /// Cache for fetched HTTP sources (URL → source text)
     http_cache: HashMap<String, String>,
-    /// Cache for evaluated local imports (canonical path → Value)
-    import_cache: HashMap<PathBuf, Value>,
+    /// Cache for evaluated local imports (canonical path → Value).
+    /// Uses Arc to avoid deep-cloning large module values on cache hits.
+    import_cache: HashMap<PathBuf, Arc<Value>>,
     /// Reusable HTTP client for connection pooling
     http_client: reqwest::Client,
     /// Extracted package zip directories (zip URL → temp dir path)
@@ -30,6 +32,10 @@ pub struct Evaluator {
     /// Converters extracted from `output.renderer.converters`.
     /// Each entry maps a class name to a converter lambda.
     converters: Vec<(String, Value)>,
+    /// Cache for class definitions extracted from amends/extends base modules.
+    /// Avoids re-parsing and re-evaluating the same base module's classes
+    /// when many files amend the same base (e.g., 80+ builtins amending Config.pkl).
+    amends_class_cache: HashMap<String, Vec<(String, Value)>>,
 }
 
 impl Default for Evaluator {
@@ -43,6 +49,7 @@ impl Default for Evaluator {
             package_dirs: HashMap::new(),
             http_rewrites: Vec::new(),
             converters: Vec::new(),
+            amends_class_cache: HashMap::new(),
         }
     }
 }
@@ -200,7 +207,7 @@ impl Evaluator {
         // Seed import cache for the entry file so circular back-references work
         if let Ok(canonical) = path.canonicalize() {
             self.import_cache
-                .insert(canonical, Value::Object(IndexMap::new(), None));
+                .insert(canonical, Arc::new(Value::Object(IndexMap::new(), None)));
         }
         let name = path.display().to_string();
         let tokens = lexer::lex_named(source, &name)?;
@@ -208,7 +215,7 @@ impl Evaluator {
         let val = self.eval_module(&module, path, 0).await?;
         // Update cache with real value
         if let Ok(canonical) = path.canonicalize() {
-            self.import_cache.insert(canonical, val.clone());
+            self.import_cache.insert(canonical, Arc::new(val.clone()));
         }
         Ok(val)
     }
@@ -225,11 +232,11 @@ impl Evaluator {
             .canonicalize()
             .map_err(|e| Error::Io(path.to_path_buf(), e))?;
         if let Some(cached) = self.import_cache.get(&canonical) {
-            return Ok(cached.clone());
+            return Ok((**cached).clone());
         }
         // Insert empty placeholder to break circular imports
         self.import_cache
-            .insert(canonical.clone(), Value::Object(IndexMap::new(), None));
+            .insert(canonical.clone(), Arc::new(Value::Object(IndexMap::new(), None)));
         let result = self.eval_file_inner(path, &canonical, depth).await;
         if result.is_err() {
             // Remove stale placeholder on failure so retries can re-evaluate
@@ -250,7 +257,7 @@ impl Evaluator {
         let module = parser::parse_named(&tokens, &source, &name)?;
         let val = self.eval_module(&module, path, depth).await?;
         self.import_cache
-            .insert(canonical.to_path_buf(), val.clone());
+            .insert(canonical.to_path_buf(), Arc::new(val.clone()));
         Ok(val)
     }
 
@@ -492,36 +499,45 @@ impl Evaluator {
             } else {
                 None
             };
-            if let Some(src) = base_source
-                && let Ok(tokens) = lexer::lex(&src)
-                && let Ok(base_module) = parser::parse(&tokens)
-            {
-                for entry in &base_module.body {
-                    if let Entry::ClassDef(name, class_mods, parent, body) = entry {
-                        let defaults = self
-                            .eval_class_def(
-                                name,
-                                class_mods,
-                                parent.as_deref(),
-                                body,
-                                &scope,
-                                depth,
-                            )
-                            .await?;
-                        scope.set(name.clone(), defaults);
-                        // Remove inherited class definitions from base output —
-                        // they were included at depth > 0 for dotted access but
-                        // should not appear in the amending module's data output.
-                        base_obj.shift_remove(name);
+            if let Some(src) = base_source {
+                let cache_key = uri.to_string();
+                if let Some(cached_classes) = self.amends_class_cache.get(&cache_key) {
+                    // Use cached class definitions
+                    for (name, val) in cached_classes.clone() {
+                        scope.set(name.clone(), val);
+                        base_obj.shift_remove(&name);
                     }
-                    // Extract converters from the base module's output block
-                    // (the amending module inherits them; child overrides if present).
-                    if let Entry::Property(prop) = entry
-                        && prop.name == "output"
-                        && depth == 0
-                    {
-                        self.extract_converters_from_ast(prop, &scope, depth).await;
+                } else if let Ok(tokens) = lexer::lex(&src)
+                    && let Ok(base_module) = parser::parse(&tokens)
+                {
+                    let mut cached = Vec::new();
+                    for entry in &base_module.body {
+                        if let Entry::ClassDef(name, class_mods, parent, body) = entry {
+                            let defaults = self
+                                .eval_class_def(
+                                    name,
+                                    class_mods,
+                                    parent.as_deref(),
+                                    body,
+                                    &scope,
+                                    depth,
+                                )
+                                .await?;
+                            scope.set(name.clone(), defaults.clone());
+                            base_obj.shift_remove(name);
+                            cached.push((name.clone(), defaults));
+                        }
+                        // Extract converters from the base module's output block
+                        // (the amending module inherits them; child overrides if present).
+                        if let Entry::Property(prop) = entry
+                            && prop.name == "output"
+                            && depth == 0
+                        {
+                            self.extract_converters_from_ast(prop, &scope, depth)
+                                .await;
+                        }
                     }
+                    self.amends_class_cache.insert(cache_key, cached);
                 }
             }
             // Remove function values from base output (not data)
@@ -898,7 +914,7 @@ impl Evaluator {
                                 }
                                 None => ObjectSource {
                                     entries: vec![],
-                                    scope: IndexMap::new(),
+                                    scope: Arc::new(IndexMap::new()),
                                     is_open: true,
                                     type_name: Some(tn.clone()),
                                 },
@@ -965,7 +981,7 @@ impl Evaluator {
         }
         let source = ObjectSource {
             entries: entries.to_vec(),
-            scope: child_scope.flatten(),
+            scope: Arc::new(child_scope.flatten()),
             is_open: true, // default: allow new properties
             type_name: None,
         };
@@ -1261,7 +1277,7 @@ impl Evaluator {
             Expr::Lambda(params, body) => {
                 // Capture current scope values
                 let captured = scope.flatten();
-                Ok(Value::Lambda(params.clone(), (**body).clone(), captured))
+                Ok(Value::Lambda(params.clone(), (**body).clone(), Arc::new(captured)))
             }
             Expr::New(type_name, entries, generic_params) => {
                 match type_name.as_deref() {
@@ -1347,7 +1363,7 @@ impl Evaluator {
                         }
                         let source = ObjectSource {
                             entries: src_entries,
-                            scope: scope.flatten(),
+                            scope: Arc::new(scope.flatten()),
                             is_open: true,
                             type_name: None,
                         };
@@ -1432,7 +1448,7 @@ impl Evaluator {
                                 } else {
                                     ObjectSource {
                                         entries: Vec::new(),
-                                        scope: IndexMap::new(),
+                                        scope: Arc::new(IndexMap::new()),
                                         is_open,
                                         type_name: tn,
                                     }
@@ -1449,7 +1465,7 @@ impl Evaluator {
                             }
                             let src = ObjectSource {
                                 entries: Vec::new(),
-                                scope: IndexMap::new(),
+                                scope: Arc::new(IndexMap::new()),
                                 is_open: true,
                                 type_name: type_name.clone(),
                             };
@@ -1645,7 +1661,7 @@ impl Evaluator {
                 && let Some(Value::Lambda(params, body, captured)) = map.get(method)
             {
                 let mut call_scope = Scope::default();
-                for (k, v) in captured {
+                for (k, v) in captured.iter() {
                     call_scope.set(k.clone(), v.clone());
                 }
                 // Layer in ALL of the instance's properties including lambdas,
@@ -1717,8 +1733,8 @@ impl Evaluator {
         if let Value::Lambda(params, body, captured) = func_val {
             let mut call_scope = Scope::default();
             // Restore captured scope
-            for (k, v) in captured {
-                call_scope.set(k, v);
+            for (k, v) in captured.iter() {
+                call_scope.set(k.clone(), v.clone());
             }
             // If we're inside a method call context (scope has `this` as an Object),
             // layer the instance's properties so local functions see overridden values
@@ -1947,7 +1963,7 @@ impl Evaluator {
             // Lambda.apply()
             (Value::Lambda(params, body, captured), "apply") => {
                 let mut call_scope = Scope::default();
-                for (k, v) in captured {
+                for (k, v) in captured.iter() {
                     call_scope.set(k.clone(), v.clone());
                 }
                 for (param, arg) in params.iter().zip(args.iter()) {
@@ -1969,7 +1985,7 @@ impl Evaluator {
     ) -> Result<Value> {
         if let Value::Lambda(params, body, captured) = lambda {
             let mut scope = Scope::default();
-            for (k, v) in captured {
+            for (k, v) in captured.iter() {
                 scope.set(k.clone(), v.clone());
             }
             for (param, arg) in params.iter().zip(args.iter()) {
@@ -2096,8 +2112,8 @@ impl Evaluator {
                             )));
                         }
                         let mut call_scope = Scope::default();
-                        for (k, v) in captured {
-                            call_scope.set(k, v);
+                        for (k, v) in captured.iter() {
+                            call_scope.set(k.clone(), v.clone());
                         }
                         call_scope.set(params[0].clone(), l);
                         self.eval_expr(&body, &call_scope, depth + 1).await
@@ -2165,7 +2181,7 @@ impl Evaluator {
                                 }
                                 None => ObjectSource {
                                     entries: vec![],
-                                    scope: IndexMap::new(),
+                                    scope: Arc::new(IndexMap::new()),
                                     is_open: true,
                                     type_name: Some(tn.clone()),
                                 },
@@ -2300,7 +2316,7 @@ impl Evaluator {
                                 && conv_name.as_bytes()[conv_name.len() - tn.len() - 1] == b'.');
                         if matches && let Value::Lambda(params, body, captured) = lambda {
                             let mut call_scope = Scope::default();
-                            for (k, v) in captured {
+                            for (k, v) in captured.iter() {
                                 call_scope.set(k.clone(), v.clone());
                             }
                             // Bind the object as the first parameter
