@@ -3701,3 +3701,22 @@ result = testMaker.checkFail("bad", 1)
     assert_eq!(json["result"]["code"], 1);
 }
 
+
+#[test]
+fn outer_keyword_in_nested_new() {
+    let json = eval(r#"
+class Inner {
+  val: String = ""
+}
+class Outer {
+  name: String = "default"
+  local function makeInner(): Inner = new Inner {
+    val = outer.name
+  }
+  function getInner(): Inner = makeInner()
+}
+inst = new Outer { name = "test" }
+result = inst.getInner().val
+"#);
+    assert_eq!(json["result"], "test");
+}
