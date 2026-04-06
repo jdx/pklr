@@ -36,11 +36,14 @@ pub enum Value {
     /// Object (ordered string-keyed map). Represents both pkl objects and
     /// string-keyed Mappings.  The optional [`ObjectSource`] stores the
     /// original entry definitions so late binding works on amendment.
-    Object(IndexMap<String, Value>, Option<Arc<ObjectSource>>),
+    /// The map is Arc-wrapped so cloning a Value::Object is O(1).
+    Object(Arc<IndexMap<String, Value>>, Option<Arc<ObjectSource>>),
     /// Listing (ordered list).
     List(Vec<Value>),
-    /// Lambda function: param names + body expression + captured scope values
-    Lambda(Vec<String>, Expr, IndexMap<String, Value>),
+    /// Lambda function: param names + body expression + captured scope values.
+    /// Captures are Arc-wrapped so cloning a Lambda is O(1) even when scopes
+    /// contain many nested Lambdas (e.g. TestMaker with checkPass/checkFail/etc.).
+    Lambda(Vec<String>, Expr, Arc<IndexMap<String, Value>>),
 }
 
 impl Value {
@@ -53,7 +56,7 @@ impl Value {
             Value::String(s) => json!(s),
             Value::Object(map, _) => {
                 let mut obj = serde_json::Map::new();
-                for (k, v) in map {
+                for (k, v) in map.iter() {
                     obj.insert(k.clone(), v.to_json());
                 }
                 serde_json::Value::Object(obj)
@@ -75,7 +78,7 @@ impl Value {
 
     pub fn as_object_mut(&mut self) -> Option<&mut IndexMap<String, Value>> {
         if let Value::Object(m, _) = self {
-            Some(m)
+            Some(Arc::make_mut(m))
         } else {
             None
         }
@@ -85,8 +88,9 @@ impl Value {
     pub fn merge(&mut self, other: Value) {
         match (self, other) {
             (Value::Object(base, _), Value::Object(overlay, _)) => {
-                for (k, v) in overlay {
-                    base.insert(k, v);
+                let base_map = Arc::make_mut(base);
+                for (k, v) in overlay.iter() {
+                    base_map.insert(k.clone(), v.clone());
                 }
             }
             (s, other) => *s = other,
@@ -113,7 +117,7 @@ impl From<serde_json::Value> for Value {
                 for (k, v) in o {
                     map.insert(k, Value::from(v));
                 }
-                Value::Object(map, None)
+                Value::Object(Arc::new(map), None)
             }
         }
     }
