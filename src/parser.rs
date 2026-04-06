@@ -931,8 +931,15 @@ impl<'a> Parser<'a> {
                 self.advance();
                 TypeExpr::Named("module".to_string())
             }
-            TokenKind::Ident(name) => {
+            TokenKind::Ident(mut name) => {
                 self.advance();
+                // Handle dotted type names: e.g., Config.StepTest
+                while matches!(self.peek(), TokenKind::Dot) {
+                    self.advance();
+                    let part = self.expect_ident()?;
+                    name.push('.');
+                    name.push_str(&part);
+                }
                 if matches!(self.peek(), TokenKind::Lt) {
                     self.advance();
                     let mut args = vec![self.parse_type()?];
