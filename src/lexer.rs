@@ -163,10 +163,10 @@ impl<'a> Lexer<'a> {
 
     fn skip_whitespace_and_comments(&mut self) {
         loop {
-            // Skip whitespace
+            // Skip whitespace and semicolons (Pkl allows `;` as a property separator)
             while self
                 .peek()
-                .map(|c| c.is_ascii_whitespace())
+                .map(|c| c.is_ascii_whitespace() || c == ';')
                 .unwrap_or(false)
             {
                 self.advance();
