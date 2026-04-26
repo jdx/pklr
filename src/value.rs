@@ -21,8 +21,9 @@ pub struct ObjectSource {
     /// Map of property name → optional deprecation message for properties
     /// annotated with `@Deprecated`. Consulted on field access so the
     /// warning fires when a deprecated property is *used*, not when the
-    /// containing module is loaded.
-    pub deprecated: IndexMap<String, Option<String>>,
+    /// containing module is loaded. Crate-private: only the evaluator
+    /// reads/writes this; not part of the public API.
+    pub(crate) deprecated: IndexMap<String, Option<String>>,
 }
 
 /// A pkl runtime value.
