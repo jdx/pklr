@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2](https://github.com/jdx/pklr/compare/v0.4.1...v0.4.2) - 2026-04-26
+
+### Fixed
+
+- *(eval)* make @Deprecated lazy — only warn on access ([#58](https://github.com/jdx/pklr/pull/58))
+
 ## [0.4.1](https://github.com/jdx/pklr/compare/v0.4.0...v0.4.1) - 2026-04-07
 
 ### Fixed
