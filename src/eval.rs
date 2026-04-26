@@ -30,6 +30,10 @@ pub struct Evaluator {
     /// Converters extracted from `output.renderer.converters`.
     /// Each entry maps a class name to a converter lambda.
     converters: Vec<(String, Value)>,
+    /// Set of (property_name, message) pairs already warned about.
+    /// Used to deduplicate `@Deprecated` warnings so a deprecated property
+    /// referenced inside a loop or template doesn't flood stderr.
+    warned_deprecated: std::collections::HashSet<(String, Option<String>)>,
 }
 
 impl Default for Evaluator {
@@ -43,6 +47,7 @@ impl Default for Evaluator {
             package_dirs: HashMap::new(),
             http_rewrites: Vec::new(),
             converters: Vec::new(),
+            warned_deprecated: std::collections::HashSet::new(),
         }
     }
 }
@@ -80,6 +85,28 @@ impl Evaluator {
                 Some((src.to_string(), tgt.to_string()))
             })
             .collect();
+    }
+
+    /// If `field` is marked `@Deprecated` in `source`, emit the warning at
+    /// most once per (field, message) pair. Called from field-access
+    /// expressions so the warning fires when a deprecated property is *used*,
+    /// not when its containing module loads. Per-call dedup mirrors pkl-jvm,
+    /// which avoids flooding stderr when a deprecated property is referenced
+    /// inside a loop or template.
+    fn warn_if_deprecated_access(&mut self, source: &Option<Arc<ObjectSource>>, field: &str) {
+        let Some(src) = source else { return };
+        let Some(message) = src.deprecated.get(field) else {
+            return;
+        };
+        let key = (field.to_string(), message.clone());
+        if !self.warned_deprecated.insert(key) {
+            return;
+        }
+        if let Some(msg) = message {
+            eprintln!("[pklr] WARNING: property '{field}' is deprecated: {msg}");
+        } else {
+            eprintln!("[pklr] WARNING: property '{field}' is deprecated");
+        }
     }
 
     /// Apply rewrite rules to a URL. Returns the rewritten URL or the original.
@@ -930,7 +957,7 @@ impl Evaluator {
                                     scope: IndexMap::new(),
                                     is_open: true,
                                     type_name: Some(tn.clone()),
-                                    deprecated: IndexMap::new(),
+                                    deprecated: src.deprecated.clone(),
                                 },
                             };
                             *result_src = Some(std::sync::Arc::new(new_src));
@@ -1485,27 +1512,36 @@ impl Evaluator {
                                         scope: IndexMap::new(),
                                         is_open,
                                         type_name: tn,
-                                        deprecated: IndexMap::new(),
+                                        deprecated: base_src.deprecated.clone(),
                                     }
                                 };
                                 *src_slot = Some(Arc::new(new_src));
                             }
                             Ok(result)
-                        } else if let Some(Value::Object(base_map, _)) = base {
+                        } else if let Some(Value::Object(base_map, base_src)) = base {
                             // Fallback: eager merge
                             let overlay = self.eval_entries(entries, scope, depth + 1).await?;
                             let mut merged: IndexMap<String, Value> = (*base_map).clone();
-                            if let Value::Object(overlay_map, _) = overlay {
+                            let mut deprecated = base_src
+                                .as_ref()
+                                .map(|s| s.deprecated.clone())
+                                .unwrap_or_default();
+                            if let Value::Object(overlay_map, overlay_src) = &overlay {
                                 merged.extend(
                                     overlay_map.iter().map(|(k, v)| (k.clone(), v.clone())),
                                 );
+                                if let Some(os) = overlay_src.as_ref() {
+                                    for (k, v) in &os.deprecated {
+                                        deprecated.insert(k.clone(), v.clone());
+                                    }
+                                }
                             }
                             let src = ObjectSource {
                                 entries: Vec::new(),
                                 scope: IndexMap::new(),
                                 is_open: true,
                                 type_name: type_name.clone(),
-                                deprecated: IndexMap::new(),
+                                deprecated,
                             };
                             Ok(Value::Object(Arc::new(merged), Some(Arc::new(src))))
                         } else {
@@ -1563,7 +1599,7 @@ impl Evaluator {
                             .get(field)
                             .cloned()
                             .ok_or_else(|| Error::Eval(format!("field not found: {field}")))?;
-                        warn_if_deprecated_access(source, field);
+                        self.warn_if_deprecated_access(source, field);
                         Ok(val)
                     }
                     _ => Err(Error::Eval(format!(
@@ -1579,7 +1615,7 @@ impl Evaluator {
                     Value::Object(map, source) => {
                         let val = map.get(field).cloned().unwrap_or(Value::Null);
                         if !matches!(val, Value::Null) {
-                            warn_if_deprecated_access(source, field);
+                            self.warn_if_deprecated_access(source, field);
                         }
                         Ok(val)
                     }
@@ -2232,7 +2268,7 @@ impl Evaluator {
                                     scope: IndexMap::new(),
                                     is_open: true,
                                     type_name: Some(tn.clone()),
-                                    deprecated: IndexMap::new(),
+                                    deprecated: src.deprecated.clone(),
                                 },
                             };
                             *result_src = Some(std::sync::Arc::new(new_src));
@@ -2510,7 +2546,6 @@ fn collect_deprecated(entries: &[Entry]) -> IndexMap<String, Option<String>> {
     for entry in entries {
         if let Entry::Property(prop) = entry {
             for ann in &prop.annotations {
-                eprintln!("[pklr-debug]     ann {:?}", ann.name);
                 if ann.name != "Deprecated" {
                     continue;
                 }
@@ -2528,21 +2563,6 @@ fn collect_deprecated(entries: &[Entry]) -> IndexMap<String, Option<String>> {
         }
     }
     out
-}
-
-/// If `field` is marked `@Deprecated` in `source`, emit the warning.
-/// Called from field-access expressions so the warning fires when a
-/// deprecated property is *used*, not when its containing module loads.
-fn warn_if_deprecated_access(source: &Option<Arc<ObjectSource>>, field: &str) {
-    let Some(src) = source else { return };
-    let Some(message) = src.deprecated.get(field) else {
-        return;
-    };
-    if let Some(msg) = message {
-        eprintln!("[pklr] WARNING: property '{field}' is deprecated: {msg}");
-    } else {
-        eprintln!("[pklr] WARNING: property '{field}' is deprecated");
-    }
 }
 
 /// Resolve a potentially dotted name (e.g. "Foo.Bar") in scope.
