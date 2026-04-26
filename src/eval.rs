@@ -957,7 +957,7 @@ impl Evaluator {
                                     scope: IndexMap::new(),
                                     is_open: true,
                                     type_name: Some(tn.clone()),
-                                    deprecated: src.deprecated.clone(),
+                                    deprecated: merge_deprecated(&src.deprecated, body),
                                 },
                             };
                             *result_src = Some(std::sync::Arc::new(new_src));
@@ -1512,7 +1512,10 @@ impl Evaluator {
                                         scope: IndexMap::new(),
                                         is_open,
                                         type_name: tn,
-                                        deprecated: base_src.deprecated.clone(),
+                                        deprecated: merge_deprecated(
+                                            &base_src.deprecated,
+                                            entries,
+                                        ),
                                     }
                                 };
                                 *src_slot = Some(Arc::new(new_src));
@@ -2268,7 +2271,7 @@ impl Evaluator {
                                     scope: IndexMap::new(),
                                     is_open: true,
                                     type_name: Some(tn.clone()),
-                                    deprecated: src.deprecated.clone(),
+                                    deprecated: merge_deprecated(&src.deprecated, body),
                                 },
                             };
                             *result_src = Some(std::sync::Arc::new(new_src));
@@ -2561,6 +2564,21 @@ fn collect_deprecated(entries: &[Entry]) -> IndexMap<String, Option<String>> {
                 out.insert(prop.name.clone(), message);
             }
         }
+    }
+    out
+}
+
+/// Combine a base deprecation map with any `@Deprecated` annotations on a
+/// list of overlay entries, with overlay winning on conflict. Used by the
+/// amend/merge code paths so an amended object's `ObjectSource.deprecated`
+/// reflects deprecations from both the base and the overlay.
+fn merge_deprecated(
+    base: &IndexMap<String, Option<String>>,
+    overlay_entries: &[Entry],
+) -> IndexMap<String, Option<String>> {
+    let mut out = base.clone();
+    for (k, v) in collect_deprecated(overlay_entries) {
+        out.insert(k, v);
     }
     out
 }
