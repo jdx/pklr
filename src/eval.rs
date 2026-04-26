@@ -8,9 +8,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 use crate::lexer;
-use crate::parser::{
-    self, BinOp, Entry, Expr, Modifier, Module, Property, StringInterpPart, UnOp,
-};
+use crate::parser::{self, BinOp, Entry, Expr, Modifier, Module, Property, StringInterpPart, UnOp};
 use crate::value::{ObjectSource, Value};
 
 /// Evaluates pkl source files to [`Value`].
@@ -1561,9 +1559,10 @@ impl Evaluator {
                 }
                 match &obj {
                     Value::Object(map, source) => {
-                        let val = map.get(field).cloned().ok_or_else(|| {
-                            Error::Eval(format!("field not found: {field}"))
-                        })?;
+                        let val = map
+                            .get(field)
+                            .cloned()
+                            .ok_or_else(|| Error::Eval(format!("field not found: {field}")))?;
                         warn_if_deprecated_access(source, field);
                         Ok(val)
                     }
