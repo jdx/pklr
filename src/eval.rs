@@ -1512,10 +1512,7 @@ impl Evaluator {
                                         scope: IndexMap::new(),
                                         is_open,
                                         type_name: tn,
-                                        deprecated: merge_deprecated(
-                                            &base_src.deprecated,
-                                            entries,
-                                        ),
+                                        deprecated: merge_deprecated(&base_src.deprecated, entries),
                                     }
                                 };
                                 *src_slot = Some(Arc::new(new_src));
