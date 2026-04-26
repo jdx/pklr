@@ -18,6 +18,11 @@ pub struct ObjectSource {
     /// The pkl class name this object was instantiated from (e.g., "Step", "Group").
     /// Used by `output.renderer.converters` to apply type-specific transforms.
     pub type_name: Option<String>,
+    /// Map of property name → optional deprecation message for properties
+    /// annotated with `@Deprecated`. Consulted on field access so the
+    /// warning fires when a deprecated property is *used*, not when the
+    /// containing module is loaded.
+    pub deprecated: IndexMap<String, Option<String>>,
 }
 
 /// A pkl runtime value.
