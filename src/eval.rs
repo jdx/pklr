@@ -8,9 +8,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 use crate::lexer;
-use crate::parser::{
-    self, BinOp, Entry, Expr, Modifier, Module, Property, StringInterpPart, UnOp,
-};
+use crate::parser::{self, BinOp, Entry, Expr, Modifier, Module, Property, StringInterpPart, UnOp};
 use crate::value::{ObjectSource, Value};
 
 /// Evaluates pkl source files to [`Value`].
