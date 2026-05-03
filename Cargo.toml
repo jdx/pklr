@@ -23,3 +23,6 @@ zip             = { version = "8", default-features = false, features = ["deflat
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[profile.dev]
+debug = 1
