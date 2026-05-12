@@ -10,6 +10,8 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions: {}
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -17,8 +19,12 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: cargo test
       - run: cargo clippy --all-targets -- -D warnings
@@ -26,8 +32,12 @@ jobs:
   msrv:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4
       - run: cargo msrv verify
@@ -35,6 +45,7 @@ jobs:
     needs: [test, msrv]
     runs-on: ubuntu-latest
     timeout-minutes: 1
+    permissions: {}
     # Run on success or upstream failure but skip when the workflow is cancelled
     # — `always()` would override `cancel-in-progress` and waste a runner.
     if: ${{ !cancelled() }}
