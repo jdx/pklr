@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.3](https://github.com/jdx/pklr/compare/v0.4.2...v0.4.3) - 2026-05-12
+
+### Fixed
+
+- *(deps)* update rust crate zip to v8 ([#69](https://github.com/jdx/pklr/pull/69))
+
+### Other
+
+- *(deps)* lock file maintenance ([#73](https://github.com/jdx/pklr/pull/73))
+- *(deps)* lock file maintenance ([#72](https://github.com/jdx/pklr/pull/72))
+- set dev profile debug to 1 ([#71](https://github.com/jdx/pklr/pull/71))
+
 ## [0.4.2](https://github.com/jdx/pklr/compare/v0.4.1...v0.4.2) - 2026-04-26
 
 ### Fixed
