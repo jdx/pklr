@@ -785,6 +785,7 @@ impl Evaluator {
                 scope: IndexMap::new(),
                 is_open: true,
                 type_name: None,
+                mapping_value_types: Vec::new(),
                 deprecated,
             }))
         };
@@ -805,7 +806,57 @@ impl Evaluator {
             // `foo { ... }` — object body amendment.
             // If the property already has a value in scope (e.g., from a base class),
             // amend that value so its ObjectSource (type info, default template) is preserved.
-            if let Some(Value::Object(_, Some(src))) = scope.get(&prop.name) {
+            if let Some(Value::Object(existing_map, Some(src))) = scope.get(&prop.name) {
+                if !src.mapping_value_types.is_empty() {
+                    // Mapping ObjectSource entries are mapping body entries such as
+                    // `default` and dynamic keys. Rebuild the entry map with the
+                    // type-aware evaluator so single-type and union mappings both keep
+                    // mapping defaults plus converter type metadata after amendment.
+                    let mut type_scope = Scope::default();
+                    for (key, value) in &src.scope {
+                        type_scope.set(key.clone(), value.clone());
+                    }
+                    for (key, value) in scope.flatten() {
+                        type_scope.set(key, value);
+                    }
+                    for (key, ty) in scope.flatten_type_aliases() {
+                        type_scope.set_type_alias(key, ty);
+                    }
+                    let value_type_defaults = src
+                        .mapping_value_types
+                        .iter()
+                        .filter_map(|name| {
+                            resolve_dotted(&type_scope, name).map(|value| (name.clone(), value))
+                        })
+                        .collect::<Vec<_>>();
+                    let inherited_default = self
+                        .find_default_template(&src.entries, &type_scope, depth)
+                        .await?;
+                    let mut amended = IndexMap::new();
+                    self.eval_mapping_entries_with_type_default(
+                        &src.entries,
+                        &type_scope,
+                        depth,
+                        &mut amended,
+                        &value_type_defaults,
+                        None,
+                    )
+                    .await?;
+                    amended.extend(existing_map.iter().map(|(k, v)| (k.clone(), v.clone())));
+                    self.eval_mapping_entries_with_type_default(
+                        body,
+                        &type_scope,
+                        depth,
+                        &mut amended,
+                        &value_type_defaults,
+                        inherited_default,
+                    )
+                    .await?;
+                    return Ok(Some(Value::Object(
+                        Arc::new(amended),
+                        Some(Arc::clone(src)),
+                    )));
+                }
                 let base_entries = src.entries.clone();
                 let base_scope = src.scope.clone();
                 return Ok(Some(
@@ -957,6 +1008,7 @@ impl Evaluator {
                                     scope: IndexMap::new(),
                                     is_open: true,
                                     type_name: Some(tn.clone()),
+                                    mapping_value_types: Vec::new(),
                                     deprecated: merge_deprecated(&src.deprecated, body),
                                 },
                             };
@@ -1025,6 +1077,7 @@ impl Evaluator {
             scope: child_scope.flatten(),
             is_open: true, // default: allow new properties
             type_name: None,
+            mapping_value_types: Vec::new(),
             deprecated: collect_deprecated(entries),
         };
         Ok(Value::Object(Arc::new(map), Some(Arc::new(source))))
@@ -1303,6 +1356,26 @@ impl Evaluator {
     }
 
     #[async_recursion(?Send)]
+    async fn eval_object_body_over_template(
+        &mut self,
+        template_map: &Arc<IndexMap<String, Value>>,
+        template_src: &Arc<ObjectSource>,
+        body: &[Entry],
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<Value> {
+        let mut template_scope = scope.child();
+        for (key, value) in template_map.iter() {
+            template_scope.set(key.clone(), value.clone());
+        }
+        let overlay = self.eval_entries(body, &template_scope, depth + 1).await?;
+        Ok(merge_values(
+            Value::Object(Arc::clone(template_map), Some(Arc::clone(template_src))),
+            overlay,
+        ))
+    }
+
+    #[async_recursion(?Send)]
     async fn eval_expr(&mut self, expr: &Expr, scope: &Scope, depth: usize) -> Result<Value> {
         if depth > self.max_depth {
             return Err(Error::Eval("maximum recursion depth exceeded".into()));
@@ -1385,23 +1458,28 @@ impl Evaluator {
                     Some("Mapping") | Some("Map") => {
                         // If the Mapping has a value type param (e.g., Mapping<String, Step>),
                         // resolve it as a default template so entries inherit the class type.
-                        let value_type_default = generic_params
-                            .get(1)
-                            .and_then(|name| resolve_dotted(scope, name));
+                        let value_type_defaults = generic_params
+                            .iter()
+                            .skip(1)
+                            .filter_map(|name| {
+                                resolve_dotted(scope, name).map(|value| (name.clone(), value))
+                            })
+                            .collect::<Vec<_>>();
                         let mut map = IndexMap::new();
                         self.eval_mapping_entries_with_type_default(
                             entries,
                             scope,
                             depth,
                             &mut map,
-                            value_type_default.as_ref(),
+                            &value_type_defaults,
+                            None,
                         )
                         .await?;
                         // Build ObjectSource with a synthetic `default` entry so that
                         // body amendments (`steps { ["x"] { ... } }`) merge new entries
                         // with the value type class, preserving type_name for converters.
                         let mut src_entries = entries.to_vec();
-                        if value_type_default.is_some()
+                        if value_type_defaults.len() == 1
                             && !entries
                                 .iter()
                                 .any(|e| matches!(e, Entry::Property(p) if p.name == "default"))
@@ -1426,6 +1504,7 @@ impl Evaluator {
                             scope: source_scope,
                             is_open: true,
                             type_name: None,
+                            mapping_value_types: generic_params.iter().skip(1).cloned().collect(),
                             deprecated,
                         };
                         Ok(Value::Object(Arc::new(map), Some(Arc::new(source))))
@@ -1512,6 +1591,7 @@ impl Evaluator {
                                         scope: IndexMap::new(),
                                         is_open,
                                         type_name: tn,
+                                        mapping_value_types: Vec::new(),
                                         deprecated: merge_deprecated(&base_src.deprecated, entries),
                                     }
                                 };
@@ -1541,6 +1621,7 @@ impl Evaluator {
                                 scope: IndexMap::new(),
                                 is_open: true,
                                 type_name: type_name.clone(),
+                                mapping_value_types: Vec::new(),
                                 deprecated,
                             };
                             Ok(Value::Object(Arc::new(merged), Some(Arc::new(src))))
@@ -2236,55 +2317,87 @@ impl Evaluator {
         scope: &Scope,
         depth: usize,
         map: &mut IndexMap<String, Value>,
-        type_default: Option<&Value>,
+        type_defaults: &[(String, Value)],
+        inherited_default: Option<Value>,
     ) -> Result<()> {
-        let explicit_default = self.find_default_template(entries, scope, depth).await?;
-        let default_template = explicit_default.as_ref().or(type_default);
+        let explicit_default = self
+            .find_default_template(entries, scope, depth)
+            .await?
+            .or(inherited_default);
 
         for entry in entries {
             match entry {
                 Entry::DynProperty(key_expr, val_expr) => {
                     let key = self.eval_expr(key_expr, scope, depth + 1).await?;
-                    // If the default template has ObjectSource, use eval_amended_object
-                    // so nested property amendments work (e.g., `steps { ["x"] { ... } }`
-                    // inside a Hook default properly amends the Hook's steps Mapping).
-                    let val = if let Some(Value::Object(_, Some(src))) = default_template
-                        && let Expr::ObjectBody(body) = val_expr
-                    {
-                        let mut result = self
-                            .eval_amended_object(&src.entries, &src.scope, body, scope, depth)
-                            .await?;
-                        if let Some(ref tn) = src.type_name
-                            && let Value::Object(_, ref mut result_src) = result
-                        {
-                            let new_src = match result_src.as_ref() {
-                                Some(s) => {
-                                    let mut ns = (**s).clone();
-                                    ns.type_name = Some(tn.clone());
-                                    ns
-                                }
-                                None => ObjectSource {
-                                    entries: vec![],
-                                    scope: IndexMap::new(),
-                                    is_open: true,
-                                    type_name: Some(tn.clone()),
-                                    deprecated: merge_deprecated(&src.deprecated, body),
-                                },
-                            };
-                            *result_src = Some(std::sync::Arc::new(new_src));
-                        }
-                        result
-                    } else {
-                        let mut val = self.eval_expr(val_expr, scope, depth + 1).await?;
-                        if let Some(tpl) = default_template {
-                            val = merge_values(tpl.clone(), val);
-                        }
-                        val
+                    let type_default = match val_expr {
+                        Expr::ObjectBody(body) => select_mapping_type_default(type_defaults, body)
+                            .map(|(name, value)| (Some(name.as_str()), value)),
+                        _ => type_defaults
+                            .first()
+                            .map(|(name, value)| (Some(name.as_str()), value)),
                     };
+                    let default_template = match (type_default, explicit_default.as_ref()) {
+                        (Some((type_name, type_default)), Some(explicit_default)) => Some((
+                            type_name,
+                            merge_values(type_default.clone(), explicit_default.clone()),
+                        )),
+                        (Some((type_name, type_default)), None) => {
+                            Some((type_name, type_default.clone()))
+                        }
+                        (None, Some(explicit_default)) => Some((None, explicit_default.clone())),
+                        (None, None) => None,
+                    };
+                    // If the default template has ObjectSource, amend the evaluated
+                    // template so inherited mapping defaults and nested amendments survive.
+                    let val =
+                        if let Some((default_type_name, Value::Object(template_map, Some(src)))) =
+                            default_template.as_ref()
+                            && let Expr::ObjectBody(body) = val_expr
+                        {
+                            let mut result = self
+                                .eval_object_body_over_template(
+                                    template_map,
+                                    src,
+                                    body,
+                                    scope,
+                                    depth,
+                                )
+                                .await?;
+                            let type_name = src.type_name.as_deref().or(*default_type_name);
+                            if let Some(tn) = type_name
+                                && let Value::Object(_, ref mut result_src) = result
+                            {
+                                let new_src = match result_src.as_ref() {
+                                    Some(s) => {
+                                        let mut ns = (**s).clone();
+                                        ns.type_name = Some(tn.to_string());
+                                        ns
+                                    }
+                                    None => ObjectSource {
+                                        entries: vec![],
+                                        scope: IndexMap::new(),
+                                        is_open: true,
+                                        type_name: Some(tn.to_string()),
+                                        mapping_value_types: Vec::new(),
+                                        deprecated: merge_deprecated(&src.deprecated, body),
+                                    },
+                                };
+                                *result_src = Some(std::sync::Arc::new(new_src));
+                            }
+                            result
+                        } else {
+                            let mut val = self.eval_expr(val_expr, scope, depth + 1).await?;
+                            if let Some((_, tpl)) = default_template {
+                                val = merge_values(tpl, val);
+                            }
+                            val
+                        };
                     map.insert(value_to_key(&key)?, val);
                 }
                 Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {}
-                Entry::Property(prop) if prop.name == "default" && default_template.is_some() => {}
+                Entry::Property(prop)
+                    if prop.name == "default"
+                        && (explicit_default.is_some() || !type_defaults.is_empty()) => {}
                 Entry::Spread(e) => {
                     let val = self.eval_expr(e, scope, depth + 1).await?;
                     if let Value::Object(m, _) = val {
@@ -2304,7 +2417,8 @@ impl Evaluator {
                             &iter_scope,
                             depth + 1,
                             map,
-                            type_default,
+                            type_defaults,
+                            explicit_default.clone(),
                         )
                         .await?;
                     }
@@ -2441,6 +2555,55 @@ impl Evaluator {
             other => Ok(other),
         }
     }
+}
+
+fn select_mapping_type_default<'a>(
+    type_defaults: &'a [(String, Value)],
+    body: &[Entry],
+) -> Option<&'a (String, Value)> {
+    if type_defaults.len() <= 1 {
+        return type_defaults.first();
+    }
+
+    let field_names = body.iter().filter_map(|entry| match entry {
+        Entry::Property(prop) if !has_modifier(&prop.modifiers, Modifier::Local) => {
+            Some(prop.name.as_str())
+        }
+        Entry::DynProperty(Expr::String(name), _) => Some(name.as_str()),
+        _ => None,
+    });
+
+    let mut best = None;
+    let mut best_score = 0;
+    for candidate in type_defaults {
+        let score = field_names
+            .clone()
+            .filter(|field| object_declares_field(&candidate.1, field))
+            .count();
+        if score > best_score {
+            best = Some(candidate);
+            best_score = score;
+        }
+    }
+
+    // Empty bodies, unknown fields, and ties fall back to the declared union
+    // order. This mirrors Pkl's first assignable type behavior when there is no
+    // stronger structural signal in the entry body.
+    best.or_else(|| type_defaults.first())
+}
+
+fn object_declares_field(value: &Value, field: &str) -> bool {
+    let Value::Object(map, source) = value else {
+        return false;
+    };
+    map.contains_key(field)
+        || source.as_ref().is_some_and(|source| {
+            source.entries.iter().any(|entry| match entry {
+                Entry::Property(prop) => prop.name == field,
+                Entry::DynProperty(Expr::String(name), _) => name == field,
+                _ => false,
+            })
+        })
 }
 
 // --- Scope ---
