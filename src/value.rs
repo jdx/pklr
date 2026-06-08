@@ -18,6 +18,10 @@ pub struct ObjectSource {
     /// The pkl class name this object was instantiated from (e.g., "Step", "Group").
     /// Used by `output.renderer.converters` to apply type-specific transforms.
     pub type_name: Option<String>,
+    /// Possible value type names for mapping entries, e.g. `Step | Group` from
+    /// `Mapping<String, Step | Group>`. Used when amending mappings so bare
+    /// entries inherit the right class template.
+    pub mapping_value_types: Vec<String>,
     /// Map of property name → optional deprecation message for properties
     /// annotated with `@Deprecated`. Consulted on field access so the
     /// warning fires when a deprecated property is *used*, not when the

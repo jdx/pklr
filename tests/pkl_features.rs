@@ -3151,6 +3151,182 @@ myGroup = new Group {
 }
 
 #[test]
+fn converter_union_mapping_chooses_matching_default_type() {
+    let json = eval_with_converters(
+        r#"
+class Group {
+    steps: Mapping<String, Step> = new Mapping<String, Step> {}
+    shared: Boolean = false
+}
+
+class Step {
+    check: String = ""
+    shared: Boolean = false
+}
+
+class Hook {
+    steps: Mapping<String, Step | Group> = new Mapping<String, Step | Group> {
+        default {
+            shared = true
+        }
+    }
+}
+
+output {
+    renderer {
+        converters {
+            [Group] = (g) -> new Dynamic {
+                _type = "group"
+                ...g.toDynamic()
+            }
+            [Step] = (s) -> new Dynamic {
+                _type = "step"
+                ...s.toDynamic()
+            }
+        }
+    }
+}
+
+hook = new Hook {
+    steps {
+        ["group"] {
+            steps {
+                ["lint"] {
+                    check = "eslint"
+                }
+            }
+        }
+        ["echo"] {
+            check = "echo ok"
+        }
+    }
+}
+"#,
+    );
+    assert_eq!(json["hook"]["steps"]["group"]["_type"], "group");
+    assert_eq!(json["hook"]["steps"]["group"]["shared"], true);
+    assert_eq!(
+        json["hook"]["steps"]["group"]["steps"]["lint"]["_type"],
+        "step"
+    );
+    assert_eq!(
+        json["hook"]["steps"]["group"]["steps"]["lint"]["check"],
+        "eslint"
+    );
+    assert_eq!(json["hook"]["steps"]["echo"]["_type"], "step");
+    assert_eq!(json["hook"]["steps"]["echo"]["shared"], true);
+    assert_eq!(json["hook"]["steps"]["echo"]["check"], "echo ok");
+}
+
+#[test]
+fn converter_union_mapping_layers_explicit_default_over_type_default() {
+    let json = eval_with_converters(
+        r#"
+class Group {
+    steps: Mapping<String, Step> = new Mapping<String, Step> {}
+    shared: Boolean = false
+}
+
+class Step {
+    check: String = ""
+    shared: Boolean = false
+}
+
+output {
+    renderer {
+        converters {
+            [Group] = (g) -> new Dynamic {
+                _type = "group"
+                ...g.toDynamic()
+            }
+            [Step] = (s) -> new Dynamic {
+                _type = "step"
+                ...s.toDynamic()
+            }
+        }
+    }
+}
+
+steps = new Mapping<String, Step | Group> {
+    default {
+        shared = true
+    }
+    ["group"] {
+        steps {
+            ["lint"] {
+                check = "eslint"
+            }
+        }
+    }
+    ["echo"] {
+        check = "echo ok"
+    }
+}
+"#,
+    );
+    assert_eq!(json["steps"]["group"]["_type"], "group");
+    assert_eq!(json["steps"]["group"]["shared"], true);
+    assert_eq!(json["steps"]["echo"]["_type"], "step");
+    assert_eq!(json["steps"]["echo"]["shared"], true);
+}
+
+#[test]
+fn mapping_amendment_preserves_type_aliases() {
+    let json = eval_with_converters(
+        r#"
+class Step {
+    check: String = ""
+}
+
+class Hook {
+    steps: Mapping<String, Step> = new Mapping<String, Step> {}
+}
+
+typealias StepAlias = Step
+
+hook = new Hook {
+    steps {
+        ["echo"] {
+            check = (new Step { check = "echo ok" } as StepAlias).check
+        }
+    }
+}
+"#,
+    );
+    assert_eq!(json["hook"]["steps"]["echo"]["check"], "echo ok");
+}
+
+#[test]
+fn single_type_mapping_amendment_preserves_default_template() {
+    let json = eval_with_converters(
+        r#"
+class Step {
+    check: String = ""
+    enabled: Boolean = false
+}
+
+class Hook {
+    steps: Mapping<String, Step> = new Mapping<String, Step> {
+        default {
+            enabled = true
+        }
+    }
+}
+
+hook = new Hook {
+    steps {
+        ["echo"] {
+            check = "echo ok"
+        }
+    }
+}
+"#,
+    );
+    assert_eq!(json["hook"]["steps"]["echo"]["check"], "echo ok");
+    assert_eq!(json["hook"]["steps"]["echo"]["enabled"], true);
+}
+
+#[test]
 fn converter_no_converters_is_noop() {
     let json = eval_with_converters(
         r#"
