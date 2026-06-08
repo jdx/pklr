@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.4](https://github.com/jdx/pklr/compare/v0.4.3...v0.4.4) - 2026-06-08
+
+### Fixed
+
+- *(eval)* preserve union mapping defaults ([#86](https://github.com/jdx/pklr/pull/86))
+
 ## [0.4.3](https://github.com/jdx/pklr/compare/v0.4.2...v0.4.3) - 2026-05-18
 
 ### Fixed
