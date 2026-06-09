@@ -2095,6 +2095,23 @@ impl Evaluator {
                 return self.eval_expr(body, &call_scope, depth + 1).await;
             }
         }
+        // Handle null-safe method calls: obj?.method(args)
+        if let Expr::NullSafeField(obj_expr, method) = func_expr {
+            let obj = self.eval_expr(obj_expr, scope, depth + 1).await?;
+            if matches!(obj, Value::Null) {
+                return Ok(Value::Null);
+            }
+            let mut evaled_args = Vec::new();
+            for a in args {
+                evaled_args.push(self.eval_expr(a, scope, depth + 1).await?);
+            }
+            if let Some(result) = self
+                .eval_method_call(&obj, method, &evaled_args, depth)
+                .await?
+            {
+                return Ok(result);
+            }
+        }
 
         // Handle built-in functions: List(), Listing(), Map()
         if let Expr::Ident(name) = func_expr {
@@ -2227,6 +2244,10 @@ impl Evaluator {
                 .parse::<i64>()
                 .map(|n| Some(Value::Int(n)))
                 .map_err(|_| Error::Eval(format!("cannot convert '{s}' to Int"))),
+            (Value::String(s), "toBoolean") => s
+                .parse::<bool>()
+                .map(|b| Some(Value::Bool(b)))
+                .map_err(|_| Error::Eval(format!("cannot convert '{s}' to Boolean"))),
 
             // List methods
             (Value::List(items), "contains") => {
