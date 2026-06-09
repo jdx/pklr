@@ -3764,6 +3764,94 @@ myStep = new Step {
 }
 
 #[test]
+fn converter_to_dynamic_removes_type_metadata() {
+    let json = eval_with_converters(
+        r#"
+class Step {
+    check: String = ""
+}
+
+output {
+    renderer {
+        converters {
+            [Step] = (s) -> new Step {
+                ...s
+                    .toMap()
+                    .mapValues((k, v) -> v)
+                    .toDynamic()
+            }.toDynamic()
+        }
+    }
+}
+
+myStep = new Step {
+    check = "cargo test"
+}
+"#,
+    );
+    assert_eq!(json["myStep"]["check"], "cargo test");
+}
+
+#[test]
+fn converter_does_not_reconvert_its_root_result() {
+    let json = eval_with_converters(
+        r#"
+class Step {
+    check: String = ""
+}
+
+output {
+    renderer {
+        converters {
+            [Step] = (s) -> new Step {
+                check = "\(s.check)!"
+            }
+        }
+    }
+}
+
+myStep = new Step {
+    check = "cargo test"
+}
+"#,
+    );
+    assert_eq!(json["myStep"]["check"], "cargo test!");
+}
+
+#[test]
+fn converter_can_chain_to_different_root_type() {
+    let json = eval_with_converters(
+        r#"
+class Step {
+    check: String = ""
+}
+
+class RenderedStep {
+    label: String = ""
+}
+
+output {
+    renderer {
+        converters {
+            [Step] = (s) -> new RenderedStep {
+                label = s.check
+            }
+            [RenderedStep] = (s) -> new Dynamic {
+                rendered = s.label
+            }
+        }
+    }
+}
+
+myStep = new Step {
+    check = "cargo test"
+}
+"#,
+    );
+    assert_eq!(json["myStep"]["rendered"], "cargo test");
+}
+
+#[test]
 fn converter_multiple_types() {
     let json = eval_with_converters(
         r#"
@@ -4507,4 +4595,105 @@ hooks {{
     eprintln!("JSON: {}", serde_json::to_string_pretty(&json).unwrap());
     assert_eq!(json["hooks"]["check"]["steps"]["echo"]["_type"], "step");
     assert_eq!(json["hooks"]["check"]["steps"]["echo"]["check"], "echo ok");
+}
+
+#[test]
+fn package_amends_with_rewrite_inherits_hk_style_converter() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    let temp = TestTempDir::new("pklr_test_package_rewrite_converter");
+    let mut zip_bytes = Vec::new();
+    {
+        let cursor = std::io::Cursor::new(&mut zip_bytes);
+        let mut zip = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("Config.pkl", options).unwrap();
+        zip.write_all(
+            br#"
+class Step {
+    check: String = ""
+}
+
+class Hook {
+    steps: Mapping<String, Step> = new Mapping<String, Step> {}
+}
+
+hooks: Mapping<String, Hook> = new Mapping<String, Hook> {}
+
+output {
+    renderer {
+        converters {
+            [Step] = (s) -> new Step {
+                ...s
+                    .toMap()
+                    .mapValues((k, v) ->
+                        if (k == "check")
+                            "\(v)!"
+                        else
+                            v
+                    )
+                    .toDynamic()
+            }.toDynamic()
+        }
+    }
+}
+"#,
+        )
+        .unwrap();
+        zip.finish().unwrap();
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 1024];
+        let _ = stream.read(&mut request).unwrap();
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            zip_bytes.len()
+        )
+        .unwrap();
+        stream.write_all(&zip_bytes).unwrap();
+    });
+
+    let child_path = temp.path().join("hk.pkl");
+    std::fs::write(
+        &child_path,
+        r#"
+amends "package://example.com/v1.0.0/hk@1.0.0#/Config.pkl"
+
+hooks {
+    ["check"] {
+        steps {
+            ["echo"] {
+                check = "echo ok"
+            }
+        }
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let json = rt
+        .block_on(async {
+            pklr::eval_to_json_with_options(
+                &child_path,
+                pklr::EvalOptions {
+                    http_rewrites: vec![format!("https://example.com/=http://{addr}/")],
+                    ..Default::default()
+                },
+            )
+            .await
+        })
+        .unwrap();
+    server.join().unwrap();
+
+    assert_eq!(json["hooks"]["check"]["steps"]["echo"]["check"], "echo ok!");
 }

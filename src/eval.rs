@@ -313,6 +313,14 @@ impl Evaluator {
         Ok(dir)
     }
 
+    fn package_dir_for_zip(&self, zip_url: &str) -> Option<&PathBuf> {
+        if let Some(dir) = self.package_dirs.get(zip_url) {
+            return Some(dir);
+        }
+        let rewritten = self.rewrite_url(zip_url);
+        self.package_dirs.get(rewritten.as_ref())
+    }
+
     pub async fn eval_source(&mut self, source: &str, path: &Path) -> Result<Value> {
         self.converters.clear();
         // Seed import cache for the entry file so circular back-references work
@@ -705,8 +713,7 @@ impl Evaluator {
                         PackageSource::Direct(url) => self.http_cache.get(url).cloned(),
                         PackageSource::Zip(zip_url, entry) => {
                             // For zip packages, read from the extracted directory
-                            self.package_dirs
-                                .get(zip_url.as_str())
+                            self.package_dir_for_zip(zip_url)
                                 .and_then(|dir| std::fs::read_to_string(dir.join(entry)).ok())
                         }
                     }
@@ -2445,9 +2452,8 @@ impl Evaluator {
                 }
                 Ok(Some(Value::Object(Arc::new(result), None)))
             }
-            (Value::Object(..), "toList") | (Value::Object(..), "toDynamic") => {
-                Ok(Some(obj.clone()))
-            }
+            (Value::Object(..), "toList") => Ok(Some(obj.clone())),
+            (Value::Object(map, _), "toDynamic") => Ok(Some(Value::Object(map.clone(), None))),
 
             // Int/Float methods
             (Value::Int(n), "toString") => Ok(Some(Value::String(n.to_string()))),
@@ -2969,7 +2975,8 @@ impl Evaluator {
             return Ok(value);
         }
         let converters = self.converters.clone();
-        self.apply_converters_recursive(value, &converters).await
+        self.apply_converters_recursive(value, &converters, Vec::new())
+            .await
     }
 
     #[async_recursion(?Send)]
@@ -2977,6 +2984,7 @@ impl Evaluator {
         &mut self,
         value: Value,
         converters: &[(String, Value)],
+        blocked_root_converters: Vec<String>,
     ) -> Result<Value> {
         match value {
             Value::Object(map, ref src) => {
@@ -2994,7 +3002,10 @@ impl Evaluator {
                             || (conv_name.len() > tn.len()
                                 && conv_name.ends_with(tn)
                                 && conv_name.as_bytes()[conv_name.len() - tn.len() - 1] == b'.');
-                        if matches && let Value::Lambda(params, body, captured) = lambda {
+                        if matches
+                            && !blocked_root_converters.contains(conv_name)
+                            && let Value::Lambda(params, body, captured) = lambda
+                        {
                             let mut call_scope = Scope::default();
                             for (k, v) in captured.iter() {
                                 call_scope.set(k.clone(), v.clone());
@@ -3005,8 +3016,11 @@ impl Evaluator {
                                     .set(param.clone(), Value::Object(map.clone(), src.clone()));
                             }
                             let result = self.eval_expr(body, &call_scope, 0).await?;
-                            // Recursively apply converters to the result
-                            return self.apply_converters_recursive(result, converters).await;
+                            let mut blocked = blocked_root_converters;
+                            blocked.push(conv_name.clone());
+                            return self
+                                .apply_converters_recursive(result, converters, blocked)
+                                .await;
                         }
                     }
                 }
@@ -3016,7 +3030,7 @@ impl Evaluator {
                 for (k, v) in map.iter() {
                     new_map.insert(
                         k.clone(),
-                        self.apply_converters_recursive(v.clone(), converters)
+                        self.apply_converters_recursive(v.clone(), converters, Vec::new())
                             .await?,
                     );
                 }
@@ -3025,7 +3039,10 @@ impl Evaluator {
             Value::List(items) => {
                 let mut new_items = Vec::with_capacity(items.len());
                 for item in items {
-                    new_items.push(self.apply_converters_recursive(item, converters).await?);
+                    new_items.push(
+                        self.apply_converters_recursive(item, converters, Vec::new())
+                            .await?,
+                    );
                 }
                 Ok(Value::List(new_items))
             }
@@ -3415,6 +3432,7 @@ impl Scope {
 // --- Helpers ---
 
 /// Resolved package info: either a direct file URL or a zip archive + entry path.
+#[derive(Debug)]
 enum PackageSource {
     /// Direct file download (pkg.pkl-lang.org format)
     Direct(String),
@@ -3424,13 +3442,39 @@ enum PackageSource {
 
 /// Resolve a `package://` URI to a download source.
 fn resolve_package_uri(uri: &str) -> Result<PackageSource> {
+    fn sanitize_package_entry(fragment: &str) -> Result<String> {
+        if fragment.is_empty()
+            || fragment.starts_with('/')
+            || fragment.contains('\\')
+            || fragment.split('/').any(|part| part == "..")
+        {
+            return Err(Error::Eval(format!(
+                "invalid package entry path: {fragment}"
+            )));
+        }
+        let path = Path::new(fragment);
+        if path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        }) {
+            return Err(Error::Eval(format!(
+                "invalid package entry path: {fragment}"
+            )));
+        }
+        Ok(fragment.to_string())
+    }
+
     // Format 1: package://pkg.pkl-lang.org/github.com/owner/repo@version#/path.pkl
     // These resolve to direct file downloads from GitHub releases
     if let Some(rest) = uri.strip_prefix("package://pkg.pkl-lang.org/github.com/")
         && let Some((repo_ver, fragment)) = rest.split_once('#')
         && let Some((repo, version)) = repo_ver.split_once('@')
     {
-        let file_path = fragment.strip_prefix('/').unwrap_or(fragment);
+        let file_path = sanitize_package_entry(fragment.strip_prefix('/').unwrap_or(fragment))?;
         return Ok(PackageSource::Direct(format!(
             "https://github.com/{repo}/releases/download/{version}/{file_path}"
         )));
@@ -3440,9 +3484,20 @@ fn resolve_package_uri(uri: &str) -> Result<PackageSource> {
     if let Some(rest) = uri.strip_prefix("package://github.com/")
         && let Some((base, fragment)) = rest.split_once('#')
     {
-        let file_path = fragment.strip_prefix('/').unwrap_or(fragment);
+        let file_path = sanitize_package_entry(fragment.strip_prefix('/').unwrap_or(fragment))?;
         let zip_url = format!("https://github.com/{base}.zip");
-        return Ok(PackageSource::Zip(zip_url, file_path.to_string()));
+        return Ok(PackageSource::Zip(zip_url, file_path));
+    }
+    // Format 3: package://host/path/name@version#/path.pkl
+    // Generic package hosts are zip archives and can be redirected with
+    // HTTP rewrite rules after resolving to https://host/path/name@version.zip.
+    if let Some(rest) = uri.strip_prefix("package://")
+        && !rest.starts_with("pkg.pkl-lang.org/")
+        && let Some((base, fragment)) = rest.split_once('#')
+    {
+        let file_path = sanitize_package_entry(fragment.strip_prefix('/').unwrap_or(fragment))?;
+        let zip_url = format!("https://{base}.zip");
+        return Ok(PackageSource::Zip(zip_url, file_path));
     }
     Err(Error::Eval(format!("unsupported package URI: {uri}")))
 }
@@ -3843,5 +3898,59 @@ fn collection_to_items(v: Value) -> Vec<(Value, Value)> {
             .map(|(k, v)| (Value::String(k.clone()), v.clone()))
             .collect(),
         _ => vec![],
+    }
+}
+
+#[cfg(test)]
+mod package_uri_tests {
+    use std::path::PathBuf;
+
+    use super::{Evaluator, PackageSource, resolve_package_uri};
+
+    #[test]
+    fn generic_package_uri_resolves_to_zip_url() {
+        let pkg =
+            resolve_package_uri("package://example.com/v1.26.0/hk@1.26.0#/Config.pkl").unwrap();
+        match pkg {
+            PackageSource::Zip(zip_url, entry) => {
+                assert_eq!(zip_url, "https://example.com/v1.26.0/hk@1.26.0.zip");
+                assert_eq!(entry, "Config.pkl");
+            }
+            PackageSource::Direct(_) => panic!("expected zip package source"),
+        }
+    }
+
+    #[test]
+    fn package_dir_lookup_uses_rewritten_zip_url() {
+        let mut evaluator = Evaluator::new();
+        evaluator.set_http_rewrites(&["https://example.com/=https://mirror.local/".to_string()]);
+        let dir = PathBuf::from("/tmp/pklr-test-package");
+        evaluator
+            .package_dirs
+            .insert("https://mirror.local/pkg@1.0.zip".to_string(), dir.clone());
+
+        assert_eq!(
+            evaluator
+                .package_dir_for_zip("https://example.com/pkg@1.0.zip")
+                .cloned(),
+            Some(dir)
+        );
+    }
+
+    #[test]
+    fn generic_package_uri_rejects_path_traversal_entries() {
+        let err = resolve_package_uri("package://example.com/pkg@1.0#/../secret.pkl")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("invalid package entry path"));
+    }
+
+    #[test]
+    fn malformed_registry_uri_does_not_fall_back_to_generic_zip() {
+        let err =
+            resolve_package_uri("package://pkg.pkl-lang.org/github.com/owner/repo#/Config.pkl")
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("unsupported package URI"));
     }
 }
