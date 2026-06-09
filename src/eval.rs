@@ -2070,30 +2070,19 @@ impl Evaluator {
             {
                 return Ok(result);
             }
-            // If the field is a Lambda on an Object (class method), invoke it
-            // with the object's properties layered into the call scope so that
-            // overridden properties are visible to the function body and any
-            // local functions it calls.
-            if let Value::Object(ref map, _) = obj
-                && let Some(Value::Lambda(params, body, captured)) = map.get(method)
+            if let Some(result) = self
+                .eval_object_method_call(&obj, method, &evaled_args, depth)
+                .await?
             {
-                let mut call_scope = Scope::default();
-                for (k, v) in captured.iter() {
-                    call_scope.set(k.clone(), v.clone());
-                }
-                // Layer in ALL of the instance's properties including lambdas,
-                // so local functions called by this method also see overrides
-                for (k, v) in map.iter() {
-                    call_scope.set(k.clone(), v.clone());
-                }
-                call_scope.set("this".into(), obj.clone());
-                for (i, param) in params.iter().enumerate() {
-                    if let Some(arg) = evaled_args.get(i) {
-                        call_scope.set(param.clone(), arg.clone());
-                    }
-                }
-                return self.eval_expr(body, &call_scope, depth + 1).await;
+                return Ok(result);
             }
+            if let Some(result) = self.eval_object_field_call(&obj, method, &evaled_args)? {
+                return Ok(result);
+            }
+            return Err(Error::Eval(format!(
+                "unknown method '{method}' on {}",
+                value_type_name(&obj)
+            )));
         }
         // Handle null-safe method calls: obj?.method(args)
         if let Expr::NullSafeField(obj_expr, method) = func_expr {
@@ -2111,6 +2100,19 @@ impl Evaluator {
             {
                 return Ok(result);
             }
+            if let Some(result) = self
+                .eval_object_method_call(&obj, method, &evaled_args, depth)
+                .await?
+            {
+                return Ok(result);
+            }
+            if let Some(result) = self.eval_object_field_call(&obj, method, &evaled_args)? {
+                return Ok(result);
+            }
+            return Err(Error::Eval(format!(
+                "unknown method '{method}' on {}",
+                value_type_name(&obj)
+            )));
         }
 
         // Handle built-in functions: List(), Listing(), Map()
@@ -2202,6 +2204,61 @@ impl Evaluator {
         Err(Error::Eval("cannot call non-function".into()))
     }
 
+    fn eval_object_field_call(
+        &mut self,
+        obj: &Value,
+        method: &str,
+        evaled_args: &[Value],
+    ) -> Result<Option<Value>> {
+        if let Value::Object(map, source) = obj
+            && let Some(func_val) = map.get(method).cloned()
+        {
+            self.warn_if_deprecated_access(source, method);
+            if let Value::String(ref name) = func_val
+                && name == "Regex"
+                && let Some(arg) = evaled_args.first()
+            {
+                return Ok(Some(regex_value(arg.clone())));
+            }
+            if evaled_args.is_empty() {
+                return Ok(Some(func_val));
+            }
+            return Err(Error::Eval("cannot call non-function".into()));
+        }
+        Ok(None)
+    }
+
+    #[async_recursion(?Send)]
+    async fn eval_object_method_call(
+        &mut self,
+        obj: &Value,
+        method: &str,
+        evaled_args: &[Value],
+        depth: usize,
+    ) -> Result<Option<Value>> {
+        if let Value::Object(map, _) = obj
+            && let Some(Value::Lambda(params, body, captured)) = map.get(method)
+        {
+            let mut call_scope = Scope::default();
+            for (k, v) in captured.iter() {
+                call_scope.set(k.clone(), v.clone());
+            }
+            // Layer in all instance properties, including lambdas, so local
+            // functions called by this method see overrides.
+            for (k, v) in map.iter() {
+                call_scope.set(k.clone(), v.clone());
+            }
+            call_scope.set("this".into(), obj.clone());
+            for (i, param) in params.iter().enumerate() {
+                if let Some(arg) = evaled_args.get(i) {
+                    call_scope.set(param.clone(), arg.clone());
+                }
+            }
+            return Ok(Some(self.eval_expr(body, &call_scope, depth + 1).await?));
+        }
+        Ok(None)
+    }
+
     #[async_recursion(?Send)]
     async fn eval_method_call(
         &mut self,
@@ -2244,10 +2301,11 @@ impl Evaluator {
                 .parse::<i64>()
                 .map(|n| Some(Value::Int(n)))
                 .map_err(|_| Error::Eval(format!("cannot convert '{s}' to Int"))),
-            (Value::String(s), "toBoolean") => s
-                .parse::<bool>()
-                .map(|b| Some(Value::Bool(b)))
-                .map_err(|_| Error::Eval(format!("cannot convert '{s}' to Boolean"))),
+            (Value::String(s), "toBoolean") => match s.to_ascii_lowercase().as_str() {
+                "true" => Ok(Some(Value::Bool(true))),
+                "false" => Ok(Some(Value::Bool(false))),
+                _ => Err(Error::Eval(format!("cannot convert '{s}' to Boolean"))),
+            },
 
             // List methods
             (Value::List(items), "contains") => {
