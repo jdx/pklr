@@ -2961,33 +2961,32 @@ fn referenced_roots(entries: &[Entry]) -> HashSet<String> {
     let mut refs = HashSet::new();
     let shadows = HashSet::new();
     collect_entry_refs(entries, &mut refs, &shadows);
-    for name in declared_entry_roots(entries) {
-        refs.remove(&name);
-    }
     refs
 }
 
 fn collect_entry_refs(entries: &[Entry], refs: &mut HashSet<String>, shadows: &HashSet<String>) {
+    let mut entry_shadows = shadows.clone();
+    entry_shadows.extend(declared_entry_roots(entries));
     for entry in entries {
         match entry {
             Entry::Property(prop) => {
                 if let Some(ty) = &prop.type_ann {
-                    collect_type_refs(ty, refs, shadows);
+                    collect_type_refs(ty, refs, &entry_shadows);
                 }
                 if let Some(expr) = &prop.value {
-                    collect_expr_refs(expr, refs, shadows);
+                    collect_expr_refs(expr, refs, &entry_shadows);
                 }
                 if let Some(body) = &prop.body {
-                    collect_entry_refs(body, refs, shadows);
+                    collect_entry_refs(body, refs, &entry_shadows);
                 }
             }
             Entry::DynProperty(key, value) => {
-                collect_expr_refs(key, refs, shadows);
-                collect_expr_refs(value, refs, shadows);
+                collect_expr_refs(key, refs, &entry_shadows);
+                collect_expr_refs(value, refs, &entry_shadows);
             }
             Entry::ForGenerator(fgen) => {
-                collect_expr_refs(&fgen.collection, refs, shadows);
-                let mut body_shadows = shadows.clone();
+                collect_expr_refs(&fgen.collection, refs, &entry_shadows);
+                let mut body_shadows = entry_shadows.clone();
                 body_shadows.insert(fgen.val_var.clone());
                 if let Some(key_var) = &fgen.key_var {
                     body_shadows.insert(key_var.clone());
@@ -2995,20 +2994,22 @@ fn collect_entry_refs(entries: &[Entry], refs: &mut HashSet<String>, shadows: &H
                 collect_entry_refs(&fgen.body, refs, &body_shadows);
             }
             Entry::WhenGenerator(wgen) => {
-                collect_expr_refs(&wgen.condition, refs, shadows);
-                collect_entry_refs(&wgen.body, refs, shadows);
+                collect_expr_refs(&wgen.condition, refs, &entry_shadows);
+                collect_entry_refs(&wgen.body, refs, &entry_shadows);
                 if let Some(else_body) = &wgen.else_body {
-                    collect_entry_refs(else_body, refs, shadows);
+                    collect_entry_refs(else_body, refs, &entry_shadows);
                 }
             }
-            Entry::Spread(expr) | Entry::Elem(expr) => collect_expr_refs(expr, refs, shadows),
+            Entry::Spread(expr) | Entry::Elem(expr) => {
+                collect_expr_refs(expr, refs, &entry_shadows)
+            }
             Entry::ClassDef(_, _, parent, body) => {
                 if let Some(parent) = parent {
-                    collect_name_root(parent, refs, shadows);
+                    collect_name_root(parent, refs, &entry_shadows);
                 }
-                collect_entry_refs(body, refs, shadows);
+                collect_entry_refs(body, refs, &entry_shadows);
             }
-            Entry::TypeAlias(_, ty) => collect_type_refs(ty, refs, shadows),
+            Entry::TypeAlias(_, ty) => collect_type_refs(ty, refs, &entry_shadows),
         }
     }
 }

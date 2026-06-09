@@ -1115,6 +1115,21 @@ result = new Foo {}
 }
 
 #[test]
+fn nested_shadowed_unused_import_is_not_evaluated() {
+    let json = eval(
+        r#"
+import "does-not-exist.pkl" as Foo
+class Outer {
+    class Foo {}
+    x = new Foo {}
+}
+result = new Outer {}
+"#,
+    );
+    assert!(json["result"]["x"].is_object());
+}
+
+#[test]
 fn unused_import_glob_without_alias_is_still_invalid() {
     let err = eval_fails(r#"import* "items/*.pkl""#);
     assert!(err.contains("import* requires an alias"), "{err}");
