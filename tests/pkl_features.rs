@@ -1037,6 +1037,71 @@ beta_val = Items["items/beta.pkl"].value
     assert_eq!(json["beta_val"], "beta");
 }
 
+#[tokio::test]
+async fn unused_import_is_not_evaluated() {
+    let dir = std::path::Path::new("/tmp/pklr_test_unused_import");
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(
+        dir.join("broken.pkl"),
+        r#"
+value = missing.field
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "broken.pkl"
+result = "ok"
+"#,
+    )
+    .unwrap();
+
+    let path = dir.join("main.pkl");
+    let val = pklr::eval_to_json(&path).await.unwrap();
+    assert_eq!(val["result"], "ok");
+}
+
+#[tokio::test]
+async fn import_used_only_by_annotation_does_not_create_builtin_cycle() {
+    let dir = std::path::Path::new("/tmp/pklr_test_annotation_import_cycle");
+    std::fs::create_dir_all(dir.join("builtins")).unwrap();
+    std::fs::write(
+        dir.join("Builtins.pkl"),
+        r#"
+class meta extends Annotation {
+    description: String?
+}
+
+import* "builtins/*.pkl" as Builtins
+prettier = Builtins["builtins/prettier.pkl"].prettier
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("builtins").join("prettier.pkl"),
+        r#"
+import "../Builtins.pkl"
+
+@Builtins.meta { description = "formatter" }
+prettier = "ok"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "builtins/prettier.pkl"
+result = prettier.prettier
+"#,
+    )
+    .unwrap();
+
+    let path = dir.join("main.pkl");
+    let val = pklr::eval_to_json(&path).await.unwrap();
+    assert_eq!(val["result"], "ok");
+}
+
 // ============================================================
 // Class instantiation (future)
 // ============================================================

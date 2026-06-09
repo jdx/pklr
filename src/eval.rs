@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -299,6 +299,7 @@ impl Evaluator {
         }
         let mut scope = Scope::default();
         seed_builtins(&mut scope);
+        let referenced_imports = referenced_roots(&module.body);
 
         // Process imports
         for import in &module.imports {
@@ -310,6 +311,9 @@ impl Evaluator {
                     .alias
                     .clone()
                     .ok_or_else(|| Error::Eval("import* requires an alias".into()))?;
+                if !referenced_imports.contains(&alias) {
+                    continue;
+                }
 
                 // Non-local glob imports bind an empty mapping
                 if uri.contains("://") {
@@ -331,13 +335,6 @@ impl Evaluator {
 
             if uri.starts_with("https://") || uri.starts_with("http://") {
                 // HTTP import
-                let source = self.fetch_source(uri).await?;
-                let imported_val = {
-                    let tokens = lexer::lex_named(&source, uri)?;
-                    let imp_module = parser::parse_named(&tokens, &source, uri)?;
-                    self.eval_module(&imp_module, Path::new(uri), depth + 1)
-                        .await?
-                };
                 let alias = import.alias.clone().unwrap_or_else(|| {
                     uri.rsplit('/')
                         .next()
@@ -346,6 +343,16 @@ impl Evaluator {
                         .unwrap_or(uri)
                         .to_string()
                 });
+                if !referenced_imports.contains(&alias) {
+                    continue;
+                }
+                let source = self.fetch_source(uri).await?;
+                let imported_val = {
+                    let tokens = lexer::lex_named(&source, uri)?;
+                    let imp_module = parser::parse_named(&tokens, &source, uri)?;
+                    self.eval_module(&imp_module, Path::new(uri), depth + 1)
+                        .await?
+                };
                 scope.set(alias, imported_val);
                 continue;
             }
@@ -354,20 +361,23 @@ impl Evaluator {
                 let pkg = resolve_package_uri(uri)?;
                 let fragment = uri.split_once('#').map(|(_, f)| f).unwrap_or("");
                 let file_path = fragment.strip_prefix('/').unwrap_or(fragment);
+                let alias = import.alias.clone().unwrap_or_else(|| {
+                    file_path
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(file_path)
+                        .strip_suffix(".pkl")
+                        .unwrap_or(file_path)
+                        .to_string()
+                });
+                if !referenced_imports.contains(&alias) {
+                    continue;
+                }
                 // For zip packages, extract to temp dir and eval as local file
                 if let PackageSource::Zip(zip_url, _) = &pkg {
                     let pkg_dir = self.extract_package_zip(zip_url).await?;
                     let local_path = pkg_dir.join(file_path);
                     let imported_val = self.eval_file(&local_path, depth + 1).await?;
-                    let alias = import.alias.clone().unwrap_or_else(|| {
-                        file_path
-                            .rsplit('/')
-                            .next()
-                            .unwrap_or(file_path)
-                            .strip_suffix(".pkl")
-                            .unwrap_or(file_path)
-                            .to_string()
-                    });
                     scope.set(alias, imported_val);
                     continue;
                 }
@@ -382,15 +392,6 @@ impl Evaluator {
                     self.eval_module(&imp_module, Path::new(&url), depth + 1)
                         .await?
                 };
-                let alias = import.alias.clone().unwrap_or_else(|| {
-                    file_path
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(file_path)
-                        .strip_suffix(".pkl")
-                        .unwrap_or(file_path)
-                        .to_string()
-                });
                 scope.set(alias, imported_val);
                 continue;
             }
@@ -402,6 +403,9 @@ impl Evaluator {
                     .alias
                     .clone()
                     .unwrap_or_else(|| module_name.to_string());
+                if !referenced_imports.contains(&alias) {
+                    continue;
+                }
                 scope.set(alias, stdlib_val);
                 continue;
             }
@@ -417,19 +421,21 @@ impl Evaluator {
                 let base = path.parent().unwrap_or(Path::new("."));
                 base.join(uri)
             };
+            let alias = import.alias.clone().unwrap_or_else(|| {
+                import_path
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string()
+            });
+            if !referenced_imports.contains(&alias) {
+                continue;
+            }
             if !import_path.exists() {
                 return Err(Error::ImportNotFound(import_path.display().to_string()));
             }
             {
                 let imported_val = self.eval_file(&import_path, depth + 1).await?;
-                // Determine the binding name: alias or filename stem
-                let alias = import.alias.clone().unwrap_or_else(|| {
-                    import_path
-                        .file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string()
-                });
                 scope.set(alias, imported_val);
             }
         }
@@ -2701,6 +2707,139 @@ fn object_declares_field(value: &Value, field: &str) -> bool {
                 _ => false,
             })
         })
+}
+
+fn referenced_roots(entries: &[Entry]) -> HashSet<String> {
+    let mut refs = HashSet::new();
+    collect_entry_refs(entries, &mut refs);
+    refs
+}
+
+fn collect_entry_refs(entries: &[Entry], refs: &mut HashSet<String>) {
+    for entry in entries {
+        match entry {
+            Entry::Property(prop) => {
+                if let Some(ty) = &prop.type_ann {
+                    collect_type_refs(ty, refs);
+                }
+                if let Some(expr) = &prop.value {
+                    collect_expr_refs(expr, refs);
+                }
+                if let Some(body) = &prop.body {
+                    collect_entry_refs(body, refs);
+                }
+            }
+            Entry::DynProperty(key, value) => {
+                collect_expr_refs(key, refs);
+                collect_expr_refs(value, refs);
+            }
+            Entry::ForGenerator(fgen) => {
+                collect_expr_refs(&fgen.collection, refs);
+                collect_entry_refs(&fgen.body, refs);
+            }
+            Entry::WhenGenerator(wgen) => {
+                collect_expr_refs(&wgen.condition, refs);
+                collect_entry_refs(&wgen.body, refs);
+                if let Some(else_body) = &wgen.else_body {
+                    collect_entry_refs(else_body, refs);
+                }
+            }
+            Entry::Spread(expr) | Entry::Elem(expr) => collect_expr_refs(expr, refs),
+            Entry::ClassDef(_, _, parent, body) => {
+                if let Some(parent) = parent {
+                    collect_name_root(parent, refs);
+                }
+                collect_entry_refs(body, refs);
+            }
+            Entry::TypeAlias(_, ty) => collect_type_refs(ty, refs),
+        }
+    }
+}
+
+fn collect_expr_refs(expr: &Expr, refs: &mut HashSet<String>) {
+    match expr {
+        Expr::Ident(name) => {
+            refs.insert(name.clone());
+        }
+        Expr::New(type_name, entries, generic_params) => {
+            if let Some(type_name) = type_name {
+                collect_name_root(type_name, refs);
+            }
+            for param in generic_params {
+                collect_name_root(param, refs);
+            }
+            collect_entry_refs(entries, refs);
+        }
+        Expr::Field(base, _) | Expr::NullSafeField(base, _) => collect_expr_refs(base, refs),
+        Expr::Index(base, index) | Expr::Binop(_, base, index) => {
+            collect_expr_refs(base, refs);
+            collect_expr_refs(index, refs);
+        }
+        Expr::Call(callee, args) => {
+            collect_expr_refs(callee, refs);
+            for arg in args {
+                collect_expr_refs(arg, refs);
+            }
+        }
+        Expr::If(cond, then_expr, else_expr) => {
+            collect_expr_refs(cond, refs);
+            collect_expr_refs(then_expr, refs);
+            collect_expr_refs(else_expr, refs);
+        }
+        Expr::Let(_, value, body) => {
+            collect_expr_refs(value, refs);
+            collect_expr_refs(body, refs);
+        }
+        Expr::Is(value, ty) | Expr::As(value, ty) => {
+            collect_expr_refs(value, refs);
+            collect_type_refs(ty, refs);
+        }
+        Expr::Unop(_, value)
+        | Expr::Lambda(_, value)
+        | Expr::Throw(value)
+        | Expr::Trace(value)
+        | Expr::Read(value)
+        | Expr::ReadOrNull(value) => collect_expr_refs(value, refs),
+        Expr::ObjectBody(entries) => collect_entry_refs(entries, refs),
+        Expr::StringInterpolation(parts) => {
+            for part in parts {
+                if let StringInterpPart::Expr(expr) = part {
+                    collect_expr_refs(expr, refs);
+                }
+            }
+        }
+        Expr::Null | Expr::Bool(_) | Expr::Int(_) | Expr::Float(_) | Expr::String(_) => {}
+    }
+}
+
+fn collect_type_refs(ty: &crate::parser::TypeExpr, refs: &mut HashSet<String>) {
+    match ty {
+        crate::parser::TypeExpr::Named(name) => collect_name_root(name, refs),
+        crate::parser::TypeExpr::Nullable(inner) => collect_type_refs(inner, refs),
+        crate::parser::TypeExpr::Union(types) => {
+            for ty in types {
+                collect_type_refs(ty, refs);
+            }
+        }
+        crate::parser::TypeExpr::Generic(name, params) => {
+            collect_name_root(name, refs);
+            for param in params {
+                collect_type_refs(param, refs);
+            }
+        }
+        crate::parser::TypeExpr::Constrained(name, expr) => {
+            collect_name_root(name, refs);
+            collect_expr_refs(expr, refs);
+        }
+    }
+}
+
+fn collect_name_root(name: &str, refs: &mut HashSet<String>) {
+    if let Some(root) = name.split('.').next()
+        && !root.is_empty()
+    {
+        refs.insert(root.to_string());
+    }
 }
 
 // --- Scope ---
