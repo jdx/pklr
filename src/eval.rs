@@ -36,6 +36,12 @@ pub struct Evaluator {
     warned_deprecated: std::collections::HashSet<(String, Option<String>)>,
 }
 
+#[derive(Clone, Default)]
+struct MappingInheritedDefault {
+    value: Option<Value>,
+    entries: Option<Vec<Entry>>,
+}
+
 impl Default for Evaluator {
     fn default() -> Self {
         Self {
@@ -839,7 +845,7 @@ impl Evaluator {
                         depth,
                         &mut amended,
                         &value_type_defaults,
-                        None,
+                        MappingInheritedDefault::default(),
                     )
                     .await?;
                     amended.extend(existing_map.iter().map(|(k, v)| (k.clone(), v.clone())));
@@ -849,7 +855,10 @@ impl Evaluator {
                         depth,
                         &mut amended,
                         &value_type_defaults,
-                        inherited_default,
+                        MappingInheritedDefault {
+                            value: inherited_default,
+                            entries: find_default_body_entries(&src.entries),
+                        },
                     )
                     .await?;
                     return Ok(Some(Value::Object(
@@ -1472,7 +1481,7 @@ impl Evaluator {
                             depth,
                             &mut map,
                             &value_type_defaults,
-                            None,
+                            MappingInheritedDefault::default(),
                         )
                         .await?;
                         // Build ObjectSource with a synthetic `default` entry so that
@@ -2318,17 +2327,66 @@ impl Evaluator {
         depth: usize,
         map: &mut IndexMap<String, Value>,
         type_defaults: &[(String, Value)],
-        inherited_default: Option<Value>,
+        inherited_default: MappingInheritedDefault,
     ) -> Result<()> {
+        let mut entry_scope = scope.child();
+        let mut deferred_lambdas: Vec<(String, &crate::parser::Expr)> = Vec::new();
+        for entry in entries {
+            match entry {
+                Entry::Property(prop)
+                    if has_modifier(&prop.modifiers, Modifier::Local) && prop.value.is_some() =>
+                {
+                    let expr = prop.value.as_ref().unwrap();
+                    if matches!(expr, crate::parser::Expr::Lambda(..)) {
+                        deferred_lambdas.push((prop.name.clone(), expr));
+                    } else {
+                        let val = self.eval_expr(expr, &entry_scope, depth).await?;
+                        entry_scope.set(prop.name.clone(), val);
+                    }
+                }
+                Entry::Property(prop)
+                    if has_modifier(&prop.modifiers, Modifier::Local) && prop.body.is_some() =>
+                {
+                    let val = self
+                        .eval_entries(prop.body.as_ref().unwrap(), &entry_scope, depth)
+                        .await?;
+                    entry_scope.set(prop.name.clone(), val);
+                }
+                Entry::ClassDef(name, class_mods, parent, body) => {
+                    let defaults = self
+                        .eval_class_def(
+                            name,
+                            class_mods,
+                            parent.as_deref(),
+                            body,
+                            &entry_scope,
+                            depth,
+                        )
+                        .await?;
+                    entry_scope.set(name.clone(), defaults);
+                }
+                Entry::TypeAlias(name, ty) => {
+                    self.eval_type_alias(name, ty, &mut entry_scope);
+                }
+                _ => {}
+            }
+        }
+        for (name, expr) in deferred_lambdas {
+            let val = self.eval_expr(expr, &entry_scope, depth).await?;
+            entry_scope.set(name, val);
+        }
+
         let explicit_default = self
-            .find_default_template(entries, scope, depth)
+            .find_default_template(entries, &entry_scope, depth)
             .await?
-            .or(inherited_default);
+            .or(inherited_default.value);
+        let explicit_default_entries =
+            find_default_body_entries(entries).or(inherited_default.entries);
 
         for entry in entries {
             match entry {
                 Entry::DynProperty(key_expr, val_expr) => {
-                    let key = self.eval_expr(key_expr, scope, depth + 1).await?;
+                    let key = self.eval_expr(key_expr, &entry_scope, depth + 1).await?;
                     let type_default = match val_expr {
                         Expr::ObjectBody(body) => select_mapping_type_default(type_defaults, body)
                             .map(|(name, value)| (Some(name.as_str()), value)),
@@ -2347,22 +2405,44 @@ impl Evaluator {
                         (None, Some(explicit_default)) => Some((None, explicit_default.clone())),
                         (None, None) => None,
                     };
-                    // If the default template has ObjectSource, amend the evaluated
-                    // template so inherited mapping defaults and nested amendments survive.
+                    // If the default template has ObjectSource, amend its source entries
+                    // so late-bound class properties are recomputed after overrides.
                     let val =
                         if let Some((default_type_name, Value::Object(template_map, Some(src)))) =
                             default_template.as_ref()
                             && let Expr::ObjectBody(body) = val_expr
                         {
-                            let mut result = self
-                                .eval_object_body_over_template(
-                                    template_map,
-                                    src,
-                                    body,
-                                    scope,
-                                    depth,
-                                )
-                                .await?;
+                            let mut result =
+                                if let Some(default_entries) = explicit_default_entries.as_ref() {
+                                    let mut overlay_entries = default_entries.clone();
+                                    overlay_entries.extend(body.iter().cloned());
+                                    self.eval_amended_object(
+                                        &src.entries,
+                                        &src.scope,
+                                        &overlay_entries,
+                                        &entry_scope,
+                                        depth,
+                                    )
+                                    .await?
+                                } else if explicit_default.is_some() && type_default.is_some() {
+                                    self.eval_object_body_over_template(
+                                        template_map,
+                                        src,
+                                        body,
+                                        &entry_scope,
+                                        depth,
+                                    )
+                                    .await?
+                                } else {
+                                    self.eval_amended_object(
+                                        &src.entries,
+                                        &src.scope,
+                                        body,
+                                        &entry_scope,
+                                        depth,
+                                    )
+                                    .await?
+                                };
                             let type_name = src.type_name.as_deref().or(*default_type_name);
                             if let Some(tn) = type_name
                                 && let Value::Object(_, ref mut result_src) = result
@@ -2386,7 +2466,7 @@ impl Evaluator {
                             }
                             result
                         } else {
-                            let mut val = self.eval_expr(val_expr, scope, depth + 1).await?;
+                            let mut val = self.eval_expr(val_expr, &entry_scope, depth + 1).await?;
                             if let Some((_, tpl)) = default_template {
                                 val = merge_values(tpl, val);
                             }
@@ -2399,15 +2479,17 @@ impl Evaluator {
                     if prop.name == "default"
                         && (explicit_default.is_some() || !type_defaults.is_empty()) => {}
                 Entry::Spread(e) => {
-                    let val = self.eval_expr(e, scope, depth + 1).await?;
+                    let val = self.eval_expr(e, &entry_scope, depth + 1).await?;
                     if let Value::Object(m, _) = val {
                         map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
                     }
                 }
                 Entry::ForGenerator(fgen) => {
-                    let collection = self.eval_expr(&fgen.collection, scope, depth + 1).await?;
+                    let collection = self
+                        .eval_expr(&fgen.collection, &entry_scope, depth + 1)
+                        .await?;
                     for (k, v) in collection_to_items(collection) {
-                        let mut iter_scope = scope.child();
+                        let mut iter_scope = entry_scope.child();
                         iter_scope.set(fgen.val_var.clone(), v);
                         if let Some(kv) = &fgen.key_var {
                             iter_scope.set(kv.clone(), k);
@@ -2418,7 +2500,10 @@ impl Evaluator {
                             depth + 1,
                             map,
                             type_defaults,
-                            explicit_default.clone(),
+                            MappingInheritedDefault {
+                                value: explicit_default.clone(),
+                                entries: explicit_default_entries.clone(),
+                            },
                         )
                         .await?;
                     }
@@ -2590,6 +2675,18 @@ fn select_mapping_type_default<'a>(
     // order. This mirrors Pkl's first assignable type behavior when there is no
     // stronger structural signal in the entry body.
     best.or_else(|| type_defaults.first())
+}
+
+fn find_default_body_entries(entries: &[Entry]) -> Option<Vec<Entry>> {
+    entries.iter().find_map(|entry| {
+        if let Entry::Property(prop) = entry
+            && prop.name == "default"
+            && !has_modifier(&prop.modifiers, Modifier::Local)
+        {
+            return prop.body.clone();
+        }
+        None
+    })
 }
 
 fn object_declares_field(value: &Value, field: &str) -> bool {

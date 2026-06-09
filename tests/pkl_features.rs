@@ -3297,6 +3297,48 @@ hook = new Hook {
 }
 
 #[test]
+fn mapping_local_const_is_visible_to_dynamic_entries() {
+    let json = eval(
+        r#"
+values = new Mapping<String, String> {
+    local const prefix = "hello"
+    ["message"] = "\(prefix), world"
+}
+"#,
+    );
+    assert_eq!(json["values"]["message"], "hello, world");
+}
+
+#[test]
+fn mapping_local_function_is_visible_to_dynamic_entries() {
+    let json = eval(
+        r#"
+values = new Mapping<String, String> {
+    local const prefix = "value"
+    local function wrap(s: String): String = "[\(prefix):\(s)]"
+    ["message"] = wrap("ok")
+}
+"#,
+    );
+    assert_eq!(json["values"]["message"], "[value:ok]");
+}
+
+#[test]
+fn mapping_local_body_is_visible_to_dynamic_entries() {
+    let json = eval(
+        r#"
+values = new Mapping<String, Int> {
+    local options {
+        port = 3000
+    }
+    ["port"] = options.port
+}
+"#,
+    );
+    assert_eq!(json["values"]["port"], 3000);
+}
+
+#[test]
 fn single_type_mapping_amendment_preserves_default_template() {
     let json = eval_with_converters(
         r#"
@@ -3324,6 +3366,31 @@ hook = new Hook {
     );
     assert_eq!(json["hook"]["steps"]["echo"]["check"], "echo ok");
     assert_eq!(json["hook"]["steps"]["echo"]["enabled"], true);
+}
+
+#[test]
+fn mapping_entry_body_recomputes_late_bound_type_properties() {
+    let json = eval_with_converters(
+        r#"
+class Step {
+    check: String = ""
+    label: String = "Step: \(check)"
+    enabled: Boolean = false
+}
+
+steps = new Mapping<String, Step> {
+    default {
+        enabled = true
+    }
+    ["lint"] {
+        check = "eslint"
+    }
+}
+"#,
+    );
+    assert_eq!(json["steps"]["lint"]["check"], "eslint");
+    assert_eq!(json["steps"]["lint"]["label"], "Step: eslint");
+    assert_eq!(json["steps"]["lint"]["enabled"], true);
 }
 
 #[test]
