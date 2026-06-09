@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1](https://github.com/jdx/pklr/compare/v1.0.0...v1.0.1) - 2026-06-09
+
+### Fixed
+
+- preserve regex output compatibility ([#93](https://github.com/jdx/pklr/pull/93))
+
 ## [1.0.0](https://github.com/jdx/pklr/compare/v0.4.5...v1.0.0) - 2026-06-09
 
 ### Fixed
