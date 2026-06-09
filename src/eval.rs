@@ -2959,100 +2959,119 @@ fn object_declares_field(value: &Value, field: &str) -> bool {
 
 fn referenced_roots(entries: &[Entry]) -> HashSet<String> {
     let mut refs = HashSet::new();
-    collect_entry_refs(entries, &mut refs);
+    let shadows = HashSet::new();
+    collect_entry_refs(entries, &mut refs, &shadows);
+    for name in declared_entry_roots(entries) {
+        refs.remove(&name);
+    }
     refs
 }
 
-fn collect_entry_refs(entries: &[Entry], refs: &mut HashSet<String>) {
+fn collect_entry_refs(entries: &[Entry], refs: &mut HashSet<String>, shadows: &HashSet<String>) {
     for entry in entries {
         match entry {
             Entry::Property(prop) => {
                 if let Some(ty) = &prop.type_ann {
-                    collect_type_refs(ty, refs);
+                    collect_type_refs(ty, refs, shadows);
                 }
                 if let Some(expr) = &prop.value {
-                    collect_expr_refs(expr, refs);
+                    collect_expr_refs(expr, refs, shadows);
                 }
                 if let Some(body) = &prop.body {
-                    collect_entry_refs(body, refs);
+                    collect_entry_refs(body, refs, shadows);
                 }
             }
             Entry::DynProperty(key, value) => {
-                collect_expr_refs(key, refs);
-                collect_expr_refs(value, refs);
+                collect_expr_refs(key, refs, shadows);
+                collect_expr_refs(value, refs, shadows);
             }
             Entry::ForGenerator(fgen) => {
-                collect_expr_refs(&fgen.collection, refs);
-                collect_entry_refs(&fgen.body, refs);
+                collect_expr_refs(&fgen.collection, refs, shadows);
+                let mut body_shadows = shadows.clone();
+                body_shadows.insert(fgen.val_var.clone());
+                if let Some(key_var) = &fgen.key_var {
+                    body_shadows.insert(key_var.clone());
+                }
+                collect_entry_refs(&fgen.body, refs, &body_shadows);
             }
             Entry::WhenGenerator(wgen) => {
-                collect_expr_refs(&wgen.condition, refs);
-                collect_entry_refs(&wgen.body, refs);
+                collect_expr_refs(&wgen.condition, refs, shadows);
+                collect_entry_refs(&wgen.body, refs, shadows);
                 if let Some(else_body) = &wgen.else_body {
-                    collect_entry_refs(else_body, refs);
+                    collect_entry_refs(else_body, refs, shadows);
                 }
             }
-            Entry::Spread(expr) | Entry::Elem(expr) => collect_expr_refs(expr, refs),
+            Entry::Spread(expr) | Entry::Elem(expr) => collect_expr_refs(expr, refs, shadows),
             Entry::ClassDef(_, _, parent, body) => {
                 if let Some(parent) = parent {
-                    collect_name_root(parent, refs);
+                    collect_name_root(parent, refs, shadows);
                 }
-                collect_entry_refs(body, refs);
+                collect_entry_refs(body, refs, shadows);
             }
-            Entry::TypeAlias(_, ty) => collect_type_refs(ty, refs),
+            Entry::TypeAlias(_, ty) => collect_type_refs(ty, refs, shadows),
         }
     }
 }
 
-fn collect_expr_refs(expr: &Expr, refs: &mut HashSet<String>) {
+fn collect_expr_refs(expr: &Expr, refs: &mut HashSet<String>, shadows: &HashSet<String>) {
     match expr {
         Expr::Ident(name) => {
-            refs.insert(name.clone());
+            if !shadows.contains(name) {
+                refs.insert(name.clone());
+            }
         }
         Expr::New(type_name, entries, generic_params) => {
             if let Some(type_name) = type_name {
-                collect_name_root(type_name, refs);
+                collect_name_root(type_name, refs, shadows);
             }
             for param in generic_params {
-                collect_name_root(param, refs);
+                collect_name_root(param, refs, shadows);
             }
-            collect_entry_refs(entries, refs);
+            collect_entry_refs(entries, refs, shadows);
         }
-        Expr::Field(base, _) | Expr::NullSafeField(base, _) => collect_expr_refs(base, refs),
+        Expr::Field(base, _) | Expr::NullSafeField(base, _) => {
+            collect_expr_refs(base, refs, shadows);
+        }
         Expr::Index(base, index) | Expr::Binop(_, base, index) => {
-            collect_expr_refs(base, refs);
-            collect_expr_refs(index, refs);
+            collect_expr_refs(base, refs, shadows);
+            collect_expr_refs(index, refs, shadows);
         }
         Expr::Call(callee, args) => {
-            collect_expr_refs(callee, refs);
+            collect_expr_refs(callee, refs, shadows);
             for arg in args {
-                collect_expr_refs(arg, refs);
+                collect_expr_refs(arg, refs, shadows);
             }
         }
         Expr::If(cond, then_expr, else_expr) => {
-            collect_expr_refs(cond, refs);
-            collect_expr_refs(then_expr, refs);
-            collect_expr_refs(else_expr, refs);
+            collect_expr_refs(cond, refs, shadows);
+            collect_expr_refs(then_expr, refs, shadows);
+            collect_expr_refs(else_expr, refs, shadows);
         }
-        Expr::Let(_, value, body) => {
-            collect_expr_refs(value, refs);
-            collect_expr_refs(body, refs);
+        Expr::Let(name, value, body) => {
+            collect_expr_refs(value, refs, shadows);
+            let mut body_shadows = shadows.clone();
+            body_shadows.insert(name.clone());
+            collect_expr_refs(body, refs, &body_shadows);
         }
         Expr::Is(value, ty) | Expr::As(value, ty) => {
-            collect_expr_refs(value, refs);
-            collect_type_refs(ty, refs);
+            collect_expr_refs(value, refs, shadows);
+            collect_type_refs(ty, refs, shadows);
+        }
+        Expr::Lambda(params, value) => {
+            let mut body_shadows = shadows.clone();
+            body_shadows.extend(params.iter().cloned());
+            collect_expr_refs(value, refs, &body_shadows);
         }
         Expr::Unop(_, value)
-        | Expr::Lambda(_, value)
         | Expr::Throw(value)
         | Expr::Trace(value)
         | Expr::Read(value)
-        | Expr::ReadOrNull(value) => collect_expr_refs(value, refs),
-        Expr::ObjectBody(entries) => collect_entry_refs(entries, refs),
+        | Expr::ReadOrNull(value) => collect_expr_refs(value, refs, shadows),
+        Expr::ObjectBody(entries) => collect_entry_refs(entries, refs, shadows),
         Expr::StringInterpolation(parts) => {
             for part in parts {
                 if let StringInterpPart::Expr(expr) = part {
-                    collect_expr_refs(expr, refs);
+                    collect_expr_refs(expr, refs, shadows);
                 }
             }
         }
@@ -3060,34 +3079,55 @@ fn collect_expr_refs(expr: &Expr, refs: &mut HashSet<String>) {
     }
 }
 
-fn collect_type_refs(ty: &crate::parser::TypeExpr, refs: &mut HashSet<String>) {
+fn collect_type_refs(
+    ty: &crate::parser::TypeExpr,
+    refs: &mut HashSet<String>,
+    shadows: &HashSet<String>,
+) {
     match ty {
-        crate::parser::TypeExpr::Named(name) => collect_name_root(name, refs),
-        crate::parser::TypeExpr::Nullable(inner) => collect_type_refs(inner, refs),
+        crate::parser::TypeExpr::Named(name) => collect_name_root(name, refs, shadows),
+        crate::parser::TypeExpr::Nullable(inner) => collect_type_refs(inner, refs, shadows),
         crate::parser::TypeExpr::Union(types) => {
             for ty in types {
-                collect_type_refs(ty, refs);
+                collect_type_refs(ty, refs, shadows);
             }
         }
         crate::parser::TypeExpr::Generic(name, params) => {
-            collect_name_root(name, refs);
+            collect_name_root(name, refs, shadows);
             for param in params {
-                collect_type_refs(param, refs);
+                collect_type_refs(param, refs, shadows);
             }
         }
         crate::parser::TypeExpr::Constrained(name, expr) => {
-            collect_name_root(name, refs);
-            collect_expr_refs(expr, refs);
+            collect_name_root(name, refs, shadows);
+            collect_expr_refs(expr, refs, shadows);
         }
     }
 }
 
-fn collect_name_root(name: &str, refs: &mut HashSet<String>) {
+fn collect_name_root(name: &str, refs: &mut HashSet<String>, shadows: &HashSet<String>) {
     if let Some(root) = name.split('.').next()
         && !root.is_empty()
+        && !shadows.contains(root)
     {
         refs.insert(root.to_string());
     }
+}
+
+fn declared_entry_roots(entries: &[Entry]) -> HashSet<String> {
+    entries
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::ClassDef(name, ..) | Entry::TypeAlias(name, _) => Some(name.clone()),
+            Entry::Property(prop)
+                if has_modifier(&prop.modifiers, Modifier::Local)
+                    || matches!(prop.value, Some(Expr::Lambda(..))) =>
+            {
+                Some(prop.name.clone())
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 // --- Scope ---

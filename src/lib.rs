@@ -101,15 +101,16 @@ fn analyze_imports_inner(
             }
         }
         for import_path in local_imports {
+            if !import_path.exists() {
+                continue;
+            }
             let result_key = import_path
                 .canonicalize()
                 .unwrap_or_else(|_| import_path.clone());
             if seen_results.insert(result_key) {
                 results.push(import_path.clone());
             }
-            if import_path.exists() {
-                analyze_imports_inner(&import_path, visited, seen_results, results)?;
-            }
+            analyze_imports_inner(&import_path, visited, seen_results, results)?;
         }
     }
     Ok(())

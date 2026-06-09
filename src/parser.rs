@@ -333,6 +333,9 @@ impl<'a> Parser<'a> {
 
         loop {
             match self.peek().clone() {
+                TokenKind::Comma | TokenKind::Semicolon => {
+                    self.advance();
+                }
                 TokenKind::KwAmends => {
                     self.advance();
                     let uri = self.expect_string()?;

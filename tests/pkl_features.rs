@@ -39,6 +39,33 @@ fn eval_fails(src: &str) -> String {
     })
 }
 
+struct TestTempDir {
+    path: std::path::PathBuf,
+}
+
+impl TestTempDir {
+    fn new(name: &str) -> Self {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("{name}_{}_{}", std::process::id(), unique));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        Self { path }
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for TestTempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
 // ============================================================
 // Primitives
 // ============================================================
@@ -1039,8 +1066,8 @@ beta_val = Items["items/beta.pkl"].value
 
 #[tokio::test]
 async fn unused_import_is_not_evaluated() {
-    let dir = std::path::Path::new("/tmp/pklr_test_unused_import");
-    std::fs::create_dir_all(dir).unwrap();
+    let temp = TestTempDir::new("pklr_test_unused_import");
+    let dir = temp.path();
     std::fs::write(
         dir.join("broken.pkl"),
         r#"
@@ -1076,6 +1103,18 @@ result = "ok"
 }
 
 #[test]
+fn shadowed_unused_import_is_not_evaluated() {
+    let json = eval(
+        r#"
+import "does-not-exist.pkl" as Foo
+class Foo {}
+result = new Foo {}
+"#,
+    );
+    assert!(json["result"].is_object());
+}
+
+#[test]
 fn unused_import_glob_without_alias_is_still_invalid() {
     let err = eval_fails(r#"import* "items/*.pkl""#);
     assert!(err.contains("import* requires an alias"), "{err}");
@@ -1083,12 +1122,8 @@ fn unused_import_glob_without_alias_is_still_invalid() {
 
 #[tokio::test]
 async fn import_used_by_inherited_class_default_is_loaded() {
-    let dir = std::env::temp_dir().join(format!(
-        "pklr_test_inherited_import_ref_{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let temp = TestTempDir::new("pklr_test_inherited_import_ref");
+    let dir = temp.path();
     std::fs::write(
         dir.join("Base.pkl"),
         r#"
@@ -1113,7 +1148,8 @@ result = new Project {}
 
 #[tokio::test]
 async fn import_used_only_by_annotation_does_not_create_builtin_cycle() {
-    let dir = std::path::Path::new("/tmp/pklr_test_annotation_import_cycle");
+    let temp = TestTempDir::new("pklr_test_annotation_import_cycle");
+    let dir = temp.path();
     std::fs::create_dir_all(dir.join("builtins")).unwrap();
     std::fs::write(
         dir.join("Builtins.pkl"),
@@ -1185,8 +1221,8 @@ fn top_level_bare_elements_are_invalid() {
 
 #[tokio::test]
 async fn imported_typed_mapping_does_not_leak_schema_classes() {
-    let dir = std::path::Path::new("/tmp/pklr_test_imported_typed_mapping");
-    std::fs::create_dir_all(dir).unwrap();
+    let temp = TestTempDir::new("pklr_test_imported_typed_mapping");
+    let dir = temp.path();
     std::fs::write(
         dir.join("Config.pkl"),
         r#"
@@ -3158,8 +3194,8 @@ result = c.compute(5)
 #[tokio::test]
 async fn eval_amends_perf() {
     // Minimal amends test to check performance
-    let dir = std::path::Path::new("/tmp/pklr_test_perf");
-    std::fs::create_dir_all(dir).unwrap();
+    let temp = TestTempDir::new("pklr_test_perf");
+    let dir = temp.path();
     std::fs::write(
         dir.join("Base.pkl"),
         r#"
@@ -3209,8 +3245,8 @@ hooks = new {
 #[tokio::test]
 async fn class_function_nested_in_new() {
     // Matches the hk builtin pattern: testMaker.checkFail() inside new Config.Step { tests { ... } }
-    let dir = std::path::Path::new("/tmp/pklr_test_nested");
-    std::fs::create_dir_all(dir).unwrap();
+    let temp = TestTempDir::new("pklr_test_nested");
+    let dir = temp.path();
     std::fs::write(
         dir.join("helpers.pkl"),
         r#"
@@ -3242,8 +3278,8 @@ x {
 
 #[tokio::test]
 async fn class_function_cross_module() {
-    let dir = std::path::Path::new("/tmp/pklr_test_cross_module");
-    std::fs::create_dir_all(dir).unwrap();
+    let temp = TestTempDir::new("pklr_test_cross_module");
+    let dir = temp.path();
     std::fs::write(
         dir.join("helpers.pkl"),
         r#"
