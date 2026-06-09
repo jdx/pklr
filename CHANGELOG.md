@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.4](https://github.com/jdx/pklr/compare/v1.0.3...v1.0.4) - 2026-06-09
+
+### Fixed
+
+- *(eval)* support rewritten package amends ([#101](https://github.com/jdx/pklr/pull/101))
+
 ## [1.0.3](https://github.com/jdx/pklr/compare/v1.0.2...v1.0.3) - 2026-06-09
 
 ### Fixed
