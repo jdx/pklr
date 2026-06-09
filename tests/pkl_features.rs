@@ -1102,6 +1102,129 @@ result = prettier.prettier
     assert_eq!(val["result"], "ok");
 }
 
+#[test]
+fn object_entries_can_be_separated_by_semicolons() {
+    let json = eval(
+        r#"
+x {
+  ["FOO"] = "foo"; ["BAR"] = "bar"
+}
+"#,
+    );
+    assert_eq!(json["x"]["FOO"], "foo");
+    assert_eq!(json["x"]["BAR"], "bar");
+}
+
+#[test]
+fn object_to_mapping_returns_mapping_like_object() {
+    let json = eval(
+        r#"
+local Builtins = new Mapping {
+  ["one"] = "1"
+}
+x = Builtins.toMap().toMapping()
+"#,
+    );
+    assert_eq!(json["x"]["one"], "1");
+}
+
+#[test]
+fn top_level_bare_elements_are_invalid() {
+    let err = eval_fails("BROKEN SYNTAX");
+    assert!(err.contains("Invalid property definition"), "{err}");
+}
+
+#[tokio::test]
+async fn imported_typed_mapping_does_not_leak_schema_classes() {
+    let dir = std::path::Path::new("/tmp/pklr_test_imported_typed_mapping");
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(
+        dir.join("Config.pkl"),
+        r#"
+class Script {
+  linux: String?
+}
+
+class Step {
+  check: (String | Script)?
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("other.pkl"),
+        r#"
+import "./Config.pkl"
+STEPS = new Mapping<String, Config.Step> {
+  ["original"] { check = "echo original" }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "./Config.pkl"
+import "./other.pkl"
+steps = other.STEPS
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    assert_eq!(val["steps"]["original"]["check"], "echo original");
+    assert!(val["steps"]["original"].get("Script").is_none(), "{val}");
+}
+
+#[test]
+fn typed_mapping_amendment_preserves_existing_keyed_entries() {
+    let json = eval(
+        r#"
+class Step {
+  check: String?
+  env: Mapping<String, String> = new Mapping<String, String> {}
+}
+
+class Hook {
+  steps: Mapping<String, Step> = new Mapping<String, Step> {}
+}
+
+local hooks = new Mapping<String, Hook> {
+  ["check"] {
+    steps {
+      ["echo"] { check = "env" }
+    }
+  }
+}
+
+result = (hooks) {
+  ["check"] {
+    steps {
+      ["echo"] {
+        env {
+          ["STEP_VAR"] = "step_value"
+        }
+      }
+      ["new step"] {
+        check = "echo hello"
+      }
+    }
+  }
+}
+"#,
+    );
+
+    assert_eq!(json["result"]["check"]["steps"]["echo"]["check"], "env");
+    assert_eq!(
+        json["result"]["check"]["steps"]["echo"]["env"]["STEP_VAR"],
+        "step_value"
+    );
+    assert_eq!(
+        json["result"]["check"]["steps"]["new step"]["check"],
+        "echo hello"
+    );
+}
+
 // ============================================================
 // Class instantiation (future)
 // ============================================================

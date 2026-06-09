@@ -65,24 +65,45 @@ pub async fn eval_to_json_with_options(
 
 /// Analyze imports of a pkl file, returning all transitive local file dependencies.
 pub fn analyze_imports(path: &Path) -> Result<Vec<std::path::PathBuf>> {
+    let mut results = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    analyze_imports_inner(path, &mut visited, &mut results)?;
+    Ok(results)
+}
+
+fn analyze_imports_inner(
+    path: &Path,
+    visited: &mut std::collections::HashSet<std::path::PathBuf>,
+    results: &mut Vec<std::path::PathBuf>,
+) -> Result<()> {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if !visited.insert(canonical) {
+        return Ok(());
+    }
     let source = std::fs::read_to_string(path).map_err(|e| Error::Io(path.to_path_buf(), e))?;
     let tokens = lexer::lex_named(&source, &path.display().to_string())?;
     let imports = parser::collect_imports(&tokens);
     let base = path.parent().unwrap_or(Path::new("."));
-    let mut results = Vec::new();
     for uri in imports {
+        let mut local_imports = Vec::new();
         if let Some(rel) = uri.strip_prefix("file://") {
-            results.push(std::path::PathBuf::from(rel));
+            local_imports.push(std::path::PathBuf::from(rel));
         } else if !uri.contains("://") {
             if uri.contains('*') {
                 // Expand glob patterns to actual files
                 if let Ok(expanded) = eval::expand_glob(base, &uri) {
-                    results.extend(expanded);
+                    local_imports.extend(expanded);
                 }
             } else {
-                results.push(base.join(&uri));
+                local_imports.push(base.join(&uri));
+            }
+        }
+        for import_path in local_imports {
+            results.push(import_path.clone());
+            if import_path.exists() {
+                analyze_imports_inner(&import_path, visited, results)?;
             }
         }
     }
-    Ok(results)
+    Ok(())
 }

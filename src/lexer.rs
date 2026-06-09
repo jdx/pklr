@@ -27,6 +27,7 @@ pub enum TokenKind {
     LBracket,         // [
     RBracket,         // ]
     Comma,            // ,
+    Semicolon,        // ;
     Dot,              // .
     DotDotDot,        // ...
     Equals,           // =
@@ -163,10 +164,10 @@ impl<'a> Lexer<'a> {
 
     fn skip_whitespace_and_comments(&mut self) {
         loop {
-            // Skip whitespace and semicolons (Pkl allows `;` as a property separator)
+            // Skip whitespace
             while self
                 .peek()
-                .map(|c| c.is_ascii_whitespace() || c == ';')
+                .map(|c| c.is_ascii_whitespace())
                 .unwrap_or(false)
             {
                 self.advance();
@@ -520,6 +521,10 @@ impl<'a> Lexer<'a> {
             ',' => {
                 self.advance();
                 TokenKind::Comma
+            }
+            ';' => {
+                self.advance();
+                TokenKind::Semicolon
             }
             '.' => {
                 self.advance();

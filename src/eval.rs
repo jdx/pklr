@@ -297,6 +297,13 @@ impl Evaluator {
                 self.max_depth
             )));
         }
+        if module
+            .body
+            .iter()
+            .any(|entry| matches!(entry, Entry::Elem(_)))
+        {
+            return Err(Error::Eval("Invalid property definition".into()));
+        }
         let mut scope = Scope::default();
         seed_builtins(&mut scope);
         let referenced_imports = referenced_roots(&module.body);
@@ -1169,6 +1176,14 @@ impl Evaluator {
             // Set is_open flag and class_name on the result's ObjectSource
             let is_open = has_modifier(class_mods, Modifier::Open);
             if let Value::Object(map, Some(src)) = val {
+                let mut map = map;
+                Arc::make_mut(&mut map).retain(|key, value| {
+                    !matches!(
+                        value,
+                        Value::Object(_, Some(value_src))
+                            if value_src.type_name.as_deref() == Some(key.as_str())
+                    ) && !matches!(value, Value::Lambda(..))
+                });
                 let mut new_src = (*src).clone();
                 new_src.is_open = is_open;
                 new_src.type_name = Some(class_name.to_string());
@@ -2117,7 +2132,9 @@ impl Evaluator {
                 let key = args.first().and_then(|v| v.as_str()).unwrap_or("");
                 Ok(Some(Value::Bool(map.contains_key(key))))
             }
-            (Value::Object(map, _), "toMap") => Ok(Some(Value::Object(map.clone(), None))),
+            (Value::Object(map, _), "toMap" | "toMapping") => {
+                Ok(Some(Value::Object(map.clone(), None)))
+            }
             (Value::Object(map, _), "mapValues") => {
                 let lambda = args
                     .first()
@@ -2195,6 +2212,54 @@ impl Evaluator {
             // merge entry lists and re-evaluate so dependent properties pick up
             // overridden values.
             if let Value::Object(_, Some(base_src)) = &base {
+                if !base_src.mapping_value_types.is_empty() {
+                    let mut type_scope = Scope::default();
+                    for (key, value) in &base_src.scope {
+                        type_scope.set(key.clone(), value.clone());
+                    }
+                    for (key, value) in scope.flatten() {
+                        type_scope.set(key, value);
+                    }
+                    for (key, ty) in scope.flatten_type_aliases() {
+                        type_scope.set_type_alias(key, ty);
+                    }
+                    let value_type_defaults = base_src
+                        .mapping_value_types
+                        .iter()
+                        .filter_map(|name| {
+                            resolve_dotted(&type_scope, name).map(|value| (name.clone(), value))
+                        })
+                        .collect::<Vec<_>>();
+                    let inherited_default = self
+                        .find_default_template(&base_src.entries, &type_scope, depth)
+                        .await?;
+                    let mut amended = IndexMap::new();
+                    self.eval_mapping_entries_with_type_default(
+                        &base_src.entries,
+                        &type_scope,
+                        depth,
+                        &mut amended,
+                        &value_type_defaults,
+                        MappingInheritedDefault::default(),
+                    )
+                    .await?;
+                    if let Value::Object(existing_map, _) = &base {
+                        amended.extend(existing_map.iter().map(|(k, v)| (k.clone(), v.clone())));
+                    }
+                    self.eval_mapping_entries_with_type_default(
+                        overlay_entries,
+                        &type_scope,
+                        depth,
+                        &mut amended,
+                        &value_type_defaults,
+                        MappingInheritedDefault {
+                            value: inherited_default,
+                            entries: find_default_body_entries(&base_src.entries),
+                        },
+                    )
+                    .await?;
+                    return Ok(Value::Object(Arc::new(amended), Some(Arc::clone(base_src))));
+                }
                 return self
                     .eval_amended_object(
                         &base_src.entries.clone(),
@@ -2393,6 +2458,22 @@ impl Evaluator {
             match entry {
                 Entry::DynProperty(key_expr, val_expr) => {
                     let key = self.eval_expr(key_expr, &entry_scope, depth + 1).await?;
+                    let key_str = value_to_key(&key)?;
+                    if let Some(Value::Object(existing_map, Some(existing_src))) = map.get(&key_str)
+                        && let Expr::ObjectBody(body) = val_expr
+                    {
+                        let val = self
+                            .eval_object_body_over_template(
+                                existing_map,
+                                existing_src,
+                                body,
+                                &entry_scope,
+                                depth,
+                            )
+                            .await?;
+                        map.insert(key_str, val);
+                        continue;
+                    }
                     let type_default = match val_expr {
                         Expr::ObjectBody(body) => select_mapping_type_default(type_defaults, body)
                             .map(|(name, value)| (Some(name.as_str()), value)),
@@ -2478,7 +2559,7 @@ impl Evaluator {
                             }
                             val
                         };
-                    map.insert(value_to_key(&key)?, val);
+                    map.insert(key_str, val);
                 }
                 Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {}
                 Entry::Property(prop)
