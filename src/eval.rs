@@ -2076,6 +2076,13 @@ impl Evaluator {
             {
                 return Ok(result);
             }
+            if let Some(result) = self.eval_object_field_call(&obj, method, &evaled_args)? {
+                return Ok(result);
+            }
+            return Err(Error::Eval(format!(
+                "unknown method '{method}' on {}",
+                value_type_name(&obj)
+            )));
         }
         // Handle null-safe method calls: obj?.method(args)
         if let Expr::NullSafeField(obj_expr, method) = func_expr {
@@ -2097,6 +2104,9 @@ impl Evaluator {
                 .eval_object_method_call(&obj, method, &evaled_args, depth)
                 .await?
             {
+                return Ok(result);
+            }
+            if let Some(result) = self.eval_object_field_call(&obj, method, &evaled_args)? {
                 return Ok(result);
             }
             return Err(Error::Eval(format!(
@@ -2192,6 +2202,30 @@ impl Evaluator {
             return Ok(func_val);
         }
         Err(Error::Eval("cannot call non-function".into()))
+    }
+
+    fn eval_object_field_call(
+        &mut self,
+        obj: &Value,
+        method: &str,
+        evaled_args: &[Value],
+    ) -> Result<Option<Value>> {
+        if let Value::Object(map, source) = obj
+            && let Some(func_val) = map.get(method).cloned()
+        {
+            self.warn_if_deprecated_access(source, method);
+            if let Value::String(ref name) = func_val
+                && name == "Regex"
+                && let Some(arg) = evaled_args.first()
+            {
+                return Ok(Some(regex_value(arg.clone())));
+            }
+            if evaled_args.is_empty() {
+                return Ok(Some(func_val));
+            }
+            return Err(Error::Eval("cannot call non-function".into()));
+        }
+        Ok(None)
     }
 
     #[async_recursion(?Send)]

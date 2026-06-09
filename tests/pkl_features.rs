@@ -3291,6 +3291,62 @@ result = g?.missing("Hello")
 }
 
 #[test]
+fn null_safe_regex_constructor_emits_type_tag() {
+    let json = eval(
+        r##"
+import "pkl:base" as base
+glob = base?.Regex(#"^.*\.json$"#)
+"##,
+    );
+    assert_eq!(json["glob"]["_type"], "regex");
+    assert_eq!(json["glob"]["pattern"], r"^.*\.json$");
+}
+
+#[test]
+fn null_safe_non_function_field_errors_like_regular_call() {
+    let error = eval_fails(
+        r#"
+class Greeter {
+    name: String = "World"
+}
+g = new Greeter {}
+result = g?.name("Hello")
+"#,
+    );
+    assert!(error.contains("cannot call non-function"));
+}
+
+#[test]
+fn zero_arg_field_call_returns_field_value() {
+    let json = eval(
+        r#"
+class Greeter {
+    name: String = "World"
+}
+g = new Greeter {}
+a = g.name()
+b = g?.name()
+"#,
+    );
+    assert_eq!(json["a"], "World");
+    assert_eq!(json["b"], "World");
+}
+
+#[test]
+fn regular_unknown_method_errors_without_falling_through() {
+    let error = eval_fails(
+        r#"
+class Greeter {
+    name: String = "World"
+}
+g = new Greeter {}
+result = g.missing("Hello")
+"#,
+    );
+    assert!(error.contains("unknown method 'missing' on Object"));
+}
+
+#[test]
 fn class_lambda_valued_property_is_preserved() {
     let json = eval(
         r#"
