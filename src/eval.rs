@@ -20,6 +20,8 @@ pub struct Evaluator {
     http_cache: HashMap<String, String>,
     /// Cache for evaluated local imports (canonical path → Value)
     import_cache: HashMap<PathBuf, Value>,
+    /// Local files currently being evaluated with inherited scope.
+    scoped_imports_in_flight: HashSet<PathBuf>,
     /// Reusable HTTP client for connection pooling
     http_client: reqwest::Client,
     /// Extracted package zip directories (zip URL → temp dir path)
@@ -49,6 +51,7 @@ impl Default for Evaluator {
             max_depth: 32,
             http_cache: HashMap::new(),
             import_cache: HashMap::new(),
+            scoped_imports_in_flight: HashSet::new(),
             http_client: reqwest::Client::new(),
             package_dirs: HashMap::new(),
             http_rewrites: Vec::new(),
@@ -354,8 +357,10 @@ impl Evaluator {
         canonical: &Path,
         depth: usize,
     ) -> Result<Value> {
-        self.eval_file_inner_with_scope(path, canonical, depth, None)
-            .await
+        let val = self.eval_file_inner_with_scope(path, depth, None).await?;
+        self.import_cache
+            .insert(canonical.to_path_buf(), val.clone());
+        Ok(val)
     }
 
     async fn eval_file_with_scope(
@@ -370,23 +375,19 @@ impl Evaluator {
         let canonical = path
             .canonicalize()
             .map_err(|e| Error::Io(path.to_path_buf(), e))?;
-        self.import_cache.insert(
-            canonical.clone(),
-            Value::Object(Arc::new(IndexMap::new()), None),
-        );
-        let result = self
-            .eval_file_inner_with_scope(path, &canonical, depth, inherited_scope)
-            .await;
-        if result.is_err() {
-            self.import_cache.remove(&canonical);
+        if !self.scoped_imports_in_flight.insert(canonical.clone()) {
+            return Ok(Value::Object(Arc::new(IndexMap::new()), None));
         }
+        let result = self
+            .eval_file_inner_with_scope(path, depth, inherited_scope)
+            .await;
+        self.scoped_imports_in_flight.remove(&canonical);
         result
     }
 
     async fn eval_file_inner_with_scope(
         &mut self,
         path: &Path,
-        canonical: &Path,
         depth: usize,
         inherited_scope: Option<Scope>,
     ) -> Result<Value> {
@@ -397,8 +398,6 @@ impl Evaluator {
         let val = self
             .eval_module_with_scope(&module, path, depth, inherited_scope)
             .await?;
-        self.import_cache
-            .insert(canonical.to_path_buf(), val.clone());
         Ok(val)
     }
 

@@ -1190,6 +1190,39 @@ baseName = Base.name
 }
 
 #[tokio::test]
+async fn scoped_inherited_base_does_not_pollute_import_cache() {
+    let temp = TestTempDir::new("pklr_test_scoped_base_cache");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Base.pkl"),
+        r#"
+name = meta.name
+"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("meta.pkl"), r#"name = "hk""#).unwrap();
+    std::fs::write(
+        dir.join("child.pkl"),
+        r#"
+amends "Base.pkl"
+import "meta.pkl"
+result = name
+"#,
+    )
+    .unwrap();
+
+    let mut ev = Evaluator::new();
+    let child_val = ev.eval_file_pub(&dir.join("child.pkl")).await.unwrap();
+    assert_eq!(child_val.to_json()["result"], "hk");
+
+    let err = ev.eval_file_pub(&dir.join("Base.pkl")).await.unwrap_err();
+    assert!(
+        err.to_string().contains("undefined variable: meta"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
 async fn imported_amends_and_extends_bases_keep_separate_values() {
     let temp = TestTempDir::new("pklr_test_imported_dual_inherited_bases");
     let dir = temp.path();
