@@ -67,13 +67,15 @@ pub async fn eval_to_json_with_options(
 pub fn analyze_imports(path: &Path) -> Result<Vec<std::path::PathBuf>> {
     let mut results = Vec::new();
     let mut visited = std::collections::HashSet::new();
-    analyze_imports_inner(path, &mut visited, &mut results)?;
+    let mut seen_results = std::collections::HashSet::new();
+    analyze_imports_inner(path, &mut visited, &mut seen_results, &mut results)?;
     Ok(results)
 }
 
 fn analyze_imports_inner(
     path: &Path,
     visited: &mut std::collections::HashSet<std::path::PathBuf>,
+    seen_results: &mut std::collections::HashSet<std::path::PathBuf>,
     results: &mut Vec<std::path::PathBuf>,
 ) -> Result<()> {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
@@ -99,9 +101,14 @@ fn analyze_imports_inner(
             }
         }
         for import_path in local_imports {
-            results.push(import_path.clone());
+            let result_key = import_path
+                .canonicalize()
+                .unwrap_or_else(|_| import_path.clone());
+            if seen_results.insert(result_key) {
+                results.push(import_path.clone());
+            }
             if import_path.exists() {
-                analyze_imports_inner(&import_path, visited, results)?;
+                analyze_imports_inner(&import_path, visited, seen_results, results)?;
             }
         }
     }
