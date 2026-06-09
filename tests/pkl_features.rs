@@ -978,12 +978,16 @@ fn string_to_boolean() {
         r#"
 truthy = "true".toBoolean()
 falsy = "false".toBoolean()
+uppercase_truthy = "TRUE".toBoolean()
+mixed_falsy = "False".toBoolean()
 nullish = null?.toBoolean()
 null_safe = "false"?.toBoolean()
 "#,
     );
     assert_eq!(json["truthy"], true);
     assert_eq!(json["falsy"], false);
+    assert_eq!(json["uppercase_truthy"], true);
+    assert_eq!(json["mixed_falsy"], false);
     assert_eq!(json["nullish"], serde_json::Value::Null);
     assert_eq!(json["null_safe"], false);
 }
@@ -3253,6 +3257,37 @@ result = g.greet("Hello")
 "#,
     );
     assert_eq!(json["result"], "Hello World");
+}
+
+#[test]
+fn null_safe_class_function_call() {
+    let json = eval(
+        r#"
+class Greeter {
+    name: String = "World"
+    function greet(prefix: String): String = prefix + " " + name
+}
+g = new Greeter {}
+a = g?.greet("Hello")
+b = null?.greet("Hello")
+"#,
+    );
+    assert_eq!(json["a"], "Hello World");
+    assert_eq!(json["b"], serde_json::Value::Null);
+}
+
+#[test]
+fn null_safe_unknown_method_errors_without_falling_through() {
+    let error = eval_fails(
+        r#"
+class Greeter {
+    name: String = "World"
+}
+g = new Greeter {}
+result = g?.missing("Hello")
+"#,
+    );
+    assert!(error.contains("unknown method 'missing' on Object"));
 }
 
 #[test]
