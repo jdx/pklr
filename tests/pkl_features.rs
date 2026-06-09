@@ -3074,6 +3074,39 @@ result = g.greet("Hello")
 }
 
 #[test]
+fn class_lambda_valued_property_is_preserved() {
+    let json = eval(
+        r#"
+class Transformer {
+    transform = (x) -> x + 1
+}
+t = new Transformer {}
+result = t.transform.apply(2)
+"#,
+    );
+    assert_eq!(json["result"], 3);
+    assert_eq!(json["t"]["transform"], "<lambda>");
+}
+
+#[test]
+fn class_same_named_typed_property_is_preserved() {
+    let json = eval(
+        r#"
+class Script {
+    linux: String = "echo ok"
+}
+
+class Holder {
+    Script = new Script {}
+}
+
+h = new Holder {}
+"#,
+    );
+    assert_eq!(json["h"]["Script"]["linux"], "echo ok");
+}
+
+#[test]
 fn class_function_testmaker_pattern() {
     // First check: does the class itself have checkFail?
     let json1 = eval(

@@ -1317,14 +1317,38 @@ impl Evaluator {
             // Set is_open flag and class_name on the result's ObjectSource
             let is_open = has_modifier(class_mods, Modifier::Open);
             if let Value::Object(map, Some(src)) = val {
+                let data_property_names = body
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        Entry::Property(prop)
+                            if !has_modifier(&prop.modifiers, Modifier::Local) =>
+                        {
+                            Some(prop.name.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect::<HashSet<_>>();
+                let schema_member_names = body
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        Entry::ClassDef(name, ..)
+                            if !data_property_names.contains(name.as_str()) =>
+                        {
+                            Some(name.as_str())
+                        }
+                        Entry::Property(prop)
+                            if matches!(prop.value, Some(Expr::Lambda(..)))
+                                && has_modifier(&prop.modifiers, Modifier::Local)
+                                && !data_property_names.contains(prop.name.as_str()) =>
+                        {
+                            Some(prop.name.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect::<HashSet<_>>();
                 let mut map = map;
-                Arc::make_mut(&mut map).retain(|key, value| {
-                    !matches!(
-                        value,
-                        Value::Object(_, Some(value_src))
-                            if value_src.type_name.as_deref() == Some(key.as_str())
-                    ) && !matches!(value, Value::Lambda(..))
-                });
+                Arc::make_mut(&mut map)
+                    .retain(|key, _| !schema_member_names.contains(key.as_str()));
                 let mut new_src = (*src).clone();
                 new_src.is_open = is_open;
                 new_src.type_name = Some(class_name.to_string());
