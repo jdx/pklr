@@ -196,6 +196,33 @@ fn string_multiline() {
 }
 
 #[test]
+fn string_raw_multiline() {
+    let src = "x = #\"\"\"\n  hello\\n\n  world\n  \"\"\"#";
+    let json = eval(src);
+    assert_eq!(json["x"], "hello\\n\nworld\n");
+}
+
+#[test]
+fn string_multiline_strips_only_one_opening_newline() {
+    let src = "x = \"\"\"\n\n  hello\n  \"\"\"";
+    let json = eval(src);
+    assert_eq!(json["x"], "\nhello\n");
+}
+
+#[test]
+fn string_multi_hash_raw() {
+    let json = eval(r####"x = ##"hello "# world"##"####);
+    assert_eq!(json["x"], "hello \"# world");
+}
+
+#[test]
+fn string_multi_hash_raw_multiline() {
+    let src = "x = ##\"\"\"\n  hello \"\"\"#\n  world\n  \"\"\"##";
+    let json = eval(src);
+    assert_eq!(json["x"], "hello \"\"\"#\nworld\n");
+}
+
+#[test]
 fn string_unicode_escape() {
     let json = eval(r#"x = "\u{26} \u{E9} \u{1F600}""#);
     assert_eq!(json["x"], "& \u{E9} \u{1F600}");
@@ -3293,6 +3320,117 @@ result = c.compute(5)
 // ============================================================
 // hk.pkl compatibility
 // ============================================================
+
+#[test]
+fn regex_constructor_emits_type_tag() {
+    let json = eval(
+        r##"
+glob = Regex(#"^.*\.json$"#)
+"##,
+    );
+    assert_eq!(json["glob"]["_type"], "regex");
+    assert_eq!(json["glob"]["pattern"], r"^.*\.json$");
+}
+
+#[tokio::test]
+async fn imported_regex_constructor_emits_type_tag() {
+    let temp = TestTempDir::new("pklr_test_imported_regex_type_tag");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Types.pkl"),
+        r#"
+import "pkl:base"
+function Regex(pattern: String) = base.Regex(pattern)
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("test.pkl"),
+        r##"
+import "Types.pkl"
+glob = Types.Regex(#"^.*\.yaml$"#)
+"##,
+    )
+    .unwrap();
+
+    let mut ev = Evaluator::new();
+    let path = dir.join("test.pkl");
+    let val = ev
+        .eval_source(&std::fs::read_to_string(&path).unwrap(), &path)
+        .await
+        .unwrap();
+    let json = val.to_json();
+    assert_eq!(json["glob"]["_type"], "regex");
+    assert_eq!(json["glob"]["pattern"], r"^.*\.yaml$");
+}
+
+#[tokio::test]
+async fn hk_step_regex_glob_emits_type_tag() {
+    let temp = TestTempDir::new("pklr_test_hk_step_regex_glob");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Config.pkl"),
+        r#"
+import "pkl:base" as base
+function Regex(pattern: String) = base.Regex(pattern)
+class Step {
+    glob: (String | List<String> | Regex)?
+    check: String?
+}
+class Hook {
+    steps: Mapping<String, Step> = new Mapping<String, Step> {}
+}
+hooks: Mapping<String, Hook> = new Mapping<String, Hook> {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("hk.pkl"),
+        r##"
+amends "Config.pkl"
+hooks {
+    ["check"] {
+        steps {
+            ["regex-test"] {
+                glob = Regex(#"^.*\.json$"#)
+                check = "echo {{files}}"
+            }
+        }
+    }
+}
+"##,
+    )
+    .unwrap();
+
+    let mut ev = Evaluator::new();
+    let path = dir.join("hk.pkl");
+    let val = ev
+        .eval_source(&std::fs::read_to_string(&path).unwrap(), &path)
+        .await
+        .unwrap();
+    let json = val.to_json();
+    let glob = &json["hooks"]["check"]["steps"]["regex-test"]["glob"];
+    assert_eq!(glob["_type"], "regex");
+    assert_eq!(glob["pattern"], r"^.*\.json$");
+}
+
+#[test]
+fn hk_multiline_regex_pattern_is_normalized() {
+    let json = eval(
+        r####"
+glob = Regex(#"""
+    (?x)
+    ^.*airflow\.template\.yaml$|
+    ^chart/(?:templates|files)/.*\.yaml$
+    """#)
+"####,
+    );
+    assert_eq!(json["glob"]["_type"], "regex");
+    assert_eq!(
+        json["glob"]["pattern"],
+        "(?x)\n^.*airflow\\.template\\.yaml$|\n^chart/(?:templates|files)/.*\\.yaml$\n"
+    );
+}
 
 #[tokio::test]
 async fn eval_amends_perf() {

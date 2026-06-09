@@ -343,10 +343,29 @@ impl<'a> Lexer<'a> {
                 Some(c) => s.push(c),
             }
         }
-        // Strip leading/trailing newlines per pkl convention
-        let s = s.trim_start_matches('\n');
-        // Dedent by removing common leading whitespace
-        dedent(s)
+        normalize_multiline_string(&s)
+    }
+
+    fn read_raw_multiline_string(&mut self, hash_count: usize) -> Result<String> {
+        // Already consumed the opening hashes and `"""`
+        // Read until the matching closing `"""` plus the same number of hashes.
+        let closing = format!("\"\"\"{}", "#".repeat(hash_count));
+        let mut s = String::new();
+        loop {
+            if self.source[self.pos..].starts_with(&closing) {
+                for _ in 0..closing.chars().count() {
+                    self.advance();
+                }
+                break;
+            }
+            match self.advance() {
+                None => {
+                    return Err(self.lex_error("unterminated raw multiline string"));
+                }
+                Some(c) => s.push(c),
+            }
+        }
+        normalize_multiline_string(&s)
     }
 
     fn read_number(&mut self, first: char) -> Result<TokenKind> {
@@ -666,11 +685,21 @@ impl<'a> Lexer<'a> {
                 }
             }
             '#' => {
-                // #"..."# raw strings
-                self.advance();
-                if self.peek() == Some('"') {
+                // #"..."# and #"""..."""# raw strings. Pkl allows multiple hashes.
+                let mut hash_count = 0;
+                while self.peek() == Some('#') {
                     self.advance();
-                    let s = self.read_raw_string('#')?;
+                    hash_count += 1;
+                }
+                if self.source[self.pos..].starts_with("\"\"\"") {
+                    self.advance();
+                    self.advance();
+                    self.advance();
+                    let s = self.read_raw_multiline_string(hash_count)?;
+                    TokenKind::StringLit(s)
+                } else if self.peek() == Some('"') {
+                    self.advance();
+                    let s = self.read_raw_string(hash_count)?;
                     TokenKind::StringLit(s)
                 } else {
                     // Could be a shebang line or annotation — skip line
@@ -722,13 +751,15 @@ impl<'a> Lexer<'a> {
         Ok(kind)
     }
 
-    fn read_raw_string(&mut self, _delimiter: char) -> Result<String> {
-        // Read until `"#`
+    fn read_raw_string(&mut self, hash_count: usize) -> Result<String> {
+        // Read until the closing quote plus the same number of hashes.
+        let closing = format!("\"{}", "#".repeat(hash_count));
         let mut s = String::new();
         loop {
-            if self.source[self.pos..].starts_with("\"#") {
-                self.advance();
-                self.advance();
+            if self.source[self.pos..].starts_with(&closing) {
+                for _ in 0..closing.chars().count() {
+                    self.advance();
+                }
                 break;
             }
             match self.advance() {
@@ -740,6 +771,11 @@ impl<'a> Lexer<'a> {
         }
         Ok(s)
     }
+}
+
+fn normalize_multiline_string(s: &str) -> Result<String> {
+    let s = s.strip_prefix('\n').unwrap_or(s);
+    dedent(s)
 }
 
 fn keyword_or_ident(s: &str) -> TokenKind {
