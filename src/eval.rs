@@ -443,11 +443,12 @@ impl Evaluator {
                 .await?,
         );
 
-        let inherited_local_path = module
+        let inherited_local_paths: Vec<_> = module
             .amends
-            .as_deref()
-            .or(module.extends.as_deref())
-            .and_then(|uri| local_module_path(path, uri));
+            .iter()
+            .chain(module.extends.iter())
+            .filter_map(|uri| local_module_path(path, uri))
+            .collect();
         let mut deferred_inherited_imports = Vec::new();
 
         // Process imports
@@ -585,11 +586,11 @@ impl Evaluator {
             if !import_path.exists() {
                 return Err(Error::ImportNotFound(import_path.display().to_string()));
             }
-            if inherited_local_path
-                .as_ref()
-                .is_some_and(|inherited_path| same_local_path(inherited_path, &import_path))
+            if let Some(inherited_path) = inherited_local_paths
+                .iter()
+                .find(|inherited_path| same_local_path(inherited_path, &import_path))
             {
-                deferred_inherited_imports.push(alias);
+                deferred_inherited_imports.push((alias, inherited_path.clone()));
                 continue;
             }
             {
@@ -600,7 +601,6 @@ impl Evaluator {
 
         // Process amends: load base module as starting values
         let mut base_obj = IndexMap::new();
-        let mut inherited_base_val = None;
         if let Some(uri) = &module.amends {
             if uri.starts_with("https://") || uri.starts_with("http://") {
                 // HTTP amends
@@ -669,7 +669,12 @@ impl Evaluator {
                         .eval_file_with_scope(&amends_path, depth + 1, Some(scope.clone()))
                         .await?;
                     if let Value::Object(m, _) = &base_val {
-                        inherited_base_val = Some(base_val.clone());
+                        bind_deferred_inherited_imports(
+                            &deferred_inherited_imports,
+                            &amends_path,
+                            &base_val,
+                            &mut scope,
+                        );
                         base_obj = (**m).clone();
                     }
                 }
@@ -770,7 +775,12 @@ impl Evaluator {
                     let tokens = lexer::lex_named(&source, &name)?;
                     let ext_module = parser::parse_named(&tokens, &source, &name)?;
                     if let Value::Object(m, _) = &ext_val {
-                        inherited_base_val = Some(ext_val.clone());
+                        bind_deferred_inherited_imports(
+                            &deferred_inherited_imports,
+                            &extends_path,
+                            &ext_val,
+                            &mut scope,
+                        );
                         base_obj = (**m).clone();
                     }
                     // Also evaluate the base module's scope (classes, locals) into our scope
@@ -833,12 +843,6 @@ impl Evaluator {
                         base_obj.shift_remove(cls_name);
                     }
                 }
-            }
-        }
-
-        if let Some(inherited_base_val) = inherited_base_val {
-            for alias in deferred_inherited_imports {
-                scope.set(alias, inherited_base_val.clone());
             }
         }
 
@@ -3617,6 +3621,19 @@ fn same_local_path(left: &Path, right: &Path) -> bool {
     let left_key = left.canonicalize().unwrap_or_else(|_| left.to_path_buf());
     let right_key = right.canonicalize().unwrap_or_else(|_| right.to_path_buf());
     left_key == right_key
+}
+
+fn bind_deferred_inherited_imports(
+    deferred: &[(String, PathBuf)],
+    inherited_path: &Path,
+    inherited_val: &Value,
+    scope: &mut Scope,
+) {
+    for (alias, alias_path) in deferred {
+        if same_local_path(alias_path, inherited_path) {
+            scope.set(alias.clone(), inherited_val.clone());
+        }
+    }
 }
 
 fn stdlib_module(name: &str) -> Value {

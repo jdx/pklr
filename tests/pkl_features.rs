@@ -1190,6 +1190,33 @@ baseName = Base.name
 }
 
 #[tokio::test]
+async fn imported_amends_and_extends_bases_keep_separate_values() {
+    let temp = TestTempDir::new("pklr_test_imported_dual_inherited_bases");
+    let dir = temp.path();
+    std::fs::write(dir.join("AmendsBase.pkl"), r#"amendsName = meta.name"#).unwrap();
+    std::fs::write(dir.join("ExtendsBase.pkl"), r#"extendsName = meta.name"#).unwrap();
+    std::fs::write(dir.join("meta.pkl"), r#"name = "hk""#).unwrap();
+    std::fs::write(
+        dir.join("child.pkl"),
+        r#"
+amends "AmendsBase.pkl"
+extends "ExtendsBase.pkl"
+import "meta.pkl"
+import "AmendsBase.pkl" as AmendsBase
+import "ExtendsBase.pkl" as ExtendsBase
+amended = AmendsBase.amendsName
+extended = ExtendsBase.extendsName
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("child.pkl")).await.unwrap();
+    assert_eq!(val["extendsName"], "hk");
+    assert_eq!(val["amended"], "hk");
+    assert_eq!(val["extended"], "hk");
+}
+
+#[tokio::test]
 async fn import_used_only_by_annotation_does_not_create_builtin_cycle() {
     let temp = TestTempDir::new("pklr_test_annotation_import_cycle");
     let dir = temp.path();
