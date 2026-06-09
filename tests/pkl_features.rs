@@ -203,6 +203,26 @@ fn string_raw_multiline() {
 }
 
 #[test]
+fn string_multiline_strips_only_one_opening_newline() {
+    let src = "x = \"\"\"\n\n  hello\n  \"\"\"";
+    let json = eval(src);
+    assert_eq!(json["x"], "\nhello\n");
+}
+
+#[test]
+fn string_multi_hash_raw() {
+    let json = eval(r####"x = ##"hello "# world"##"####);
+    assert_eq!(json["x"], "hello \"# world");
+}
+
+#[test]
+fn string_multi_hash_raw_multiline() {
+    let src = "x = ##\"\"\"\n  hello \"\"\"#\n  world\n  \"\"\"##";
+    let json = eval(src);
+    assert_eq!(json["x"], "hello \"\"\"#\nworld\n");
+}
+
+#[test]
 fn string_unicode_escape() {
     let json = eval(r#"x = "\u{26} \u{E9} \u{1F600}""#);
     assert_eq!(json["x"], "& \u{E9} \u{1F600}");
@@ -3351,6 +3371,7 @@ async fn hk_step_regex_glob_emits_type_tag() {
     std::fs::write(
         dir.join("Config.pkl"),
         r#"
+import "pkl:base" as base
 function Regex(pattern: String) = base.Regex(pattern)
 class Step {
     glob: (String | List<String> | Regex)?
