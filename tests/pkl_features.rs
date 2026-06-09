@@ -972,6 +972,22 @@ x = List().isEmpty
     assert_eq!(json["x"], true);
 }
 
+#[test]
+fn string_to_boolean() {
+    let json = eval(
+        r#"
+truthy = "true".toBoolean()
+falsy = "false".toBoolean()
+nullish = null?.toBoolean()
+null_safe = "false"?.toBoolean()
+"#,
+    );
+    assert_eq!(json["truthy"], true);
+    assert_eq!(json["falsy"], false);
+    assert_eq!(json["nullish"], serde_json::Value::Null);
+    assert_eq!(json["null_safe"], false);
+}
+
 // ============================================================
 // Import resolution (future)
 // ============================================================
