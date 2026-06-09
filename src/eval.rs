@@ -191,6 +191,81 @@ impl Evaluator {
         Ok(body)
     }
 
+    #[async_recursion(?Send)]
+    async fn inherited_reference_roots(
+        &mut self,
+        module: &Module,
+        path: &Path,
+        depth: usize,
+    ) -> Result<HashSet<String>> {
+        let mut refs = HashSet::new();
+        if depth > self.max_depth {
+            return Ok(refs);
+        }
+        for uri in [module.amends.as_deref(), module.extends.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            if let Some((source, source_path)) = self.load_module_source(uri, path).await?
+                && let Ok(tokens) = lexer::lex_named(&source, &source_path)
+                && let Ok(base_module) = parser::parse_named(&tokens, &source, &source_path)
+            {
+                refs.extend(referenced_roots(&base_module.body));
+                refs.extend(
+                    self.inherited_reference_roots(
+                        &base_module,
+                        Path::new(&source_path),
+                        depth + 1,
+                    )
+                    .await?,
+                );
+            }
+        }
+        Ok(refs)
+    }
+
+    async fn load_module_source(
+        &mut self,
+        uri: &str,
+        path: &Path,
+    ) -> Result<Option<(String, String)>> {
+        if uri.starts_with("https://") || uri.starts_with("http://") {
+            let source = self.fetch_source(uri).await?;
+            return Ok(Some((source, uri.to_string())));
+        }
+        if uri.starts_with("package://") {
+            let pkg = resolve_package_uri(uri)?;
+            match &pkg {
+                PackageSource::Direct(url) => {
+                    let source = self.fetch_source(url).await?;
+                    return Ok(Some((source, url.clone())));
+                }
+                PackageSource::Zip(zip_url, entry) => {
+                    let pkg_dir = self.extract_package_zip(zip_url).await?;
+                    let local_path = pkg_dir.join(entry);
+                    let source = std::fs::read_to_string(&local_path)
+                        .map_err(|e| Error::Io(local_path.clone(), e))?;
+                    return Ok(Some((source, local_path.display().to_string())));
+                }
+            }
+        }
+        if uri.starts_with("pkl:") || (uri.contains("://") && !uri.starts_with("file://")) {
+            return Ok(None);
+        }
+        let import_path = if let Some(rel) = uri.strip_prefix("file://") {
+            PathBuf::from(rel)
+        } else {
+            let base = path.parent().unwrap_or(Path::new("."));
+            base.join(uri)
+        };
+        if !import_path.exists() {
+            return Ok(None);
+        }
+        let source =
+            std::fs::read_to_string(&import_path).map_err(|e| Error::Io(import_path.clone(), e))?;
+        Ok(Some((source, import_path.display().to_string())))
+    }
+
     /// Download a package zip and extract it to a temp directory.
     /// Returns the path to the extracted directory. Caches by zip URL.
     async fn extract_package_zip(&mut self, zip_url: &str) -> Result<PathBuf> {
@@ -289,8 +364,18 @@ impl Evaluator {
         Ok(val)
     }
 
-    #[async_recursion(?Send)]
     async fn eval_module(&mut self, module: &Module, path: &Path, depth: usize) -> Result<Value> {
+        self.eval_module_with_scope(module, path, depth, None).await
+    }
+
+    #[async_recursion(?Send)]
+    async fn eval_module_with_scope(
+        &mut self,
+        module: &Module,
+        path: &Path,
+        depth: usize,
+        inherited_scope: Option<Scope>,
+    ) -> Result<Value> {
         if depth > self.max_depth {
             return Err(Error::Eval(format!(
                 "max import depth {} exceeded",
@@ -306,7 +391,19 @@ impl Evaluator {
         }
         let mut scope = Scope::default();
         seed_builtins(&mut scope);
-        let referenced_imports = referenced_roots(&module.body);
+        if let Some(inherited_scope) = inherited_scope {
+            for (key, value) in inherited_scope.flatten() {
+                scope.set(key, value);
+            }
+            for (key, ty) in inherited_scope.flatten_type_aliases() {
+                scope.set_type_alias(key, ty);
+            }
+        }
+        let mut referenced_imports = referenced_roots(&module.body);
+        referenced_imports.extend(
+            self.inherited_reference_roots(module, path, depth + 1)
+                .await?,
+        );
 
         // Process imports
         for import in &module.imports {
@@ -456,7 +553,12 @@ impl Evaluator {
                 let tokens = lexer::lex_named(&source, uri)?;
                 let base_module = parser::parse_named(&tokens, &source, uri)?;
                 let base_val = self
-                    .eval_module(&base_module, Path::new(uri), depth + 1)
+                    .eval_module_with_scope(
+                        &base_module,
+                        Path::new(uri),
+                        depth + 1,
+                        Some(scope.clone()),
+                    )
                     .await?;
                 if let Value::Object(m, _) = base_val {
                     base_obj = (*m).clone();
@@ -466,7 +568,19 @@ impl Evaluator {
                 if let PackageSource::Zip(zip_url, entry) = &pkg {
                     let pkg_dir = self.extract_package_zip(zip_url).await?;
                     let local_path = pkg_dir.join(entry);
-                    let base_val = self.eval_file(&local_path, depth + 1).await?;
+                    let source = std::fs::read_to_string(&local_path)
+                        .map_err(|e| Error::Io(local_path.clone(), e))?;
+                    let name = local_path.display().to_string();
+                    let tokens = lexer::lex_named(&source, &name)?;
+                    let base_module = parser::parse_named(&tokens, &source, &name)?;
+                    let base_val = self
+                        .eval_module_with_scope(
+                            &base_module,
+                            &local_path,
+                            depth + 1,
+                            Some(scope.clone()),
+                        )
+                        .await?;
                     if let Value::Object(m, _) = base_val {
                         base_obj = (*m).clone();
                     }
@@ -475,7 +589,12 @@ impl Evaluator {
                     let tokens = lexer::lex_named(&source, url)?;
                     let base_module = parser::parse_named(&tokens, &source, url)?;
                     let base_val = self
-                        .eval_module(&base_module, Path::new(url.as_str()), depth + 1)
+                        .eval_module_with_scope(
+                            &base_module,
+                            Path::new(url.as_str()),
+                            depth + 1,
+                            Some(scope.clone()),
+                        )
                         .await?;
                     if let Value::Object(m, _) = base_val {
                         base_obj = (*m).clone();
@@ -491,7 +610,19 @@ impl Evaluator {
                     base.join(uri)
                 };
                 if amends_path.exists() {
-                    let base_val = self.eval_file(&amends_path, depth + 1).await?;
+                    let source = std::fs::read_to_string(&amends_path)
+                        .map_err(|e| Error::Io(amends_path.clone(), e))?;
+                    let name = amends_path.display().to_string();
+                    let tokens = lexer::lex_named(&source, &name)?;
+                    let base_module = parser::parse_named(&tokens, &source, &name)?;
+                    let base_val = self
+                        .eval_module_with_scope(
+                            &base_module,
+                            &amends_path,
+                            depth + 1,
+                            Some(scope.clone()),
+                        )
+                        .await?;
                     if let Value::Object(m, _) = base_val {
                         base_obj = (*m).clone();
                     }
@@ -591,7 +722,12 @@ impl Evaluator {
                     let ext_module = parser::parse_named(&tokens, &source, &name)?;
                     // Evaluate the base module to get its properties
                     let ext_val = self
-                        .eval_module(&ext_module, &extends_path, depth + 1)
+                        .eval_module_with_scope(
+                            &ext_module,
+                            &extends_path,
+                            depth + 1,
+                            Some(scope.clone()),
+                        )
                         .await?;
                     if let Value::Object(m, _) = ext_val {
                         base_obj = (*m).clone();
@@ -629,7 +765,12 @@ impl Evaluator {
                 let tokens = lexer::lex_named(&source, uri)?;
                 let ext_module = parser::parse_named(&tokens, &source, uri)?;
                 let ext_val = self
-                    .eval_module(&ext_module, Path::new(uri), depth + 1)
+                    .eval_module_with_scope(
+                        &ext_module,
+                        Path::new(uri),
+                        depth + 1,
+                        Some(scope.clone()),
+                    )
                     .await?;
                 if let Value::Object(m, _) = ext_val {
                     base_obj = (*m).clone();

@@ -1062,6 +1062,55 @@ result = "ok"
     assert_eq!(val["result"], "ok");
 }
 
+#[test]
+fn missing_unused_import_is_not_evaluated() {
+    // Unused imports are intentionally lazy, so missing paths only fail once
+    // the imported binding is referenced.
+    let json = eval(
+        r#"
+import "does-not-exist.pkl"
+result = "ok"
+"#,
+    );
+    assert_eq!(json["result"], "ok");
+}
+
+#[test]
+fn unused_import_glob_without_alias_is_still_invalid() {
+    let err = eval_fails(r#"import* "items/*.pkl""#);
+    assert!(err.contains("import* requires an alias"), "{err}");
+}
+
+#[tokio::test]
+async fn import_used_by_inherited_class_default_is_loaded() {
+    let dir = std::env::temp_dir().join(format!(
+        "pklr_test_inherited_import_ref_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("Base.pkl"),
+        r#"
+class Project {
+    name = meta.name
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("meta.pkl"), r#"name = "hk""#).unwrap();
+    let src = r#"
+amends "Base.pkl"
+import "meta.pkl"
+result = new Project {}
+"#;
+
+    let mut ev = Evaluator::new();
+    let val = ev.eval_source(src, &dir.join("child.pkl")).await.unwrap();
+    let json = val.to_json();
+    assert_eq!(json["result"]["name"], "hk");
+}
+
 #[tokio::test]
 async fn import_used_only_by_annotation_does_not_create_builtin_cycle() {
     let dir = std::path::Path::new("/tmp/pklr_test_annotation_import_cycle");
