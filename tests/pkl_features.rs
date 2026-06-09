@@ -39,6 +39,33 @@ fn eval_fails(src: &str) -> String {
     })
 }
 
+struct TestTempDir {
+    path: std::path::PathBuf,
+}
+
+impl TestTempDir {
+    fn new(name: &str) -> Self {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("{name}_{}_{}", std::process::id(), unique));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        Self { path }
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for TestTempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
 // ============================================================
 // Primitives
 // ============================================================
@@ -1035,6 +1062,355 @@ beta_val = Items["items/beta.pkl"].value
     let json = val.to_json();
     assert_eq!(json["alpha_val"], "alpha");
     assert_eq!(json["beta_val"], "beta");
+}
+
+#[tokio::test]
+async fn unused_import_is_not_evaluated() {
+    let temp = TestTempDir::new("pklr_test_unused_import");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("broken.pkl"),
+        r#"
+value = missing.field
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "broken.pkl"
+result = "ok"
+"#,
+    )
+    .unwrap();
+
+    let path = dir.join("main.pkl");
+    let val = pklr::eval_to_json(&path).await.unwrap();
+    assert_eq!(val["result"], "ok");
+}
+
+#[test]
+fn missing_unused_import_is_not_evaluated() {
+    // Unused imports are intentionally lazy, so missing paths only fail once
+    // the imported binding is referenced.
+    let json = eval(
+        r#"
+import "does-not-exist.pkl"
+result = "ok"
+"#,
+    );
+    assert_eq!(json["result"], "ok");
+}
+
+#[test]
+fn shadowed_unused_import_is_not_evaluated() {
+    let json = eval(
+        r#"
+import "does-not-exist.pkl" as Foo
+class Foo {}
+result = new Foo {}
+"#,
+    );
+    assert!(json["result"].is_object());
+}
+
+#[test]
+fn nested_shadowed_unused_import_is_not_evaluated() {
+    let json = eval(
+        r#"
+import "does-not-exist.pkl" as Foo
+class Outer {
+    class Foo {}
+    x = new Foo {}
+}
+result = new Outer {}
+"#,
+    );
+    assert!(json["result"]["x"].is_object());
+}
+
+#[test]
+fn unused_import_glob_without_alias_is_still_invalid() {
+    let err = eval_fails(r#"import* "items/*.pkl""#);
+    assert!(err.contains("import* requires an alias"), "{err}");
+}
+
+#[tokio::test]
+async fn import_used_by_inherited_class_default_is_loaded() {
+    let temp = TestTempDir::new("pklr_test_inherited_import_ref");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Base.pkl"),
+        r#"
+class Project {
+    name = meta.name
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("meta.pkl"), r#"name = "hk""#).unwrap();
+    let src = r#"
+amends "Base.pkl"
+import "meta.pkl"
+result = new Project {}
+"#;
+
+    let mut ev = Evaluator::new();
+    let val = ev.eval_source(src, &dir.join("child.pkl")).await.unwrap();
+    let json = val.to_json();
+    assert_eq!(json["result"]["name"], "hk");
+}
+
+#[tokio::test]
+async fn imported_amends_base_uses_inherited_scope() {
+    let temp = TestTempDir::new("pklr_test_imported_amends_base_scope");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Base.pkl"),
+        r#"
+name = meta.name
+"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("meta.pkl"), r#"name = "hk""#).unwrap();
+    std::fs::write(
+        dir.join("child.pkl"),
+        r#"
+amends "Base.pkl"
+import "meta.pkl"
+import "Base.pkl" as Base
+baseName = Base.name
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("child.pkl")).await.unwrap();
+    assert_eq!(val["name"], "hk");
+    assert_eq!(val["baseName"], "hk");
+}
+
+#[tokio::test]
+async fn scoped_inherited_base_does_not_pollute_import_cache() {
+    let temp = TestTempDir::new("pklr_test_scoped_base_cache");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Base.pkl"),
+        r#"
+name = meta.name
+"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("meta.pkl"), r#"name = "hk""#).unwrap();
+    std::fs::write(
+        dir.join("child.pkl"),
+        r#"
+amends "Base.pkl"
+import "meta.pkl"
+result = name
+"#,
+    )
+    .unwrap();
+
+    let mut ev = Evaluator::new();
+    let child_val = ev.eval_file_pub(&dir.join("child.pkl")).await.unwrap();
+    assert_eq!(child_val.to_json()["result"], "hk");
+
+    let err = ev.eval_file_pub(&dir.join("Base.pkl")).await.unwrap_err();
+    assert!(
+        err.to_string().contains("undefined variable: meta"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn imported_amends_and_extends_bases_keep_separate_values() {
+    let temp = TestTempDir::new("pklr_test_imported_dual_inherited_bases");
+    let dir = temp.path();
+    std::fs::write(dir.join("AmendsBase.pkl"), r#"amendsName = meta.name"#).unwrap();
+    std::fs::write(dir.join("ExtendsBase.pkl"), r#"extendsName = meta.name"#).unwrap();
+    std::fs::write(dir.join("meta.pkl"), r#"name = "hk""#).unwrap();
+    std::fs::write(
+        dir.join("child.pkl"),
+        r#"
+amends "AmendsBase.pkl"
+extends "ExtendsBase.pkl"
+import "meta.pkl"
+import "AmendsBase.pkl" as AmendsBase
+import "ExtendsBase.pkl" as ExtendsBase
+amended = AmendsBase.amendsName
+extended = ExtendsBase.extendsName
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("child.pkl")).await.unwrap();
+    assert_eq!(val["extendsName"], "hk");
+    assert_eq!(val["amended"], "hk");
+    assert_eq!(val["extended"], "hk");
+}
+
+#[tokio::test]
+async fn import_used_only_by_annotation_does_not_create_builtin_cycle() {
+    let temp = TestTempDir::new("pklr_test_annotation_import_cycle");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("builtins")).unwrap();
+    std::fs::write(
+        dir.join("Builtins.pkl"),
+        r#"
+class meta extends Annotation {
+    description: String?
+}
+
+import* "builtins/*.pkl" as Builtins
+prettier = Builtins["builtins/prettier.pkl"].prettier
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("builtins").join("prettier.pkl"),
+        r#"
+import "../Builtins.pkl"
+
+@Builtins.meta { description = "formatter" }
+prettier = "ok"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "builtins/prettier.pkl"
+result = prettier.prettier
+"#,
+    )
+    .unwrap();
+
+    let path = dir.join("main.pkl");
+    let val = pklr::eval_to_json(&path).await.unwrap();
+    assert_eq!(val["result"], "ok");
+}
+
+#[test]
+fn object_entries_can_be_separated_by_semicolons() {
+    let json = eval(
+        r#"
+x {
+  ["FOO"] = "foo"; ["BAR"] = "bar"
+}
+"#,
+    );
+    assert_eq!(json["x"]["FOO"], "foo");
+    assert_eq!(json["x"]["BAR"], "bar");
+}
+
+#[test]
+fn object_to_mapping_returns_mapping_like_object() {
+    let json = eval(
+        r#"
+local Builtins = new Mapping {
+  ["one"] = "1"
+}
+x = Builtins.toMap().toMapping()
+"#,
+    );
+    assert_eq!(json["x"]["one"], "1");
+}
+
+#[test]
+fn top_level_bare_elements_are_invalid() {
+    let err = eval_fails("BROKEN SYNTAX");
+    assert!(err.contains("Invalid property definition"), "{err}");
+}
+
+#[tokio::test]
+async fn imported_typed_mapping_does_not_leak_schema_classes() {
+    let temp = TestTempDir::new("pklr_test_imported_typed_mapping");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Config.pkl"),
+        r#"
+class Script {
+  linux: String?
+}
+
+class Step {
+  check: (String | Script)?
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("other.pkl"),
+        r#"
+import "./Config.pkl"
+STEPS = new Mapping<String, Config.Step> {
+  ["original"] { check = "echo original" }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "./Config.pkl"
+import "./other.pkl"
+steps = other.STEPS
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    assert_eq!(val["steps"]["original"]["check"], "echo original");
+    assert!(val["steps"]["original"].get("Script").is_none(), "{val}");
+}
+
+#[test]
+fn typed_mapping_amendment_preserves_existing_keyed_entries() {
+    let json = eval(
+        r#"
+class Step {
+  check: String?
+  env: Mapping<String, String> = new Mapping<String, String> {}
+}
+
+class Hook {
+  steps: Mapping<String, Step> = new Mapping<String, Step> {}
+}
+
+local hooks = new Mapping<String, Hook> {
+  ["check"] {
+    steps {
+      ["echo"] { check = "env" }
+    }
+  }
+}
+
+result = (hooks) {
+  ["check"] {
+    steps {
+      ["echo"] {
+        env {
+          ["STEP_VAR"] = "step_value"
+        }
+      }
+      ["new step"] {
+        check = "echo hello"
+      }
+    }
+  }
+}
+"#,
+    );
+
+    assert_eq!(json["result"]["check"]["steps"]["echo"]["check"], "env");
+    assert_eq!(
+        json["result"]["check"]["steps"]["echo"]["env"]["STEP_VAR"],
+        "step_value"
+    );
+    assert_eq!(
+        json["result"]["check"]["steps"]["new step"]["check"],
+        "echo hello"
+    );
 }
 
 // ============================================================
@@ -2837,6 +3213,39 @@ result = g.greet("Hello")
 }
 
 #[test]
+fn class_lambda_valued_property_is_preserved() {
+    let json = eval(
+        r#"
+class Transformer {
+    transform = (x) -> x + 1
+}
+t = new Transformer {}
+result = t.transform.apply(2)
+"#,
+    );
+    assert_eq!(json["result"], 3);
+    assert_eq!(json["t"]["transform"], "<lambda>");
+}
+
+#[test]
+fn class_same_named_typed_property_is_preserved() {
+    let json = eval(
+        r#"
+class Script {
+    linux: String = "echo ok"
+}
+
+class Holder {
+    Script = new Script {}
+}
+
+h = new Holder {}
+"#,
+    );
+    assert_eq!(json["h"]["Script"]["linux"], "echo ok");
+}
+
+#[test]
 fn class_function_testmaker_pattern() {
     // First check: does the class itself have checkFail?
     let json1 = eval(
@@ -2888,8 +3297,8 @@ result = c.compute(5)
 #[tokio::test]
 async fn eval_amends_perf() {
     // Minimal amends test to check performance
-    let dir = std::path::Path::new("/tmp/pklr_test_perf");
-    std::fs::create_dir_all(dir).unwrap();
+    let temp = TestTempDir::new("pklr_test_perf");
+    let dir = temp.path();
     std::fs::write(
         dir.join("Base.pkl"),
         r#"
@@ -2939,8 +3348,8 @@ hooks = new {
 #[tokio::test]
 async fn class_function_nested_in_new() {
     // Matches the hk builtin pattern: testMaker.checkFail() inside new Config.Step { tests { ... } }
-    let dir = std::path::Path::new("/tmp/pklr_test_nested");
-    std::fs::create_dir_all(dir).unwrap();
+    let temp = TestTempDir::new("pklr_test_nested");
+    let dir = temp.path();
     std::fs::write(
         dir.join("helpers.pkl"),
         r#"
@@ -2972,8 +3381,8 @@ x {
 
 #[tokio::test]
 async fn class_function_cross_module() {
-    let dir = std::path::Path::new("/tmp/pklr_test_cross_module");
-    std::fs::create_dir_all(dir).unwrap();
+    let temp = TestTempDir::new("pklr_test_cross_module");
+    let dir = temp.path();
     std::fs::write(
         dir.join("helpers.pkl"),
         r#"

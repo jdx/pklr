@@ -333,6 +333,9 @@ impl<'a> Parser<'a> {
 
         loop {
             match self.peek().clone() {
+                TokenKind::Comma | TokenKind::Semicolon => {
+                    self.advance();
+                }
                 TokenKind::KwAmends => {
                     self.advance();
                     let uri = self.expect_string()?;
@@ -376,6 +379,10 @@ impl<'a> Parser<'a> {
     fn parse_entries(&mut self) -> Result<Vec<Entry>> {
         let mut entries = Vec::new();
         while !self.at_eof() && !matches!(self.peek(), TokenKind::RBrace) {
+            if matches!(self.peek(), TokenKind::Comma | TokenKind::Semicolon) {
+                self.advance();
+                continue;
+            }
             let entry_annotations = self.parse_annotations()?;
             // Parse class definitions (with optional modifiers); skip typealias/function declarations
             let class_modifiers =
@@ -460,6 +467,9 @@ impl<'a> Parser<'a> {
                 prop.annotations = entry_annotations;
             }
             entries.push(entry);
+            while matches!(self.peek(), TokenKind::Comma | TokenKind::Semicolon) {
+                self.advance();
+            }
         }
         Ok(entries)
     }
@@ -486,8 +496,15 @@ impl<'a> Parser<'a> {
                     self.advance();
                 }
                 TokenKind::Ident(name) if depth == 1 => {
-                    params.push(name.clone());
+                    let mut name = name.clone();
                     self.advance();
+                    while depth == 1 && matches!(self.peek(), TokenKind::Dot) {
+                        self.advance();
+                        let part = self.expect_ident()?;
+                        name.push('.');
+                        name.push_str(&part);
+                    }
+                    params.push(name);
                 }
                 TokenKind::Eof => {
                     return Err(self.parse_error("unclosed generic type parameters"));

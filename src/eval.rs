@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -20,6 +20,8 @@ pub struct Evaluator {
     http_cache: HashMap<String, String>,
     /// Cache for evaluated local imports (canonical path → Value)
     import_cache: HashMap<PathBuf, Value>,
+    /// Local files currently being evaluated with inherited scope.
+    scoped_imports_in_flight: HashSet<PathBuf>,
     /// Reusable HTTP client for connection pooling
     http_client: reqwest::Client,
     /// Extracted package zip directories (zip URL → temp dir path)
@@ -49,6 +51,7 @@ impl Default for Evaluator {
             max_depth: 32,
             http_cache: HashMap::new(),
             import_cache: HashMap::new(),
+            scoped_imports_in_flight: HashSet::new(),
             http_client: reqwest::Client::new(),
             package_dirs: HashMap::new(),
             http_rewrites: Vec::new(),
@@ -191,6 +194,81 @@ impl Evaluator {
         Ok(body)
     }
 
+    #[async_recursion(?Send)]
+    async fn inherited_reference_roots(
+        &mut self,
+        module: &Module,
+        path: &Path,
+        depth: usize,
+    ) -> Result<HashSet<String>> {
+        let mut refs = HashSet::new();
+        if depth > self.max_depth {
+            return Ok(refs);
+        }
+        for uri in [module.amends.as_deref(), module.extends.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            if let Some((source, source_path)) = self.load_module_source(uri, path).await?
+                && let Ok(tokens) = lexer::lex_named(&source, &source_path)
+                && let Ok(base_module) = parser::parse_named(&tokens, &source, &source_path)
+            {
+                refs.extend(referenced_roots(&base_module.body));
+                refs.extend(
+                    self.inherited_reference_roots(
+                        &base_module,
+                        Path::new(&source_path),
+                        depth + 1,
+                    )
+                    .await?,
+                );
+            }
+        }
+        Ok(refs)
+    }
+
+    async fn load_module_source(
+        &mut self,
+        uri: &str,
+        path: &Path,
+    ) -> Result<Option<(String, String)>> {
+        if uri.starts_with("https://") || uri.starts_with("http://") {
+            let source = self.fetch_source(uri).await?;
+            return Ok(Some((source, uri.to_string())));
+        }
+        if uri.starts_with("package://") {
+            let pkg = resolve_package_uri(uri)?;
+            match &pkg {
+                PackageSource::Direct(url) => {
+                    let source = self.fetch_source(url).await?;
+                    return Ok(Some((source, url.clone())));
+                }
+                PackageSource::Zip(zip_url, entry) => {
+                    let pkg_dir = self.extract_package_zip(zip_url).await?;
+                    let local_path = pkg_dir.join(entry);
+                    let source = std::fs::read_to_string(&local_path)
+                        .map_err(|e| Error::Io(local_path.clone(), e))?;
+                    return Ok(Some((source, local_path.display().to_string())));
+                }
+            }
+        }
+        if uri.starts_with("pkl:") || (uri.contains("://") && !uri.starts_with("file://")) {
+            return Ok(None);
+        }
+        let import_path = if let Some(rel) = uri.strip_prefix("file://") {
+            PathBuf::from(rel)
+        } else {
+            let base = path.parent().unwrap_or(Path::new("."));
+            base.join(uri)
+        };
+        if !import_path.exists() {
+            return Ok(None);
+        }
+        let source =
+            std::fs::read_to_string(&import_path).map_err(|e| Error::Io(import_path.clone(), e))?;
+        Ok(Some((source, import_path.display().to_string())))
+    }
+
     /// Download a package zip and extract it to a temp directory.
     /// Returns the path to the extracted directory. Caches by zip URL.
     async fn extract_package_zip(&mut self, zip_url: &str) -> Result<PathBuf> {
@@ -279,26 +357,98 @@ impl Evaluator {
         canonical: &Path,
         depth: usize,
     ) -> Result<Value> {
-        let source = std::fs::read_to_string(path).map_err(|e| Error::Io(path.to_path_buf(), e))?;
-        let name = path.display().to_string();
-        let tokens = lexer::lex_named(&source, &name)?;
-        let module = parser::parse_named(&tokens, &source, &name)?;
-        let val = self.eval_module(&module, path, depth).await?;
+        let val = self.eval_file_inner_with_scope(path, depth, None).await?;
         self.import_cache
             .insert(canonical.to_path_buf(), val.clone());
         Ok(val)
     }
 
-    #[async_recursion(?Send)]
+    async fn eval_file_with_scope(
+        &mut self,
+        path: &Path,
+        depth: usize,
+        inherited_scope: Option<Scope>,
+    ) -> Result<Value> {
+        if inherited_scope.is_none() {
+            return self.eval_file(path, depth).await;
+        }
+        let canonical = path
+            .canonicalize()
+            .map_err(|e| Error::Io(path.to_path_buf(), e))?;
+        if !self.scoped_imports_in_flight.insert(canonical.clone()) {
+            return Ok(Value::Object(Arc::new(IndexMap::new()), None));
+        }
+        let result = self
+            .eval_file_inner_with_scope(path, depth, inherited_scope)
+            .await;
+        self.scoped_imports_in_flight.remove(&canonical);
+        result
+    }
+
+    async fn eval_file_inner_with_scope(
+        &mut self,
+        path: &Path,
+        depth: usize,
+        inherited_scope: Option<Scope>,
+    ) -> Result<Value> {
+        let source = std::fs::read_to_string(path).map_err(|e| Error::Io(path.to_path_buf(), e))?;
+        let name = path.display().to_string();
+        let tokens = lexer::lex_named(&source, &name)?;
+        let module = parser::parse_named(&tokens, &source, &name)?;
+        let val = self
+            .eval_module_with_scope(&module, path, depth, inherited_scope)
+            .await?;
+        Ok(val)
+    }
+
     async fn eval_module(&mut self, module: &Module, path: &Path, depth: usize) -> Result<Value> {
+        self.eval_module_with_scope(module, path, depth, None).await
+    }
+
+    #[async_recursion(?Send)]
+    async fn eval_module_with_scope(
+        &mut self,
+        module: &Module,
+        path: &Path,
+        depth: usize,
+        inherited_scope: Option<Scope>,
+    ) -> Result<Value> {
         if depth > self.max_depth {
             return Err(Error::Eval(format!(
                 "max import depth {} exceeded",
                 self.max_depth
             )));
         }
+        if module
+            .body
+            .iter()
+            .any(|entry| matches!(entry, Entry::Elem(_)))
+        {
+            return Err(Error::Eval("Invalid property definition".into()));
+        }
         let mut scope = Scope::default();
         seed_builtins(&mut scope);
+        if let Some(inherited_scope) = inherited_scope {
+            for (key, value) in inherited_scope.flatten() {
+                scope.set(key, value);
+            }
+            for (key, ty) in inherited_scope.flatten_type_aliases() {
+                scope.set_type_alias(key, ty);
+            }
+        }
+        let mut referenced_imports = referenced_roots(&module.body);
+        referenced_imports.extend(
+            self.inherited_reference_roots(module, path, depth + 1)
+                .await?,
+        );
+
+        let inherited_local_paths: Vec<_> = module
+            .amends
+            .iter()
+            .chain(module.extends.iter())
+            .filter_map(|uri| local_module_path(path, uri))
+            .collect();
+        let mut deferred_inherited_imports = Vec::new();
 
         // Process imports
         for import in &module.imports {
@@ -310,6 +460,9 @@ impl Evaluator {
                     .alias
                     .clone()
                     .ok_or_else(|| Error::Eval("import* requires an alias".into()))?;
+                if !referenced_imports.contains(&alias) {
+                    continue;
+                }
 
                 // Non-local glob imports bind an empty mapping
                 if uri.contains("://") {
@@ -331,13 +484,6 @@ impl Evaluator {
 
             if uri.starts_with("https://") || uri.starts_with("http://") {
                 // HTTP import
-                let source = self.fetch_source(uri).await?;
-                let imported_val = {
-                    let tokens = lexer::lex_named(&source, uri)?;
-                    let imp_module = parser::parse_named(&tokens, &source, uri)?;
-                    self.eval_module(&imp_module, Path::new(uri), depth + 1)
-                        .await?
-                };
                 let alias = import.alias.clone().unwrap_or_else(|| {
                     uri.rsplit('/')
                         .next()
@@ -346,6 +492,16 @@ impl Evaluator {
                         .unwrap_or(uri)
                         .to_string()
                 });
+                if !referenced_imports.contains(&alias) {
+                    continue;
+                }
+                let source = self.fetch_source(uri).await?;
+                let imported_val = {
+                    let tokens = lexer::lex_named(&source, uri)?;
+                    let imp_module = parser::parse_named(&tokens, &source, uri)?;
+                    self.eval_module(&imp_module, Path::new(uri), depth + 1)
+                        .await?
+                };
                 scope.set(alias, imported_val);
                 continue;
             }
@@ -354,20 +510,23 @@ impl Evaluator {
                 let pkg = resolve_package_uri(uri)?;
                 let fragment = uri.split_once('#').map(|(_, f)| f).unwrap_or("");
                 let file_path = fragment.strip_prefix('/').unwrap_or(fragment);
+                let alias = import.alias.clone().unwrap_or_else(|| {
+                    file_path
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(file_path)
+                        .strip_suffix(".pkl")
+                        .unwrap_or(file_path)
+                        .to_string()
+                });
+                if !referenced_imports.contains(&alias) {
+                    continue;
+                }
                 // For zip packages, extract to temp dir and eval as local file
                 if let PackageSource::Zip(zip_url, _) = &pkg {
                     let pkg_dir = self.extract_package_zip(zip_url).await?;
                     let local_path = pkg_dir.join(file_path);
                     let imported_val = self.eval_file(&local_path, depth + 1).await?;
-                    let alias = import.alias.clone().unwrap_or_else(|| {
-                        file_path
-                            .rsplit('/')
-                            .next()
-                            .unwrap_or(file_path)
-                            .strip_suffix(".pkl")
-                            .unwrap_or(file_path)
-                            .to_string()
-                    });
                     scope.set(alias, imported_val);
                     continue;
                 }
@@ -382,15 +541,6 @@ impl Evaluator {
                     self.eval_module(&imp_module, Path::new(&url), depth + 1)
                         .await?
                 };
-                let alias = import.alias.clone().unwrap_or_else(|| {
-                    file_path
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(file_path)
-                        .strip_suffix(".pkl")
-                        .unwrap_or(file_path)
-                        .to_string()
-                });
                 scope.set(alias, imported_val);
                 continue;
             }
@@ -402,6 +552,9 @@ impl Evaluator {
                     .alias
                     .clone()
                     .unwrap_or_else(|| module_name.to_string());
+                if !referenced_imports.contains(&alias) {
+                    continue;
+                }
                 scope.set(alias, stdlib_val);
                 continue;
             }
@@ -417,19 +570,30 @@ impl Evaluator {
                 let base = path.parent().unwrap_or(Path::new("."));
                 base.join(uri)
             };
+            let alias = import.alias.clone().unwrap_or_else(|| {
+                import_path
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string()
+            });
+            if !referenced_imports.contains(&alias) {
+                // Unused imports are intentionally lazy: missing local paths are
+                // reported only if the imported binding is actually referenced.
+                continue;
+            }
             if !import_path.exists() {
                 return Err(Error::ImportNotFound(import_path.display().to_string()));
             }
+            if let Some(inherited_path) = inherited_local_paths
+                .iter()
+                .find(|inherited_path| same_local_path(inherited_path, &import_path))
+            {
+                deferred_inherited_imports.push((alias, inherited_path.clone()));
+                continue;
+            }
             {
                 let imported_val = self.eval_file(&import_path, depth + 1).await?;
-                // Determine the binding name: alias or filename stem
-                let alias = import.alias.clone().unwrap_or_else(|| {
-                    import_path
-                        .file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string()
-                });
                 scope.set(alias, imported_val);
             }
         }
@@ -443,7 +607,12 @@ impl Evaluator {
                 let tokens = lexer::lex_named(&source, uri)?;
                 let base_module = parser::parse_named(&tokens, &source, uri)?;
                 let base_val = self
-                    .eval_module(&base_module, Path::new(uri), depth + 1)
+                    .eval_module_with_scope(
+                        &base_module,
+                        Path::new(uri),
+                        depth + 1,
+                        Some(scope.clone()),
+                    )
                     .await?;
                 if let Value::Object(m, _) = base_val {
                     base_obj = (*m).clone();
@@ -453,7 +622,19 @@ impl Evaluator {
                 if let PackageSource::Zip(zip_url, entry) = &pkg {
                     let pkg_dir = self.extract_package_zip(zip_url).await?;
                     let local_path = pkg_dir.join(entry);
-                    let base_val = self.eval_file(&local_path, depth + 1).await?;
+                    let source = std::fs::read_to_string(&local_path)
+                        .map_err(|e| Error::Io(local_path.clone(), e))?;
+                    let name = local_path.display().to_string();
+                    let tokens = lexer::lex_named(&source, &name)?;
+                    let base_module = parser::parse_named(&tokens, &source, &name)?;
+                    let base_val = self
+                        .eval_module_with_scope(
+                            &base_module,
+                            &local_path,
+                            depth + 1,
+                            Some(scope.clone()),
+                        )
+                        .await?;
                     if let Value::Object(m, _) = base_val {
                         base_obj = (*m).clone();
                     }
@@ -462,7 +643,12 @@ impl Evaluator {
                     let tokens = lexer::lex_named(&source, url)?;
                     let base_module = parser::parse_named(&tokens, &source, url)?;
                     let base_val = self
-                        .eval_module(&base_module, Path::new(url.as_str()), depth + 1)
+                        .eval_module_with_scope(
+                            &base_module,
+                            Path::new(url.as_str()),
+                            depth + 1,
+                            Some(scope.clone()),
+                        )
                         .await?;
                     if let Value::Object(m, _) = base_val {
                         base_obj = (*m).clone();
@@ -478,9 +664,17 @@ impl Evaluator {
                     base.join(uri)
                 };
                 if amends_path.exists() {
-                    let base_val = self.eval_file(&amends_path, depth + 1).await?;
-                    if let Value::Object(m, _) = base_val {
-                        base_obj = (*m).clone();
+                    let base_val = self
+                        .eval_file_with_scope(&amends_path, depth + 1, Some(scope.clone()))
+                        .await?;
+                    if let Value::Object(m, _) = &base_val {
+                        bind_deferred_inherited_imports(
+                            &deferred_inherited_imports,
+                            &amends_path,
+                            &base_val,
+                            &mut scope,
+                        );
+                        base_obj = (**m).clone();
                     }
                 }
             }
@@ -571,17 +765,22 @@ impl Evaluator {
                     base.join(uri)
                 };
                 if extends_path.exists() {
+                    let ext_val = self
+                        .eval_file_with_scope(&extends_path, depth + 1, Some(scope.clone()))
+                        .await?;
+                    let name = extends_path.display().to_string();
                     let source = std::fs::read_to_string(&extends_path)
                         .map_err(|e| Error::Io(extends_path.clone(), e))?;
-                    let name = extends_path.display().to_string();
                     let tokens = lexer::lex_named(&source, &name)?;
                     let ext_module = parser::parse_named(&tokens, &source, &name)?;
-                    // Evaluate the base module to get its properties
-                    let ext_val = self
-                        .eval_module(&ext_module, &extends_path, depth + 1)
-                        .await?;
-                    if let Value::Object(m, _) = ext_val {
-                        base_obj = (*m).clone();
+                    if let Value::Object(m, _) = &ext_val {
+                        bind_deferred_inherited_imports(
+                            &deferred_inherited_imports,
+                            &extends_path,
+                            &ext_val,
+                            &mut scope,
+                        );
+                        base_obj = (**m).clone();
                     }
                     // Also evaluate the base module's scope (classes, locals) into our scope
                     // by re-processing its body entries
@@ -616,7 +815,12 @@ impl Evaluator {
                 let tokens = lexer::lex_named(&source, uri)?;
                 let ext_module = parser::parse_named(&tokens, &source, uri)?;
                 let ext_val = self
-                    .eval_module(&ext_module, Path::new(uri), depth + 1)
+                    .eval_module_with_scope(
+                        &ext_module,
+                        Path::new(uri),
+                        depth + 1,
+                        Some(scope.clone()),
+                    )
                     .await?;
                 if let Value::Object(m, _) = ext_val {
                     base_obj = (*m).clone();
@@ -1163,6 +1367,38 @@ impl Evaluator {
             // Set is_open flag and class_name on the result's ObjectSource
             let is_open = has_modifier(class_mods, Modifier::Open);
             if let Value::Object(map, Some(src)) = val {
+                let data_property_names = body
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        Entry::Property(prop)
+                            if !has_modifier(&prop.modifiers, Modifier::Local) =>
+                        {
+                            Some(prop.name.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect::<HashSet<_>>();
+                let schema_member_names = body
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        Entry::ClassDef(name, ..)
+                            if !data_property_names.contains(name.as_str()) =>
+                        {
+                            Some(name.as_str())
+                        }
+                        Entry::Property(prop)
+                            if matches!(prop.value, Some(Expr::Lambda(..)))
+                                && has_modifier(&prop.modifiers, Modifier::Local)
+                                && !data_property_names.contains(prop.name.as_str()) =>
+                        {
+                            Some(prop.name.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect::<HashSet<_>>();
+                let mut map = map;
+                Arc::make_mut(&mut map)
+                    .retain(|key, _| !schema_member_names.contains(key.as_str()));
                 let mut new_src = (*src).clone();
                 new_src.is_open = is_open;
                 new_src.type_name = Some(class_name.to_string());
@@ -2111,7 +2347,9 @@ impl Evaluator {
                 let key = args.first().and_then(|v| v.as_str()).unwrap_or("");
                 Ok(Some(Value::Bool(map.contains_key(key))))
             }
-            (Value::Object(map, _), "toMap") => Ok(Some(Value::Object(map.clone(), None))),
+            (Value::Object(map, _), "toMap" | "toMapping") => {
+                Ok(Some(Value::Object(map.clone(), None)))
+            }
             (Value::Object(map, _), "mapValues") => {
                 let lambda = args
                     .first()
@@ -2189,6 +2427,54 @@ impl Evaluator {
             // merge entry lists and re-evaluate so dependent properties pick up
             // overridden values.
             if let Value::Object(_, Some(base_src)) = &base {
+                if !base_src.mapping_value_types.is_empty() {
+                    let mut type_scope = Scope::default();
+                    for (key, value) in &base_src.scope {
+                        type_scope.set(key.clone(), value.clone());
+                    }
+                    for (key, value) in scope.flatten() {
+                        type_scope.set(key, value);
+                    }
+                    for (key, ty) in scope.flatten_type_aliases() {
+                        type_scope.set_type_alias(key, ty);
+                    }
+                    let value_type_defaults = base_src
+                        .mapping_value_types
+                        .iter()
+                        .filter_map(|name| {
+                            resolve_dotted(&type_scope, name).map(|value| (name.clone(), value))
+                        })
+                        .collect::<Vec<_>>();
+                    let inherited_default = self
+                        .find_default_template(&base_src.entries, &type_scope, depth)
+                        .await?;
+                    let mut amended = IndexMap::new();
+                    self.eval_mapping_entries_with_type_default(
+                        &base_src.entries,
+                        &type_scope,
+                        depth,
+                        &mut amended,
+                        &value_type_defaults,
+                        MappingInheritedDefault::default(),
+                    )
+                    .await?;
+                    if let Value::Object(existing_map, _) = &base {
+                        amended.extend(existing_map.iter().map(|(k, v)| (k.clone(), v.clone())));
+                    }
+                    self.eval_mapping_entries_with_type_default(
+                        overlay_entries,
+                        &type_scope,
+                        depth,
+                        &mut amended,
+                        &value_type_defaults,
+                        MappingInheritedDefault {
+                            value: inherited_default,
+                            entries: find_default_body_entries(&base_src.entries),
+                        },
+                    )
+                    .await?;
+                    return Ok(Value::Object(Arc::new(amended), Some(Arc::clone(base_src))));
+                }
                 return self
                     .eval_amended_object(
                         &base_src.entries.clone(),
@@ -2387,6 +2673,22 @@ impl Evaluator {
             match entry {
                 Entry::DynProperty(key_expr, val_expr) => {
                     let key = self.eval_expr(key_expr, &entry_scope, depth + 1).await?;
+                    let key_str = value_to_key(&key)?;
+                    if let Some(Value::Object(existing_map, Some(existing_src))) = map.get(&key_str)
+                        && let Expr::ObjectBody(body) = val_expr
+                    {
+                        let val = self
+                            .eval_object_body_over_template(
+                                existing_map,
+                                existing_src,
+                                body,
+                                &entry_scope,
+                                depth,
+                            )
+                            .await?;
+                        map.insert(key_str, val);
+                        continue;
+                    }
                     let type_default = match val_expr {
                         Expr::ObjectBody(body) => select_mapping_type_default(type_defaults, body)
                             .map(|(name, value)| (Some(name.as_str()), value)),
@@ -2472,7 +2774,7 @@ impl Evaluator {
                             }
                             val
                         };
-                    map.insert(value_to_key(&key)?, val);
+                    map.insert(key_str, val);
                 }
                 Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {}
                 Entry::Property(prop)
@@ -2701,6 +3003,180 @@ fn object_declares_field(value: &Value, field: &str) -> bool {
                 _ => false,
             })
         })
+}
+
+fn referenced_roots(entries: &[Entry]) -> HashSet<String> {
+    let mut refs = HashSet::new();
+    let shadows = HashSet::new();
+    collect_entry_refs(entries, &mut refs, &shadows);
+    refs
+}
+
+fn collect_entry_refs(entries: &[Entry], refs: &mut HashSet<String>, shadows: &HashSet<String>) {
+    let mut entry_shadows = shadows.clone();
+    entry_shadows.extend(declared_entry_roots(entries));
+    for entry in entries {
+        match entry {
+            Entry::Property(prop) => {
+                if let Some(ty) = &prop.type_ann {
+                    collect_type_refs(ty, refs, &entry_shadows);
+                }
+                if let Some(expr) = &prop.value {
+                    collect_expr_refs(expr, refs, &entry_shadows);
+                }
+                if let Some(body) = &prop.body {
+                    collect_entry_refs(body, refs, &entry_shadows);
+                }
+            }
+            Entry::DynProperty(key, value) => {
+                collect_expr_refs(key, refs, &entry_shadows);
+                collect_expr_refs(value, refs, &entry_shadows);
+            }
+            Entry::ForGenerator(fgen) => {
+                collect_expr_refs(&fgen.collection, refs, &entry_shadows);
+                let mut body_shadows = entry_shadows.clone();
+                body_shadows.insert(fgen.val_var.clone());
+                if let Some(key_var) = &fgen.key_var {
+                    body_shadows.insert(key_var.clone());
+                }
+                collect_entry_refs(&fgen.body, refs, &body_shadows);
+            }
+            Entry::WhenGenerator(wgen) => {
+                collect_expr_refs(&wgen.condition, refs, &entry_shadows);
+                collect_entry_refs(&wgen.body, refs, &entry_shadows);
+                if let Some(else_body) = &wgen.else_body {
+                    collect_entry_refs(else_body, refs, &entry_shadows);
+                }
+            }
+            Entry::Spread(expr) | Entry::Elem(expr) => {
+                collect_expr_refs(expr, refs, &entry_shadows)
+            }
+            Entry::ClassDef(_, _, parent, body) => {
+                if let Some(parent) = parent {
+                    collect_name_root(parent, refs, &entry_shadows);
+                }
+                collect_entry_refs(body, refs, &entry_shadows);
+            }
+            Entry::TypeAlias(_, ty) => collect_type_refs(ty, refs, &entry_shadows),
+        }
+    }
+}
+
+fn collect_expr_refs(expr: &Expr, refs: &mut HashSet<String>, shadows: &HashSet<String>) {
+    match expr {
+        Expr::Ident(name) => {
+            if !shadows.contains(name) {
+                refs.insert(name.clone());
+            }
+        }
+        Expr::New(type_name, entries, generic_params) => {
+            if let Some(type_name) = type_name {
+                collect_name_root(type_name, refs, shadows);
+            }
+            for param in generic_params {
+                collect_name_root(param, refs, shadows);
+            }
+            collect_entry_refs(entries, refs, shadows);
+        }
+        Expr::Field(base, _) | Expr::NullSafeField(base, _) => {
+            collect_expr_refs(base, refs, shadows);
+        }
+        Expr::Index(base, index) | Expr::Binop(_, base, index) => {
+            collect_expr_refs(base, refs, shadows);
+            collect_expr_refs(index, refs, shadows);
+        }
+        Expr::Call(callee, args) => {
+            collect_expr_refs(callee, refs, shadows);
+            for arg in args {
+                collect_expr_refs(arg, refs, shadows);
+            }
+        }
+        Expr::If(cond, then_expr, else_expr) => {
+            collect_expr_refs(cond, refs, shadows);
+            collect_expr_refs(then_expr, refs, shadows);
+            collect_expr_refs(else_expr, refs, shadows);
+        }
+        Expr::Let(name, value, body) => {
+            collect_expr_refs(value, refs, shadows);
+            let mut body_shadows = shadows.clone();
+            body_shadows.insert(name.clone());
+            collect_expr_refs(body, refs, &body_shadows);
+        }
+        Expr::Is(value, ty) | Expr::As(value, ty) => {
+            collect_expr_refs(value, refs, shadows);
+            collect_type_refs(ty, refs, shadows);
+        }
+        Expr::Lambda(params, value) => {
+            let mut body_shadows = shadows.clone();
+            body_shadows.extend(params.iter().cloned());
+            collect_expr_refs(value, refs, &body_shadows);
+        }
+        Expr::Unop(_, value)
+        | Expr::Throw(value)
+        | Expr::Trace(value)
+        | Expr::Read(value)
+        | Expr::ReadOrNull(value) => collect_expr_refs(value, refs, shadows),
+        Expr::ObjectBody(entries) => collect_entry_refs(entries, refs, shadows),
+        Expr::StringInterpolation(parts) => {
+            for part in parts {
+                if let StringInterpPart::Expr(expr) = part {
+                    collect_expr_refs(expr, refs, shadows);
+                }
+            }
+        }
+        Expr::Null | Expr::Bool(_) | Expr::Int(_) | Expr::Float(_) | Expr::String(_) => {}
+    }
+}
+
+fn collect_type_refs(
+    ty: &crate::parser::TypeExpr,
+    refs: &mut HashSet<String>,
+    shadows: &HashSet<String>,
+) {
+    match ty {
+        crate::parser::TypeExpr::Named(name) => collect_name_root(name, refs, shadows),
+        crate::parser::TypeExpr::Nullable(inner) => collect_type_refs(inner, refs, shadows),
+        crate::parser::TypeExpr::Union(types) => {
+            for ty in types {
+                collect_type_refs(ty, refs, shadows);
+            }
+        }
+        crate::parser::TypeExpr::Generic(name, params) => {
+            collect_name_root(name, refs, shadows);
+            for param in params {
+                collect_type_refs(param, refs, shadows);
+            }
+        }
+        crate::parser::TypeExpr::Constrained(name, expr) => {
+            collect_name_root(name, refs, shadows);
+            collect_expr_refs(expr, refs, shadows);
+        }
+    }
+}
+
+fn collect_name_root(name: &str, refs: &mut HashSet<String>, shadows: &HashSet<String>) {
+    if let Some(root) = name.split('.').next()
+        && !root.is_empty()
+        && !shadows.contains(root)
+    {
+        refs.insert(root.to_string());
+    }
+}
+
+fn declared_entry_roots(entries: &[Entry]) -> HashSet<String> {
+    entries
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::ClassDef(name, ..) | Entry::TypeAlias(name, _) => Some(name.clone()),
+            Entry::Property(prop)
+                if has_modifier(&prop.modifiers, Modifier::Local)
+                    || matches!(prop.value, Some(Expr::Lambda(..))) =>
+            {
+                Some(prop.name.clone())
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 // --- Scope ---
@@ -3127,6 +3603,36 @@ fn pathdiff_or_full(path: &Path, base: &Path) -> String {
         .unwrap_or(path)
         .to_string_lossy()
         .to_string()
+}
+
+fn local_module_path(current_path: &Path, uri: &str) -> Option<PathBuf> {
+    if uri.contains("://") && !uri.starts_with("file://") {
+        return None;
+    }
+    Some(if let Some(rel) = uri.strip_prefix("file://") {
+        PathBuf::from(rel)
+    } else {
+        current_path.parent().unwrap_or(Path::new(".")).join(uri)
+    })
+}
+
+fn same_local_path(left: &Path, right: &Path) -> bool {
+    let left_key = left.canonicalize().unwrap_or_else(|_| left.to_path_buf());
+    let right_key = right.canonicalize().unwrap_or_else(|_| right.to_path_buf());
+    left_key == right_key
+}
+
+fn bind_deferred_inherited_imports(
+    deferred: &[(String, PathBuf)],
+    inherited_path: &Path,
+    inherited_val: &Value,
+    scope: &mut Scope,
+) {
+    for (alias, alias_path) in deferred {
+        if same_local_path(alias_path, inherited_path) {
+            scope.set(alias.clone(), inherited_val.clone());
+        }
+    }
 }
 
 fn stdlib_module(name: &str) -> Value {

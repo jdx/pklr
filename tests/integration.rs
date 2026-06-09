@@ -56,6 +56,70 @@ import "pkl/Builtins.pkl"
     assert!(imports.contains(&"pkl/Builtins.pkl".to_string()));
 }
 
+#[test]
+fn parser_allows_semicolons_between_header_directives() {
+    let src = r#"
+amends "base.pkl"; import "helper.pkl"; x = helper.value
+"#;
+    let tokens = lex(src).unwrap();
+    let module = parse(&tokens).unwrap();
+    assert_eq!(module.amends.as_deref(), Some("base.pkl"));
+    assert_eq!(module.imports.len(), 1);
+    assert_eq!(module.imports[0].uri, "helper.pkl");
+}
+
+#[test]
+fn analyze_imports_deduplicates_diamond_graph() {
+    let dir = std::env::temp_dir().join(format!(
+        "pklr_test_analyze_imports_diamond_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "left.pkl"
+import "right.pkl"
+"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("left.pkl"), r#"import "shared.pkl""#).unwrap();
+    std::fs::write(dir.join("right.pkl"), r#"import "shared.pkl""#).unwrap();
+    std::fs::write(dir.join("shared.pkl"), "x = 1").unwrap();
+
+    let imports = pklr::analyze_imports(&dir.join("main.pkl")).unwrap();
+    let shared = dir.join("shared.pkl");
+    assert_eq!(
+        imports.iter().filter(|path| **path == shared).count(),
+        1,
+        "{imports:?}"
+    );
+}
+
+#[test]
+fn analyze_imports_excludes_missing_files() {
+    let dir = std::env::temp_dir().join(format!(
+        "pklr_test_analyze_imports_missing_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "missing.pkl"
+import "existing.pkl"
+"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("existing.pkl"), "x = 1").unwrap();
+
+    let imports = pklr::analyze_imports(&dir.join("main.pkl")).unwrap();
+    assert_eq!(imports, vec![dir.join("existing.pkl")]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // --- Evaluator tests ---
 
 fn eval_src(src: &str) -> serde_json::Value {
