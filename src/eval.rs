@@ -44,6 +44,13 @@ struct MappingInheritedDefault {
     entries: Option<Vec<Entry>>,
 }
 
+fn regex_value(pattern: Value) -> Value {
+    let mut map = IndexMap::new();
+    map.insert("_type".to_string(), Value::String("regex".to_string()));
+    map.insert("pattern".to_string(), pattern);
+    Value::Object(Arc::new(map), None)
+}
+
 impl Default for Evaluator {
     fn default() -> Self {
         Self {
@@ -2112,9 +2119,7 @@ impl Evaluator {
                 "Regex" => {
                     if let Some(arg) = args.first() {
                         let val = self.eval_expr(arg, scope, depth + 1).await?;
-                        let mut map = IndexMap::new();
-                        map.insert("pattern".to_string(), val);
-                        return Ok(Value::Object(Arc::new(map), None));
+                        return Ok(regex_value(val));
                     }
                     return Err(Error::Eval("Regex() requires a pattern argument".into()));
                 }
@@ -2170,9 +2175,7 @@ impl Evaluator {
             && let Some(arg) = args.first()
         {
             let val = self.eval_expr(arg, scope, depth + 1).await?;
-            let mut map = IndexMap::new();
-            map.insert("pattern".to_string(), val);
-            return Ok(Value::Object(Arc::new(map), None));
+            return Ok(regex_value(val));
         }
 
         // Plain call with no args on an object — return the object

@@ -343,10 +343,29 @@ impl<'a> Lexer<'a> {
                 Some(c) => s.push(c),
             }
         }
-        // Strip leading/trailing newlines per pkl convention
-        let s = s.trim_start_matches('\n');
-        // Dedent by removing common leading whitespace
-        dedent(s)
+        normalize_multiline_string(&s)
+    }
+
+    fn read_raw_multiline_string(&mut self) -> Result<String> {
+        // Already consumed `#"""`
+        // Read until closing `"""#`
+        let mut s = String::new();
+        loop {
+            if self.source[self.pos..].starts_with("\"\"\"#") {
+                self.advance();
+                self.advance();
+                self.advance();
+                self.advance();
+                break;
+            }
+            match self.advance() {
+                None => {
+                    return Err(self.lex_error("unterminated raw multiline string"));
+                }
+                Some(c) => s.push(c),
+            }
+        }
+        normalize_multiline_string(&s)
     }
 
     fn read_number(&mut self, first: char) -> Result<TokenKind> {
@@ -668,7 +687,13 @@ impl<'a> Lexer<'a> {
             '#' => {
                 // #"..."# raw strings
                 self.advance();
-                if self.peek() == Some('"') {
+                if self.source[self.pos..].starts_with("\"\"\"") {
+                    self.advance();
+                    self.advance();
+                    self.advance();
+                    let s = self.read_raw_multiline_string()?;
+                    TokenKind::StringLit(s)
+                } else if self.peek() == Some('"') {
                     self.advance();
                     let s = self.read_raw_string('#')?;
                     TokenKind::StringLit(s)
@@ -740,6 +765,11 @@ impl<'a> Lexer<'a> {
         }
         Ok(s)
     }
+}
+
+fn normalize_multiline_string(s: &str) -> Result<String> {
+    let s = s.trim_start_matches('\n');
+    dedent(s)
 }
 
 fn keyword_or_ident(s: &str) -> TokenKind {
