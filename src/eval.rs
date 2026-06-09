@@ -533,6 +533,8 @@ impl Evaluator {
                     .to_string()
             });
             if !referenced_imports.contains(&alias) {
+                // Unused imports are intentionally lazy: missing local paths are
+                // reported only if the imported binding is actually referenced.
                 continue;
             }
             if !import_path.exists() {
