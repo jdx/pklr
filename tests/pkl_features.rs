@@ -1162,6 +1162,34 @@ result = new Project {}
 }
 
 #[tokio::test]
+async fn imported_amends_base_uses_inherited_scope() {
+    let temp = TestTempDir::new("pklr_test_imported_amends_base_scope");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Base.pkl"),
+        r#"
+name = meta.name
+"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("meta.pkl"), r#"name = "hk""#).unwrap();
+    std::fs::write(
+        dir.join("child.pkl"),
+        r#"
+amends "Base.pkl"
+import "meta.pkl"
+import "Base.pkl" as Base
+baseName = Base.name
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("child.pkl")).await.unwrap();
+    assert_eq!(val["name"], "hk");
+    assert_eq!(val["baseName"], "hk");
+}
+
+#[tokio::test]
 async fn import_used_only_by_annotation_does_not_create_builtin_cycle() {
     let temp = TestTempDir::new("pklr_test_annotation_import_cycle");
     let dir = temp.path();

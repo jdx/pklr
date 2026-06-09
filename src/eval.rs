@@ -354,11 +354,49 @@ impl Evaluator {
         canonical: &Path,
         depth: usize,
     ) -> Result<Value> {
+        self.eval_file_inner_with_scope(path, canonical, depth, None)
+            .await
+    }
+
+    async fn eval_file_with_scope(
+        &mut self,
+        path: &Path,
+        depth: usize,
+        inherited_scope: Option<Scope>,
+    ) -> Result<Value> {
+        if inherited_scope.is_none() {
+            return self.eval_file(path, depth).await;
+        }
+        let canonical = path
+            .canonicalize()
+            .map_err(|e| Error::Io(path.to_path_buf(), e))?;
+        self.import_cache.insert(
+            canonical.clone(),
+            Value::Object(Arc::new(IndexMap::new()), None),
+        );
+        let result = self
+            .eval_file_inner_with_scope(path, &canonical, depth, inherited_scope)
+            .await;
+        if result.is_err() {
+            self.import_cache.remove(&canonical);
+        }
+        result
+    }
+
+    async fn eval_file_inner_with_scope(
+        &mut self,
+        path: &Path,
+        canonical: &Path,
+        depth: usize,
+        inherited_scope: Option<Scope>,
+    ) -> Result<Value> {
         let source = std::fs::read_to_string(path).map_err(|e| Error::Io(path.to_path_buf(), e))?;
         let name = path.display().to_string();
         let tokens = lexer::lex_named(&source, &name)?;
         let module = parser::parse_named(&tokens, &source, &name)?;
-        let val = self.eval_module(&module, path, depth).await?;
+        let val = self
+            .eval_module_with_scope(&module, path, depth, inherited_scope)
+            .await?;
         self.import_cache
             .insert(canonical.to_path_buf(), val.clone());
         Ok(val)
@@ -404,6 +442,13 @@ impl Evaluator {
             self.inherited_reference_roots(module, path, depth + 1)
                 .await?,
         );
+
+        let inherited_local_path = module
+            .amends
+            .as_deref()
+            .or(module.extends.as_deref())
+            .and_then(|uri| local_module_path(path, uri));
+        let mut deferred_inherited_imports = Vec::new();
 
         // Process imports
         for import in &module.imports {
@@ -540,6 +585,13 @@ impl Evaluator {
             if !import_path.exists() {
                 return Err(Error::ImportNotFound(import_path.display().to_string()));
             }
+            if inherited_local_path
+                .as_ref()
+                .is_some_and(|inherited_path| same_local_path(inherited_path, &import_path))
+            {
+                deferred_inherited_imports.push(alias);
+                continue;
+            }
             {
                 let imported_val = self.eval_file(&import_path, depth + 1).await?;
                 scope.set(alias, imported_val);
@@ -548,6 +600,7 @@ impl Evaluator {
 
         // Process amends: load base module as starting values
         let mut base_obj = IndexMap::new();
+        let mut inherited_base_val = None;
         if let Some(uri) = &module.amends {
             if uri.starts_with("https://") || uri.starts_with("http://") {
                 // HTTP amends
@@ -612,21 +665,12 @@ impl Evaluator {
                     base.join(uri)
                 };
                 if amends_path.exists() {
-                    let source = std::fs::read_to_string(&amends_path)
-                        .map_err(|e| Error::Io(amends_path.clone(), e))?;
-                    let name = amends_path.display().to_string();
-                    let tokens = lexer::lex_named(&source, &name)?;
-                    let base_module = parser::parse_named(&tokens, &source, &name)?;
                     let base_val = self
-                        .eval_module_with_scope(
-                            &base_module,
-                            &amends_path,
-                            depth + 1,
-                            Some(scope.clone()),
-                        )
+                        .eval_file_with_scope(&amends_path, depth + 1, Some(scope.clone()))
                         .await?;
-                    if let Value::Object(m, _) = base_val {
-                        base_obj = (*m).clone();
+                    if let Value::Object(m, _) = &base_val {
+                        inherited_base_val = Some(base_val.clone());
+                        base_obj = (**m).clone();
                     }
                 }
             }
@@ -717,22 +761,17 @@ impl Evaluator {
                     base.join(uri)
                 };
                 if extends_path.exists() {
+                    let ext_val = self
+                        .eval_file_with_scope(&extends_path, depth + 1, Some(scope.clone()))
+                        .await?;
+                    let name = extends_path.display().to_string();
                     let source = std::fs::read_to_string(&extends_path)
                         .map_err(|e| Error::Io(extends_path.clone(), e))?;
-                    let name = extends_path.display().to_string();
                     let tokens = lexer::lex_named(&source, &name)?;
                     let ext_module = parser::parse_named(&tokens, &source, &name)?;
-                    // Evaluate the base module to get its properties
-                    let ext_val = self
-                        .eval_module_with_scope(
-                            &ext_module,
-                            &extends_path,
-                            depth + 1,
-                            Some(scope.clone()),
-                        )
-                        .await?;
-                    if let Value::Object(m, _) = ext_val {
-                        base_obj = (*m).clone();
+                    if let Value::Object(m, _) = &ext_val {
+                        inherited_base_val = Some(ext_val.clone());
+                        base_obj = (**m).clone();
                     }
                     // Also evaluate the base module's scope (classes, locals) into our scope
                     // by re-processing its body entries
@@ -794,6 +833,12 @@ impl Evaluator {
                         base_obj.shift_remove(cls_name);
                     }
                 }
+            }
+        }
+
+        if let Some(inherited_base_val) = inherited_base_val {
+            for alias in deferred_inherited_imports {
+                scope.set(alias, inherited_base_val.clone());
             }
         }
 
@@ -3555,6 +3600,23 @@ fn pathdiff_or_full(path: &Path, base: &Path) -> String {
         .unwrap_or(path)
         .to_string_lossy()
         .to_string()
+}
+
+fn local_module_path(current_path: &Path, uri: &str) -> Option<PathBuf> {
+    if uri.contains("://") && !uri.starts_with("file://") {
+        return None;
+    }
+    Some(if let Some(rel) = uri.strip_prefix("file://") {
+        PathBuf::from(rel)
+    } else {
+        current_path.parent().unwrap_or(Path::new(".")).join(uri)
+    })
+}
+
+fn same_local_path(left: &Path, right: &Path) -> bool {
+    let left_key = left.canonicalize().unwrap_or_else(|_| left.to_path_buf());
+    let right_key = right.canonicalize().unwrap_or_else(|_| right.to_path_buf());
+    left_key == right_key
 }
 
 fn stdlib_module(name: &str) -> Value {
