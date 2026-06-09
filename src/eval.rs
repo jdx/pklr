@@ -2695,6 +2695,11 @@ impl Evaluator {
                     let type_default = match val_expr {
                         Expr::ObjectBody(body) => select_mapping_type_default(type_defaults, body)
                             .map(|(name, value)| (Some(name.as_str()), value)),
+                        Expr::New(Some(type_name), _, _) => {
+                            select_mapping_type_default_for_new(type_defaults, type_name)
+                                .map(|(name, value)| (Some(name.as_str()), value))
+                        }
+                        Expr::New(None, _, _) => None,
                         _ => type_defaults
                             .first()
                             .map(|(name, value)| (Some(name.as_str()), value)),
@@ -2715,8 +2720,11 @@ impl Evaluator {
                     let val =
                         if let Some((default_type_name, Value::Object(template_map, Some(src)))) =
                             default_template.as_ref()
-                            && let Expr::ObjectBody(body) = val_expr
+                            && let Some(body) = mapping_entry_body(val_expr)
                         {
+                            if let Expr::New(Some(type_name), _, _) = val_expr {
+                                validate_new_object_body(type_name, body, src)?;
+                            }
                             let mut result =
                                 if let Some(default_entries) = explicit_default_entries.as_ref() {
                                     let mut overlay_entries = default_entries.clone();
@@ -2980,6 +2988,90 @@ fn select_mapping_type_default<'a>(
     // order. This mirrors Pkl's first assignable type behavior when there is no
     // stronger structural signal in the entry body.
     best.or_else(|| type_defaults.first())
+}
+
+fn select_mapping_type_default_for_new<'a>(
+    type_defaults: &'a [(String, Value)],
+    type_name: &str,
+) -> Option<&'a (String, Value)> {
+    type_defaults
+        .iter()
+        .find(|(name, _)| name == type_name)
+        .or_else(|| {
+            type_defaults
+                .iter()
+                .find(|(name, _)| type_names_match(name, type_name))
+        })
+        .or_else(|| {
+            type_defaults.iter().find(|(_, value)| {
+                matches!(
+                    value,
+                    Value::Object(_, Some(src))
+                        if src
+                            .type_name
+                            .as_deref()
+                            .is_some_and(|tn| type_names_match(tn, type_name))
+                )
+            })
+        })
+}
+
+fn type_names_match(a: &str, b: &str) -> bool {
+    a == b
+        || (a.len() > b.len() && a.ends_with(b) && a.as_bytes()[a.len() - b.len() - 1] == b'.')
+        || (b.len() > a.len() && b.ends_with(a) && b.as_bytes()[b.len() - a.len() - 1] == b'.')
+}
+
+fn mapping_entry_body(expr: &Expr) -> Option<&[Entry]> {
+    match expr {
+        Expr::ObjectBody(body) => Some(body),
+        Expr::New(Some(_), body, _) => Some(body),
+        _ => None,
+    }
+}
+
+fn validate_new_object_body(
+    type_name: &str,
+    entries: &[Entry],
+    base_src: &ObjectSource,
+) -> Result<()> {
+    if base_src.is_open {
+        return Ok(());
+    }
+
+    let base_names: HashSet<String> = base_src
+        .entries
+        .iter()
+        .filter_map(|entry| {
+            if let Entry::Property(prop) = entry {
+                Some(prop.name.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for entry in entries {
+        match entry {
+            Entry::Property(prop)
+                if !has_modifier(&prop.modifiers, Modifier::Local)
+                    && !base_names.contains(&prop.name) =>
+            {
+                return Err(Error::Eval(format!(
+                    "cannot add property '{}' to non-open class {type_name}",
+                    prop.name
+                )));
+            }
+            Entry::DynProperty(Expr::String(key), _) if !base_names.contains(key) => {
+                return Err(Error::Eval(format!(
+                    "cannot add property '{key}' to non-open class {type_name}"
+                )));
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
 }
 
 fn find_default_body_entries(entries: &[Entry]) -> Option<Vec<Entry>> {

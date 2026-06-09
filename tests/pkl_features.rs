@@ -3818,6 +3818,199 @@ steps = new Mapping<String, Step | Group> {
 }
 
 #[test]
+fn converter_union_mapping_preserves_explicit_new_type() {
+    let json = eval_with_converters(
+        r#"
+class Group {
+    steps: Mapping<String, Step> = new Mapping<String, Step> {}
+    shared: Boolean = false
+}
+
+class Step {
+    check: String = ""
+    shared: Boolean = false
+}
+
+output {
+    renderer {
+        converters {
+            [Group] = (g) -> new Dynamic {
+                _type = "group"
+                ...g.toDynamic()
+            }
+            [Step] = (s) -> new Dynamic {
+                _type = "step"
+                ...s.toDynamic()
+            }
+        }
+    }
+}
+
+steps = new Mapping<String, Step | Group> {
+    default {
+        shared = true
+    }
+    ["group"] = new Group {
+        steps {
+            ["lint"] {
+                check = "eslint"
+            }
+        }
+    }
+    ["echo"] {
+        check = "echo ok"
+    }
+}
+"#,
+    );
+    assert_eq!(json["steps"]["group"]["_type"], "group");
+    assert_eq!(json["steps"]["group"]["shared"], true);
+    assert_eq!(json["steps"]["group"]["steps"]["lint"]["_type"], "step");
+    assert_eq!(json["steps"]["echo"]["_type"], "step");
+    assert_eq!(json["steps"]["echo"]["shared"], true);
+}
+
+#[test]
+fn converter_union_mapping_explicit_new_validates_class_body() {
+    let msg = eval_fails(
+        r#"
+class Group {
+    steps: Mapping<String, Step> = new Mapping<String, Step> {}
+}
+
+class Step {
+    check: String = ""
+}
+
+steps = new Mapping<String, Step | Group> {
+    ["group"] = new Group {
+        unknown = true
+    }
+}
+"#,
+    );
+    assert!(msg.contains("non-open"));
+    assert!(msg.contains("unknown"));
+}
+
+#[test]
+fn converter_union_mapping_explicit_default_does_not_open_new_body() {
+    let msg = eval_fails(
+        r#"
+class Group {
+    steps: Mapping<String, Step> = new Mapping<String, Step> {}
+}
+
+class Step {
+    check: String = ""
+}
+
+steps = new Mapping<String, Step | Group> {
+    default {
+        extra = false
+    }
+    ["group"] = new Group {
+        extra = true
+    }
+}
+"#,
+    );
+    assert!(msg.contains("non-open"));
+    assert!(msg.contains("extra"));
+}
+
+#[test]
+fn converter_union_mapping_untyped_new_stays_untyped() {
+    let json = eval_with_converters(
+        r#"
+class Group {
+    steps: Mapping<String, Step> = new Mapping<String, Step> {}
+}
+
+class Step {
+    check: String = ""
+}
+
+output {
+    renderer {
+        converters {
+            [Group] = (g) -> new Dynamic {
+                _type = "group"
+                ...g.toDynamic()
+            }
+            [Step] = (s) -> new Dynamic {
+                _type = "step"
+                ...s.toDynamic()
+            }
+        }
+    }
+}
+
+steps = new Mapping<String, Step | Group> {
+    ["plain"] = new {
+        steps {
+            ["lint"] {
+                check = "eslint"
+            }
+        }
+    }
+}
+"#,
+    );
+    assert_eq!(json["steps"]["plain"]["_type"], serde_json::Value::Null);
+    assert_eq!(json["steps"]["plain"]["steps"]["lint"]["check"], "eslint");
+}
+
+#[test]
+fn converter_union_mapping_explicit_new_without_type_default_uses_constructor() {
+    let json = eval_with_converters(
+        r#"
+class Group {
+    steps: Mapping<String, Step> = new Mapping<String, Step> {}
+    shared: Boolean = false
+}
+
+class Step {
+    check: String = ""
+}
+
+typealias GroupAlias = Group
+
+output {
+    renderer {
+        converters {
+            [Group] = (g) -> new Dynamic {
+                _type = "group"
+                ...g.toDynamic()
+            }
+            [Step] = (s) -> new Dynamic {
+                _type = "step"
+                ...s.toDynamic()
+            }
+        }
+    }
+}
+
+steps = new Mapping<String, GroupAlias | Step> {
+    default {
+        shared = true
+    }
+    ["group"] = new Group {
+        steps {
+            ["lint"] {
+                check = "eslint"
+            }
+        }
+    }
+}
+"#,
+    );
+    assert_eq!(json["steps"]["group"]["_type"], "group");
+    assert_eq!(json["steps"]["group"]["shared"], true);
+    assert_eq!(json["steps"]["group"]["steps"]["lint"]["_type"], "step");
+}
+
+#[test]
 fn mapping_amendment_preserves_type_aliases() {
     let json = eval_with_converters(
         r#"
