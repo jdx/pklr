@@ -1155,6 +1155,27 @@ has_nested = Index.containsKey("nested/config/bar.pkl")
     assert_eq!(val["has_nested"], false);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn import_glob_matches_symlinked_files() {
+    let temp = TestTempDir::new("pklr_test_import_glob_symlinked_files");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("real")).unwrap();
+    std::fs::write(dir.join("real/foo.pkl"), r#"value = "foo""#).unwrap();
+    std::os::unix::fs::symlink(dir.join("real/foo.pkl"), dir.join("linked.pkl")).unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import* "*.pkl" as Index
+value = Index["linked.pkl"].value
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    assert_eq!(val["value"], "foo");
+}
+
 #[tokio::test]
 async fn unused_import_is_not_evaluated() {
     let temp = TestTempDir::new("pklr_test_unused_import");

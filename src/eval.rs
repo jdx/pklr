@@ -3759,10 +3759,10 @@ fn collect_glob_matches(
     for entry in entries {
         let entry = entry.map_err(|e| Error::Io(dir.to_path_buf(), e))?;
         let path = entry.path();
-        let file_type = entry.file_type().map_err(|e| Error::Io(entry.path(), e))?;
+        let file_type = entry.file_type().map_err(|e| Error::Io(path.clone(), e))?;
         if file_type.is_dir() {
             collect_glob_matches(base, &path, pattern, results)?;
-        } else if file_type.is_file() {
+        } else if path.is_file() {
             let relative = pathdiff_or_full(&path, base);
             if glob_matches(pattern, &relative) {
                 results.push(path);
