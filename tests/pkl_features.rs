@@ -1122,12 +1122,14 @@ async fn import_glob_double_star_crosses_directories() {
         r#"
 import* "**.pkl" as Index
 value = Index["config/foo.pkl"].value
+has_self = Index.containsKey("hk.pkl")
 "#,
     )
     .unwrap();
 
     let val = pklr::eval_to_json(&dir.join("hk.pkl")).await.unwrap();
     assert_eq!(val["value"], "foo");
+    assert_eq!(val["has_self"], false);
 }
 
 #[tokio::test]

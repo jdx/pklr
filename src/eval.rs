@@ -481,7 +481,7 @@ impl Evaluator {
                 let matched = expand_glob(base_dir, uri)?;
                 let mut mapping = IndexMap::new();
                 for matched_path in matched {
-                    if matched_path == path {
+                    if same_local_path(&matched_path, path) {
                         continue;
                     }
                     let rel_key = pathdiff_or_full(&matched_path, base_dir);
@@ -3799,10 +3799,22 @@ fn glob_matches_chars(pattern: &[char], path: &[char]) -> bool {
 
 /// Get a relative path string from `path` relative to `base`, or the full path if not a prefix.
 fn pathdiff_or_full(path: &Path, base: &Path) -> String {
-    path.strip_prefix(base)
+    let path = path
+        .strip_prefix(base)
         .unwrap_or(path)
         .to_string_lossy()
-        .to_string()
+        .to_string();
+    normalize_pkl_path(path)
+}
+
+#[cfg(windows)]
+fn normalize_pkl_path(path: String) -> String {
+    path.replace(std::path::MAIN_SEPARATOR, "/")
+}
+
+#[cfg(not(windows))]
+fn normalize_pkl_path(path: String) -> String {
+    path
 }
 
 fn local_module_path(current_path: &Path, uri: &str) -> Option<PathBuf> {
