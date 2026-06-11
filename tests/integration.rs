@@ -215,6 +215,46 @@ hooks {
 }
 
 #[test]
+fn eval_mapping_amendment_uses_union_type_annotation_defaults() {
+    let src = r#"
+class Step {
+    check: String?
+}
+
+class Group {
+    steps: Mapping<String, Step> = new Mapping<String, Step> {}
+}
+
+class Hook {
+    steps: Mapping<String, Step | Group> = new Mapping<String, Step> {}
+}
+
+local formatters = new Mapping<String, Step> {
+    ["echo"] {
+        check = "echo ok"
+    }
+}
+
+local baseHook = new Hook {
+    steps {
+        ["formatters"] = new Group {
+            steps = formatters
+        }
+    }
+}
+
+hooks {
+    ["check"] = baseHook
+}
+"#;
+    let json = eval_src(src);
+    assert_eq!(
+        json["hooks"]["check"]["steps"]["formatters"]["steps"]["echo"]["check"],
+        "echo ok"
+    );
+}
+
+#[test]
 fn eval_spread_operator() {
     let src = r#"
 amends "pkl/Config.pkl"
