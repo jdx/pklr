@@ -3817,12 +3817,14 @@ fn collect_glob_matches(
     for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
-            Err(_) => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(Error::Io(dir.to_path_buf(), e)),
         };
         let path = entry.path();
         let file_type = match entry.file_type() {
             Ok(file_type) => file_type,
-            Err(_) => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(Error::Io(path.clone(), e)),
         };
         if file_type.is_dir() {
             if max_depth.is_none_or(|max_depth| depth < max_depth) {
@@ -3853,7 +3855,16 @@ fn glob_matches_chars(pattern: &[char], path: &[char]) -> bool {
     let mut i = 0;
     while i < pattern.len() {
         let mut next = vec![false; path.len() + 1];
-        if pattern[i] == '*' && pattern.get(i + 1) == Some(&'*') {
+        if pattern[i] == '*' && pattern.get(i + 1) == Some(&'*') && pattern.get(i + 2) == Some(&'/')
+        {
+            next[0] = prev[0];
+            let mut can_consume_to_slash = prev[0];
+            for j in 1..=path.len() {
+                next[j] = prev[j] || (path[j - 1] == '/' && can_consume_to_slash);
+                can_consume_to_slash |= prev[j];
+            }
+            i += 3;
+        } else if pattern[i] == '*' && pattern.get(i + 1) == Some(&'*') {
             next[0] = prev[0];
             for j in 1..=path.len() {
                 next[j] = prev[j] || next[j - 1];
@@ -3911,7 +3922,7 @@ mod glob_tests {
 
     #[test]
     fn double_star_slash_keeps_literal_separator() {
-        assert!(!glob_matches("**/foo.pkl", "foo.pkl"));
+        assert!(glob_matches("**/foo.pkl", "foo.pkl"));
         assert!(glob_matches("**/foo.pkl", "config/foo.pkl"));
     }
 

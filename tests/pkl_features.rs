@@ -1155,6 +1155,28 @@ has_nested = Index.containsKey("nested/config/bar.pkl")
     assert_eq!(val["has_nested"], false);
 }
 
+#[tokio::test]
+async fn import_glob_double_star_slash_matches_root_and_nested_files() {
+    let temp = TestTempDir::new("pklr_test_import_glob_double_star_slash");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("nested")).unwrap();
+    std::fs::write(dir.join("foo.pkl"), r#"value = "root""#).unwrap();
+    std::fs::write(dir.join("nested/foo.pkl"), r#"value = "nested""#).unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import* "**/foo.pkl" as Index
+root_value = Index["foo.pkl"].value
+nested_value = Index["nested/foo.pkl"].value
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    assert_eq!(val["root_value"], "root");
+    assert_eq!(val["nested_value"], "nested");
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn import_glob_matches_symlinked_files() {
