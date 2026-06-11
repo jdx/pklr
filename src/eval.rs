@@ -3773,6 +3773,8 @@ fn collect_glob_matches(
 }
 
 fn glob_matches(pattern: &str, path: &str) -> bool {
+    let pattern = normalize_pkl_path(pattern);
+    let path = normalize_pkl_path(path);
     glob_matches_chars(
         &pattern.chars().collect::<Vec<_>>(),
         &path.chars().collect::<Vec<_>>(),
@@ -3804,17 +3806,11 @@ fn pathdiff_or_full(path: &Path, base: &Path) -> String {
         .unwrap_or(path)
         .to_string_lossy()
         .to_string();
-    normalize_pkl_path(path)
+    normalize_pkl_path(&path)
 }
 
-#[cfg(windows)]
-fn normalize_pkl_path(path: String) -> String {
-    path.replace(std::path::MAIN_SEPARATOR, "/")
-}
-
-#[cfg(not(windows))]
-fn normalize_pkl_path(path: String) -> String {
-    path
+fn normalize_pkl_path(path: &str) -> String {
+    path.replace('\\', "/")
 }
 
 fn local_module_path(current_path: &Path, uri: &str) -> Option<PathBuf> {
