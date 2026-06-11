@@ -481,6 +481,9 @@ impl Evaluator {
                 let matched = expand_glob(base_dir, uri)?;
                 let mut mapping = IndexMap::new();
                 for matched_path in matched {
+                    if matched_path == path {
+                        continue;
+                    }
                     let rel_key = pathdiff_or_full(&matched_path, base_dir);
                     let val = self.eval_file(&matched_path, depth + 1).await?;
                     mapping.insert(rel_key, val);
@@ -3725,50 +3728,73 @@ fn make_unit_object(value: Value, unit: &str) -> Value {
     Value::Object(Arc::new(map), None)
 }
 
-/// Expand a simple glob pattern relative to a base directory.
-/// Supports `dir/*.ext` and `*.ext` patterns (single `*` only).
-/// Expand a simple glob pattern relative to a base directory.
-/// Supports `dir/*.ext` and `*.ext` patterns (single `*` only).
+/// Expand a Pkl glob pattern relative to a base directory.
 pub fn expand_glob(base: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
-    let full = base.join(pattern);
-    let dir = full.parent().unwrap_or(base).to_path_buf();
-    let file_pattern = full
-        .file_name()
-        .map(|f| f.to_string_lossy().to_string())
-        .unwrap_or_default();
-
-    if !dir.is_dir() {
+    if !base.is_dir() {
         return Ok(vec![]);
     }
 
-    // Convert simple glob to prefix/suffix matching
-    let (prefix, suffix) = if let Some(star_pos) = file_pattern.find('*') {
-        (
-            file_pattern[..star_pos].to_string(),
-            file_pattern[star_pos + 1..].to_string(),
-        )
-    } else {
-        // No wildcard — exact match
-        let p = dir.join(&file_pattern);
-        return if p.exists() { Ok(vec![p]) } else { Ok(vec![]) };
-    };
-
-    let min_len = prefix.len() + suffix.len();
-    let mut results = Vec::new();
-    let entries = std::fs::read_dir(&dir).map_err(|e| Error::Io(dir.to_path_buf(), e))?;
-    for entry in entries {
-        let entry = entry.map_err(|e| Error::Io(dir.to_path_buf(), e))?;
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name.len() >= min_len
-            && name.starts_with(&prefix)
-            && name.ends_with(&suffix)
-            && entry.path().is_file()
-        {
-            results.push(entry.path());
-        }
+    if !pattern.contains('*') {
+        let path = base.join(pattern);
+        return if path.is_file() {
+            Ok(vec![path])
+        } else {
+            Ok(vec![])
+        };
     }
+
+    let mut results = Vec::new();
+    collect_glob_matches(base, base, pattern, &mut results)?;
     results.sort();
     Ok(results)
+}
+
+fn collect_glob_matches(
+    base: &Path,
+    dir: &Path,
+    pattern: &str,
+    results: &mut Vec<PathBuf>,
+) -> Result<()> {
+    let entries = std::fs::read_dir(dir).map_err(|e| Error::Io(dir.to_path_buf(), e))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| Error::Io(dir.to_path_buf(), e))?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|e| Error::Io(entry.path(), e))?;
+        if file_type.is_dir() {
+            collect_glob_matches(base, &path, pattern, results)?;
+        } else if file_type.is_file() {
+            let relative = pathdiff_or_full(&path, base);
+            if glob_matches(pattern, &relative) {
+                results.push(path);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn glob_matches(pattern: &str, path: &str) -> bool {
+    glob_matches_chars(
+        &pattern.chars().collect::<Vec<_>>(),
+        &path.chars().collect::<Vec<_>>(),
+    )
+}
+
+fn glob_matches_chars(pattern: &[char], path: &[char]) -> bool {
+    if pattern.is_empty() {
+        return path.is_empty();
+    }
+
+    if pattern.starts_with(&['*', '*']) {
+        return glob_matches_chars(&pattern[2..], path)
+            || (!path.is_empty() && glob_matches_chars(pattern, &path[1..]));
+    }
+
+    if pattern[0] == '*' {
+        return glob_matches_chars(&pattern[1..], path)
+            || (!path.is_empty() && path[0] != '/' && glob_matches_chars(pattern, &path[1..]));
+    }
+
+    !path.is_empty() && pattern[0] == path[0] && glob_matches_chars(&pattern[1..], &path[1..])
 }
 
 /// Get a relative path string from `path` relative to `base`, or the full path if not a prefix.

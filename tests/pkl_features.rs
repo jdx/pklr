@@ -1112,6 +1112,48 @@ beta_val = Items["items/beta.pkl"].value
 }
 
 #[tokio::test]
+async fn import_glob_double_star_crosses_directories() {
+    let temp = TestTempDir::new("pklr_test_import_glob_double_star");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("config")).unwrap();
+    std::fs::write(dir.join("config/foo.pkl"), r#"value = "foo""#).unwrap();
+    std::fs::write(
+        dir.join("hk.pkl"),
+        r#"
+import* "**.pkl" as Index
+value = Index["config/foo.pkl"].value
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("hk.pkl")).await.unwrap();
+    assert_eq!(val["value"], "foo");
+}
+
+#[tokio::test]
+async fn import_glob_star_matches_one_directory_segment() {
+    let temp = TestTempDir::new("pklr_test_import_glob_star_directory_segment");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("config")).unwrap();
+    std::fs::create_dir_all(dir.join("nested/config")).unwrap();
+    std::fs::write(dir.join("config/foo.pkl"), r#"value = "foo""#).unwrap();
+    std::fs::write(dir.join("nested/config/bar.pkl"), r#"value = "bar""#).unwrap();
+    std::fs::write(
+        dir.join("hk.pkl"),
+        r#"
+import* "*/*.pkl" as Index
+value = Index["config/foo.pkl"].value
+has_nested = Index.containsKey("nested/config/bar.pkl")
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("hk.pkl")).await.unwrap();
+    assert_eq!(val["value"], "foo");
+    assert_eq!(val["has_nested"], false);
+}
+
+#[tokio::test]
 async fn unused_import_is_not_evaluated() {
     let temp = TestTempDir::new("pklr_test_unused_import");
     let dir = temp.path();
