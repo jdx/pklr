@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.5](https://github.com/jdx/pklr/compare/v1.0.4...v1.0.5) - 2026-06-11
+
+### Fixed
+
+- *(eval)* harden import glob matching ([#105](https://github.com/jdx/pklr/pull/105))
+- *(eval)* support import glob wildcards ([#103](https://github.com/jdx/pklr/pull/103))
+
 ## [1.0.4](https://github.com/jdx/pklr/compare/v1.0.3...v1.0.4) - 2026-06-09
 
 ### Fixed
