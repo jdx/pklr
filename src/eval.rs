@@ -1027,7 +1027,9 @@ impl Evaluator {
         depth: usize,
     ) -> Result<Option<Value>> {
         if let Some(expr) = &prop.value {
-            return Ok(Some(self.eval_expr(expr, scope, depth).await?));
+            let mut value = self.eval_expr(expr, scope, depth).await?;
+            apply_mapping_type_annotation(&mut value, prop.type_ann.as_ref());
+            return Ok(Some(value));
         }
         if let Some(body) = &prop.body {
             // `foo { ... }` — object body amendment.
@@ -3126,6 +3128,81 @@ fn mapping_entry_body(expr: &Expr) -> Option<&[Entry]> {
         Expr::ObjectBody(body) => Some(body),
         Expr::New(Some(_), body, _) => Some(body),
         _ => None,
+    }
+}
+
+fn apply_mapping_type_annotation(value: &mut Value, type_ann: Option<&crate::parser::TypeExpr>) {
+    let Some(type_ann) = type_ann else {
+        return;
+    };
+    let type_names = mapping_value_type_names(type_ann);
+    if type_names.is_empty() {
+        return;
+    }
+    let Value::Object(_, src_slot) = value else {
+        return;
+    };
+
+    let mut src = src_slot
+        .as_ref()
+        .map(|src| (**src).clone())
+        .unwrap_or_else(|| ObjectSource {
+            entries: Vec::new(),
+            scope: IndexMap::new(),
+            is_open: true,
+            type_name: None,
+            mapping_value_types: Vec::new(),
+            deprecated: IndexMap::new(),
+        });
+    for name in type_names {
+        if !src.mapping_value_types.contains(&name) {
+            src.mapping_value_types.push(name);
+        }
+    }
+    *src_slot = Some(Arc::new(src));
+}
+
+fn mapping_value_type_names(type_ann: &crate::parser::TypeExpr) -> Vec<String> {
+    use crate::parser::TypeExpr;
+
+    let TypeExpr::Generic(name, params) = type_ann else {
+        return Vec::new();
+    };
+    if name != "Mapping" && name != "Map" {
+        return Vec::new();
+    }
+    let Some(value_type) = params.get(1) else {
+        return Vec::new();
+    };
+
+    let mut names = Vec::new();
+    collect_mapping_value_type_names(value_type, &mut names);
+    names
+}
+
+fn collect_mapping_value_type_names(type_ann: &crate::parser::TypeExpr, names: &mut Vec<String>) {
+    use crate::parser::TypeExpr;
+
+    match type_ann {
+        TypeExpr::Named(name) | TypeExpr::Constrained(name, _) => {
+            if !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
+        // Keep only the top-level value type. For example,
+        // Mapping<String, Mapping<String, Step>> needs a structured Mapping
+        // default, not Step as the default for the outer mapping's entries.
+        TypeExpr::Generic(name, _) => {
+            if !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
+        TypeExpr::Nullable(inner) => collect_mapping_value_type_names(inner, names),
+        TypeExpr::Union(variants) => {
+            for variant in variants {
+                collect_mapping_value_type_names(variant, names);
+            }
+        }
     }
 }
 
