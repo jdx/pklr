@@ -3798,8 +3798,9 @@ pub fn expand_glob(base: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
         };
     }
 
+    let max_depth = max_glob_depth(pattern);
     let mut results = Vec::new();
-    collect_glob_matches(base, base, pattern, &mut results)?;
+    collect_glob_matches(base, base, pattern, max_depth, 0, &mut results)?;
     results.sort();
     Ok(results)
 }
@@ -3808,15 +3809,25 @@ fn collect_glob_matches(
     base: &Path,
     dir: &Path,
     pattern: &str,
+    max_depth: Option<usize>,
+    depth: usize,
     results: &mut Vec<PathBuf>,
 ) -> Result<()> {
     let entries = std::fs::read_dir(dir).map_err(|e| Error::Io(dir.to_path_buf(), e))?;
     for entry in entries {
-        let entry = entry.map_err(|e| Error::Io(dir.to_path_buf(), e))?;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
         let path = entry.path();
-        let file_type = entry.file_type().map_err(|e| Error::Io(path.clone(), e))?;
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => continue,
+        };
         if file_type.is_dir() {
-            collect_glob_matches(base, &path, pattern, results)?;
+            if max_depth.is_none_or(|max_depth| depth < max_depth) {
+                collect_glob_matches(base, &path, pattern, max_depth, depth + 1, results)?;
+            }
         } else if path.is_file() {
             let relative = pathdiff_or_full(&path, base);
             if glob_matches(pattern, &relative) {
@@ -3837,21 +3848,41 @@ fn glob_matches(pattern: &str, path: &str) -> bool {
 }
 
 fn glob_matches_chars(pattern: &[char], path: &[char]) -> bool {
-    if pattern.is_empty() {
-        return path.is_empty();
+    let mut prev = vec![false; path.len() + 1];
+    prev[0] = true;
+    let mut i = 0;
+    while i < pattern.len() {
+        let mut next = vec![false; path.len() + 1];
+        if pattern[i] == '*' && pattern.get(i + 1) == Some(&'*') {
+            next[0] = prev[0];
+            for j in 1..=path.len() {
+                next[j] = prev[j] || next[j - 1];
+            }
+            i += 2;
+        } else if pattern[i] == '*' {
+            next[0] = prev[0];
+            for j in 1..=path.len() {
+                next[j] = prev[j] || (path[j - 1] != '/' && next[j - 1]);
+            }
+            i += 1;
+        } else {
+            for j in 1..=path.len() {
+                next[j] = prev[j - 1] && pattern[i] == path[j - 1];
+            }
+            i += 1;
+        }
+        prev = next;
     }
+    prev[path.len()]
+}
 
-    if pattern.starts_with(&['*', '*']) {
-        return glob_matches_chars(&pattern[2..], path)
-            || (!path.is_empty() && glob_matches_chars(pattern, &path[1..]));
+fn max_glob_depth(pattern: &str) -> Option<usize> {
+    let pattern = normalize_pkl_path(pattern);
+    if pattern.contains("**") {
+        None
+    } else {
+        Some(pattern.chars().filter(|c| *c == '/').count())
     }
-
-    if pattern[0] == '*' {
-        return glob_matches_chars(&pattern[1..], path)
-            || (!path.is_empty() && path[0] != '/' && glob_matches_chars(pattern, &path[1..]));
-    }
-
-    !path.is_empty() && pattern[0] == path[0] && glob_matches_chars(&pattern[1..], &path[1..])
 }
 
 /// Get a relative path string from `path` relative to `base`, or the full path if not a prefix.
@@ -3866,6 +3897,36 @@ fn pathdiff_or_full(path: &Path, base: &Path) -> String {
 
 fn normalize_pkl_path(path: &str) -> String {
     path.replace('\\', "/")
+}
+
+#[cfg(test)]
+mod glob_tests {
+    use super::{glob_matches, max_glob_depth};
+
+    #[test]
+    fn double_star_crosses_directories() {
+        assert!(glob_matches("**.pkl", "config/foo.pkl"));
+        assert!(glob_matches("a/**/b.pkl", "a/x/y/b.pkl"));
+    }
+
+    #[test]
+    fn double_star_slash_keeps_literal_separator() {
+        assert!(!glob_matches("**/foo.pkl", "foo.pkl"));
+        assert!(glob_matches("**/foo.pkl", "config/foo.pkl"));
+    }
+
+    #[test]
+    fn star_stays_in_one_directory_segment() {
+        assert!(glob_matches("*/*.pkl", "config/foo.pkl"));
+        assert!(!glob_matches("*/*.pkl", "nested/config/foo.pkl"));
+    }
+
+    #[test]
+    fn non_recursive_patterns_have_bounded_depth() {
+        assert_eq!(max_glob_depth("*.pkl"), Some(0));
+        assert_eq!(max_glob_depth("*/*.pkl"), Some(1));
+        assert_eq!(max_glob_depth("**.pkl"), None);
+    }
 }
 
 fn local_module_path(current_path: &Path, uri: &str) -> Option<PathBuf> {

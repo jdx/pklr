@@ -1176,6 +1176,28 @@ value = Index["linked.pkl"].value
     assert_eq!(val["value"], "foo");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn import_glob_skips_broken_symlinks() {
+    let temp = TestTempDir::new("pklr_test_import_glob_broken_symlinks");
+    let dir = temp.path();
+    std::fs::write(dir.join("good.pkl"), r#"value = "good""#).unwrap();
+    std::os::unix::fs::symlink(dir.join("missing.pkl"), dir.join("broken.pkl")).unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import* "*.pkl" as Index
+value = Index["good.pkl"].value
+has_broken = Index.containsKey("broken.pkl")
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    assert_eq!(val["value"], "good");
+    assert_eq!(val["has_broken"], false);
+}
+
 #[tokio::test]
 async fn unused_import_is_not_evaluated() {
     let temp = TestTempDir::new("pklr_test_unused_import");
