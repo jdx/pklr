@@ -1155,6 +1155,28 @@ has_nested = Index.containsKey("nested/config/bar.pkl")
     assert_eq!(val["has_nested"], false);
 }
 
+#[tokio::test]
+async fn import_glob_double_star_slash_matches_root_and_nested_files() {
+    let temp = TestTempDir::new("pklr_test_import_glob_double_star_slash");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("nested")).unwrap();
+    std::fs::write(dir.join("foo.pkl"), r#"value = "root""#).unwrap();
+    std::fs::write(dir.join("nested/foo.pkl"), r#"value = "nested""#).unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import* "**/foo.pkl" as Index
+root_value = Index["foo.pkl"].value
+nested_value = Index["nested/foo.pkl"].value
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    assert_eq!(val["root_value"], "root");
+    assert_eq!(val["nested_value"], "nested");
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn import_glob_matches_symlinked_files() {
@@ -1174,6 +1196,28 @@ value = Index["linked.pkl"].value
 
     let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
     assert_eq!(val["value"], "foo");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn import_glob_skips_broken_symlinks() {
+    let temp = TestTempDir::new("pklr_test_import_glob_broken_symlinks");
+    let dir = temp.path();
+    std::fs::write(dir.join("good.pkl"), r#"value = "good""#).unwrap();
+    std::os::unix::fs::symlink(dir.join("missing.pkl"), dir.join("broken.pkl")).unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import* "*.pkl" as Index
+value = Index["good.pkl"].value
+has_broken = Index.containsKey("broken.pkl")
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    assert_eq!(val["value"], "good");
+    assert_eq!(val["has_broken"], false);
 }
 
 #[tokio::test]
