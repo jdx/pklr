@@ -3565,12 +3565,12 @@ fn resolve_package_uri(uri: &str) -> Result<PackageSource> {
         && let Some((package_ver, fragment)) = rest.split_once('#')
         && let Some((package, version)) = package_ver.split_once('@')
     {
-        let file_path = fragment.strip_prefix('/').unwrap_or(fragment);
+        let file_path = sanitize_package_entry(fragment.strip_prefix('/').unwrap_or(fragment))?;
         return Ok(PackageSource::Zip(
             format!(
                 "https://github.com/apple/pkl-pantry/releases/download/{package}@{version}/{package}@{version}.zip"
             ),
-            file_path.to_string(),
+            file_path,
         ));
     }
     // Format 3: package://github.com/owner/repo/releases/download/v1.0/name@1.0#/path.pkl
