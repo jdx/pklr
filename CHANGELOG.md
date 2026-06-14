@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0](https://github.com/jdx/pklr/compare/v1.0.6...v1.1.0) - 2026-06-14
+
+### Added
+
+- support package://pkl.pkl-lang.org/pkl-pantry ([#108](https://github.com/jdx/pklr/pull/108))
+
 ## [1.0.6](https://github.com/jdx/pklr/compare/v1.0.5...v1.0.6) - 2026-06-11
 
 ### Fixed
