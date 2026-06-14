@@ -3559,7 +3559,21 @@ fn resolve_package_uri(uri: &str) -> Result<PackageSource> {
             "https://github.com/{repo}/releases/download/{version}/{file_path}"
         )));
     }
-    // Format 2: package://github.com/owner/repo/releases/download/v1.0/name@1.0#/path.pkl
+    // Format 2: package://pkg.pkl-lang.org/pkl-pantry/package@version#/path.pkl
+    // These are under https://github.com/apple/pkl-pantry's release named `package@version`
+    if let Some(rest) = uri.strip_prefix("package://pkg.pkl-lang.org/pkl-pantry/")
+        && let Some((package_ver, fragment)) = rest.split_once('#')
+        && let Some((package, version)) = package_ver.split_once('@')
+    {
+        let file_path = sanitize_package_entry(fragment.strip_prefix('/').unwrap_or(fragment))?;
+        return Ok(PackageSource::Zip(
+            format!(
+                "https://github.com/apple/pkl-pantry/releases/download/{package}@{version}/{package}@{version}.zip"
+            ),
+            file_path,
+        ));
+    }
+    // Format 3: package://github.com/owner/repo/releases/download/v1.0/name@1.0#/path.pkl
     // These are zip archives; the fragment is a path within the zip
     if let Some(rest) = uri.strip_prefix("package://github.com/")
         && let Some((base, fragment)) = rest.split_once('#')
@@ -3568,7 +3582,7 @@ fn resolve_package_uri(uri: &str) -> Result<PackageSource> {
         let zip_url = format!("https://github.com/{base}.zip");
         return Ok(PackageSource::Zip(zip_url, file_path));
     }
-    // Format 3: package://host/path/name@version#/path.pkl
+    // Format 4: package://host/path/name@version#/path.pkl
     // Generic package hosts are zip archives and can be redirected with
     // HTTP rewrite rules after resolving to https://host/path/name@version.zip.
     if let Some(rest) = uri.strip_prefix("package://")
