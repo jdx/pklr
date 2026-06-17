@@ -4368,6 +4368,36 @@ values = new Mapping<String, String> {
 }
 
 #[test]
+fn mapping_local_lambda_is_visible_to_sibling_local() {
+    // A lambda local must be in scope for a later (non-lambda) local that uses it.
+    let json = eval(
+        r#"
+values = new Mapping<String, Int> {
+    local f = (k, v) -> v * 2
+    local doubled = (new Mapping<String, Int> { ["a"] = 1 }).toMap().mapValues(f).toMapping()
+    ["out"] = doubled["a"]
+}
+"#,
+    );
+    assert_eq!(json["values"]["out"], 2);
+}
+
+#[test]
+fn mapping_local_lambda_is_visible_to_sibling_local_untyped() {
+    // Same, for an untyped `new Mapping {}` body (different eval path).
+    let json = eval(
+        r#"
+values = new Mapping {
+    local f = (x) -> x + 1
+    local g = f.apply(10)
+    ["out"] = g
+}
+"#,
+    );
+    assert_eq!(json["values"]["out"], 11);
+}
+
+#[test]
 fn mapping_local_body_is_visible_to_dynamic_entries() {
     let json = eval(
         r#"
