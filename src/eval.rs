@@ -2583,6 +2583,23 @@ impl Evaluator {
             return Ok(merge_values(base, overlay));
         }
 
+        // Logical `&&` and `||` short-circuit: the right operand must not be
+        // evaluated when the left already determines the result (e.g.
+        // `x is Foo && x.fooField` must not touch `fooField` when `x` is not a
+        // `Foo`).
+        if matches!(op, BinOp::And | BinOp::Or) {
+            let left_truthy = is_truthy(&self.eval_expr(left, scope, depth + 1).await?);
+            let short_circuit = match op {
+                BinOp::And => !left_truthy,
+                _ => left_truthy,
+            };
+            if short_circuit {
+                return Ok(Value::Bool(left_truthy));
+            }
+            let right_truthy = is_truthy(&self.eval_expr(right, scope, depth + 1).await?);
+            return Ok(Value::Bool(right_truthy));
+        }
+
         let l = self.eval_expr(left, scope, depth + 1).await?;
         let r = self.eval_expr(right, scope, depth + 1).await?;
         match op {

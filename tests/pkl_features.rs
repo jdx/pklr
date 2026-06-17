@@ -517,6 +517,31 @@ fn logical_not() {
     assert_eq!(json["x"], true);
 }
 
+#[test]
+fn logical_and_short_circuits() {
+    // The right operand must not be evaluated when the left is false:
+    // `missing.field` would error if it were touched.
+    let json = eval(
+        r#"
+local v = new Dynamic { other = 1 }
+x = if (false && v.missing) "y" else "n"
+"#,
+    );
+    assert_eq!(json["x"], "n");
+}
+
+#[test]
+fn logical_or_short_circuits() {
+    // The right operand must not be evaluated when the left is true.
+    let json = eval(
+        r#"
+local v = new Dynamic { other = 1 }
+x = if (true || v.missing) "y" else "n"
+"#,
+    );
+    assert_eq!(json["x"], "y");
+}
+
 // ============================================================
 // Null coalescing
 // ============================================================
