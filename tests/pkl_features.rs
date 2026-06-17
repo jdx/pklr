@@ -1706,7 +1706,6 @@ all_positive = items.every((n) -> n > 0)
 // ============================================================
 
 #[test]
-#[ignore = "Map/Mapping does not yet implement filter()"]
 fn map_filter() {
     let json = eval(
         r#"
@@ -1724,7 +1723,6 @@ x = items.toMap().filter((k, v) -> v > 1).toMapping()
 }
 
 #[test]
-#[ignore = "Map/Mapping does not yet implement filter()"]
 fn map_filter_then_map_values_chain() {
     // toMap().filter().mapValues().toMapping() is a common transformation chain.
     let json = eval(
