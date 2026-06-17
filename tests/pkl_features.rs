@@ -1701,6 +1701,52 @@ all_positive = items.every((n) -> n > 0)
     assert_eq!(json["all_positive"], true);
 }
 
+// ============================================================
+// Higher-order methods on Map / Mapping
+// ============================================================
+
+#[test]
+#[ignore = "Map/Mapping does not yet implement filter()"]
+fn map_filter() {
+    let json = eval(
+        r#"
+local items = new Mapping<String, Int> {
+    ["a"] = 1
+    ["b"] = 2
+    ["c"] = 3
+}
+x = items.toMap().filter((k, v) -> v > 1).toMapping()
+"#,
+    );
+    assert_eq!(json["x"]["b"], 2);
+    assert_eq!(json["x"]["c"], 3);
+    assert!(json["x"].get("a").is_none());
+}
+
+#[test]
+#[ignore = "Map/Mapping does not yet implement filter()"]
+fn map_filter_then_map_values_chain() {
+    // toMap().filter().mapValues().toMapping() is a common transformation chain.
+    let json = eval(
+        r#"
+local items = new Mapping<String, Int> {
+    ["a"] = 1
+    ["b"] = 2
+    ["c"] = 3
+}
+x =
+    items
+        .toMap()
+        .filter((k, v) -> v > 1)
+        .mapValues((k, v) -> v * 10)
+        .toMapping()
+"#,
+    );
+    assert_eq!(json["x"]["b"], 20);
+    assert_eq!(json["x"]["c"], 30);
+    assert!(json["x"].get("a").is_none());
+}
+
 #[test]
 fn object_amendment_with_named_property() {
     let json = eval(
