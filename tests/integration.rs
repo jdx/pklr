@@ -340,6 +340,119 @@ hooks {
     assert!(result.is_ok());
 }
 
+/// Minimal, hermetic HTTP/1.1 server for tests. Serves a fixed set of
+/// `path -> body` responses on a background thread and returns its base URL
+/// (e.g. `http://127.0.0.1:PORT`). The thread runs for the lifetime of the
+/// test process; each request gets `Connection: close` so the client does not
+/// reuse connections.
+fn spawn_test_http_server(routes: Vec<(&'static str, &'static str)>) -> String {
+    use std::collections::HashMap;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let routes: HashMap<String, String> = routes
+        .into_iter()
+        .map(|(p, b)| (p.to_string(), b.to_string()))
+        .collect();
+
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = match stream {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request_line = String::new();
+            if reader.read_line(&mut request_line).is_err() {
+                continue;
+            }
+            // "GET /path HTTP/1.1"
+            let path = request_line
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or("/")
+                .to_string();
+            // Drain remaining request headers.
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) if line == "\r\n" || line == "\n" => break,
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+            let response = match routes.get(&path) {
+                Some(body) => format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                ),
+                None => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_string(),
+            };
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+
+    format!("http://127.0.0.1:{port}")
+}
+
+/// A module loaded over HTTP that itself uses a relative `import` should
+/// resolve that import against its own (HTTP) URL, not the local filesystem.
+#[tokio::test]
+#[ignore = "relative imports inside an HTTP-loaded module are not resolved against the base URL"]
+async fn http_module_resolves_relative_import() {
+    let base = spawn_test_http_server(vec![
+        (
+            "/cfg/Main.pkl",
+            "import \"../Lib.pkl\"\nvalue = Lib.value\n",
+        ),
+        ("/Lib.pkl", "value = 42\n"),
+    ]);
+    let src = format!("import \"{base}/cfg/Main.pkl\" as Main\nresult = Main.value\n");
+
+    let mut evaluator = pklr::Evaluator::new();
+    let result = evaluator
+        .eval_source(&src, std::path::Path::new("entry.pkl"))
+        .await;
+    if let Err(ref e) = result {
+        eprintln!("error: {e}");
+    }
+    let json = result.unwrap().to_json();
+    assert_eq!(json["result"], 42);
+}
+
+/// A module loaded over HTTP that itself uses a relative `amends` should
+/// resolve that base against its own (HTTP) URL. With the relative base
+/// unresolved, properties inherited through it (here `version`) go missing.
+#[tokio::test]
+#[ignore = "relative amends inside an HTTP-loaded module are not resolved against the base URL"]
+async fn http_module_resolves_relative_amends() {
+    let base = spawn_test_http_server(vec![
+        (
+            "/cfg/Main.pkl",
+            "amends \"../Base.pkl\"\nname = \"override\"\n",
+        ),
+        ("/Base.pkl", "name = \"base\"\nversion = 1\n"),
+    ]);
+    let src = format!("amends \"{base}/cfg/Main.pkl\"\n");
+
+    let mut evaluator = pklr::Evaluator::new();
+    let result = evaluator
+        .eval_source(&src, std::path::Path::new("entry.pkl"))
+        .await;
+    if let Err(ref e) = result {
+        eprintln!("error: {e}");
+    }
+    let json = result.unwrap().to_json();
+    assert_eq!(json["name"], "override");
+    assert_eq!(json["version"], 1);
+}
+
 #[tokio::test]
 async fn test_step_amend_minimal() {
     // Test: does amending a class with many properties hang?
