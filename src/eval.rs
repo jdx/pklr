@@ -2457,6 +2457,21 @@ impl Evaluator {
                 }
                 Ok(Some(Value::Object(Arc::new(result), None)))
             }
+            (Value::Object(map, _), "filter") => {
+                let lambda = args
+                    .first()
+                    .ok_or_else(|| Error::Eval("filter requires a function".into()))?;
+                let mut result = IndexMap::new();
+                for (k, v) in map.iter() {
+                    let keep = self
+                        .invoke_lambda(lambda, &[Value::String(k.clone()), v.clone()], depth)
+                        .await?;
+                    if is_truthy(&keep) {
+                        result.insert(k.clone(), v.clone());
+                    }
+                }
+                Ok(Some(Value::Object(Arc::new(result), None)))
+            }
             (Value::Object(..), "toList") => Ok(Some(obj.clone())),
             (Value::Object(map, _), "toDynamic") => Ok(Some(Value::Object(map.clone(), None))),
 
