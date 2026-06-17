@@ -3832,6 +3832,35 @@ myStep = new Step {
 }
 
 #[test]
+fn converter_applies_to_amended_instance() {
+    // Amending an instance preserves its class identity, so the class-keyed
+    // converter still matches the amended value.
+    let json = eval_with_converters(
+        r#"
+class Step {
+    check: String = ""
+}
+
+output {
+    renderer {
+        converters {
+            [Step] = (s) -> new Dynamic {
+                _type = "step"
+                ...s.toMap().toDynamic()
+            }
+        }
+    }
+}
+
+local base = new Step { check = "a" }
+myStep = (base) { check = "b" }
+"#,
+    );
+    assert_eq!(json["myStep"]["_type"], "step");
+    assert_eq!(json["myStep"]["check"], "b");
+}
+
+#[test]
 fn converter_coerces_values() {
     let json = eval_with_converters(
         r#"

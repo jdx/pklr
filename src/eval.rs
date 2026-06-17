@@ -1091,9 +1091,17 @@ impl Evaluator {
                 }
                 let base_entries = src.entries.clone();
                 let base_scope = src.scope.clone();
+                let base_type_name = src.type_name.clone();
                 return Ok(Some(
-                    self.eval_amended_object(&base_entries, &base_scope, body, scope, depth)
-                        .await?,
+                    self.eval_amended_object(
+                        &base_entries,
+                        &base_scope,
+                        body,
+                        scope,
+                        depth,
+                        base_type_name,
+                    )
+                    .await?,
                 ));
             }
             let val = self.eval_entries(body, scope, depth).await?;
@@ -1223,6 +1231,7 @@ impl Evaluator {
                                 body,
                                 &child_scope,
                                 depth,
+                                src.type_name.clone(),
                             )
                             .await?;
                         // Propagate the template's type_name so converters can match.
@@ -1539,6 +1548,7 @@ impl Evaluator {
         overlay_entries: &[Entry],
         current_scope: &Scope,
         depth: usize,
+        base_type_name: Option<String>,
     ) -> Result<Value> {
         // Build merged entry list preserving base order.
         // Overridden properties are replaced in-place so that later
@@ -1616,7 +1626,31 @@ impl Evaluator {
 
         // Evaluate the merged entries (eval_entries handles locals, classes,
         // and evaluates properties in order with each added to scope)
-        self.eval_entries(&merged, &eval_scope, depth + 1).await
+        let result = self.eval_entries(&merged, &eval_scope, depth + 1).await?;
+        // Amending an object preserves its class identity (so `is Foo` and
+        // output converters still match). eval_entries does not know the base
+        // type, so re-tag the result here.
+        match (base_type_name, result) {
+            (Some(tn), Value::Object(map, src)) => {
+                let new_src = match src {
+                    Some(s) => {
+                        let mut s = (*s).clone();
+                        s.type_name = Some(tn);
+                        s
+                    }
+                    None => ObjectSource {
+                        entries: Vec::new(),
+                        scope: IndexMap::new(),
+                        is_open: true,
+                        type_name: Some(tn),
+                        mapping_value_types: Vec::new(),
+                        deprecated: IndexMap::new(),
+                    },
+                };
+                Ok(Value::Object(map, Some(Arc::new(new_src))))
+            }
+            (_, other) => Ok(other),
+        }
     }
 
     #[async_recursion(?Send)]
@@ -1836,6 +1870,7 @@ impl Evaluator {
                                     entries,
                                     scope,
                                     depth,
+                                    base_src.type_name.clone(),
                                 )
                                 .await?;
                             // Preserve the base class's is_open flag and tag the
@@ -2575,6 +2610,7 @@ impl Evaluator {
                         overlay_entries,
                         scope,
                         depth,
+                        base_src.type_name.clone(),
                     )
                     .await;
             }
@@ -2825,6 +2861,7 @@ impl Evaluator {
                                         &overlay_entries,
                                         &entry_scope,
                                         depth,
+                                        src.type_name.clone(),
                                     )
                                     .await?
                                 } else if explicit_default.is_some() && type_default.is_some() {
@@ -2843,6 +2880,7 @@ impl Evaluator {
                                         body,
                                         &entry_scope,
                                         depth,
+                                        src.type_name.clone(),
                                     )
                                     .await?
                                 };
@@ -3852,7 +3890,7 @@ fn value_cmp(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
 
 fn merge_values(base: Value, overlay: Value) -> Value {
     match (base, overlay) {
-        (Value::Object(mut b, base_src), Value::Object(o, _)) => {
+        (Value::Object(mut b, base_src), Value::Object(o, overlay_src)) => {
             let b_map = Arc::make_mut(&mut b);
             for (k, v) in o.iter() {
                 if let Some(existing) = b_map.shift_remove(k) {
@@ -3861,7 +3899,20 @@ fn merge_values(base: Value, overlay: Value) -> Value {
                     b_map.insert(k.clone(), v.clone());
                 }
             }
-            Value::Object(b, base_src)
+            // Keep the base's source (entries/scope for late binding), but when it
+            // carries no class identity, inherit the overlay's. This preserves a
+            // concrete value's type when it is merged onto a typeless default
+            // template (e.g. a union-typed Mapping value).
+            let src = match (base_src, overlay_src) {
+                (Some(b), Some(o)) if b.type_name.is_none() && o.type_name.is_some() => {
+                    let mut nb = (*b).clone();
+                    nb.type_name = o.type_name.clone();
+                    Some(Arc::new(nb))
+                }
+                (Some(b), _) => Some(b),
+                (None, o) => o,
+            };
+            Value::Object(b, src)
         }
         (_, overlay) => overlay,
     }
