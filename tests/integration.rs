@@ -404,7 +404,6 @@ fn spawn_test_http_server(routes: Vec<(&'static str, &'static str)>) -> String {
 /// A module loaded over HTTP that itself uses a relative `import` should
 /// resolve that import against its own (HTTP) URL, not the local filesystem.
 #[tokio::test]
-#[ignore = "relative imports inside an HTTP-loaded module are not resolved against the base URL"]
 async fn http_module_resolves_relative_import() {
     let base = spawn_test_http_server(vec![
         (
@@ -430,7 +429,6 @@ async fn http_module_resolves_relative_import() {
 /// resolve that base against its own (HTTP) URL. With the relative base
 /// unresolved, properties inherited through it (here `version`) go missing.
 #[tokio::test]
-#[ignore = "relative amends inside an HTTP-loaded module are not resolved against the base URL"]
 async fn http_module_resolves_relative_amends() {
     let base = spawn_test_http_server(vec![
         (
