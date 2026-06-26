@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1](https://github.com/jdx/pklr/compare/v1.1.0...v1.1.1) - 2026-06-26
+
+### Fixed
+
+- *(eval)* support filter() on Map/Mapping ([#111](https://github.com/jdx/pklr/pull/111))
+- *(eval)* short-circuit && and || ([#113](https://github.com/jdx/pklr/pull/113))
+
+### Other
+
+- *(deps)* lock file maintenance lockfile maintenance ([#118](https://github.com/jdx/pklr/pull/118))
+
 ## [1.1.0](https://github.com/jdx/pklr/compare/v1.0.6...v1.1.0) - 2026-06-14
 
 ### Added
