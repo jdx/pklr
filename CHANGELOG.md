@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1](https://github.com/jdx/pklr/compare/v1.1.0...v1.1.1) - 2026-07-01
+
+### Fixed
+
+- *(eval)* track import generic param fields ([#124](https://github.com/jdx/pklr/pull/124))
+- *(eval)* resolve relative imports/amends against a remote base URL ([#112](https://github.com/jdx/pklr/pull/112))
+- *(eval)* bind local lambdas in declaration order in object bodies ([#114](https://github.com/jdx/pklr/pull/114))
+- *(eval)* preserve class identity (type_name) through amendment ([#115](https://github.com/jdx/pklr/pull/115))
+- *(eval)* avoid evaluating unused import fields ([#123](https://github.com/jdx/pklr/pull/123))
+- *(eval)* support filter() on Map/Mapping ([#111](https://github.com/jdx/pklr/pull/111))
+- *(eval)* short-circuit && and || ([#113](https://github.com/jdx/pklr/pull/113))
+
+### Other
+
+- *(deps)* lock file maintenance lockfile maintenance ([#118](https://github.com/jdx/pklr/pull/118))
+
 ## [1.1.0](https://github.com/jdx/pklr/compare/v1.0.6...v1.1.0) - 2026-06-14
 
 ### Added
