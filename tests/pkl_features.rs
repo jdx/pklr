@@ -1672,6 +1672,83 @@ result = Dep.wanted
     assert_eq!(val["result"], "ok");
 }
 
+#[tokio::test]
+async fn partial_import_treats_object_method_receiver_as_whole_import() {
+    let temp = TestTempDir::new("pklr_test_partial_import_object_method");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("dep.pkl"),
+        r#"
+first = "one"
+second = "two"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "dep.pkl" as Dep
+result = Dep.toMap().toMapping()
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    assert_eq!(val["result"]["first"], "one");
+    assert_eq!(val["result"]["second"], "two");
+}
+
+#[tokio::test]
+async fn partial_import_treats_object_map_values_receiver_as_whole_import() {
+    let temp = TestTempDir::new("pklr_test_partial_import_map_values");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("dep.pkl"),
+        r#"
+first = 1
+second = 2
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "dep.pkl" as Dep
+result = Dep.mapValues((k, v) -> v + 1).toMapping()
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    assert_eq!(val["result"]["first"], 2);
+    assert_eq!(val["result"]["second"], 3);
+}
+
+#[tokio::test]
+async fn partial_import_keeps_user_defined_method_names_field_scoped() {
+    let temp = TestTempDir::new("pklr_test_partial_import_user_method");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("dep.pkl"),
+        r#"
+map = (n) -> n + 1
+broken = missing.field
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "dep.pkl" as Dep
+result = Dep.map(41)
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    assert_eq!(val["result"], 42);
+}
+
 #[test]
 fn object_entries_can_be_separated_by_semicolons() {
     let json = eval(
