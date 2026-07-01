@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.2](https://github.com/jdx/pklr/compare/v1.1.1...v1.1.2) - 2026-07-01
+
+### Fixed
+
+- *(eval)* treat object methods as whole import uses ([#126](https://github.com/jdx/pklr/pull/126))
+
 ## [1.1.1](https://github.com/jdx/pklr/compare/v1.1.0...v1.1.1) - 2026-07-01
 
 ### Fixed
