@@ -1471,6 +1471,45 @@ result = prettier.prettier
     assert_eq!(val["result"], "ok");
 }
 
+#[tokio::test]
+async fn unused_import_glob_field_does_not_evaluate() {
+    let temp = TestTempDir::new("pklr_test_unused_import_glob_field");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("builtins")).unwrap();
+    std::fs::write(
+        dir.join("Builtins.pkl"),
+        r#"
+import* "builtins/*.pkl" as Builtins
+prettier = Builtins["builtins/prettier.pkl"].prettier
+staticcheck = Builtins["builtins/staticcheck.pkl"].staticcheck
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("builtins").join("prettier.pkl"),
+        r#"prettier = "ok""#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("builtins").join("staticcheck.pkl"),
+        r#"
+static_check = "misspelled"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "Builtins.pkl"
+result = Builtins.prettier
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    assert_eq!(val["result"], "ok");
+}
+
 #[test]
 fn object_entries_can_be_separated_by_semicolons() {
     let json = eval(
