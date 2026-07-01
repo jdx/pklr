@@ -1611,6 +1611,41 @@ enabled = steps["a"].enabled
 }
 
 #[tokio::test]
+async fn partial_import_includes_generic_param_fields() {
+    let temp = TestTempDir::new("pklr_test_partial_import_generic_param");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("types.pkl"),
+        r#"
+Step = new Dynamic {
+    enabled = true
+}
+Other = "other"
+broken = missing.field
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "types.pkl" as Types
+other = Types.Other
+steps = new Mapping<String, Types.Step> {
+    ["a"] {
+        name = "alpha"
+    }
+}
+enabled = steps["a"].enabled
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    assert_eq!(val["other"], "other");
+    assert_eq!(val["enabled"], true);
+}
+
+#[tokio::test]
 async fn partial_import_ignores_imports_used_only_by_skipped_properties() {
     let temp = TestTempDir::new("pklr_test_partial_import_skipped_import");
     let dir = temp.path();

@@ -3564,7 +3564,7 @@ fn collect_expr_import_field_uses(
                 }
             }
             for param in generic_params {
-                record_whole_import_use(uses, shadows, param);
+                record_type_name_import_use(uses, shadows, param);
             }
             collect_entry_import_field_uses(entries, uses, shadows);
         }
