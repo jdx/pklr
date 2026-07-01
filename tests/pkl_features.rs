@@ -517,6 +517,31 @@ fn logical_not() {
     assert_eq!(json["x"], true);
 }
 
+#[test]
+fn logical_and_short_circuits() {
+    // The right operand must not be evaluated when the left is false:
+    // `missing.field` would error if it were touched.
+    let json = eval(
+        r#"
+local v = new Dynamic { other = 1 }
+x = if (false && v.missing) "y" else "n"
+"#,
+    );
+    assert_eq!(json["x"], "n");
+}
+
+#[test]
+fn logical_or_short_circuits() {
+    // The right operand must not be evaluated when the left is true.
+    let json = eval(
+        r#"
+local v = new Dynamic { other = 1 }
+x = if (true || v.missing) "y" else "n"
+"#,
+    );
+    assert_eq!(json["x"], "y");
+}
+
 // ============================================================
 // Null coalescing
 // ============================================================
@@ -1090,6 +1115,41 @@ async fn circular_import_does_not_loop() {
     assert_eq!(json["b_ref"], "from_b");
 }
 
+#[tokio::test]
+async fn partial_imports_keep_circular_placeholder() {
+    let temp = TestTempDir::new("pklr_test_partial_import_cycle");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("a.pkl"),
+        r#"
+import "b.pkl"
+a_value = "from_a"
+b_ref = b.b_value
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("b.pkl"),
+        r#"
+import "a.pkl"
+b_value = "from_b"
+a_ref = a.a_value
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "a.pkl"
+result = a.a_value
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    assert_eq!(val["result"], "from_a");
+}
+
 // ============================================================
 // Glob imports (import*)
 // ============================================================
@@ -1446,6 +1506,137 @@ result = prettier.prettier
     assert_eq!(val["result"], "ok");
 }
 
+#[tokio::test]
+async fn unused_import_glob_field_does_not_evaluate() {
+    let temp = TestTempDir::new("pklr_test_unused_import_glob_field");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("builtins")).unwrap();
+    std::fs::write(
+        dir.join("Builtins.pkl"),
+        r#"
+import* "builtins/*.pkl" as Builtins
+prettier = Builtins["builtins/prettier.pkl"].prettier
+staticcheck = Builtins["builtins/staticcheck.pkl"].staticcheck
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("builtins").join("prettier.pkl"),
+        r#"prettier = "ok""#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("builtins").join("staticcheck.pkl"),
+        r#"
+static_check = "misspelled"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "Builtins.pkl"
+result = Builtins.prettier
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    assert_eq!(val["result"], "ok");
+}
+
+#[tokio::test]
+async fn partial_import_expands_this_and_module_dependencies() {
+    let temp = TestTempDir::new("pklr_test_partial_import_this_deps");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("dep.pkl"),
+        r#"
+x = 41
+y = this.x + 1
+z = module.x + 2
+broken = missing.field
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "dep.pkl" as Dep
+y = Dep.y
+z = Dep.z
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    assert_eq!(val["y"], 42);
+    assert_eq!(val["z"], 43);
+}
+
+#[tokio::test]
+async fn partial_import_includes_type_annotation_fields() {
+    let temp = TestTempDir::new("pklr_test_partial_import_type_ann");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("types.pkl"),
+        r#"
+Step = new Dynamic {
+    enabled = true
+}
+Other = "other"
+broken = missing.field
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "types.pkl" as Types
+other = Types.Other
+steps: Mapping<String, Types.Step> = new Mapping {}
+steps {
+    ["a"] {
+        name = "alpha"
+    }
+}
+enabled = steps["a"].enabled
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    assert_eq!(val["other"], "other");
+    assert_eq!(val["enabled"], true);
+}
+
+#[tokio::test]
+async fn partial_import_ignores_imports_used_only_by_skipped_properties() {
+    let temp = TestTempDir::new("pklr_test_partial_import_skipped_import");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("dep.pkl"),
+        r#"
+import "broken.pkl" as Broken
+wanted = "ok"
+unused = Broken.value
+"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("broken.pkl"), r#"value = missing.field"#).unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "dep.pkl" as Dep
+result = Dep.wanted
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    assert_eq!(val["result"], "ok");
+}
+
 #[test]
 fn object_entries_can_be_separated_by_semicolons() {
     let json = eval(
@@ -1699,6 +1890,50 @@ all_positive = items.every((n) -> n > 0)
     );
     assert_eq!(json["has_even"], true);
     assert_eq!(json["all_positive"], true);
+}
+
+// ============================================================
+// Higher-order methods on Map / Mapping
+// ============================================================
+
+#[test]
+fn map_filter() {
+    let json = eval(
+        r#"
+local items = new Mapping<String, Int> {
+    ["a"] = 1
+    ["b"] = 2
+    ["c"] = 3
+}
+x = items.toMap().filter((k, v) -> v > 1).toMapping()
+"#,
+    );
+    assert_eq!(json["x"]["b"], 2);
+    assert_eq!(json["x"]["c"], 3);
+    assert!(json["x"].get("a").is_none());
+}
+
+#[test]
+fn map_filter_then_map_values_chain() {
+    // toMap().filter().mapValues().toMapping() is a common transformation chain.
+    let json = eval(
+        r#"
+local items = new Mapping<String, Int> {
+    ["a"] = 1
+    ["b"] = 2
+    ["c"] = 3
+}
+x =
+    items
+        .toMap()
+        .filter((k, v) -> v > 1)
+        .mapValues((k, v) -> v * 10)
+        .toMapping()
+"#,
+    );
+    assert_eq!(json["x"]["b"], 20);
+    assert_eq!(json["x"]["c"], 30);
+    assert!(json["x"].get("a").is_none());
 }
 
 #[test]
