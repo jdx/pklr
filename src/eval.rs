@@ -487,15 +487,17 @@ impl Evaluator {
                 scope.set_type_alias(key, ty);
             }
         }
-        let mut referenced_imports = referenced_roots(&module.body);
+        let requested_output_fields = requested_fields
+            .as_ref()
+            .map(|fields| expand_requested_fields(&module.body, fields));
+        let analysis_entries =
+            analysis_entries_for_requested_fields(&module.body, requested_output_fields.as_ref());
+        let mut referenced_imports = referenced_roots(&analysis_entries);
         referenced_imports.extend(
             self.inherited_reference_roots(module, path, depth + 1)
                 .await?,
         );
-        let import_field_uses = import_field_uses(&module.body);
-        let requested_output_fields = requested_fields
-            .as_ref()
-            .map(|fields| expand_requested_fields(&module.body, fields));
+        let import_field_uses = import_field_uses(&analysis_entries);
 
         let inherited_local_paths: Vec<_> = module
             .amends
@@ -3383,6 +3385,34 @@ fn parse_file(path: &Path) -> Result<Module> {
     let name = path.display().to_string();
     let tokens = lexer::lex_named(&source, &name)?;
     parser::parse_named(&tokens, &source, &name)
+}
+
+fn analysis_entries_for_requested_fields(
+    entries: &[Entry],
+    requested_fields: Option<&HashSet<String>>,
+) -> Vec<Entry> {
+    let Some(requested_fields) = requested_fields else {
+        return entries.to_vec();
+    };
+    entries
+        .iter()
+        .filter(|entry| match entry {
+            Entry::Property(prop) => {
+                has_modifier(&prop.modifiers, Modifier::Local)
+                    || requested_fields.contains(&prop.name)
+            }
+            // These entries are still evaluated outside the property output
+            // filter, so their imports must remain visible to the analysis.
+            Entry::DynProperty(..)
+            | Entry::Spread(_)
+            | Entry::ForGenerator(_)
+            | Entry::WhenGenerator(_)
+            | Entry::ClassDef(..)
+            | Entry::TypeAlias(..) => true,
+            Entry::Elem(_) => false,
+        })
+        .cloned()
+        .collect()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

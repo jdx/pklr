@@ -1610,6 +1610,33 @@ enabled = steps["a"].enabled
     assert_eq!(val["enabled"], true);
 }
 
+#[tokio::test]
+async fn partial_import_ignores_imports_used_only_by_skipped_properties() {
+    let temp = TestTempDir::new("pklr_test_partial_import_skipped_import");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("dep.pkl"),
+        r#"
+import "broken.pkl" as Broken
+wanted = "ok"
+unused = Broken.value
+"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("broken.pkl"), r#"value = missing.field"#).unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "dep.pkl" as Dep
+result = Dep.wanted
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    assert_eq!(val["result"], "ok");
+}
+
 #[test]
 fn object_entries_can_be_separated_by_semicolons() {
     let json = eval(
