@@ -375,6 +375,29 @@ impl Evaluator {
         if requested_fields.is_none() {
             return self.eval_file(path, depth).await;
         }
+        let canonical = path
+            .canonicalize()
+            .map_err(|e| Error::Io(path.to_path_buf(), e))?;
+        if let Some(cached) = self.import_cache.get(&canonical) {
+            return Ok(cached.clone());
+        }
+        self.import_cache.insert(
+            canonical.clone(),
+            Value::Object(Arc::new(IndexMap::new()), None),
+        );
+        let result = self
+            .eval_file_requested_fields_inner(path, depth, requested_fields)
+            .await;
+        self.import_cache.remove(&canonical);
+        result
+    }
+
+    async fn eval_file_requested_fields_inner(
+        &mut self,
+        path: &Path,
+        depth: usize,
+        requested_fields: Option<HashSet<String>>,
+    ) -> Result<Value> {
         let source = std::fs::read_to_string(path).map_err(|e| Error::Io(path.to_path_buf(), e))?;
         let name = path.display().to_string();
         let tokens = lexer::lex_named(&source, &name)?;
@@ -3561,9 +3584,11 @@ fn expand_requested_fields(entries: &[Entry], requested: &HashSet<String>) -> Ha
             let shadows = declared_entry_roots(entries);
             if let Some(expr) = &prop.value {
                 collect_expr_refs(expr, &mut refs, &shadows);
+                collect_sibling_field_refs_expr(expr, &mut refs, true);
             }
             if let Some(body) = &prop.body {
                 collect_entry_refs(body, &mut refs, &shadows);
+                collect_sibling_field_refs_entries(body, &mut refs);
             }
             for dep in refs {
                 if property_names.contains(&dep) && expanded.insert(dep) {
@@ -3573,6 +3598,111 @@ fn expand_requested_fields(entries: &[Entry], requested: &HashSet<String>) -> Ha
         }
     }
     expanded
+}
+
+fn collect_sibling_field_refs_entries(entries: &[Entry], refs: &mut HashSet<String>) {
+    for entry in entries {
+        match entry {
+            Entry::Property(prop) => {
+                if let Some(expr) = &prop.value {
+                    collect_sibling_field_refs_expr(expr, refs, false);
+                }
+                if let Some(body) = &prop.body {
+                    collect_sibling_field_refs_entries(body, refs);
+                }
+            }
+            Entry::DynProperty(key, value) => {
+                collect_sibling_field_refs_expr(key, refs, false);
+                collect_sibling_field_refs_expr(value, refs, false);
+            }
+            Entry::ForGenerator(fgen) => {
+                collect_sibling_field_refs_expr(&fgen.collection, refs, false);
+                collect_sibling_field_refs_entries(&fgen.body, refs);
+            }
+            Entry::WhenGenerator(wgen) => {
+                collect_sibling_field_refs_expr(&wgen.condition, refs, false);
+                collect_sibling_field_refs_entries(&wgen.body, refs);
+                if let Some(else_body) = &wgen.else_body {
+                    collect_sibling_field_refs_entries(else_body, refs);
+                }
+            }
+            Entry::Spread(expr) | Entry::Elem(expr) => {
+                collect_sibling_field_refs_expr(expr, refs, false);
+            }
+            Entry::ClassDef(_, _, _, body) => collect_sibling_field_refs_entries(body, refs),
+            Entry::TypeAlias(..) => {}
+        }
+    }
+}
+
+fn collect_sibling_field_refs_expr(expr: &Expr, refs: &mut HashSet<String>, include_this: bool) {
+    match expr {
+        Expr::Field(base, field) | Expr::NullSafeField(base, field) => {
+            if is_module_sibling_ref(base, include_this) {
+                refs.insert(field.clone());
+            }
+            collect_sibling_field_refs_expr(base, refs, include_this);
+        }
+        Expr::Index(base, index) => {
+            if is_module_sibling_ref(base, include_this)
+                && let Expr::String(key) = index.as_ref()
+            {
+                refs.insert(key.clone());
+            }
+            collect_sibling_field_refs_expr(base, refs, include_this);
+            collect_sibling_field_refs_expr(index, refs, include_this);
+        }
+        Expr::Binop(_, left, right) => {
+            collect_sibling_field_refs_expr(left, refs, include_this);
+            collect_sibling_field_refs_expr(right, refs, include_this);
+        }
+        Expr::New(_, entries, _) | Expr::ObjectBody(entries) => {
+            collect_sibling_field_refs_entries(entries, refs);
+        }
+        Expr::Call(callee, args) => {
+            collect_sibling_field_refs_expr(callee, refs, include_this);
+            for arg in args {
+                collect_sibling_field_refs_expr(arg, refs, include_this);
+            }
+        }
+        Expr::If(cond, then_expr, else_expr) => {
+            collect_sibling_field_refs_expr(cond, refs, include_this);
+            collect_sibling_field_refs_expr(then_expr, refs, include_this);
+            collect_sibling_field_refs_expr(else_expr, refs, include_this);
+        }
+        Expr::Let(_, value, body) => {
+            collect_sibling_field_refs_expr(value, refs, include_this);
+            collect_sibling_field_refs_expr(body, refs, include_this);
+        }
+        Expr::Is(value, _) | Expr::As(value, _) => {
+            collect_sibling_field_refs_expr(value, refs, include_this);
+        }
+        Expr::Lambda(_, body)
+        | Expr::Unop(_, body)
+        | Expr::Throw(body)
+        | Expr::Trace(body)
+        | Expr::Read(body)
+        | Expr::ReadOrNull(body) => {
+            collect_sibling_field_refs_expr(body, refs, include_this);
+        }
+        Expr::StringInterpolation(parts) => {
+            for part in parts {
+                if let StringInterpPart::Expr(expr) = part {
+                    collect_sibling_field_refs_expr(expr, refs, include_this);
+                }
+            }
+        }
+        Expr::Ident(_)
+        | Expr::Null
+        | Expr::Bool(_)
+        | Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::String(_) => {}
+    }
+}
+
+fn is_module_sibling_ref(expr: &Expr, include_this: bool) -> bool {
+    matches!(expr, Expr::Ident(name) if name == "module" || (include_this && name == "this"))
 }
 
 fn referenced_roots(entries: &[Entry]) -> HashSet<String> {

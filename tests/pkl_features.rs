@@ -1115,6 +1115,41 @@ async fn circular_import_does_not_loop() {
     assert_eq!(json["b_ref"], "from_b");
 }
 
+#[tokio::test]
+async fn partial_imports_keep_circular_placeholder() {
+    let temp = TestTempDir::new("pklr_test_partial_import_cycle");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("a.pkl"),
+        r#"
+import "b.pkl"
+a_value = "from_a"
+b_ref = b.b_value
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("b.pkl"),
+        r#"
+import "a.pkl"
+b_value = "from_b"
+a_ref = a.a_value
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "a.pkl"
+result = a.a_value
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    assert_eq!(val["result"], "from_a");
+}
+
 // ============================================================
 // Glob imports (import*)
 // ============================================================
@@ -1508,6 +1543,35 @@ result = Builtins.prettier
 
     let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
     assert_eq!(val["result"], "ok");
+}
+
+#[tokio::test]
+async fn partial_import_expands_this_and_module_dependencies() {
+    let temp = TestTempDir::new("pklr_test_partial_import_this_deps");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("dep.pkl"),
+        r#"
+x = 41
+y = this.x + 1
+z = module.x + 2
+broken = missing.field
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "dep.pkl" as Dep
+y = Dep.y
+z = Dep.z
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    assert_eq!(val["y"], 42);
+    assert_eq!(val["z"], 43);
 }
 
 #[test]
