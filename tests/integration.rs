@@ -451,6 +451,31 @@ async fn http_module_resolves_relative_amends() {
     assert_eq!(json["version"], 1);
 }
 
+/// A module loaded over HTTP that itself uses a relative `extends` should
+/// resolve that base against its own (HTTP) URL, not the local filesystem.
+#[tokio::test]
+async fn http_module_resolves_relative_extends() {
+    let base = spawn_test_http_server(vec![
+        (
+            "/cfg/Main.pkl",
+            "extends \"../Base.pkl\"\nname = \"override\"\n",
+        ),
+        ("/Base.pkl", "name = \"base\"\nversion = 1\n"),
+    ]);
+    let src = format!("import \"{base}/cfg/Main.pkl\" as Main\nresult = Main\n");
+
+    let mut evaluator = pklr::Evaluator::new();
+    let result = evaluator
+        .eval_source(&src, std::path::Path::new("entry.pkl"))
+        .await;
+    if let Err(ref e) = result {
+        eprintln!("error: {e}");
+    }
+    let json = result.unwrap().to_json();
+    assert_eq!(json["result"]["name"], "override");
+    assert_eq!(json["result"]["version"], 1);
+}
+
 #[tokio::test]
 async fn test_step_amend_minimal() {
     // Test: does amending a class with many properties hang?

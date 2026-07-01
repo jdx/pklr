@@ -4074,41 +4074,10 @@ fn resolve_remote_relative(current_path: &Path, uri: &str) -> Option<String> {
     if !(base.starts_with("http://") || base.starts_with("https://")) {
         return None;
     }
-    Some(join_url(base, uri))
-}
-
-/// Resolve a relative reference against a base URL, collapsing `.`/`..`
-/// segments. Covers the cases pkl imports use: relative paths (`../x.pkl`)
-/// and absolute-from-root paths (`/x.pkl`).
-fn join_url(base: &str, rel: &str) -> String {
-    let Some(scheme_end) = base.find("://").map(|i| i + 3) else {
-        return rel.to_string();
-    };
-    let (prefix, after) = base.split_at(scheme_end);
-    let (authority, base_path) = match after.find('/') {
-        Some(i) => (&after[..i], &after[i..]),
-        None => (after, "/"),
-    };
-    let combined = if rel.starts_with('/') {
-        rel.to_string()
-    } else {
-        let dir = match base_path.rfind('/') {
-            Some(i) => &base_path[..=i],
-            None => "/",
-        };
-        format!("{dir}{rel}")
-    };
-    let mut segments: Vec<&str> = Vec::new();
-    for seg in combined.split('/') {
-        match seg {
-            "" | "." => {}
-            ".." => {
-                segments.pop();
-            }
-            s => segments.push(s),
-        }
-    }
-    format!("{prefix}{authority}/{}", segments.join("/"))
+    reqwest::Url::parse(base)
+        .ok()
+        .and_then(|base| base.join(uri).ok())
+        .map(|url| url.to_string())
 }
 
 fn same_local_path(left: &Path, right: &Path) -> bool {
