@@ -4204,6 +4204,43 @@ steps = new Mapping<String, Step | Group> {
 }
 
 #[test]
+fn converter_union_mapping_preserves_variable_value_type_after_default_merge() {
+    let json = eval_with_converters(
+        r#"
+class Step {
+    check: String = ""
+    shared: Boolean = false
+}
+
+output {
+    renderer {
+        converters {
+            [Step] = (s) -> new Dynamic {
+                _type = "step"
+                ...s.toDynamic()
+            }
+        }
+    }
+}
+
+local echo = new Step {
+    check = "echo ok"
+}
+
+steps = new Mapping<String, Dynamic | Step> {
+    default {
+        shared = true
+    }
+    ["echo"] = echo
+}
+"#,
+    );
+    assert_eq!(json["steps"]["echo"]["_type"], "step");
+    assert_eq!(json["steps"]["echo"]["check"], "echo ok");
+    assert_eq!(json["steps"]["echo"]["shared"], false);
+}
+
+#[test]
 fn converter_union_mapping_explicit_new_validates_class_body() {
     let msg = eval_fails(
         r#"

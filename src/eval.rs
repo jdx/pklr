@@ -1631,22 +1631,9 @@ impl Evaluator {
         // output converters still match). eval_entries does not know the base
         // type, so re-tag the result here.
         match (base_type_name, result) {
-            (Some(tn), Value::Object(map, src)) => {
-                let new_src = match src {
-                    Some(s) => {
-                        let mut s = (*s).clone();
-                        s.type_name = Some(tn);
-                        s
-                    }
-                    None => ObjectSource {
-                        entries: Vec::new(),
-                        scope: IndexMap::new(),
-                        is_open: true,
-                        type_name: Some(tn),
-                        mapping_value_types: Vec::new(),
-                        deprecated: IndexMap::new(),
-                    },
-                };
+            (Some(tn), Value::Object(map, Some(src))) => {
+                let mut new_src = (*src).clone();
+                new_src.type_name = Some(tn);
                 Ok(Value::Object(map, Some(Arc::new(new_src))))
             }
             (_, other) => Ok(other),
