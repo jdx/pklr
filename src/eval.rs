@@ -3569,7 +3569,11 @@ fn collect_expr_import_field_uses(
             collect_entry_import_field_uses(entries, uses, shadows);
         }
         Expr::Call(callee, args) => {
-            collect_expr_import_field_uses(callee, uses, shadows);
+            if let Some(name) = object_method_import_receiver(callee.as_ref()) {
+                record_whole_import_use(uses, shadows, name);
+            } else {
+                collect_expr_import_field_uses(callee, uses, shadows);
+            }
             for arg in args {
                 collect_expr_import_field_uses(arg, uses, shadows);
             }
@@ -3609,6 +3613,30 @@ fn collect_expr_import_field_uses(
         }
         Expr::Null | Expr::Bool(_) | Expr::Int(_) | Expr::Float(_) | Expr::String(_) => {}
     }
+}
+
+fn object_method_import_receiver(expr: &Expr) -> Option<&str> {
+    let (base, method) = match expr {
+        Expr::Field(base, method) | Expr::NullSafeField(base, method) => (base.as_ref(), method),
+        _ => return None,
+    };
+    if !is_intrinsic_object_method(method) {
+        return None;
+    }
+    match base {
+        Expr::Ident(name) => Some(name),
+        _ => None,
+    }
+}
+
+fn is_intrinsic_object_method(method: &str) -> bool {
+    // Import aliases evaluate to module objects. Only methods dispatched for
+    // `Value::Object` are whole-object uses here; list/string method names can
+    // still be user-defined exported methods such as `Dep.map()`.
+    matches!(
+        method,
+        "containsKey" | "toMap" | "toMapping" | "mapValues" | "filter" | "toList" | "toDynamic"
+    )
 }
 
 fn collect_type_import_field_uses(
