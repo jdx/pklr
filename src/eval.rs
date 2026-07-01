@@ -398,10 +398,7 @@ impl Evaluator {
         depth: usize,
         requested_fields: Option<HashSet<String>>,
     ) -> Result<Value> {
-        let source = std::fs::read_to_string(path).map_err(|e| Error::Io(path.to_path_buf(), e))?;
-        let name = path.display().to_string();
-        let tokens = lexer::lex_named(&source, &name)?;
-        let module = parser::parse_named(&tokens, &source, &name)?;
+        let module = parse_file(path)?;
         self.eval_module_with_scope(&module, path, depth, None, requested_fields)
             .await
     }
@@ -446,10 +443,7 @@ impl Evaluator {
         depth: usize,
         inherited_scope: Option<Scope>,
     ) -> Result<Value> {
-        let source = std::fs::read_to_string(path).map_err(|e| Error::Io(path.to_path_buf(), e))?;
-        let name = path.display().to_string();
-        let tokens = lexer::lex_named(&source, &name)?;
-        let module = parser::parse_named(&tokens, &source, &name)?;
+        let module = parse_file(path)?;
         let val = self
             .eval_module_with_scope(&module, path, depth, inherited_scope, None)
             .await?;
@@ -3384,6 +3378,13 @@ fn object_declares_field(value: &Value, field: &str) -> bool {
         })
 }
 
+fn parse_file(path: &Path) -> Result<Module> {
+    let source = std::fs::read_to_string(path).map_err(|e| Error::Io(path.to_path_buf(), e))?;
+    let name = path.display().to_string();
+    let tokens = lexer::lex_named(&source, &name)?;
+    parser::parse_named(&tokens, &source, &name)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ImportUse {
     Fields(HashSet<String>),
@@ -3417,6 +3418,9 @@ fn collect_entry_import_field_uses(
     for entry in entries {
         match entry {
             Entry::Property(prop) => {
+                if let Some(ty) = &prop.type_ann {
+                    collect_type_import_field_uses(ty, uses, &entry_shadows);
+                }
                 if let Some(expr) = &prop.value {
                     collect_expr_import_field_uses(expr, uses, &entry_shadows);
                 }
@@ -3503,8 +3507,9 @@ fn collect_expr_import_field_uses(
             body_shadows.insert(name.clone());
             collect_expr_import_field_uses(body, uses, &body_shadows);
         }
-        Expr::Is(value, _) | Expr::As(value, _) => {
+        Expr::Is(value, ty) | Expr::As(value, ty) => {
             collect_expr_import_field_uses(value, uses, shadows);
+            collect_type_import_field_uses(ty, uses, shadows);
         }
         Expr::Lambda(params, value) => {
             let mut body_shadows = shadows.clone();
@@ -3525,6 +3530,48 @@ fn collect_expr_import_field_uses(
             }
         }
         Expr::Null | Expr::Bool(_) | Expr::Int(_) | Expr::Float(_) | Expr::String(_) => {}
+    }
+}
+
+fn collect_type_import_field_uses(
+    ty: &crate::parser::TypeExpr,
+    uses: &mut HashMap<String, ImportUse>,
+    shadows: &HashSet<String>,
+) {
+    match ty {
+        crate::parser::TypeExpr::Named(name) => {
+            record_type_name_import_use(uses, shadows, name);
+        }
+        crate::parser::TypeExpr::Nullable(inner) => {
+            collect_type_import_field_uses(inner, uses, shadows);
+        }
+        crate::parser::TypeExpr::Union(types) => {
+            for ty in types {
+                collect_type_import_field_uses(ty, uses, shadows);
+            }
+        }
+        crate::parser::TypeExpr::Generic(name, params) => {
+            record_type_name_import_use(uses, shadows, name);
+            for param in params {
+                collect_type_import_field_uses(param, uses, shadows);
+            }
+        }
+        crate::parser::TypeExpr::Constrained(name, expr) => {
+            record_type_name_import_use(uses, shadows, name);
+            collect_expr_import_field_uses(expr, uses, shadows);
+        }
+    }
+}
+
+fn record_type_name_import_use(
+    uses: &mut HashMap<String, ImportUse>,
+    shadows: &HashSet<String>,
+    name: &str,
+) {
+    if let Some((root, field)) = name.split_once('.') {
+        record_field_import_use(uses, shadows, root, field);
+    } else {
+        record_whole_import_use(uses, shadows, name);
     }
 }
 
@@ -3582,6 +3629,9 @@ fn expand_requested_fields(entries: &[Entry], requested: &HashSet<String>) -> Ha
             }
             let mut refs = HashSet::new();
             let shadows = declared_entry_roots(entries);
+            if let Some(ty) = &prop.type_ann {
+                collect_type_refs(ty, &mut refs, &shadows);
+            }
             if let Some(expr) = &prop.value {
                 collect_expr_refs(expr, &mut refs, &shadows);
                 collect_sibling_field_refs_expr(expr, &mut refs, true);

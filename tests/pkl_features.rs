@@ -1574,6 +1574,42 @@ z = Dep.z
     assert_eq!(val["z"], 43);
 }
 
+#[tokio::test]
+async fn partial_import_includes_type_annotation_fields() {
+    let temp = TestTempDir::new("pklr_test_partial_import_type_ann");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("types.pkl"),
+        r#"
+Step = new Dynamic {
+    enabled = true
+}
+Other = "other"
+broken = missing.field
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "types.pkl" as Types
+other = Types.Other
+steps: Mapping<String, Types.Step> = new Mapping {}
+steps {
+    ["a"] {
+        name = "alpha"
+    }
+}
+enabled = steps["a"].enabled
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    assert_eq!(val["other"], "other");
+    assert_eq!(val["enabled"], true);
+}
+
 #[test]
 fn object_entries_can_be_separated_by_semicolons() {
     let json = eval(
