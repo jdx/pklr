@@ -1219,12 +1219,17 @@ impl Evaluator {
                     if has_modifier(&prop.modifiers, Modifier::Local) && prop.value.is_some() =>
                 {
                     let expr = prop.value.as_ref().unwrap();
+                    // Bind every local in declaration order so later locals and
+                    // entries can reference it (e.g. a non-lambda local that
+                    // calls a lambda local defined just above it).
+                    let val = self.eval_expr(expr, &child_scope, depth).await?;
+                    child_scope.set(prop.name.clone(), val);
                     if matches!(expr, crate::parser::Expr::Lambda(..)) {
-                        // Defer lambda locals so they capture the final scope
+                        // Lambda evaluation only captures the current scope; it
+                        // does not run the body. Bind once for declaration-order
+                        // visibility, then re-bind after properties for late
+                        // binding of overrides.
                         deferred_lambdas.push((prop.name.clone(), expr));
-                    } else {
-                        let val = self.eval_expr(expr, &child_scope, depth).await?;
-                        child_scope.set(prop.name.clone(), val);
                     }
                 }
                 Entry::ClassDef(name, class_mods, parent, body) => {
@@ -2843,11 +2848,17 @@ impl Evaluator {
                     if has_modifier(&prop.modifiers, Modifier::Local) && prop.value.is_some() =>
                 {
                     let expr = prop.value.as_ref().unwrap();
+                    // Bind every local in declaration order so later locals and
+                    // entries can reference it (e.g. a non-lambda local that
+                    // calls a lambda local defined just above it).
+                    let val = self.eval_expr(expr, &entry_scope, depth).await?;
+                    entry_scope.set(prop.name.clone(), val);
                     if matches!(expr, crate::parser::Expr::Lambda(..)) {
+                        // Lambda evaluation only captures the current scope; it
+                        // does not run the body. Bind once for declaration-order
+                        // visibility, then re-bind after properties for late
+                        // binding of overrides.
                         deferred_lambdas.push((prop.name.clone(), expr));
-                    } else {
-                        let val = self.eval_expr(expr, &entry_scope, depth).await?;
-                        entry_scope.set(prop.name.clone(), val);
                     }
                 }
                 Entry::Property(prop)
