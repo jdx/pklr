@@ -4067,6 +4067,35 @@ myStep = new Step {
 }
 
 #[test]
+fn converter_applies_to_amended_instance() {
+    // Amending an instance preserves its class identity, so the class-keyed
+    // converter still matches the amended value.
+    let json = eval_with_converters(
+        r#"
+class Step {
+    check: String = ""
+}
+
+output {
+    renderer {
+        converters {
+            [Step] = (s) -> new Dynamic {
+                _type = "step"
+                ...s.toMap().toDynamic()
+            }
+        }
+    }
+}
+
+local base = new Step { check = "a" }
+myStep = (base) { check = "b" }
+"#,
+    );
+    assert_eq!(json["myStep"]["_type"], "step");
+    assert_eq!(json["myStep"]["check"], "b");
+}
+
+#[test]
 fn converter_coerces_values() {
     let json = eval_with_converters(
         r#"
@@ -4407,6 +4436,43 @@ steps = new Mapping<String, Step | Group> {
     assert_eq!(json["steps"]["group"]["steps"]["lint"]["_type"], "step");
     assert_eq!(json["steps"]["echo"]["_type"], "step");
     assert_eq!(json["steps"]["echo"]["shared"], true);
+}
+
+#[test]
+fn converter_union_mapping_preserves_variable_value_type_after_default_merge() {
+    let json = eval_with_converters(
+        r#"
+class Step {
+    check: String = ""
+    shared: Boolean = false
+}
+
+output {
+    renderer {
+        converters {
+            [Step] = (s) -> new Dynamic {
+                _type = "step"
+                ...s.toDynamic()
+            }
+        }
+    }
+}
+
+local echo = new Step {
+    check = "echo ok"
+}
+
+steps = new Mapping<String, Dynamic | Step> {
+    default {
+        shared = true
+    }
+    ["echo"] = echo
+}
+"#,
+    );
+    assert_eq!(json["steps"]["echo"]["_type"], "step");
+    assert_eq!(json["steps"]["echo"]["check"], "echo ok");
+    assert_eq!(json["steps"]["echo"]["shared"], false);
 }
 
 #[test]
