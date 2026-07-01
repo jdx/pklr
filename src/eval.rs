@@ -1145,8 +1145,10 @@ impl Evaluator {
                     let val = self.eval_expr(expr, &child_scope, depth).await?;
                     child_scope.set(prop.name.clone(), val);
                     if matches!(expr, crate::parser::Expr::Lambda(..)) {
-                        // Also re-evaluate lambda locals at the end so they
-                        // capture the final scope (late binding of overrides).
+                        // Lambda evaluation only captures the current scope; it
+                        // does not run the body. Bind once for declaration-order
+                        // visibility, then re-bind after properties for late
+                        // binding of overrides.
                         deferred_lambdas.push((prop.name.clone(), expr));
                     }
                 }
@@ -2725,8 +2727,10 @@ impl Evaluator {
                     let val = self.eval_expr(expr, &entry_scope, depth).await?;
                     entry_scope.set(prop.name.clone(), val);
                     if matches!(expr, crate::parser::Expr::Lambda(..)) {
-                        // Also re-evaluate lambda locals at the end so they
-                        // capture the final scope (late binding of overrides).
+                        // Lambda evaluation only captures the current scope; it
+                        // does not run the body. Bind once for declaration-order
+                        // visibility, then re-bind after properties for late
+                        // binding of overrides.
                         deferred_lambdas.push((prop.name.clone(), expr));
                     }
                 }

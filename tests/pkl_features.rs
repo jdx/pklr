@@ -4398,6 +4398,36 @@ values = new Mapping {
 }
 
 #[test]
+fn object_local_lambda_does_not_capture_later_local_for_early_call() {
+    let msg = eval_fails(
+        r#"
+values {
+    local f = (x) -> x + h
+    local g = f.apply(1)
+    local h = 42
+    out = g
+}
+"#,
+    );
+    assert!(msg.contains("undefined variable: h"), "{msg}");
+}
+
+#[test]
+fn mapping_local_lambda_does_not_capture_later_local_for_early_call() {
+    let msg = eval_fails(
+        r#"
+values = new Mapping {
+    local f = (x) -> x + h
+    local g = f.apply(1)
+    local h = 42
+    ["out"] = g
+}
+"#,
+    );
+    assert!(msg.contains("undefined variable: h"), "{msg}");
+}
+
+#[test]
 fn mapping_local_body_is_visible_to_dynamic_entries() {
     let json = eval(
         r#"
