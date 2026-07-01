@@ -239,6 +239,8 @@ impl Evaluator {
         uri: &str,
         path: &Path,
     ) -> Result<Option<(String, String)>> {
+        let resolved = resolve_remote_relative(path, uri);
+        let uri = resolved.as_deref().unwrap_or(uri);
         if uri.starts_with("https://") || uri.starts_with("http://") {
             let source = self.fetch_source(uri).await?;
             return Ok(Some((source, uri.to_string())));
@@ -509,7 +511,9 @@ impl Evaluator {
 
         // Process imports
         for import in &module.imports {
-            let uri = &import.uri;
+            // A relative import inside a remote module resolves against that URL.
+            let resolved_uri = resolve_remote_relative(path, &import.uri);
+            let uri: &str = resolved_uri.as_deref().unwrap_or(&import.uri);
 
             // Handle glob imports: import* "dir/*.pkl" as Alias
             if import.is_glob {
@@ -681,7 +685,10 @@ impl Evaluator {
 
         // Process amends: load base module as starting values
         let mut base_obj = IndexMap::new();
-        if let Some(uri) = &module.amends {
+        if let Some(amends_uri) = &module.amends {
+            // A relative amends inside a remote module resolves against that URL.
+            let resolved_amends = resolve_remote_relative(path, amends_uri);
+            let uri: &str = resolved_amends.as_deref().unwrap_or(amends_uri);
             if uri.starts_with("https://") || uri.starts_with("http://") {
                 // HTTP amends
                 let source = self.fetch_source(uri).await?;
@@ -771,7 +778,9 @@ impl Evaluator {
         // class definitions from its return value.
         // Also remove inherited class definitions from base_obj so they don't
         // appear in the amending module's data output.
-        if let Some(uri) = &module.amends {
+        if let Some(amends_uri) = &module.amends {
+            let resolved_amends = resolve_remote_relative(path, amends_uri);
+            let uri: &str = resolved_amends.as_deref().unwrap_or(amends_uri);
             let base_source = if uri.starts_with("https://") || uri.starts_with("http://") {
                 // HTTP source was already fetched and cached
                 self.http_cache.get(uri).cloned()
@@ -839,7 +848,10 @@ impl Evaluator {
         }
 
         // Process extends: load base module, inherit all members and scope
-        if let Some(uri) = &module.extends {
+        if let Some(extends_uri) = &module.extends {
+            // A relative extends inside a remote module resolves against that URL.
+            let resolved_extends = resolve_remote_relative(path, extends_uri);
+            let uri: &str = resolved_extends.as_deref().unwrap_or(extends_uri);
             if !uri.contains("://") || uri.starts_with("file://") {
                 let extends_path = if let Some(rel) = uri.strip_prefix("file://") {
                     PathBuf::from(rel)
@@ -4593,11 +4605,37 @@ fn local_module_path(current_path: &Path, uri: &str) -> Option<PathBuf> {
     if uri.contains("://") && !uri.starts_with("file://") {
         return None;
     }
+    // A relative reference inside a remote (http/https) module is not a local file.
+    if !uri.starts_with("file://")
+        && let Some(base) = current_path.to_str()
+        && (base.starts_with("http://") || base.starts_with("https://"))
+    {
+        return None;
+    }
     Some(if let Some(rel) = uri.strip_prefix("file://") {
         PathBuf::from(rel)
     } else {
         current_path.parent().unwrap_or(Path::new(".")).join(uri)
     })
+}
+
+/// If `current_path` is a remote (http/https) module URL and `uri` is a
+/// relative reference (no scheme), resolve `uri` against that URL so the
+/// referenced module is fetched over HTTP rather than from the local
+/// filesystem. Returns the rewritten absolute URL, or `None` when no rewrite
+/// applies (local base module, or `uri` already carries a scheme).
+fn resolve_remote_relative(current_path: &Path, uri: &str) -> Option<String> {
+    if uri.contains("://") || uri.starts_with("pkl:") {
+        return None;
+    }
+    let base = current_path.to_str()?;
+    if !(base.starts_with("http://") || base.starts_with("https://")) {
+        return None;
+    }
+    reqwest::Url::parse(base)
+        .ok()
+        .and_then(|base| base.join(uri).ok())
+        .map(|url| url.to_string())
 }
 
 fn same_local_path(left: &Path, right: &Path) -> bool {
