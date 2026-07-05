@@ -3734,7 +3734,7 @@ fn expand_requested_fields(entries: &[Entry], requested: &HashSet<String>) -> Ha
                 continue;
             }
             let mut refs = HashSet::new();
-            let shadows = declared_entry_roots(entries);
+            let shadows = HashSet::new();
             if let Some(ty) = &prop.type_ann {
                 collect_type_refs(ty, &mut refs, &shadows);
             }

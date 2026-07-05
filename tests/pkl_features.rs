@@ -1749,6 +1749,32 @@ result = Dep.map(41)
     assert_eq!(val["result"], 42);
 }
 
+#[tokio::test]
+async fn partial_import_includes_sibling_function_called_by_requested_function() {
+    let temp = TestTempDir::new("pklr_test_partial_import_sibling_function");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("dep.pkl"),
+        r#"
+function helper(): String = "ok"
+function picked(): String = helper()
+broken = missing.field
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "dep.pkl" as Dep
+result = Dep.picked()
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    assert_eq!(val["result"], "ok");
+}
+
 #[test]
 fn object_entries_can_be_separated_by_semicolons() {
     let json = eval(
