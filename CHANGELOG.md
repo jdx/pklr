@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.3](https://github.com/jdx/pklr/compare/v1.1.2...v1.1.3) - 2026-07-06
+
+### Fixed
+
+- *(eval)* include sibling functions in partial imports ([#129](https://github.com/jdx/pklr/pull/129))
+
 ## [1.1.2](https://github.com/jdx/pklr/compare/v1.1.1...v1.1.2) - 2026-07-01
 
 ### Fixed
