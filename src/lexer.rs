@@ -135,11 +135,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_error(&self, message: impl Into<String>) -> Error {
-        Error::Lex {
-            src: miette::NamedSource::new(&self.name, self.source.to_string()),
-            span: miette::SourceOffset::from(self.pos),
-            message: message.into(),
-        }
+        Error::lex(&self.name, self.source, self.pos, message.into())
     }
 
     fn peek(&self) -> Option<char> {

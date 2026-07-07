@@ -11,18 +11,42 @@ keywords    = ["pkl", "config", "parser"]
 categories  = ["config", "parsing"]
 include     = ["/src/**/*", "/tests/**/*", "/Cargo.toml", "/README.md", "/LICENSE"]
 
+[features]
+default = [
+  "parse",
+  "eval-core",
+  "native-io",
+  "http",
+  "package-zip",
+  "miette-diagnostics",
+]
+parse = []
+eval-core = ["parse", "dep:async-recursion"]
+native-io = ["eval-core"]
+http = ["eval-core", "dep:reqwest"]
+package-zip = ["http", "native-io", "dep:zip"]
+miette-diagnostics = ["dep:miette"]
+
 [dependencies]
 indexmap    = "2"
-miette     = { version = "7", features = ["derive"] }
+miette     = { version = "7", features = ["derive"], optional = true }
 serde_json = "1"
 thiserror  = "2"
-async-recursion = "1"
-reqwest         = { version = "0.13", default-features = false, features = ["rustls"] }
-tokio           = { version = "1", features = ["rt"] }
-zip             = { version = "8", default-features = false, features = ["deflate"] }
+async-recursion = { version = "1", optional = true }
+reqwest         = { version = "0.13", default-features = false, features = ["rustls"], optional = true }
+tokio           = { version = "1", features = ["rt"], optional = true }
+zip             = { version = "8", default-features = false, features = ["deflate"], optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[[test]]
+name = "integration"
+required-features = ["native-io", "http", "package-zip"]
+
+[[test]]
+name = "pkl_features"
+required-features = ["native-io", "http", "package-zip"]
 
 [profile.dev]
 debug = 1

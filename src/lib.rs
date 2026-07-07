@@ -1,28 +1,43 @@
+#[cfg(feature = "eval-core")]
+pub mod capabilities;
 pub mod error;
+#[cfg(feature = "eval-core")]
 pub mod eval;
 pub mod lexer;
 pub mod parser;
+#[cfg(feature = "eval-core")]
 pub mod value;
 
+#[cfg(feature = "eval-core")]
+pub use capabilities::EvalCapabilities;
+#[cfg(feature = "native-io")]
+pub use capabilities::NativeCapabilities;
 pub use error::{Error, Result};
+#[cfg(feature = "eval-core")]
 pub use eval::Evaluator;
+#[cfg(feature = "eval-core")]
 pub use value::Value;
 
 /// Re-export reqwest so consumers can build a Client without a separate dependency.
+#[cfg(feature = "http")]
 pub use reqwest;
 
+#[cfg(feature = "native-io")]
 use std::path::Path;
 
 /// Evaluate a pkl file and return its contents as a JSON value.
 /// This is the primary entry point for use in tools like hk.
+#[cfg(feature = "native-io")]
 pub async fn eval_to_json(path: &Path) -> Result<serde_json::Value> {
     eval_to_json_with_client(path, None).await
 }
 
 /// Options for configuring the pkl evaluator.
+#[cfg(feature = "native-io")]
 #[derive(Default)]
 pub struct EvalOptions {
     /// Custom HTTP client for proxy/CA configuration.
+    #[cfg(feature = "http")]
     pub client: Option<reqwest::Client>,
     /// HTTP URL rewrite rules in `"source_prefix=target_prefix"` format.
     /// Matches pkl CLI's `--http-rewrite` behavior: longest matching prefix wins.
@@ -30,6 +45,7 @@ pub struct EvalOptions {
 }
 
 /// Evaluate a pkl file with a custom HTTP client for proxy/CA configuration.
+#[cfg(all(feature = "native-io", feature = "http"))]
 pub async fn eval_to_json_with_client(
     path: &Path,
     client: Option<reqwest::Client>,
@@ -44,7 +60,16 @@ pub async fn eval_to_json_with_client(
     .await
 }
 
+#[cfg(all(feature = "native-io", not(feature = "http")))]
+pub async fn eval_to_json_with_client(
+    path: &Path,
+    _client: Option<()>,
+) -> Result<serde_json::Value> {
+    eval_to_json_with_options(path, EvalOptions::default()).await
+}
+
 /// Evaluate a pkl file with full configuration options.
+#[cfg(feature = "native-io")]
 pub async fn eval_to_json_with_options(
     path: &Path,
     options: EvalOptions,
@@ -52,6 +77,7 @@ pub async fn eval_to_json_with_options(
     let source = std::fs::read_to_string(path).map_err(|e| Error::Io(path.to_path_buf(), e))?;
     let mut evaluator = Evaluator::new();
     evaluator.set_base_path(path.parent().unwrap_or(Path::new(".")));
+    #[cfg(feature = "http")]
     if let Some(client) = options.client {
         evaluator.set_http_client(client);
     }
@@ -64,6 +90,7 @@ pub async fn eval_to_json_with_options(
 }
 
 /// Analyze imports of a pkl file, returning all transitive local file dependencies.
+#[cfg(feature = "native-io")]
 pub fn analyze_imports(path: &Path) -> Result<Vec<std::path::PathBuf>> {
     let mut results = Vec::new();
     let mut visited = std::collections::HashSet::new();
@@ -72,6 +99,7 @@ pub fn analyze_imports(path: &Path) -> Result<Vec<std::path::PathBuf>> {
     Ok(results)
 }
 
+#[cfg(feature = "native-io")]
 fn analyze_imports_inner(
     path: &Path,
     visited: &mut std::collections::HashSet<std::path::PathBuf>,
