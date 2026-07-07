@@ -1,9 +1,98 @@
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use pklr::capabilities::{BoxFuture, EvalCapabilities};
 use pklr::eval::Evaluator;
 use pklr::lexer::{TokenKind, lex};
 use pklr::parser::{collect_imports, parse};
 
 fn lex_kinds(src: &str) -> Vec<TokenKind> {
     lex(src).unwrap().into_iter().map(|t| t.kind).collect()
+}
+
+struct MemoryCapabilities {
+    modules: HashMap<String, String>,
+    fetches: Arc<Mutex<Vec<String>>>,
+}
+
+impl EvalCapabilities for MemoryCapabilities {
+    fn read_to_string<'a>(&'a mut self, path: &'a Path) -> BoxFuture<'a, pklr::Result<String>> {
+        let path = path.display().to_string();
+        Box::pin(async move { Err(pklr::Error::ImportNotFound(path)) })
+    }
+
+    fn read_env<'a>(&'a mut self, _name: &'a str) -> BoxFuture<'a, pklr::Result<Option<String>>> {
+        Box::pin(async move { Ok(None) })
+    }
+
+    fn fetch_text<'a>(&'a mut self, url: &'a str) -> BoxFuture<'a, pklr::Result<String>> {
+        self.fetches.lock().unwrap().push(url.to_string());
+        let source = self.modules.get(url).cloned();
+        let url = url.to_string();
+        Box::pin(async move { source.ok_or(pklr::Error::ImportNotFound(url)) })
+    }
+
+    fn fetch_bytes<'a>(&'a mut self, url: &'a str) -> BoxFuture<'a, pklr::Result<Vec<u8>>> {
+        let url = url.to_string();
+        Box::pin(async move {
+            Err(pklr::Error::Unsupported(format!(
+                "byte fetch unavailable in test capabilities: {url}"
+            )))
+        })
+    }
+
+    fn temp_dir<'a>(&'a mut self, prefix: &'a str) -> BoxFuture<'a, pklr::Result<PathBuf>> {
+        let prefix = prefix.to_string();
+        Box::pin(async move {
+            Err(pklr::Error::Unsupported(format!(
+                "temp dir unavailable in test capabilities: {prefix}"
+            )))
+        })
+    }
+
+    fn glob<'a>(
+        &'a mut self,
+        _base: &'a Path,
+        _pattern: &'a str,
+    ) -> BoxFuture<'a, pklr::Result<Vec<PathBuf>>> {
+        Box::pin(async move { Ok(Vec::new()) })
+    }
+}
+
+#[test]
+fn evaluator_is_send() {
+    fn assert_send<T: Send>() {}
+    assert_send::<pklr::Evaluator>();
+}
+
+#[tokio::test]
+async fn custom_capabilities_handle_http_import() {
+    let fetches = Arc::new(Mutex::new(Vec::new()));
+    let mut modules = HashMap::new();
+    modules.insert(
+        "http://example.test/Main.pkl".to_string(),
+        "value = 42\n".to_string(),
+    );
+
+    let mut evaluator = pklr::Evaluator::with_capabilities(MemoryCapabilities {
+        modules,
+        fetches: fetches.clone(),
+    });
+    let json = evaluator
+        .eval_source(
+            "import \"http://example.test/Main.pkl\" as Main\nresult = Main.value\n",
+            Path::new("entry.pkl"),
+        )
+        .await
+        .unwrap()
+        .to_json();
+
+    assert_eq!(json["result"], 42);
+    assert_eq!(
+        *fetches.lock().unwrap(),
+        vec!["http://example.test/Main.pkl".to_string()]
+    );
 }
 
 // --- Lexer tests ---
@@ -399,6 +488,85 @@ fn spawn_test_http_server(routes: Vec<(&'static str, &'static str)>) -> String {
     });
 
     format!("http://127.0.0.1:{port}")
+}
+
+fn spawn_header_check_http_server(
+    path: &'static str,
+    header_name: &'static str,
+    header_value: &'static str,
+    body: &'static str,
+) -> String {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let expected_header = format!("{}: {}", header_name.to_ascii_lowercase(), header_value);
+
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = match stream {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request_line = String::new();
+            if reader.read_line(&mut request_line).is_err() {
+                continue;
+            }
+            let request_path = request_line.split_whitespace().nth(1).unwrap_or("/");
+            let mut has_header = false;
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) if line == "\r\n" || line == "\n" => break,
+                    Ok(_) => {
+                        if line.trim_end().to_ascii_lowercase() == expected_header {
+                            has_header = true;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let response = if request_path == path && has_header {
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+            } else {
+                "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_string()
+            };
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+
+    format!("http://127.0.0.1:{port}")
+}
+
+#[tokio::test]
+async fn native_capabilities_fetch_bytes_uses_configured_client() {
+    let base = spawn_header_check_http_server("/pkg.zip", "x-pklr-test", "ok", "zip-bytes");
+    let mut headers = pklr::reqwest::header::HeaderMap::new();
+    headers.insert(
+        pklr::reqwest::header::HeaderName::from_static("x-pklr-test"),
+        pklr::reqwest::header::HeaderValue::from_static("ok"),
+    );
+    let client = pklr::reqwest::Client::builder()
+        .default_headers(headers)
+        .build()
+        .unwrap();
+    let mut capabilities = pklr::NativeCapabilities::with_http_client(client);
+
+    let bytes = capabilities
+        .fetch_bytes(&format!("{base}/pkg.zip"))
+        .await
+        .unwrap();
+
+    assert_eq!(bytes, b"zip-bytes");
 }
 
 /// A module loaded over HTTP that itself uses a relative `import` should

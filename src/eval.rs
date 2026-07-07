@@ -23,9 +23,6 @@ pub struct Evaluator {
     import_cache: HashMap<PathBuf, Value>,
     /// Local files currently being evaluated with inherited scope.
     scoped_imports_in_flight: HashSet<PathBuf>,
-    /// Reusable HTTP client for connection pooling
-    #[cfg(feature = "http")]
-    http_client: reqwest::Client,
     /// Host-provided IO for files, environment, HTTP, packages, and globs.
     capabilities: Box<dyn EvalCapabilities>,
     /// Extracted package zip directories (zip URL → temp dir path)
@@ -65,9 +62,7 @@ impl Default for Evaluator {
             http_cache: HashMap::new(),
             import_cache: HashMap::new(),
             scoped_imports_in_flight: HashSet::new(),
-            #[cfg(feature = "http")]
-            http_client: reqwest::Client::new(),
-            capabilities: Box::new(crate::capabilities::NativeCapabilities),
+            capabilities: Box::new(crate::capabilities::NativeCapabilities::new()),
             #[cfg(feature = "package-zip")]
             package_dirs: HashMap::new(),
             http_rewrites: Vec::new(),
@@ -90,8 +85,6 @@ impl Evaluator {
             http_cache: HashMap::new(),
             import_cache: HashMap::new(),
             scoped_imports_in_flight: HashSet::new(),
-            #[cfg(feature = "http")]
-            http_client: reqwest::Client::new(),
             capabilities: Box::new(capabilities),
             #[cfg(feature = "package-zip")]
             package_dirs: HashMap::new(),
@@ -109,7 +102,7 @@ impl Evaluator {
     /// Use this to configure proxy settings, CA certificates, timeouts, etc.
     #[cfg(feature = "http")]
     pub fn set_http_client(&mut self, client: reqwest::Client) {
-        self.http_client = client;
+        self.capabilities.set_http_client(client);
     }
 
     /// Add HTTP URL rewrite rules. Each rule is a `"source_prefix=target_prefix"` string
@@ -213,19 +206,6 @@ impl Evaluator {
         } else {
             fetch_url.to_string()
         };
-        #[cfg(feature = "http")]
-        let body = self
-            .http_client
-            .get(fetch_url)
-            .send()
-            .await
-            .map_err(|e| Error::Eval(format!("HTTP fetch failed for {err_ctx}: {e}")))?
-            .error_for_status()
-            .map_err(|e| Error::Eval(format!("HTTP error for {err_ctx}: {e}")))?
-            .text()
-            .await
-            .map_err(|e| Error::Eval(format!("HTTP read failed for {err_ctx}: {e}")))?;
-        #[cfg(not(feature = "http"))]
         let body = self
             .capabilities
             .fetch_text(fetch_url)
@@ -4696,8 +4676,18 @@ fn resolve_remote_relative(current_path: &Path, uri: &str) -> Option<String> {
 
 fn resolve_http_relative(base: &str, uri: &str) -> Option<String> {
     let scheme_end = base.find("://")? + 3;
-    let (origin, base_path) = match base[scheme_end..].find('/') {
-        Some(path_start) => base.split_at(scheme_end + path_start),
+    let authority_end = base[scheme_end..]
+        .find(['/', '?', '#'])
+        .map(|offset| scheme_end + offset);
+    let (origin, base_path) = match authority_end {
+        Some(path_start) if base[path_start..].starts_with('/') => {
+            let (origin, path_and_suffix) = base.split_at(path_start);
+            let path_end = path_and_suffix
+                .find(['?', '#'])
+                .unwrap_or(path_and_suffix.len());
+            (origin, &path_and_suffix[..path_end])
+        }
+        Some(path_start) => base.split_at(path_start),
         None => (base, ""),
     };
     if uri.starts_with('/') {
@@ -4718,6 +4708,47 @@ fn resolve_http_relative(base: &str, uri: &str) -> Option<String> {
         }
     }
     Some(format!("{origin}/{}", segments.join("/")))
+}
+
+#[cfg(test)]
+mod remote_relative_tests {
+    use super::resolve_http_relative;
+
+    #[test]
+    fn http_relative_resolves_against_base_directory() {
+        assert_eq!(
+            resolve_http_relative("https://example.com/cfg/Main.pkl", "../Lib.pkl").as_deref(),
+            Some("https://example.com/Lib.pkl")
+        );
+    }
+
+    #[test]
+    fn http_relative_ignores_base_query_and_fragment() {
+        assert_eq!(
+            resolve_http_relative(
+                "https://example.com/cfg/Main.pkl?version=2#part",
+                "../Lib.pkl"
+            )
+            .as_deref(),
+            Some("https://example.com/Lib.pkl")
+        );
+    }
+
+    #[test]
+    fn http_relative_keeps_absolute_path_references_absolute() {
+        assert_eq!(
+            resolve_http_relative("https://example.com/cfg/Main.pkl", "/shared/Lib.pkl").as_deref(),
+            Some("https://example.com/shared/Lib.pkl")
+        );
+    }
+
+    #[test]
+    fn http_relative_clamps_above_root_segments() {
+        assert_eq!(
+            resolve_http_relative("https://example.com/Main.pkl", "../../Lib.pkl").as_deref(),
+            Some("https://example.com/Lib.pkl")
+        );
+    }
 }
 
 fn same_local_path(left: &Path, right: &Path) -> bool {
