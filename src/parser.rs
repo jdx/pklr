@@ -232,11 +232,7 @@ impl<'a> Parser<'a> {
 
     fn parse_error(&self, message: impl Into<String>) -> Error {
         let tok = self.peek_tok();
-        Error::Parse {
-            src: miette::NamedSource::new(&self.name, self.source.clone()),
-            span: miette::SourceOffset::from(tok.offset),
-            message: message.into(),
-        }
+        Error::parse(&self.name, &self.source, tok.offset, message.into())
     }
 
     fn peek(&self) -> &TokenKind {
@@ -1393,11 +1389,12 @@ impl<'a> Parser<'a> {
         if let TokenKind::StringLit(s) = kind {
             Ok(s)
         } else {
-            Err(Error::Parse {
-                src: miette::NamedSource::new(&self.name, self.source.clone()),
-                span: miette::SourceOffset::from(offset),
-                message: format!("expected string, got {:?}", kind),
-            })
+            Err(Error::parse(
+                &self.name,
+                &self.source,
+                offset,
+                format!("expected string, got {:?}", kind),
+            ))
         }
     }
 
@@ -1413,11 +1410,12 @@ impl<'a> Parser<'a> {
             TokenKind::KwHidden => Ok("hidden".into()),
             TokenKind::KwNew => Ok("new".into()),
             TokenKind::KwModule => Ok("module".into()),
-            other => Err(Error::Parse {
-                src: miette::NamedSource::new(&self.name, self.source.clone()),
-                span: miette::SourceOffset::from(offset),
-                message: format!("expected identifier, got {:?}", other),
-            }),
+            other => Err(Error::parse(
+                &self.name,
+                &self.source,
+                offset,
+                format!("expected identifier, got {:?}", other),
+            )),
         }
     }
 }

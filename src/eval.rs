@@ -6,6 +6,7 @@ use async_recursion::async_recursion;
 use indexmap::IndexMap;
 use std::path::{Path, PathBuf};
 
+use crate::capabilities::EvalCapabilities;
 use crate::error::{Error, Result};
 use crate::lexer;
 use crate::parser::{self, BinOp, Entry, Expr, Modifier, Module, Property, StringInterpPart, UnOp};
@@ -22,9 +23,10 @@ pub struct Evaluator {
     import_cache: HashMap<PathBuf, Value>,
     /// Local files currently being evaluated with inherited scope.
     scoped_imports_in_flight: HashSet<PathBuf>,
-    /// Reusable HTTP client for connection pooling
-    http_client: reqwest::Client,
+    /// Host-provided IO for files, environment, HTTP, packages, and globs.
+    capabilities: Box<dyn EvalCapabilities>,
     /// Extracted package zip directories (zip URL → temp dir path)
+    #[cfg(feature = "package-zip")]
     package_dirs: HashMap<String, PathBuf>,
     /// HTTP URL rewrite rules (source_prefix → target_prefix).
     /// Longest matching prefix wins.
@@ -51,6 +53,7 @@ fn regex_value(pattern: Value) -> Value {
     Value::Object(Arc::new(map), None)
 }
 
+#[cfg(feature = "native-io")]
 impl Default for Evaluator {
     fn default() -> Self {
         Self {
@@ -59,7 +62,8 @@ impl Default for Evaluator {
             http_cache: HashMap::new(),
             import_cache: HashMap::new(),
             scoped_imports_in_flight: HashSet::new(),
-            http_client: reqwest::Client::new(),
+            capabilities: Box::new(crate::capabilities::NativeCapabilities::new()),
+            #[cfg(feature = "package-zip")]
             package_dirs: HashMap::new(),
             http_rewrites: Vec::new(),
             converters: Vec::new(),
@@ -69,8 +73,25 @@ impl Default for Evaluator {
 }
 
 impl Evaluator {
+    #[cfg(feature = "native-io")]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_capabilities(capabilities: impl EvalCapabilities + 'static) -> Self {
+        Self {
+            base_path: PathBuf::from("."),
+            max_depth: 32,
+            http_cache: HashMap::new(),
+            import_cache: HashMap::new(),
+            scoped_imports_in_flight: HashSet::new(),
+            capabilities: Box::new(capabilities),
+            #[cfg(feature = "package-zip")]
+            package_dirs: HashMap::new(),
+            http_rewrites: Vec::new(),
+            converters: Vec::new(),
+            warned_deprecated: std::collections::HashSet::new(),
+        }
     }
 
     pub fn set_base_path(&mut self, path: &Path) {
@@ -79,8 +100,9 @@ impl Evaluator {
 
     /// Set a custom HTTP client for fetching remote imports and packages.
     /// Use this to configure proxy settings, CA certificates, timeouts, etc.
+    #[cfg(feature = "http")]
     pub fn set_http_client(&mut self, client: reqwest::Client) {
-        self.http_client = client;
+        self.capabilities.set_http_client(client);
     }
 
     /// Add HTTP URL rewrite rules. Each rule is a `"source_prefix=target_prefix"` string
@@ -146,17 +168,16 @@ impl Evaluator {
     async fn read_resource(&mut self, uri: &str) -> Result<Value> {
         if let Some(path) = uri.strip_prefix("file://") {
             // file:// — read local file
-            let content = std::fs::read_to_string(path)
-                .map_err(|e| Error::Eval(format!("read() failed for {uri}: {e}")))?;
+            let content = self.capabilities.read_to_string(Path::new(path)).await?;
             Ok(Value::String(content))
         } else if let Some(var_name) = uri.strip_prefix("env:") {
             // env: — read environment variable
-            match std::env::var(var_name) {
-                Ok(val) => Ok(Value::String(val)),
-                Err(_) => Err(Error::Eval(format!(
+            let Some(val) = self.capabilities.read_env(var_name).await? else {
+                return Err(Error::Eval(format!(
                     "environment variable not found: {var_name}"
-                ))),
-            }
+                )));
+            };
+            Ok(Value::String(val))
         } else if let Some(prop_name) = uri.strip_prefix("prop:") {
             // prop: — system properties (not standard in Rust, return empty)
             Err(Error::Eval(format!(
@@ -169,8 +190,7 @@ impl Evaluator {
         } else {
             // Bare path — treat as file relative to base_path
             let file_path = self.base_path.join(uri);
-            let content = std::fs::read_to_string(&file_path)
-                .map_err(|e| Error::Eval(format!("read() failed for {uri}: {e}")))?;
+            let content = self.capabilities.read_to_string(&file_path).await?;
             Ok(Value::String(content))
         }
     }
@@ -181,22 +201,7 @@ impl Evaluator {
         if let Some(cached) = self.http_cache.get(fetch_url) {
             return Ok(cached.clone());
         }
-        let err_ctx = if fetch_url != url {
-            format!("{url} (rewritten to {fetch_url})")
-        } else {
-            fetch_url.to_string()
-        };
-        let body = self
-            .http_client
-            .get(fetch_url)
-            .send()
-            .await
-            .map_err(|e| Error::Eval(format!("HTTP fetch failed for {err_ctx}: {e}")))?
-            .error_for_status()
-            .map_err(|e| Error::Eval(format!("HTTP error for {err_ctx}: {e}")))?
-            .text()
-            .await
-            .map_err(|e| Error::Eval(format!("HTTP read failed for {err_ctx}: {e}")))?;
+        let body = self.capabilities.fetch_text(fetch_url).await?;
         self.http_cache.insert(fetch_url.to_string(), body.clone());
         Ok(body)
     }
@@ -253,11 +258,20 @@ impl Evaluator {
                     return Ok(Some((source, url.clone())));
                 }
                 PackageSource::Zip(zip_url, entry) => {
-                    let pkg_dir = self.extract_package_zip(zip_url).await?;
-                    let local_path = pkg_dir.join(entry);
-                    let source = std::fs::read_to_string(&local_path)
-                        .map_err(|e| Error::Io(local_path.clone(), e))?;
-                    return Ok(Some((source, local_path.display().to_string())));
+                    #[cfg(feature = "package-zip")]
+                    {
+                        let pkg_dir = self.extract_package_zip(zip_url).await?;
+                        let local_path = pkg_dir.join(entry);
+                        let source = self.capabilities.read_to_string(&local_path).await?;
+                        return Ok(Some((source, local_path.display().to_string())));
+                    }
+                    #[cfg(not(feature = "package-zip"))]
+                    {
+                        let _ = entry;
+                        return Err(Error::Unsupported(format!(
+                            "package zip imports require pklr's 'package-zip' feature: {zip_url}"
+                        )));
+                    }
                 }
             }
         }
@@ -270,16 +284,16 @@ impl Evaluator {
             let base = path.parent().unwrap_or(Path::new("."));
             base.join(uri)
         };
-        if !import_path.exists() {
+        if !self.capabilities.path_exists(&import_path).await? {
             return Ok(None);
         }
-        let source =
-            std::fs::read_to_string(&import_path).map_err(|e| Error::Io(import_path.clone(), e))?;
+        let source = self.capabilities.read_to_string(&import_path).await?;
         Ok(Some((source, import_path.display().to_string())))
     }
 
     /// Download a package zip and extract it to a temp directory.
     /// Returns the path to the extracted directory. Caches by zip URL.
+    #[cfg(feature = "package-zip")]
     async fn extract_package_zip(&mut self, zip_url: &str) -> Result<PathBuf> {
         let rewritten = self.rewrite_url(zip_url);
         let fetch_url = rewritten.as_ref();
@@ -287,27 +301,14 @@ impl Evaluator {
         if let Some(dir) = self.package_dirs.get(fetch_url) {
             return Ok(dir.clone());
         }
-        let err_ctx = if fetch_url != zip_url {
-            format!("{zip_url} (rewritten to {fetch_url})")
-        } else {
-            fetch_url.to_string()
-        };
-        let bytes = self
-            .http_client
-            .get(fetch_url)
-            .send()
-            .await
-            .map_err(|e| Error::Eval(format!("HTTP fetch failed for {err_ctx}: {e}")))?
-            .error_for_status()
-            .map_err(|e| Error::Eval(format!("HTTP error for {err_ctx}: {e}")))?
-            .bytes()
-            .await
-            .map_err(|e| Error::Eval(format!("HTTP read failed for {err_ctx}: {e}")))?;
+        let bytes = self.capabilities.fetch_bytes(fetch_url).await?;
         let cursor = std::io::Cursor::new(bytes);
         let mut archive =
             zip::ZipArchive::new(cursor).map_err(|e| Error::Eval(format!("zip error: {e}")))?;
-        let dir = std::env::temp_dir().join(format!("pklr-pkg-{}", self.package_dirs.len()));
-        std::fs::create_dir_all(&dir).map_err(|e| Error::Eval(format!("mkdir error: {e}")))?;
+        let dir = self
+            .capabilities
+            .temp_dir(&format!("pklr-pkg-{}", self.package_dirs.len()))
+            .await?;
         archive
             .extract(&dir)
             .map_err(|e| Error::Eval(format!("zip extract error: {e}")))?;
@@ -315,6 +316,7 @@ impl Evaluator {
         Ok(dir)
     }
 
+    #[cfg(all(test, feature = "package-zip"))]
     fn package_dir_for_zip(&self, zip_url: &str) -> Option<&PathBuf> {
         if let Some(dir) = self.package_dirs.get(zip_url) {
             return Some(dir);
@@ -326,7 +328,7 @@ impl Evaluator {
     pub async fn eval_source(&mut self, source: &str, path: &Path) -> Result<Value> {
         self.converters.clear();
         // Seed import cache for the entry file so circular back-references work
-        if let Ok(canonical) = path.canonicalize() {
+        if let Ok(canonical) = self.capabilities.canonicalize(path).await {
             self.import_cache
                 .insert(canonical, Value::Object(Arc::new(IndexMap::new()), None));
         }
@@ -335,7 +337,7 @@ impl Evaluator {
         let module = parser::parse_named(&tokens, source, &name)?;
         let val = self.eval_module(&module, path, 0).await?;
         // Update cache with real value
-        if let Ok(canonical) = path.canonicalize() {
+        if let Ok(canonical) = self.capabilities.canonicalize(path).await {
             self.import_cache.insert(canonical, val.clone());
         }
         Ok(val)
@@ -349,9 +351,7 @@ impl Evaluator {
     /// Read, lex, parse, and evaluate a local file (with caching).
     /// Inserts a placeholder before evaluation to break circular imports.
     async fn eval_file(&mut self, path: &Path, depth: usize) -> Result<Value> {
-        let canonical = path
-            .canonicalize()
-            .map_err(|e| Error::Io(path.to_path_buf(), e))?;
+        let canonical = self.capabilities.canonicalize(path).await?;
         if let Some(cached) = self.import_cache.get(&canonical) {
             return Ok(cached.clone());
         }
@@ -377,9 +377,7 @@ impl Evaluator {
         if requested_fields.is_none() {
             return self.eval_file(path, depth).await;
         }
-        let canonical = path
-            .canonicalize()
-            .map_err(|e| Error::Io(path.to_path_buf(), e))?;
+        let canonical = self.capabilities.canonicalize(path).await?;
         if let Some(cached) = self.import_cache.get(&canonical) {
             return Ok(cached.clone());
         }
@@ -400,7 +398,7 @@ impl Evaluator {
         depth: usize,
         requested_fields: Option<HashSet<String>>,
     ) -> Result<Value> {
-        let module = parse_file(path)?;
+        let module = self.parse_file(path).await?;
         self.eval_module_with_scope(&module, path, depth, None, requested_fields)
             .await
     }
@@ -426,9 +424,7 @@ impl Evaluator {
         if inherited_scope.is_none() {
             return self.eval_file(path, depth).await;
         }
-        let canonical = path
-            .canonicalize()
-            .map_err(|e| Error::Io(path.to_path_buf(), e))?;
+        let canonical = self.capabilities.canonicalize(path).await?;
         if !self.scoped_imports_in_flight.insert(canonical.clone()) {
             return Ok(Value::Object(Arc::new(IndexMap::new()), None));
         }
@@ -445,11 +441,18 @@ impl Evaluator {
         depth: usize,
         inherited_scope: Option<Scope>,
     ) -> Result<Value> {
-        let module = parse_file(path)?;
+        let module = self.parse_file(path).await?;
         let val = self
             .eval_module_with_scope(&module, path, depth, inherited_scope, None)
             .await?;
         Ok(val)
+    }
+
+    async fn parse_file(&mut self, path: &Path) -> Result<Module> {
+        let source = self.capabilities.read_to_string(path).await?;
+        let name = path.display().to_string();
+        let tokens = lexer::lex_named(&source, &name)?;
+        parser::parse_named(&tokens, &source, &name)
     }
 
     async fn eval_module(&mut self, module: &Module, path: &Path, depth: usize) -> Result<Value> {
@@ -532,10 +535,10 @@ impl Evaluator {
                 }
 
                 let base_dir = path.parent().unwrap_or(Path::new("."));
-                let matched = expand_glob(base_dir, uri)?;
+                let matched = self.capabilities.glob(base_dir, uri).await?;
                 let mut mapping = IndexMap::new();
                 for matched_path in matched {
-                    if same_local_path(&matched_path, path) {
+                    if self.same_local_path(&matched_path, path).await? {
                         continue;
                     }
                     let rel_key = pathdiff_or_full(&matched_path, base_dir);
@@ -598,13 +601,22 @@ impl Evaluator {
                 let requested = requested_fields_for_import(&import_field_uses, &alias);
                 // For zip packages, extract to temp dir and eval as local file
                 if let PackageSource::Zip(zip_url, _) = &pkg {
-                    let pkg_dir = self.extract_package_zip(zip_url).await?;
-                    let local_path = pkg_dir.join(file_path);
-                    let imported_val = self
-                        .eval_file_with_requested_fields(&local_path, depth + 1, requested)
-                        .await?;
-                    scope.set(alias, imported_val);
-                    continue;
+                    #[cfg(feature = "package-zip")]
+                    {
+                        let pkg_dir = self.extract_package_zip(zip_url).await?;
+                        let local_path = pkg_dir.join(file_path);
+                        let imported_val = self
+                            .eval_file_with_requested_fields(&local_path, depth + 1, requested)
+                            .await?;
+                        scope.set(alias, imported_val);
+                        continue;
+                    }
+                    #[cfg(not(feature = "package-zip"))]
+                    {
+                        return Err(Error::Unsupported(format!(
+                            "package zip imports require pklr's 'package-zip' feature: {zip_url}"
+                        )));
+                    }
                 }
                 let url = match &pkg {
                     PackageSource::Direct(url) => url.clone(),
@@ -664,13 +676,17 @@ impl Evaluator {
                 // reported only if the imported binding is actually referenced.
                 continue;
             }
-            if !import_path.exists() {
+            if !self.capabilities.path_exists(&import_path).await? {
                 return Err(Error::ImportNotFound(import_path.display().to_string()));
             }
-            if let Some(inherited_path) = inherited_local_paths
-                .iter()
-                .find(|inherited_path| same_local_path(inherited_path, &import_path))
-            {
+            let mut inherited_path = None;
+            for candidate in &inherited_local_paths {
+                if self.same_local_path(candidate, &import_path).await? {
+                    inherited_path = Some(candidate);
+                    break;
+                }
+            }
+            if let Some(inherited_path) = inherited_path {
                 deferred_inherited_imports.push((alias, inherited_path.clone()));
                 continue;
             }
@@ -709,24 +725,33 @@ impl Evaluator {
             } else if uri.starts_with("package://") {
                 let pkg = resolve_package_uri(uri)?;
                 if let PackageSource::Zip(zip_url, entry) = &pkg {
-                    let pkg_dir = self.extract_package_zip(zip_url).await?;
-                    let local_path = pkg_dir.join(entry);
-                    let source = std::fs::read_to_string(&local_path)
-                        .map_err(|e| Error::Io(local_path.clone(), e))?;
-                    let name = local_path.display().to_string();
-                    let tokens = lexer::lex_named(&source, &name)?;
-                    let base_module = parser::parse_named(&tokens, &source, &name)?;
-                    let base_val = self
-                        .eval_module_with_scope(
-                            &base_module,
-                            &local_path,
-                            depth + 1,
-                            Some(scope.clone()),
-                            None,
-                        )
-                        .await?;
-                    if let Value::Object(m, _) = base_val {
-                        base_obj = (*m).clone();
+                    #[cfg(feature = "package-zip")]
+                    {
+                        let pkg_dir = self.extract_package_zip(zip_url).await?;
+                        let local_path = pkg_dir.join(entry);
+                        let source = self.capabilities.read_to_string(&local_path).await?;
+                        let name = local_path.display().to_string();
+                        let tokens = lexer::lex_named(&source, &name)?;
+                        let base_module = parser::parse_named(&tokens, &source, &name)?;
+                        let base_val = self
+                            .eval_module_with_scope(
+                                &base_module,
+                                &local_path,
+                                depth + 1,
+                                Some(scope.clone()),
+                                None,
+                            )
+                            .await?;
+                        if let Value::Object(m, _) = base_val {
+                            base_obj = (*m).clone();
+                        }
+                    }
+                    #[cfg(not(feature = "package-zip"))]
+                    {
+                        let _ = entry;
+                        return Err(Error::Unsupported(format!(
+                            "package zip imports require pklr's 'package-zip' feature: {zip_url}"
+                        )));
                     }
                 } else if let PackageSource::Direct(url) = &pkg {
                     let source = self.fetch_source(url).await?;
@@ -754,17 +779,18 @@ impl Evaluator {
                     let base = path.parent().unwrap_or(Path::new("."));
                     base.join(uri)
                 };
-                if amends_path.exists() {
+                if self.capabilities.path_exists(&amends_path).await? {
                     let base_val = self
                         .eval_file_with_scope(&amends_path, depth + 1, Some(scope.clone()))
                         .await?;
                     if let Value::Object(m, _) = &base_val {
-                        bind_deferred_inherited_imports(
+                        self.bind_deferred_inherited_imports(
                             &deferred_inherited_imports,
                             &amends_path,
                             &base_val,
                             &mut scope,
-                        );
+                        )
+                        .await?;
                         base_obj = (**m).clone();
                     }
                 }
@@ -781,36 +807,10 @@ impl Evaluator {
         if let Some(amends_uri) = &module.amends {
             let resolved_amends = resolve_remote_relative(path, amends_uri);
             let uri: &str = resolved_amends.as_deref().unwrap_or(amends_uri);
-            let base_source = if uri.starts_with("https://") || uri.starts_with("http://") {
-                // HTTP source was already fetched and cached
-                self.http_cache.get(uri).cloned()
-            } else if uri.starts_with("package://") {
-                // For package:// URIs with Direct source, the source was cached
-                if let Ok(pkg) = resolve_package_uri(uri) {
-                    match &pkg {
-                        PackageSource::Direct(url) => self.http_cache.get(url).cloned(),
-                        PackageSource::Zip(zip_url, entry) => {
-                            // For zip packages, read from the extracted directory
-                            self.package_dir_for_zip(zip_url)
-                                .and_then(|dir| std::fs::read_to_string(dir.join(entry)).ok())
-                        }
-                    }
-                } else {
-                    None
-                }
-            } else if !uri.starts_with("pkl:")
-                && (!uri.contains("://") || uri.starts_with("file://"))
-            {
-                let amends_path = if let Some(rel) = uri.strip_prefix("file://") {
-                    PathBuf::from(rel)
-                } else {
-                    let base = path.parent().unwrap_or(Path::new("."));
-                    base.join(uri)
-                };
-                std::fs::read_to_string(&amends_path).ok()
-            } else {
-                None
-            };
+            let base_source = self
+                .load_module_source(uri, path)
+                .await?
+                .map(|(source, _)| source);
             if let Some(src) = base_source
                 && let Ok(tokens) = lexer::lex(&src)
                 && let Ok(base_module) = parser::parse(&tokens)
@@ -859,22 +859,22 @@ impl Evaluator {
                     let base = path.parent().unwrap_or(Path::new("."));
                     base.join(uri)
                 };
-                if extends_path.exists() {
+                if self.capabilities.path_exists(&extends_path).await? {
                     let ext_val = self
                         .eval_file_with_scope(&extends_path, depth + 1, Some(scope.clone()))
                         .await?;
                     let name = extends_path.display().to_string();
-                    let source = std::fs::read_to_string(&extends_path)
-                        .map_err(|e| Error::Io(extends_path.clone(), e))?;
+                    let source = self.capabilities.read_to_string(&extends_path).await?;
                     let tokens = lexer::lex_named(&source, &name)?;
                     let ext_module = parser::parse_named(&tokens, &source, &name)?;
                     if let Value::Object(m, _) = &ext_val {
-                        bind_deferred_inherited_imports(
+                        self.bind_deferred_inherited_imports(
                             &deferred_inherited_imports,
                             &extends_path,
                             &ext_val,
                             &mut scope,
-                        );
+                        )
+                        .await?;
                         base_obj = (**m).clone();
                     }
                     // Also evaluate the base module's scope (classes, locals) into our scope
@@ -3428,13 +3428,6 @@ fn object_declares_field(value: &Value, field: &str) -> bool {
         })
 }
 
-fn parse_file(path: &Path) -> Result<Module> {
-    let source = std::fs::read_to_string(path).map_err(|e| Error::Io(path.to_path_buf(), e))?;
-    let name = path.display().to_string();
-    let tokens = lexer::lex_named(&source, &name)?;
-    parser::parse_named(&tokens, &source, &name)
-}
-
 fn analysis_entries_for_requested_fields(
     entries: &[Entry],
     requested_fields: Option<&HashSet<String>>,
@@ -4660,28 +4653,114 @@ fn resolve_remote_relative(current_path: &Path, uri: &str) -> Option<String> {
     if !(base.starts_with("http://") || base.starts_with("https://")) {
         return None;
     }
-    reqwest::Url::parse(base)
+    resolve_http_relative(base, uri)
+}
+
+fn resolve_http_relative(base: &str, uri: &str) -> Option<String> {
+    url::Url::parse(base)
+        .ok()?
+        .join(uri)
         .ok()
-        .and_then(|base| base.join(uri).ok())
         .map(|url| url.to_string())
 }
 
-fn same_local_path(left: &Path, right: &Path) -> bool {
-    let left_key = left.canonicalize().unwrap_or_else(|_| left.to_path_buf());
-    let right_key = right.canonicalize().unwrap_or_else(|_| right.to_path_buf());
-    left_key == right_key
+#[cfg(test)]
+mod remote_relative_tests {
+    use super::resolve_http_relative;
+
+    #[test]
+    fn http_relative_resolves_against_base_directory() {
+        assert_eq!(
+            resolve_http_relative("https://example.com/cfg/Main.pkl", "../Lib.pkl").as_deref(),
+            Some("https://example.com/Lib.pkl")
+        );
+    }
+
+    #[test]
+    fn http_relative_ignores_base_query_and_fragment() {
+        assert_eq!(
+            resolve_http_relative(
+                "https://example.com/cfg/Main.pkl?version=2#part",
+                "../Lib.pkl"
+            )
+            .as_deref(),
+            Some("https://example.com/Lib.pkl")
+        );
+    }
+
+    #[test]
+    fn http_relative_keeps_absolute_path_references_absolute() {
+        assert_eq!(
+            resolve_http_relative("https://example.com/cfg/Main.pkl", "/shared/Lib.pkl").as_deref(),
+            Some("https://example.com/shared/Lib.pkl")
+        );
+    }
+
+    #[test]
+    fn http_relative_clamps_above_root_segments() {
+        assert_eq!(
+            resolve_http_relative("https://example.com/Main.pkl", "../../Lib.pkl").as_deref(),
+            Some("https://example.com/Lib.pkl")
+        );
+    }
+
+    #[test]
+    fn http_relative_resolves_query_only_references() {
+        assert_eq!(
+            resolve_http_relative("https://example.com/cfg/Main.pkl", "?v=2").as_deref(),
+            Some("https://example.com/cfg/Main.pkl?v=2")
+        );
+    }
+
+    #[test]
+    fn http_relative_resolves_fragment_only_references() {
+        assert_eq!(
+            resolve_http_relative("https://example.com/cfg/Main.pkl", "#frag").as_deref(),
+            Some("https://example.com/cfg/Main.pkl#frag")
+        );
+    }
+
+    #[test]
+    fn http_relative_resolves_network_path_references() {
+        assert_eq!(
+            resolve_http_relative("https://example.com/cfg/Main.pkl", "//cdn.example/Lib.pkl")
+                .as_deref(),
+            Some("https://cdn.example/Lib.pkl")
+        );
+    }
 }
 
-fn bind_deferred_inherited_imports(
-    deferred: &[(String, PathBuf)],
-    inherited_path: &Path,
-    inherited_val: &Value,
-    scope: &mut Scope,
-) {
-    for (alias, alias_path) in deferred {
-        if same_local_path(alias_path, inherited_path) {
-            scope.set(alias.clone(), inherited_val.clone());
+impl Evaluator {
+    async fn same_local_path(&mut self, left: &Path, right: &Path) -> Result<bool> {
+        if left == right {
+            return Ok(true);
         }
+        let left_key = self
+            .capabilities
+            .canonicalize(left)
+            .await
+            .unwrap_or_else(|_| left.to_path_buf());
+        let right_key = self
+            .capabilities
+            .canonicalize(right)
+            .await
+            .unwrap_or_else(|_| right.to_path_buf());
+        Ok(left_key == right_key)
+    }
+
+    async fn bind_deferred_inherited_imports(
+        &mut self,
+        deferred: &[(String, PathBuf)],
+        inherited_path: &Path,
+        inherited_val: &Value,
+        scope: &mut Scope,
+    ) -> Result<()> {
+        for (alias, alias_path) in deferred {
+            if self.same_local_path(alias_path, inherited_path).await? {
+                scope.set(alias.clone(), inherited_val.clone());
+            }
+        }
+        Ok(())
     }
 }
 
@@ -4724,9 +4803,12 @@ fn collection_to_items(v: Value) -> Vec<(Value, Value)> {
 
 #[cfg(test)]
 mod package_uri_tests {
+    #[cfg(all(feature = "native-io", feature = "package-zip"))]
     use std::path::PathBuf;
 
-    use super::{Evaluator, PackageSource, resolve_package_uri};
+    #[cfg(all(feature = "native-io", feature = "package-zip"))]
+    use super::Evaluator;
+    use super::{PackageSource, resolve_package_uri};
 
     #[test]
     fn generic_package_uri_resolves_to_zip_url() {
@@ -4742,6 +4824,7 @@ mod package_uri_tests {
     }
 
     #[test]
+    #[cfg(all(feature = "native-io", feature = "package-zip"))]
     fn package_dir_lookup_uses_rewritten_zip_url() {
         let mut evaluator = Evaluator::new();
         evaluator.set_http_rewrites(&["https://example.com/=https://mirror.local/".to_string()]);
