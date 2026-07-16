@@ -95,6 +95,27 @@ async fn custom_capabilities_handle_http_import() {
     );
 }
 
+#[tokio::test]
+async fn custom_capabilities_preserve_fetch_errors() {
+    let fetches = Arc::new(Mutex::new(Vec::new()));
+    let mut evaluator = pklr::Evaluator::with_capabilities(MemoryCapabilities {
+        modules: HashMap::new(),
+        fetches,
+    });
+    let error = evaluator
+        .eval_source(
+            "import \"http://example.test/missing.pkl\" as Missing\nresult = Missing.value\n",
+            Path::new("entry.pkl"),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        pklr::Error::ImportNotFound(url) if url == "http://example.test/missing.pkl"
+    ));
+}
+
 // --- Lexer tests ---
 
 #[test]

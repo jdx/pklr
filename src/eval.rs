@@ -201,16 +201,7 @@ impl Evaluator {
         if let Some(cached) = self.http_cache.get(fetch_url) {
             return Ok(cached.clone());
         }
-        let err_ctx = if fetch_url != url {
-            format!("{url} (rewritten to {fetch_url})")
-        } else {
-            fetch_url.to_string()
-        };
-        let body = self
-            .capabilities
-            .fetch_text(fetch_url)
-            .await
-            .map_err(|error| Error::Eval(format!("HTTP fetch failed for {err_ctx}: {error}")))?;
+        let body = self.capabilities.fetch_text(fetch_url).await?;
         self.http_cache.insert(fetch_url.to_string(), body.clone());
         Ok(body)
     }
@@ -310,16 +301,7 @@ impl Evaluator {
         if let Some(dir) = self.package_dirs.get(fetch_url) {
             return Ok(dir.clone());
         }
-        let err_ctx = if fetch_url != zip_url {
-            format!("{zip_url} (rewritten to {fetch_url})")
-        } else {
-            fetch_url.to_string()
-        };
-        let bytes = self
-            .capabilities
-            .fetch_bytes(fetch_url)
-            .await
-            .map_err(|e| Error::Eval(format!("HTTP read failed for {err_ctx}: {e}")))?;
+        let bytes = self.capabilities.fetch_bytes(fetch_url).await?;
         let cursor = std::io::Cursor::new(bytes);
         let mut archive =
             zip::ZipArchive::new(cursor).map_err(|e| Error::Eval(format!("zip error: {e}")))?;
