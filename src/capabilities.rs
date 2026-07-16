@@ -1,6 +1,8 @@
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+#[cfg(feature = "native-io")]
+use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "http")]
 use std::time::Duration;
 
@@ -14,6 +16,10 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 /// can provide their own file, environment, HTTP, temp-dir, and glob behavior.
 pub trait EvalCapabilities: Send {
     fn read_to_string<'a>(&'a mut self, path: &'a Path) -> BoxFuture<'a, Result<String>>;
+
+    fn path_exists<'a>(&'a mut self, path: &'a Path) -> BoxFuture<'a, Result<bool>>;
+
+    fn canonicalize<'a>(&'a mut self, path: &'a Path) -> BoxFuture<'a, Result<PathBuf>>;
 
     fn read_env<'a>(&'a mut self, name: &'a str) -> BoxFuture<'a, Result<Option<String>>>;
 
@@ -78,6 +84,17 @@ impl EvalCapabilities for NativeCapabilities {
     fn read_to_string<'a>(&'a mut self, path: &'a Path) -> BoxFuture<'a, Result<String>> {
         Box::pin(async move {
             std::fs::read_to_string(path)
+                .map_err(|error| crate::Error::Io(path.to_path_buf(), error))
+        })
+    }
+
+    fn path_exists<'a>(&'a mut self, path: &'a Path) -> BoxFuture<'a, Result<bool>> {
+        Box::pin(async move { Ok(path.exists()) })
+    }
+
+    fn canonicalize<'a>(&'a mut self, path: &'a Path) -> BoxFuture<'a, Result<PathBuf>> {
+        Box::pin(async move {
+            path.canonicalize()
                 .map_err(|error| crate::Error::Io(path.to_path_buf(), error))
         })
     }
@@ -165,13 +182,7 @@ impl EvalCapabilities for NativeCapabilities {
     }
 
     fn temp_dir<'a>(&'a mut self, prefix: &'a str) -> BoxFuture<'a, Result<PathBuf>> {
-        Box::pin(async move {
-            let dir = std::env::temp_dir().join(prefix);
-            std::fs::create_dir_all(&dir).map_err(|error| {
-                crate::Error::Eval(format!("mkdir failed for {}: {error}", dir.display()))
-            })?;
-            Ok(dir)
-        })
+        Box::pin(async move { unique_temp_dir(prefix) })
     }
 
     fn glob<'a>(
@@ -180,5 +191,56 @@ impl EvalCapabilities for NativeCapabilities {
         pattern: &'a str,
     ) -> BoxFuture<'a, Result<Vec<PathBuf>>> {
         Box::pin(async move { crate::eval::expand_glob(base, pattern) })
+    }
+}
+
+#[cfg(feature = "native-io")]
+static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(feature = "native-io")]
+fn unique_temp_dir(prefix: &str) -> Result<PathBuf> {
+    let base = std::env::temp_dir();
+    for _ in 0..100 {
+        let counter = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = base.join(format!("{prefix}-{}-{counter}", std::process::id()));
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(crate::Error::Eval(format!(
+                    "mkdir failed for {}: {error}",
+                    dir.display()
+                )));
+            }
+        }
+    }
+    Err(crate::Error::Eval(format!(
+        "mkdir failed for {}: unable to create a unique directory",
+        base.join(prefix).display()
+    )))
+}
+
+#[cfg(all(test, feature = "native-io"))]
+mod tests {
+    use super::{EvalCapabilities, NativeCapabilities};
+
+    #[tokio::test]
+    async fn native_temp_dirs_are_unique_and_empty() {
+        let mut capabilities = NativeCapabilities::new();
+        let first = capabilities
+            .temp_dir("pklr-capabilities-test")
+            .await
+            .unwrap();
+        let second = capabilities
+            .temp_dir("pklr-capabilities-test")
+            .await
+            .unwrap();
+
+        assert_ne!(first, second);
+        assert!(std::fs::read_dir(&first).unwrap().next().is_none());
+        assert!(std::fs::read_dir(&second).unwrap().next().is_none());
+
+        std::fs::remove_dir(&first).unwrap();
+        std::fs::remove_dir(&second).unwrap();
     }
 }

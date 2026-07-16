@@ -284,7 +284,7 @@ impl Evaluator {
             let base = path.parent().unwrap_or(Path::new("."));
             base.join(uri)
         };
-        if !import_path.exists() {
+        if !self.capabilities.path_exists(&import_path).await? {
             return Ok(None);
         }
         let source = self.capabilities.read_to_string(&import_path).await?;
@@ -328,7 +328,7 @@ impl Evaluator {
     pub async fn eval_source(&mut self, source: &str, path: &Path) -> Result<Value> {
         self.converters.clear();
         // Seed import cache for the entry file so circular back-references work
-        if let Ok(canonical) = path.canonicalize() {
+        if let Ok(canonical) = self.capabilities.canonicalize(path).await {
             self.import_cache
                 .insert(canonical, Value::Object(Arc::new(IndexMap::new()), None));
         }
@@ -337,7 +337,7 @@ impl Evaluator {
         let module = parser::parse_named(&tokens, source, &name)?;
         let val = self.eval_module(&module, path, 0).await?;
         // Update cache with real value
-        if let Ok(canonical) = path.canonicalize() {
+        if let Ok(canonical) = self.capabilities.canonicalize(path).await {
             self.import_cache.insert(canonical, val.clone());
         }
         Ok(val)
@@ -351,9 +351,7 @@ impl Evaluator {
     /// Read, lex, parse, and evaluate a local file (with caching).
     /// Inserts a placeholder before evaluation to break circular imports.
     async fn eval_file(&mut self, path: &Path, depth: usize) -> Result<Value> {
-        let canonical = path
-            .canonicalize()
-            .map_err(|e| Error::Io(path.to_path_buf(), e))?;
+        let canonical = self.capabilities.canonicalize(path).await?;
         if let Some(cached) = self.import_cache.get(&canonical) {
             return Ok(cached.clone());
         }
@@ -379,9 +377,7 @@ impl Evaluator {
         if requested_fields.is_none() {
             return self.eval_file(path, depth).await;
         }
-        let canonical = path
-            .canonicalize()
-            .map_err(|e| Error::Io(path.to_path_buf(), e))?;
+        let canonical = self.capabilities.canonicalize(path).await?;
         if let Some(cached) = self.import_cache.get(&canonical) {
             return Ok(cached.clone());
         }
@@ -428,9 +424,7 @@ impl Evaluator {
         if inherited_scope.is_none() {
             return self.eval_file(path, depth).await;
         }
-        let canonical = path
-            .canonicalize()
-            .map_err(|e| Error::Io(path.to_path_buf(), e))?;
+        let canonical = self.capabilities.canonicalize(path).await?;
         if !self.scoped_imports_in_flight.insert(canonical.clone()) {
             return Ok(Value::Object(Arc::new(IndexMap::new()), None));
         }
@@ -544,7 +538,7 @@ impl Evaluator {
                 let matched = self.capabilities.glob(base_dir, uri).await?;
                 let mut mapping = IndexMap::new();
                 for matched_path in matched {
-                    if same_local_path(&matched_path, path) {
+                    if self.same_local_path(&matched_path, path).await? {
                         continue;
                     }
                     let rel_key = pathdiff_or_full(&matched_path, base_dir);
@@ -682,13 +676,17 @@ impl Evaluator {
                 // reported only if the imported binding is actually referenced.
                 continue;
             }
-            if !import_path.exists() {
+            if !self.capabilities.path_exists(&import_path).await? {
                 return Err(Error::ImportNotFound(import_path.display().to_string()));
             }
-            if let Some(inherited_path) = inherited_local_paths
-                .iter()
-                .find(|inherited_path| same_local_path(inherited_path, &import_path))
-            {
+            let mut inherited_path = None;
+            for candidate in &inherited_local_paths {
+                if self.same_local_path(candidate, &import_path).await? {
+                    inherited_path = Some(candidate);
+                    break;
+                }
+            }
+            if let Some(inherited_path) = inherited_path {
                 deferred_inherited_imports.push((alias, inherited_path.clone()));
                 continue;
             }
@@ -781,17 +779,18 @@ impl Evaluator {
                     let base = path.parent().unwrap_or(Path::new("."));
                     base.join(uri)
                 };
-                if amends_path.exists() {
+                if self.capabilities.path_exists(&amends_path).await? {
                     let base_val = self
                         .eval_file_with_scope(&amends_path, depth + 1, Some(scope.clone()))
                         .await?;
                     if let Value::Object(m, _) = &base_val {
-                        bind_deferred_inherited_imports(
+                        self.bind_deferred_inherited_imports(
                             &deferred_inherited_imports,
                             &amends_path,
                             &base_val,
                             &mut scope,
-                        );
+                        )
+                        .await?;
                         base_obj = (**m).clone();
                     }
                 }
@@ -860,7 +859,7 @@ impl Evaluator {
                     let base = path.parent().unwrap_or(Path::new("."));
                     base.join(uri)
                 };
-                if extends_path.exists() {
+                if self.capabilities.path_exists(&extends_path).await? {
                     let ext_val = self
                         .eval_file_with_scope(&extends_path, depth + 1, Some(scope.clone()))
                         .await?;
@@ -869,12 +868,13 @@ impl Evaluator {
                     let tokens = lexer::lex_named(&source, &name)?;
                     let ext_module = parser::parse_named(&tokens, &source, &name)?;
                     if let Value::Object(m, _) = &ext_val {
-                        bind_deferred_inherited_imports(
+                        self.bind_deferred_inherited_imports(
                             &deferred_inherited_imports,
                             &extends_path,
                             &ext_val,
                             &mut scope,
-                        );
+                        )
+                        .await?;
                         base_obj = (**m).clone();
                     }
                     // Also evaluate the base module's scope (classes, locals) into our scope
@@ -4657,39 +4657,11 @@ fn resolve_remote_relative(current_path: &Path, uri: &str) -> Option<String> {
 }
 
 fn resolve_http_relative(base: &str, uri: &str) -> Option<String> {
-    let scheme_end = base.find("://")? + 3;
-    let authority_end = base[scheme_end..]
-        .find(['/', '?', '#'])
-        .map(|offset| scheme_end + offset);
-    let (origin, base_path) = match authority_end {
-        Some(path_start) if base[path_start..].starts_with('/') => {
-            let (origin, path_and_suffix) = base.split_at(path_start);
-            let path_end = path_and_suffix
-                .find(['?', '#'])
-                .unwrap_or(path_and_suffix.len());
-            (origin, &path_and_suffix[..path_end])
-        }
-        Some(path_start) => base.split_at(path_start),
-        None => (base, ""),
-    };
-    if uri.starts_with('/') {
-        return Some(format!("{origin}{uri}"));
-    }
-    let base_dir = base_path
-        .rsplit_once('/')
-        .map(|(dir, _)| format!("{dir}/"))
-        .unwrap_or_else(|| "/".to_string());
-    let mut segments = Vec::new();
-    for segment in base_dir.split('/').chain(uri.split('/')) {
-        match segment {
-            "" | "." => {}
-            ".." => {
-                segments.pop();
-            }
-            segment => segments.push(segment),
-        }
-    }
-    Some(format!("{origin}/{}", segments.join("/")))
+    url::Url::parse(base)
+        .ok()?
+        .join(uri)
+        .ok()
+        .map(|url| url.to_string())
 }
 
 #[cfg(test)]
@@ -4731,24 +4703,64 @@ mod remote_relative_tests {
             Some("https://example.com/Lib.pkl")
         );
     }
+
+    #[test]
+    fn http_relative_resolves_query_only_references() {
+        assert_eq!(
+            resolve_http_relative("https://example.com/cfg/Main.pkl", "?v=2").as_deref(),
+            Some("https://example.com/cfg/Main.pkl?v=2")
+        );
+    }
+
+    #[test]
+    fn http_relative_resolves_fragment_only_references() {
+        assert_eq!(
+            resolve_http_relative("https://example.com/cfg/Main.pkl", "#frag").as_deref(),
+            Some("https://example.com/cfg/Main.pkl#frag")
+        );
+    }
+
+    #[test]
+    fn http_relative_resolves_network_path_references() {
+        assert_eq!(
+            resolve_http_relative("https://example.com/cfg/Main.pkl", "//cdn.example/Lib.pkl")
+                .as_deref(),
+            Some("https://cdn.example/Lib.pkl")
+        );
+    }
 }
 
-fn same_local_path(left: &Path, right: &Path) -> bool {
-    let left_key = left.canonicalize().unwrap_or_else(|_| left.to_path_buf());
-    let right_key = right.canonicalize().unwrap_or_else(|_| right.to_path_buf());
-    left_key == right_key
-}
-
-fn bind_deferred_inherited_imports(
-    deferred: &[(String, PathBuf)],
-    inherited_path: &Path,
-    inherited_val: &Value,
-    scope: &mut Scope,
-) {
-    for (alias, alias_path) in deferred {
-        if same_local_path(alias_path, inherited_path) {
-            scope.set(alias.clone(), inherited_val.clone());
+impl Evaluator {
+    async fn same_local_path(&mut self, left: &Path, right: &Path) -> Result<bool> {
+        if left == right {
+            return Ok(true);
         }
+        let left_key = self
+            .capabilities
+            .canonicalize(left)
+            .await
+            .unwrap_or_else(|_| left.to_path_buf());
+        let right_key = self
+            .capabilities
+            .canonicalize(right)
+            .await
+            .unwrap_or_else(|_| right.to_path_buf());
+        Ok(left_key == right_key)
+    }
+
+    async fn bind_deferred_inherited_imports(
+        &mut self,
+        deferred: &[(String, PathBuf)],
+        inherited_path: &Path,
+        inherited_val: &Value,
+        scope: &mut Scope,
+    ) -> Result<()> {
+        for (alias, alias_path) in deferred {
+            if self.same_local_path(alias_path, inherited_path).await? {
+                scope.set(alias.clone(), inherited_val.clone());
+            }
+        }
+        Ok(())
     }
 }
 

@@ -18,8 +18,20 @@ struct MemoryCapabilities {
 
 impl EvalCapabilities for MemoryCapabilities {
     fn read_to_string<'a>(&'a mut self, path: &'a Path) -> BoxFuture<'a, pklr::Result<String>> {
-        let path = path.display().to_string();
-        Box::pin(async move { Err(pklr::Error::ImportNotFound(path)) })
+        let key = path.display().to_string();
+        let source = self.modules.get(&key).cloned();
+        Box::pin(async move { source.ok_or(pklr::Error::ImportNotFound(key)) })
+    }
+
+    fn path_exists<'a>(&'a mut self, path: &'a Path) -> BoxFuture<'a, pklr::Result<bool>> {
+        let key = path.display().to_string();
+        let exists = self.modules.contains_key(&key);
+        Box::pin(async move { Ok(exists) })
+    }
+
+    fn canonicalize<'a>(&'a mut self, path: &'a Path) -> BoxFuture<'a, pklr::Result<PathBuf>> {
+        let path = path.to_path_buf();
+        Box::pin(async move { Ok(path) })
     }
 
     fn read_env<'a>(&'a mut self, _name: &'a str) -> BoxFuture<'a, pklr::Result<Option<String>>> {
@@ -114,6 +126,27 @@ async fn custom_capabilities_preserve_fetch_errors() {
         error,
         pklr::Error::ImportNotFound(url) if url == "http://example.test/missing.pkl"
     ));
+}
+
+#[tokio::test]
+async fn custom_capabilities_handle_virtual_local_import() {
+    let mut modules = HashMap::new();
+    modules.insert("virtual/Main.pkl".to_string(), "value = 42\n".to_string());
+
+    let mut evaluator = pklr::Evaluator::with_capabilities(MemoryCapabilities {
+        modules,
+        fetches: Arc::new(Mutex::new(Vec::new())),
+    });
+    let json = evaluator
+        .eval_source(
+            "import \"Main.pkl\" as Main\nresult = Main.value\n",
+            Path::new("virtual/entry.pkl"),
+        )
+        .await
+        .unwrap()
+        .to_json();
+
+    assert_eq!(json["result"], 42);
 }
 
 // --- Lexer tests ---

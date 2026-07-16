@@ -21,7 +21,7 @@ default = [
   "miette-diagnostics",
 ]
 parse = []
-eval-core = ["parse", "dep:async-recursion"]
+eval-core = ["parse", "dep:async-recursion", "dep:url"]
 native-io = ["eval-core"]
 http = ["eval-core", "dep:reqwest"]
 package-zip = ["http", "native-io", "dep:zip"]
@@ -36,6 +36,7 @@ async-recursion = { version = "1", optional = true }
 reqwest         = { version = "0.13", default-features = false, features = ["rustls"], optional = true }
 tokio           = { version = "1", features = ["rt"], optional = true }
 zip             = { version = "8", default-features = false, features = ["deflate"], optional = true }
+url             = { version = "2", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
