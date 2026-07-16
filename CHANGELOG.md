@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0](https://github.com/jdx/pklr/compare/v1.1.3...v1.2.0) - 2026-07-16
+
+### Added
+
+- support parser-only and capability-backed builds ([#131](https://github.com/jdx/pklr/pull/131))
+
+### Fixed
+
+- *(eval)* restore evaluator sync compatibility ([#135](https://github.com/jdx/pklr/pull/135))
+
 ## [1.1.3](https://github.com/jdx/pklr/compare/v1.1.2...v1.1.3) - 2026-07-06
 
 ### Fixed
