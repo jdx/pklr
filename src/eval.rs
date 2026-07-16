@@ -4802,6 +4802,18 @@ fn collection_to_items(v: Value) -> Vec<(Value, Value)> {
 }
 
 #[cfg(test)]
+mod auto_trait_tests {
+    use super::Evaluator;
+
+    #[test]
+    fn evaluator_is_sync() {
+        fn assert_sync<T: Sync>() {}
+
+        assert_sync::<Evaluator>();
+    }
+}
+
+#[cfg(test)]
 mod package_uri_tests {
     #[cfg(all(feature = "native-io", feature = "package-zip"))]
     use std::path::PathBuf;

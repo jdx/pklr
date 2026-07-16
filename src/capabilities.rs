@@ -14,7 +14,7 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 ///
 /// The default evaluator still uses the native implementation, but embedders
 /// can provide their own file, environment, HTTP, temp-dir, and glob behavior.
-pub trait EvalCapabilities: Send {
+pub trait EvalCapabilities: Send + Sync {
     fn read_to_string<'a>(&'a mut self, path: &'a Path) -> BoxFuture<'a, Result<String>>;
 
     fn path_exists<'a>(&'a mut self, path: &'a Path) -> BoxFuture<'a, Result<bool>>;

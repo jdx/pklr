@@ -41,8 +41,19 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
       - run: cargo msrv verify
+  semver:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - name: Check for breaking API changes
+        uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2
   final:
-    needs: [test, msrv]
+    needs: [test, msrv, semver]
     runs-on: ubuntu-latest
     timeout-minutes: 1
     permissions: {}
@@ -52,7 +63,7 @@ jobs:
     steps:
       - name: Check CI job results
         run: |
-          results=("${{ needs.test.result }}" "${{ needs.msrv.result }}")
+          results=("${{ needs.test.result }}" "${{ needs.msrv.result }}" "${{ needs.semver.result }}")
           for r in "${results[@]}"; do
             if [ "$r" != "success" ]; then
               echo "CI job failed or was skipped"
