@@ -590,6 +590,26 @@ async fn native_capabilities_fetch_bytes_uses_configured_client() {
     assert_eq!(bytes, b"zip-bytes");
 }
 
+#[tokio::test]
+async fn native_capabilities_map_not_found_to_import_errors() {
+    let base = spawn_test_http_server(vec![]);
+    let mut capabilities = pklr::NativeCapabilities::new();
+
+    let text_url = format!("{base}/missing.pkl");
+    let text_error = capabilities.fetch_text(&text_url).await.unwrap_err();
+    assert!(matches!(
+        text_error,
+        pklr::Error::ImportNotFound(url) if url == text_url
+    ));
+
+    let bytes_url = format!("{base}/missing.zip");
+    let bytes_error = capabilities.fetch_bytes(&bytes_url).await.unwrap_err();
+    assert!(matches!(
+        bytes_error,
+        pklr::Error::ImportNotFound(url) if url == bytes_url
+    ));
+}
+
 /// A module loaded over HTTP that itself uses a relative `import` should
 /// resolve that import against its own (HTTP) URL, not the local filesystem.
 #[tokio::test]

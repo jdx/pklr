@@ -100,7 +100,13 @@ impl EvalCapabilities for NativeCapabilities {
                         crate::Error::Eval(format!("HTTP fetch failed for {url}: {error}"))
                     })?
                     .error_for_status()
-                    .map_err(|error| crate::Error::Eval(format!("HTTP error for {url}: {error}")))?
+                    .map_err(|error| {
+                        if error.status() == Some(reqwest::StatusCode::NOT_FOUND) {
+                            crate::Error::ImportNotFound(url.to_string())
+                        } else {
+                            crate::Error::Eval(format!("HTTP error for {url}: {error}"))
+                        }
+                    })?
                     .text()
                     .await
                     .map_err(|error| {
@@ -130,7 +136,13 @@ impl EvalCapabilities for NativeCapabilities {
                         crate::Error::Eval(format!("HTTP fetch failed for {url}: {error}"))
                     })?
                     .error_for_status()
-                    .map_err(|error| crate::Error::Eval(format!("HTTP error for {url}: {error}")))?
+                    .map_err(|error| {
+                        if error.status() == Some(reqwest::StatusCode::NOT_FOUND) {
+                            crate::Error::ImportNotFound(url.to_string())
+                        } else {
+                            crate::Error::Eval(format!("HTTP error for {url}: {error}"))
+                        }
+                    })?
                     .bytes()
                     .await
                     .map_err(|error| {
