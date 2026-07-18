@@ -89,6 +89,36 @@ pub async fn eval_to_json_with_options(
     Ok(value.to_json())
 }
 
+/// Evaluate a pkl file synchronously and return its contents as a JSON value.
+///
+/// This entry point is available with the `blocking` feature. It is intended
+/// for synchronous applications; callers already running inside Tokio should
+/// use [`eval_to_json`] instead.
+#[cfg(feature = "blocking")]
+pub fn eval_to_json_blocking(path: &Path) -> Result<serde_json::Value> {
+    eval_to_json_with_options_blocking(path, EvalOptions::default())
+}
+
+/// Evaluate a pkl file synchronously with full evaluator options.
+#[cfg(feature = "blocking")]
+pub fn eval_to_json_with_options_blocking(
+    path: &Path,
+    options: EvalOptions,
+) -> Result<serde_json::Value> {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return Err(Error::Eval(
+            "blocking evaluation cannot run inside a Tokio runtime; use the async API instead"
+                .to_string(),
+        ));
+    }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| Error::Eval(format!("failed to create Tokio runtime: {error}")))?;
+    runtime.block_on(eval_to_json_with_options(path, options))
+}
+
 /// Analyze imports of a pkl file, returning all transitive local file dependencies.
 #[cfg(feature = "native-io")]
 pub fn analyze_imports(path: &Path) -> Result<Vec<std::path::PathBuf>> {
@@ -97,6 +127,43 @@ pub fn analyze_imports(path: &Path) -> Result<Vec<std::path::PathBuf>> {
     let mut seen_results = std::collections::HashSet::new();
     analyze_imports_inner(path, &mut visited, &mut seen_results, &mut results)?;
     Ok(results)
+}
+
+#[cfg(all(test, feature = "blocking"))]
+mod blocking_tests {
+    use super::{eval_to_json, eval_to_json_blocking};
+    use std::path::Path;
+
+    const FIXTURE: &str = "tests/fixtures/base.pkl";
+
+    #[test]
+    fn blocking_evaluation_matches_async_evaluation() {
+        let path = Path::new(FIXTURE);
+        let blocking = eval_to_json_blocking(path).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let asynchronous = runtime.block_on(eval_to_json(path)).unwrap();
+
+        assert_eq!(blocking, asynchronous);
+    }
+
+    #[test]
+    fn blocking_evaluation_rejects_an_active_runtime() {
+        let path = Path::new(FIXTURE);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let error = runtime.block_on(async { eval_to_json_blocking(path).unwrap_err() });
+
+        assert!(
+            error
+                .to_string()
+                .contains("cannot run inside a Tokio runtime")
+        );
+    }
 }
 
 #[cfg(feature = "native-io")]
