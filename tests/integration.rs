@@ -217,6 +217,35 @@ async fn evaluator_records_environment_reads_from_imported_modules() {
 }
 
 #[tokio::test]
+async fn evaluator_retains_environment_reads_for_cached_imports() {
+    let mut modules = HashMap::new();
+    modules.insert(
+        "virtual/Imported.pkl".to_string(),
+        "value = read(\"env:IMPORTED_VALUE\")\n".to_string(),
+    );
+    let mut evaluator = pklr::Evaluator::with_capabilities(MemoryCapabilities {
+        modules,
+        env: HashMap::from([("IMPORTED_VALUE".to_string(), "cached".to_string())]),
+        fetches: Arc::new(Mutex::new(Vec::new())),
+    });
+    let source = "import \"Imported.pkl\" as Imported\nresult = Imported.value\n";
+
+    evaluator
+        .eval_source(source, Path::new("virtual/first.pkl"))
+        .await
+        .unwrap();
+    evaluator
+        .eval_source(source, Path::new("virtual/second.pkl"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        evaluator.env_reads()["IMPORTED_VALUE"].as_deref(),
+        Some("cached")
+    );
+}
+
+#[tokio::test]
 async fn eval_outcome_exposes_environment_reads() {
     let dir = std::env::temp_dir().join(format!(
         "pklr_test_eval_outcome_env_reads_{}",

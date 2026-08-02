@@ -102,10 +102,12 @@ impl Evaluator {
         self.base_path = path.to_path_buf();
     }
 
-    /// Return the environment variables observed by this evaluator.
+    /// Return every environment variable observed by this evaluator.
     ///
     /// Missing variables are included with a `None` value. Entries are ordered
     /// by variable name so callers can serialize or hash them deterministically.
+    /// The record is cumulative because evaluated imports are cached for the
+    /// evaluator's lifetime; create a new evaluator for an isolated record.
     pub fn env_reads(&self) -> &BTreeMap<String, Option<String>> {
         &self.env_reads
     }
