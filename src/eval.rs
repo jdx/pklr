@@ -102,12 +102,10 @@ impl Evaluator {
         self.base_path = path.to_path_buf();
     }
 
-    /// Return every environment variable observed by this evaluator.
+    /// Return the environment variables observed by the latest evaluation.
     ///
     /// Missing variables are included with a `None` value. Entries are ordered
     /// by variable name so callers can serialize or hash them deterministically.
-    /// The record is cumulative because evaluated imports are cached for the
-    /// evaluator's lifetime; create a new evaluator for an isolated record.
     pub fn env_reads(&self) -> &BTreeMap<String, Option<String>> {
         &self.env_reads
     }
@@ -115,6 +113,12 @@ impl Evaluator {
     #[cfg(feature = "native-io")]
     pub(crate) fn take_env_reads(&mut self) -> BTreeMap<String, Option<String>> {
         std::mem::take(&mut self.env_reads)
+    }
+
+    fn begin_evaluation(&mut self) {
+        self.env_reads.clear();
+        self.import_cache.clear();
+        self.scoped_imports_in_flight.clear();
     }
 
     /// Set a custom HTTP client for fetching remote imports and packages.
@@ -347,6 +351,7 @@ impl Evaluator {
     }
 
     pub async fn eval_source(&mut self, source: &str, path: &Path) -> Result<Value> {
+        self.begin_evaluation();
         self.converters.clear();
         // Seed import cache for the entry file so circular back-references work
         if let Ok(canonical) = self.capabilities.canonicalize(path).await {
@@ -366,6 +371,7 @@ impl Evaluator {
 
     /// Evaluate a local pkl file by path (public entry point).
     pub async fn eval_file_pub(&mut self, path: &Path) -> Result<Value> {
+        self.begin_evaluation();
         self.eval_file(path, 0).await
     }
 

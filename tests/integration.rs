@@ -14,6 +14,7 @@ fn lex_kinds(src: &str) -> Vec<TokenKind> {
 struct MemoryCapabilities {
     modules: HashMap<String, String>,
     env: HashMap<String, String>,
+    env_fetches: Arc<Mutex<Vec<String>>>,
     fetches: Arc<Mutex<Vec<String>>>,
 }
 
@@ -36,6 +37,7 @@ impl EvalCapabilities for MemoryCapabilities {
     }
 
     fn read_env<'a>(&'a mut self, name: &'a str) -> BoxFuture<'a, pklr::Result<Option<String>>> {
+        self.env_fetches.lock().unwrap().push(name.to_string());
         let value = self.env.get(name).cloned();
         Box::pin(async move { Ok(value) })
     }
@@ -92,6 +94,7 @@ async fn custom_capabilities_handle_http_import() {
     let mut evaluator = pklr::Evaluator::with_capabilities(MemoryCapabilities {
         modules,
         env: HashMap::new(),
+        env_fetches: Arc::new(Mutex::new(Vec::new())),
         fetches: fetches.clone(),
     });
     let json = evaluator
@@ -116,6 +119,7 @@ async fn custom_capabilities_preserve_fetch_errors() {
     let mut evaluator = pklr::Evaluator::with_capabilities(MemoryCapabilities {
         modules: HashMap::new(),
         env: HashMap::new(),
+        env_fetches: Arc::new(Mutex::new(Vec::new())),
         fetches,
     });
     let error = evaluator
@@ -140,6 +144,7 @@ async fn custom_capabilities_handle_virtual_local_import() {
     let mut evaluator = pklr::Evaluator::with_capabilities(MemoryCapabilities {
         modules,
         env: HashMap::new(),
+        env_fetches: Arc::new(Mutex::new(Vec::new())),
         fetches: Arc::new(Mutex::new(Vec::new())),
     });
     let json = evaluator
@@ -162,6 +167,7 @@ async fn evaluator_records_environment_hits_and_misses_in_name_order() {
             ("ZEBRA".to_string(), "last".to_string()),
             ("ALPHA".to_string(), "first".to_string()),
         ]),
+        env_fetches: Arc::new(Mutex::new(Vec::new())),
         fetches: Arc::new(Mutex::new(Vec::new())),
     });
 
@@ -197,6 +203,7 @@ async fn evaluator_records_environment_reads_from_imported_modules() {
     let mut evaluator = pklr::Evaluator::with_capabilities(MemoryCapabilities {
         modules,
         env: HashMap::from([("IMPORTED_VALUE".to_string(), "transitive".to_string())]),
+        env_fetches: Arc::new(Mutex::new(Vec::new())),
         fetches: Arc::new(Mutex::new(Vec::new())),
     });
 
@@ -217,15 +224,48 @@ async fn evaluator_records_environment_reads_from_imported_modules() {
 }
 
 #[tokio::test]
-async fn evaluator_retains_environment_reads_for_cached_imports() {
+async fn evaluator_resets_environment_reads_between_evaluations() {
+    let mut evaluator = pklr::Evaluator::with_capabilities(MemoryCapabilities {
+        modules: HashMap::new(),
+        env: HashMap::from([
+            ("FIRST".to_string(), "one".to_string()),
+            ("SECOND".to_string(), "two".to_string()),
+        ]),
+        env_fetches: Arc::new(Mutex::new(Vec::new())),
+        fetches: Arc::new(Mutex::new(Vec::new())),
+    });
+
+    evaluator
+        .eval_source("value = read(\"env:FIRST\")\n", Path::new("first.pkl"))
+        .await
+        .unwrap();
+    evaluator
+        .eval_source("value = read(\"env:SECOND\")\n", Path::new("second.pkl"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        evaluator
+            .env_reads()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["SECOND"]
+    );
+}
+
+#[tokio::test]
+async fn evaluator_reevaluates_imports_between_evaluations() {
     let mut modules = HashMap::new();
     modules.insert(
         "virtual/Imported.pkl".to_string(),
         "value = read(\"env:IMPORTED_VALUE\")\n".to_string(),
     );
+    let env_fetches = Arc::new(Mutex::new(Vec::new()));
     let mut evaluator = pklr::Evaluator::with_capabilities(MemoryCapabilities {
         modules,
         env: HashMap::from([("IMPORTED_VALUE".to_string(), "cached".to_string())]),
+        env_fetches: env_fetches.clone(),
         fetches: Arc::new(Mutex::new(Vec::new())),
     });
     let source = "import \"Imported.pkl\" as Imported\nresult = Imported.value\n";
@@ -242,6 +282,10 @@ async fn evaluator_retains_environment_reads_for_cached_imports() {
     assert_eq!(
         evaluator.env_reads()["IMPORTED_VALUE"].as_deref(),
         Some("cached")
+    );
+    assert_eq!(
+        *env_fetches.lock().unwrap(),
+        vec!["IMPORTED_VALUE", "IMPORTED_VALUE"]
     );
 }
 
