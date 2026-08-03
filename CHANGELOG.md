@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0](https://github.com/jdx/pklr/compare/v1.2.0...v1.3.0) - 2026-08-03
+
+### Added
+
+- track environment reads during evaluation ([#145](https://github.com/jdx/pklr/pull/145))
+
 ## [1.2.0](https://github.com/jdx/pklr/compare/v1.1.3...v1.2.0) - 2026-07-16
 
 ### Added
