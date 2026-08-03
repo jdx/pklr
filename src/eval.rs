@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -21,6 +21,8 @@ pub struct Evaluator {
     http_cache: HashMap<String, String>,
     /// Cache for evaluated local imports (canonical path → Value)
     import_cache: HashMap<PathBuf, Value>,
+    /// Environment variables read during evaluation (name → observed value).
+    env_reads: BTreeMap<String, Option<String>>,
     /// Local files currently being evaluated with inherited scope.
     scoped_imports_in_flight: HashSet<PathBuf>,
     /// Host-provided IO for files, environment, HTTP, packages, and globs.
@@ -61,6 +63,7 @@ impl Default for Evaluator {
             max_depth: 32,
             http_cache: HashMap::new(),
             import_cache: HashMap::new(),
+            env_reads: BTreeMap::new(),
             scoped_imports_in_flight: HashSet::new(),
             capabilities: Box::new(crate::capabilities::NativeCapabilities::new()),
             #[cfg(feature = "package-zip")]
@@ -84,6 +87,7 @@ impl Evaluator {
             max_depth: 32,
             http_cache: HashMap::new(),
             import_cache: HashMap::new(),
+            env_reads: BTreeMap::new(),
             scoped_imports_in_flight: HashSet::new(),
             capabilities: Box::new(capabilities),
             #[cfg(feature = "package-zip")]
@@ -96,6 +100,25 @@ impl Evaluator {
 
     pub fn set_base_path(&mut self, path: &Path) {
         self.base_path = path.to_path_buf();
+    }
+
+    /// Return the environment variables observed by the latest evaluation.
+    ///
+    /// Missing variables are included with a `None` value. Entries are ordered
+    /// by variable name so callers can serialize or hash them deterministically.
+    pub fn env_reads(&self) -> &BTreeMap<String, Option<String>> {
+        &self.env_reads
+    }
+
+    #[cfg(feature = "native-io")]
+    pub(crate) fn take_env_reads(&mut self) -> BTreeMap<String, Option<String>> {
+        std::mem::take(&mut self.env_reads)
+    }
+
+    fn begin_evaluation(&mut self) {
+        self.env_reads.clear();
+        self.import_cache.clear();
+        self.scoped_imports_in_flight.clear();
     }
 
     /// Set a custom HTTP client for fetching remote imports and packages.
@@ -172,7 +195,9 @@ impl Evaluator {
             Ok(Value::String(content))
         } else if let Some(var_name) = uri.strip_prefix("env:") {
             // env: — read environment variable
-            let Some(val) = self.capabilities.read_env(var_name).await? else {
+            let value = self.capabilities.read_env(var_name).await?;
+            self.env_reads.insert(var_name.to_string(), value.clone());
+            let Some(val) = value else {
                 return Err(Error::Eval(format!(
                     "environment variable not found: {var_name}"
                 )));
@@ -326,6 +351,7 @@ impl Evaluator {
     }
 
     pub async fn eval_source(&mut self, source: &str, path: &Path) -> Result<Value> {
+        self.begin_evaluation();
         self.converters.clear();
         // Seed import cache for the entry file so circular back-references work
         if let Ok(canonical) = self.capabilities.canonicalize(path).await {
@@ -345,6 +371,7 @@ impl Evaluator {
 
     /// Evaluate a local pkl file by path (public entry point).
     pub async fn eval_file_pub(&mut self, path: &Path) -> Result<Value> {
+        self.begin_evaluation();
         self.eval_file(path, 0).await
     }
 

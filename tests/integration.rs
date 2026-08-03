@@ -13,18 +13,20 @@ fn lex_kinds(src: &str) -> Vec<TokenKind> {
 
 struct MemoryCapabilities {
     modules: HashMap<String, String>,
+    env: HashMap<String, String>,
+    env_fetches: Arc<Mutex<Vec<String>>>,
     fetches: Arc<Mutex<Vec<String>>>,
 }
 
 impl EvalCapabilities for MemoryCapabilities {
     fn read_to_string<'a>(&'a mut self, path: &'a Path) -> BoxFuture<'a, pklr::Result<String>> {
-        let key = path.display().to_string();
+        let key = path.display().to_string().replace('\\', "/");
         let source = self.modules.get(&key).cloned();
         Box::pin(async move { source.ok_or(pklr::Error::ImportNotFound(key)) })
     }
 
     fn path_exists<'a>(&'a mut self, path: &'a Path) -> BoxFuture<'a, pklr::Result<bool>> {
-        let key = path.display().to_string();
+        let key = path.display().to_string().replace('\\', "/");
         let exists = self.modules.contains_key(&key);
         Box::pin(async move { Ok(exists) })
     }
@@ -34,8 +36,10 @@ impl EvalCapabilities for MemoryCapabilities {
         Box::pin(async move { Ok(path) })
     }
 
-    fn read_env<'a>(&'a mut self, _name: &'a str) -> BoxFuture<'a, pklr::Result<Option<String>>> {
-        Box::pin(async move { Ok(None) })
+    fn read_env<'a>(&'a mut self, name: &'a str) -> BoxFuture<'a, pklr::Result<Option<String>>> {
+        self.env_fetches.lock().unwrap().push(name.to_string());
+        let value = self.env.get(name).cloned();
+        Box::pin(async move { Ok(value) })
     }
 
     fn fetch_text<'a>(&'a mut self, url: &'a str) -> BoxFuture<'a, pklr::Result<String>> {
@@ -89,6 +93,8 @@ async fn custom_capabilities_handle_http_import() {
 
     let mut evaluator = pklr::Evaluator::with_capabilities(MemoryCapabilities {
         modules,
+        env: HashMap::new(),
+        env_fetches: Arc::new(Mutex::new(Vec::new())),
         fetches: fetches.clone(),
     });
     let json = evaluator
@@ -112,6 +118,8 @@ async fn custom_capabilities_preserve_fetch_errors() {
     let fetches = Arc::new(Mutex::new(Vec::new()));
     let mut evaluator = pklr::Evaluator::with_capabilities(MemoryCapabilities {
         modules: HashMap::new(),
+        env: HashMap::new(),
+        env_fetches: Arc::new(Mutex::new(Vec::new())),
         fetches,
     });
     let error = evaluator
@@ -135,6 +143,8 @@ async fn custom_capabilities_handle_virtual_local_import() {
 
     let mut evaluator = pklr::Evaluator::with_capabilities(MemoryCapabilities {
         modules,
+        env: HashMap::new(),
+        env_fetches: Arc::new(Mutex::new(Vec::new())),
         fetches: Arc::new(Mutex::new(Vec::new())),
     });
     let json = evaluator
@@ -147,6 +157,159 @@ async fn custom_capabilities_handle_virtual_local_import() {
         .to_json();
 
     assert_eq!(json["result"], 42);
+}
+
+#[tokio::test]
+async fn evaluator_records_environment_hits_and_misses_in_name_order() {
+    let mut evaluator = pklr::Evaluator::with_capabilities(MemoryCapabilities {
+        modules: HashMap::new(),
+        env: HashMap::from([
+            ("ZEBRA".to_string(), "last".to_string()),
+            ("ALPHA".to_string(), "first".to_string()),
+        ]),
+        env_fetches: Arc::new(Mutex::new(Vec::new())),
+        fetches: Arc::new(Mutex::new(Vec::new())),
+    });
+
+    evaluator
+        .eval_source(
+            r#"
+zebra = read("env:ZEBRA")
+missing = read?("env:MISSING")
+alpha = read("env:ALPHA")
+"#,
+            Path::new("entry.pkl"),
+        )
+        .await
+        .unwrap();
+
+    let reads = evaluator.env_reads();
+    assert_eq!(
+        reads.keys().map(String::as_str).collect::<Vec<_>>(),
+        vec!["ALPHA", "MISSING", "ZEBRA"]
+    );
+    assert_eq!(reads["ALPHA"].as_deref(), Some("first"));
+    assert_eq!(reads["MISSING"], None);
+    assert_eq!(reads["ZEBRA"].as_deref(), Some("last"));
+}
+
+#[tokio::test]
+async fn evaluator_records_environment_reads_from_imported_modules() {
+    let mut modules = HashMap::new();
+    modules.insert(
+        "virtual/Imported.pkl".to_string(),
+        "value = read(\"env:IMPORTED_VALUE\")\n".to_string(),
+    );
+    let mut evaluator = pklr::Evaluator::with_capabilities(MemoryCapabilities {
+        modules,
+        env: HashMap::from([("IMPORTED_VALUE".to_string(), "transitive".to_string())]),
+        env_fetches: Arc::new(Mutex::new(Vec::new())),
+        fetches: Arc::new(Mutex::new(Vec::new())),
+    });
+
+    let json = evaluator
+        .eval_source(
+            "import \"Imported.pkl\" as Imported\nresult = Imported.value\n",
+            Path::new("virtual/entry.pkl"),
+        )
+        .await
+        .unwrap()
+        .to_json();
+
+    assert_eq!(json["result"], "transitive");
+    assert_eq!(
+        evaluator.env_reads()["IMPORTED_VALUE"].as_deref(),
+        Some("transitive")
+    );
+}
+
+#[tokio::test]
+async fn evaluator_resets_environment_reads_between_evaluations() {
+    let mut evaluator = pklr::Evaluator::with_capabilities(MemoryCapabilities {
+        modules: HashMap::new(),
+        env: HashMap::from([
+            ("FIRST".to_string(), "one".to_string()),
+            ("SECOND".to_string(), "two".to_string()),
+        ]),
+        env_fetches: Arc::new(Mutex::new(Vec::new())),
+        fetches: Arc::new(Mutex::new(Vec::new())),
+    });
+
+    evaluator
+        .eval_source("value = read(\"env:FIRST\")\n", Path::new("first.pkl"))
+        .await
+        .unwrap();
+    evaluator
+        .eval_source("value = read(\"env:SECOND\")\n", Path::new("second.pkl"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        evaluator
+            .env_reads()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["SECOND"]
+    );
+}
+
+#[tokio::test]
+async fn evaluator_reevaluates_imports_between_evaluations() {
+    let mut modules = HashMap::new();
+    modules.insert(
+        "virtual/Imported.pkl".to_string(),
+        "value = read(\"env:IMPORTED_VALUE\")\n".to_string(),
+    );
+    let env_fetches = Arc::new(Mutex::new(Vec::new()));
+    let mut evaluator = pklr::Evaluator::with_capabilities(MemoryCapabilities {
+        modules,
+        env: HashMap::from([("IMPORTED_VALUE".to_string(), "cached".to_string())]),
+        env_fetches: env_fetches.clone(),
+        fetches: Arc::new(Mutex::new(Vec::new())),
+    });
+    let source = "import \"Imported.pkl\" as Imported\nresult = Imported.value\n";
+
+    evaluator
+        .eval_source(source, Path::new("virtual/first.pkl"))
+        .await
+        .unwrap();
+    evaluator
+        .eval_source(source, Path::new("virtual/second.pkl"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        evaluator.env_reads()["IMPORTED_VALUE"].as_deref(),
+        Some("cached")
+    );
+    assert_eq!(
+        *env_fetches.lock().unwrap(),
+        vec!["IMPORTED_VALUE", "IMPORTED_VALUE"]
+    );
+}
+
+#[tokio::test]
+async fn eval_outcome_exposes_environment_reads() {
+    let dir = std::env::temp_dir().join(format!(
+        "pklr_test_eval_outcome_env_reads_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("main.pkl");
+    std::fs::write(&path, "value = read?(\"env:PATH\")\n").unwrap();
+
+    let outcome = pklr::eval_with_options(&path, pklr::EvalOptions::default())
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.env_reads["PATH"], std::env::var("PATH").ok());
+    assert_eq!(
+        outcome.json["value"].as_str(),
+        std::env::var("PATH").ok().as_deref()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // --- Lexer tests ---

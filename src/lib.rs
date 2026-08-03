@@ -25,6 +25,19 @@ pub use reqwest;
 #[cfg(feature = "native-io")]
 use std::path::Path;
 
+/// The result of an evaluation together with its environment dependencies.
+#[cfg(feature = "native-io")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct EvalOutcome {
+    /// The evaluated pkl document as JSON.
+    pub json: serde_json::Value,
+    /// Environment variables read during evaluation (name → observed value).
+    ///
+    /// Missing variables are included with a `None` value. Entries are ordered
+    /// by variable name so callers can serialize or hash them deterministically.
+    pub env_reads: std::collections::BTreeMap<String, Option<String>>,
+}
+
 /// Evaluate a pkl file and return its contents as a JSON value.
 /// This is the primary entry point for use in tools like hk.
 #[cfg(feature = "native-io")]
@@ -74,6 +87,12 @@ pub async fn eval_to_json_with_options(
     path: &Path,
     options: EvalOptions,
 ) -> Result<serde_json::Value> {
+    Ok(eval_with_options(path, options).await?.json)
+}
+
+/// Evaluate a pkl file and return its JSON value and environment dependencies.
+#[cfg(feature = "native-io")]
+pub async fn eval_with_options(path: &Path, options: EvalOptions) -> Result<EvalOutcome> {
     let source = std::fs::read_to_string(path).map_err(|e| Error::Io(path.to_path_buf(), e))?;
     let mut evaluator = Evaluator::new();
     evaluator.set_base_path(path.parent().unwrap_or(Path::new(".")));
@@ -86,7 +105,10 @@ pub async fn eval_to_json_with_options(
     }
     let value = evaluator.eval_source(&source, path).await?;
     let value = evaluator.apply_converters(value).await?;
-    Ok(value.to_json())
+    Ok(EvalOutcome {
+        json: value.to_json(),
+        env_reads: evaluator.take_env_reads(),
+    })
 }
 
 /// Analyze imports of a pkl file, returning all transitive local file dependencies.
