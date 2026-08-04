@@ -16,8 +16,15 @@ No external binary or CLI required.
 ```rust
 use pklr::eval_to_json;
 
-let json = eval_to_json(std::path::Path::new("config.pkl"))?;
+let json = eval_to_json(std::path::Path::new("config.pkl")).await?;
 println!("{}", json);
+```
+
+Synchronous applications can enable the `blocking` feature and use the
+blocking entry point:
+
+```rust
+let json = pklr::eval_to_json_blocking(std::path::Path::new("config.pkl"))?;
 ```
 
 ## License

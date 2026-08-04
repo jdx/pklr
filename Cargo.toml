@@ -26,6 +26,8 @@ native-io = ["eval-core"]
 http = ["eval-core", "dep:reqwest"]
 package-zip = ["http", "native-io", "dep:zip"]
 miette-diagnostics = ["dep:miette"]
+tokio = ["dep:tokio"]
+blocking = ["native-io", "tokio"]
 
 [dependencies]
 indexmap    = "2"
