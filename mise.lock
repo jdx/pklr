@@ -45,42 +45,42 @@ version = "0.19.3"
 backend = "cargo:cargo-msrv"
 
 [[tools.communique]]
-version = "1.2.4"
+version = "1.3.0"
 backend = "github:jdx/communique"
 
 [tools.communique."platforms.linux-arm64"]
-checksum = "sha256:6dc141afb8238f3c7cf9495865cd961ddc94f8a40583f4748ae5e7030c2d5999"
-url = "https://github.com/jdx/communique/releases/download/v1.2.4/communique-aarch64-unknown-linux-gnu.tar.gz"
-url_api = "https://api.github.com/repos/jdx/communique/releases/assets/489909180"
+checksum = "sha256:0a34889b583190461f2c495500c984a43cdc2428705662dc0cf75ef6c650b1b2"
+url = "https://github.com/jdx/communique/releases/download/v1.3.0/communique-aarch64-unknown-linux-gnu.tar.gz"
+url_api = "https://api.github.com/repos/jdx/communique/releases/assets/498809417"
 provenance = "github-attestations"
 
 [tools.communique."platforms.linux-arm64-musl"]
-checksum = "sha256:29274114be5a387167683ed7a7d8bdc8fa2f11381bb4a5216ee4bb783950986d"
-url = "https://github.com/jdx/communique/releases/download/v1.2.4/communique-aarch64-unknown-linux-musl.tar.gz"
-url_api = "https://api.github.com/repos/jdx/communique/releases/assets/489909098"
+checksum = "sha256:8961a827827fdf171e798dcfbb45d041dbfecd20d337c3535e23c09caccb4e19"
+url = "https://github.com/jdx/communique/releases/download/v1.3.0/communique-aarch64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/jdx/communique/releases/assets/498809339"
 provenance = "github-attestations"
 
 [tools.communique."platforms.linux-x64"]
-checksum = "sha256:114b642d15f3360bda73a256f3c76b7cec50e6c92e19463ca6122bbd7c7a85e8"
-url = "https://github.com/jdx/communique/releases/download/v1.2.4/communique-x86_64-unknown-linux-gnu.tar.gz"
-url_api = "https://api.github.com/repos/jdx/communique/releases/assets/489909201"
+checksum = "sha256:c207d60ecc5be9348946b2b4063b7772910a5f29554a0a802ebb4ce51820a955"
+url = "https://github.com/jdx/communique/releases/download/v1.3.0/communique-x86_64-unknown-linux-gnu.tar.gz"
+url_api = "https://api.github.com/repos/jdx/communique/releases/assets/498809193"
 provenance = "github-attestations"
 provenance_verified = true
 
 [tools.communique."platforms.linux-x64-musl"]
-checksum = "sha256:f555ad0d997511d2a0c591429dab3bf814747fab0cb989593fdd0f3a2f7da822"
-url = "https://github.com/jdx/communique/releases/download/v1.2.4/communique-x86_64-unknown-linux-musl.tar.gz"
-url_api = "https://api.github.com/repos/jdx/communique/releases/assets/489909103"
+checksum = "sha256:56de2eae36f4d98bcf1742624220feb3e2c00efee6a30ff5a65f973563e01a59"
+url = "https://github.com/jdx/communique/releases/download/v1.3.0/communique-x86_64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/jdx/communique/releases/assets/498809217"
 provenance = "github-attestations"
 
 [tools.communique."platforms.macos-arm64"]
-checksum = "sha256:15fd88593edc83ac50020818e17d0ccefc048d9179bdfd28329710476d3ae6b9"
-url = "https://github.com/jdx/communique/releases/download/v1.2.4/communique-aarch64-apple-darwin.tar.gz"
-url_api = "https://api.github.com/repos/jdx/communique/releases/assets/489909561"
+checksum = "sha256:588d7be1c70fd271020a9bebdb1ea4294ddae11eae2916cfbe352a99f2d8ec5c"
+url = "https://github.com/jdx/communique/releases/download/v1.3.0/communique-aarch64-apple-darwin.tar.gz"
+url_api = "https://api.github.com/repos/jdx/communique/releases/assets/498809386"
 provenance = "github-attestations"
 
 [tools.communique."platforms.windows-x64"]
-checksum = "sha256:8b8667d205bf61b229a17b36bdd05c316d9c55f0cc985acf4fc0cf85b8a046a3"
-url = "https://github.com/jdx/communique/releases/download/v1.2.4/communique-x86_64-pc-windows-msvc.zip"
-url_api = "https://api.github.com/repos/jdx/communique/releases/assets/489910283"
+checksum = "sha256:0f313bb5a80d7201c78606bf0cf9ed5003a7009c37af0a2710a551e20fed912c"
+url = "https://github.com/jdx/communique/releases/download/v1.3.0/communique-x86_64-pc-windows-msvc.zip"
+url_api = "https://api.github.com/repos/jdx/communique/releases/assets/498810824"
 provenance = "github-attestations"
