@@ -30,6 +30,12 @@ pub struct Evaluator {
     /// Extracted package zip directories (zip URL → temp dir path)
     #[cfg(feature = "package-zip")]
     package_dirs: HashMap<String, PathBuf>,
+    /// Directory used to persist downloaded package content across evaluators.
+    package_cache_dir: Option<PathBuf>,
+    /// HTTP URL roots whose sources belong to direct-download packages.
+    package_http_roots: HashSet<String>,
+    /// Whether network access is disabled for this evaluator.
+    offline: bool,
     /// HTTP URL rewrite rules (source_prefix → target_prefix).
     /// Longest matching prefix wins.
     http_rewrites: Vec<(String, String)>,
@@ -68,6 +74,9 @@ impl Default for Evaluator {
             capabilities: Box::new(crate::capabilities::NativeCapabilities::new()),
             #[cfg(feature = "package-zip")]
             package_dirs: HashMap::new(),
+            package_cache_dir: None,
+            package_http_roots: HashSet::new(),
+            offline: false,
             http_rewrites: Vec::new(),
             converters: Vec::new(),
             warned_deprecated: std::collections::HashSet::new(),
@@ -92,6 +101,9 @@ impl Evaluator {
             capabilities: Box::new(capabilities),
             #[cfg(feature = "package-zip")]
             package_dirs: HashMap::new(),
+            package_cache_dir: None,
+            package_http_roots: HashSet::new(),
+            offline: false,
             http_rewrites: Vec::new(),
             converters: Vec::new(),
             warned_deprecated: std::collections::HashSet::new(),
@@ -100,6 +112,16 @@ impl Evaluator {
 
     pub fn set_base_path(&mut self, path: &Path) {
         self.base_path = path.to_path_buf();
+    }
+
+    /// Persist downloaded package content under `path`.
+    pub fn set_package_cache_dir(&mut self, path: impl Into<PathBuf>) {
+        self.package_cache_dir = Some(path.into());
+    }
+
+    /// Disable network access. Package imports can still use the persistent cache.
+    pub fn set_offline(&mut self, offline: bool) {
+        self.offline = offline;
     }
 
     /// Return the environment variables observed by the latest evaluation.
@@ -221,10 +243,22 @@ impl Evaluator {
     }
 
     async fn fetch_source(&mut self, url: &str) -> Result<String> {
+        if self
+            .package_http_roots
+            .iter()
+            .any(|root| url.starts_with(root))
+        {
+            return self.fetch_package_source(url).await;
+        }
         let rewritten = self.rewrite_url(url);
         let fetch_url = rewritten.as_ref();
         if let Some(cached) = self.http_cache.get(fetch_url) {
             return Ok(cached.clone());
+        }
+        if self.offline {
+            return Err(Error::Eval(format!(
+                "offline mode prevented HTTP fetch for {url}"
+            )));
         }
         let body = self.capabilities.fetch_text(fetch_url).await?;
         self.http_cache.insert(fetch_url.to_string(), body.clone());
@@ -278,8 +312,8 @@ impl Evaluator {
         if uri.starts_with("package://") {
             let pkg = resolve_package_uri(uri)?;
             match &pkg {
-                PackageSource::Direct(url) => {
-                    let source = self.fetch_source(url).await?;
+                PackageSource::Direct { url, root } => {
+                    let source = self.fetch_direct_package_source(url, root).await?;
                     return Ok(Some((source, url.clone())));
                 }
                 PackageSource::Zip(zip_url, entry) => {
@@ -316,17 +350,108 @@ impl Evaluator {
         Ok(Some((source, import_path.display().to_string())))
     }
 
+    async fn fetch_package_source(&mut self, url: &str) -> Result<String> {
+        if let Some(cached) = self.http_cache.get(url) {
+            return Ok(cached.clone());
+        }
+        let bytes = self.fetch_package_bytes(url, "pkl").await?;
+        let source = String::from_utf8(bytes)
+            .map_err(|error| Error::Eval(format!("package source is not UTF-8: {url}: {error}")))?;
+        self.http_cache.insert(url.to_string(), source.clone());
+        Ok(source)
+    }
+
+    async fn fetch_direct_package_source(&mut self, url: &str, root: &str) -> Result<String> {
+        self.package_http_roots.insert(root.to_string());
+        self.fetch_package_source(url).await
+    }
+
+    async fn fetch_package_bytes(&mut self, url: &str, extension: &str) -> Result<Vec<u8>> {
+        match self.read_package_cache(url, extension) {
+            Ok(Some(bytes)) => match validate_package_bytes(url, extension, &bytes) {
+                Ok(()) => return Ok(bytes),
+                Err(error) if self.offline => return Err(error),
+                Err(_) => self.remove_package_cache(url, extension),
+            },
+            Ok(None) => {}
+            Err(error) if self.offline => return Err(error),
+            Err(_) => {
+                // The persistent cache is an optimization while online. If it
+                // is unreadable, fetch from the network and continue without it.
+            }
+        }
+        if self.offline {
+            let cache = self
+                .package_cache_dir
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<disabled>".to_string());
+            return Err(Error::Eval(format!(
+                "package is not cached and offline mode is enabled: {url} (cache: {cache})"
+            )));
+        }
+        let fetch_url = self.rewrite_url(url).into_owned();
+        let bytes = self.capabilities.fetch_bytes(&fetch_url).await?;
+        validate_package_bytes(url, extension, &bytes)?;
+        self.write_package_cache(url, extension, &bytes);
+        Ok(bytes)
+    }
+
+    fn read_package_cache(&self, url: &str, extension: &str) -> Result<Option<Vec<u8>>> {
+        let Some(cache_dir) = &self.package_cache_dir else {
+            return Ok(None);
+        };
+        let (data_path, url_path) = package_cache_paths(cache_dir, url, extension);
+        let cached_url = match std::fs::read_to_string(&url_path) {
+            Ok(cached_url) => cached_url,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(Error::Io(url_path, error)),
+        };
+        if cached_url != url {
+            return Ok(None);
+        }
+        match std::fs::read(&data_path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(Error::Io(data_path, error)),
+        }
+    }
+
+    fn write_package_cache(&self, url: &str, extension: &str, bytes: &[u8]) {
+        let Some(cache_dir) = &self.package_cache_dir else {
+            return;
+        };
+        let (data_path, url_path) = package_cache_paths(cache_dir, url, extension);
+        let Some(parent) = data_path.parent() else {
+            return;
+        };
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+        if write_atomic(&data_path, bytes).is_err() {
+            return;
+        }
+        let _ = write_atomic(&url_path, url.as_bytes());
+    }
+
+    fn remove_package_cache(&self, url: &str, extension: &str) {
+        let Some(cache_dir) = &self.package_cache_dir else {
+            return;
+        };
+        let (data_path, url_path) = package_cache_paths(cache_dir, url, extension);
+        let _ = std::fs::remove_file(data_path);
+        let _ = std::fs::remove_file(url_path);
+    }
+
     /// Download a package zip and extract it to a temp directory.
     /// Returns the path to the extracted directory. Caches by zip URL.
     #[cfg(feature = "package-zip")]
     async fn extract_package_zip(&mut self, zip_url: &str) -> Result<PathBuf> {
-        let rewritten = self.rewrite_url(zip_url);
-        let fetch_url = rewritten.as_ref();
         // Check if already extracted
-        if let Some(dir) = self.package_dirs.get(fetch_url) {
+        if let Some(dir) = self.package_dirs.get(zip_url) {
             return Ok(dir.clone());
         }
-        let bytes = self.capabilities.fetch_bytes(fetch_url).await?;
+        let bytes = self.fetch_package_bytes(zip_url, "zip").await?;
         let cursor = std::io::Cursor::new(bytes);
         let mut archive =
             zip::ZipArchive::new(cursor).map_err(|e| Error::Eval(format!("zip error: {e}")))?;
@@ -337,17 +462,13 @@ impl Evaluator {
         archive
             .extract(&dir)
             .map_err(|e| Error::Eval(format!("zip extract error: {e}")))?;
-        self.package_dirs.insert(fetch_url.to_string(), dir.clone());
+        self.package_dirs.insert(zip_url.to_string(), dir.clone());
         Ok(dir)
     }
 
     #[cfg(all(test, feature = "package-zip"))]
     fn package_dir_for_zip(&self, zip_url: &str) -> Option<&PathBuf> {
-        if let Some(dir) = self.package_dirs.get(zip_url) {
-            return Some(dir);
-        }
-        let rewritten = self.rewrite_url(zip_url);
-        self.package_dirs.get(rewritten.as_ref())
+        self.package_dirs.get(zip_url)
     }
 
     pub async fn eval_source(&mut self, source: &str, path: &Path) -> Result<Value> {
@@ -646,10 +767,14 @@ impl Evaluator {
                     }
                 }
                 let url = match &pkg {
-                    PackageSource::Direct(url) => url.clone(),
+                    PackageSource::Direct { url, .. } => url.clone(),
                     PackageSource::Zip(..) => unreachable!(),
                 };
-                let source = self.fetch_source(&url).await?;
+                let root = match &pkg {
+                    PackageSource::Direct { root, .. } => root,
+                    PackageSource::Zip(..) => unreachable!(),
+                };
+                let source = self.fetch_direct_package_source(&url, root).await?;
                 let imported_val = {
                     let tokens = lexer::lex_named(&source, &url)?;
                     let imp_module = parser::parse_named(&tokens, &source, &url)?;
@@ -780,8 +905,8 @@ impl Evaluator {
                             "package zip imports require pklr's 'package-zip' feature: {zip_url}"
                         )));
                     }
-                } else if let PackageSource::Direct(url) = &pkg {
-                    let source = self.fetch_source(url).await?;
+                } else if let PackageSource::Direct { url, root } = &pkg {
+                    let source = self.fetch_direct_package_source(url, root).await?;
                     let tokens = lexer::lex_named(&source, url)?;
                     let base_module = parser::parse_named(&tokens, &source, url)?;
                     let base_val = self
@@ -4120,9 +4245,86 @@ impl Scope {
 #[derive(Debug)]
 enum PackageSource {
     /// Direct file download (pkg.pkl-lang.org format)
-    Direct(String),
+    Direct { url: String, root: String },
     /// Zip archive URL + path within the archive
     Zip(String, String),
+}
+
+fn package_cache_paths(cache_dir: &Path, url: &str, extension: &str) -> (PathBuf, PathBuf) {
+    // FNV-1a gives package URLs stable, filesystem-safe names without making
+    // the cache layout depend on platform path rules. The adjacent URL file
+    // detects the extraordinarily unlikely hash collision.
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in url.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    let base = cache_dir.join("packages").join(format!("{hash:016x}"));
+    (base.with_extension(extension), base.with_extension("url"))
+}
+
+fn validate_package_bytes(url: &str, extension: &str, bytes: &[u8]) -> Result<()> {
+    if extension == "pkl" {
+        std::str::from_utf8(bytes)
+            .map_err(|error| Error::Eval(format!("package source is not UTF-8: {url}: {error}")))?;
+    }
+    #[cfg(feature = "package-zip")]
+    if extension == "zip" {
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
+            .map_err(|error| Error::Eval(format!("package archive is invalid: {url}: {error}")))?;
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index).map_err(|error| {
+                Error::Eval(format!("package archive is invalid: {url}: {error}"))
+            })?;
+            std::io::copy(&mut entry, &mut std::io::sink()).map_err(|error| {
+                Error::Eval(format!(
+                    "package archive entry is invalid: {url}: {}: {error}",
+                    entry.name()
+                ))
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("cache");
+    let temp_path = path.with_file_name(format!(
+        ".{file_name}.tmp-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)?;
+    let write_result = file.write_all(bytes).and_then(|()| file.sync_all());
+    drop(file);
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error);
+    }
+    let rename_result = match std::fs::rename(&temp_path, path) {
+        Ok(()) => return Ok(()),
+        // Windows rename does not replace an existing file. There is a brief
+        // non-atomic gap on that platform, but the destination must not retain
+        // stale bytes while its URL sidecar is updated.
+        Err(_) if path.exists() => {
+            std::fs::remove_file(path).and_then(|()| std::fs::rename(&temp_path, path))
+        }
+        Err(error) => Err(error),
+    };
+    if rename_result.is_err() {
+        let _ = std::fs::remove_file(temp_path);
+    }
+    rename_result
 }
 
 /// Resolve a `package://` URI to a download source.
@@ -4160,9 +4362,11 @@ fn resolve_package_uri(uri: &str) -> Result<PackageSource> {
         && let Some((repo, version)) = repo_ver.split_once('@')
     {
         let file_path = sanitize_package_entry(fragment.strip_prefix('/').unwrap_or(fragment))?;
-        return Ok(PackageSource::Direct(format!(
-            "https://github.com/{repo}/releases/download/{version}/{file_path}"
-        )));
+        let root = format!("https://github.com/{repo}/releases/download/{version}/");
+        return Ok(PackageSource::Direct {
+            url: format!("{root}{file_path}"),
+            root,
+        });
     }
     // Format 2: package://pkg.pkl-lang.org/pkl-pantry/package@version#/path.pkl
     // These are under https://github.com/apple/pkl-pantry's release named `package@version`
@@ -4850,6 +5054,23 @@ mod package_uri_tests {
     use super::{PackageSource, resolve_package_uri};
 
     #[test]
+    fn atomic_write_replaces_existing_file() {
+        let test_dir = std::env::temp_dir().join(format!(
+            "pklr-write-atomic-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&test_dir).unwrap();
+        let path = test_dir.join("package.pkl");
+
+        super::write_atomic(&path, b"old").unwrap();
+        super::write_atomic(&path, b"new").unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        std::fs::remove_dir_all(test_dir).unwrap();
+    }
+
+    #[test]
     fn generic_package_uri_resolves_to_zip_url() {
         let pkg =
             resolve_package_uri("package://example.com/v1.26.0/hk@1.26.0#/Config.pkl").unwrap();
@@ -4858,19 +5079,51 @@ mod package_uri_tests {
                 assert_eq!(zip_url, "https://example.com/v1.26.0/hk@1.26.0.zip");
                 assert_eq!(entry, "Config.pkl");
             }
-            PackageSource::Direct(_) => panic!("expected zip package source"),
+            PackageSource::Direct { .. } => panic!("expected zip package source"),
         }
     }
 
     #[test]
+    #[cfg(feature = "package-zip")]
+    fn package_archive_validation_reads_entry_payloads() {
+        use std::io::Write;
+
+        let payload = b"payload whose checksum must be validated";
+        let mut bytes = Vec::new();
+        {
+            let cursor = std::io::Cursor::new(&mut bytes);
+            let mut archive = zip::ZipWriter::new(cursor);
+            archive
+                .start_file(
+                    "Config.pkl",
+                    zip::write::SimpleFileOptions::default()
+                        .compression_method(zip::CompressionMethod::Stored),
+                )
+                .unwrap();
+            archive.write_all(payload).unwrap();
+            archive.finish().unwrap();
+        }
+        let payload_start = bytes
+            .windows(payload.len())
+            .position(|window| window == payload)
+            .unwrap();
+        bytes[payload_start] ^= 0xff;
+
+        let error = super::validate_package_bytes("https://example.com/package.zip", "zip", &bytes)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("package archive entry is invalid"));
+    }
+
+    #[test]
     #[cfg(all(feature = "native-io", feature = "package-zip"))]
-    fn package_dir_lookup_uses_rewritten_zip_url() {
+    fn package_dir_lookup_uses_source_zip_url() {
         let mut evaluator = Evaluator::new();
         evaluator.set_http_rewrites(&["https://example.com/=https://mirror.local/".to_string()]);
         let dir = PathBuf::from("/tmp/pklr-test-package");
         evaluator
             .package_dirs
-            .insert("https://mirror.local/pkg@1.0.zip".to_string(), dir.clone());
+            .insert("https://example.com/pkg@1.0.zip".to_string(), dir.clone());
 
         assert_eq!(
             evaluator
