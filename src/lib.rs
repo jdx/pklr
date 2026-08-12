@@ -57,6 +57,74 @@ pub struct EvalOptions {
     pub http_rewrites: Vec<String>,
 }
 
+/// Extensible builder for configuring a Pkl evaluator.
+#[cfg(feature = "native-io")]
+#[derive(Default)]
+pub struct EvaluatorBuilder {
+    #[cfg(feature = "http")]
+    client: Option<reqwest::Client>,
+    http_rewrites: Vec<String>,
+    package_cache_dir: Option<std::path::PathBuf>,
+    offline: bool,
+}
+
+#[cfg(feature = "native-io")]
+impl EvaluatorBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Use a custom HTTP client for proxy, certificate, or timeout configuration.
+    #[cfg(feature = "http")]
+    pub fn http_client(mut self, client: reqwest::Client) -> Self {
+        self.client = Some(client);
+        self
+    }
+
+    /// Add HTTP URL rewrite rules in `"source_prefix=target_prefix"` format.
+    pub fn http_rewrites(mut self, rules: impl IntoIterator<Item = String>) -> Self {
+        self.http_rewrites.extend(rules);
+        self
+    }
+
+    /// Persist downloaded `package://` content under `path`.
+    pub fn package_cache_dir(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.package_cache_dir = Some(path.into());
+        self
+    }
+
+    /// Disable network access while allowing cached packages to load.
+    pub fn offline(mut self, offline: bool) -> Self {
+        self.offline = offline;
+        self
+    }
+
+    /// Build a configured evaluator for direct source evaluation.
+    pub fn build(self) -> Evaluator {
+        let mut evaluator = Evaluator::new();
+        #[cfg(feature = "http")]
+        if let Some(client) = self.client {
+            evaluator.set_http_client(client);
+        }
+        evaluator.set_http_rewrites(&self.http_rewrites);
+        if let Some(cache_dir) = self.package_cache_dir {
+            evaluator.set_package_cache_dir(cache_dir);
+        }
+        evaluator.set_offline(self.offline);
+        evaluator
+    }
+
+    /// Evaluate a Pkl file and return its JSON value.
+    pub async fn eval_to_json(self, path: &Path) -> Result<serde_json::Value> {
+        Ok(self.eval(path).await?.json)
+    }
+
+    /// Evaluate a Pkl file and return its JSON and environment dependencies.
+    pub async fn eval(self, path: &Path) -> Result<EvalOutcome> {
+        eval_with_evaluator(path, self.build()).await
+    }
+}
+
 /// Evaluate a pkl file with a custom HTTP client for proxy/CA configuration.
 #[cfg(all(feature = "native-io", feature = "http"))]
 pub async fn eval_to_json_with_client(
@@ -93,16 +161,18 @@ pub async fn eval_to_json_with_options(
 /// Evaluate a pkl file and return its JSON value and environment dependencies.
 #[cfg(feature = "native-io")]
 pub async fn eval_with_options(path: &Path, options: EvalOptions) -> Result<EvalOutcome> {
-    let source = std::fs::read_to_string(path).map_err(|e| Error::Io(path.to_path_buf(), e))?;
-    let mut evaluator = Evaluator::new();
-    evaluator.set_base_path(path.parent().unwrap_or(Path::new(".")));
+    let mut builder = EvaluatorBuilder::new().http_rewrites(options.http_rewrites);
     #[cfg(feature = "http")]
     if let Some(client) = options.client {
-        evaluator.set_http_client(client);
+        builder = builder.http_client(client);
     }
-    if !options.http_rewrites.is_empty() {
-        evaluator.set_http_rewrites(&options.http_rewrites);
-    }
+    builder.eval(path).await
+}
+
+#[cfg(feature = "native-io")]
+async fn eval_with_evaluator(path: &Path, mut evaluator: Evaluator) -> Result<EvalOutcome> {
+    let source = std::fs::read_to_string(path).map_err(|e| Error::Io(path.to_path_buf(), e))?;
+    evaluator.set_base_path(path.parent().unwrap_or(Path::new(".")));
     let value = evaluator.eval_source(&source, path).await?;
     let value = evaluator.apply_converters(value).await?;
     Ok(EvalOutcome {

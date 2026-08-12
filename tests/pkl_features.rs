@@ -5305,3 +5305,209 @@ hooks {
 
     assert_eq!(json["hooks"]["check"]["steps"]["echo"]["check"], "echo ok!");
 }
+
+#[test]
+fn package_cache_survives_across_offline_evaluators() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    let temp = TestTempDir::new("pklr_test_persistent_package_cache");
+    let cache_dir = temp.path().join("cache");
+    let mut zip_bytes = Vec::new();
+    {
+        let cursor = std::io::Cursor::new(&mut zip_bytes);
+        let mut zip = zip::ZipWriter::new(cursor);
+        zip.start_file("Config.pkl", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"answer = 42\n").unwrap();
+        zip.finish().unwrap();
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 1024];
+        let _ = stream.read(&mut request).unwrap();
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            zip_bytes.len()
+        )
+        .unwrap();
+        stream.write_all(&zip_bytes).unwrap();
+    });
+
+    let config_path = temp.path().join("config.pkl");
+    std::fs::write(
+        &config_path,
+        "amends \"package://example.com/pkg@1.0.0#/Config.pkl\"\n",
+    )
+    .unwrap();
+    let rewrite = format!("https://example.com/=http://{addr}/");
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let first = rt
+        .block_on(
+            pklr::EvaluatorBuilder::new()
+                .http_rewrites([rewrite.clone()])
+                .package_cache_dir(cache_dir.clone())
+                .eval_to_json(&config_path),
+        )
+        .unwrap();
+    server.join().unwrap();
+    assert_eq!(first["answer"], 42);
+
+    // A new evaluator succeeds after the one-shot server has shut down.
+    let second = rt
+        .block_on(
+            pklr::EvaluatorBuilder::new()
+                .http_rewrites([rewrite])
+                .package_cache_dir(cache_dir)
+                .offline(true)
+                .eval_to_json(&config_path),
+        )
+        .unwrap();
+    assert_eq!(second["answer"], 42);
+}
+
+#[test]
+fn direct_package_relatives_survive_across_offline_evaluators() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    let temp = TestTempDir::new("pklr_test_direct_package_relative_cache");
+    let cache_dir = temp.path().join("cache");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 2048];
+            let length = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..length]);
+            let body = if request.starts_with("GET /Config.pkl ") {
+                "amends \"./Base.pkl\"\nanswer = 42\n"
+            } else if request.starts_with("GET /Base.pkl ") {
+                "base = 41\n"
+            } else {
+                panic!("unexpected request: {request}");
+            };
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        }
+    });
+
+    let config_path = temp.path().join("config.pkl");
+    std::fs::write(
+        &config_path,
+        "amends \"package://pkg.pkl-lang.org/github.com/acme/pkg@v1#/Config.pkl\"\n",
+    )
+    .unwrap();
+    let rewrite = format!("https://github.com/acme/pkg/releases/download/v1/=http://{addr}/");
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let first = rt
+        .block_on(
+            pklr::EvaluatorBuilder::new()
+                .http_rewrites([rewrite.clone()])
+                .package_cache_dir(cache_dir.clone())
+                .eval_to_json(&config_path),
+        )
+        .unwrap();
+    server.join().unwrap();
+    assert_eq!(first["base"], 41);
+    assert_eq!(first["answer"], 42);
+
+    let second = rt
+        .block_on(
+            pklr::EvaluatorBuilder::new()
+                .http_rewrites([rewrite])
+                .package_cache_dir(cache_dir)
+                .offline(true)
+                .eval_to_json(&config_path),
+        )
+        .unwrap();
+    assert_eq!(second["base"], 41);
+    assert_eq!(second["answer"], 42);
+}
+
+#[test]
+fn unreadable_package_cache_is_a_miss_while_online() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    let temp = TestTempDir::new("pklr_test_unreadable_package_cache");
+    let cache_path = temp.path().join("cache");
+    std::fs::write(&cache_path, "not a directory").unwrap();
+    let mut zip_bytes = Vec::new();
+    {
+        let cursor = std::io::Cursor::new(&mut zip_bytes);
+        let mut zip = zip::ZipWriter::new(cursor);
+        zip.start_file("Config.pkl", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"answer = 42\n").unwrap();
+        zip.finish().unwrap();
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 1024];
+        let _ = stream.read(&mut request).unwrap();
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            zip_bytes.len()
+        )
+        .unwrap();
+        stream.write_all(&zip_bytes).unwrap();
+    });
+
+    let config_path = temp.path().join("config.pkl");
+    std::fs::write(
+        &config_path,
+        "amends \"package://example.com/pkg@1.0.0#/Config.pkl\"\n",
+    )
+    .unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let json = rt
+        .block_on(
+            pklr::EvaluatorBuilder::new()
+                .http_rewrites([format!("https://example.com/=http://{addr}/")])
+                .package_cache_dir(cache_path)
+                .eval_to_json(&config_path),
+        )
+        .unwrap();
+    server.join().unwrap();
+    assert_eq!(json["answer"], 42);
+}
+
+#[test]
+fn offline_package_cache_miss_is_actionable() {
+    let temp = TestTempDir::new("pklr_test_offline_package_cache_miss");
+    let config_path = temp.path().join("config.pkl");
+    std::fs::write(
+        &config_path,
+        "amends \"package://example.com/pkg@1.0.0#/Config.pkl\"\n",
+    )
+    .unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let error = rt
+        .block_on(
+            pklr::EvaluatorBuilder::new()
+                .package_cache_dir(temp.path().join("cache"))
+                .offline(true)
+                .eval_to_json(&config_path),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("package is not cached and offline mode is enabled"));
+    assert!(error.contains("https://example.com/pkg@1.0.0.zip"));
+}
