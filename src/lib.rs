@@ -66,6 +66,15 @@ pub struct EvaluatorBuilder {
     http_rewrites: Vec<String>,
     package_cache_dir: Option<std::path::PathBuf>,
     offline: bool,
+    preloaded_packages: Vec<PreloadedPackage>,
+}
+
+/// Package content a host supplies up front instead of fetching it.
+#[cfg(feature = "native-io")]
+struct PreloadedPackage {
+    url: String,
+    extension: String,
+    bytes: std::borrow::Cow<'static, [u8]>,
 }
 
 #[cfg(feature = "native-io")]
@@ -99,7 +108,33 @@ impl EvaluatorBuilder {
         self
     }
 
+    /// Seed the package cache with content the host already has.
+    ///
+    /// Lets a host that ships a copy of a package evaluate configs importing
+    /// it without a network round trip. `extension` is `"zip"` for archive
+    /// packages and `"pkl"` for direct file downloads. Requires
+    /// [`package_cache_dir`](Self::package_cache_dir).
+    ///
+    /// Cached content already on disk wins, so this never overrides a package
+    /// fetched from the network.
+    pub fn preload_package(
+        mut self,
+        url: impl Into<String>,
+        extension: impl Into<String>,
+        bytes: impl Into<std::borrow::Cow<'static, [u8]>>,
+    ) -> Self {
+        self.preloaded_packages.push(PreloadedPackage {
+            url: url.into(),
+            extension: extension.into(),
+            bytes: bytes.into(),
+        });
+        self
+    }
+
     /// Build a configured evaluator for direct source evaluation.
+    ///
+    /// A preloaded package that fails to seed is skipped rather than reported:
+    /// evaluation then fetches it the usual way.
     pub fn build(self) -> Evaluator {
         let mut evaluator = Evaluator::new();
         #[cfg(feature = "http")]
@@ -111,6 +146,9 @@ impl EvaluatorBuilder {
             evaluator.set_package_cache_dir(cache_dir);
         }
         evaluator.set_offline(self.offline);
+        for package in &self.preloaded_packages {
+            let _ = evaluator.preload_package(&package.url, &package.extension, &package.bytes);
+        }
         evaluator
     }
 

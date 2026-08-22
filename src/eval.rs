@@ -434,6 +434,29 @@ impl Evaluator {
         let _ = write_atomic(&url_path, url.as_bytes());
     }
 
+    /// Seed the persistent package cache with `bytes` for `url`.
+    ///
+    /// Lets a host embed a package it already ships and evaluate configs that
+    /// import it without a network round trip. `extension` is `"zip"` for
+    /// archive packages and `"pkl"` for direct file downloads.
+    ///
+    /// A cache entry that is already present and valid wins, so preloading
+    /// never overrides content fetched from the network. Does nothing when no
+    /// package cache directory is configured.
+    pub fn preload_package(&self, url: &str, extension: &str, bytes: &[u8]) -> Result<()> {
+        if self.package_cache_dir.is_none() {
+            return Ok(());
+        }
+        if matches!(self.read_package_cache(url, extension), Ok(Some(cached))
+            if validate_package_bytes(url, extension, &cached).is_ok())
+        {
+            return Ok(());
+        }
+        validate_package_bytes(url, extension, bytes)?;
+        self.write_package_cache(url, extension, bytes);
+        Ok(())
+    }
+
     fn remove_package_cache(&self, url: &str, extension: &str) {
         let Some(cache_dir) = &self.package_cache_dir else {
             return;
