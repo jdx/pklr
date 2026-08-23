@@ -5371,6 +5371,181 @@ fn package_cache_survives_across_offline_evaluators() {
     assert_eq!(second["answer"], 42);
 }
 
+/// Build a single-entry package zip holding `contents` at `name`.
+#[cfg(feature = "package-zip")]
+fn package_zip(name: &str, contents: &str) -> Vec<u8> {
+    use std::io::Write;
+
+    let mut bytes = Vec::new();
+    {
+        let cursor = std::io::Cursor::new(&mut bytes);
+        let mut zip = zip::ZipWriter::new(cursor);
+        zip.start_file(name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(contents.as_bytes()).unwrap();
+        zip.finish().unwrap();
+    }
+    bytes
+}
+
+#[test]
+fn preloaded_package_evaluates_offline_without_a_cold_start() {
+    let temp = TestTempDir::new("pklr_test_preloaded_package");
+    let config_path = temp.path().join("config.pkl");
+    std::fs::write(
+        &config_path,
+        "amends \"package://example.com/pkg@1.0.0#/Config.pkl\"\n",
+    )
+    .unwrap();
+
+    // No server is ever started: the preloaded zip is the only source.
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let json = rt
+        .block_on(
+            pklr::EvaluatorBuilder::new()
+                .package_cache_dir(temp.path().join("cache"))
+                .offline(true)
+                .preload_package(
+                    "https://example.com/pkg@1.0.0.zip",
+                    "zip",
+                    package_zip("Config.pkl", "answer = 42\n"),
+                )
+                .eval_to_json(&config_path),
+        )
+        .unwrap();
+    assert_eq!(json["answer"], 42);
+}
+
+#[test]
+fn preloaded_package_does_not_override_a_cached_download() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    let temp = TestTempDir::new("pklr_test_preload_precedence");
+    let cache_dir = temp.path().join("cache");
+    let fetched = package_zip("Config.pkl", "answer = 42\n");
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 1024];
+        let _ = stream.read(&mut request).unwrap();
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            fetched.len()
+        )
+        .unwrap();
+        stream.write_all(&fetched).unwrap();
+    });
+
+    let config_path = temp.path().join("config.pkl");
+    std::fs::write(
+        &config_path,
+        "amends \"package://example.com/pkg@1.0.0#/Config.pkl\"\n",
+    )
+    .unwrap();
+    let rewrite = format!("https://example.com/=http://{addr}/");
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(
+        pklr::EvaluatorBuilder::new()
+            .http_rewrites([rewrite])
+            .package_cache_dir(cache_dir.clone())
+            .eval_to_json(&config_path),
+    )
+    .unwrap();
+    server.join().unwrap();
+
+    // The downloaded package is already cached, so the preloaded copy is ignored.
+    let json = rt
+        .block_on(
+            pklr::EvaluatorBuilder::new()
+                .package_cache_dir(cache_dir)
+                .offline(true)
+                .preload_package(
+                    "https://example.com/pkg@1.0.0.zip",
+                    "zip",
+                    package_zip("Config.pkl", "answer = 7\n"),
+                )
+                .eval_to_json(&config_path),
+        )
+        .unwrap();
+    assert_eq!(json["answer"], 42);
+}
+
+#[test]
+fn preloading_a_package_for_another_version_is_a_cache_miss() {
+    let temp = TestTempDir::new("pklr_test_preload_version_mismatch");
+    let config_path = temp.path().join("config.pkl");
+    // The config pins 2.0.0 while the preloaded package is 1.0.0.
+    std::fs::write(
+        &config_path,
+        "amends \"package://example.com/pkg@2.0.0#/Config.pkl\"\n",
+    )
+    .unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let error = rt
+        .block_on(
+            pklr::EvaluatorBuilder::new()
+                .package_cache_dir(temp.path().join("cache"))
+                .offline(true)
+                .preload_package(
+                    "https://example.com/pkg@1.0.0.zip",
+                    "zip",
+                    package_zip("Config.pkl", "answer = 42\n"),
+                )
+                .eval_to_json(&config_path),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("package is not cached and offline mode is enabled"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn preloading_invalid_package_bytes_is_rejected() {
+    let temp = TestTempDir::new("pklr_test_preload_invalid");
+    let mut evaluator = pklr::Evaluator::new();
+    evaluator.set_package_cache_dir(temp.path().join("cache"));
+    let error = evaluator
+        .preload_package("https://example.com/pkg@1.0.0.zip", "zip", b"not a zip")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("package archive is invalid"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn preloading_reports_a_cache_write_failure() {
+    let temp = TestTempDir::new("pklr_test_preload_write_failure");
+    // A file where the cache directory belongs: the seed cannot be stored, and
+    // reporting success would leave the host expecting a usable cache entry.
+    let cache_path = temp.path().join("cache");
+    std::fs::write(&cache_path, b"not a directory").unwrap();
+
+    let mut evaluator = pklr::Evaluator::new();
+    evaluator.set_package_cache_dir(&cache_path);
+    let error = evaluator
+        .preload_package(
+            "https://example.com/pkg@1.0.0.zip",
+            "zip",
+            &package_zip("Config.pkl", "answer = 42\n"),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains(&cache_path.display().to_string()),
+        "error should name the cache path: {error}"
+    );
+}
+
 #[test]
 fn direct_package_relatives_survive_across_offline_evaluators() {
     use std::io::{Read, Write};

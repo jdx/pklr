@@ -8,7 +8,7 @@ No external binary or CLI required.
 - Lexer, parser, and evaluator written entirely in Rust
 - Evaluates `.pkl` files to `serde_json::Value`
 - Import and amends resolution for local files
-- Persistent caching and offline evaluation for `package://` imports
+- Persistent caching, cache preloading, and offline evaluation for `package://` imports
 - String interpolation, lambdas, higher-order methods
 - Rich error diagnostics via [miette](https://crates.io/crates/miette)
 
@@ -33,6 +33,25 @@ async fn load_config() -> pklr::Result<serde_json::Value> {
         .await
 }
 ```
+
+A host that already ships a copy of a package can seed the cache with it,
+so a config importing that package evaluates without any network round trip:
+
+```rust
+static PACKAGE: &[u8] = include_bytes!("pkg@1.0.0.zip");
+
+async fn load_bundled_config() -> pklr::Result<serde_json::Value> {
+    pklr::EvaluatorBuilder::new()
+        .package_cache_dir(".pklr-cache")
+        .preload_package("https://example.com/pkg@1.0.0.zip", "zip", PACKAGE)
+        .eval_to_json(std::path::Path::new("config.pkl"))
+        .await
+}
+```
+
+Cached content already on disk wins, so preloading never overrides a package
+fetched from the network, and a config pinning a different version still
+resolves that version normally.
 
 ## License
 

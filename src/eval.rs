@@ -393,7 +393,8 @@ impl Evaluator {
         let fetch_url = self.rewrite_url(url).into_owned();
         let bytes = self.capabilities.fetch_bytes(&fetch_url).await?;
         validate_package_bytes(url, extension, &bytes)?;
-        self.write_package_cache(url, extension, &bytes);
+        // Best-effort: the bytes are already in hand.
+        let _ = self.write_package_cache(url, extension, &bytes);
         Ok(bytes)
     }
 
@@ -417,21 +418,37 @@ impl Evaluator {
         }
     }
 
-    fn write_package_cache(&self, url: &str, extension: &str, bytes: &[u8]) {
+    /// Cache `bytes` for `url`. The fetch path ignores the error; preloading does not.
+    fn write_package_cache(&self, url: &str, extension: &str, bytes: &[u8]) -> Result<()> {
         let Some(cache_dir) = &self.package_cache_dir else {
-            return;
+            return Ok(());
         };
         let (data_path, url_path) = package_cache_paths(cache_dir, url, extension);
         let Some(parent) = data_path.parent() else {
-            return;
+            return Ok(());
         };
-        if std::fs::create_dir_all(parent).is_err() {
-            return;
+        std::fs::create_dir_all(parent).map_err(|error| Error::Io(parent.to_path_buf(), error))?;
+        write_atomic(&data_path, bytes).map_err(|error| Error::Io(data_path, error))?;
+        write_atomic(&url_path, url.as_bytes()).map_err(|error| Error::Io(url_path, error))
+    }
+
+    /// Seed the persistent package cache with `bytes` for `url`.
+    ///
+    /// `extension` is `"zip"` for archive packages and `"pkl"` for direct file
+    /// downloads. A valid cache entry already present wins, so preloading never
+    /// overrides content fetched from the network. Does nothing when no package
+    /// cache directory is configured.
+    pub fn preload_package(&self, url: &str, extension: &str, bytes: &[u8]) -> Result<()> {
+        if self.package_cache_dir.is_none() {
+            return Ok(());
         }
-        if write_atomic(&data_path, bytes).is_err() {
-            return;
+        if let Ok(Some(cached)) = self.read_package_cache(url, extension)
+            && validate_package_bytes(url, extension, &cached).is_ok()
+        {
+            return Ok(());
         }
-        let _ = write_atomic(&url_path, url.as_bytes());
+        validate_package_bytes(url, extension, bytes)?;
+        self.write_package_cache(url, extension, bytes)
     }
 
     fn remove_package_cache(&self, url: &str, extension: &str) {
