@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0](https://github.com/jdx/pklr/compare/v1.4.0...v1.5.0) - 2026-08-23
+
+### Added
+
+- add preload_package to seed the package cache ([#157](https://github.com/jdx/pklr/pull/157))
+
 ## [1.4.0](https://github.com/jdx/pklr/compare/v1.3.0...v1.4.0) - 2026-08-12
 
 ### Added
