@@ -393,7 +393,9 @@ impl Evaluator {
         let fetch_url = self.rewrite_url(url).into_owned();
         let bytes = self.capabilities.fetch_bytes(&fetch_url).await?;
         validate_package_bytes(url, extension, &bytes)?;
-        self.write_package_cache(url, extension, &bytes);
+        // The cache is only an optimization here: the bytes are already in
+        // hand, so a cache that cannot be written must not fail the fetch.
+        let _ = self.write_package_cache(url, extension, &bytes);
         Ok(bytes)
     }
 
@@ -417,19 +419,12 @@ impl Evaluator {
         }
     }
 
-    /// Cache `bytes` for `url`, ignoring failures.
+    /// Cache `bytes` for `url`.
     ///
-    /// The cache is an optimization for downloads, so a cache that cannot be
-    /// written must not fail an evaluation that already has the bytes.
-    fn write_package_cache(&self, url: &str, extension: &str, bytes: &[u8]) {
-        let _ = self.write_package_cache_checked(url, extension, bytes);
-    }
-
-    /// Cache `bytes` for `url`, reporting why the write failed.
-    ///
-    /// Callers that treat a cache entry as the only copy of a package need to
-    /// know it was actually stored.
-    fn write_package_cache_checked(&self, url: &str, extension: &str, bytes: &[u8]) -> Result<()> {
+    /// Callers that treat the cache as an optimization ignore the error; one
+    /// that treats the entry as the only copy of a package needs to know it
+    /// was actually stored.
+    fn write_package_cache(&self, url: &str, extension: &str, bytes: &[u8]) -> Result<()> {
         let Some(cache_dir) = &self.package_cache_dir else {
             return Ok(());
         };
@@ -461,13 +456,13 @@ impl Evaluator {
         if self.package_cache_dir.is_none() {
             return Ok(());
         }
-        if matches!(self.read_package_cache(url, extension), Ok(Some(cached))
-            if validate_package_bytes(url, extension, &cached).is_ok())
+        if let Ok(Some(cached)) = self.read_package_cache(url, extension)
+            && validate_package_bytes(url, extension, &cached).is_ok()
         {
             return Ok(());
         }
         validate_package_bytes(url, extension, bytes)?;
-        self.write_package_cache_checked(url, extension, bytes)
+        self.write_package_cache(url, extension, bytes)
     }
 
     fn remove_package_cache(&self, url: &str, extension: &str) {
