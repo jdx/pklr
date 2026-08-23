@@ -108,15 +108,8 @@ impl EvaluatorBuilder {
         self
     }
 
-    /// Seed the package cache with content the host already has.
-    ///
-    /// Lets a host that ships a copy of a package evaluate configs importing
-    /// it without a network round trip. `extension` is `"zip"` for archive
-    /// packages and `"pkl"` for direct file downloads. Requires
-    /// [`package_cache_dir`](Self::package_cache_dir).
-    ///
-    /// Cached content already on disk wins, so this never overrides a package
-    /// fetched from the network.
+    /// Seed the package cache with content the host already has, instead of
+    /// fetching it. Requires [`package_cache_dir`](Self::package_cache_dir).
     pub fn preload_package(
         mut self,
         url: impl Into<String>,
@@ -133,8 +126,7 @@ impl EvaluatorBuilder {
 
     /// Build a configured evaluator for direct source evaluation.
     ///
-    /// A preloaded package that fails to seed is skipped rather than reported:
-    /// evaluation then fetches it the usual way.
+    /// A package that fails to preload is skipped and fetched normally.
     pub fn build(self) -> Evaluator {
         let mut evaluator = Evaluator::new();
         #[cfg(feature = "http")]

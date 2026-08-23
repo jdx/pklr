@@ -393,8 +393,7 @@ impl Evaluator {
         let fetch_url = self.rewrite_url(url).into_owned();
         let bytes = self.capabilities.fetch_bytes(&fetch_url).await?;
         validate_package_bytes(url, extension, &bytes)?;
-        // The cache is only an optimization here: the bytes are already in
-        // hand, so a cache that cannot be written must not fail the fetch.
+        // Best-effort: the bytes are already in hand.
         let _ = self.write_package_cache(url, extension, &bytes);
         Ok(bytes)
     }
@@ -419,11 +418,7 @@ impl Evaluator {
         }
     }
 
-    /// Cache `bytes` for `url`.
-    ///
-    /// Callers that treat the cache as an optimization ignore the error; one
-    /// that treats the entry as the only copy of a package needs to know it
-    /// was actually stored.
+    /// Cache `bytes` for `url`. The fetch path ignores the error; preloading does not.
     fn write_package_cache(&self, url: &str, extension: &str, bytes: &[u8]) -> Result<()> {
         let Some(cache_dir) = &self.package_cache_dir else {
             return Ok(());
@@ -439,19 +434,10 @@ impl Evaluator {
 
     /// Seed the persistent package cache with `bytes` for `url`.
     ///
-    /// Lets a host embed a package it already ships and evaluate configs that
-    /// import it without a network round trip. `extension` is `"zip"` for
-    /// archive packages and `"pkl"` for direct file downloads.
-    ///
-    /// A cache entry that is already present and valid wins, so preloading
-    /// never overrides content fetched from the network. Like the rest of the
-    /// cache this check is not synchronized across processes: an evaluator
-    /// racing a download of the same URL can still replace it, which is
-    /// harmless because both hold that URL's version of the package.
-    ///
-    /// Does nothing when no package cache directory is configured. Returns an
-    /// error when the bytes are not a valid package or could not be stored, so
-    /// a host cannot mistake a failed seed for a usable cache entry.
+    /// `extension` is `"zip"` for archive packages and `"pkl"` for direct file
+    /// downloads. A valid cache entry already present wins, so preloading never
+    /// overrides content fetched from the network. Does nothing when no package
+    /// cache directory is configured.
     pub fn preload_package(&self, url: &str, extension: &str, bytes: &[u8]) -> Result<()> {
         if self.package_cache_dir.is_none() {
             return Ok(());
