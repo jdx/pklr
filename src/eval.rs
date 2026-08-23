@@ -417,21 +417,29 @@ impl Evaluator {
         }
     }
 
+    /// Cache `bytes` for `url`, ignoring failures.
+    ///
+    /// The cache is an optimization for downloads, so a cache that cannot be
+    /// written must not fail an evaluation that already has the bytes.
     fn write_package_cache(&self, url: &str, extension: &str, bytes: &[u8]) {
+        let _ = self.write_package_cache_checked(url, extension, bytes);
+    }
+
+    /// Cache `bytes` for `url`, reporting why the write failed.
+    ///
+    /// Callers that treat a cache entry as the only copy of a package need to
+    /// know it was actually stored.
+    fn write_package_cache_checked(&self, url: &str, extension: &str, bytes: &[u8]) -> Result<()> {
         let Some(cache_dir) = &self.package_cache_dir else {
-            return;
+            return Ok(());
         };
         let (data_path, url_path) = package_cache_paths(cache_dir, url, extension);
         let Some(parent) = data_path.parent() else {
-            return;
+            return Ok(());
         };
-        if std::fs::create_dir_all(parent).is_err() {
-            return;
-        }
-        if write_atomic(&data_path, bytes).is_err() {
-            return;
-        }
-        let _ = write_atomic(&url_path, url.as_bytes());
+        std::fs::create_dir_all(parent).map_err(|error| Error::Io(parent.to_path_buf(), error))?;
+        write_atomic(&data_path, bytes).map_err(|error| Error::Io(data_path, error))?;
+        write_atomic(&url_path, url.as_bytes()).map_err(|error| Error::Io(url_path, error))
     }
 
     /// Seed the persistent package cache with `bytes` for `url`.
@@ -441,8 +449,14 @@ impl Evaluator {
     /// archive packages and `"pkl"` for direct file downloads.
     ///
     /// A cache entry that is already present and valid wins, so preloading
-    /// never overrides content fetched from the network. Does nothing when no
-    /// package cache directory is configured.
+    /// never overrides content fetched from the network. Like the rest of the
+    /// cache this check is not synchronized across processes: an evaluator
+    /// racing a download of the same URL can still replace it, which is
+    /// harmless because both hold that URL's version of the package.
+    ///
+    /// Does nothing when no package cache directory is configured. Returns an
+    /// error when the bytes are not a valid package or could not be stored, so
+    /// a host cannot mistake a failed seed for a usable cache entry.
     pub fn preload_package(&self, url: &str, extension: &str, bytes: &[u8]) -> Result<()> {
         if self.package_cache_dir.is_none() {
             return Ok(());
@@ -453,8 +467,7 @@ impl Evaluator {
             return Ok(());
         }
         validate_package_bytes(url, extension, bytes)?;
-        self.write_package_cache(url, extension, bytes);
-        Ok(())
+        self.write_package_cache_checked(url, extension, bytes)
     }
 
     fn remove_package_cache(&self, url: &str, extension: &str) {

@@ -5523,6 +5523,30 @@ fn preloading_invalid_package_bytes_is_rejected() {
 }
 
 #[test]
+fn preloading_reports_a_cache_write_failure() {
+    let temp = TestTempDir::new("pklr_test_preload_write_failure");
+    // A file where the cache directory belongs: the seed cannot be stored, and
+    // reporting success would leave the host expecting a usable cache entry.
+    let cache_path = temp.path().join("cache");
+    std::fs::write(&cache_path, b"not a directory").unwrap();
+
+    let mut evaluator = pklr::Evaluator::new();
+    evaluator.set_package_cache_dir(&cache_path);
+    let error = evaluator
+        .preload_package(
+            "https://example.com/pkg@1.0.0.zip",
+            "zip",
+            &package_zip("Config.pkl", "answer = 42\n"),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains(&cache_path.display().to_string()),
+        "error should name the cache path: {error}"
+    );
+}
+
+#[test]
 fn direct_package_relatives_survive_across_offline_evaluators() {
     use std::io::{Read, Write};
     use std::net::TcpListener;
