@@ -12,6 +12,8 @@ use crate::lexer;
 use crate::parser::{self, BinOp, Entry, Expr, Modifier, Module, Property, StringInterpPart, UnOp};
 use crate::value::{ObjectSource, Value};
 
+const DYNAMIC_SIBLING_REF: &str = "\0pklr:dynamic-sibling";
+
 /// Evaluates pkl source files to [`Value`].
 pub struct Evaluator {
     base_path: PathBuf,
@@ -21,6 +23,8 @@ pub struct Evaluator {
     http_cache: HashMap<String, String>,
     /// Cache for evaluated local imports (canonical path → Value)
     import_cache: HashMap<PathBuf, Value>,
+    /// Final scopes for modules evaluated in this run, used to preserve inherited locals.
+    module_scopes: HashMap<PathBuf, ModuleScopeSnapshot>,
     /// Environment variables read during evaluation (name → observed value).
     env_reads: BTreeMap<String, Option<String>>,
     /// Local files currently being evaluated with inherited scope.
@@ -54,6 +58,13 @@ struct MappingInheritedDefault {
     entries: Option<Vec<Entry>>,
 }
 
+#[derive(Clone, Default)]
+struct ModuleScopeSnapshot {
+    values: IndexMap<String, Value>,
+    type_aliases: IndexMap<String, crate::parser::TypeExpr>,
+    late_properties: Vec<Property>,
+}
+
 fn regex_value(pattern: Value) -> Value {
     let mut map = IndexMap::new();
     map.insert("_type".to_string(), Value::String("regex".to_string()));
@@ -69,6 +80,7 @@ impl Default for Evaluator {
             max_depth: 32,
             http_cache: HashMap::new(),
             import_cache: HashMap::new(),
+            module_scopes: HashMap::new(),
             env_reads: BTreeMap::new(),
             scoped_imports_in_flight: HashSet::new(),
             capabilities: Box::new(crate::capabilities::NativeCapabilities::new()),
@@ -96,6 +108,7 @@ impl Evaluator {
             max_depth: 32,
             http_cache: HashMap::new(),
             import_cache: HashMap::new(),
+            module_scopes: HashMap::new(),
             env_reads: BTreeMap::new(),
             scoped_imports_in_flight: HashSet::new(),
             capabilities: Box::new(capabilities),
@@ -112,6 +125,22 @@ impl Evaluator {
 
     pub fn set_base_path(&mut self, path: &Path) {
         self.base_path = path.to_path_buf();
+    }
+
+    fn resolve_local_path(&self, current_path: &Path, uri: &str) -> PathBuf {
+        #[cfg(feature = "package-zip")]
+        if let Some(from_root) = uri.strip_prefix(".../")
+            && let Some(root) = self
+                .package_dirs
+                .values()
+                .find(|root| current_path.starts_with(root))
+        {
+            return root.join(from_root);
+        }
+        if let Some(from_root) = uri.strip_prefix(".../") {
+            return self.base_path.join(from_root);
+        }
+        current_path.parent().unwrap_or(Path::new(".")).join(uri)
     }
 
     /// Persist downloaded package content under `path`.
@@ -140,6 +169,7 @@ impl Evaluator {
     fn begin_evaluation(&mut self) {
         self.env_reads.clear();
         self.import_cache.clear();
+        self.module_scopes.clear();
         self.scoped_imports_in_flight.clear();
     }
 
@@ -340,8 +370,7 @@ impl Evaluator {
         let import_path = if let Some(rel) = uri.strip_prefix("file://") {
             PathBuf::from(rel)
         } else {
-            let base = path.parent().unwrap_or(Path::new("."));
-            base.join(uri)
+            self.resolve_local_path(path, uri)
         };
         if !self.capabilities.path_exists(&import_path).await? {
             return Ok(None);
@@ -625,6 +654,27 @@ impl Evaluator {
             .await
     }
 
+    fn layer_evaluated_module_scope(&self, path: &Path, scope: &mut Scope) {
+        let Some(inherited) = self.module_scopes.get(path) else {
+            return;
+        };
+        for (name, value) in &inherited.values {
+            if name != "this" && name != "module" {
+                scope.set(name.clone(), value.clone());
+            }
+        }
+        for (name, ty) in &inherited.type_aliases {
+            scope.set_type_alias(name.clone(), ty.clone());
+        }
+    }
+
+    fn inherited_late_properties(&self, path: &Path) -> Vec<Property> {
+        self.module_scopes
+            .get(path)
+            .map(|snapshot| snapshot.late_properties.clone())
+            .unwrap_or_default()
+    }
+
     #[async_recursion(?Send)]
     async fn eval_module_with_scope(
         &mut self,
@@ -830,8 +880,7 @@ impl Evaluator {
             let import_path = if let Some(rel) = uri.strip_prefix("file://") {
                 PathBuf::from(rel)
             } else {
-                let base = path.parent().unwrap_or(Path::new("."));
-                base.join(uri)
+                self.resolve_local_path(path, uri)
             };
             let alias = import.alias.clone().unwrap_or_else(|| {
                 import_path
@@ -870,6 +919,7 @@ impl Evaluator {
 
         // Process amends: load base module as starting values
         let mut base_obj = IndexMap::new();
+        let mut late_inherited_properties = Vec::new();
         if let Some(amends_uri) = &module.amends {
             // A relative amends inside a remote module resolves against that URL.
             let resolved_amends = resolve_remote_relative(path, amends_uri);
@@ -888,6 +938,8 @@ impl Evaluator {
                         None,
                     )
                     .await?;
+                self.layer_evaluated_module_scope(Path::new(uri), &mut scope);
+                late_inherited_properties.extend(self.inherited_late_properties(Path::new(uri)));
                 if let Value::Object(m, _) = base_val {
                     base_obj = (*m).clone();
                 }
@@ -911,6 +963,9 @@ impl Evaluator {
                                 None,
                             )
                             .await?;
+                        self.layer_evaluated_module_scope(&local_path, &mut scope);
+                        late_inherited_properties
+                            .extend(self.inherited_late_properties(&local_path));
                         if let Value::Object(m, _) = base_val {
                             base_obj = (*m).clone();
                         }
@@ -935,6 +990,9 @@ impl Evaluator {
                             None,
                         )
                         .await?;
+                    self.layer_evaluated_module_scope(Path::new(url.as_str()), &mut scope);
+                    late_inherited_properties
+                        .extend(self.inherited_late_properties(Path::new(url.as_str())));
                     if let Value::Object(m, _) = base_val {
                         base_obj = (*m).clone();
                     }
@@ -945,13 +1003,14 @@ impl Evaluator {
                 let amends_path = if let Some(rel) = uri.strip_prefix("file://") {
                     PathBuf::from(rel)
                 } else {
-                    let base = path.parent().unwrap_or(Path::new("."));
-                    base.join(uri)
+                    self.resolve_local_path(path, uri)
                 };
                 if self.capabilities.path_exists(&amends_path).await? {
                     let base_val = self
                         .eval_file_with_scope(&amends_path, depth + 1, Some(scope.clone()))
                         .await?;
+                    self.layer_evaluated_module_scope(&amends_path, &mut scope);
+                    late_inherited_properties.extend(self.inherited_late_properties(&amends_path));
                     if let Value::Object(m, _) = &base_val {
                         self.bind_deferred_inherited_imports(
                             &deferred_inherited_imports,
@@ -1010,6 +1069,12 @@ impl Evaluator {
                     {
                         self.extract_converters_from_ast(prop, &scope, depth).await;
                     }
+                    if let Entry::Property(prop) = entry
+                        && !has_modifier(&prop.modifiers, Modifier::Local)
+                        && prop.name != "output"
+                    {
+                        late_inherited_properties.push(prop.clone());
+                    }
                 }
             }
             // Remove function values from base output (not data)
@@ -1025,13 +1090,14 @@ impl Evaluator {
                 let extends_path = if let Some(rel) = uri.strip_prefix("file://") {
                     PathBuf::from(rel)
                 } else {
-                    let base = path.parent().unwrap_or(Path::new("."));
-                    base.join(uri)
+                    self.resolve_local_path(path, uri)
                 };
                 if self.capabilities.path_exists(&extends_path).await? {
                     let ext_val = self
                         .eval_file_with_scope(&extends_path, depth + 1, Some(scope.clone()))
                         .await?;
+                    self.layer_evaluated_module_scope(&extends_path, &mut scope);
+                    late_inherited_properties.extend(self.inherited_late_properties(&extends_path));
                     let name = extends_path.display().to_string();
                     let source = self.capabilities.read_to_string(&extends_path).await?;
                     let tokens = lexer::lex_named(&source, &name)?;
@@ -1070,6 +1136,17 @@ impl Evaluator {
                             Entry::Property(prop) if prop.name == "output" && depth == 0 => {
                                 self.extract_converters_from_ast(prop, &scope, depth).await;
                             }
+                            Entry::Property(prop)
+                                if !has_modifier(&prop.modifiers, Modifier::Local)
+                                    && prop.name != "output" =>
+                            {
+                                late_inherited_properties.push(prop.clone());
+                                if let Ok(Some(value)) =
+                                    self.eval_property(prop, &scope, depth).await
+                                {
+                                    scope.set(prop.name.clone(), value);
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -1087,6 +1164,8 @@ impl Evaluator {
                         None,
                     )
                     .await?;
+                self.layer_evaluated_module_scope(Path::new(uri), &mut scope);
+                late_inherited_properties.extend(self.inherited_late_properties(Path::new(uri)));
                 if let Value::Object(m, _) = ext_val {
                     base_obj = (*m).clone();
                 }
@@ -1106,9 +1185,34 @@ impl Evaluator {
                         scope.set(cls_name.clone(), defaults);
                         base_obj.shift_remove(cls_name);
                     }
+                    if let Entry::Property(prop) = entry
+                        && !has_modifier(&prop.modifiers, Modifier::Local)
+                        && prop.name != "output"
+                    {
+                        late_inherited_properties.push(prop.clone());
+                        if let Ok(Some(value)) = self.eval_property(prop, &scope, depth).await {
+                            scope.set(prop.name.clone(), value);
+                        }
+                    }
                 }
             }
         }
+
+        let requested_eval_fields = requested_output_fields.as_ref().map(|fields| {
+            let mut dependency_entries = late_inherited_properties
+                .iter()
+                .cloned()
+                .map(Entry::Property)
+                .collect::<Vec<_>>();
+            dependency_entries.extend(module.body.iter().cloned());
+            expand_requested_fields(&dependency_entries, fields)
+        });
+
+        // Locals are evaluated before the main property pass, but `this` and
+        // `module` must already expose inherited members at that point.
+        let inherited_snapshot = Value::Object(Arc::new(base_obj.clone()), None);
+        scope.set("this".into(), inherited_snapshot.clone());
+        scope.set("module".into(), inherited_snapshot);
 
         // First pass: collect locals, class definitions, and type aliases in
         // declaration order so they can reference each other
@@ -1117,10 +1221,14 @@ impl Evaluator {
                 Entry::Property(prop)
                     if has_modifier(&prop.modifiers, Modifier::Local) && prop.value.is_some() =>
                 {
-                    let val = self
+                    match self
                         .eval_expr(prop.value.as_ref().unwrap(), &scope, depth)
-                        .await?;
-                    scope.set(prop.name.clone(), val);
+                        .await
+                    {
+                        Ok(val) => scope.set(prop.name.clone(), val),
+                        Err(Error::Eval(message)) => scope.poison(prop.name.clone(), message),
+                        Err(error) => return Err(error),
+                    }
                 }
                 Entry::ClassDef(name, class_mods, parent, body) => {
                     let defaults = self
@@ -1184,7 +1292,7 @@ impl Evaluator {
                     }
                     continue;
                 }
-                if let Some(fields) = &requested_output_fields
+                if let Some(fields) = &requested_eval_fields
                     && !fields.contains(&prop.name)
                 {
                     continue;
@@ -1198,20 +1306,39 @@ impl Evaluator {
                     if let Some(v) = out.get(&prop.name) {
                         // Satisfied by base — add to scope so other properties can reference it
                         scope.set(prop.name.clone(), v.clone());
-                    } else {
-                        let kind = if has_modifier(mods, Modifier::Abstract) {
-                            "abstract"
-                        } else {
-                            "external"
-                        };
+                    } else if has_modifier(mods, Modifier::External) {
                         return Err(Error::Eval(format!(
-                            "{kind} property '{}' must be assigned a value",
-                            prop.name
+                            "external property '{}' must be assigned a value in {}",
+                            prop.name,
+                            path.display()
+                        )));
+                    } else if depth == 0 && !module_is_abstract(module) {
+                        return Err(Error::Eval(format!(
+                            "abstract property '{}' must be assigned a value in {}",
+                            prop.name,
+                            path.display()
                         )));
                     }
                     continue;
                 }
-                let val = self.eval_property(prop, &scope, depth).await?;
+                let val = match self.eval_property(prop, &scope, depth).await {
+                    Ok(value) => value,
+                    // Module properties are late-bound. Keep an unresolved
+                    // template expression deferred until a consumer actually
+                    // requires it; poisoned locals still surface that error.
+                    Err(Error::Eval(message))
+                        if is_unresolved_template_error(&message)
+                            && (module_is_abstract(module)
+                                || property_reference_names(prop).iter().any(|name| {
+                                    late_inherited_properties
+                                        .iter()
+                                        .any(|inherited| inherited.name == *name)
+                                })) =>
+                    {
+                        None
+                    }
+                    Err(error) => return Err(error),
+                };
                 if let Some(v) = val {
                     // const/fixed: error if overriding an immutable property from base
                     if (has_modifier(mods, Modifier::Const) || has_modifier(mods, Modifier::Fixed))
@@ -1231,13 +1358,154 @@ impl Evaluator {
                     scope.set(prop.name.clone(), v.clone());
                     // Track in all_props (including hidden) for `this`/`module`
                     all_props.insert(prop.name.clone(), v.clone());
-                    if !has_modifier(mods, Modifier::Hidden) {
+                    if !has_modifier(mods, Modifier::Hidden)
+                        && (depth > 0 || should_render_property_value(prop, &v))
+                        && requested_output_fields
+                            .as_ref()
+                            .is_none_or(|fields| fields.contains(&prop.name))
+                    {
                         out.insert(prop.name.clone(), v);
                     }
                     // Update `this` and `module` with all properties (including hidden)
                     let snapshot = Value::Object(Arc::new(all_props.clone()), None);
                     scope.set("this".into(), snapshot.clone());
                     scope.set("module".into(), snapshot);
+                }
+            }
+        }
+
+        // Pkl properties are late-bound. Re-evaluate inherited expressions after
+        // child overrides have populated the scope (for example `uses` derived
+        // from an action module's overridden `action` and `version`).
+        let child_property_names: HashSet<&str> = module
+            .body
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Property(prop) => Some(prop.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        if depth == 0
+            && !module_is_abstract(module)
+            && let Some(prop) = late_inherited_properties.iter().find(|prop| {
+                has_modifier(&prop.modifiers, Modifier::Abstract)
+                    && prop.value.is_none()
+                    && prop.body.is_none()
+                    && !child_property_names.contains(prop.name.as_str())
+            })
+        {
+            return Err(Error::Eval(format!(
+                "abstract property '{}' must be assigned a value in {}",
+                prop.name,
+                path.display()
+            )));
+        }
+        let child_candidates = module
+            .body
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Property(prop)
+                    if prop.name != "output" && (prop.value.is_some() || prop.body.is_some()) =>
+                {
+                    Some(prop)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut late_bound_names = late_inherited_properties
+            .iter()
+            .map(|prop| prop.name.clone())
+            .collect::<HashSet<_>>();
+        let mut late_child_properties = Vec::new();
+        loop {
+            let mut added = false;
+            for prop in &child_candidates {
+                if late_child_properties
+                    .iter()
+                    .any(|selected: &&Property| selected.name == prop.name)
+                {
+                    continue;
+                }
+                let refs = property_reference_names(prop);
+                if refs.iter().any(|name| late_bound_names.contains(name))
+                    || (refs.contains(DYNAMIC_SIBLING_REF) && !late_bound_names.is_empty())
+                {
+                    late_bound_names.insert(prop.name.clone());
+                    late_child_properties.push(*prop);
+                    added = true;
+                }
+            }
+            if !added {
+                break;
+            }
+        }
+        let late_passes = late_inherited_properties.len() + late_child_properties.len();
+        for pass in 0..=late_passes {
+            for prop in &late_inherited_properties {
+                if child_property_names.contains(prop.name.as_str()) {
+                    continue;
+                }
+                match self.eval_property(prop, &scope, depth).await {
+                    Ok(Some(value)) => {
+                        scope.set(prop.name.clone(), value.clone());
+                        all_props.insert(prop.name.clone(), value.clone());
+                        if !has_modifier(&prop.modifiers, Modifier::Hidden)
+                            && (depth > 0 || should_render_property_value(prop, &value))
+                            && requested_output_fields
+                                .as_ref()
+                                .is_none_or(|fields| fields.contains(&prop.name))
+                        {
+                            out.insert(prop.name.clone(), value);
+                        }
+                        let snapshot = Value::Object(Arc::new(all_props.clone()), None);
+                        scope.set("this".into(), snapshot.clone());
+                        scope.set("module".into(), snapshot);
+                    }
+                    Ok(None) => {}
+                    Err(Error::Eval(message))
+                        if pass < late_passes
+                            || (module_is_abstract(module)
+                                && is_unresolved_template_error(&message)) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            for prop in &late_child_properties {
+                match self.eval_property(prop, &scope, depth).await {
+                    Ok(Some(value)) => {
+                        scope.set(prop.name.clone(), value.clone());
+                        if has_modifier(&prop.modifiers, Modifier::Local) {
+                            continue;
+                        }
+                        all_props.insert(prop.name.clone(), value.clone());
+                        if !has_modifier(&prop.modifiers, Modifier::Hidden)
+                            && (depth > 0 || should_render_property_value(prop, &value))
+                            && requested_output_fields
+                                .as_ref()
+                                .is_none_or(|fields| fields.contains(&prop.name))
+                        {
+                            out.insert(prop.name.clone(), value);
+                        }
+                        let snapshot = Value::Object(Arc::new(all_props.clone()), None);
+                        scope.set("this".into(), snapshot.clone());
+                        scope.set("module".into(), snapshot);
+                    }
+                    Ok(None) => {}
+                    Err(Error::Eval(message))
+                        if pass < late_passes
+                            || (module_is_abstract(module)
+                                && is_unresolved_template_error(&message)) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+
+        if depth == 0 {
+            for prop in &late_inherited_properties {
+                if let Some(value) = all_props.get(&prop.name)
+                    && !should_render_property_value(prop, value)
+                    && !child_property_names.contains(prop.name.as_str())
+                {
+                    out.shift_remove(&prop.name);
                 }
             }
         }
@@ -1251,6 +1519,9 @@ impl Evaluator {
                 out.shift_remove(name);
             }
             out.retain(|_, v| !matches!(v, Value::Lambda(..)));
+        }
+        if let Some(fields) = &requested_output_fields {
+            out.retain(|name, _| fields.contains(name));
         }
         // If the module declares any `@Deprecated` properties, attach a
         // minimal ObjectSource carrying just the deprecation map so field
@@ -1270,6 +1541,28 @@ impl Evaluator {
                 deprecated,
             }))
         };
+        let mut effective_late_properties = IndexMap::new();
+        for prop in late_inherited_properties
+            .iter()
+            .chain(module.body.iter().filter_map(|entry| match entry {
+                Entry::Property(prop)
+                    if !has_modifier(&prop.modifiers, Modifier::Local) && prop.name != "output" =>
+                {
+                    Some(prop)
+                }
+                _ => None,
+            }))
+        {
+            effective_late_properties.insert(prop.name.clone(), prop.clone());
+        }
+        self.module_scopes.insert(
+            path.to_path_buf(),
+            ModuleScopeSnapshot {
+                values: scope.flatten(),
+                type_aliases: scope.flatten_type_aliases(),
+                late_properties: effective_late_properties.into_values().collect(),
+            },
+        );
         Ok(Value::Object(Arc::new(out), source))
     }
 
@@ -1286,10 +1579,35 @@ impl Evaluator {
             return Ok(Some(value));
         }
         if let Some(body) = &prop.body {
+            let mut nullable_default = prop
+                .type_ann
+                .as_ref()
+                .and_then(|ty| nullable_inner_default(ty, scope));
+            if let Some(default) = &mut nullable_default {
+                apply_mapping_type_annotation(default, prop.type_ann.as_ref());
+            }
+            let scoped = scope.get(&prop.name);
+            let amendment_base = scoped
+                .filter(|value| !is_null_value(value))
+                .or(nullable_default.as_ref())
+                .or(scoped);
+            if matches!(amendment_base, Some(Value::List(_)))
+                || (!matches!(amendment_base, Some(Value::Object(..)))
+                    && (prop.type_ann.as_ref().is_some_and(type_is_listing)
+                        || entries_are_listing_amendment(body)))
+            {
+                let mut items = match amendment_base {
+                    Some(Value::List(existing)) => existing.clone(),
+                    _ => Vec::new(),
+                };
+                self.eval_listing_entries(body, scope, depth, &mut items)
+                    .await?;
+                return Ok(Some(Value::List(items)));
+            }
             // `foo { ... }` — object body amendment.
             // If the property already has a value in scope (e.g., from a base class),
             // amend that value so its ObjectSource (type info, default template) is preserved.
-            if let Some(Value::Object(existing_map, Some(src))) = scope.get(&prop.name) {
+            if let Some(Value::Object(existing_map, Some(src))) = amendment_base {
                 if !src.mapping_value_types.is_empty() {
                     // Mapping ObjectSource entries are mapping body entries such as
                     // `default` and dynamic keys. Rebuild the entry map with the
@@ -1361,7 +1679,22 @@ impl Evaluator {
             let val = self.eval_entries(body, scope, depth).await?;
             return Ok(Some(val));
         }
-        Ok(None) // bare type-only declaration
+        if let Some(ty) = &prop.type_ann {
+            let mut default = type_default_value(ty, scope);
+            if let Some(default) = &mut default {
+                apply_mapping_type_annotation(default, Some(ty));
+            }
+            if default.is_none()
+                && matches!(ty, crate::parser::TypeExpr::Union(variants) if !variants.iter().any(is_default_type))
+            {
+                return Err(Error::Eval(format!(
+                    "union property '{}' has no selected default",
+                    prop.name
+                )));
+            }
+            return Ok(default);
+        }
+        Ok(None)
     }
 
     #[async_recursion(?Send)]
@@ -1411,11 +1744,16 @@ impl Evaluator {
                     // Bind every local in declaration order so later locals and
                     // entries can reference it (e.g. a non-lambda local that
                     // calls a lambda local defined just above it).
-                    let val = self.eval_expr(expr, &child_scope, depth).await?;
-                    child_scope.set(prop.name.clone(), val);
-                    if matches!(expr, Expr::Ident(name) if name == "this" || this_aliases.contains(name))
-                    {
-                        this_aliases.push(prop.name.clone());
+                    match self.eval_expr(expr, &child_scope, depth).await {
+                        Ok(val) => {
+                            child_scope.set(prop.name.clone(), val);
+                            if matches!(expr, Expr::Ident(name) if name == "this" || this_aliases.contains(name))
+                            {
+                                this_aliases.push(prop.name.clone());
+                            }
+                        }
+                        Err(Error::Eval(message)) => child_scope.poison(prop.name.clone(), message),
+                        Err(error) => return Err(error),
                     }
                     if matches!(expr, crate::parser::Expr::Lambda(..)) {
                         // Lambda evaluation only captures the current scope; it
@@ -1745,13 +2083,16 @@ impl Evaluator {
                 }
             }
             crate::parser::TypeExpr::Constrained(base, _) => {
-                // Alias to a constrained type -- also bind as the base class if available
-                if let Some(val) = scope.get(base) {
-                    scope.set(name.to_string(), val.clone());
-                }
+                self.bind_type_alias_value(name, base, scope);
             }
             // Union types, generics, etc. -- no runtime representation needed
             _ => {}
+        }
+    }
+
+    fn bind_type_alias_value(&self, name: &str, target: &str, scope: &mut Scope) {
+        if let Some(val) = scope.get(target.trim_end_matches('?')).cloned() {
+            scope.set(name.to_string(), val);
         }
     }
 
@@ -1767,6 +2108,9 @@ impl Evaluator {
         use crate::parser::TypeExpr;
         match ty {
             TypeExpr::Named(name) => {
+                if let Some(expected) = string_literal_type_value(name) {
+                    return Ok(matches!(val, Value::String(actual) if actual == expected));
+                }
                 // Check if name is a type alias; if so, resolve to the aliased type
                 if let Some(resolved) = scope.get_type_alias(name) {
                     let resolved = resolved.clone();
@@ -1775,9 +2119,9 @@ impl Evaluator {
                 // Otherwise, plain type check
                 Ok(value_is_type(val, ty))
             }
-            TypeExpr::Constrained(base_name, constraint) => {
+            TypeExpr::Constrained(base, constraint) => {
                 // First check the base type
-                if !value_is_type(val, &TypeExpr::Named(base_name.clone())) {
+                if !value_is_named_type(val, base) {
                     return Ok(false);
                 }
                 // Evaluate the constraint with `this` bound to the value
@@ -1794,6 +2138,10 @@ impl Evaluator {
                         constraint_scope.set("length".into(), Value::Int(items.len() as i64));
                         constraint_scope.set("isEmpty".into(), Value::Bool(items.is_empty()));
                     }
+                    Value::Object(items, _) => {
+                        constraint_scope.set("length".into(), Value::Int(items.len() as i64));
+                        constraint_scope.set("isEmpty".into(), Value::Bool(items.is_empty()));
+                    }
                     _ => {}
                 }
                 let result = self
@@ -1802,7 +2150,7 @@ impl Evaluator {
                 Ok(is_truthy(&result))
             }
             TypeExpr::Nullable(inner) => {
-                if matches!(val, Value::Null) {
+                if is_null_value(val) {
                     return Ok(true);
                 }
                 self.eval_type_check(val, inner, scope, depth).await
@@ -1857,14 +2205,20 @@ impl Evaluator {
                 if let Entry::Property(overlay_prop) = replacement
                     && overlay_prop.body.is_some()
                     && overlay_prop.value.is_none()
-                    && (prop.value.is_some() || prop.body.is_some())
+                    && (prop.value.is_some() || prop.body.is_some() || prop.type_ann.is_some())
                 {
                     // Body amendment: keep base entry (for its value) AND overlay
                     // entry (for body amendment). eval_property will see the base
                     // value in scope and amend it.
                     merged.push(entry.clone());
                 }
-                merged.push((*replacement).clone());
+                let mut replacement = (*replacement).clone();
+                if let Entry::Property(overlay_prop) = &mut replacement
+                    && overlay_prop.type_ann.is_none()
+                {
+                    overlay_prop.type_ann = prop.type_ann.clone();
+                }
+                merged.push(replacement);
                 used_overlay.insert(prop.name.clone());
                 continue;
             }
@@ -1991,6 +2345,105 @@ impl Evaluator {
     }
 
     #[async_recursion(?Send)]
+    async fn eval_listing_entries(
+        &mut self,
+        entries: &[Entry],
+        scope: &Scope,
+        depth: usize,
+        items: &mut Vec<Value>,
+    ) -> Result<()> {
+        let mut listing_scope = scope.child();
+        for entry in entries {
+            match entry {
+                Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {
+                    if let Some(expr) = &prop.value {
+                        let value = self.eval_expr(expr, &listing_scope, depth + 1).await?;
+                        listing_scope.set(prop.name.clone(), value);
+                    }
+                }
+                Entry::Elem(expr) => {
+                    items.push(self.eval_expr(expr, &listing_scope, depth + 1).await?)
+                }
+                Entry::Property(prop) if prop.value.is_some() => {
+                    let value = self
+                        .eval_expr(prop.value.as_ref().unwrap(), &listing_scope, depth + 1)
+                        .await?;
+                    listing_scope.set(prop.name.clone(), value);
+                }
+                Entry::DynProperty(index, value) => {
+                    let index = self.eval_expr(index, &listing_scope, depth + 1).await?;
+                    let Value::Int(index) = index else {
+                        return Err(Error::Eval(
+                            "listing index amendment requires an Int index".into(),
+                        ));
+                    };
+                    let index = usize::try_from(index)
+                        .map_err(|_| Error::Eval("listing index cannot be negative".into()))?;
+                    let value = if index < items.len()
+                        && let Expr::ObjectBody(entries) = value
+                    {
+                        self.eval_value_amendment(
+                            items[index].clone(),
+                            entries,
+                            &listing_scope,
+                            depth + 1,
+                        )
+                        .await?
+                    } else {
+                        self.eval_expr(value, &listing_scope, depth + 1).await?
+                    };
+                    if index < items.len() {
+                        items[index] = value;
+                    } else if index == items.len() {
+                        items.push(value);
+                    } else {
+                        return Err(Error::Eval(format!(
+                            "listing index {index} is out of bounds for length {}",
+                            items.len()
+                        )));
+                    }
+                }
+                Entry::Spread(expr) => match self.eval_expr(expr, &listing_scope, depth + 1).await?
+                {
+                    Value::List(values) => items.extend(values),
+                    Value::Object(values, _) => items.extend(values.values().cloned()),
+                    value => items.push(value),
+                },
+                Entry::ForGenerator(generator) => {
+                    let collection = self
+                        .eval_expr(&generator.collection, &listing_scope, depth + 1)
+                        .await?;
+                    for (key, value) in collection_to_items(collection) {
+                        let mut iter_scope = listing_scope.child();
+                        iter_scope.set(generator.val_var.clone(), value);
+                        if let Some(key_var) = &generator.key_var {
+                            iter_scope.set(key_var.clone(), key);
+                        }
+                        self.eval_listing_entries(&generator.body, &iter_scope, depth + 1, items)
+                            .await?;
+                    }
+                }
+                Entry::WhenGenerator(generator) => {
+                    let condition = self
+                        .eval_expr(&generator.condition, &listing_scope, depth + 1)
+                        .await?;
+                    let selected = if is_truthy(&condition) {
+                        Some(generator.body.as_slice())
+                    } else {
+                        generator.else_body.as_deref()
+                    };
+                    if let Some(selected) = selected {
+                        self.eval_listing_entries(selected, &listing_scope, depth + 1, items)
+                            .await?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    #[async_recursion(?Send)]
     async fn eval_expr(&mut self, expr: &Expr, scope: &Scope, depth: usize) -> Result<Value> {
         if depth > self.max_depth {
             return Err(Error::Eval("maximum recursion depth exceeded".into()));
@@ -2014,60 +2467,34 @@ impl Evaluator {
                 }
                 Ok(Value::String(result))
             }
-            Expr::Ident(name) => scope
-                .get(name)
-                .cloned()
-                .ok_or_else(|| Error::Eval(format!("undefined variable: {name}"))),
+            Expr::Ident(name) => scope.get(name).cloned().ok_or_else(|| {
+                Error::Eval(
+                    scope
+                        .poison_of(name)
+                        .cloned()
+                        .unwrap_or_else(|| format!("undefined variable: {name}")),
+                )
+            }),
             Expr::Lambda(params, body) => {
                 // Capture current scope values (Arc-wrapped for O(1) clone)
                 let captured = Arc::new(scope.flatten());
-                Ok(Value::Lambda(params.clone(), (**body).clone(), captured))
+                let mut refs = HashSet::new();
+                let shadows = params.iter().cloned().collect::<HashSet<_>>();
+                collect_expr_refs(body, &mut refs, &shadows);
+                let captured_body = refs
+                    .iter()
+                    .filter(|name| scope.get(name).is_none())
+                    .find_map(|name| scope.poison_of(name))
+                    .map(|message| Expr::Throw(Box::new(Expr::String(message.clone()))))
+                    .unwrap_or_else(|| (**body).clone());
+                Ok(Value::Lambda(params.clone(), captured_body, captured))
             }
             Expr::New(type_name, entries, generic_params) => {
                 match type_name.as_deref() {
                     Some("Listing") => {
                         let mut items = Vec::new();
-                        for entry in entries {
-                            match entry {
-                                Entry::Elem(e) => {
-                                    items.push(self.eval_expr(e, scope, depth + 1).await?);
-                                }
-                                Entry::Property(p) if p.value.is_some() => {
-                                    items.push(
-                                        self.eval_expr(p.value.as_ref().unwrap(), scope, depth + 1)
-                                            .await?,
-                                    );
-                                }
-                                Entry::Spread(e) => {
-                                    let v = self.eval_expr(e, scope, depth + 1).await?;
-                                    match v {
-                                        Value::List(l) => items.extend(l),
-                                        Value::Object(m, _) => items.extend(m.values().cloned()),
-                                        other => items.push(other),
-                                    }
-                                }
-                                Entry::ForGenerator(fgen) => {
-                                    let collection =
-                                        self.eval_expr(&fgen.collection, scope, depth + 1).await?;
-                                    for (k, v) in collection_to_items(collection) {
-                                        let mut iter_scope = scope.child();
-                                        iter_scope.set(fgen.val_var.clone(), v);
-                                        if let Some(key_var) = &fgen.key_var {
-                                            iter_scope.set(key_var.clone(), k);
-                                        }
-                                        for sub in &fgen.body {
-                                            if let Entry::Elem(e) = sub {
-                                                items.push(
-                                                    self.eval_expr(e, &iter_scope, depth + 1)
-                                                        .await?,
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
+                        self.eval_listing_entries(entries, scope, depth + 1, &mut items)
+                            .await?;
                         Ok(Value::List(items))
                     }
                     Some("Mapping") | Some("Map") => {
@@ -2318,7 +2745,7 @@ impl Evaluator {
                     Value::Null => Ok(Value::Null),
                     Value::Object(map, source) => {
                         let val = map.get(field).cloned().unwrap_or(Value::Null);
-                        if !matches!(val, Value::Null) {
+                        if !is_null_value(&val) {
                             self.warn_if_deprecated_access(source, field);
                         }
                         Ok(val)
@@ -2367,7 +2794,7 @@ impl Evaluator {
                     },
                     UnOp::Not => Ok(Value::Bool(!is_truthy(&v))),
                     UnOp::NonNull => {
-                        if matches!(v, Value::Null) {
+                        if is_null_value(&v) {
                             Err(Error::Eval(
                                 "non-null assertion failed: value is null".into(),
                             ))
@@ -2458,7 +2885,7 @@ impl Evaluator {
         // Handle null-safe method calls: obj?.method(args)
         if let Expr::NullSafeField(obj_expr, method) = func_expr {
             let obj = self.eval_expr(obj_expr, scope, depth + 1).await?;
-            if matches!(obj, Value::Null) {
+            if is_null_value(&obj) {
                 return Ok(Value::Null);
             }
             let mut evaled_args = Vec::new();
@@ -2738,6 +3165,13 @@ impl Evaluator {
                 }
                 Ok(Some(Value::List(result)))
             }
+            (Value::List(items), "filterNonNull") => Ok(Some(Value::List(
+                items
+                    .iter()
+                    .filter(|item| !is_null_value(item))
+                    .cloned()
+                    .collect(),
+            ))),
             (Value::List(items), "fold") => {
                 let init = args
                     .first()
@@ -2877,6 +3311,95 @@ impl Evaluator {
     }
 
     #[async_recursion(?Send)]
+    async fn eval_value_amendment(
+        &mut self,
+        base: Value,
+        overlay_entries: &[Entry],
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<Value> {
+        if let Value::List(existing) = base {
+            let mut amended = existing;
+            self.eval_listing_entries(overlay_entries, scope, depth + 1, &mut amended)
+                .await?;
+            return Ok(Value::List(amended));
+        }
+        if let Value::Object(_, Some(base_src)) = &base {
+            if !base_src.mapping_value_types.is_empty() {
+                let mut type_scope = Scope::default();
+                for (key, value) in &base_src.scope {
+                    type_scope.set(key.clone(), value.clone());
+                }
+                for (key, value) in scope.flatten() {
+                    type_scope.set(key, value);
+                }
+                for (key, ty) in scope.flatten_type_aliases() {
+                    type_scope.set_type_alias(key, ty);
+                }
+                let value_type_defaults = base_src
+                    .mapping_value_types
+                    .iter()
+                    .filter_map(|name| {
+                        resolve_dotted(&type_scope, name).map(|value| (name.clone(), value))
+                    })
+                    .collect::<Vec<_>>();
+                let inherited_default = self
+                    .find_default_template(&base_src.entries, &type_scope, depth)
+                    .await?;
+                let mut amended = IndexMap::new();
+                self.eval_mapping_entries_with_type_default(
+                    &base_src.entries,
+                    &type_scope,
+                    depth,
+                    &mut amended,
+                    &value_type_defaults,
+                    MappingInheritedDefault::default(),
+                )
+                .await?;
+                if let Value::Object(existing_map, _) = &base {
+                    amended.extend(existing_map.iter().map(|(k, v)| (k.clone(), v.clone())));
+                }
+                self.eval_mapping_entries_with_type_default(
+                    overlay_entries,
+                    &type_scope,
+                    depth,
+                    &mut amended,
+                    &value_type_defaults,
+                    MappingInheritedDefault {
+                        value: inherited_default,
+                        entries: find_default_body_entries(&base_src.entries),
+                    },
+                )
+                .await?;
+                return Ok(Value::Object(Arc::new(amended), Some(Arc::clone(base_src))));
+            }
+            return self
+                .eval_amended_object(
+                    &base_src.entries.clone(),
+                    &base_src.scope.clone(),
+                    overlay_entries,
+                    scope,
+                    depth,
+                    base_src
+                        .type_name
+                        .clone()
+                        .map(|name| (name, base_src.parent_type_names.clone())),
+                )
+                .await;
+        }
+        let mut amendment_scope = scope.child();
+        if let Value::Object(existing, _) = &base {
+            for (name, value) in existing.iter() {
+                amendment_scope.set(name.clone(), value.clone());
+            }
+        }
+        let overlay = self
+            .eval_entries(overlay_entries, &amendment_scope, depth + 1)
+            .await?;
+        Ok(merge_values(base, overlay))
+    }
+
+    #[async_recursion(?Send)]
     async fn eval_binop(
         &mut self,
         op: BinOp,
@@ -2890,75 +3413,9 @@ impl Evaluator {
             && let Expr::ObjectBody(overlay_entries) = right
         {
             let base = self.eval_expr(left, scope, depth + 1).await?;
-            // Late binding: if the base carries its original entry definitions,
-            // merge entry lists and re-evaluate so dependent properties pick up
-            // overridden values.
-            if let Value::Object(_, Some(base_src)) = &base {
-                if !base_src.mapping_value_types.is_empty() {
-                    let mut type_scope = Scope::default();
-                    for (key, value) in &base_src.scope {
-                        type_scope.set(key.clone(), value.clone());
-                    }
-                    for (key, value) in scope.flatten() {
-                        type_scope.set(key, value);
-                    }
-                    for (key, ty) in scope.flatten_type_aliases() {
-                        type_scope.set_type_alias(key, ty);
-                    }
-                    let value_type_defaults = base_src
-                        .mapping_value_types
-                        .iter()
-                        .filter_map(|name| {
-                            resolve_dotted(&type_scope, name).map(|value| (name.clone(), value))
-                        })
-                        .collect::<Vec<_>>();
-                    let inherited_default = self
-                        .find_default_template(&base_src.entries, &type_scope, depth)
-                        .await?;
-                    let mut amended = IndexMap::new();
-                    self.eval_mapping_entries_with_type_default(
-                        &base_src.entries,
-                        &type_scope,
-                        depth,
-                        &mut amended,
-                        &value_type_defaults,
-                        MappingInheritedDefault::default(),
-                    )
-                    .await?;
-                    if let Value::Object(existing_map, _) = &base {
-                        amended.extend(existing_map.iter().map(|(k, v)| (k.clone(), v.clone())));
-                    }
-                    self.eval_mapping_entries_with_type_default(
-                        overlay_entries,
-                        &type_scope,
-                        depth,
-                        &mut amended,
-                        &value_type_defaults,
-                        MappingInheritedDefault {
-                            value: inherited_default,
-                            entries: find_default_body_entries(&base_src.entries),
-                        },
-                    )
-                    .await?;
-                    return Ok(Value::Object(Arc::new(amended), Some(Arc::clone(base_src))));
-                }
-                return self
-                    .eval_amended_object(
-                        &base_src.entries.clone(),
-                        &base_src.scope.clone(),
-                        overlay_entries,
-                        scope,
-                        depth,
-                        base_src
-                            .type_name
-                            .clone()
-                            .map(|name| (name, base_src.parent_type_names.clone())),
-                    )
-                    .await;
-            }
-            // Fallback: eager merge when base has no entry source
-            let overlay = self.eval_entries(overlay_entries, scope, depth + 1).await?;
-            return Ok(merge_values(base, overlay));
+            return self
+                .eval_value_amendment(base, overlay_entries, scope, depth)
+                .await;
         }
 
         // Logical `&&` and `||` short-circuit: the right operand must not be
@@ -3043,7 +3500,7 @@ impl Evaluator {
                 |a, b| Ok(a.powf(b)),
             ),
             BinOp::NullCoalesce => {
-                if matches!(l, Value::Null) {
+                if is_null_value(&l) {
                     Ok(r)
                 } else {
                     Ok(l)
@@ -3608,33 +4065,67 @@ fn apply_mapping_type_annotation(value: &mut Value, type_ann: Option<&crate::par
 fn mapping_value_type_names(type_ann: &crate::parser::TypeExpr) -> Vec<String> {
     use crate::parser::TypeExpr;
 
-    let TypeExpr::Generic(name, params) = type_ann else {
-        return Vec::new();
-    };
-    if name != "Mapping" && name != "Map" {
-        return Vec::new();
-    }
-    let Some(value_type) = params.get(1) else {
-        return Vec::new();
-    };
-
     let mut names = Vec::new();
-    collect_mapping_value_type_names(value_type, &mut names);
+    match type_ann {
+        TypeExpr::Generic(name, params) if name == "Mapping" || name == "Map" => {
+            if let Some(value_type) = params.get(1) {
+                collect_mapping_value_type_names(value_type, &mut names);
+            }
+        }
+        TypeExpr::Nullable(inner) => return mapping_value_type_names(inner),
+        TypeExpr::Constrained(base, _) => {
+            if let Some(value_type) = mapping_value_type_from_name(base) {
+                names.push(value_type);
+            }
+        }
+        _ => {}
+    }
     names
+}
+
+fn mapping_value_type_from_name(name: &str) -> Option<String> {
+    let name = name.trim_start_matches('*').trim_end_matches('?');
+    let inner = name
+        .strip_prefix("Mapping<")
+        .or_else(|| name.strip_prefix("Map<"))?
+        .strip_suffix('>')?;
+    let mut depth = 0usize;
+    for (index, ch) in inner.char_indices() {
+        match ch {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                let value_type = inner[index + 1..].trim();
+                return Some(
+                    value_type
+                        .split('<')
+                        .next()
+                        .unwrap_or(value_type)
+                        .trim_start_matches('*')
+                        .trim_end_matches('?')
+                        .to_string(),
+                );
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn collect_mapping_value_type_names(type_ann: &crate::parser::TypeExpr, names: &mut Vec<String>) {
     use crate::parser::TypeExpr;
 
     match type_ann {
-        TypeExpr::Named(name) | TypeExpr::Constrained(name, _)
-            if string_literal_type_value(name).is_none() =>
-        {
+        TypeExpr::Named(name) => {
             if !names.contains(name) {
                 names.push(name.clone());
             }
         }
-        TypeExpr::Named(_) | TypeExpr::Constrained(_, _) => {}
+        TypeExpr::Constrained(base, _) => {
+            if !names.contains(base) {
+                names.push(base.clone());
+            }
+        }
         // Keep only the top-level value type. For example,
         // Mapping<String, Mapping<String, Step>> needs a structured Mapping
         // default, not Step as the default for the outer mapping's entries.
@@ -3951,9 +4442,11 @@ fn collect_type_import_field_uses(
                 collect_type_import_field_uses(param, uses, shadows);
             }
         }
-        crate::parser::TypeExpr::Constrained(name, expr) => {
-            record_type_name_import_use(uses, shadows, name);
-            collect_expr_import_field_uses(expr, uses, shadows);
+        crate::parser::TypeExpr::Constrained(base, constraint) => {
+            for component in constrained_type_components(base) {
+                record_type_name_import_use(uses, shadows, component);
+            }
+            collect_expr_import_field_uses(constraint, uses, shadows);
         }
     }
 }
@@ -4036,6 +4529,14 @@ fn expand_requested_fields(entries: &[Entry], requested: &HashSet<String>) -> Ha
                 collect_sibling_field_refs_entries(body, &mut refs);
             }
             for dep in refs {
+                if dep == DYNAMIC_SIBLING_REF {
+                    for name in &property_names {
+                        if expanded.insert(name.clone()) {
+                            changed = true;
+                        }
+                    }
+                    continue;
+                }
                 if property_names.contains(&dep) && expanded.insert(dep) {
                     changed = true;
                 }
@@ -4089,10 +4590,12 @@ fn collect_sibling_field_refs_expr(expr: &Expr, refs: &mut HashSet<String>, incl
             collect_sibling_field_refs_expr(base, refs, include_this);
         }
         Expr::Index(base, index) => {
-            if is_module_sibling_ref(base, include_this)
-                && let Expr::String(key) = index.as_ref()
-            {
-                refs.insert(key.clone());
+            if is_module_sibling_ref(base, include_this) {
+                if let Expr::String(key) = index.as_ref() {
+                    refs.insert(key.clone());
+                } else {
+                    refs.insert(DYNAMIC_SIBLING_REF.to_string());
+                }
             }
             collect_sibling_field_refs_expr(base, refs, include_this);
             collect_sibling_field_refs_expr(index, refs, include_this);
@@ -4144,6 +4647,23 @@ fn collect_sibling_field_refs_expr(expr: &Expr, refs: &mut HashSet<String>, incl
         | Expr::Float(_)
         | Expr::String(_) => {}
     }
+}
+
+fn property_reference_names(prop: &Property) -> HashSet<String> {
+    let mut refs = HashSet::new();
+    let shadows = HashSet::new();
+    if let Some(expr) = &prop.value {
+        collect_expr_refs(expr, &mut refs, &shadows);
+        collect_sibling_field_refs_expr(expr, &mut refs, true);
+        if has_modifier(&prop.modifiers, Modifier::Local) && is_module_sibling_ref(expr, true) {
+            refs.insert(DYNAMIC_SIBLING_REF.to_string());
+        }
+    }
+    if let Some(body) = &prop.body {
+        collect_entry_refs(body, &mut refs, &shadows);
+        collect_sibling_field_refs_entries(body, &mut refs);
+    }
+    refs
 }
 
 fn is_module_sibling_ref(expr: &Expr, include_this: bool) -> bool {
@@ -4279,11 +4799,7 @@ fn collect_type_refs(
     shadows: &HashSet<String>,
 ) {
     match ty {
-        crate::parser::TypeExpr::Named(name) => {
-            if string_literal_type_value(name).is_none() {
-                collect_name_root(name, refs, shadows);
-            }
-        }
+        crate::parser::TypeExpr::Named(name) => collect_name_root(name, refs, shadows),
         crate::parser::TypeExpr::Nullable(inner) => collect_type_refs(inner, refs, shadows),
         crate::parser::TypeExpr::Union(types) => {
             for ty in types {
@@ -4296,9 +4812,11 @@ fn collect_type_refs(
                 collect_type_refs(param, refs, shadows);
             }
         }
-        crate::parser::TypeExpr::Constrained(name, expr) => {
-            collect_name_root(name, refs, shadows);
-            collect_expr_refs(expr, refs, shadows);
+        crate::parser::TypeExpr::Constrained(base, constraint) => {
+            for component in constrained_type_components(base) {
+                collect_name_root(component, refs, shadows);
+            }
+            collect_expr_refs(constraint, refs, shadows);
         }
     }
 }
@@ -4310,6 +4828,14 @@ fn collect_name_root(name: &str, refs: &mut HashSet<String>, shadows: &HashSet<S
     {
         refs.insert(root.to_string());
     }
+}
+
+fn constrained_type_components(name: &str) -> impl Iterator<Item = &str> {
+    name.trim_start_matches('*')
+        .trim_end_matches('?')
+        .split(['<', '>', ','])
+        .map(str::trim)
+        .filter(|component| !component.is_empty())
 }
 
 fn declared_entry_roots(entries: &[Entry]) -> HashSet<String> {
@@ -4334,6 +4860,7 @@ fn declared_entry_roots(entries: &[Entry]) -> HashSet<String> {
 struct Scope {
     vars: IndexMap<String, Value>,
     type_aliases: IndexMap<String, crate::parser::TypeExpr>,
+    poisoned: IndexMap<String, String>,
     parent: Option<Rc<Scope>>,
 }
 
@@ -4342,12 +4869,26 @@ impl Scope {
         Self {
             vars: IndexMap::new(),
             type_aliases: IndexMap::new(),
+            poisoned: IndexMap::new(),
             parent: Some(Rc::new(self.clone())),
         }
     }
 
     fn set(&mut self, name: String, val: Value) {
+        self.poisoned.shift_remove(&name);
         self.vars.insert(name, val);
+    }
+
+    fn poison(&mut self, name: String, message: String) {
+        self.poisoned.insert(name, message);
+    }
+
+    fn poison_of(&self, name: &str) -> Option<&String> {
+        self.poisoned.get(name).or_else(|| {
+            self.parent
+                .as_ref()
+                .and_then(|parent| parent.poison_of(name))
+        })
     }
 
     fn set_type_alias(&mut self, name: String, ty: crate::parser::TypeExpr) {
@@ -4361,6 +4902,9 @@ impl Scope {
     }
 
     fn get(&self, name: &str) -> Option<&Value> {
+        if self.poisoned.contains_key(name) {
+            return None;
+        }
         self.vars
             .get(name)
             .or_else(|| self.parent.as_ref().and_then(|p| p.get(name)))
@@ -4372,6 +4916,9 @@ impl Scope {
             .as_ref()
             .map(|p| p.flatten())
             .unwrap_or_default();
+        for name in self.poisoned.keys() {
+            result.shift_remove(name);
+        }
         result.extend(self.vars.clone());
         result
     }
@@ -4597,6 +5144,85 @@ fn merge_deprecated(
 }
 
 /// Resolve a potentially dotted name (e.g. "Foo.Bar") in scope.
+fn type_default_value(ty: &crate::parser::TypeExpr, scope: &Scope) -> Option<Value> {
+    use crate::parser::TypeExpr;
+    match ty {
+        TypeExpr::Constrained(base, _) if base.ends_with('?') => Some(Value::Null),
+        TypeExpr::Constrained(base, _) => type_default_for_name(base, scope),
+        TypeExpr::Nullable(_) => Some(Value::Null),
+        TypeExpr::Named(name) if name == "Null" => Some(Value::Null),
+        TypeExpr::Named(name) => {
+            if let Some(value) = string_literal_type_value(name) {
+                return Some(Value::String(value.to_string()));
+            }
+            if let Some(alias) = scope.get_type_alias(name).cloned() {
+                return type_default_value(&alias, scope);
+            }
+            type_default_for_name(name, scope)
+        }
+        TypeExpr::Generic(name, _) => match name.as_str() {
+            "Collection" | "List" | "Set" | "Listing" => Some(Value::List(Vec::new())),
+            "Map" | "Mapping" => Some(Value::Object(Arc::new(IndexMap::new()), None)),
+            _ => resolve_dotted(scope, name),
+        },
+        TypeExpr::Union(variants) => variants
+            .iter()
+            .find(|ty| is_default_type(ty))
+            .and_then(|ty| type_default_value(ty, scope)),
+    }
+}
+
+fn type_default_for_name(name: &str, scope: &Scope) -> Option<Value> {
+    let name = name.trim_start_matches('*').trim_end_matches('?');
+    let base_name = name.split('<').next().unwrap_or(name);
+    match base_name {
+        "Null" => Some(Value::Null),
+        "Collection" | "List" | "Set" | "Listing" => Some(Value::List(Vec::new())),
+        "Map" | "Mapping" => Some(Value::Object(Arc::new(IndexMap::new()), None)),
+        "String" | "Boolean" | "Bool" | "Int" | "Float" | "Number" | "Any" | "Dynamic"
+        | "Duration" | "DataSize" | "Pair" | "Regex" => None,
+        other => resolve_dotted(scope, other),
+    }
+}
+
+fn nullable_inner_default(ty: &crate::parser::TypeExpr, scope: &Scope) -> Option<Value> {
+    use crate::parser::TypeExpr;
+    match ty {
+        TypeExpr::Nullable(inner) => type_default_value(inner, scope),
+        TypeExpr::Constrained(name, _) if name.ends_with('?') => {
+            type_default_for_name(name.trim_end_matches('?'), scope)
+        }
+        _ => None,
+    }
+}
+
+fn type_is_listing(ty: &crate::parser::TypeExpr) -> bool {
+    use crate::parser::TypeExpr;
+    match ty {
+        TypeExpr::Named(name) | TypeExpr::Generic(name, _) => name == "Listing",
+        TypeExpr::Nullable(inner) => type_is_listing(inner),
+        TypeExpr::Constrained(name, _) => {
+            name.trim_end_matches('?') == "Listing" || name.starts_with("Listing<")
+        }
+        TypeExpr::Union(variants) => variants.iter().any(type_is_listing),
+    }
+}
+
+fn entries_are_listing_amendment(entries: &[Entry]) -> bool {
+    entries.iter().any(|entry| match entry {
+        Entry::Elem(_) => true,
+        Entry::ForGenerator(generator) => entries_are_listing_amendment(&generator.body),
+        Entry::WhenGenerator(generator) => {
+            entries_are_listing_amendment(&generator.body)
+                || generator
+                    .else_body
+                    .as_deref()
+                    .is_some_and(entries_are_listing_amendment)
+        }
+        _ => false,
+    })
+}
+
 fn resolve_dotted(scope: &Scope, name: &str) -> Option<Value> {
     let parts: Vec<&str> = name.split('.').collect();
     let mut val = scope.get(parts[0])?.clone();
@@ -4611,6 +5237,21 @@ fn resolve_dotted(scope: &Scope, name: &str) -> Option<Value> {
 
 fn has_modifier(mods: &[Modifier], target: Modifier) -> bool {
     mods.contains(&target)
+}
+
+fn should_render_property_value(prop: &Property, value: &Value) -> bool {
+    prop.value.is_some() || prop.body.is_some() || !matches!(value, Value::Null | Value::Object(..))
+}
+
+fn module_is_abstract(module: &Module) -> bool {
+    module
+        .annotations
+        .iter()
+        .any(|annotation| annotation.name == "pklr:module:Abstract")
+}
+
+fn is_unresolved_template_error(message: &str) -> bool {
+    message.contains("undefined variable") || message.contains("field not found")
 }
 
 fn require_str_arg<'a>(args: &'a [Value], idx: usize, method: &str) -> Result<&'a str> {
@@ -4664,7 +5305,14 @@ fn value_to_display(v: &Value) -> String {
 }
 
 fn string_literal_type_value(name: &str) -> Option<&str> {
-    name.strip_prefix('"')?.strip_suffix('"')
+    name.strip_prefix('*')
+        .unwrap_or(name)
+        .strip_prefix('"')?
+        .strip_suffix('"')
+}
+
+fn is_default_type(ty: &crate::parser::TypeExpr) -> bool {
+    matches!(ty, crate::parser::TypeExpr::Named(name) if name.starts_with('*'))
 }
 
 /// Format a TypeExpr for user-facing error messages.
@@ -4682,7 +5330,7 @@ fn display_type_expr(ty: &crate::parser::TypeExpr) -> String {
             let args_str: Vec<_> = args.iter().map(display_type_expr).collect();
             format!("{}<{}>", name, args_str.join(", "))
         }
-        TypeExpr::Constrained(name, _) => format!("{name}(...)"),
+        TypeExpr::Constrained(base, _) => format!("{base}(... )"),
     }
 }
 
@@ -4691,31 +5339,26 @@ fn display_type_expr(ty: &crate::parser::TypeExpr) -> String {
 fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
     use crate::parser::TypeExpr;
     match ty {
-        TypeExpr::Named(name) => {
-            if let Some(expected) = string_literal_type_value(name) {
-                matches!(val, Value::String(actual) if actual == expected)
-            } else {
-                match name.as_str() {
-                    "Null" => matches!(val, Value::Null),
-                    "Boolean" | "Bool" => matches!(val, Value::Bool(_)),
-                    "Int" => matches!(val, Value::Int(_)),
-                    "Float" => matches!(val, Value::Float(_)),
-                    "Number" => matches!(val, Value::Int(_) | Value::Float(_)),
-                    "String" => matches!(val, Value::String(_)),
-                    "List" | "Listing" | "Set" => matches!(val, Value::List(_)),
-                    "Map" | "Mapping" | "Object" | "Dynamic" => {
-                        matches!(val, Value::Object(..))
-                    }
-                    "Function" => matches!(val, Value::Lambda(..)),
-                    "Any" => true,
-                    _ => {
-                        // Unknown type name -- could be a class; treat objects as matching
-                        matches!(val, Value::Object(..))
-                    }
-                }
-            }
+        TypeExpr::Named(name) if string_literal_type_value(name).is_some() => {
+            matches!(val, Value::String(actual) if Some(actual.as_str()) == string_literal_type_value(name))
         }
-        TypeExpr::Nullable(inner) => matches!(val, Value::Null) || value_is_type(val, inner),
+        TypeExpr::Named(name) => match name.strip_prefix('*').unwrap_or(name) {
+            "Null" => is_null_value(val),
+            "Boolean" | "Bool" => matches!(val, Value::Bool(_)),
+            "Int" => matches!(val, Value::Int(_)),
+            "Float" => matches!(val, Value::Float(_)),
+            "Number" => matches!(val, Value::Int(_) | Value::Float(_)),
+            "String" => matches!(val, Value::String(_)),
+            "List" | "Listing" | "Set" => matches!(val, Value::List(_)),
+            "Map" | "Mapping" | "Object" | "Dynamic" => matches!(val, Value::Object(..)),
+            "Function" => matches!(val, Value::Lambda(..)),
+            "Any" => true,
+            _ => {
+                // Unknown type name -- could be a class; treat objects as matching
+                matches!(val, Value::Object(..))
+            }
+        },
+        TypeExpr::Nullable(inner) => is_null_value(val) || value_is_type(val, inner),
         TypeExpr::Union(variants) => variants.iter().any(|v| value_is_type(val, v)),
         TypeExpr::Generic(name, _) => {
             // Check the base type, ignore type parameters
@@ -4725,20 +5368,37 @@ fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
                 _ => matches!(val, Value::Object(..)),
             }
         }
-        TypeExpr::Constrained(base_name, _) => {
+        TypeExpr::Constrained(base, _) => {
             // Just check the base type; constraint requires async eval
-            value_is_type(val, &TypeExpr::Named(base_name.clone()))
+            value_is_named_type(val, base)
         }
     }
+}
+
+fn value_is_named_type(val: &Value, name: &str) -> bool {
+    if name.ends_with('?') && is_null_value(val) {
+        return true;
+    }
+    value_is_type(
+        val,
+        &crate::parser::TypeExpr::Named(
+            name.trim_end_matches('?')
+                .split('<')
+                .next()
+                .unwrap_or(name)
+                .to_string(),
+        ),
+    )
 }
 
 fn type_is_runtime_checkable(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
     use crate::parser::TypeExpr;
     match ty {
         TypeExpr::Named(name) => {
+            let runtime_name = name.strip_prefix('*').unwrap_or(name);
             string_literal_type_value(name).is_some()
                 || matches!(
-                    name.as_str(),
+                    runtime_name,
                     "Null"
                         | "Boolean"
                         | "Bool"
@@ -4756,16 +5416,22 @@ fn type_is_runtime_checkable(ty: &crate::parser::TypeExpr, scope: &Scope) -> boo
                         | "Function"
                         | "Any"
                 )
-                || scope.get_type_alias(name).is_some()
-                || resolve_dotted(scope, name).is_some()
+                || scope.get_type_alias(runtime_name).is_some()
+                || resolve_dotted(scope, runtime_name).is_some()
         }
         TypeExpr::Nullable(inner) => type_is_runtime_checkable(inner, scope),
         TypeExpr::Union(variants) => variants
             .iter()
             .all(|variant| type_is_runtime_checkable(variant, scope)),
         TypeExpr::Generic(_, _) => true,
-        TypeExpr::Constrained(name, _) => {
-            type_is_runtime_checkable(&TypeExpr::Named(name.clone()), scope)
+        TypeExpr::Constrained(base, _) => {
+            let runtime_name = base
+                .trim_start_matches('*')
+                .trim_end_matches('?')
+                .split('<')
+                .next()
+                .unwrap_or(base);
+            type_is_runtime_checkable(&TypeExpr::Named(runtime_name.into()), scope)
         }
     }
 }
@@ -4781,9 +5447,13 @@ fn is_truthy(v: &Value) -> bool {
     }
 }
 
+fn is_null_value(value: &Value) -> bool {
+    matches!(value, Value::Null)
+}
+
 fn values_eq(a: &Value, b: &Value) -> bool {
     match (a, b) {
-        (Value::Null, Value::Null) => true,
+        (left, right) if is_null_value(left) && is_null_value(right) => true,
         (Value::Bool(a), Value::Bool(b)) => a == b,
         (Value::Int(a), Value::Int(b)) => a == b,
         (Value::Float(a), Value::Float(b)) => a == b,
@@ -5019,6 +5689,52 @@ fn pathdiff_or_full(path: &Path, base: &Path) -> String {
 
 fn normalize_pkl_path(path: &str) -> String {
     path.replace('\\', "/")
+}
+
+#[cfg(test)]
+mod requested_field_tests {
+    use std::collections::HashSet;
+
+    use super::Evaluator;
+    use crate::{Value, lexer, parser};
+
+    #[tokio::test]
+    async fn inherited_late_properties_respect_requested_fields() {
+        let test_dir = std::env::temp_dir().join(format!(
+            "pklr-requested-fields-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&test_dir).unwrap();
+        std::fs::write(
+            test_dir.join("Base.pkl"),
+            "abstract module Base\nwanted = source + 1\nextra = source + 2\nsource = 1\n",
+        )
+        .unwrap();
+        let child_path = test_dir.join("Child.pkl");
+        let source = "extends \"Base.pkl\"\nsource = 2\n";
+        std::fs::write(&child_path, source).unwrap();
+        let tokens = lexer::lex(source).unwrap();
+        let module = parser::parse(&tokens).unwrap();
+
+        let value = Evaluator::new()
+            .eval_module_with_scope(
+                &module,
+                &child_path,
+                1,
+                None,
+                Some(HashSet::from(["wanted".to_string()])),
+            )
+            .await
+            .unwrap();
+        let Value::Object(fields, _) = value else {
+            panic!("expected an object");
+        };
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields["wanted"], Value::Int(3));
+
+        std::fs::remove_dir_all(test_dir).unwrap();
+    }
 }
 
 #[cfg(test)]

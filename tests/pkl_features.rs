@@ -3053,6 +3053,485 @@ x = 8080
 }
 
 #[test]
+fn type_defaults_cover_literals_unions_and_collections() {
+    let json = eval(
+        r#"
+literal: "only"
+selected: "first" | *"second"
+items: Listing<String>
+mapping: Mapping<String, Int>
+"#,
+    );
+    assert_eq!(json["literal"], "only");
+    assert_eq!(json["selected"], "second");
+    assert_eq!(json["items"], serde_json::json!([]));
+    assert!(json.get("mapping").is_none());
+}
+
+#[test]
+fn selected_structured_union_defaults_retain_semantics() {
+    let json = eval(
+        r#"
+nullable: String | *Null
+listing: String | *Listing<String>
+nullableResult = nullable == null
+stringMatches = "ok" is Int | *String
+"#,
+    );
+    assert_eq!(json["nullableResult"], true);
+    assert_eq!(json["listing"], serde_json::json!([]));
+    assert_eq!(json["stringMatches"], true);
+    assert!(json.get("nullable").is_none());
+}
+
+#[test]
+fn union_without_selected_default_fails() {
+    let message = eval_fails(r#"value: "first" | "second""#);
+    assert!(message.contains("no selected default"));
+}
+
+#[test]
+fn selected_union_member_without_implicit_value_stays_undefined() {
+    let json = eval(
+        r#"
+optional: *String | Int
+provided: *String | Int = "value"
+"#,
+    );
+    assert!(json.get("optional").is_none());
+    assert_eq!(json["provided"], "value");
+}
+
+#[test]
+fn multiple_type_constraints_are_conjunctive() {
+    let json = eval(
+        r#"
+local small = 5
+local large = 20
+smallMatches = small is Int(this > 0, this < 10)
+largeMatches = large is Int(this > 0, this < 10)
+"#,
+    );
+    assert_eq!(json["smallMatches"], true);
+    assert_eq!(json["largeMatches"], false);
+}
+
+#[test]
+fn failing_constraint_in_list_rejects_cast() {
+    let message = eval_fails("result = 20 as Int(this > 0, this < 10)");
+    assert!(message.contains("cannot cast"));
+}
+
+#[test]
+fn typed_lambda_parameters_evaluate() {
+    let json = eval(
+        r#"
+local choose = (value: String) -> value
+result = choose("ok")
+"#,
+    );
+    assert_eq!(json["result"], "ok");
+}
+
+#[test]
+fn nullable_class_default_can_be_amended() {
+    let json = eval(
+        r#"
+class Options { enabled: Boolean = false }
+base { options: Options? }
+result = (base) { options { enabled = true } }
+"#,
+    );
+    assert_eq!(json["result"]["options"]["enabled"], true);
+}
+
+#[test]
+fn nullable_amendment_prefers_existing_non_null_value() {
+    let json = eval(
+        r#"
+class Options { enabled: Boolean = false; label: String = "default" }
+base { options: Options? = new Options { enabled = true } }
+result = (base) { options { label = "changed" } }
+"#,
+    );
+    assert_eq!(json["result"]["options"]["enabled"], true);
+    assert_eq!(json["result"]["options"]["label"], "changed");
+}
+
+#[test]
+fn listing_body_amendment_appends_elements() {
+    let json = eval(
+        r#"
+base { items: Listing<String> }
+result = (base) {
+  items {
+    local prefix = ""
+    "first"
+    for (item in List("second")) { prefix + item }
+    when (true) { "third" } else { "wrong" }
+  }
+}
+"#,
+    );
+    assert_eq!(
+        json["result"]["items"],
+        serde_json::json!(["first", "second", "third"])
+    );
+}
+
+#[test]
+fn listing_body_amendment_applies_index_updates() {
+    let json = eval(
+        r#"
+base { items = List("old", "stay") }
+result = (base) {
+  items {
+    [0] = "new"
+    "appended"
+  }
+}
+"#,
+    );
+    assert_eq!(
+        json["result"]["items"],
+        serde_json::json!(["new", "stay", "appended"])
+    );
+}
+
+#[test]
+fn listing_index_body_amends_existing_element() {
+    let json = eval(
+        r#"
+base {
+  items = List(new Dynamic {
+    kept = 1
+    changed = 1
+  })
+}
+result = (base) {
+  items {
+    [0] {
+      changed = 2
+      added = 3
+    }
+  }
+}
+"#,
+    );
+    assert_eq!(
+        json["result"]["items"][0],
+        serde_json::json!({"kept": 1, "changed": 2, "added": 3})
+    );
+}
+
+#[test]
+fn listing_named_members_are_not_elements() {
+    let json = eval(
+        r#"
+items = new Listing {
+  default = "template"
+  "value"
+}
+"#,
+    );
+    assert_eq!(json["items"], serde_json::json!(["value"]));
+}
+
+#[test]
+fn listing_shaped_body_preserves_existing_object_kind() {
+    let json = eval(
+        r#"
+base {
+  value = new Dynamic {
+    kept = 1
+  }
+}
+result = (base) {
+  value {
+    "element"
+    added = 2
+  }
+}
+"#,
+    );
+    assert_eq!(
+        json["result"]["value"],
+        serde_json::json!({"kept": 1, "added": 2})
+    );
+}
+
+#[test]
+fn poisoned_local_shadows_parent_binding() {
+    let message = eval_fails(
+        r#"
+name = "outer"
+result {
+  local name = throw("local failed")
+  value = name
+}
+"#,
+    );
+    assert!(message.contains("local failed"), "{message}");
+}
+
+#[test]
+fn poisoned_local_is_preserved_in_closure_capture() {
+    let message = eval_fails(
+        r#"
+name = "outer"
+result {
+  local name = throw("local failed")
+  local getName = () -> name
+  value = getName()
+}
+"#,
+    );
+    assert!(message.contains("local failed"), "{message}");
+}
+
+#[test]
+fn current_binding_shadows_outer_poison_in_closure_capture() {
+    let json = eval(
+        r#"
+local name = throw("outer failed")
+result {
+  local name = 1
+  local getName = () -> name
+  value = getName()
+}
+"#,
+    );
+    assert_eq!(json["result"]["value"], 1);
+}
+
+#[test]
+fn inherited_late_binding_recomputes_dependency_chains() {
+    let temp = TestTempDir::new("pklr_inherited_chain");
+    std::fs::write(
+        temp.path().join("Base.pkl"),
+        "abstract module Base\na = this.b\nm = module.b\nb = c\nd = b + 1\nc = 1\n",
+    )
+    .unwrap();
+    let child = temp.path().join("Child.pkl");
+    std::fs::write(&child, "extends \"Base.pkl\"\nc = 2\ne = d + 1\n").unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let json = runtime
+        .block_on(pklr::EvaluatorBuilder::new().eval_to_json(&child))
+        .unwrap();
+    assert_eq!(json["a"], 2);
+    assert_eq!(json["m"], 2);
+    assert_eq!(json["b"], 2);
+    assert_eq!(json["d"], 3);
+    assert_eq!(json["e"], 4);
+}
+
+#[test]
+fn child_locals_recompute_after_inherited_properties_are_overridden() {
+    let temp = TestTempDir::new("pklr_child_local_late_binding");
+    std::fs::write(
+        temp.path().join("Base.pkl"),
+        "abstract module Base\nsource = 1\n",
+    )
+    .unwrap();
+    let child = temp.path().join("Child.pkl");
+    std::fs::write(
+        &child,
+        "extends \"Base.pkl\"\nlocal derived = source + 1\nresult = derived\nsource = 2\n",
+    )
+    .unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let json = runtime
+        .block_on(pklr::EvaluatorBuilder::new().eval_to_json(&child))
+        .unwrap();
+    assert_eq!(json["source"], 2);
+    assert_eq!(json["result"], 3);
+    assert!(json.get("derived").is_none());
+}
+
+#[test]
+fn inherited_late_binding_preserves_parent_locals() {
+    let temp = TestTempDir::new("pklr_parent_local_late_binding");
+    std::fs::write(
+        temp.path().join("Base.pkl"),
+        "abstract module Base\nlocal offset = 1\nsource = 1\nderived = source + offset\n",
+    )
+    .unwrap();
+    let child = temp.path().join("Child.pkl");
+    std::fs::write(&child, "extends \"Base.pkl\"\nsource = 2\n").unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let json = runtime
+        .block_on(pklr::EvaluatorBuilder::new().eval_to_json(&child))
+        .unwrap();
+    assert_eq!(json["source"], 2);
+    assert_eq!(json["derived"], 3);
+    assert!(json.get("offset").is_none());
+}
+
+#[test]
+fn inherited_late_binding_reaches_grandparent_declarations() {
+    let temp = TestTempDir::new("pklr_grandparent_late_binding");
+    std::fs::write(
+        temp.path().join("Grand.pkl"),
+        "abstract module Grand\nsource = 1\nderived = source + 1\n",
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("Parent.pkl"),
+        "abstract module Parent\nextends \"Grand.pkl\"\n",
+    )
+    .unwrap();
+    let child = temp.path().join("Child.pkl");
+    std::fs::write(
+        &child,
+        "extends \"Parent.pkl\"\nsource = 2\nresult = derived\n",
+    )
+    .unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let json = runtime
+        .block_on(pklr::EvaluatorBuilder::new().eval_to_json(&child))
+        .unwrap();
+    assert_eq!(json["source"], 2);
+    assert_eq!(json["derived"], 3);
+    assert_eq!(json["result"], 3);
+}
+
+#[test]
+fn computed_sibling_access_recomputes_after_child_override() {
+    let temp = TestTempDir::new("pklr_computed_late_binding");
+    std::fs::write(
+        temp.path().join("Base.pkl"),
+        "abstract module Base\nsource = 1\n",
+    )
+    .unwrap();
+    let child = temp.path().join("Child.pkl");
+    std::fs::write(
+        &child,
+        "extends \"Base.pkl\"\nlocal keyName = \"source\"\nresult = this[keyName]\nsource = 2\n",
+    )
+    .unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let json = runtime
+        .block_on(pklr::EvaluatorBuilder::new().eval_to_json(&child))
+        .unwrap();
+    assert_eq!(json["result"], 2);
+}
+
+#[test]
+fn aliased_module_snapshot_recomputes_after_child_override() {
+    let temp = TestTempDir::new("pklr_aliased_snapshot_late_binding");
+    std::fs::write(
+        temp.path().join("Base.pkl"),
+        "abstract module Base\nsource = 1\n",
+    )
+    .unwrap();
+    let child = temp.path().join("Child.pkl");
+    std::fs::write(
+        &child,
+        "extends \"Base.pkl\"\nlocal snapshot = this\nresult = snapshot.source\nsource = 2\n",
+    )
+    .unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let json = runtime
+        .block_on(pklr::EvaluatorBuilder::new().eval_to_json(&child))
+        .unwrap();
+    assert_eq!(json["result"], 2);
+}
+
+#[test]
+fn amended_scope_only_defaults_stay_out_of_output() {
+    let temp = TestTempDir::new("pklr_amended_scope_default");
+    std::fs::write(
+        temp.path().join("Base.pkl"),
+        "implicit: Mapping<String, String>\nvisible = implicit.length\n",
+    )
+    .unwrap();
+    let child = temp.path().join("Child.pkl");
+    std::fs::write(&child, "amends \"Base.pkl\"\n").unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let json = runtime
+        .block_on(pklr::EvaluatorBuilder::new().eval_to_json(&child))
+        .unwrap();
+    assert!(json.get("implicit").is_none());
+    assert_eq!(json["visible"], 0);
+}
+
+#[test]
+fn inherited_late_binding_propagates_errors() {
+    let temp = TestTempDir::new("pklr_inherited_error");
+    std::fs::write(
+        temp.path().join("Base.pkl"),
+        "abstract module Base\nderived = 1 / denominator\ndenominator = 1\n",
+    )
+    .unwrap();
+    let child = temp.path().join("Child.pkl");
+    std::fs::write(&child, "extends \"Base.pkl\"\ndenominator = 0\n").unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let error = runtime
+        .block_on(pklr::EvaluatorBuilder::new().eval_to_json(&child))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("division by zero"));
+}
+
+#[test]
+fn constrained_nullable_mapping_preserves_value_defaults() {
+    let json = eval(
+        r#"
+class Item { enabled: Boolean = false }
+base { items: Mapping<String, Item>?(length >= 0) }
+result = (base) { items { ["example"] { enabled = true } } }
+"#,
+    );
+    assert_eq!(json["result"]["items"]["example"]["enabled"], true);
+}
+
+#[test]
+fn used_unresolved_abstract_member_still_errors() {
+    let temp = TestTempDir::new("pklr_abstract_member");
+    std::fs::write(
+        temp.path().join("Base.pkl"),
+        "abstract module Base\nabstract missing: String\ndependent = missing\n",
+    )
+    .unwrap();
+    let child = temp.path().join("Child.pkl");
+    std::fs::write(&child, "extends \"Base.pkl\"\nresult = dependent\n").unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let error = runtime
+        .block_on(pklr::EvaluatorBuilder::new().eval_to_json(&child))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("abstract property") || error.contains("undefined variable"));
+}
+
+#[test]
+fn concrete_module_must_implement_inherited_abstract_property() {
+    let temp = TestTempDir::new("pklr_required_abstract_member");
+    std::fs::write(
+        temp.path().join("Base.pkl"),
+        "abstract module Base\nabstract required: Listing<String>\n",
+    )
+    .unwrap();
+    let child = temp.path().join("Child.pkl");
+    std::fs::write(&child, "extends \"Base.pkl\"\n").unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let error = runtime
+        .block_on(pklr::EvaluatorBuilder::new().eval_to_json(&child))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("abstract property 'required'"));
+
+    std::fs::write(
+        &child,
+        "extends \"Base.pkl\"\nrequired = List(\"implemented\")\n",
+    )
+    .unwrap();
+    let json = runtime
+        .block_on(pklr::EvaluatorBuilder::new().eval_to_json(&child))
+        .unwrap();
+    assert_eq!(json["required"], serde_json::json!(["implemented"]));
+}
+
+#[test]
 fn typealias_union_parses() {
     // Union type alias should parse without error
     let json = eval(

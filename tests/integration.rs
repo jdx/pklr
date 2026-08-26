@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use pklr::capabilities::{BoxFuture, EvalCapabilities};
 use pklr::eval::Evaluator;
 use pklr::lexer::{TokenKind, lex};
-use pklr::parser::{collect_imports, parse};
+use pklr::parser::{BinOp, Entry, Expr, TypeExpr, collect_imports, parse};
 
 fn lex_kinds(src: &str) -> Vec<TokenKind> {
     lex(src).unwrap().into_iter().map(|t| t.kind).collect()
@@ -351,6 +351,73 @@ fail_fast = false
 }
 
 #[test]
+fn parser_accepts_github_actions_type_syntax() {
+    let source = r#"
+abstract module Example
+`runs-on`: "ubuntu"|*"macos"
+local select = (jobs: Mapping<String, String>) -> jobs
+value: Mapping<String, String>?(length > 0, !isEmpty)
+"#;
+    let module = parse(&lex(source).unwrap()).unwrap();
+    assert!(
+        module
+            .annotations
+            .iter()
+            .any(|annotation| annotation.name == "pklr:module:Abstract")
+    );
+    let Entry::Property(runs_on) = &module.body[0] else {
+        panic!("expected runs-on property");
+    };
+    assert_eq!(runs_on.name, "runs-on");
+    assert!(matches!(
+        runs_on.type_ann,
+        Some(TypeExpr::Union(ref members))
+            if matches!(members[0], TypeExpr::Named(ref value) if value == "\"ubuntu\"")
+                && matches!(members[1], TypeExpr::Named(ref value) if value == "*\"macos\"")
+    ));
+    let Entry::Property(select) = &module.body[1] else {
+        panic!("expected lambda property");
+    };
+    assert!(matches!(
+        select.value,
+        Some(Expr::Lambda(ref params, _))
+            if params == &["jobs".to_string()]
+    ));
+    let Entry::Property(value) = &module.body[2] else {
+        panic!("expected constrained property");
+    };
+    assert!(matches!(
+        value.type_ann,
+        Some(TypeExpr::Constrained(_, ref constraint))
+            if matches!(constraint.as_ref(), Expr::Binop(BinOp::And, _, _))
+    ));
+}
+
+#[test]
+fn type_constraints_do_not_consume_next_line_elements() {
+    let source = r#"
+items {
+  value: String
+  ("next")
+}
+"#;
+    let module = parse(&lex(source).unwrap()).unwrap();
+    let Entry::Property(items) = &module.body[0] else {
+        panic!("expected items property");
+    };
+    let body = items.body.as_ref().expect("expected items body");
+    assert_eq!(body.len(), 2);
+    assert!(matches!(body[0], Entry::Property(_)));
+    assert!(matches!(body[1], Entry::Elem(Expr::String(ref value)) if value == "next"));
+}
+
+#[test]
+fn quoted_identifier_reports_missing_terminator() {
+    let error = lex("`runs-on = true").unwrap_err().to_string();
+    assert!(error.contains("unterminated quoted identifier"));
+}
+
+#[test]
 fn collect_imports_finds_amends() {
     let src = r#"
 amends "pkl/Config.pkl"
@@ -608,6 +675,57 @@ async fn test_hk_config_amends() {
         eprintln!("error: {e}");
     }
     assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn test_github_actions_workflow() {
+    let mut evaluator = pklr::Evaluator::new();
+    let cache_dir = std::env::temp_dir().join(format!(
+        "pklr-github-actions-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    evaluator.set_package_cache_dir(&cache_dir);
+    evaluator
+        .preload_package(
+            "https://github.com/apple/pkl-pantry/releases/download/com.github.actions@1.9.0/com.github.actions@1.9.0.zip",
+            "zip",
+            include_bytes!("fixtures/com.github.actions-1.9.0.zip"),
+        )
+        .unwrap();
+    evaluator.set_offline(true);
+    let source = r#"
+amends "package://pkg.pkl-lang.org/pkl-pantry/com.github.actions@1.9.0#/Workflow.pkl"
+import "package://pkg.pkl-lang.org/pkl-pantry/com.github.actions@1.9.0#/catalog.pkl"
+
+jobs {
+  ["build"] {
+    `runs-on` = "ubuntu-latest"
+    steps {
+      new { run = "echo hello" }
+      (catalog.`actions/checkout@v6`) { with { `fetch-depth` = 0 } }
+    }
+  }
+}
+"#;
+    let value = evaluator
+        .eval_source(source, std::path::Path::new("workflow.pkl"))
+        .await
+        .unwrap();
+    let value = evaluator.apply_converters(value).await.unwrap();
+    assert_eq!(value.to_json()["jobs"]["build"]["runs-on"], "ubuntu-latest");
+    assert_eq!(
+        value.to_json()["jobs"]["build"]["steps"][0]["run"],
+        "echo hello"
+    );
+    assert_eq!(
+        value.to_json()["jobs"]["build"]["steps"][1]["uses"],
+        "actions/checkout@v6"
+    );
+    assert_eq!(
+        value.to_json()["jobs"]["build"]["steps"][1]["with"]["fetch-depth"],
+        0
+    );
 }
 
 #[tokio::test]
