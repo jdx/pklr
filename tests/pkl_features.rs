@@ -2428,9 +2428,10 @@ fn class_local_this_alias_is_complete_for_deferred_methods() {
         r#"
 class Factory {
     local factory = this
+    local secondAlias = factory
     first: String = "first"
     last: String = "last"
-    function lastValue(): String = factory.last
+    function lastValue(): String = secondAlias.last
 }
 
 local factory = new Factory {}
@@ -4288,6 +4289,21 @@ factory = new Factory { version = "5" }
     assert!(message.contains("\"3\"|\"4\""), "{message}");
 }
 
+#[test]
+fn class_instance_validates_hidden_property_types() {
+    let message = eval_fails(
+        r#"
+class Factory {
+    hidden enabled: Boolean = false
+}
+
+factory = new Factory { enabled = "yes" }
+"#,
+    );
+    assert!(message.contains("enabled"), "{message}");
+    assert!(message.contains("Boolean"), "{message}");
+}
+
 // ============================================================
 // output.renderer.converters
 // ============================================================
@@ -4371,6 +4387,28 @@ step = new Prettier {}
     );
     assert_eq!(json["step"]["check"], "base");
     assert!(json["step"].get("output").is_none());
+}
+
+#[test]
+fn converter_prefers_most_specific_class() {
+    let json = eval_with_converters(
+        r#"
+abstract class Factory {}
+class Prettier extends Factory {}
+
+output {
+    renderer {
+        converters {
+            [Factory] = (_) -> "factory"
+            [Prettier] = (_) -> "prettier"
+        }
+    }
+}
+
+value = new Prettier {}
+"#,
+    );
+    assert_eq!(json["value"], "prettier");
 }
 
 #[test]

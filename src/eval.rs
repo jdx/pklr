@@ -1413,7 +1413,8 @@ impl Evaluator {
                     // calls a lambda local defined just above it).
                     let val = self.eval_expr(expr, &child_scope, depth).await?;
                     child_scope.set(prop.name.clone(), val);
-                    if matches!(expr, Expr::Ident(name) if name == "this") {
+                    if matches!(expr, Expr::Ident(name) if name == "this" || this_aliases.contains(name))
+                    {
                         this_aliases.push(prop.name.clone());
                     }
                     if matches!(expr, crate::parser::Expr::Lambda(..)) {
@@ -1911,7 +1912,7 @@ impl Evaluator {
         // Evaluate the merged entries (eval_entries handles locals, classes,
         // and evaluates properties in order with each added to scope)
         let result = self.eval_entries(&merged, &eval_scope, depth + 1).await?;
-        if let Value::Object(map, _) = &result {
+        if let Value::Object(map, source) = &result {
             for entry in base_entries {
                 let Entry::Property(prop) = entry else {
                     continue;
@@ -1919,7 +1920,12 @@ impl Evaluator {
                 let Some(type_ann) = &prop.type_ann else {
                     continue;
                 };
-                let Some(value) = map.get(&prop.name) else {
+                let value = map.get(&prop.name).or_else(|| {
+                    source
+                        .as_ref()
+                        .and_then(|source| source.scope.get(&prop.name))
+                });
+                let Some(value) = value else {
                     continue;
                 };
                 if type_is_runtime_checkable(type_ann, &eval_scope)
@@ -3412,29 +3418,30 @@ impl Evaluator {
                     .collect::<Vec<_>>();
 
                 if !type_names.is_empty() {
-                    for (conv_name, lambda) in converters {
-                        let matches = type_names
-                            .iter()
-                            .any(|type_name| type_names_match(conv_name, type_name));
-                        if matches
-                            && !blocked_root_converters.contains(conv_name)
-                            && let Value::Lambda(params, body, captured) = lambda
-                        {
-                            let mut call_scope = Scope::default();
-                            for (k, v) in captured.iter() {
-                                call_scope.set(k.clone(), v.clone());
+                    for type_name in type_names {
+                        for (conv_name, lambda) in converters {
+                            if type_names_match(conv_name, type_name)
+                                && !blocked_root_converters.contains(conv_name)
+                                && let Value::Lambda(params, body, captured) = lambda
+                            {
+                                let mut call_scope = Scope::default();
+                                for (k, v) in captured.iter() {
+                                    call_scope.set(k.clone(), v.clone());
+                                }
+                                // Bind the object as the first parameter
+                                if let Some(param) = params.first() {
+                                    call_scope.set(
+                                        param.clone(),
+                                        Value::Object(map.clone(), src.clone()),
+                                    );
+                                }
+                                let result = self.eval_expr(body, &call_scope, 0).await?;
+                                let mut blocked = blocked_root_converters;
+                                blocked.push(conv_name.clone());
+                                return self
+                                    .apply_converters_recursive(result, converters, blocked)
+                                    .await;
                             }
-                            // Bind the object as the first parameter
-                            if let Some(param) = params.first() {
-                                call_scope
-                                    .set(param.clone(), Value::Object(map.clone(), src.clone()));
-                            }
-                            let result = self.eval_expr(body, &call_scope, 0).await?;
-                            let mut blocked = blocked_root_converters;
-                            blocked.push(conv_name.clone());
-                            return self
-                                .apply_converters_recursive(result, converters, blocked)
-                                .await;
                         }
                     }
                 }
