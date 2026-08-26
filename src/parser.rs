@@ -83,8 +83,26 @@ pub enum TypeExpr {
     Nullable(Box<TypeExpr>),
     Union(Vec<TypeExpr>),
     Generic(String, Vec<TypeExpr>),
-    /// Constrained type: `Type(predicate)` e.g. `Int(this >= 0)`
+    /// Constrained type: `Type(predicate)` e.g. `Int(this >= 0)`.
+    /// Multiple source constraints are represented by a conjunctive expression.
     Constrained(String, Box<Expr>),
+}
+
+fn type_expr_runtime_name(ty: &TypeExpr) -> String {
+    match ty {
+        TypeExpr::Named(name) => name.clone(),
+        TypeExpr::Nullable(inner) => format!("{}?", type_expr_runtime_name(inner)),
+        TypeExpr::Union(_) => "Any".to_string(),
+        TypeExpr::Generic(name, args) => format!(
+            "{}<{}>",
+            name,
+            args.iter()
+                .map(type_expr_runtime_name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        TypeExpr::Constrained(name, _) => name.clone(),
+    }
 }
 
 /// An expression.
@@ -308,9 +326,17 @@ impl<'a> Parser<'a> {
         let mut imports = Vec::new();
 
         // Parse module-level annotations (e.g. @ModuleInfo)
-        let annotations = self.parse_annotations()?;
+        let mut annotations = self.parse_annotations()?;
 
         // Parse header: module declaration, amends, imports
+        if self.peek_is_modifier() && self.peek_past_modifiers_is(TokenKind::KwModule) {
+            for modifier in self.collect_modifiers() {
+                annotations.push(Annotation {
+                    name: format!("pklr:module:{modifier:?}"),
+                    body: Vec::new(),
+                });
+            }
+        }
         // Skip `module <name>` declaration if present
         if matches!(self.peek(), TokenKind::KwModule) {
             self.advance();
@@ -657,12 +683,11 @@ impl<'a> Parser<'a> {
         let mut params = Vec::new();
         while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
             let param_name = self.expect_ident()?;
-            params.push(param_name);
-            // Skip optional type annotation: `: Type`
             if matches!(self.peek(), TokenKind::Colon) {
                 self.advance();
-                let _ = self.parse_type()?;
+                self.parse_type()?;
             }
+            params.push(param_name);
             if matches!(self.peek(), TokenKind::Comma) {
                 self.advance();
             }
@@ -842,6 +867,7 @@ impl<'a> Parser<'a> {
                         | TokenKind::BoolLit(_)
                         | TokenKind::Null
                         | TokenKind::KwNew
+                        | TokenKind::LParen
                 );
                 let is_bare_ident = matches!(self.peek(), TokenKind::Ident(_))
                     && self.pos + 1 < self.tokens.len()
@@ -925,6 +951,42 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type(&mut self) -> Result<TypeExpr> {
+        let (first, first_is_default) = self.parse_type_member()?;
+        let mut variants = vec![(first, first_is_default)];
+        while matches!(self.peek(), TokenKind::Pipe) {
+            self.advance();
+            variants.push(self.parse_type_member()?);
+        }
+        if variants.len() == 1 {
+            let (ty, is_default) = variants.pop().unwrap();
+            Ok(if is_default {
+                mark_default_type(ty)
+            } else {
+                ty
+            })
+        } else {
+            Ok(TypeExpr::Union(
+                variants
+                    .into_iter()
+                    .map(|(ty, is_default)| {
+                        if is_default {
+                            mark_default_type(ty)
+                        } else {
+                            ty
+                        }
+                    })
+                    .collect(),
+            ))
+        }
+    }
+
+    fn parse_type_member(&mut self) -> Result<(TypeExpr, bool)> {
+        let is_default = if matches!(self.peek(), TokenKind::Star) {
+            self.advance();
+            true
+        } else {
+            false
+        };
         let base = match self.peek().clone() {
             TokenKind::LParen => {
                 self.advance();
@@ -963,15 +1025,7 @@ impl<'a> Parser<'a> {
                     self.expect(&TokenKind::Gt)?;
                     TypeExpr::Generic(name, args)
                 } else {
-                    // Parse optional type constraint: Type(predicate)
-                    if matches!(self.peek(), TokenKind::LParen) {
-                        self.advance();
-                        let constraint = self.parse_expr()?;
-                        self.expect(&TokenKind::RParen)?;
-                        TypeExpr::Constrained(name, Box::new(constraint))
-                    } else {
-                        TypeExpr::Named(name)
-                    }
+                    TypeExpr::Named(name)
                 }
             }
             tok => {
@@ -979,25 +1033,31 @@ impl<'a> Parser<'a> {
             }
         };
 
-        // Nullable: Type?
-        let t = if matches!(self.peek(), TokenKind::QuestionMark) {
+        let mut t = self.parse_type_constraints(base)?;
+        if matches!(self.peek(), TokenKind::QuestionMark) {
             self.advance();
-            TypeExpr::Nullable(Box::new(base))
-        } else {
-            base
-        };
-
-        // Union: Type | Type
-        if matches!(self.peek(), TokenKind::Pipe) {
-            let mut variants = vec![t];
-            while matches!(self.peek(), TokenKind::Pipe) {
-                self.advance();
-                variants.push(self.parse_type()?);
-            }
-            Ok(TypeExpr::Union(variants))
-        } else {
-            Ok(t)
+            t = TypeExpr::Nullable(Box::new(t));
+            t = self.parse_type_constraints(t)?;
         }
+        Ok((t, is_default))
+    }
+
+    fn parse_type_constraints(&mut self, base: TypeExpr) -> Result<TypeExpr> {
+        if !matches!(self.peek(), TokenKind::LParen) || self.peek_tok().line != self.last_line {
+            return Ok(base);
+        }
+        self.advance();
+        let mut constraint = self.parse_expr()?;
+        while matches!(self.peek(), TokenKind::Comma) {
+            self.advance();
+            let next = self.parse_expr()?;
+            constraint = Expr::Binop(BinOp::And, Box::new(constraint), Box::new(next));
+        }
+        self.expect(&TokenKind::RParen)?;
+        Ok(TypeExpr::Constrained(
+            type_expr_runtime_name(&base),
+            Box::new(constraint),
+        ))
     }
 
     fn parse_expr(&mut self) -> Result<Expr> {
@@ -1147,6 +1207,9 @@ impl<'a> Parser<'a> {
                     expr = Expr::Index(Box::new(expr), Box::new(idx));
                 }
                 TokenKind::LParen => {
+                    if self.peek_tok().line != self.last_line {
+                        break;
+                    }
                     self.advance();
                     let mut args = Vec::new();
                     while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
@@ -1360,6 +1423,10 @@ impl<'a> Parser<'a> {
         // First param
         if let TokenKind::Ident(name) = self.peek().clone() {
             self.advance();
+            if matches!(self.peek(), TokenKind::Colon) {
+                self.advance();
+                self.parse_type().ok()?;
+            }
             params.push(name);
         } else {
             return None;
@@ -1369,6 +1436,10 @@ impl<'a> Parser<'a> {
             self.advance();
             if let TokenKind::Ident(name) = self.peek().clone() {
                 self.advance();
+                if matches!(self.peek(), TokenKind::Colon) {
+                    self.advance();
+                    self.parse_type().ok()?;
+                }
                 params.push(name);
             } else {
                 return None;
@@ -1418,4 +1489,8 @@ impl<'a> Parser<'a> {
             )),
         }
     }
+}
+
+fn mark_default_type(ty: TypeExpr) -> TypeExpr {
+    TypeExpr::Named(format!("*{}", type_expr_runtime_name(&ty)))
 }

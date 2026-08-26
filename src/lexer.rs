@@ -740,6 +740,22 @@ impl<'a> Lexer<'a> {
                     keyword_or_ident(ident)
                 }
             }
+            '`' => {
+                self.advance();
+                let start = self.pos;
+                while self.peek().is_some_and(|c| c != '`') {
+                    self.advance();
+                }
+                if self.peek() != Some('`') {
+                    return Err(self.lex_error("unterminated quoted identifier"));
+                }
+                let ident = self.source[start..self.pos].to_string();
+                self.advance();
+                if ident.is_empty() {
+                    return Err(self.lex_error("empty quoted identifier"));
+                }
+                TokenKind::Ident(ident)
+            }
             c => {
                 return Err(self.lex_error(format!("unexpected character: {c:?}")));
             }
