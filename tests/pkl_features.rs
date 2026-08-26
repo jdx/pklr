@@ -4304,6 +4304,22 @@ factory = new Factory { enabled = "yes" }
     assert!(message.contains("Boolean"), "{message}");
 }
 
+#[test]
+fn class_instance_does_not_validate_missing_property_against_enclosing_scope() {
+    let json = eval(
+        r#"
+local enabled = "not a boolean"
+
+class Factory {
+    hidden enabled: Boolean
+}
+
+factory = new Factory {}
+"#,
+    );
+    assert_eq!(json["factory"], serde_json::json!({}));
+}
+
 // ============================================================
 // output.renderer.converters
 // ============================================================

@@ -1912,6 +1912,15 @@ impl Evaluator {
         // Evaluate the merged entries (eval_entries handles locals, classes,
         // and evaluates properties in order with each added to scope)
         let result = self.eval_entries(&merged, &eval_scope, depth + 1).await?;
+        let assigned_property_names = merged
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Property(prop) if prop.value.is_some() || prop.body.is_some() => {
+                    Some(prop.name.as_str())
+                }
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
         if let Value::Object(map, source) = &result {
             for entry in base_entries {
                 let Entry::Property(prop) = entry else {
@@ -1921,9 +1930,14 @@ impl Evaluator {
                     continue;
                 };
                 let value = map.get(&prop.name).or_else(|| {
-                    source
-                        .as_ref()
-                        .and_then(|source| source.scope.get(&prop.name))
+                    assigned_property_names
+                        .contains(prop.name.as_str())
+                        .then(|| {
+                            source
+                                .as_ref()
+                                .and_then(|source| source.scope.get(&prop.name))
+                        })
+                        .flatten()
                 });
                 let Some(value) = value else {
                     continue;
