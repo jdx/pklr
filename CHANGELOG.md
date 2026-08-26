@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.1](https://github.com/jdx/pklr/compare/v1.5.0...v1.5.1) - 2026-08-26
+
+### Fixed
+
+- *(eval)* complete class-as-function semantics ([#161](https://github.com/jdx/pklr/pull/161))
+
 ## [1.5.0](https://github.com/jdx/pklr/compare/v1.4.0...v1.5.0) - 2026-08-23
 
 ### Added
