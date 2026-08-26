@@ -32,6 +32,18 @@ impl EvalCapabilities for MemoryCapabilities {
     }
 
     fn canonicalize<'a>(&'a mut self, path: &'a Path) -> BoxFuture<'a, pklr::Result<PathBuf>> {
+        if path == Path::new("uncanonicalized.pkl") {
+            let path = path.to_path_buf();
+            return Box::pin(async move {
+                Err(pklr::Error::Io(
+                    path,
+                    std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "canonicalization unavailable in test capabilities",
+                    ),
+                ))
+            });
+        }
         let path = path.to_path_buf();
         Box::pin(async move { Ok(path) })
     }
@@ -76,10 +88,85 @@ impl EvalCapabilities for MemoryCapabilities {
     }
 }
 
+struct SandboxPackageCapabilities {
+    archive: Vec<u8>,
+    extraction_dir: PathBuf,
+}
+
+impl EvalCapabilities for SandboxPackageCapabilities {
+    fn read_to_string<'a>(&'a mut self, path: &'a Path) -> BoxFuture<'a, pklr::Result<String>> {
+        Box::pin(async move {
+            std::fs::read_to_string(path)
+                .map_err(|error| pklr::Error::Io(path.to_path_buf(), error))
+        })
+    }
+
+    fn path_exists<'a>(&'a mut self, path: &'a Path) -> BoxFuture<'a, pklr::Result<bool>> {
+        Box::pin(async move { Ok(path.exists()) })
+    }
+
+    fn canonicalize<'a>(&'a mut self, path: &'a Path) -> BoxFuture<'a, pklr::Result<PathBuf>> {
+        Box::pin(async move {
+            path.canonicalize()
+                .map_err(|error| pklr::Error::Io(path.to_path_buf(), error))
+        })
+    }
+
+    fn read_env<'a>(&'a mut self, _name: &'a str) -> BoxFuture<'a, pklr::Result<Option<String>>> {
+        Box::pin(async move { Ok(None) })
+    }
+
+    fn fetch_text<'a>(&'a mut self, url: &'a str) -> BoxFuture<'a, pklr::Result<String>> {
+        let url = url.to_string();
+        Box::pin(async move {
+            Err(pklr::Error::Unsupported(format!(
+                "text fetch unavailable in package test: {url}"
+            )))
+        })
+    }
+
+    fn fetch_bytes<'a>(&'a mut self, _url: &'a str) -> BoxFuture<'a, pklr::Result<Vec<u8>>> {
+        let archive = self.archive.clone();
+        Box::pin(async move { Ok(archive) })
+    }
+
+    fn temp_dir<'a>(&'a mut self, _prefix: &'a str) -> BoxFuture<'a, pklr::Result<PathBuf>> {
+        let extraction_dir = self.extraction_dir.clone();
+        Box::pin(async move {
+            std::fs::create_dir_all(&extraction_dir)
+                .map_err(|error| pklr::Error::Io(extraction_dir.clone(), error))?;
+            Ok(extraction_dir)
+        })
+    }
+
+    fn glob<'a>(
+        &'a mut self,
+        _base: &'a Path,
+        _pattern: &'a str,
+    ) -> BoxFuture<'a, pklr::Result<Vec<PathBuf>>> {
+        Box::pin(async move { Ok(Vec::new()) })
+    }
+}
+
 #[test]
 fn evaluator_is_send() {
     fn assert_send<T: Send>() {}
     assert_send::<pklr::Evaluator>();
+}
+
+#[tokio::test]
+async fn entry_file_evaluates_when_canonicalization_is_unavailable() {
+    let path = Path::new("uncanonicalized.pkl");
+    let mut evaluator = Evaluator::with_capabilities(MemoryCapabilities {
+        modules: HashMap::from([(path.display().to_string(), "answer = 42\n".to_string())]),
+        env: HashMap::new(),
+        env_fetches: Arc::new(Mutex::new(Vec::new())),
+        fetches: Arc::new(Mutex::new(Vec::new())),
+    });
+
+    let json = evaluator.eval_file_pub(path).await.unwrap().to_json();
+
+    assert_eq!(json["answer"], 42);
 }
 
 #[tokio::test]
@@ -111,6 +198,47 @@ async fn custom_capabilities_handle_http_import() {
         *fetches.lock().unwrap(),
         vec!["http://example.test/Main.pkl".to_string()]
     );
+}
+
+#[tokio::test]
+async fn package_extraction_uses_custom_temp_dir() {
+    use std::io::Write;
+
+    let root = std::env::temp_dir().join(format!(
+        "pklr_test_custom_package_temp_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let extraction_dir = root.join("sandbox");
+    let mut archive = Vec::new();
+    {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut archive));
+        zip.start_file(
+            "Config.pkl",
+            zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored),
+        )
+        .unwrap();
+        zip.write_all(b"answer = 42\n").unwrap();
+        zip.finish().unwrap();
+    }
+    let mut evaluator = Evaluator::with_capabilities(SandboxPackageCapabilities {
+        archive,
+        extraction_dir: extraction_dir.clone(),
+    });
+
+    let json = evaluator
+        .eval_source(
+            "amends \"package://example.com/package@1.0.0#/Config.pkl\"\n",
+            &root.join("main.pkl"),
+        )
+        .await
+        .unwrap()
+        .to_json();
+
+    assert_eq!(json["answer"], 42);
+    assert!(extraction_dir.join("Config.pkl").is_file());
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[tokio::test]
@@ -300,7 +428,7 @@ async fn eval_outcome_exposes_environment_reads() {
     let path = dir.join("main.pkl");
     std::fs::write(&path, "value = read?(\"env:PATH\")\n").unwrap();
 
-    let outcome = pklr::eval_with_options(&path, pklr::EvalOptions::default())
+    let outcome = pklr::eval_with_options_async(&path, pklr::AsyncEvalOptions::default())
         .await
         .unwrap();
 
@@ -441,8 +569,8 @@ amends "base.pkl"; import "helper.pkl"; x = helper.value
     assert_eq!(module.imports[0].uri, "helper.pkl");
 }
 
-#[test]
-fn analyze_imports_deduplicates_diamond_graph() {
+#[tokio::test]
+async fn analyze_imports_deduplicates_diamond_graph() {
     let dir = std::env::temp_dir().join(format!(
         "pklr_test_analyze_imports_diamond_{}",
         std::process::id()
@@ -461,7 +589,9 @@ import "right.pkl"
     std::fs::write(dir.join("right.pkl"), r#"import "shared.pkl""#).unwrap();
     std::fs::write(dir.join("shared.pkl"), "x = 1").unwrap();
 
-    let imports = pklr::analyze_imports(&dir.join("main.pkl")).unwrap();
+    let imports = pklr::analyze_imports_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
     let shared = dir.join("shared.pkl");
     assert_eq!(
         imports.iter().filter(|path| **path == shared).count(),
@@ -470,8 +600,8 @@ import "right.pkl"
     );
 }
 
-#[test]
-fn analyze_imports_excludes_missing_files() {
+#[tokio::test]
+async fn analyze_imports_excludes_missing_files() {
     let dir = std::env::temp_dir().join(format!(
         "pklr_test_analyze_imports_missing_{}",
         std::process::id()
@@ -488,7 +618,9 @@ import "existing.pkl"
     .unwrap();
     std::fs::write(dir.join("existing.pkl"), "x = 1").unwrap();
 
-    let imports = pklr::analyze_imports(&dir.join("main.pkl")).unwrap();
+    let imports = pklr::analyze_imports_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
     assert_eq!(imports, vec![dir.join("existing.pkl")]);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -498,7 +630,7 @@ import "existing.pkl"
 fn eval_src(src: &str) -> serde_json::Value {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let mut ev = Evaluator::new();
+        let mut ev = Evaluator::new_async();
         let path = std::path::Path::new("test.pkl");
         let val = ev.eval_source(src, path).await.unwrap();
         val.to_json()
@@ -665,7 +797,7 @@ fail_fast = true
 #[tokio::test]
 #[ignore = "requires network access to fetch package zip"]
 async fn test_hk_config_amends() {
-    let mut evaluator = pklr::Evaluator::new();
+    let mut evaluator = pklr::Evaluator::new_async();
     let result = evaluator.eval_source(
         r#"amends "package://github.com/jdx/hk/releases/download/v1.40.0/hk@1.40.0#/Config.pkl""#,
         std::path::Path::new("test_hk.pkl"),
@@ -679,7 +811,7 @@ async fn test_hk_config_amends() {
 
 #[tokio::test]
 async fn test_github_actions_workflow() {
-    let mut evaluator = pklr::Evaluator::new();
+    let mut evaluator = pklr::Evaluator::new_async();
     let cache_dir = std::env::temp_dir().join(format!(
         "pklr-github-actions-{}-{:?}",
         std::process::id(),
@@ -687,11 +819,12 @@ async fn test_github_actions_workflow() {
     ));
     evaluator.set_package_cache_dir(&cache_dir);
     evaluator
-        .preload_package(
+        .preload_package_async(
             "https://github.com/apple/pkl-pantry/releases/download/com.github.actions@1.9.0/com.github.actions@1.9.0.zip",
             "zip",
             include_bytes!("fixtures/com.github.actions-1.9.0.zip"),
         )
+        .await
         .unwrap();
     evaluator.set_offline(true);
     let source = r#"
@@ -751,7 +884,7 @@ hooks {
     }
 }
 "#;
-    let mut evaluator = pklr::Evaluator::new();
+    let mut evaluator = pklr::Evaluator::new_async();
     let result = evaluator
         .eval_source(src, std::path::Path::new("test_hk_full.pkl"))
         .await;
@@ -937,7 +1070,7 @@ async fn http_module_resolves_relative_import() {
     ]);
     let src = format!("import \"{base}/cfg/Main.pkl\" as Main\nresult = Main.value\n");
 
-    let mut evaluator = pklr::Evaluator::new();
+    let mut evaluator = pklr::Evaluator::new_async();
     let result = evaluator
         .eval_source(&src, std::path::Path::new("entry.pkl"))
         .await;
@@ -962,7 +1095,7 @@ async fn http_module_resolves_relative_amends() {
     ]);
     let src = format!("amends \"{base}/cfg/Main.pkl\"\n");
 
-    let mut evaluator = pklr::Evaluator::new();
+    let mut evaluator = pklr::Evaluator::new_async();
     let result = evaluator
         .eval_source(&src, std::path::Path::new("entry.pkl"))
         .await;
@@ -987,7 +1120,7 @@ async fn http_module_resolves_relative_extends() {
     ]);
     let src = format!("import \"{base}/cfg/Main.pkl\" as Main\nresult = Main\n");
 
-    let mut evaluator = pklr::Evaluator::new();
+    let mut evaluator = pklr::Evaluator::new_async();
     let result = evaluator
         .eval_source(&src, std::path::Path::new("entry.pkl"))
         .await;
@@ -1026,7 +1159,7 @@ local steps = new Mapping<String, Step> {
 
 result = steps
 "#;
-    let mut evaluator = pklr::Evaluator::new();
+    let mut evaluator = pklr::Evaluator::new_async();
     let result = evaluator
         .eval_source(src, std::path::Path::new("test_min.pkl"))
         .await;
@@ -1089,7 +1222,7 @@ class Hook {
 
 hooks: Mapping<String, Hook> = new Mapping<String, Hook> {}
 "#;
-    let mut evaluator = pklr::Evaluator::new();
+    let mut evaluator = pklr::Evaluator::new_async();
     let result = evaluator
         .eval_source(src, std::path::Path::new("test_nested.pkl"))
         .await;
@@ -1150,7 +1283,7 @@ hooks {
     }
 }
 "#;
-    let mut evaluator = pklr::Evaluator::new();
+    let mut evaluator = pklr::Evaluator::new_async();
     let result = evaluator
         .eval_source(src, std::path::Path::new("test_nested_amend.pkl"))
         .await;
@@ -1166,7 +1299,7 @@ hooks {
 async fn test_local_config_pkl() {
     // Test with the actual extracted Config.pkl
     let src = std::fs::read_to_string("/tmp/hk-extracted/Config.pkl").unwrap();
-    let mut evaluator = pklr::Evaluator::new();
+    let mut evaluator = pklr::Evaluator::new_async();
     let result = evaluator
         .eval_source(&src, std::path::Path::new("/tmp/hk-extracted/Config.pkl"))
         .await;
@@ -1182,7 +1315,7 @@ async fn test_local_config_pkl() {
 async fn test_single_builtin() {
     // Test evaluating just one builtin file directly
     let src = std::fs::read_to_string("/tmp/hk-extracted/builtins/actionlint.pkl").unwrap();
-    let mut evaluator = pklr::Evaluator::new();
+    let mut evaluator = pklr::Evaluator::new_async();
     let start = std::time::Instant::now();
     let result = evaluator
         .eval_source(
@@ -1205,7 +1338,7 @@ async fn test_single_builtin() {
 async fn test_builtins_pkl() {
     // Test evaluating Builtins.pkl (which imports all 128 builtins)
     let src = std::fs::read_to_string("/tmp/hk-extracted/Builtins.pkl").unwrap();
-    let mut evaluator = pklr::Evaluator::new();
+    let mut evaluator = pklr::Evaluator::new_async();
     let start = std::time::Instant::now();
     let result = evaluator
         .eval_source(&src, std::path::Path::new("/tmp/hk-extracted/Builtins.pkl"))
@@ -1240,7 +1373,7 @@ class TestMaker {
 local tm = new TestMaker { before = "git init" }
 result = tm.checkPass()
 "#;
-    let mut ev = pklr::Evaluator::new();
+    let mut ev = pklr::Evaluator::new_async();
     let result = ev
         .eval_source(src, std::path::Path::new("test_outer.pkl"))
         .await;
@@ -1262,7 +1395,7 @@ async fn test_outer_before_with_local_config() {
         return;
     }
     // Test: can we evaluate helpers.pkl which uses outer.before?
-    let mut ev = pklr::Evaluator::new();
+    let mut ev = pklr::Evaluator::new_async();
     let result = ev
         .eval_source(
             &src,
@@ -1284,7 +1417,7 @@ async fn test_outer_before_single_builtin() {
     if src.is_empty() {
         return;
     }
-    let mut ev = pklr::Evaluator::new();
+    let mut ev = pklr::Evaluator::new_async();
     let result = ev
         .eval_source(
             &src,

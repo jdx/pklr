@@ -21,16 +21,38 @@ let json = eval_to_json(std::path::Path::new("config.pkl"))?;
 println!("{}", json);
 ```
 
+The default synchronous API uses blocking HTTP and creates no thread or Tokio
+runtime. A default build has no Tokio dependency.
+
+Asynchronous applications can disable default features and enable `async` plus
+any optional features they need:
+
+```toml
+pklr = { version = "2", default-features = false, features = ["async", "package-zip", "miette-diagnostics"] }
+```
+
+```rust
+let json = pklr::eval_to_json_async(std::path::Path::new("config.pkl")).await?;
+```
+
+Async evaluation and `analyze_imports_async` use Tokio filesystem operations;
+blocking-only work such as ZIP extraction and glob walking runs on Tokio's
+blocking pool. For direct construction, use `Evaluator::new_async()`; the
+unsuffixed `Evaluator::new()` always selects blocking capabilities.
+
+Use `EvaluatorBuilder::http_agent` with a custom `pklr::ureq::Agent` for
+synchronous HTTP configuration. The async `AsyncEvaluatorBuilder::http_client`
+accepts a custom `pklr::reqwest::Client`.
+
 Package downloads can be shared across evaluator instances and reused without
 network access:
 
 ```rust
-async fn load_config() -> pklr::Result<serde_json::Value> {
+fn load_config() -> pklr::Result<serde_json::Value> {
     pklr::EvaluatorBuilder::new()
         .package_cache_dir(".pklr-cache")
         .offline(true)
         .eval_to_json(std::path::Path::new("config.pkl"))
-        .await
 }
 ```
 
@@ -40,12 +62,11 @@ so a config importing that package evaluates without any network round trip:
 ```rust
 static PACKAGE: &[u8] = include_bytes!("pkg@1.0.0.zip");
 
-async fn load_bundled_config() -> pklr::Result<serde_json::Value> {
+fn load_bundled_config() -> pklr::Result<serde_json::Value> {
     pklr::EvaluatorBuilder::new()
         .package_cache_dir(".pklr-cache")
         .preload_package("https://example.com/pkg@1.0.0.zip", "zip", PACKAGE)
         .eval_to_json(std::path::Path::new("config.pkl"))
-        .await
 }
 ```
 

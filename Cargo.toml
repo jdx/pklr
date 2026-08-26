@@ -13,19 +13,18 @@ include     = ["/src/**/*", "/tests/**/*", "/Cargo.toml", "/README.md", "/LICENS
 
 [features]
 default = [
-  "parse",
-  "eval-core",
-  "native-io",
-  "http",
-  "package-zip",
+  "blocking",
   "miette-diagnostics",
 ]
 parse = []
 eval-core = ["parse", "dep:async-recursion", "dep:url"]
 native-io = ["eval-core"]
 http = ["eval-core", "dep:reqwest"]
-package-zip = ["http", "native-io", "dep:zip"]
+package-zip-core = ["native-io", "dep:zip"]
+package-zip = ["package-zip-core"]
 miette-diagnostics = ["dep:miette"]
+blocking = ["package-zip-core", "dep:pollster", "dep:rustls", "dep:ureq"]
+async = ["native-io", "http", "dep:tokio"]
 
 [dependencies]
 indexmap    = "2"
@@ -33,8 +32,11 @@ miette     = { version = "7", features = ["derive"], optional = true }
 serde_json = "1"
 thiserror  = "2"
 async-recursion = { version = "1", optional = true }
+pollster         = { version = "1", optional = true }
 reqwest         = { version = "0.13", default-features = false, features = ["rustls"], optional = true }
-tokio           = { version = "1", features = ["rt"], optional = true }
+rustls          = { version = "0.23", default-features = false, features = ["aws-lc-rs", "tls12"], optional = true }
+tokio           = { version = "1", features = ["fs", "rt"], optional = true }
+ureq            = { version = "3", default-features = false, features = ["platform-verifier", "rustls-no-provider"], optional = true }
 zip             = { version = "8", default-features = false, features = ["deflate"], optional = true }
 url             = { version = "2", optional = true }
 
@@ -43,11 +45,15 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [[test]]
 name = "integration"
-required-features = ["native-io", "http", "package-zip"]
+required-features = ["async", "package-zip"]
 
 [[test]]
 name = "pkl_features"
-required-features = ["native-io", "http", "package-zip"]
+required-features = ["async", "package-zip"]
+
+[[test]]
+name = "blocking"
+required-features = ["blocking"]
 
 [profile.dev]
 debug = 1
