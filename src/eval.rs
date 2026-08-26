@@ -3606,11 +3606,14 @@ fn collect_mapping_value_type_names(type_ann: &crate::parser::TypeExpr, names: &
     use crate::parser::TypeExpr;
 
     match type_ann {
-        TypeExpr::Named(name) | TypeExpr::Constrained(name, _) => {
+        TypeExpr::Named(name) | TypeExpr::Constrained(name, _)
+            if string_literal_type_value(name).is_none() =>
+        {
             if !names.contains(name) {
                 names.push(name.clone());
             }
         }
+        TypeExpr::Named(_) | TypeExpr::Constrained(_, _) => {}
         // Keep only the top-level value type. For example,
         // Mapping<String, Mapping<String, Step>> needs a structured Mapping
         // default, not Step as the default for the outer mapping's entries.
@@ -3625,7 +3628,6 @@ fn collect_mapping_value_type_names(type_ann: &crate::parser::TypeExpr, names: &
                 collect_mapping_value_type_names(variant, names);
             }
         }
-        TypeExpr::StringLiteral(_) => {}
     }
 }
 
@@ -3910,7 +3912,9 @@ fn collect_type_import_field_uses(
 ) {
     match ty {
         crate::parser::TypeExpr::Named(name) => {
-            record_type_name_import_use(uses, shadows, name);
+            if string_literal_type_value(name).is_none() {
+                record_type_name_import_use(uses, shadows, name);
+            }
         }
         crate::parser::TypeExpr::Nullable(inner) => {
             collect_type_import_field_uses(inner, uses, shadows);
@@ -3930,7 +3934,6 @@ fn collect_type_import_field_uses(
             record_type_name_import_use(uses, shadows, name);
             collect_expr_import_field_uses(expr, uses, shadows);
         }
-        crate::parser::TypeExpr::StringLiteral(_) => {}
     }
 }
 
@@ -4255,7 +4258,11 @@ fn collect_type_refs(
     shadows: &HashSet<String>,
 ) {
     match ty {
-        crate::parser::TypeExpr::Named(name) => collect_name_root(name, refs, shadows),
+        crate::parser::TypeExpr::Named(name) => {
+            if string_literal_type_value(name).is_none() {
+                collect_name_root(name, refs, shadows);
+            }
+        }
         crate::parser::TypeExpr::Nullable(inner) => collect_type_refs(inner, refs, shadows),
         crate::parser::TypeExpr::Union(types) => {
             for ty in types {
@@ -4272,7 +4279,6 @@ fn collect_type_refs(
             collect_name_root(name, refs, shadows);
             collect_expr_refs(expr, refs, shadows);
         }
-        crate::parser::TypeExpr::StringLiteral(_) => {}
     }
 }
 
@@ -4636,6 +4642,10 @@ fn value_to_display(v: &Value) -> String {
     }
 }
 
+fn string_literal_type_value(name: &str) -> Option<&str> {
+    name.strip_prefix('"')?.strip_suffix('"')
+}
+
 /// Format a TypeExpr for user-facing error messages.
 fn display_type_expr(ty: &crate::parser::TypeExpr) -> String {
     use crate::parser::TypeExpr;
@@ -4652,7 +4662,6 @@ fn display_type_expr(ty: &crate::parser::TypeExpr) -> String {
             format!("{}<{}>", name, args_str.join(", "))
         }
         TypeExpr::Constrained(name, _) => format!("{name}(...)"),
-        TypeExpr::StringLiteral(value) => format!("\"{value}\""),
     }
 }
 
@@ -4661,22 +4670,30 @@ fn display_type_expr(ty: &crate::parser::TypeExpr) -> String {
 fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
     use crate::parser::TypeExpr;
     match ty {
-        TypeExpr::Named(name) => match name.as_str() {
-            "Null" => matches!(val, Value::Null),
-            "Boolean" | "Bool" => matches!(val, Value::Bool(_)),
-            "Int" => matches!(val, Value::Int(_)),
-            "Float" => matches!(val, Value::Float(_)),
-            "Number" => matches!(val, Value::Int(_) | Value::Float(_)),
-            "String" => matches!(val, Value::String(_)),
-            "List" | "Listing" | "Set" => matches!(val, Value::List(_)),
-            "Map" | "Mapping" | "Object" | "Dynamic" => matches!(val, Value::Object(..)),
-            "Function" => matches!(val, Value::Lambda(..)),
-            "Any" => true,
-            _ => {
-                // Unknown type name -- could be a class; treat objects as matching
-                matches!(val, Value::Object(..))
+        TypeExpr::Named(name) => {
+            if let Some(expected) = string_literal_type_value(name) {
+                matches!(val, Value::String(actual) if actual == expected)
+            } else {
+                match name.as_str() {
+                    "Null" => matches!(val, Value::Null),
+                    "Boolean" | "Bool" => matches!(val, Value::Bool(_)),
+                    "Int" => matches!(val, Value::Int(_)),
+                    "Float" => matches!(val, Value::Float(_)),
+                    "Number" => matches!(val, Value::Int(_) | Value::Float(_)),
+                    "String" => matches!(val, Value::String(_)),
+                    "List" | "Listing" | "Set" => matches!(val, Value::List(_)),
+                    "Map" | "Mapping" | "Object" | "Dynamic" => {
+                        matches!(val, Value::Object(..))
+                    }
+                    "Function" => matches!(val, Value::Lambda(..)),
+                    "Any" => true,
+                    _ => {
+                        // Unknown type name -- could be a class; treat objects as matching
+                        matches!(val, Value::Object(..))
+                    }
+                }
             }
-        },
+        }
         TypeExpr::Nullable(inner) => matches!(val, Value::Null) || value_is_type(val, inner),
         TypeExpr::Union(variants) => variants.iter().any(|v| value_is_type(val, v)),
         TypeExpr::Generic(name, _) => {
@@ -4686,9 +4703,6 @@ fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
                 "Map" | "Mapping" => matches!(val, Value::Object(..)),
                 _ => matches!(val, Value::Object(..)),
             }
-        }
-        TypeExpr::StringLiteral(expected) => {
-            matches!(val, Value::String(actual) if actual == expected)
         }
         TypeExpr::Constrained(base_name, _) => {
             // Just check the base type; constraint requires async eval
@@ -4701,28 +4715,29 @@ fn type_is_runtime_checkable(ty: &crate::parser::TypeExpr, scope: &Scope) -> boo
     use crate::parser::TypeExpr;
     match ty {
         TypeExpr::Named(name) => {
-            matches!(
-                name.as_str(),
-                "Null"
-                    | "Boolean"
-                    | "Bool"
-                    | "Int"
-                    | "Float"
-                    | "Number"
-                    | "String"
-                    | "List"
-                    | "Listing"
-                    | "Set"
-                    | "Map"
-                    | "Mapping"
-                    | "Object"
-                    | "Dynamic"
-                    | "Function"
-                    | "Any"
-            ) || scope.get_type_alias(name).is_some()
+            string_literal_type_value(name).is_some()
+                || matches!(
+                    name.as_str(),
+                    "Null"
+                        | "Boolean"
+                        | "Bool"
+                        | "Int"
+                        | "Float"
+                        | "Number"
+                        | "String"
+                        | "List"
+                        | "Listing"
+                        | "Set"
+                        | "Map"
+                        | "Mapping"
+                        | "Object"
+                        | "Dynamic"
+                        | "Function"
+                        | "Any"
+                )
+                || scope.get_type_alias(name).is_some()
                 || resolve_dotted(scope, name).is_some()
         }
-        TypeExpr::StringLiteral(_) => true,
         TypeExpr::Nullable(inner) => type_is_runtime_checkable(inner, scope),
         TypeExpr::Union(variants) => variants
             .iter()

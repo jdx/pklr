@@ -80,7 +80,6 @@ pub enum Modifier {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeExpr {
     Named(String),
-    StringLiteral(String),
     Nullable(Box<TypeExpr>),
     Union(Vec<TypeExpr>),
     Generic(String, Vec<TypeExpr>),
@@ -935,7 +934,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::StringLit(s) => {
                 self.advance();
-                TypeExpr::StringLiteral(s)
+                TypeExpr::Named(format!("\"{s}\""))
             }
             TokenKind::Null => {
                 self.advance();
