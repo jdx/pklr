@@ -18,6 +18,9 @@ pub struct ObjectSource {
     /// The pkl class name this object was instantiated from (e.g., "Step", "Group").
     /// Used by `output.renderer.converters` to apply type-specific transforms.
     pub type_name: Option<String>,
+    /// Parent class names, nearest first. Converters declared for a base class
+    /// also apply to instances of its subclasses.
+    pub parent_type_names: Vec<String>,
     /// Possible value type names for mapping entries, e.g. `Step | Group` from
     /// `Mapping<String, Step | Group>`. Used when amending mappings so bare
     /// entries inherit the right class template.

@@ -1172,6 +1172,43 @@ beta_val = Items["items/beta.pkl"].value
 }
 
 #[tokio::test]
+async fn import_glob_value_is_available_to_class_output() {
+    let temp = TestTempDir::new("pklr_test_import_glob_class_output");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("builtins")).unwrap();
+    std::fs::write(
+        dir.join("builtins/prettier.pkl"),
+        r#"
+prettier { check = "prettier --check" }
+prettier_stdin { check = "prettier --stdin-filepath" }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import* "builtins/*.pkl" as Raw
+
+class Factory {
+    stdin: Boolean = false
+    fixed step = if (stdin)
+        Raw["builtins/prettier.pkl"].prettier_stdin
+    else
+        Raw["builtins/prettier.pkl"].prettier
+}
+
+factory = new Factory {}
+amended = (factory) { stdin = true }
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    assert_eq!(val["factory"]["step"]["check"], "prettier --check");
+    assert_eq!(val["amended"]["step"]["check"], "prettier --stdin-filepath");
+}
+
+#[tokio::test]
 async fn import_glob_double_star_crosses_directories() {
     let temp = TestTempDir::new("pklr_test_import_glob_double_star");
     let dir = temp.path();
@@ -1473,12 +1510,20 @@ async fn import_used_only_by_annotation_does_not_create_builtin_cycle() {
     std::fs::write(
         dir.join("Builtins.pkl"),
         r#"
+import* "builtins/*.pkl" as RawBuiltins
+
 class meta extends Annotation {
     description: String?
 }
 
-import* "builtins/*.pkl" as Builtins
-prettier = Builtins["builtins/prettier.pkl"].prettier
+class PrettierFactory {
+    stdin: Boolean = false
+    fixed step = if (stdin)
+        RawBuiltins["builtins/prettier.pkl"].prettier_stdin
+    else
+        RawBuiltins["builtins/prettier.pkl"].prettier
+}
+prettier = new PrettierFactory {}
 "#,
     )
     .unwrap();
@@ -1489,14 +1534,16 @@ import "../Builtins.pkl"
 
 @Builtins.meta { description = "formatter" }
 prettier = "ok"
+prettier_stdin = "stdin"
 "#,
     )
     .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
         r#"
-import "builtins/prettier.pkl"
-result = prettier.prettier
+import "Builtins.pkl"
+result = Builtins.prettier.step
+amended = ((Builtins.prettier) { stdin = true }).step
 "#,
     )
     .unwrap();
@@ -1504,6 +1551,7 @@ result = prettier.prettier
     let path = dir.join("main.pkl");
     let val = pklr::eval_to_json(&path).await.unwrap();
     assert_eq!(val["result"], "ok");
+    assert_eq!(val["amended"], "stdin");
 }
 
 #[tokio::test]
@@ -4192,6 +4240,36 @@ fn rewrite_url_no_rules_is_identity() {
     );
 }
 
+#[test]
+fn class_instance_rejects_wrong_property_type() {
+    let message = eval_fails(
+        r#"
+class Factory {
+    enabled: Boolean = false
+}
+
+factory = new Factory { enabled = "yes" }
+"#,
+    );
+    assert!(message.contains("enabled"), "{message}");
+    assert!(message.contains("Boolean"), "{message}");
+}
+
+#[test]
+fn class_instance_rejects_value_outside_string_literal_union() {
+    let message = eval_fails(
+        r#"
+class Factory {
+    version: "3" | "4" = "4"
+}
+
+factory = new Factory { version = "5" }
+"#,
+    );
+    assert!(message.contains("version"), "{message}");
+    assert!(message.contains("\"3\"|\"4\""), "{message}");
+}
+
 // ============================================================
 // output.renderer.converters
 // ============================================================
@@ -4251,6 +4329,163 @@ myStep = (base) { check = "b" }
     );
     assert_eq!(json["myStep"]["_type"], "step");
     assert_eq!(json["myStep"]["check"], "b");
+}
+
+#[test]
+fn converter_applies_to_subclass_instance() {
+    let json = eval_with_converters(
+        r#"
+class Factory {
+    fixed output = new { check = "base" }
+}
+class Prettier extends Factory {}
+
+output {
+    renderer {
+        converters {
+            [Factory] = (factory) -> factory.output
+        }
+    }
+}
+
+step = new Prettier {}
+"#,
+    );
+    assert_eq!(json["step"]["check"], "base");
+    assert!(json["step"].get("output").is_none());
+}
+
+#[test]
+fn converter_can_call_module_local_helper() {
+    let json = eval_with_converters(
+        r#"
+class Step {
+    check: String = ""
+}
+
+local function renderStep(step) = new Dynamic {
+    _type = "step"
+    ...step.toMap().toDynamic()
+}
+
+output {
+    renderer {
+        converters {
+            [Step] = (step) -> renderStep(step)
+        }
+    }
+}
+
+step = new Step { check = "cargo test" }
+"#,
+    );
+    assert_eq!(json["step"]["_type"], "step");
+    assert_eq!(json["step"]["check"], "cargo test");
+}
+
+#[test]
+fn converter_can_call_output_local_helper() {
+    let json = eval_with_converters(
+        r#"
+class Step {
+    check: String = ""
+}
+
+output {
+    local function renderStep(step) = new Dynamic {
+        _type = "step"
+        ...step.toMap().toDynamic()
+    }
+    renderer {
+        converters {
+            [Step] = (step) -> renderStep(step)
+        }
+    }
+}
+
+step = new Step { check = "cargo test" }
+"#,
+    );
+    assert_eq!(json["step"]["_type"], "step");
+    assert_eq!(json["step"]["check"], "cargo test");
+}
+
+#[test]
+fn hk_style_factories_support_options_step_amendments_and_containers() {
+    let json = eval_with_converters(
+        r#"
+open class Step {
+    check: String = ""
+    batch: Boolean = false
+}
+
+abstract class BuiltinFactory {
+    step: Step
+}
+
+class Gitleaks extends BuiltinFactory {
+    staged: Boolean = false
+    local factory = this
+    step = new Step {
+        check = if (factory.staged) "gitleaks --staged" else "gitleaks"
+    }
+}
+
+local gitleaks = new Gitleaks {}
+
+plain = gitleaks
+configured = (gitleaks) {
+    staged = true
+    step { batch = true }
+}
+steps: Mapping<String, BuiltinFactory | Step> = new Mapping {
+    ["factory"] = (gitleaks) { staged = true }
+    ["manual"] = new Step { check = "cargo test" }
+}
+all: Mapping<String, BuiltinFactory> = new Mapping {
+    ["gitleaks"] = gitleaks
+}
+
+output {
+    local function renderStep(step) = new Dynamic {
+        _type = "step"
+        ...step.toMap().toDynamic()
+    }
+    renderer {
+        converters {
+            [BuiltinFactory] = (factory) -> renderStep(factory.step)
+            [Step] = (step) -> renderStep(step)
+        }
+    }
+}
+"#,
+    );
+
+    assert_eq!(json["plain"]["check"], "gitleaks");
+    assert_eq!(json["plain"]["batch"], false);
+    assert_eq!(json["plain"]["_type"], "step");
+    assert_eq!(json["configured"]["check"], "gitleaks --staged");
+    assert_eq!(json["configured"]["batch"], true);
+    assert_eq!(json["configured"]["_type"], "step");
+    assert_eq!(json["steps"]["factory"]["check"], "gitleaks --staged");
+    assert_eq!(json["steps"]["manual"]["check"], "cargo test");
+    assert_eq!(json["all"]["gitleaks"]["check"], "gitleaks");
+    assert!(json["configured"].get("staged").is_none());
+    assert!(json["configured"].get("step").is_none());
+}
+
+#[test]
+fn hk_style_factory_rejects_unknown_input() {
+    let message = eval_fails(
+        r#"
+class Step {}
+abstract class BuiltinFactory { step: Step }
+class Prettier extends BuiltinFactory { step = new Step {} }
+prettier = new Prettier { futureOption = true }
+"#,
+    );
+    assert!(message.contains("futureOption"), "{message}");
+    assert!(message.contains("non-open"), "{message}");
 }
 
 #[test]
