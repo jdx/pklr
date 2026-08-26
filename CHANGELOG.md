@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/jdx/pklr/compare/v1.5.1...v2.0.0) - 2026-08-26
+
+### Added
+
+- [**breaking**] make blocking evaluation the default ([#162](https://github.com/jdx/pklr/pull/162))
+
+### Fixed
+
+- *(eval)* support com.github.actions packages ([#164](https://github.com/jdx/pklr/pull/164))
+
 ## [1.5.1](https://github.com/jdx/pklr/compare/v1.5.0...v1.5.1) - 2026-08-26
 
 ### Fixed
