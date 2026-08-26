@@ -1395,11 +1395,8 @@ impl Evaluator {
         // before locals are evaluated, then keep direct aliases synchronized as
         // properties populate the instance.
         let mut all_props: IndexMap<String, Value> = IndexMap::new();
-        child_scope.set(
-            "this".into(),
-            Value::Object(Arc::new(all_props.clone()), None),
-        );
         let mut this_aliases = Vec::new();
+        refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
         // First pass: collect locals, class definitions, and type aliases in
         // declaration order so they can reference each other correctly.
         // Non-lambda locals are evaluated eagerly; lambda locals are deferred
@@ -1469,22 +1466,14 @@ impl Evaluator {
                     {
                         continue; // abstract without value — skip (must be overridden)
                     }
-                    let snapshot = Value::Object(Arc::new(all_props.clone()), None);
-                    child_scope.set("this".into(), snapshot.clone());
-                    for alias in &this_aliases {
-                        child_scope.set(alias.clone(), snapshot.clone());
-                    }
+                    refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                     if let Some(v) = self.eval_property(prop, &child_scope, depth).await? {
                         child_scope.set(prop.name.clone(), v.clone());
                         all_props.insert(prop.name.clone(), v.clone());
                         if !has_modifier(mods, Modifier::Hidden) {
                             map.insert(prop.name.clone(), v);
                         }
-                        // Update `this` with all properties (including hidden)
-                        child_scope.set(
-                            "this".into(),
-                            Value::Object(Arc::new(all_props.clone()), None),
-                        );
+                        refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                     }
                 }
                 Entry::DynProperty(key_expr, val_expr) => {
@@ -1537,12 +1526,16 @@ impl Evaluator {
                         val
                     };
                     let key_str = value_to_key(&key)?;
+                    all_props.insert(key_str.clone(), val.clone());
                     map.insert(key_str, val);
+                    refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                 }
                 Entry::Spread(expr) => {
                     let val = self.eval_expr(expr, &child_scope, depth).await?;
                     if let Value::Object(m, _) = val {
+                        all_props.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
                         map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                        refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                     }
                 }
                 Entry::ForGenerator(fgen) => {
@@ -1558,7 +1551,9 @@ impl Evaluator {
                         }
                         let body_val = self.eval_entries(&fgen.body, &iter_scope, depth).await?;
                         if let Value::Object(m, _) = body_val {
+                            all_props.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
                             map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                            refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                         }
                     }
                 }
@@ -1567,12 +1562,16 @@ impl Evaluator {
                     if is_truthy(&cond) {
                         let body_val = self.eval_entries(&wgen.body, &child_scope, depth).await?;
                         if let Value::Object(m, _) = body_val {
+                            all_props.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
                             map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                            refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                         }
                     } else if let Some(else_body) = &wgen.else_body {
                         let else_val = self.eval_entries(else_body, &child_scope, depth).await?;
                         if let Value::Object(m, _) = else_val {
+                            all_props.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
                             map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                            refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                         }
                     }
                 }
@@ -1582,6 +1581,7 @@ impl Evaluator {
         }
         // Evaluate deferred local lambdas (function definitions) AFTER all
         // properties so they capture overridden values (late binding).
+        refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
         for (name, expr) in deferred_lambdas {
             let val = self.eval_expr(expr, &child_scope, depth).await?;
             child_scope.set(name, val);
@@ -3462,6 +3462,18 @@ impl Evaluator {
             }
             other => Ok(other),
         }
+    }
+}
+
+fn refresh_this_aliases(
+    scope: &mut Scope,
+    aliases: &[String],
+    properties: &IndexMap<String, Value>,
+) {
+    let snapshot = Value::Object(Arc::new(properties.clone()), None);
+    scope.set("this".into(), snapshot.clone());
+    for alias in aliases {
+        scope.set(alias.clone(), snapshot.clone());
     }
 }
 

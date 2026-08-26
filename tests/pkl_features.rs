@@ -2423,6 +2423,24 @@ x = new Factory {
 }
 
 #[test]
+fn class_local_this_alias_is_complete_for_deferred_methods() {
+    let json = eval(
+        r#"
+class Factory {
+    local factory = this
+    first: String = "first"
+    last: String = "last"
+    function lastValue(): String = factory.last
+}
+
+local factory = new Factory {}
+result = factory.lastValue()
+"#,
+    );
+    assert_eq!(json["result"], "last");
+}
+
+#[test]
 fn class_with_type_params() {
     let json = eval(
         r#"
