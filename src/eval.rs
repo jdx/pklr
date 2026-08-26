@@ -1265,6 +1265,7 @@ impl Evaluator {
                 scope: IndexMap::new(),
                 is_open: true,
                 type_name: None,
+                parent_type_names: Vec::new(),
                 mapping_value_types: Vec::new(),
                 deprecated,
             }))
@@ -1352,7 +1353,7 @@ impl Evaluator {
                         body,
                         scope,
                         depth,
-                        base_type_name,
+                        base_type_name.map(|name| (name, src.parent_type_names.clone())),
                     )
                     .await?,
                 ));
@@ -1389,6 +1390,13 @@ impl Evaluator {
         }
         let outer_obj = Value::Object(Arc::new(outer_map), None);
         child_scope.set("outer".into(), outer_obj);
+        // Class-as-a-function definitions commonly use `local self = this` so
+        // output properties can close over the amended instance. Bind `this`
+        // before locals are evaluated, then keep direct aliases synchronized as
+        // properties populate the instance.
+        let mut all_props: IndexMap<String, Value> = IndexMap::new();
+        let mut this_aliases = Vec::new();
+        refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
         // First pass: collect locals, class definitions, and type aliases in
         // declaration order so they can reference each other correctly.
         // Non-lambda locals are evaluated eagerly; lambda locals are deferred
@@ -1405,6 +1413,10 @@ impl Evaluator {
                     // calls a lambda local defined just above it).
                     let val = self.eval_expr(expr, &child_scope, depth).await?;
                     child_scope.set(prop.name.clone(), val);
+                    if matches!(expr, Expr::Ident(name) if name == "this" || this_aliases.contains(name))
+                    {
+                        this_aliases.push(prop.name.clone());
+                    }
                     if matches!(expr, crate::parser::Expr::Lambda(..)) {
                         // Lambda evaluation only captures the current scope; it
                         // does not run the body. Bind once for declaration-order
@@ -1438,13 +1450,6 @@ impl Evaluator {
             .await?;
 
         let mut map: IndexMap<String, Value> = IndexMap::new();
-        // all_props includes hidden properties — used for `this` snapshot
-        let mut all_props: IndexMap<String, Value> = IndexMap::new();
-        // Bind `this` so properties can reference the object being built
-        child_scope.set(
-            "this".into(),
-            Value::Object(Arc::new(all_props.clone()), None),
-        );
         for entry in entries {
             match entry {
                 Entry::Property(prop) => {
@@ -1462,17 +1467,14 @@ impl Evaluator {
                     {
                         continue; // abstract without value — skip (must be overridden)
                     }
+                    refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                     if let Some(v) = self.eval_property(prop, &child_scope, depth).await? {
                         child_scope.set(prop.name.clone(), v.clone());
                         all_props.insert(prop.name.clone(), v.clone());
                         if !has_modifier(mods, Modifier::Hidden) {
                             map.insert(prop.name.clone(), v);
                         }
-                        // Update `this` with all properties (including hidden)
-                        child_scope.set(
-                            "this".into(),
-                            Value::Object(Arc::new(all_props.clone()), None),
-                        );
+                        refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                     }
                 }
                 Entry::DynProperty(key_expr, val_expr) => {
@@ -1489,7 +1491,9 @@ impl Evaluator {
                                 body,
                                 &child_scope,
                                 depth,
-                                src.type_name.clone(),
+                                src.type_name
+                                    .clone()
+                                    .map(|name| (name, src.parent_type_names.clone())),
                             )
                             .await?;
                         // Propagate the template's type_name so converters can match.
@@ -1507,6 +1511,7 @@ impl Evaluator {
                                     scope: IndexMap::new(),
                                     is_open: true,
                                     type_name: Some(tn.clone()),
+                                    parent_type_names: Vec::new(),
                                     mapping_value_types: Vec::new(),
                                     deprecated: merge_deprecated(&src.deprecated, body),
                                 },
@@ -1522,12 +1527,16 @@ impl Evaluator {
                         val
                     };
                     let key_str = value_to_key(&key)?;
+                    all_props.insert(key_str.clone(), val.clone());
                     map.insert(key_str, val);
+                    refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                 }
                 Entry::Spread(expr) => {
                     let val = self.eval_expr(expr, &child_scope, depth).await?;
                     if let Value::Object(m, _) = val {
+                        all_props.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
                         map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                        refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                     }
                 }
                 Entry::ForGenerator(fgen) => {
@@ -1543,7 +1552,9 @@ impl Evaluator {
                         }
                         let body_val = self.eval_entries(&fgen.body, &iter_scope, depth).await?;
                         if let Value::Object(m, _) = body_val {
+                            all_props.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
                             map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                            refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                         }
                     }
                 }
@@ -1552,12 +1563,16 @@ impl Evaluator {
                     if is_truthy(&cond) {
                         let body_val = self.eval_entries(&wgen.body, &child_scope, depth).await?;
                         if let Value::Object(m, _) = body_val {
+                            all_props.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
                             map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                            refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                         }
                     } else if let Some(else_body) = &wgen.else_body {
                         let else_val = self.eval_entries(else_body, &child_scope, depth).await?;
                         if let Value::Object(m, _) = else_val {
+                            all_props.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
                             map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                            refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                         }
                     }
                 }
@@ -1567,6 +1582,7 @@ impl Evaluator {
         }
         // Evaluate deferred local lambdas (function definitions) AFTER all
         // properties so they capture overridden values (late binding).
+        refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
         for (name, expr) in deferred_lambdas {
             let val = self.eval_expr(expr, &child_scope, depth).await?;
             child_scope.set(name, val);
@@ -1576,6 +1592,7 @@ impl Evaluator {
             scope: child_scope.flatten(),
             is_open: true, // default: allow new properties
             type_name: None,
+            parent_type_names: Vec::new(),
             mapping_value_types: Vec::new(),
             deprecated: collect_deprecated(entries),
         };
@@ -1598,6 +1615,15 @@ impl Evaluator {
         depth: usize,
     ) -> Result<Value> {
         let parent_val = parent_name.and_then(|name| resolve_dotted(scope, name));
+        let parent_type_names = match &parent_val {
+            Some(Value::Object(_, Some(source))) => source
+                .type_name
+                .iter()
+                .cloned()
+                .chain(source.parent_type_names.iter().cloned())
+                .collect(),
+            _ => Vec::new(),
+        };
 
         let mut child_scope = scope.child();
         if let Some(ref pv) = parent_val {
@@ -1688,6 +1714,7 @@ impl Evaluator {
                 let mut new_src = (*src).clone();
                 new_src.is_open = is_open;
                 new_src.type_name = Some(class_name.to_string());
+                new_src.parent_type_names = parent_type_names;
                 Value::Object(map, Some(Arc::new(new_src)))
             } else {
                 val
@@ -1806,7 +1833,7 @@ impl Evaluator {
         overlay_entries: &[Entry],
         current_scope: &Scope,
         depth: usize,
-        base_type_name: Option<String>,
+        base_type: Option<(String, Vec<String>)>,
     ) -> Result<Value> {
         // Build merged entry list preserving base order.
         // Overridden properties are replaced in-place so that later
@@ -1885,13 +1912,58 @@ impl Evaluator {
         // Evaluate the merged entries (eval_entries handles locals, classes,
         // and evaluates properties in order with each added to scope)
         let result = self.eval_entries(&merged, &eval_scope, depth + 1).await?;
+        let assigned_property_names = merged
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Property(prop) if prop.value.is_some() || prop.body.is_some() => {
+                    Some(prop.name.as_str())
+                }
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        if let Value::Object(map, source) = &result {
+            for entry in base_entries {
+                let Entry::Property(prop) = entry else {
+                    continue;
+                };
+                let Some(type_ann) = &prop.type_ann else {
+                    continue;
+                };
+                let value = map.get(&prop.name).or_else(|| {
+                    assigned_property_names
+                        .contains(prop.name.as_str())
+                        .then(|| {
+                            source
+                                .as_ref()
+                                .and_then(|source| source.scope.get(&prop.name))
+                        })
+                        .flatten()
+                });
+                let Some(value) = value else {
+                    continue;
+                };
+                if type_is_runtime_checkable(type_ann, &eval_scope)
+                    && !self
+                        .eval_type_check(value, type_ann, &eval_scope, depth + 1)
+                        .await?
+                {
+                    return Err(Error::Eval(format!(
+                        "property '{}' expected {}, got {}",
+                        prop.name,
+                        display_type_expr(type_ann),
+                        value_type_name(value)
+                    )));
+                }
+            }
+        }
         // Amending an object preserves its class identity (so `is Foo` and
         // output converters still match). eval_entries does not know the base
         // type, so re-tag the result here.
-        match (base_type_name, result) {
-            (Some(tn), Value::Object(map, Some(src))) => {
+        match (base_type, result) {
+            (Some((type_name, parent_type_names)), Value::Object(map, Some(src))) => {
                 let mut new_src = (*src).clone();
-                new_src.type_name = Some(tn);
+                new_src.type_name = Some(type_name);
+                new_src.parent_type_names = parent_type_names;
                 Ok(Value::Object(map, Some(Arc::new(new_src))))
             }
             (_, other) => Ok(other),
@@ -2047,6 +2119,7 @@ impl Evaluator {
                             scope: source_scope,
                             is_open: true,
                             type_name: None,
+                            parent_type_names: Vec::new(),
                             mapping_value_types: generic_params.iter().skip(1).cloned().collect(),
                             deprecated,
                         };
@@ -2115,7 +2188,10 @@ impl Evaluator {
                                     entries,
                                     scope,
                                     depth,
-                                    base_src.type_name.clone(),
+                                    base_src
+                                        .type_name
+                                        .clone()
+                                        .map(|name| (name, base_src.parent_type_names.clone())),
                                 )
                                 .await?;
                             // Preserve the base class's is_open flag and tag the
@@ -2128,6 +2204,7 @@ impl Evaluator {
                                         s.is_open = is_open;
                                     }
                                     s.type_name = tn;
+                                    s.parent_type_names = base_src.parent_type_names.clone();
                                     s
                                 } else {
                                     ObjectSource {
@@ -2135,6 +2212,7 @@ impl Evaluator {
                                         scope: IndexMap::new(),
                                         is_open,
                                         type_name: tn,
+                                        parent_type_names: Vec::new(),
                                         mapping_value_types: Vec::new(),
                                         deprecated: merge_deprecated(&base_src.deprecated, entries),
                                     }
@@ -2165,6 +2243,7 @@ impl Evaluator {
                                 scope: IndexMap::new(),
                                 is_open: true,
                                 type_name: type_name.clone(),
+                                parent_type_names: Vec::new(),
                                 mapping_value_types: Vec::new(),
                                 deprecated,
                             };
@@ -2870,7 +2949,10 @@ impl Evaluator {
                         overlay_entries,
                         scope,
                         depth,
-                        base_src.type_name.clone(),
+                        base_src
+                            .type_name
+                            .clone()
+                            .map(|name| (name, base_src.parent_type_names.clone())),
                     )
                     .await;
             }
@@ -3144,7 +3226,9 @@ impl Evaluator {
                                         &overlay_entries,
                                         &entry_scope,
                                         depth,
-                                        src.type_name.clone(),
+                                        src.type_name
+                                            .clone()
+                                            .map(|name| (name, src.parent_type_names.clone())),
                                     )
                                     .await?
                                 } else if explicit_default.is_some() && type_default.is_some() {
@@ -3163,7 +3247,9 @@ impl Evaluator {
                                         body,
                                         &entry_scope,
                                         depth,
-                                        src.type_name.clone(),
+                                        src.type_name
+                                            .clone()
+                                            .map(|name| (name, src.parent_type_names.clone())),
                                     )
                                     .await?
                                 };
@@ -3182,6 +3268,7 @@ impl Evaluator {
                                         scope: IndexMap::new(),
                                         is_open: true,
                                         type_name: Some(tn.to_string()),
+                                        parent_type_names: Vec::new(),
                                         mapping_value_types: Vec::new(),
                                         deprecated: merge_deprecated(&src.deprecated, body),
                                     },
@@ -3251,6 +3338,16 @@ impl Evaluator {
         let Some(output_body) = &output_prop.body else {
             return;
         };
+        let mut converter_scope = scope.child();
+        for entry in output_body {
+            if let Entry::Property(prop) = entry
+                && has_modifier(&prop.modifiers, Modifier::Local)
+                && let Some(expr) = &prop.value
+                && let Ok(value) = self.eval_expr(expr, &converter_scope, depth).await
+            {
+                converter_scope.set(prop.name.clone(), value);
+            }
+        }
         // Find `renderer { converters { ... } }` inside output
         let Some(renderer_body) = output_body.iter().find_map(|entry| {
             if let Entry::Property(p) = entry
@@ -3263,6 +3360,15 @@ impl Evaluator {
         }) else {
             return;
         };
+        for entry in renderer_body {
+            if let Entry::Property(prop) = entry
+                && has_modifier(&prop.modifiers, Modifier::Local)
+                && let Some(expr) = &prop.value
+                && let Ok(value) = self.eval_expr(expr, &converter_scope, depth).await
+            {
+                converter_scope.set(prop.name.clone(), value);
+            }
+        }
         let Some(converters_body) = renderer_body.iter().find_map(|entry| {
             if let Entry::Property(p) = entry
                 && p.name == "converters"
@@ -3285,7 +3391,7 @@ impl Evaluator {
                     _ => continue,
                 };
                 // Evaluate the lambda value
-                if let Ok(lambda) = self.eval_expr(val_expr, scope, depth).await
+                if let Ok(lambda) = self.eval_expr(val_expr, &converter_scope, depth).await
                     && matches!(lambda, Value::Lambda(..))
                 {
                     self.converters.push((class_name, lambda));
@@ -3315,38 +3421,41 @@ impl Evaluator {
         match value {
             Value::Object(map, ref src) => {
                 // Check if this object has a type_name that matches a converter
-                let type_name = src.as_ref().and_then(|s| s.type_name.as_deref());
+                let type_names = src
+                    .iter()
+                    .flat_map(|source| {
+                        source
+                            .type_name
+                            .iter()
+                            .chain(source.parent_type_names.iter())
+                    })
+                    .collect::<Vec<_>>();
 
-                if let Some(tn) = type_name {
-                    for (conv_name, lambda) in converters {
-                        // Match exact name, or as a dotted suffix
-                        // (e.g., converter "Step" matches type "Step" or "Config.Step")
-                        let matches = conv_name == tn
-                            || (tn.len() > conv_name.len()
-                                && tn.ends_with(conv_name.as_str())
-                                && tn.as_bytes()[tn.len() - conv_name.len() - 1] == b'.')
-                            || (conv_name.len() > tn.len()
-                                && conv_name.ends_with(tn)
-                                && conv_name.as_bytes()[conv_name.len() - tn.len() - 1] == b'.');
-                        if matches
-                            && !blocked_root_converters.contains(conv_name)
-                            && let Value::Lambda(params, body, captured) = lambda
-                        {
-                            let mut call_scope = Scope::default();
-                            for (k, v) in captured.iter() {
-                                call_scope.set(k.clone(), v.clone());
+                if !type_names.is_empty() {
+                    for type_name in type_names {
+                        for (conv_name, lambda) in converters {
+                            if type_names_match(conv_name, type_name)
+                                && !blocked_root_converters.contains(conv_name)
+                                && let Value::Lambda(params, body, captured) = lambda
+                            {
+                                let mut call_scope = Scope::default();
+                                for (k, v) in captured.iter() {
+                                    call_scope.set(k.clone(), v.clone());
+                                }
+                                // Bind the object as the first parameter
+                                if let Some(param) = params.first() {
+                                    call_scope.set(
+                                        param.clone(),
+                                        Value::Object(map.clone(), src.clone()),
+                                    );
+                                }
+                                let result = self.eval_expr(body, &call_scope, 0).await?;
+                                let mut blocked = blocked_root_converters;
+                                blocked.push(conv_name.clone());
+                                return self
+                                    .apply_converters_recursive(result, converters, blocked)
+                                    .await;
                             }
-                            // Bind the object as the first parameter
-                            if let Some(param) = params.first() {
-                                call_scope
-                                    .set(param.clone(), Value::Object(map.clone(), src.clone()));
-                            }
-                            let result = self.eval_expr(body, &call_scope, 0).await?;
-                            let mut blocked = blocked_root_converters;
-                            blocked.push(conv_name.clone());
-                            return self
-                                .apply_converters_recursive(result, converters, blocked)
-                                .await;
                         }
                     }
                 }
@@ -3374,6 +3483,18 @@ impl Evaluator {
             }
             other => Ok(other),
         }
+    }
+}
+
+fn refresh_this_aliases(
+    scope: &mut Scope,
+    aliases: &[String],
+    properties: &IndexMap<String, Value>,
+) {
+    let snapshot = Value::Object(Arc::new(properties.clone()), None);
+    scope.set("this".into(), snapshot.clone());
+    for alias in aliases {
+        scope.set(alias.clone(), snapshot.clone());
     }
 }
 
@@ -3472,6 +3593,7 @@ fn apply_mapping_type_annotation(value: &mut Value, type_ann: Option<&crate::par
             scope: IndexMap::new(),
             is_open: true,
             type_name: None,
+            parent_type_names: Vec::new(),
             mapping_value_types: Vec::new(),
             deprecated: IndexMap::new(),
         });
@@ -3505,11 +3627,14 @@ fn collect_mapping_value_type_names(type_ann: &crate::parser::TypeExpr, names: &
     use crate::parser::TypeExpr;
 
     match type_ann {
-        TypeExpr::Named(name) | TypeExpr::Constrained(name, _) => {
+        TypeExpr::Named(name) | TypeExpr::Constrained(name, _)
+            if string_literal_type_value(name).is_none() =>
+        {
             if !names.contains(name) {
                 names.push(name.clone());
             }
         }
+        TypeExpr::Named(_) | TypeExpr::Constrained(_, _) => {}
         // Keep only the top-level value type. For example,
         // Mapping<String, Mapping<String, Step>> needs a structured Mapping
         // default, not Step as the default for the outer mapping's entries.
@@ -3808,7 +3933,9 @@ fn collect_type_import_field_uses(
 ) {
     match ty {
         crate::parser::TypeExpr::Named(name) => {
-            record_type_name_import_use(uses, shadows, name);
+            if string_literal_type_value(name).is_none() {
+                record_type_name_import_use(uses, shadows, name);
+            }
         }
         crate::parser::TypeExpr::Nullable(inner) => {
             collect_type_import_field_uses(inner, uses, shadows);
@@ -4152,7 +4279,11 @@ fn collect_type_refs(
     shadows: &HashSet<String>,
 ) {
     match ty {
-        crate::parser::TypeExpr::Named(name) => collect_name_root(name, refs, shadows),
+        crate::parser::TypeExpr::Named(name) => {
+            if string_literal_type_value(name).is_none() {
+                collect_name_root(name, refs, shadows);
+            }
+        }
         crate::parser::TypeExpr::Nullable(inner) => collect_type_refs(inner, refs, shadows),
         crate::parser::TypeExpr::Union(types) => {
             for ty in types {
@@ -4532,6 +4663,10 @@ fn value_to_display(v: &Value) -> String {
     }
 }
 
+fn string_literal_type_value(name: &str) -> Option<&str> {
+    name.strip_prefix('"')?.strip_suffix('"')
+}
+
 /// Format a TypeExpr for user-facing error messages.
 fn display_type_expr(ty: &crate::parser::TypeExpr) -> String {
     use crate::parser::TypeExpr;
@@ -4556,22 +4691,30 @@ fn display_type_expr(ty: &crate::parser::TypeExpr) -> String {
 fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
     use crate::parser::TypeExpr;
     match ty {
-        TypeExpr::Named(name) => match name.as_str() {
-            "Null" => matches!(val, Value::Null),
-            "Boolean" | "Bool" => matches!(val, Value::Bool(_)),
-            "Int" => matches!(val, Value::Int(_)),
-            "Float" => matches!(val, Value::Float(_)),
-            "Number" => matches!(val, Value::Int(_) | Value::Float(_)),
-            "String" => matches!(val, Value::String(_)),
-            "List" | "Listing" | "Set" => matches!(val, Value::List(_)),
-            "Map" | "Mapping" | "Object" | "Dynamic" => matches!(val, Value::Object(..)),
-            "Function" => matches!(val, Value::Lambda(..)),
-            "Any" => true,
-            _ => {
-                // Unknown type name -- could be a class; treat objects as matching
-                matches!(val, Value::Object(..))
+        TypeExpr::Named(name) => {
+            if let Some(expected) = string_literal_type_value(name) {
+                matches!(val, Value::String(actual) if actual == expected)
+            } else {
+                match name.as_str() {
+                    "Null" => matches!(val, Value::Null),
+                    "Boolean" | "Bool" => matches!(val, Value::Bool(_)),
+                    "Int" => matches!(val, Value::Int(_)),
+                    "Float" => matches!(val, Value::Float(_)),
+                    "Number" => matches!(val, Value::Int(_) | Value::Float(_)),
+                    "String" => matches!(val, Value::String(_)),
+                    "List" | "Listing" | "Set" => matches!(val, Value::List(_)),
+                    "Map" | "Mapping" | "Object" | "Dynamic" => {
+                        matches!(val, Value::Object(..))
+                    }
+                    "Function" => matches!(val, Value::Lambda(..)),
+                    "Any" => true,
+                    _ => {
+                        // Unknown type name -- could be a class; treat objects as matching
+                        matches!(val, Value::Object(..))
+                    }
+                }
             }
-        },
+        }
         TypeExpr::Nullable(inner) => matches!(val, Value::Null) || value_is_type(val, inner),
         TypeExpr::Union(variants) => variants.iter().any(|v| value_is_type(val, v)),
         TypeExpr::Generic(name, _) => {
@@ -4585,6 +4728,44 @@ fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
         TypeExpr::Constrained(base_name, _) => {
             // Just check the base type; constraint requires async eval
             value_is_type(val, &TypeExpr::Named(base_name.clone()))
+        }
+    }
+}
+
+fn type_is_runtime_checkable(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
+    use crate::parser::TypeExpr;
+    match ty {
+        TypeExpr::Named(name) => {
+            string_literal_type_value(name).is_some()
+                || matches!(
+                    name.as_str(),
+                    "Null"
+                        | "Boolean"
+                        | "Bool"
+                        | "Int"
+                        | "Float"
+                        | "Number"
+                        | "String"
+                        | "List"
+                        | "Listing"
+                        | "Set"
+                        | "Map"
+                        | "Mapping"
+                        | "Object"
+                        | "Dynamic"
+                        | "Function"
+                        | "Any"
+                )
+                || scope.get_type_alias(name).is_some()
+                || resolve_dotted(scope, name).is_some()
+        }
+        TypeExpr::Nullable(inner) => type_is_runtime_checkable(inner, scope),
+        TypeExpr::Union(variants) => variants
+            .iter()
+            .all(|variant| type_is_runtime_checkable(variant, scope)),
+        TypeExpr::Generic(_, _) => true,
+        TypeExpr::Constrained(name, _) => {
+            type_is_runtime_checkable(&TypeExpr::Named(name.clone()), scope)
         }
     }
 }

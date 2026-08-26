@@ -934,7 +934,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::StringLit(s) => {
                 self.advance();
-                TypeExpr::Named(s)
+                TypeExpr::Named(format!("\"{s}\""))
             }
             TokenKind::Null => {
                 self.advance();
