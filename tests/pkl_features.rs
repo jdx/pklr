@@ -8,7 +8,7 @@ use pklr::eval::Evaluator;
 fn eval(src: &str) -> serde_json::Value {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let mut ev = Evaluator::new();
+        let mut ev = Evaluator::new_async();
         let path = std::path::Path::new("test.pkl");
         let val = ev.eval_source(src, path).await.unwrap();
         val.to_json()
@@ -19,7 +19,7 @@ fn eval(src: &str) -> serde_json::Value {
 fn eval_with_converters(src: &str) -> serde_json::Value {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let mut ev = Evaluator::new();
+        let mut ev = Evaluator::new_async();
         let path = std::path::Path::new("test.pkl");
         let val = ev.eval_source(src, path).await.unwrap();
         let val = ev.apply_converters(val).await.unwrap();
@@ -30,7 +30,7 @@ fn eval_with_converters(src: &str) -> serde_json::Value {
 fn eval_fails(src: &str) -> String {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let mut ev = Evaluator::new();
+        let mut ev = Evaluator::new_async();
         let path = std::path::Path::new("test.pkl");
         match ev.eval_source(src, path).await {
             Err(e) => e.to_string(),
@@ -1023,7 +1023,7 @@ null_safe = "false"?.toBoolean()
 
 #[tokio::test]
 async fn import_local_file() {
-    let mut ev = pklr::eval::Evaluator::new();
+    let mut ev = pklr::eval::Evaluator::new_async();
     // Set base path so relative imports resolve correctly
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     ev.set_base_path(&base);
@@ -1043,7 +1043,7 @@ x = helper.value
 
 #[tokio::test]
 async fn amends_local_file() {
-    let mut ev = pklr::eval::Evaluator::new();
+    let mut ev = pklr::eval::Evaluator::new_async();
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     ev.set_base_path(&base);
     let src = r#"
@@ -1062,7 +1062,7 @@ name = "override"
 
 #[tokio::test]
 async fn amends_strips_inherited_class_definitions() {
-    let mut ev = pklr::eval::Evaluator::new();
+    let mut ev = pklr::eval::Evaluator::new_async();
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     ev.set_base_path(&base);
     let src = r#"
@@ -1081,7 +1081,7 @@ name = "override"
 
 #[tokio::test]
 async fn extends_strips_inherited_class_definitions() {
-    let mut ev = pklr::eval::Evaluator::new();
+    let mut ev = pklr::eval::Evaluator::new_async();
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     ev.set_base_path(&base);
     let src = r#"
@@ -1104,7 +1104,7 @@ name = "child"
 
 #[tokio::test]
 async fn circular_import_does_not_loop() {
-    let mut ev = pklr::eval::Evaluator::new();
+    let mut ev = pklr::eval::Evaluator::new_async();
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     ev.set_base_path(&base);
     let path = base.join("circular_a.pkl");
@@ -1146,7 +1146,9 @@ result = a.a_value
     )
     .unwrap();
 
-    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
     assert_eq!(val["result"], "from_a");
 }
 
@@ -1156,7 +1158,7 @@ result = a.a_value
 
 #[tokio::test]
 async fn import_glob() {
-    let mut ev = pklr::eval::Evaluator::new();
+    let mut ev = pklr::eval::Evaluator::new_async();
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     ev.set_base_path(&base);
     let src = r#"
@@ -1203,7 +1205,9 @@ amended = (factory) { stdin = true }
     )
     .unwrap();
 
-    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
     assert_eq!(val["factory"]["step"]["check"], "prettier --check");
     assert_eq!(val["amended"]["step"]["check"], "prettier --stdin-filepath");
 }
@@ -1224,7 +1228,7 @@ has_self = Index.containsKey("hk.pkl")
     )
     .unwrap();
 
-    let val = pklr::eval_to_json(&dir.join("hk.pkl")).await.unwrap();
+    let val = pklr::eval_to_json_async(&dir.join("hk.pkl")).await.unwrap();
     assert_eq!(val["value"], "foo");
     assert_eq!(val["has_self"], false);
 }
@@ -1247,7 +1251,7 @@ has_nested = Index.containsKey("nested/config/bar.pkl")
     )
     .unwrap();
 
-    let val = pklr::eval_to_json(&dir.join("hk.pkl")).await.unwrap();
+    let val = pklr::eval_to_json_async(&dir.join("hk.pkl")).await.unwrap();
     assert_eq!(val["value"], "foo");
     assert_eq!(val["has_nested"], false);
 }
@@ -1269,7 +1273,9 @@ nested_value = Index["nested/foo.pkl"].value
     )
     .unwrap();
 
-    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
     assert_eq!(val["root_value"], "root");
     assert_eq!(val["nested_value"], "nested");
 }
@@ -1291,7 +1297,9 @@ value = Index["linked.pkl"].value
     )
     .unwrap();
 
-    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
     assert_eq!(val["value"], "foo");
 }
 
@@ -1312,7 +1320,9 @@ has_broken = Index.containsKey("broken.pkl")
     )
     .unwrap();
 
-    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
     assert_eq!(val["value"], "good");
     assert_eq!(val["has_broken"], false);
 }
@@ -1338,7 +1348,7 @@ result = "ok"
     .unwrap();
 
     let path = dir.join("main.pkl");
-    let val = pklr::eval_to_json(&path).await.unwrap();
+    let val = pklr::eval_to_json_async(&path).await.unwrap();
     assert_eq!(val["result"], "ok");
 }
 
@@ -1408,7 +1418,7 @@ import "meta.pkl"
 result = new Project {}
 "#;
 
-    let mut ev = Evaluator::new();
+    let mut ev = Evaluator::new_async();
     let val = ev.eval_source(src, &dir.join("child.pkl")).await.unwrap();
     let json = val.to_json();
     assert_eq!(json["result"]["name"], "hk");
@@ -1437,7 +1447,9 @@ baseName = Base.name
     )
     .unwrap();
 
-    let val = pklr::eval_to_json(&dir.join("child.pkl")).await.unwrap();
+    let val = pklr::eval_to_json_async(&dir.join("child.pkl"))
+        .await
+        .unwrap();
     assert_eq!(val["name"], "hk");
     assert_eq!(val["baseName"], "hk");
 }
@@ -1464,7 +1476,7 @@ result = name
     )
     .unwrap();
 
-    let mut ev = Evaluator::new();
+    let mut ev = Evaluator::new_async();
     let child_val = ev.eval_file_pub(&dir.join("child.pkl")).await.unwrap();
     assert_eq!(child_val.to_json()["result"], "hk");
 
@@ -1496,7 +1508,9 @@ extended = ExtendsBase.extendsName
     )
     .unwrap();
 
-    let val = pklr::eval_to_json(&dir.join("child.pkl")).await.unwrap();
+    let val = pklr::eval_to_json_async(&dir.join("child.pkl"))
+        .await
+        .unwrap();
     assert_eq!(val["extendsName"], "hk");
     assert_eq!(val["amended"], "hk");
     assert_eq!(val["extended"], "hk");
@@ -1549,7 +1563,7 @@ amended = ((Builtins.prettier) { stdin = true }).step
     .unwrap();
 
     let path = dir.join("main.pkl");
-    let val = pklr::eval_to_json(&path).await.unwrap();
+    let val = pklr::eval_to_json_async(&path).await.unwrap();
     assert_eq!(val["result"], "ok");
     assert_eq!(val["amended"], "stdin");
 }
@@ -1589,7 +1603,9 @@ result = Builtins.prettier
     )
     .unwrap();
 
-    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
     assert_eq!(val["result"], "ok");
 }
 
@@ -1617,7 +1633,9 @@ z = Dep.z
     )
     .unwrap();
 
-    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
     assert_eq!(val["y"], 42);
     assert_eq!(val["z"], 43);
 }
@@ -1653,7 +1671,9 @@ enabled = steps["a"].enabled
     )
     .unwrap();
 
-    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
     assert_eq!(val["other"], "other");
     assert_eq!(val["enabled"], true);
 }
@@ -1688,7 +1708,9 @@ enabled = steps["a"].enabled
     )
     .unwrap();
 
-    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
     assert_eq!(val["other"], "other");
     assert_eq!(val["enabled"], true);
 }
@@ -1716,7 +1738,9 @@ result = Dep.wanted
     )
     .unwrap();
 
-    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
     assert_eq!(val["result"], "ok");
 }
 
@@ -1741,7 +1765,9 @@ result = Dep.toMap().toMapping()
     )
     .unwrap();
 
-    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
     assert_eq!(val["result"]["first"], "one");
     assert_eq!(val["result"]["second"], "two");
 }
@@ -1767,7 +1793,9 @@ result = Dep.mapValues((k, v) -> v + 1).toMapping()
     )
     .unwrap();
 
-    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
     assert_eq!(val["result"]["first"], 2);
     assert_eq!(val["result"]["second"], 3);
 }
@@ -1793,7 +1821,9 @@ result = Dep.map(41)
     )
     .unwrap();
 
-    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
     assert_eq!(val["result"], 42);
 }
 
@@ -1819,7 +1849,9 @@ result = Dep.picked()
     )
     .unwrap();
 
-    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
     assert_eq!(val["result"], "ok");
 }
 
@@ -1892,7 +1924,9 @@ steps = other.STEPS
     )
     .unwrap();
 
-    let val = pklr::eval_to_json(&dir.join("main.pkl")).await.unwrap();
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
     assert_eq!(val["steps"]["original"]["check"], "echo original");
     assert!(val["steps"]["original"].get("Script").is_none(), "{val}");
 }
@@ -2859,7 +2893,7 @@ x = name
 
 #[tokio::test]
 async fn const_cannot_override_in_amends() {
-    let mut ev = pklr::eval::Evaluator::new();
+    let mut ev = pklr::eval::Evaluator::new_async();
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     ev.set_base_path(&base);
     // Create a base file with const property
@@ -3316,7 +3350,7 @@ fn inherited_late_binding_recomputes_dependency_chains() {
     std::fs::write(&child, "extends \"Base.pkl\"\nc = 2\ne = d + 1\n").unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let json = runtime
-        .block_on(pklr::EvaluatorBuilder::new().eval_to_json(&child))
+        .block_on(pklr::AsyncEvaluatorBuilder::new().eval_to_json(&child))
         .unwrap();
     assert_eq!(json["a"], 2);
     assert_eq!(json["m"], 2);
@@ -3341,7 +3375,7 @@ fn child_locals_recompute_after_inherited_properties_are_overridden() {
     .unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let json = runtime
-        .block_on(pklr::EvaluatorBuilder::new().eval_to_json(&child))
+        .block_on(pklr::AsyncEvaluatorBuilder::new().eval_to_json(&child))
         .unwrap();
     assert_eq!(json["source"], 2);
     assert_eq!(json["result"], 3);
@@ -3360,7 +3394,7 @@ fn inherited_late_binding_preserves_parent_locals() {
     std::fs::write(&child, "extends \"Base.pkl\"\nsource = 2\n").unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let json = runtime
-        .block_on(pklr::EvaluatorBuilder::new().eval_to_json(&child))
+        .block_on(pklr::AsyncEvaluatorBuilder::new().eval_to_json(&child))
         .unwrap();
     assert_eq!(json["source"], 2);
     assert_eq!(json["derived"], 3);
@@ -3388,7 +3422,7 @@ fn inherited_late_binding_reaches_grandparent_declarations() {
     .unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let json = runtime
-        .block_on(pklr::EvaluatorBuilder::new().eval_to_json(&child))
+        .block_on(pklr::AsyncEvaluatorBuilder::new().eval_to_json(&child))
         .unwrap();
     assert_eq!(json["source"], 2);
     assert_eq!(json["derived"], 3);
@@ -3411,7 +3445,7 @@ fn computed_sibling_access_recomputes_after_child_override() {
     .unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let json = runtime
-        .block_on(pklr::EvaluatorBuilder::new().eval_to_json(&child))
+        .block_on(pklr::AsyncEvaluatorBuilder::new().eval_to_json(&child))
         .unwrap();
     assert_eq!(json["result"], 2);
 }
@@ -3432,7 +3466,7 @@ fn aliased_module_snapshot_recomputes_after_child_override() {
     .unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let json = runtime
-        .block_on(pklr::EvaluatorBuilder::new().eval_to_json(&child))
+        .block_on(pklr::AsyncEvaluatorBuilder::new().eval_to_json(&child))
         .unwrap();
     assert_eq!(json["result"], 2);
 }
@@ -3449,7 +3483,7 @@ fn amended_scope_only_defaults_stay_out_of_output() {
     std::fs::write(&child, "amends \"Base.pkl\"\n").unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let json = runtime
-        .block_on(pklr::EvaluatorBuilder::new().eval_to_json(&child))
+        .block_on(pklr::AsyncEvaluatorBuilder::new().eval_to_json(&child))
         .unwrap();
     assert!(json.get("implicit").is_none());
     assert_eq!(json["visible"], 0);
@@ -3467,7 +3501,7 @@ fn inherited_late_binding_propagates_errors() {
     std::fs::write(&child, "extends \"Base.pkl\"\ndenominator = 0\n").unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let error = runtime
-        .block_on(pklr::EvaluatorBuilder::new().eval_to_json(&child))
+        .block_on(pklr::AsyncEvaluatorBuilder::new().eval_to_json(&child))
         .unwrap_err()
         .to_string();
     assert!(error.contains("division by zero"));
@@ -3497,7 +3531,7 @@ fn used_unresolved_abstract_member_still_errors() {
     std::fs::write(&child, "extends \"Base.pkl\"\nresult = dependent\n").unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let error = runtime
-        .block_on(pklr::EvaluatorBuilder::new().eval_to_json(&child))
+        .block_on(pklr::AsyncEvaluatorBuilder::new().eval_to_json(&child))
         .unwrap_err()
         .to_string();
     assert!(error.contains("abstract property") || error.contains("undefined variable"));
@@ -3515,7 +3549,7 @@ fn concrete_module_must_implement_inherited_abstract_property() {
     std::fs::write(&child, "extends \"Base.pkl\"\n").unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let error = runtime
-        .block_on(pklr::EvaluatorBuilder::new().eval_to_json(&child))
+        .block_on(pklr::AsyncEvaluatorBuilder::new().eval_to_json(&child))
         .unwrap_err()
         .to_string();
     assert!(error.contains("abstract property 'required'"));
@@ -3526,7 +3560,7 @@ fn concrete_module_must_implement_inherited_abstract_property() {
     )
     .unwrap();
     let json = runtime
-        .block_on(pklr::EvaluatorBuilder::new().eval_to_json(&child))
+        .block_on(pklr::AsyncEvaluatorBuilder::new().eval_to_json(&child))
         .unwrap();
     assert_eq!(json["required"], serde_json::json!(["implemented"]));
 }
@@ -3996,7 +4030,7 @@ x = new Child {}
 
 #[tokio::test]
 async fn module_extends_inherits_properties() {
-    let mut ev = pklr::eval::Evaluator::new();
+    let mut ev = pklr::eval::Evaluator::new_async();
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     ev.set_base_path(&base);
     let src = r#"
@@ -4017,7 +4051,7 @@ extra = "new property"
 
 #[tokio::test]
 async fn module_extends_inherits_classes() {
-    let mut ev = pklr::eval::Evaluator::new();
+    let mut ev = pklr::eval::Evaluator::new_async();
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     ev.set_base_path(&base);
     let src = r#"
@@ -4061,7 +4095,7 @@ x = read?("env:DEFINITELY_NOT_SET_12345")
 
 #[tokio::test]
 async fn read_local_file() {
-    let mut ev = pklr::eval::Evaluator::new();
+    let mut ev = pklr::eval::Evaluator::new_async();
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     ev.set_base_path(&base);
     let src = r#"
@@ -4075,7 +4109,7 @@ x = read("readme.txt")
 
 #[tokio::test]
 async fn read_file_uri() {
-    let mut ev = pklr::eval::Evaluator::new();
+    let mut ev = pklr::eval::Evaluator::new_async();
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     ev.set_base_path(&base);
     let file_path = base.join("readme.txt");
@@ -4508,7 +4542,7 @@ glob = Types.Regex(#"^.*\.yaml$"#)
     )
     .unwrap();
 
-    let mut ev = Evaluator::new();
+    let mut ev = Evaluator::new_async();
     let path = dir.join("test.pkl");
     let val = ev
         .eval_source(&std::fs::read_to_string(&path).unwrap(), &path)
@@ -4557,7 +4591,7 @@ hooks {
     )
     .unwrap();
 
-    let mut ev = Evaluator::new();
+    let mut ev = Evaluator::new_async();
     let path = dir.join("hk.pkl");
     let val = ev
         .eval_source(&std::fs::read_to_string(&path).unwrap(), &path)
@@ -4627,7 +4661,7 @@ hooks = new {
     .unwrap();
     let path = dir.join("test.pkl");
     let start = std::time::Instant::now();
-    let val = pklr::eval_to_json(&path).await.unwrap();
+    let val = pklr::eval_to_json_async(&path).await.unwrap();
     let elapsed = start.elapsed();
     eprintln!("eval_amends_perf: {:?}", elapsed);
     assert!(
@@ -4668,7 +4702,7 @@ x {
     )
     .unwrap();
     let path = dir.join("main.pkl");
-    let val = pklr::eval_to_json(&path).await.unwrap();
+    let val = pklr::eval_to_json_async(&path).await.unwrap();
     assert_eq!(val["x"]["tests"]["check bad file"], "check:src/main.rs");
 }
 
@@ -4697,7 +4731,7 @@ result = testMaker.checkFail("bad", 1)
     )
     .unwrap();
     let path = dir.join("main.pkl");
-    let val = pklr::eval_to_json(&path).await.unwrap();
+    let val = pklr::eval_to_json_async(&path).await.unwrap();
     assert_eq!(val["result"], "check:main.rs");
 }
 
@@ -4707,7 +4741,7 @@ result = testMaker.checkFail("bad", 1)
 
 #[test]
 fn rewrite_url_longest_prefix_wins() {
-    let mut ev = Evaluator::new();
+    let mut ev = Evaluator::new_async();
     ev.set_http_rewrites(&[
         "https://example.com/=https://mirror.local/".to_string(),
         "https://example.com/special/=https://special.local/".to_string(),
@@ -4731,7 +4765,7 @@ fn rewrite_url_longest_prefix_wins() {
 
 #[test]
 fn rewrite_url_no_rules_is_identity() {
-    let ev = Evaluator::new();
+    let ev = Evaluator::new_async();
     assert_eq!(
         ev.rewrite_url("https://example.com/foo.pkl"),
         "https://example.com/foo.pkl"
@@ -5829,7 +5863,7 @@ myStep = new Step {{
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let json = rt.block_on(async {
-        let mut ev = Evaluator::new();
+        let mut ev = Evaluator::new_async();
         let val = ev
             .eval_source(&std::fs::read_to_string(&child_path).unwrap(), &child_path)
             .await
@@ -5889,7 +5923,7 @@ myStep = new Step {{
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let json = rt.block_on(async {
-        let mut ev = Evaluator::new();
+        let mut ev = Evaluator::new_async();
         let val = ev
             .eval_source(&std::fs::read_to_string(&child_path).unwrap(), &child_path)
             .await
@@ -5998,7 +6032,7 @@ hooks {{
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let json = rt.block_on(async {
-        let mut ev = Evaluator::new();
+        let mut ev = Evaluator::new_async();
         let val = ev
             .eval_source(&std::fs::read_to_string(&child_path).unwrap(), &child_path)
             .await
@@ -6097,9 +6131,9 @@ hooks {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let json = rt
         .block_on(async {
-            pklr::eval_to_json_with_options(
+            pklr::eval_to_json_with_options_async(
                 &child_path,
-                pklr::EvalOptions {
+                pklr::AsyncEvalOptions {
                     http_rewrites: vec![format!("https://example.com/=http://{addr}/")],
                     ..Default::default()
                 },
@@ -6155,7 +6189,7 @@ fn package_cache_survives_across_offline_evaluators() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let first = rt
         .block_on(
-            pklr::EvaluatorBuilder::new()
+            pklr::AsyncEvaluatorBuilder::new()
                 .http_rewrites([rewrite.clone()])
                 .package_cache_dir(cache_dir.clone())
                 .eval_to_json(&config_path),
@@ -6167,7 +6201,7 @@ fn package_cache_survives_across_offline_evaluators() {
     // A new evaluator succeeds after the one-shot server has shut down.
     let second = rt
         .block_on(
-            pklr::EvaluatorBuilder::new()
+            pklr::AsyncEvaluatorBuilder::new()
                 .http_rewrites([rewrite])
                 .package_cache_dir(cache_dir)
                 .offline(true)
@@ -6178,7 +6212,7 @@ fn package_cache_survives_across_offline_evaluators() {
 }
 
 /// Build a single-entry package zip holding `contents` at `name`.
-#[cfg(feature = "package-zip")]
+#[cfg(feature = "package-zip-core")]
 fn package_zip(name: &str, contents: &str) -> Vec<u8> {
     use std::io::Write;
 
@@ -6208,7 +6242,7 @@ fn preloaded_package_evaluates_offline_without_a_cold_start() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let json = rt
         .block_on(
-            pklr::EvaluatorBuilder::new()
+            pklr::AsyncEvaluatorBuilder::new()
                 .package_cache_dir(temp.path().join("cache"))
                 .offline(true)
                 .preload_package(
@@ -6256,7 +6290,7 @@ fn preloaded_package_does_not_override_a_cached_download() {
     let rewrite = format!("https://example.com/=http://{addr}/");
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(
-        pklr::EvaluatorBuilder::new()
+        pklr::AsyncEvaluatorBuilder::new()
             .http_rewrites([rewrite])
             .package_cache_dir(cache_dir.clone())
             .eval_to_json(&config_path),
@@ -6267,7 +6301,7 @@ fn preloaded_package_does_not_override_a_cached_download() {
     // The downloaded package is already cached, so the preloaded copy is ignored.
     let json = rt
         .block_on(
-            pklr::EvaluatorBuilder::new()
+            pklr::AsyncEvaluatorBuilder::new()
                 .package_cache_dir(cache_dir)
                 .offline(true)
                 .preload_package(
@@ -6295,7 +6329,7 @@ fn preloading_a_package_for_another_version_is_a_cache_miss() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let error = rt
         .block_on(
-            pklr::EvaluatorBuilder::new()
+            pklr::AsyncEvaluatorBuilder::new()
                 .package_cache_dir(temp.path().join("cache"))
                 .offline(true)
                 .preload_package(
@@ -6313,13 +6347,14 @@ fn preloading_a_package_for_another_version_is_a_cache_miss() {
     );
 }
 
-#[test]
-fn preloading_invalid_package_bytes_is_rejected() {
+#[tokio::test]
+async fn preloading_invalid_package_bytes_is_rejected() {
     let temp = TestTempDir::new("pklr_test_preload_invalid");
-    let mut evaluator = pklr::Evaluator::new();
+    let mut evaluator = pklr::Evaluator::new_async();
     evaluator.set_package_cache_dir(temp.path().join("cache"));
     let error = evaluator
-        .preload_package("https://example.com/pkg@1.0.0.zip", "zip", b"not a zip")
+        .preload_package_async("https://example.com/pkg@1.0.0.zip", "zip", b"not a zip")
+        .await
         .unwrap_err()
         .to_string();
     assert!(
@@ -6328,22 +6363,23 @@ fn preloading_invalid_package_bytes_is_rejected() {
     );
 }
 
-#[test]
-fn preloading_reports_a_cache_write_failure() {
+#[tokio::test]
+async fn preloading_reports_a_cache_write_failure() {
     let temp = TestTempDir::new("pklr_test_preload_write_failure");
     // A file where the cache directory belongs: the seed cannot be stored, and
     // reporting success would leave the host expecting a usable cache entry.
     let cache_path = temp.path().join("cache");
     std::fs::write(&cache_path, b"not a directory").unwrap();
 
-    let mut evaluator = pklr::Evaluator::new();
+    let mut evaluator = pklr::Evaluator::new_async();
     evaluator.set_package_cache_dir(&cache_path);
     let error = evaluator
-        .preload_package(
+        .preload_package_async(
             "https://example.com/pkg@1.0.0.zip",
             "zip",
             &package_zip("Config.pkl", "answer = 42\n"),
         )
+        .await
         .unwrap_err()
         .to_string();
     assert!(
@@ -6394,7 +6430,7 @@ fn direct_package_relatives_survive_across_offline_evaluators() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let first = rt
         .block_on(
-            pklr::EvaluatorBuilder::new()
+            pklr::AsyncEvaluatorBuilder::new()
                 .http_rewrites([rewrite.clone()])
                 .package_cache_dir(cache_dir.clone())
                 .eval_to_json(&config_path),
@@ -6406,7 +6442,7 @@ fn direct_package_relatives_survive_across_offline_evaluators() {
 
     let second = rt
         .block_on(
-            pklr::EvaluatorBuilder::new()
+            pklr::AsyncEvaluatorBuilder::new()
                 .http_rewrites([rewrite])
                 .package_cache_dir(cache_dir)
                 .offline(true)
@@ -6459,7 +6495,7 @@ fn unreadable_package_cache_is_a_miss_while_online() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let json = rt
         .block_on(
-            pklr::EvaluatorBuilder::new()
+            pklr::AsyncEvaluatorBuilder::new()
                 .http_rewrites([format!("https://example.com/=http://{addr}/")])
                 .package_cache_dir(cache_path)
                 .eval_to_json(&config_path),
@@ -6482,7 +6518,7 @@ fn offline_package_cache_miss_is_actionable() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let error = rt
         .block_on(
-            pklr::EvaluatorBuilder::new()
+            pklr::AsyncEvaluatorBuilder::new()
                 .package_cache_dir(temp.path().join("cache"))
                 .offline(true)
                 .eval_to_json(&config_path),

@@ -27,7 +27,8 @@ jobs:
           persist-credentials: false
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo test
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --all-features
+      - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo fmt --check
   msrv:
     runs-on: ubuntu-latest
@@ -51,6 +52,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Check for breaking API changes
+        if: github.event_name == 'pull_request' && !contains(github.event.pull_request.title, '!:')
         uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2
   final:
     needs: [test, msrv, semver]

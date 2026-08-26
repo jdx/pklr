@@ -32,7 +32,7 @@ pub struct Evaluator {
     /// Host-provided IO for files, environment, HTTP, packages, and globs.
     capabilities: Box<dyn EvalCapabilities>,
     /// Extracted package zip directories (zip URL → temp dir path)
-    #[cfg(feature = "package-zip")]
+    #[cfg(feature = "package-zip-core")]
     package_dirs: HashMap<String, PathBuf>,
     /// Directory used to persist downloaded package content across evaluators.
     package_cache_dir: Option<PathBuf>,
@@ -83,8 +83,11 @@ impl Default for Evaluator {
             module_scopes: HashMap::new(),
             env_reads: BTreeMap::new(),
             scoped_imports_in_flight: HashSet::new(),
+            #[cfg(feature = "blocking")]
+            capabilities: Box::new(crate::capabilities::BlockingCapabilities::new()),
+            #[cfg(not(feature = "blocking"))]
             capabilities: Box::new(crate::capabilities::NativeCapabilities::new()),
-            #[cfg(feature = "package-zip")]
+            #[cfg(feature = "package-zip-core")]
             package_dirs: HashMap::new(),
             package_cache_dir: None,
             package_http_roots: HashSet::new(),
@@ -97,9 +100,16 @@ impl Default for Evaluator {
 }
 
 impl Evaluator {
-    #[cfg(feature = "native-io")]
+    /// Construct an evaluator with synchronous host capabilities.
+    #[cfg(feature = "blocking")]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Construct an evaluator with asynchronous host capabilities.
+    #[cfg(feature = "async")]
+    pub fn new_async() -> Self {
+        Self::with_capabilities(crate::capabilities::NativeCapabilities::new())
     }
 
     pub fn with_capabilities(capabilities: impl EvalCapabilities + 'static) -> Self {
@@ -112,7 +122,7 @@ impl Evaluator {
             env_reads: BTreeMap::new(),
             scoped_imports_in_flight: HashSet::new(),
             capabilities: Box::new(capabilities),
-            #[cfg(feature = "package-zip")]
+            #[cfg(feature = "package-zip-core")]
             package_dirs: HashMap::new(),
             package_cache_dir: None,
             package_http_roots: HashSet::new(),
@@ -128,7 +138,7 @@ impl Evaluator {
     }
 
     fn resolve_local_path(&self, current_path: &Path, uri: &str) -> PathBuf {
-        #[cfg(feature = "package-zip")]
+        #[cfg(feature = "package-zip-core")]
         if let Some(from_root) = uri.strip_prefix(".../")
             && let Some(root) = self
                 .package_dirs
@@ -171,13 +181,15 @@ impl Evaluator {
         self.import_cache.clear();
         self.module_scopes.clear();
         self.scoped_imports_in_flight.clear();
+        self.converters.clear();
     }
 
     /// Set a custom HTTP client for fetching remote imports and packages.
     /// Use this to configure proxy settings, CA certificates, timeouts, etc.
+    /// Returns an error when the installed capabilities use another HTTP backend.
     #[cfg(feature = "http")]
-    pub fn set_http_client(&mut self, client: reqwest::Client) {
-        self.capabilities.set_http_client(client);
+    pub fn set_http_client(&mut self, client: reqwest::Client) -> Result<()> {
+        self.capabilities.set_http_client(client)
     }
 
     /// Add HTTP URL rewrite rules. Each rule is a `"source_prefix=target_prefix"` string
@@ -347,14 +359,14 @@ impl Evaluator {
                     return Ok(Some((source, url.clone())));
                 }
                 PackageSource::Zip(zip_url, entry) => {
-                    #[cfg(feature = "package-zip")]
+                    #[cfg(feature = "package-zip-core")]
                     {
                         let pkg_dir = self.extract_package_zip(zip_url).await?;
                         let local_path = pkg_dir.join(entry);
                         let source = self.capabilities.read_to_string(&local_path).await?;
                         return Ok(Some((source, local_path.display().to_string())));
                     }
-                    #[cfg(not(feature = "package-zip"))]
+                    #[cfg(not(feature = "package-zip-core"))]
                     {
                         let _ = entry;
                         return Err(Error::Unsupported(format!(
@@ -396,11 +408,11 @@ impl Evaluator {
     }
 
     async fn fetch_package_bytes(&mut self, url: &str, extension: &str) -> Result<Vec<u8>> {
-        match self.read_package_cache(url, extension) {
+        match self.read_package_cache(url, extension).await {
             Ok(Some(bytes)) => match validate_package_bytes(url, extension, &bytes) {
                 Ok(()) => return Ok(bytes),
                 Err(error) if self.offline => return Err(error),
-                Err(_) => self.remove_package_cache(url, extension),
+                Err(_) => self.remove_package_cache(url, extension).await,
             },
             Ok(None) => {}
             Err(error) if self.offline => return Err(error),
@@ -423,32 +435,39 @@ impl Evaluator {
         let bytes = self.capabilities.fetch_bytes(&fetch_url).await?;
         validate_package_bytes(url, extension, &bytes)?;
         // Best-effort: the bytes are already in hand.
-        let _ = self.write_package_cache(url, extension, &bytes);
+        let _ = self.write_package_cache(url, extension, &bytes).await;
         Ok(bytes)
     }
 
-    fn read_package_cache(&self, url: &str, extension: &str) -> Result<Option<Vec<u8>>> {
+    async fn read_package_cache(&mut self, url: &str, extension: &str) -> Result<Option<Vec<u8>>> {
         let Some(cache_dir) = &self.package_cache_dir else {
             return Ok(None);
         };
         let (data_path, url_path) = package_cache_paths(cache_dir, url, extension);
-        let cached_url = match std::fs::read_to_string(&url_path) {
+        let cached_url = match self.capabilities.read_to_string(&url_path).await {
             Ok(cached_url) => cached_url,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(Error::Io(url_path, error)),
+            Err(Error::Io(_, error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
         };
         if cached_url != url {
             return Ok(None);
         }
-        match std::fs::read(&data_path) {
+        match self.capabilities.read_bytes(&data_path).await {
             Ok(bytes) => Ok(Some(bytes)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(Error::Io(data_path, error)),
+            Err(Error::Io(_, error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
         }
     }
 
     /// Cache `bytes` for `url`. The fetch path ignores the error; preloading does not.
-    fn write_package_cache(&self, url: &str, extension: &str, bytes: &[u8]) -> Result<()> {
+    async fn write_package_cache(
+        &mut self,
+        url: &str,
+        extension: &str,
+        bytes: &[u8],
+    ) -> Result<()> {
         let Some(cache_dir) = &self.package_cache_dir else {
             return Ok(());
         };
@@ -456,9 +475,11 @@ impl Evaluator {
         let Some(parent) = data_path.parent() else {
             return Ok(());
         };
-        std::fs::create_dir_all(parent).map_err(|error| Error::Io(parent.to_path_buf(), error))?;
-        write_atomic(&data_path, bytes).map_err(|error| Error::Io(data_path, error))?;
-        write_atomic(&url_path, url.as_bytes()).map_err(|error| Error::Io(url_path, error))
+        self.capabilities.create_dir_all(parent).await?;
+        self.capabilities.write_atomic(&data_path, bytes).await?;
+        self.capabilities
+            .write_atomic(&url_path, url.as_bytes())
+            .await
     }
 
     /// Seed the persistent package cache with `bytes` for `url`.
@@ -467,59 +488,67 @@ impl Evaluator {
     /// downloads. A valid cache entry already present wins, so preloading never
     /// overrides content fetched from the network. Does nothing when no package
     /// cache directory is configured.
-    pub fn preload_package(&self, url: &str, extension: &str, bytes: &[u8]) -> Result<()> {
+    pub async fn preload_package_async(
+        &mut self,
+        url: &str,
+        extension: &str,
+        bytes: &[u8],
+    ) -> Result<()> {
         if self.package_cache_dir.is_none() {
             return Ok(());
         }
-        if let Ok(Some(cached)) = self.read_package_cache(url, extension)
+        if let Ok(Some(cached)) = self.read_package_cache(url, extension).await
             && validate_package_bytes(url, extension, &cached).is_ok()
         {
             return Ok(());
         }
         validate_package_bytes(url, extension, bytes)?;
-        self.write_package_cache(url, extension, bytes)
+        self.write_package_cache(url, extension, bytes).await
     }
 
-    fn remove_package_cache(&self, url: &str, extension: &str) {
+    #[cfg(feature = "blocking")]
+    pub fn preload_package(&mut self, url: &str, extension: &str, bytes: &[u8]) -> Result<()> {
+        pollster::block_on(self.preload_package_async(url, extension, bytes))
+    }
+
+    async fn remove_package_cache(&mut self, url: &str, extension: &str) {
         let Some(cache_dir) = &self.package_cache_dir else {
             return;
         };
         let (data_path, url_path) = package_cache_paths(cache_dir, url, extension);
-        let _ = std::fs::remove_file(data_path);
-        let _ = std::fs::remove_file(url_path);
+        let _ = self.capabilities.remove_file(&data_path).await;
+        let _ = self.capabilities.remove_file(&url_path).await;
     }
 
     /// Download a package zip and extract it to a temp directory.
     /// Returns the path to the extracted directory. Caches by zip URL.
-    #[cfg(feature = "package-zip")]
+    #[cfg(feature = "package-zip-core")]
     async fn extract_package_zip(&mut self, zip_url: &str) -> Result<PathBuf> {
         // Check if already extracted
         if let Some(dir) = self.package_dirs.get(zip_url) {
             return Ok(dir.clone());
         }
         let bytes = self.fetch_package_bytes(zip_url, "zip").await?;
-        let cursor = std::io::Cursor::new(bytes);
-        let mut archive =
-            zip::ZipArchive::new(cursor).map_err(|e| Error::Eval(format!("zip error: {e}")))?;
         let dir = self
             .capabilities
             .temp_dir(&format!("pklr-pkg-{}", self.package_dirs.len()))
             .await?;
-        archive
-            .extract(&dir)
-            .map_err(|e| Error::Eval(format!("zip extract error: {e}")))?;
+        self.capabilities.extract_zip(bytes, &dir).await?;
         self.package_dirs.insert(zip_url.to_string(), dir.clone());
         Ok(dir)
     }
 
-    #[cfg(all(test, feature = "package-zip"))]
+    #[cfg(all(test, feature = "package-zip-core"))]
     fn package_dir_for_zip(&self, zip_url: &str) -> Option<&PathBuf> {
         self.package_dirs.get(zip_url)
     }
 
     pub async fn eval_source(&mut self, source: &str, path: &Path) -> Result<Value> {
         self.begin_evaluation();
-        self.converters.clear();
+        self.eval_source_inner(source, path).await
+    }
+
+    async fn eval_source_inner(&mut self, source: &str, path: &Path) -> Result<Value> {
         // Seed import cache for the entry file so circular back-references work
         if let Ok(canonical) = self.capabilities.canonicalize(path).await {
             self.import_cache
@@ -539,7 +568,8 @@ impl Evaluator {
     /// Evaluate a local pkl file by path (public entry point).
     pub async fn eval_file_pub(&mut self, path: &Path) -> Result<Value> {
         self.begin_evaluation();
-        self.eval_file(path, 0).await
+        let source = self.capabilities.read_to_string(path).await?;
+        self.eval_source_inner(&source, path).await
     }
 
     /// Read, lex, parse, and evaluate a local file (with caching).
@@ -816,7 +846,7 @@ impl Evaluator {
                 let requested = requested_fields_for_import(&import_field_uses, &alias);
                 // For zip packages, extract to temp dir and eval as local file
                 if let PackageSource::Zip(zip_url, _) = &pkg {
-                    #[cfg(feature = "package-zip")]
+                    #[cfg(feature = "package-zip-core")]
                     {
                         let pkg_dir = self.extract_package_zip(zip_url).await?;
                         let local_path = pkg_dir.join(file_path);
@@ -826,7 +856,7 @@ impl Evaluator {
                         scope.set(alias, imported_val);
                         continue;
                     }
-                    #[cfg(not(feature = "package-zip"))]
+                    #[cfg(not(feature = "package-zip-core"))]
                     {
                         return Err(Error::Unsupported(format!(
                             "package zip imports require pklr's 'package-zip' feature: {zip_url}"
@@ -946,7 +976,7 @@ impl Evaluator {
             } else if uri.starts_with("package://") {
                 let pkg = resolve_package_uri(uri)?;
                 if let PackageSource::Zip(zip_url, entry) = &pkg {
-                    #[cfg(feature = "package-zip")]
+                    #[cfg(feature = "package-zip-core")]
                     {
                         let pkg_dir = self.extract_package_zip(zip_url).await?;
                         let local_path = pkg_dir.join(entry);
@@ -970,7 +1000,7 @@ impl Evaluator {
                             base_obj = (*m).clone();
                         }
                     }
-                    #[cfg(not(feature = "package-zip"))]
+                    #[cfg(not(feature = "package-zip-core"))]
                     {
                         let _ = entry;
                         return Err(Error::Unsupported(format!(
@@ -4963,7 +4993,7 @@ fn validate_package_bytes(url: &str, extension: &str, bytes: &[u8]) -> Result<()
         std::str::from_utf8(bytes)
             .map_err(|error| Error::Eval(format!("package source is not UTF-8: {url}: {error}")))?;
     }
-    #[cfg(feature = "package-zip")]
+    #[cfg(feature = "package-zip-core")]
     if extension == "zip" {
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
             .map_err(|error| Error::Eval(format!("package archive is invalid: {url}: {error}")))?;
@@ -4982,7 +5012,7 @@ fn validate_package_bytes(url: &str, extension: &str, bytes: &[u8]) -> Result<()
     Ok(())
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -5717,7 +5747,7 @@ mod requested_field_tests {
         let tokens = lexer::lex(source).unwrap();
         let module = parser::parse(&tokens).unwrap();
 
-        let value = Evaluator::new()
+        let value = Evaluator::default()
             .eval_module_with_scope(
                 &module,
                 &child_path,
@@ -5960,10 +5990,10 @@ mod auto_trait_tests {
 
 #[cfg(test)]
 mod package_uri_tests {
-    #[cfg(all(feature = "native-io", feature = "package-zip"))]
+    #[cfg(all(feature = "native-io", feature = "package-zip-core"))]
     use std::path::PathBuf;
 
-    #[cfg(all(feature = "native-io", feature = "package-zip"))]
+    #[cfg(all(feature = "native-io", feature = "package-zip-core"))]
     use super::Evaluator;
     use super::{PackageSource, resolve_package_uri};
 
@@ -5998,7 +6028,7 @@ mod package_uri_tests {
     }
 
     #[test]
-    #[cfg(feature = "package-zip")]
+    #[cfg(feature = "package-zip-core")]
     fn package_archive_validation_reads_entry_payloads() {
         use std::io::Write;
 
@@ -6030,9 +6060,33 @@ mod package_uri_tests {
     }
 
     #[test]
-    #[cfg(all(feature = "native-io", feature = "package-zip"))]
+    #[cfg(all(feature = "blocking", feature = "native-io"))]
+    fn blocking_preload_does_not_require_a_tokio_runtime() {
+        let cache_dir = std::env::temp_dir().join(format!(
+            "pklr-blocking-preload-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&cache_dir);
+        let mut evaluator = Evaluator::default();
+        evaluator.set_package_cache_dir(&cache_dir);
+
+        evaluator
+            .preload_package(
+                "https://example.com/package@1.0.0.pkl",
+                "pkl",
+                b"answer = 42\n",
+            )
+            .unwrap();
+
+        assert!(std::fs::read_dir(&cache_dir).unwrap().next().is_some());
+        std::fs::remove_dir_all(cache_dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(all(feature = "native-io", feature = "package-zip-core"))]
     fn package_dir_lookup_uses_source_zip_url() {
-        let mut evaluator = Evaluator::new();
+        let mut evaluator = Evaluator::default();
         evaluator.set_http_rewrites(&["https://example.com/=https://mirror.local/".to_string()]);
         let dir = PathBuf::from("/tmp/pklr-test-package");
         evaluator
