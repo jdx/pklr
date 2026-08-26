@@ -1389,6 +1389,16 @@ impl Evaluator {
         }
         let outer_obj = Value::Object(Arc::new(outer_map), None);
         child_scope.set("outer".into(), outer_obj);
+        // Class-as-a-function definitions commonly use `local self = this` so
+        // output properties can close over the amended instance. Bind `this`
+        // before locals are evaluated, then keep direct aliases synchronized as
+        // properties populate the instance.
+        let mut all_props: IndexMap<String, Value> = IndexMap::new();
+        child_scope.set(
+            "this".into(),
+            Value::Object(Arc::new(all_props.clone()), None),
+        );
+        let mut this_aliases = Vec::new();
         // First pass: collect locals, class definitions, and type aliases in
         // declaration order so they can reference each other correctly.
         // Non-lambda locals are evaluated eagerly; lambda locals are deferred
@@ -1405,6 +1415,9 @@ impl Evaluator {
                     // calls a lambda local defined just above it).
                     let val = self.eval_expr(expr, &child_scope, depth).await?;
                     child_scope.set(prop.name.clone(), val);
+                    if matches!(expr, Expr::Ident(name) if name == "this") {
+                        this_aliases.push(prop.name.clone());
+                    }
                     if matches!(expr, crate::parser::Expr::Lambda(..)) {
                         // Lambda evaluation only captures the current scope; it
                         // does not run the body. Bind once for declaration-order
@@ -1438,13 +1451,6 @@ impl Evaluator {
             .await?;
 
         let mut map: IndexMap<String, Value> = IndexMap::new();
-        // all_props includes hidden properties — used for `this` snapshot
-        let mut all_props: IndexMap<String, Value> = IndexMap::new();
-        // Bind `this` so properties can reference the object being built
-        child_scope.set(
-            "this".into(),
-            Value::Object(Arc::new(all_props.clone()), None),
-        );
         for entry in entries {
             match entry {
                 Entry::Property(prop) => {
@@ -1461,6 +1467,11 @@ impl Evaluator {
                         && prop.body.is_none()
                     {
                         continue; // abstract without value — skip (must be overridden)
+                    }
+                    let snapshot = Value::Object(Arc::new(all_props.clone()), None);
+                    child_scope.set("this".into(), snapshot.clone());
+                    for alias in &this_aliases {
+                        child_scope.set(alias.clone(), snapshot.clone());
                     }
                     if let Some(v) = self.eval_property(prop, &child_scope, depth).await? {
                         child_scope.set(prop.name.clone(), v.clone());

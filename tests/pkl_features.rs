@@ -2355,6 +2355,26 @@ x = new Config {}
 }
 
 #[test]
+fn class_local_this_alias_tracks_amended_inputs() {
+    let json = eval(
+        r#"
+class Factory {
+    local factory = this
+    staged: Boolean = false
+    fixed step = (new { staged = false }) {
+        staged = factory.staged
+    }
+}
+x = new Factory {
+    staged = true
+}
+"#,
+    );
+    assert_eq!(json["x"]["step"]["staged"], true);
+    assert!(json["x"].get("factory").is_none());
+}
+
+#[test]
 fn class_with_type_params() {
     let json = eval(
         r#"
