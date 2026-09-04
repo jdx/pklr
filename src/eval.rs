@@ -58,6 +58,11 @@ struct MappingInheritedDefault {
     entries: Option<Vec<Entry>>,
 }
 
+struct MappingTypeInfo {
+    defaults: Vec<(String, Value)>,
+    value_types: Vec<String>,
+}
+
 #[derive(Clone, Default)]
 struct ModuleScopeSnapshot {
     values: IndexMap<String, Value>,
@@ -1605,7 +1610,7 @@ impl Evaluator {
     ) -> Result<Option<Value>> {
         if let Some(expr) = &prop.value {
             let mut value = self.eval_expr(expr, scope, depth).await?;
-            apply_mapping_type_annotation(&mut value, prop.type_ann.as_ref());
+            apply_mapping_type_annotation(&mut value, prop.type_ann.as_ref(), scope);
             return Ok(Some(value));
         }
         if let Some(body) = &prop.body {
@@ -1614,7 +1619,7 @@ impl Evaluator {
                 .as_ref()
                 .and_then(|ty| nullable_inner_default(ty, scope));
             if let Some(default) = &mut nullable_default {
-                apply_mapping_type_annotation(default, prop.type_ann.as_ref());
+                apply_mapping_type_annotation(default, prop.type_ann.as_ref(), scope);
             }
             let scoped = scope.get(&prop.name);
             let amendment_base = scoped
@@ -1660,6 +1665,10 @@ impl Evaluator {
                             resolve_dotted(&type_scope, name).map(|value| (name.clone(), value))
                         })
                         .collect::<Vec<_>>();
+                    let mapping_type_info = MappingTypeInfo {
+                        defaults: value_type_defaults,
+                        value_types: src.mapping_value_types.clone(),
+                    };
                     let inherited_default = self
                         .find_default_template(&src.entries, &type_scope, depth)
                         .await?;
@@ -1669,7 +1678,7 @@ impl Evaluator {
                         &type_scope,
                         depth,
                         &mut amended,
-                        &value_type_defaults,
+                        &mapping_type_info,
                         MappingInheritedDefault::default(),
                     )
                     .await?;
@@ -1679,7 +1688,7 @@ impl Evaluator {
                         &type_scope,
                         depth,
                         &mut amended,
-                        &value_type_defaults,
+                        &mapping_type_info,
                         MappingInheritedDefault {
                             value: inherited_default,
                             entries: find_default_body_entries(&src.entries),
@@ -1712,7 +1721,7 @@ impl Evaluator {
         if let Some(ty) = &prop.type_ann {
             let mut default = type_default_value(ty, scope);
             if let Some(default) = &mut default {
-                apply_mapping_type_annotation(default, Some(ty));
+                apply_mapping_type_annotation(default, Some(ty), scope);
             }
             if default.is_none()
                 && matches!(ty, crate::parser::TypeExpr::Union(variants) if !variants.iter().any(is_default_type))
@@ -2146,6 +2155,9 @@ impl Evaluator {
                     let resolved = resolved.clone();
                     return self.eval_type_check(val, &resolved, scope, depth + 1).await;
                 }
+                if resolve_dotted(scope, name).is_some() {
+                    return Ok(value_is_class(val, name));
+                }
                 // Otherwise, plain type check
                 Ok(value_is_type(val, ty))
             }
@@ -2193,8 +2205,42 @@ impl Evaluator {
                 }
                 Ok(false)
             }
-            // Non-constrained types: delegate to the simple check
-            _ => Ok(value_is_type(val, ty)),
+            TypeExpr::Generic(name, params) => {
+                if !value_is_type(val, ty) {
+                    return Ok(false);
+                }
+                match (name.as_str(), val) {
+                    ("List" | "Listing" | "Set", Value::List(items)) => {
+                        let Some(element_type) = params.first() else {
+                            return Ok(true);
+                        };
+                        for item in items {
+                            if !self
+                                .eval_type_check(item, element_type, scope, depth + 1)
+                                .await?
+                            {
+                                return Ok(false);
+                            }
+                        }
+                        Ok(true)
+                    }
+                    ("Map" | "Mapping", Value::Object(entries, _)) => {
+                        let Some(value_type) = params.get(1) else {
+                            return Ok(true);
+                        };
+                        for value in entries.values() {
+                            if !self
+                                .eval_type_check(value, value_type, scope, depth + 1)
+                                .await?
+                            {
+                                return Ok(false);
+                            }
+                        }
+                        Ok(true)
+                    }
+                    _ => Ok(true),
+                }
+            }
         }
     }
 
@@ -2530,20 +2576,25 @@ impl Evaluator {
                     Some("Mapping") | Some("Map") => {
                         // If the Mapping has a value type param (e.g., Mapping<String, Step>),
                         // resolve it as a default template so entries inherit the class type.
-                        let value_type_defaults = generic_params
+                        let mapping_value_types =
+                            generic_params.iter().skip(1).cloned().collect::<Vec<_>>();
+                        let value_type_defaults = mapping_value_types
                             .iter()
-                            .skip(1)
                             .filter_map(|name| {
                                 resolve_dotted(scope, name).map(|value| (name.clone(), value))
                             })
                             .collect::<Vec<_>>();
+                        let mapping_type_info = MappingTypeInfo {
+                            defaults: value_type_defaults,
+                            value_types: mapping_value_types.clone(),
+                        };
                         let mut map = IndexMap::new();
                         self.eval_mapping_entries_with_type_default(
                             entries,
                             scope,
                             depth,
                             &mut map,
-                            &value_type_defaults,
+                            &mapping_type_info,
                             MappingInheritedDefault::default(),
                         )
                         .await?;
@@ -2551,7 +2602,7 @@ impl Evaluator {
                         // body amendments (`steps { ["x"] { ... } }`) merge new entries
                         // with the value type class, preserving type_name for converters.
                         let mut src_entries = entries.to_vec();
-                        if value_type_defaults.len() == 1
+                        if mapping_type_info.defaults.len() == 1
                             && !entries
                                 .iter()
                                 .any(|e| matches!(e, Entry::Property(p) if p.name == "default"))
@@ -2577,7 +2628,7 @@ impl Evaluator {
                             is_open: true,
                             type_name: None,
                             parent_type_names: Vec::new(),
-                            mapping_value_types: generic_params.iter().skip(1).cloned().collect(),
+                            mapping_value_types,
                             deprecated,
                         };
                         Ok(Value::Object(Arc::new(map), Some(Arc::new(source))))
@@ -3373,6 +3424,10 @@ impl Evaluator {
                         resolve_dotted(&type_scope, name).map(|value| (name.clone(), value))
                     })
                     .collect::<Vec<_>>();
+                let mapping_type_info = MappingTypeInfo {
+                    defaults: value_type_defaults,
+                    value_types: base_src.mapping_value_types.clone(),
+                };
                 let inherited_default = self
                     .find_default_template(&base_src.entries, &type_scope, depth)
                     .await?;
@@ -3382,7 +3437,7 @@ impl Evaluator {
                     &type_scope,
                     depth,
                     &mut amended,
-                    &value_type_defaults,
+                    &mapping_type_info,
                     MappingInheritedDefault::default(),
                 )
                 .await?;
@@ -3394,7 +3449,7 @@ impl Evaluator {
                     &type_scope,
                     depth,
                     &mut amended,
-                    &value_type_defaults,
+                    &mapping_type_info,
                     MappingInheritedDefault {
                         value: inherited_default,
                         entries: find_default_body_entries(&base_src.entries),
@@ -3587,9 +3642,13 @@ impl Evaluator {
         scope: &Scope,
         depth: usize,
         map: &mut IndexMap<String, Value>,
-        type_defaults: &[(String, Value)],
+        type_info: &MappingTypeInfo,
         inherited_default: MappingInheritedDefault,
     ) -> Result<()> {
+        let MappingTypeInfo {
+            defaults: type_defaults,
+            value_types: mapping_value_types,
+        } = type_info;
         let mut entry_scope = scope.child();
         let mut deferred_lambdas: Vec<(String, &crate::parser::Expr)> = Vec::new();
         for entry in entries {
@@ -3669,6 +3728,15 @@ impl Evaluator {
                             .await?;
                         map.insert(key_str, val);
                         continue;
+                    }
+                    if let Expr::New(Some(type_name), _, _) = val_expr
+                        && !mapping_value_types.is_empty()
+                        && select_mapping_type_default_for_new(type_defaults, type_name).is_none()
+                        && resolve_dotted(&entry_scope, type_name).is_some_and(|value| {
+                            !value_matches_mapping_type(&value, mapping_value_types, type_defaults)
+                        })
+                    {
+                        return Err(mapping_value_type_error(mapping_value_types, type_name));
                     }
                     let type_default = match val_expr {
                         Expr::ObjectBody(body) => select_mapping_type_default(type_defaults, body)
@@ -3765,6 +3833,7 @@ impl Evaluator {
                             result
                         } else {
                             let mut val = self.eval_expr(val_expr, &entry_scope, depth + 1).await?;
+                            validate_mapping_value(&val, mapping_value_types, type_defaults)?;
                             if let Some((_, tpl)) = default_template {
                                 val = merge_values(tpl, val);
                             }
@@ -3797,7 +3866,7 @@ impl Evaluator {
                             &iter_scope,
                             depth + 1,
                             map,
-                            type_defaults,
+                            type_info,
                             MappingInheritedDefault {
                                 value: explicit_default.clone(),
                                 entries: explicit_default_entries.clone(),
@@ -4060,11 +4129,15 @@ fn mapping_entry_body(expr: &Expr) -> Option<&[Entry]> {
     }
 }
 
-fn apply_mapping_type_annotation(value: &mut Value, type_ann: Option<&crate::parser::TypeExpr>) {
+fn apply_mapping_type_annotation(
+    value: &mut Value,
+    type_ann: Option<&crate::parser::TypeExpr>,
+    scope: &Scope,
+) {
     let Some(type_ann) = type_ann else {
         return;
     };
-    let type_names = mapping_value_type_names(type_ann);
+    let type_names = mapping_value_type_names(type_ann, scope);
     if type_names.is_empty() {
         return;
     }
@@ -4092,17 +4165,18 @@ fn apply_mapping_type_annotation(value: &mut Value, type_ann: Option<&crate::par
     *src_slot = Some(Arc::new(src));
 }
 
-fn mapping_value_type_names(type_ann: &crate::parser::TypeExpr) -> Vec<String> {
+fn mapping_value_type_names(type_ann: &crate::parser::TypeExpr, scope: &Scope) -> Vec<String> {
     use crate::parser::TypeExpr;
 
     let mut names = Vec::new();
+    let mut aliases_seen = HashSet::new();
     match type_ann {
         TypeExpr::Generic(name, params) if name == "Mapping" || name == "Map" => {
             if let Some(value_type) = params.get(1) {
-                collect_mapping_value_type_names(value_type, &mut names);
+                collect_mapping_value_type_names(value_type, scope, &mut names, &mut aliases_seen);
             }
         }
-        TypeExpr::Nullable(inner) => return mapping_value_type_names(inner),
+        TypeExpr::Nullable(inner) => return mapping_value_type_names(inner, scope),
         TypeExpr::Constrained(base, _) => {
             if let Some(value_type) = mapping_value_type_from_name(base) {
                 names.push(value_type);
@@ -4142,11 +4216,22 @@ fn mapping_value_type_from_name(name: &str) -> Option<String> {
     None
 }
 
-fn collect_mapping_value_type_names(type_ann: &crate::parser::TypeExpr, names: &mut Vec<String>) {
+fn collect_mapping_value_type_names(
+    type_ann: &crate::parser::TypeExpr,
+    scope: &Scope,
+    names: &mut Vec<String>,
+    aliases_seen: &mut HashSet<String>,
+) {
     use crate::parser::TypeExpr;
 
     match type_ann {
         TypeExpr::Named(name) => {
+            if let Some(alias) = scope.get_type_alias(name)
+                && aliases_seen.insert(name.clone())
+            {
+                collect_mapping_value_type_names(alias, scope, names, aliases_seen);
+                return;
+            }
             if !names.contains(name) {
                 names.push(name.clone());
             }
@@ -4164,10 +4249,15 @@ fn collect_mapping_value_type_names(type_ann: &crate::parser::TypeExpr, names: &
                 names.push(name.clone());
             }
         }
-        TypeExpr::Nullable(inner) => collect_mapping_value_type_names(inner, names),
+        TypeExpr::Nullable(inner) => {
+            collect_mapping_value_type_names(inner, scope, names, aliases_seen);
+            if !names.iter().any(|name| name == "Null") {
+                names.push("Null".into());
+            }
+        }
         TypeExpr::Union(variants) => {
             for variant in variants {
-                collect_mapping_value_type_names(variant, names);
+                collect_mapping_value_type_names(variant, scope, names, aliases_seen);
             }
         }
     }
@@ -5309,6 +5399,95 @@ fn value_type_name(v: &Value) -> &'static str {
         Value::List(_) => "List",
         Value::Lambda(..) => "Function",
     }
+}
+
+fn value_class_name(value: &Value) -> Option<&str> {
+    let Value::Object(_, Some(source)) = value else {
+        return None;
+    };
+    source.type_name.as_deref()
+}
+
+fn value_is_class(value: &Value, expected: &str) -> bool {
+    let Value::Object(_, Some(source)) = value else {
+        return false;
+    };
+    source
+        .type_name
+        .iter()
+        .chain(&source.parent_type_names)
+        .any(|actual| type_names_match(actual, expected))
+}
+
+fn value_matches_mapping_type(
+    value: &Value,
+    mapping_value_types: &[String],
+    type_defaults: &[(String, Value)],
+) -> bool {
+    mapping_value_types.iter().any(|name| {
+        type_defaults.iter().any(|(default_name, default)| {
+            type_names_match(default_name, name)
+                && (value_is_class(value, name)
+                    || matches!(
+                        default,
+                        Value::Object(_, Some(source))
+                            if source
+                                .type_name
+                                .as_deref()
+                                .is_some_and(|expected| value_is_class(value, expected))
+                    ))
+        }) || value_is_builtin_type(value, name)
+    })
+}
+
+fn value_is_builtin_type(value: &Value, name: &str) -> bool {
+    if let Some(expected) = string_literal_type_value(name) {
+        return matches!(value, Value::String(actual) if actual == expected);
+    }
+    matches!(
+        name.trim_start_matches('*'),
+        "Null"
+            | "Boolean"
+            | "Bool"
+            | "Int"
+            | "Float"
+            | "Number"
+            | "String"
+            | "List"
+            | "Listing"
+            | "Set"
+            | "Map"
+            | "Mapping"
+            | "Object"
+            | "Dynamic"
+            | "Function"
+            | "Any"
+    ) && value_is_named_type(value, name)
+}
+
+fn mapping_value_type_error(mapping_value_types: &[String], actual: &str) -> Error {
+    Error::Eval(format!(
+        "expected mapping value of type {}, got {}",
+        mapping_value_types.join("|"),
+        actual
+    ))
+}
+
+fn validate_mapping_value(
+    value: &Value,
+    mapping_value_types: &[String],
+    type_defaults: &[(String, Value)],
+) -> Result<()> {
+    if !mapping_value_types.is_empty()
+        && !matches!(value, Value::Object(_, Some(source)) if source.type_name.is_none())
+        && !value_matches_mapping_type(value, mapping_value_types, type_defaults)
+    {
+        return Err(mapping_value_type_error(
+            mapping_value_types,
+            value_class_name(value).unwrap_or_else(|| value_type_name(value)),
+        ));
+    }
+    Ok(())
 }
 
 fn value_to_key(v: &Value) -> Result<String> {

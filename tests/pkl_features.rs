@@ -4833,6 +4833,78 @@ factory = new Factory {}
     assert_eq!(json["factory"], serde_json::json!({}));
 }
 
+#[test]
+fn mapping_rejects_value_outside_class_union() {
+    let message = eval_fails(
+        r#"
+class Step {}
+class Group {}
+class Prettier {}
+local Builtins = new Dynamic {
+    prettier = new Prettier {}
+}
+
+class Config {
+    steps: Mapping<String, Step | Group> = new Mapping<String, Step> {}
+}
+
+config = new Config {
+    steps {
+        ["prettier"] = Builtins.prettier
+    }
+}
+"#,
+    );
+    assert!(message.contains("Step|Group"), "{message}");
+    assert!(message.contains("Prettier"), "{message}");
+}
+
+#[test]
+fn mapping_accepts_value_from_class_union_alias() {
+    let json = eval(
+        r#"
+class Step {}
+abstract class BuiltinFactory {}
+class Prettier extends BuiltinFactory {}
+typealias StepDefinition = Step | BuiltinFactory
+
+class Hook {
+    steps: Mapping<String, StepDefinition> = new Mapping<String, Step> {}
+}
+
+local prettier = new Prettier {}
+hook = new Hook {
+    steps {
+        ["prettier"] = prettier
+    }
+}
+"#,
+    );
+    assert_eq!(json["hook"]["steps"]["prettier"], serde_json::json!({}));
+}
+
+#[test]
+fn mapping_validation_preserves_builtin_union_members() {
+    let json = eval(
+        r#"
+class Step {}
+
+class Config {
+    values: Mapping<String, Step | String | Null> = new Mapping<String, Step> {}
+}
+
+config = new Config {
+    values {
+        ["string"] = "ok"
+        ["null"] = null
+    }
+}
+"#,
+    );
+    assert_eq!(json["config"]["values"]["string"], "ok");
+    assert_eq!(json["config"]["values"]["null"], serde_json::Value::Null);
+}
+
 // ============================================================
 // output.renderer.converters
 // ============================================================
