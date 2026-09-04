@@ -4905,6 +4905,143 @@ config = new Config {
     assert_eq!(json["config"]["values"]["null"], serde_json::Value::Null);
 }
 
+#[test]
+fn mapping_rejects_explicit_dynamic_value() {
+    let message = eval_fails(
+        r#"
+class Step {}
+
+class Config {
+    steps: Mapping<String, Step> = new Mapping<String, Step> {}
+}
+
+config = new Config {
+    steps {
+        ["dynamic"] = new Dynamic {}
+    }
+}
+"#,
+    );
+    assert!(message.contains("Step"), "{message}");
+    assert!(message.contains("Object"), "{message}");
+}
+
+#[test]
+fn mapping_contextually_types_untyped_new_value() {
+    let json = eval(
+        r#"
+class Step {
+    check: String = ""
+}
+
+class Config {
+    steps: Mapping<String, Step> = new Mapping<String, Step> {}
+}
+
+config = new Config {
+    steps {
+        ["lint"] = new { check = "eslint" }
+    }
+}
+"#,
+    );
+    assert_eq!(json["config"]["steps"]["lint"]["check"], "eslint");
+}
+
+#[test]
+fn mapping_rejects_invalid_spread_value() {
+    let message = eval_fails(
+        r#"
+class Step {}
+class Factory {}
+
+local factories = new Mapping {
+    ["prettier"] = new Factory {}
+}
+
+class Config {
+    steps: Mapping<String, Step> = new Mapping<String, Step> {}
+}
+
+config = new Config {
+    steps {
+        ...factories
+    }
+}
+"#,
+    );
+    assert!(message.contains("Step"), "{message}");
+    assert!(message.contains("Factory"), "{message}");
+}
+
+#[test]
+fn mapping_rejects_invalid_untyped_initializer() {
+    let message = eval_fails(
+        r#"
+class Step {}
+
+class Config {
+    steps: Mapping<String, Step> = new Mapping {
+        ["dynamic"] = new Dynamic {}
+    }
+}
+
+config = new Config {}
+"#,
+    );
+    assert!(message.contains("Step"), "{message}");
+}
+
+#[test]
+fn mapping_accepts_subclass_value() {
+    let json = eval(
+        r#"
+class Step {}
+class SpecializedStep extends Step {}
+
+class Config {
+    steps: Mapping<String, Step> = new Mapping<String, Step> {}
+}
+
+config = new Config {
+    steps {
+        ["specialized"] = new SpecializedStep {}
+    }
+}
+"#,
+    );
+    assert_eq!(
+        json["config"]["steps"]["specialized"],
+        serde_json::json!({})
+    );
+}
+
+#[test]
+fn mapping_default_does_not_amend_explicit_value() {
+    let json = eval(
+        r#"
+class Step {
+    shared: Boolean = false
+}
+
+local explicit = new Step {}
+
+class Config {
+    steps: Mapping<String, Step> = new Mapping<String, Step> {
+        default { shared = true }
+    }
+}
+
+config = new Config {
+    steps {
+        ["explicit"] = explicit
+    }
+}
+"#,
+    );
+    assert_eq!(json["config"]["steps"]["explicit"]["shared"], false);
+}
+
 // ============================================================
 // output.renderer.converters
 // ============================================================
@@ -5436,7 +5573,7 @@ steps = new Mapping<String, Step | Group> {
 }
 
 #[test]
-fn converter_union_mapping_preserves_explicit_new_type() {
+fn converter_union_mapping_does_not_amend_explicit_new_with_mapping_default() {
     let json = eval_with_converters(
         r#"
 class Group {
@@ -5482,7 +5619,7 @@ steps = new Mapping<String, Step | Group> {
 "#,
     );
     assert_eq!(json["steps"]["group"]["_type"], "group");
-    assert_eq!(json["steps"]["group"]["shared"], true);
+    assert_eq!(json["steps"]["group"]["shared"], false);
     assert_eq!(json["steps"]["group"]["steps"]["lint"]["_type"], "step");
     assert_eq!(json["steps"]["echo"]["_type"], "step");
     assert_eq!(json["steps"]["echo"]["shared"], true);
@@ -5575,7 +5712,7 @@ steps = new Mapping<String, Step | Group> {
 }
 
 #[test]
-fn converter_union_mapping_untyped_new_stays_untyped() {
+fn converter_union_mapping_contextually_types_untyped_new() {
     let json = eval_with_converters(
         r#"
 class Group {
@@ -5612,12 +5749,12 @@ steps = new Mapping<String, Step | Group> {
 }
 "#,
     );
-    assert_eq!(json["steps"]["plain"]["_type"], serde_json::Value::Null);
+    assert_eq!(json["steps"]["plain"]["_type"], "group");
     assert_eq!(json["steps"]["plain"]["steps"]["lint"]["check"], "eslint");
 }
 
 #[test]
-fn converter_union_mapping_explicit_new_without_type_default_uses_constructor() {
+fn converter_union_mapping_explicit_new_ignores_mapping_default() {
     let json = eval_with_converters(
         r#"
 class Group {
@@ -5661,7 +5798,7 @@ steps = new Mapping<String, GroupAlias | Step> {
 "#,
     );
     assert_eq!(json["steps"]["group"]["_type"], "group");
-    assert_eq!(json["steps"]["group"]["shared"], true);
+    assert_eq!(json["steps"]["group"]["shared"], false);
     assert_eq!(json["steps"]["group"]["steps"]["lint"]["_type"], "step");
 }
 

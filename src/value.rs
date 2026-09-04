@@ -3,7 +3,18 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 use serde_json::json;
 
-use crate::parser::{Entry, Expr};
+use crate::parser::{Entry, Expr, TypeExpr};
+
+/// Authoritative runtime type information for a typed Pkl mapping.
+///
+/// The legacy `mapping_value_types` names on [`ObjectSource`] are only used to
+/// select contextual object templates. Assignability is checked against these
+/// full type expressions instead.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MappingType {
+    pub key: TypeExpr,
+    pub value: TypeExpr,
+}
 
 /// Captures the original AST entries and scope for an object, enabling
 /// late binding: when this object is amended, its entries can be merged
@@ -25,6 +36,8 @@ pub struct ObjectSource {
     /// `Mapping<String, Step | Group>`. Used when amending mappings so bare
     /// entries inherit the right class template.
     pub mapping_value_types: Vec<String>,
+    /// Full declared key and value types used for runtime assignability checks.
+    pub(crate) mapping_type: Option<MappingType>,
     /// Map of property name → optional deprecation message for properties
     /// annotated with `@Deprecated`. Consulted on field access so the
     /// warning fires when a deprecated property is *used*, not when the

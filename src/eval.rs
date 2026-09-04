@@ -10,7 +10,7 @@ use crate::capabilities::EvalCapabilities;
 use crate::error::{Error, Result};
 use crate::lexer;
 use crate::parser::{self, BinOp, Entry, Expr, Modifier, Module, Property, StringInterpPart, UnOp};
-use crate::value::{ObjectSource, Value};
+use crate::value::{MappingType, ObjectSource, Value};
 
 const DYNAMIC_SIBLING_REF: &str = "\0pklr:dynamic-sibling";
 
@@ -60,7 +60,7 @@ struct MappingInheritedDefault {
 
 struct MappingTypeInfo {
     defaults: Vec<(String, Value)>,
-    value_types: Vec<String>,
+    mapping_type: Option<MappingType>,
 }
 
 #[derive(Clone, Default)]
@@ -1573,6 +1573,7 @@ impl Evaluator {
                 type_name: None,
                 parent_type_names: Vec::new(),
                 mapping_value_types: Vec::new(),
+                mapping_type: None,
                 deprecated,
             }))
         };
@@ -1610,6 +1611,16 @@ impl Evaluator {
     ) -> Result<Option<Value>> {
         if let Some(expr) = &prop.value {
             let mut value = self.eval_expr(expr, scope, depth).await?;
+            if let Some(type_ann) = &prop.type_ann {
+                self.ensure_assignable(
+                    &value,
+                    type_ann,
+                    scope,
+                    depth,
+                    &format!("property '{}'", prop.name),
+                )
+                .await?;
+            }
             apply_mapping_type_annotation(&mut value, prop.type_ann.as_ref(), scope);
             return Ok(Some(value));
         }
@@ -1667,7 +1678,7 @@ impl Evaluator {
                         .collect::<Vec<_>>();
                     let mapping_type_info = MappingTypeInfo {
                         defaults: value_type_defaults,
-                        value_types: src.mapping_value_types.clone(),
+                        mapping_type: src.mapping_type.clone(),
                     };
                     let inherited_default = self
                         .find_default_template(&src.entries, &type_scope, depth)
@@ -1682,7 +1693,17 @@ impl Evaluator {
                         MappingInheritedDefault::default(),
                     )
                     .await?;
-                    amended.extend(existing_map.iter().map(|(k, v)| (k.clone(), v.clone())));
+                    for (key, value) in existing_map.iter() {
+                        self.insert_mapping_value(
+                            &mut amended,
+                            Value::String(key.clone()),
+                            value.clone(),
+                            &mapping_type_info,
+                            &type_scope,
+                            depth,
+                        )
+                        .await?;
+                    }
                     self.eval_mapping_entries_with_type_default(
                         body,
                         &type_scope,
@@ -1890,6 +1911,7 @@ impl Evaluator {
                                     type_name: Some(tn.clone()),
                                     parent_type_names: Vec::new(),
                                     mapping_value_types: Vec::new(),
+                                    mapping_type: None,
                                     deprecated: merge_deprecated(&src.deprecated, body),
                                 },
                             };
@@ -1971,6 +1993,7 @@ impl Evaluator {
             type_name: None,
             parent_type_names: Vec::new(),
             mapping_value_types: Vec::new(),
+            mapping_type: None,
             deprecated: collect_deprecated(entries),
         };
         Ok(Value::Object(Arc::new(map), Some(Arc::new(source))))
@@ -2163,7 +2186,17 @@ impl Evaluator {
             }
             TypeExpr::Constrained(base, constraint) => {
                 // First check the base type
-                if !value_is_named_type(val, base) {
+                let base_type = TypeExpr::Named(
+                    base.trim_end_matches('?')
+                        .split('<')
+                        .next()
+                        .unwrap_or(base)
+                        .to_string(),
+                );
+                if !self
+                    .eval_type_check(val, &base_type, scope, depth + 1)
+                    .await?
+                {
                     return Ok(false);
                 }
                 // Evaluate the constraint with `this` bound to the value
@@ -2242,6 +2275,47 @@ impl Evaluator {
                 }
             }
         }
+    }
+
+    async fn ensure_assignable(
+        &mut self,
+        value: &Value,
+        type_ann: &crate::parser::TypeExpr,
+        scope: &Scope,
+        depth: usize,
+        context: &str,
+    ) -> Result<()> {
+        if type_is_runtime_checkable(type_ann, scope)
+            && !self
+                .eval_type_check(value, type_ann, scope, depth + 1)
+                .await?
+        {
+            return Err(Error::Eval(format!(
+                "{context} expected {}, got {}",
+                display_type_expr(type_ann),
+                value_runtime_type_name(value)
+            )));
+        }
+        Ok(())
+    }
+
+    async fn insert_mapping_value(
+        &mut self,
+        map: &mut IndexMap<String, Value>,
+        key: Value,
+        value: Value,
+        type_info: &MappingTypeInfo,
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<()> {
+        if let Some(mapping_type) = &type_info.mapping_type {
+            self.ensure_assignable(&key, &mapping_type.key, scope, depth, "mapping key")
+                .await?;
+            self.ensure_assignable(&value, &mapping_type.value, scope, depth, "mapping value")
+                .await?;
+        }
+        map.insert(value_to_key(&key)?, value);
+        Ok(())
     }
 
     /// Evaluate an amended object with late binding.
@@ -2372,18 +2446,14 @@ impl Evaluator {
                 let Some(value) = value else {
                     continue;
                 };
-                if type_is_runtime_checkable(type_ann, &eval_scope)
-                    && !self
-                        .eval_type_check(value, type_ann, &eval_scope, depth + 1)
-                        .await?
-                {
-                    return Err(Error::Eval(format!(
-                        "property '{}' expected {}, got {}",
-                        prop.name,
-                        display_type_expr(type_ann),
-                        value_type_name(value)
-                    )));
-                }
+                self.ensure_assignable(
+                    value,
+                    type_ann,
+                    &eval_scope,
+                    depth,
+                    &format!("property '{}'", prop.name),
+                )
+                .await?;
             }
         }
         // Amending an object preserves its class identity (so `is Foo` and
@@ -2586,7 +2656,7 @@ impl Evaluator {
                             .collect::<Vec<_>>();
                         let mapping_type_info = MappingTypeInfo {
                             defaults: value_type_defaults,
-                            value_types: mapping_value_types.clone(),
+                            mapping_type: None,
                         };
                         let mut map = IndexMap::new();
                         self.eval_mapping_entries_with_type_default(
@@ -2629,6 +2699,7 @@ impl Evaluator {
                             type_name: None,
                             parent_type_names: Vec::new(),
                             mapping_value_types,
+                            mapping_type: None,
                             deprecated,
                         };
                         Ok(Value::Object(Arc::new(map), Some(Arc::new(source))))
@@ -2722,6 +2793,7 @@ impl Evaluator {
                                         type_name: tn,
                                         parent_type_names: Vec::new(),
                                         mapping_value_types: Vec::new(),
+                                        mapping_type: None,
                                         deprecated: merge_deprecated(&base_src.deprecated, entries),
                                     }
                                 };
@@ -2753,6 +2825,7 @@ impl Evaluator {
                                 type_name: type_name.clone(),
                                 parent_type_names: Vec::new(),
                                 mapping_value_types: Vec::new(),
+                                mapping_type: None,
                                 deprecated,
                             };
                             Ok(Value::Object(Arc::new(merged), Some(Arc::new(src))))
@@ -3426,7 +3499,7 @@ impl Evaluator {
                     .collect::<Vec<_>>();
                 let mapping_type_info = MappingTypeInfo {
                     defaults: value_type_defaults,
-                    value_types: base_src.mapping_value_types.clone(),
+                    mapping_type: base_src.mapping_type.clone(),
                 };
                 let inherited_default = self
                     .find_default_template(&base_src.entries, &type_scope, depth)
@@ -3442,7 +3515,17 @@ impl Evaluator {
                 )
                 .await?;
                 if let Value::Object(existing_map, _) = &base {
-                    amended.extend(existing_map.iter().map(|(k, v)| (k.clone(), v.clone())));
+                    for (key, value) in existing_map.iter() {
+                        self.insert_mapping_value(
+                            &mut amended,
+                            Value::String(key.clone()),
+                            value.clone(),
+                            &mapping_type_info,
+                            &type_scope,
+                            depth,
+                        )
+                        .await?;
+                    }
                 }
                 self.eval_mapping_entries_with_type_default(
                     overlay_entries,
@@ -3647,7 +3730,7 @@ impl Evaluator {
     ) -> Result<()> {
         let MappingTypeInfo {
             defaults: type_defaults,
-            value_types: mapping_value_types,
+            mapping_type: _,
         } = type_info;
         let mut entry_scope = scope.child();
         let mut deferred_lambdas: Vec<(String, &crate::parser::Expr)> = Vec::new();
@@ -3726,29 +3809,18 @@ impl Evaluator {
                                 depth,
                             )
                             .await?;
-                        map.insert(key_str, val);
+                        self.insert_mapping_value(map, key, val, type_info, &entry_scope, depth)
+                            .await?;
                         continue;
-                    }
-                    if let Expr::New(Some(type_name), _, _) = val_expr
-                        && !mapping_value_types.is_empty()
-                        && select_mapping_type_default_for_new(type_defaults, type_name).is_none()
-                        && resolve_dotted(&entry_scope, type_name).is_some_and(|value| {
-                            !value_matches_mapping_type(&value, mapping_value_types, type_defaults)
-                        })
-                    {
-                        return Err(mapping_value_type_error(mapping_value_types, type_name));
                     }
                     let type_default = match val_expr {
                         Expr::ObjectBody(body) => select_mapping_type_default(type_defaults, body)
                             .map(|(name, value)| (Some(name.as_str()), value)),
-                        Expr::New(Some(type_name), _, _) => {
-                            select_mapping_type_default_for_new(type_defaults, type_name)
+                        Expr::New(None, body, _) => {
+                            select_mapping_type_default(type_defaults, body)
                                 .map(|(name, value)| (Some(name.as_str()), value))
                         }
-                        Expr::New(None, _, _) => None,
-                        _ => type_defaults
-                            .first()
-                            .map(|(name, value)| (Some(name.as_str()), value)),
+                        _ => None,
                     };
                     let default_template = match (type_default, explicit_default.as_ref()) {
                         (Some((type_name, type_default)), Some(explicit_default)) => Some((
@@ -3768,9 +3840,6 @@ impl Evaluator {
                             default_template.as_ref()
                             && let Some(body) = mapping_entry_body(val_expr)
                         {
-                            if let Expr::New(Some(type_name), _, _) = val_expr {
-                                validate_new_object_body(type_name, body, src)?;
-                            }
                             let mut result =
                                 if let Some(default_entries) = explicit_default_entries.as_ref() {
                                     let mut overlay_entries = default_entries.clone();
@@ -3825,6 +3894,7 @@ impl Evaluator {
                                         type_name: Some(tn.to_string()),
                                         parent_type_names: Vec::new(),
                                         mapping_value_types: Vec::new(),
+                                        mapping_type: None,
                                         deprecated: merge_deprecated(&src.deprecated, body),
                                     },
                                 };
@@ -3832,14 +3902,10 @@ impl Evaluator {
                             }
                             result
                         } else {
-                            let mut val = self.eval_expr(val_expr, &entry_scope, depth + 1).await?;
-                            validate_mapping_value(&val, mapping_value_types, type_defaults)?;
-                            if let Some((_, tpl)) = default_template {
-                                val = merge_values(tpl, val);
-                            }
-                            val
+                            self.eval_expr(val_expr, &entry_scope, depth + 1).await?
                         };
-                    map.insert(key_str, val);
+                    self.insert_mapping_value(map, key, val, type_info, &entry_scope, depth)
+                        .await?;
                 }
                 Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {}
                 Entry::Property(prop)
@@ -3848,7 +3914,17 @@ impl Evaluator {
                 Entry::Spread(e) => {
                     let val = self.eval_expr(e, &entry_scope, depth + 1).await?;
                     if let Value::Object(m, _) = val {
-                        map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                        for (key, value) in m.iter() {
+                            self.insert_mapping_value(
+                                map,
+                                Value::String(key.clone()),
+                                value.clone(),
+                                type_info,
+                                &entry_scope,
+                                depth,
+                            )
+                            .await?;
+                        }
                     }
                 }
                 Entry::ForGenerator(fgen) => {
@@ -3864,6 +3940,30 @@ impl Evaluator {
                         self.eval_mapping_entries_with_type_default(
                             &fgen.body,
                             &iter_scope,
+                            depth + 1,
+                            map,
+                            type_info,
+                            MappingInheritedDefault {
+                                value: explicit_default.clone(),
+                                entries: explicit_default_entries.clone(),
+                            },
+                        )
+                        .await?;
+                    }
+                }
+                Entry::WhenGenerator(generator) => {
+                    let condition = self
+                        .eval_expr(&generator.condition, &entry_scope, depth + 1)
+                        .await?;
+                    let selected = if is_truthy(&condition) {
+                        Some(generator.body.as_slice())
+                    } else {
+                        generator.else_body.as_deref()
+                    };
+                    if let Some(selected) = selected {
+                        self.eval_mapping_entries_with_type_default(
+                            selected,
+                            &entry_scope,
                             depth + 1,
                             map,
                             type_info,
@@ -4089,32 +4189,6 @@ fn select_mapping_type_default<'a>(
     best.or_else(|| type_defaults.first())
 }
 
-fn select_mapping_type_default_for_new<'a>(
-    type_defaults: &'a [(String, Value)],
-    type_name: &str,
-) -> Option<&'a (String, Value)> {
-    type_defaults
-        .iter()
-        .find(|(name, _)| name == type_name)
-        .or_else(|| {
-            type_defaults
-                .iter()
-                .find(|(name, _)| type_names_match(name, type_name))
-        })
-        .or_else(|| {
-            type_defaults.iter().find(|(_, value)| {
-                matches!(
-                    value,
-                    Value::Object(_, Some(src))
-                        if src
-                            .type_name
-                            .as_deref()
-                            .is_some_and(|tn| type_names_match(tn, type_name))
-                )
-            })
-        })
-}
-
 fn type_names_match(a: &str, b: &str) -> bool {
     a == b
         || (a.len() > b.len() && a.ends_with(b) && a.as_bytes()[a.len() - b.len() - 1] == b'.')
@@ -4124,7 +4198,7 @@ fn type_names_match(a: &str, b: &str) -> bool {
 fn mapping_entry_body(expr: &Expr) -> Option<&[Entry]> {
     match expr {
         Expr::ObjectBody(body) => Some(body),
-        Expr::New(Some(_), body, _) => Some(body),
+        Expr::New(None, body, _) => Some(body),
         _ => None,
     }
 }
@@ -4137,10 +4211,11 @@ fn apply_mapping_type_annotation(
     let Some(type_ann) = type_ann else {
         return;
     };
-    let type_names = mapping_value_type_names(type_ann, scope);
-    if type_names.is_empty() {
+    let Some(mapping_type) = mapping_type_annotation(type_ann, scope) else {
         return;
-    }
+    };
+    let mut type_names = Vec::new();
+    collect_mapping_value_type_names(&mapping_type.value, &mut type_names);
     let Value::Object(_, src_slot) = value else {
         return;
     };
@@ -4155,73 +4230,43 @@ fn apply_mapping_type_annotation(
             type_name: None,
             parent_type_names: Vec::new(),
             mapping_value_types: Vec::new(),
+            mapping_type: None,
             deprecated: IndexMap::new(),
         });
-    for name in type_names {
-        if !src.mapping_value_types.contains(&name) {
-            src.mapping_value_types.push(name);
-        }
-    }
+    src.mapping_value_types = type_names;
+    src.mapping_type = Some(mapping_type);
     *src_slot = Some(Arc::new(src));
 }
 
-fn mapping_value_type_names(type_ann: &crate::parser::TypeExpr, scope: &Scope) -> Vec<String> {
-    use crate::parser::TypeExpr;
-
-    let mut names = Vec::new();
-    let mut aliases_seen = HashSet::new();
-    match type_ann {
-        TypeExpr::Generic(name, params) if name == "Mapping" || name == "Map" => {
-            if let Some(value_type) = params.get(1) {
-                collect_mapping_value_type_names(value_type, scope, &mut names, &mut aliases_seen);
-            }
-        }
-        TypeExpr::Nullable(inner) => return mapping_value_type_names(inner, scope),
-        TypeExpr::Constrained(base, _) => {
-            if let Some(value_type) = mapping_value_type_from_name(base) {
-                names.push(value_type);
-            }
-        }
-        _ => {}
-    }
-    names
-}
-
-fn mapping_value_type_from_name(name: &str) -> Option<String> {
-    let name = name.trim_start_matches('*').trim_end_matches('?');
-    let inner = name
-        .strip_prefix("Mapping<")
-        .or_else(|| name.strip_prefix("Map<"))?
-        .strip_suffix('>')?;
-    let mut depth = 0usize;
-    for (index, ch) in inner.char_indices() {
-        match ch {
-            '<' => depth += 1,
-            '>' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                let value_type = inner[index + 1..].trim();
-                return Some(
-                    value_type
-                        .split('<')
-                        .next()
-                        .unwrap_or(value_type)
-                        .trim_start_matches('*')
-                        .trim_end_matches('?')
-                        .to_string(),
-                );
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn collect_mapping_value_type_names(
+fn mapping_type_annotation(
     type_ann: &crate::parser::TypeExpr,
     scope: &Scope,
-    names: &mut Vec<String>,
+) -> Option<MappingType> {
+    use crate::parser::TypeExpr;
+
+    let mut aliases_seen = HashSet::new();
+    let resolved = resolve_type_aliases(type_ann, scope, &mut aliases_seen);
+    let mapping = match &resolved {
+        TypeExpr::Nullable(inner) => inner.as_ref(),
+        other => other,
+    };
+    let TypeExpr::Generic(name, params) = mapping else {
+        return None;
+    };
+    if name != "Mapping" && name != "Map" {
+        return None;
+    }
+    Some(MappingType {
+        key: params.first()?.clone(),
+        value: params.get(1)?.clone(),
+    })
+}
+
+fn resolve_type_aliases(
+    type_ann: &crate::parser::TypeExpr,
+    scope: &Scope,
     aliases_seen: &mut HashSet<String>,
-) {
+) -> crate::parser::TypeExpr {
     use crate::parser::TypeExpr;
 
     match type_ann {
@@ -4229,9 +4274,37 @@ fn collect_mapping_value_type_names(
             if let Some(alias) = scope.get_type_alias(name)
                 && aliases_seen.insert(name.clone())
             {
-                collect_mapping_value_type_names(alias, scope, names, aliases_seen);
-                return;
+                let resolved = resolve_type_aliases(alias, scope, aliases_seen);
+                aliases_seen.remove(name);
+                return resolved;
             }
+            type_ann.clone()
+        }
+        TypeExpr::Nullable(inner) => {
+            TypeExpr::Nullable(Box::new(resolve_type_aliases(inner, scope, aliases_seen)))
+        }
+        TypeExpr::Union(variants) => TypeExpr::Union(
+            variants
+                .iter()
+                .map(|variant| resolve_type_aliases(variant, scope, aliases_seen))
+                .collect(),
+        ),
+        TypeExpr::Generic(name, params) => TypeExpr::Generic(
+            name.clone(),
+            params
+                .iter()
+                .map(|param| resolve_type_aliases(param, scope, aliases_seen))
+                .collect(),
+        ),
+        TypeExpr::Constrained(..) => type_ann.clone(),
+    }
+}
+
+fn collect_mapping_value_type_names(type_ann: &crate::parser::TypeExpr, names: &mut Vec<String>) {
+    use crate::parser::TypeExpr;
+
+    match type_ann {
+        TypeExpr::Named(name) => {
             if !names.contains(name) {
                 names.push(name.clone());
             }
@@ -4250,61 +4323,14 @@ fn collect_mapping_value_type_names(
             }
         }
         TypeExpr::Nullable(inner) => {
-            collect_mapping_value_type_names(inner, scope, names, aliases_seen);
-            if !names.iter().any(|name| name == "Null") {
-                names.push("Null".into());
-            }
+            collect_mapping_value_type_names(inner, names);
         }
         TypeExpr::Union(variants) => {
             for variant in variants {
-                collect_mapping_value_type_names(variant, scope, names, aliases_seen);
+                collect_mapping_value_type_names(variant, names);
             }
         }
     }
-}
-
-fn validate_new_object_body(
-    type_name: &str,
-    entries: &[Entry],
-    base_src: &ObjectSource,
-) -> Result<()> {
-    if base_src.is_open {
-        return Ok(());
-    }
-
-    let base_names: HashSet<String> = base_src
-        .entries
-        .iter()
-        .filter_map(|entry| {
-            if let Entry::Property(prop) = entry {
-                Some(prop.name.clone())
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    for entry in entries {
-        match entry {
-            Entry::Property(prop)
-                if !has_modifier(&prop.modifiers, Modifier::Local)
-                    && !base_names.contains(&prop.name) =>
-            {
-                return Err(Error::Eval(format!(
-                    "cannot add property '{}' to non-open class {type_name}",
-                    prop.name
-                )));
-            }
-            Entry::DynProperty(Expr::String(key), _) if !base_names.contains(key) => {
-                return Err(Error::Eval(format!(
-                    "cannot add property '{key}' to non-open class {type_name}"
-                )));
-            }
-            _ => {}
-        }
-    }
-
-    Ok(())
 }
 
 fn find_default_body_entries(entries: &[Entry]) -> Option<Vec<Entry>> {
@@ -5408,6 +5434,10 @@ fn value_class_name(value: &Value) -> Option<&str> {
     source.type_name.as_deref()
 }
 
+fn value_runtime_type_name(value: &Value) -> &str {
+    value_class_name(value).unwrap_or_else(|| value_type_name(value))
+}
+
 fn value_is_class(value: &Value, expected: &str) -> bool {
     let Value::Object(_, Some(source)) = value else {
         return false;
@@ -5417,77 +5447,6 @@ fn value_is_class(value: &Value, expected: &str) -> bool {
         .iter()
         .chain(&source.parent_type_names)
         .any(|actual| type_names_match(actual, expected))
-}
-
-fn value_matches_mapping_type(
-    value: &Value,
-    mapping_value_types: &[String],
-    type_defaults: &[(String, Value)],
-) -> bool {
-    mapping_value_types.iter().any(|name| {
-        type_defaults.iter().any(|(default_name, default)| {
-            type_names_match(default_name, name)
-                && (value_is_class(value, name)
-                    || matches!(
-                        default,
-                        Value::Object(_, Some(source))
-                            if source
-                                .type_name
-                                .as_deref()
-                                .is_some_and(|expected| value_is_class(value, expected))
-                    ))
-        }) || value_is_builtin_type(value, name)
-    })
-}
-
-fn value_is_builtin_type(value: &Value, name: &str) -> bool {
-    if let Some(expected) = string_literal_type_value(name) {
-        return matches!(value, Value::String(actual) if actual == expected);
-    }
-    matches!(
-        name.trim_start_matches('*'),
-        "Null"
-            | "Boolean"
-            | "Bool"
-            | "Int"
-            | "Float"
-            | "Number"
-            | "String"
-            | "List"
-            | "Listing"
-            | "Set"
-            | "Map"
-            | "Mapping"
-            | "Object"
-            | "Dynamic"
-            | "Function"
-            | "Any"
-    ) && value_is_named_type(value, name)
-}
-
-fn mapping_value_type_error(mapping_value_types: &[String], actual: &str) -> Error {
-    Error::Eval(format!(
-        "expected mapping value of type {}, got {}",
-        mapping_value_types.join("|"),
-        actual
-    ))
-}
-
-fn validate_mapping_value(
-    value: &Value,
-    mapping_value_types: &[String],
-    type_defaults: &[(String, Value)],
-) -> Result<()> {
-    if !mapping_value_types.is_empty()
-        && !matches!(value, Value::Object(_, Some(source)) if source.type_name.is_none())
-        && !value_matches_mapping_type(value, mapping_value_types, type_defaults)
-    {
-        return Err(mapping_value_type_error(
-            mapping_value_types,
-            value_class_name(value).unwrap_or_else(|| value_type_name(value)),
-        ));
-    }
-    Ok(())
 }
 
 fn value_to_key(v: &Value) -> Result<String> {
@@ -5626,7 +5585,10 @@ fn type_is_runtime_checkable(ty: &crate::parser::TypeExpr, scope: &Scope) -> boo
                         | "Any"
                 )
                 || scope.get_type_alias(runtime_name).is_some()
-                || resolve_dotted(scope, runtime_name).is_some()
+                || matches!(
+                    resolve_dotted(scope, runtime_name),
+                    Some(Value::Object(_, Some(source))) if source.type_name.is_some()
+                )
         }
         TypeExpr::Nullable(inner) => type_is_runtime_checkable(inner, scope),
         TypeExpr::Union(variants) => variants
