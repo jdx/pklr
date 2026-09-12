@@ -3763,6 +3763,32 @@ impl Evaluator {
                                             .map(|name| (name, src.parent_type_names.clone())),
                                     )
                                     .await?
+                                } else if let Some(Value::Object(_, Some(explicit_src))) =
+                                    explicit_default.as_ref()
+                                    && type_default.is_some()
+                                    && explicit_src
+                                        .type_name
+                                        .as_deref()
+                                        .zip(*default_type_name)
+                                        .is_some_and(|(actual, expected)| {
+                                            type_names_match(actual, expected)
+                                        })
+                                {
+                                    // The `default` is itself an instance of the selected
+                                    // value type (for example the synthetic `new Step {}`
+                                    // of a typed mapping literal). Amend its entries so the
+                                    // body's assignments late-bind sibling properties.
+                                    self.eval_amended_object(
+                                        &explicit_src.entries,
+                                        &explicit_src.scope,
+                                        body,
+                                        &entry_scope,
+                                        depth,
+                                        explicit_src.type_name.clone().map(|name| {
+                                            (name, explicit_src.parent_type_names.clone())
+                                        }),
+                                    )
+                                    .await?
                                 } else if explicit_default.is_some() && type_default.is_some() {
                                     self.eval_object_body_over_template(
                                         template_map,
@@ -4061,20 +4087,34 @@ fn apply_mapping_entry_template(
     if allowed.is_empty() {
         return Ok(merge(value));
     }
-    let chain =
-        std::iter::once(actual).chain(value_src.parent_type_names.iter().map(String::as_str));
-    for candidate in chain {
+    if allowed
+        .iter()
+        .any(|name| matches!(name.as_str(), "Any" | "Dynamic" | "Object" | "Typed"))
+    {
+        return Ok(value);
+    }
+    // `new Alias {}` tags the value with the alias name; compare the expanded
+    // class chain so an alias of a declared class is accepted.
+    let chain = std::iter::once(actual.to_string())
+        .chain(value_src.parent_type_names.iter().cloned())
+        .collect::<Vec<_>>();
+    let chain = expand_type_alias_names(&chain, scope);
+    for candidate in &chain {
         if allowed.iter().any(|name| type_names_match(name, candidate)) {
             return Ok(value);
         }
     }
-    let all_known_classes = allowed.iter().all(|name| {
-        matches!(
-            resolve_dotted(scope, name),
-            Some(Value::Object(_, Some(src))) if src.type_name.is_some()
-        )
+    // Only fail when every alternative is understood: a class in scope, or a
+    // primitive that an object can never satisfy. Anything unresolved (an
+    // imported qualified alias, a generic collection type) stays lenient.
+    let all_known = allowed.iter().all(|name| {
+        is_object_incompatible_type_name(name)
+            || matches!(
+                resolve_dotted(scope, name),
+                Some(Value::Object(_, Some(src))) if src.type_name.is_some()
+            )
     });
-    if all_known_classes {
+    if all_known {
         return Err(Error::Eval(format!(
             "Expected value of type `{}`, but got type `{}`.",
             allowed.join(" | "),
@@ -4082,6 +4122,32 @@ fn apply_mapping_entry_template(
         )));
     }
     Ok(value)
+}
+
+/// Type names an object value can never satisfy.
+fn is_object_incompatible_type_name(name: &str) -> bool {
+    string_literal_type_value(name).is_some()
+        || matches!(
+            name,
+            "Null"
+                | "Boolean"
+                | "Bool"
+                | "Int"
+                | "Int8"
+                | "Int16"
+                | "Int32"
+                | "UInt"
+                | "UInt8"
+                | "UInt16"
+                | "UInt32"
+                | "Float"
+                | "Number"
+                | "String"
+                | "Duration"
+                | "DataSize"
+                | "Regex"
+                | "Char"
+        )
 }
 
 /// Expand mapping value type names, replacing type aliases with the class

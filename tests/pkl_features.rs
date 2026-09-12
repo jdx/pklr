@@ -5103,6 +5103,61 @@ hook = new Hook { steps { ["s"] { staged = true } } }
         "{}",
         json["hook"]
     );
+    assert_eq!(json["hook"]["steps"]["s"]["label"], "staged");
+}
+
+#[test]
+fn typed_mapping_entry_accepts_instance_built_through_alias() {
+    let json = eval(
+        r#"
+class Step { name: String = "x" }
+typealias StepAlias = Step
+steps: Mapping<String, Step> = new Mapping<String, Step> {}
+amended = (steps) { ["a"] = new StepAlias { name = "aliased" } }
+"#,
+    );
+    assert_eq!(json["amended"]["a"], serde_json::json!({"name": "aliased"}));
+}
+
+#[test]
+fn typed_mapping_entry_rejects_other_class_in_union_with_primitive() {
+    let message = eval_fails(
+        r#"
+class Step { name: String = "x" }
+class Other { y: Int = 1 }
+other = new Other {}
+steps: Mapping<String, Step | String> = new Mapping<String, Step> {}
+amended = (steps) { ["o"] = other }
+"#,
+    );
+    assert!(
+        message.contains("Expected value of type `Step | String`"),
+        "{message}"
+    );
+    assert!(message.contains("got type `Other`"), "{message}");
+}
+
+#[test]
+fn typed_mapping_entry_stays_lenient_for_unresolved_alternatives() {
+    for src in [
+        r#"
+class Step { name: String = "x" }
+class Other { y: Int = 1 }
+other = new Other {}
+steps: Mapping<String, Step | Dynamic> = new Mapping<String, Step> {}
+amended = (steps) { ["o"] = other }
+"#,
+        r#"
+class Step { name: String = "x" }
+class Other { y: Int = 1 }
+other = new Other {}
+steps: Mapping<String, Step | Unknown.Alias> = new Mapping<String, Step> {}
+amended = (steps) { ["o"] = other }
+"#,
+    ] {
+        let json = eval(src);
+        assert_eq!(json["amended"]["o"], serde_json::json!({"y": 1}), "{src}");
+    }
 }
 
 #[test]
