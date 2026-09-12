@@ -3774,9 +3774,17 @@ impl Evaluator {
                                             .chain(explicit_src.parent_type_names.iter())
                                             .cloned()
                                             .collect::<Vec<_>>();
-                                        expand_type_alias_names(&chain, &entry_scope)
-                                            .iter()
-                                            .any(|actual| type_names_match(actual, expected))
+                                        let expected = expand_type_alias_names(
+                                            std::slice::from_ref(&expected.to_string()),
+                                            &entry_scope,
+                                        );
+                                        expand_type_alias_names(&chain, &entry_scope).iter().any(
+                                            |actual| {
+                                                expected.iter().any(|expected| {
+                                                    type_names_match(actual, expected)
+                                                })
+                                            },
+                                        )
                                     })
                                 {
                                     // The `default` is itself an instance of the selected

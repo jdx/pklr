@@ -5164,9 +5164,14 @@ steps: Mapping<String, Step> = new Mapping<String, Step> {
     default = new StepAlias {}
     ["s"] { staged = true }
 }
+aliased: Mapping<String, StepAlias> = new Mapping<String, StepAlias> {
+    default = new StepAlias {}
+    ["s"] { staged = true }
+}
 "#,
     );
     assert_eq!(json["steps"]["s"], serde_json::json!({"label": "staged"}));
+    assert_eq!(json["aliased"]["s"], serde_json::json!({"label": "staged"}));
 }
 
 #[test]
