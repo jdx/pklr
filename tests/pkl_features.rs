@@ -5074,6 +5074,135 @@ prettier = new Prettier { futureOption = true }
 }
 
 #[test]
+fn hidden_property_assigned_in_body_is_not_rendered() {
+    // Apple Pkl excludes `hidden` properties from rendered output and from
+    // `toMap()` whether the value comes from the class default or from an
+    // assignment in a `new` body or an amendment.
+    let json = eval(
+        r#"
+class Step {
+    hidden staged: Boolean = false
+    name: String = "x"
+    label: String = if (staged) "staged" else "worktree"
+}
+constructed = new Step { staged = true }
+amended = (new Step {}) { staged = true }
+reamended = (constructed) { name = "y" }
+asMap = constructed.toMap()
+class Hook { steps: Mapping<String, Step> = new Mapping<String, Step> {} }
+hook = new Hook { steps { ["s"] { staged = true } } }
+"#,
+    );
+    for key in ["constructed", "amended", "reamended", "asMap"] {
+        assert!(json[key].get("staged").is_none(), "{key}: {}", json[key]);
+        assert_eq!(json[key]["label"], "staged", "{key}");
+    }
+    assert_eq!(json["reamended"]["name"], "y");
+    assert!(
+        json["hook"]["steps"]["s"].get("staged").is_none(),
+        "{}",
+        json["hook"]
+    );
+}
+
+#[test]
+fn typed_mapping_entry_keeps_instance_of_declared_value_type() {
+    // `= expr` entries whose value already is an instance of one of the
+    // declared value types are stored as-is. The mapping's default template
+    // (here the synthetic `new Step {}` from the typed literal) must not be
+    // merged into a BuiltinFactory or a Group, and a type alias in the
+    // annotation must be expanded before deciding that.
+    let json = eval(
+        r#"
+open class Step { name: String = "x"; batch: Boolean = true }
+class Group { dir: String = "" }
+abstract class BuiltinFactory { step: Step }
+class PrettierFactory extends BuiltinFactory { step = new Step { name = "prettier" } }
+typealias StepDefinition = Step | BuiltinFactory
+prettier = new PrettierFactory {}
+class Hook { steps: Mapping<String, StepDefinition | Group> = new Mapping<String, Step> {} }
+hooks: Mapping<String, Hook> = new Mapping<String, Hook> {}
+hooks {
+    ["check"] {
+        steps {
+            ["plain"] = prettier
+            ["configured"] = (prettier) { step { batch = false } }
+            ["group"] = new Group {}
+            ["body"] { name = "custom" }
+            ["typed"] = new Step { name = "t" }
+        }
+    }
+}
+"#,
+    );
+    let steps = &json["hooks"]["check"]["steps"];
+    assert_eq!(
+        steps["plain"],
+        serde_json::json!({"step": {"name": "prettier", "batch": true}})
+    );
+    assert_eq!(
+        steps["configured"],
+        serde_json::json!({"step": {"name": "prettier", "batch": false}})
+    );
+    assert_eq!(steps["group"], serde_json::json!({"dir": ""}));
+    assert_eq!(
+        steps["body"],
+        serde_json::json!({"name": "custom", "batch": true})
+    );
+    assert_eq!(
+        steps["typed"],
+        serde_json::json!({"name": "t", "batch": true})
+    );
+}
+
+#[test]
+fn typed_mapping_entry_rejects_instance_of_other_class() {
+    // Apple Pkl: "Expected value of type `Step`, but got type `Other`."
+    for src in [
+        r#"
+class Step { name: String = "x" }
+class Other { y: Int = 1 }
+class Hook { steps: Mapping<String, Step> = new Mapping<String, Step> {} }
+hook = new Hook { steps { ["o"] = new Other {} } }
+"#,
+        r#"
+class Step { name: String = "x" }
+class Other { y: Int = 1 }
+other = new Other {}
+steps: Mapping<String, Step> = new Mapping<String, Step> {}
+amended = (steps) { ["o"] = other }
+"#,
+    ] {
+        let message = eval_fails(src);
+        assert!(
+            message.contains("Expected value of type `Step`"),
+            "{message}"
+        );
+        assert!(message.contains("got type `Other`"), "{message}");
+    }
+}
+
+#[test]
+fn typed_mapping_entry_still_merges_template_into_untyped_values() {
+    let json = eval(
+        r#"
+class Step { name: String = "x" }
+steps: Mapping<String, Step> = new Mapping<String, Step> {}
+amended = (steps) {
+    ["dynamic"] = new Dynamic { extra = 1 }
+    ["anonymous"] = new { extra = 2 }
+}
+"#,
+    );
+    // `new Dynamic { ... }` is a fresh object like any other `new T { ... }`.
+    assert_eq!(json["amended"]["dynamic"], serde_json::json!({"extra": 1}));
+    assert_eq!(
+        json["amended"]["anonymous"],
+        serde_json::json!({"extra": 2, "name": "x"})
+    );
+}
+
+#[test]
 fn converter_coerces_values() {
     let json = eval_with_converters(
         r#"
