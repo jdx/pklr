@@ -1670,6 +1670,7 @@ impl Evaluator {
                         depth,
                         &mut amended,
                         &value_type_defaults,
+                        &src.mapping_value_types,
                         MappingInheritedDefault::default(),
                     )
                     .await?;
@@ -1680,6 +1681,7 @@ impl Evaluator {
                         depth,
                         &mut amended,
                         &value_type_defaults,
+                        &src.mapping_value_types,
                         MappingInheritedDefault {
                             value: inherited_default,
                             entries: find_default_body_entries(&src.entries),
@@ -2243,10 +2245,18 @@ impl Evaluator {
                     merged.push(entry.clone());
                 }
                 let mut replacement = (*replacement).clone();
-                if let Entry::Property(overlay_prop) = &mut replacement
-                    && overlay_prop.type_ann.is_none()
-                {
-                    overlay_prop.type_ann = prop.type_ann.clone();
+                if let Entry::Property(overlay_prop) = &mut replacement {
+                    if overlay_prop.type_ann.is_none() {
+                        overlay_prop.type_ann = prop.type_ann.clone();
+                    }
+                    // `hidden` is declared on the class property. An overlay
+                    // that assigns it (`new Step { staged = true }` or
+                    // `(step) { staged = true }`) keeps it out of the output.
+                    if has_modifier(&prop.modifiers, Modifier::Hidden)
+                        && !has_modifier(&overlay_prop.modifiers, Modifier::Hidden)
+                    {
+                        overlay_prop.modifiers.push(Modifier::Hidden);
+                    }
                 }
                 merged.push(replacement);
                 used_overlay.insert(prop.name.clone());
@@ -2367,7 +2377,27 @@ impl Evaluator {
         for (key, value) in template_map.iter() {
             template_scope.set(key.clone(), value.clone());
         }
-        let overlay = self.eval_entries(body, &template_scope, depth + 1).await?;
+        let mut overlay = self.eval_entries(body, &template_scope, depth + 1).await?;
+        // Properties the template's class declares `hidden` stay out of the
+        // output even when the body assigns them.
+        if let Value::Object(overlay_map, _) = &mut overlay {
+            let hidden = template_src
+                .entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Hidden) => {
+                        Some(prop.name.as_str())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if !hidden.is_empty() {
+                let overlay_map = Arc::make_mut(overlay_map);
+                for name in hidden {
+                    overlay_map.shift_remove(name);
+                }
+            }
+        }
         Ok(merge_values(
             Value::Object(Arc::clone(template_map), Some(Arc::clone(template_src))),
             overlay,
@@ -2544,6 +2574,7 @@ impl Evaluator {
                             depth,
                             &mut map,
                             &value_type_defaults,
+                            generic_params.get(1..).unwrap_or(&[]),
                             MappingInheritedDefault::default(),
                         )
                         .await?;
@@ -3383,6 +3414,7 @@ impl Evaluator {
                     depth,
                     &mut amended,
                     &value_type_defaults,
+                    &base_src.mapping_value_types,
                     MappingInheritedDefault::default(),
                 )
                 .await?;
@@ -3395,6 +3427,7 @@ impl Evaluator {
                     depth,
                     &mut amended,
                     &value_type_defaults,
+                    &base_src.mapping_value_types,
                     MappingInheritedDefault {
                         value: inherited_default,
                         entries: find_default_body_entries(&base_src.entries),
@@ -3580,6 +3613,7 @@ impl Evaluator {
         Ok(None)
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[async_recursion(?Send)]
     async fn eval_mapping_entries_with_type_default(
         &mut self,
@@ -3588,6 +3622,7 @@ impl Evaluator {
         depth: usize,
         map: &mut IndexMap<String, Value>,
         type_defaults: &[(String, Value)],
+        value_type_names: &[String],
         inherited_default: MappingInheritedDefault,
     ) -> Result<()> {
         let mut entry_scope = scope.child();
@@ -3682,7 +3717,17 @@ impl Evaluator {
                             .first()
                             .map(|(name, value)| (Some(name.as_str()), value)),
                     };
+                    // `new T { ... }` constructs a fresh T. It never amends the
+                    // mapping's `default`, so only T's own defaults apply. In
+                    // particular a `default` of another class (the synthetic
+                    // `new Step {}` of `new Mapping<String, Step> {}`) must not
+                    // turn a `new Group {}` entry into a Step.
+                    let is_typed_new = matches!(val_expr, Expr::New(Some(_), _, _));
                     let default_template = match (type_default, explicit_default.as_ref()) {
+                        (Some((type_name, type_default)), _) if is_typed_new => {
+                            Some((type_name, type_default.clone()))
+                        }
+                        (None, _) if is_typed_new => None,
                         (Some((type_name, type_default)), Some(explicit_default)) => Some((
                             type_name,
                             merge_values(type_default.clone(), explicit_default.clone()),
@@ -3716,6 +3761,45 @@ impl Evaluator {
                                         src.type_name
                                             .clone()
                                             .map(|name| (name, src.parent_type_names.clone())),
+                                    )
+                                    .await?
+                                } else if !is_typed_new
+                                    && let Some(Value::Object(_, Some(explicit_src))) =
+                                        explicit_default.as_ref()
+                                    && type_default.is_some()
+                                    && default_type_name.is_some_and(|expected| {
+                                        let chain = explicit_src
+                                            .type_name
+                                            .iter()
+                                            .chain(explicit_src.parent_type_names.iter())
+                                            .cloned()
+                                            .collect::<Vec<_>>();
+                                        let expected = expand_type_alias_names(
+                                            std::slice::from_ref(&expected.to_string()),
+                                            &entry_scope,
+                                        );
+                                        expand_type_alias_names(&chain, &entry_scope).iter().any(
+                                            |actual| {
+                                                expected.iter().any(|expected| {
+                                                    type_names_match(actual, expected)
+                                                })
+                                            },
+                                        )
+                                    })
+                                {
+                                    // The `default` is itself an instance of the selected
+                                    // value type (for example the synthetic `new Step {}`
+                                    // of a typed mapping literal). Amend its entries so the
+                                    // body's assignments late-bind sibling properties.
+                                    self.eval_amended_object(
+                                        &explicit_src.entries,
+                                        &explicit_src.scope,
+                                        body,
+                                        &entry_scope,
+                                        depth,
+                                        explicit_src.type_name.clone().map(|name| {
+                                            (name, explicit_src.parent_type_names.clone())
+                                        }),
                                     )
                                     .await?
                                 } else if explicit_default.is_some() && type_default.is_some() {
@@ -3764,11 +3848,13 @@ impl Evaluator {
                             }
                             result
                         } else {
-                            let mut val = self.eval_expr(val_expr, &entry_scope, depth + 1).await?;
-                            if let Some((_, tpl)) = default_template {
-                                val = merge_values(tpl, val);
-                            }
-                            val
+                            let val = self.eval_expr(val_expr, &entry_scope, depth + 1).await?;
+                            apply_mapping_entry_template(
+                                default_template.map(|(_, template)| template),
+                                val,
+                                value_type_names,
+                                &entry_scope,
+                            )?
                         };
                     map.insert(key_str, val);
                 }
@@ -3798,6 +3884,7 @@ impl Evaluator {
                             depth + 1,
                             map,
                             type_defaults,
+                            value_type_names,
                             MappingInheritedDefault {
                                 value: explicit_default.clone(),
                                 entries: explicit_default_entries.clone(),
@@ -3982,6 +4069,147 @@ fn refresh_this_aliases(
     scope.set("this".into(), snapshot.clone());
     for alias in aliases {
         scope.set(alias.clone(), snapshot.clone());
+    }
+}
+
+/// Apply a mapping's default template to an `["key"] = expr` entry.
+///
+/// An untyped value (a `Dynamic`, a plain object body, a primitive) is merged
+/// onto the template as before. A value that is already an instance of a class
+/// is kept as-is: an instance of one of the declared value types has nothing to
+/// inherit from the template, and an instance of an unrelated class must not be
+/// turned into the template's class. When every declared value type is a known
+/// class and none matches, this is the type error Apple Pkl reports.
+fn apply_mapping_entry_template(
+    template: Option<Value>,
+    value: Value,
+    value_type_names: &[String],
+    scope: &Scope,
+) -> Result<Value> {
+    let merge = |value: Value| match template {
+        Some(template) => merge_values(template, value),
+        None => value,
+    };
+    let Value::Object(_, Some(value_src)) = &value else {
+        return Ok(merge(value));
+    };
+    let Some(actual) = value_src.type_name.as_deref() else {
+        return Ok(merge(value));
+    };
+    let allowed = expand_type_alias_names(value_type_names, scope);
+    if allowed.is_empty() {
+        return Ok(merge(value));
+    }
+    if allowed
+        .iter()
+        .any(|name| matches!(name.as_str(), "Any" | "Dynamic" | "Object" | "Typed"))
+    {
+        return Ok(value);
+    }
+    // `new Alias {}` tags the value with the alias name; compare the expanded
+    // class chain so an alias of a declared class is accepted.
+    let chain = std::iter::once(actual.to_string())
+        .chain(value_src.parent_type_names.iter().cloned())
+        .collect::<Vec<_>>();
+    let chain = expand_type_alias_names(&chain, scope);
+    for candidate in &chain {
+        if allowed.iter().any(|name| type_names_match(name, candidate)) {
+            return Ok(value);
+        }
+    }
+    // Only fail when every alternative is understood: a class in scope, or a
+    // primitive that an object can never satisfy. Anything unresolved (an
+    // imported qualified alias, a generic collection type) stays lenient.
+    let all_known = allowed.iter().all(|name| {
+        is_object_incompatible_type_name(name)
+            || matches!(
+                resolve_dotted(scope, name),
+                Some(Value::Object(_, Some(src))) if src.type_name.is_some()
+            )
+    });
+    if all_known {
+        return Err(Error::Eval(format!(
+            "Expected value of type `{}`, but got type `{}`.",
+            allowed.join(" | "),
+            actual
+        )));
+    }
+    Ok(value)
+}
+
+/// Type names an object value can never satisfy.
+fn is_object_incompatible_type_name(name: &str) -> bool {
+    string_literal_type_value(name).is_some()
+        || matches!(
+            name,
+            "Null"
+                | "Boolean"
+                | "Bool"
+                | "Int"
+                | "Int8"
+                | "Int16"
+                | "Int32"
+                | "UInt"
+                | "UInt8"
+                | "UInt16"
+                | "UInt32"
+                | "Float"
+                | "Number"
+                | "String"
+                | "Duration"
+                | "DataSize"
+                | "Regex"
+                | "Char"
+        )
+}
+
+/// Expand mapping value type names, replacing type aliases with the class
+/// names they name. `Mapping<String, StepDefinition | Group>` with
+/// `typealias StepDefinition = Step | BuiltinFactory` expands to
+/// `Step`, `BuiltinFactory`, `Group`.
+fn expand_type_alias_names(names: &[String], scope: &Scope) -> Vec<String> {
+    let mut out = Vec::new();
+    for name in names {
+        expand_type_alias_name(name, scope, &mut out, 0);
+    }
+    out
+}
+
+fn expand_type_alias_name(name: &str, scope: &Scope, out: &mut Vec<String>, depth: usize) {
+    let base = name.trim_start_matches('*').trim_end_matches('?');
+    if depth < 8
+        && let Some(alias) = scope.get_type_alias(base)
+    {
+        let alias = alias.clone();
+        collect_type_expr_class_names(&alias, scope, out, depth + 1);
+        return;
+    }
+    if !out.iter().any(|existing| existing == base) {
+        out.push(base.to_string());
+    }
+}
+
+fn collect_type_expr_class_names(
+    ty: &crate::parser::TypeExpr,
+    scope: &Scope,
+    out: &mut Vec<String>,
+    depth: usize,
+) {
+    use crate::parser::TypeExpr;
+    match ty {
+        TypeExpr::Named(name) => expand_type_alias_name(name, scope, out, depth),
+        TypeExpr::Constrained(base, _) => expand_type_alias_name(base, scope, out, depth),
+        TypeExpr::Generic(name, _) => {
+            if !out.iter().any(|existing| existing == name) {
+                out.push(name.clone());
+            }
+        }
+        TypeExpr::Nullable(inner) => collect_type_expr_class_names(inner, scope, out, depth),
+        TypeExpr::Union(variants) => {
+            for variant in variants {
+                collect_type_expr_class_names(variant, scope, out, depth);
+            }
+        }
     }
 }
 
