@@ -5107,6 +5107,28 @@ hook = new Hook { steps { ["s"] { staged = true } } }
 }
 
 #[test]
+fn typed_mapping_subclass_default_late_binds_body_assignments() {
+    let json = eval(
+        r#"
+open class Step {
+    hidden staged: Boolean = false
+    name: String = "x"
+    label: String = if (staged) "staged" else "worktree"
+}
+class SpecializedStep extends Step { extra: Int = 1 }
+steps: Mapping<String, Step> = new Mapping<String, Step> {
+    default = new SpecializedStep {}
+    ["s"] { staged = true }
+}
+"#,
+    );
+    assert_eq!(
+        json["steps"]["s"],
+        serde_json::json!({"name": "x", "label": "staged", "extra": 1})
+    );
+}
+
+#[test]
 fn typed_mapping_entry_accepts_instance_built_through_alias() {
     let json = eval(
         r#"

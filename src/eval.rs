@@ -3766,13 +3766,13 @@ impl Evaluator {
                                 } else if let Some(Value::Object(_, Some(explicit_src))) =
                                     explicit_default.as_ref()
                                     && type_default.is_some()
-                                    && explicit_src
-                                        .type_name
-                                        .as_deref()
-                                        .zip(*default_type_name)
-                                        .is_some_and(|(actual, expected)| {
-                                            type_names_match(actual, expected)
-                                        })
+                                    && default_type_name.is_some_and(|expected| {
+                                        explicit_src
+                                            .type_name
+                                            .iter()
+                                            .chain(explicit_src.parent_type_names.iter())
+                                            .any(|actual| type_names_match(actual, expected))
+                                    })
                                 {
                                     // The `default` is itself an instance of the selected
                                     // value type (for example the synthetic `new Step {}`
