@@ -3763,14 +3763,19 @@ impl Evaluator {
                                             .map(|name| (name, src.parent_type_names.clone())),
                                     )
                                     .await?
-                                } else if let Some(Value::Object(_, Some(explicit_src))) =
-                                    explicit_default.as_ref()
+                                } else if !is_typed_new
+                                    && let Some(Value::Object(_, Some(explicit_src))) =
+                                        explicit_default.as_ref()
                                     && type_default.is_some()
                                     && default_type_name.is_some_and(|expected| {
-                                        explicit_src
+                                        let chain = explicit_src
                                             .type_name
                                             .iter()
                                             .chain(explicit_src.parent_type_names.iter())
+                                            .cloned()
+                                            .collect::<Vec<_>>();
+                                        expand_type_alias_names(&chain, &entry_scope)
+                                            .iter()
                                             .any(|actual| type_names_match(actual, expected))
                                     })
                                 {

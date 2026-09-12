@@ -5129,6 +5129,47 @@ steps: Mapping<String, Step> = new Mapping<String, Step> {
 }
 
 #[test]
+fn typed_new_entry_ignores_customized_mapping_default() {
+    let json = eval(
+        r#"
+open class Step { name: String = "x"; batch: Boolean = false }
+class SpecializedStep extends Step { extra: Int = 1 }
+steps: Mapping<String, Step> = new Mapping<String, Step> {
+    default = new SpecializedStep { batch = true }
+    ["fresh"] = new Step {}
+    ["amended"] { name = "y" }
+}
+"#,
+    );
+    assert_eq!(
+        json["steps"]["fresh"],
+        serde_json::json!({"name": "x", "batch": false})
+    );
+    assert_eq!(
+        json["steps"]["amended"],
+        serde_json::json!({"name": "y", "batch": true, "extra": 1})
+    );
+}
+
+#[test]
+fn typed_mapping_alias_default_late_binds_body_assignments() {
+    let json = eval(
+        r#"
+class Step {
+    hidden staged: Boolean = false
+    label: String = if (staged) "staged" else "worktree"
+}
+typealias StepAlias = Step
+steps: Mapping<String, Step> = new Mapping<String, Step> {
+    default = new StepAlias {}
+    ["s"] { staged = true }
+}
+"#,
+    );
+    assert_eq!(json["steps"]["s"], serde_json::json!({"label": "staged"}));
+}
+
+#[test]
 fn typed_mapping_entry_accepts_instance_built_through_alias() {
     let json = eval(
         r#"
