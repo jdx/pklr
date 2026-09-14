@@ -2102,18 +2102,26 @@ impl Evaluator {
                         let mut combined_entries = Vec::new();
                         let mut combined_entry_scopes = Vec::new();
                         let mut combined_evaluated_properties = Vec::new();
+                        let mut inherited_property_values = IndexMap::new();
                         for (entry_index, pe) in psrc.entries.iter().enumerate() {
                             if let Entry::Property(p) = pe
                                 && !child_names.contains(&p.name)
                             {
                                 combined_entries.push(pe.clone());
                                 combined_entry_scopes.push(
-                                    psrc.entry_scopes.get(entry_index).cloned().unwrap_or_else(
-                                        || Some(Arc::new(capture_object_source_scope(&psrc))),
-                                    ),
+                                    psrc.entry_scopes
+                                        .get(entry_index)
+                                        .and_then(Clone::clone)
+                                        .or_else(|| {
+                                            Some(Arc::new(capture_object_source_scope(&psrc)))
+                                        }),
                                 );
                                 if psrc.evaluated_properties.contains(&p.name) {
                                     combined_evaluated_properties.push(p.name.clone());
+                                    if let Some(value) = psrc.scope.get(&p.name) {
+                                        inherited_property_values
+                                            .insert(p.name.clone(), value.clone());
+                                    }
                                 }
                             }
                         }
@@ -2125,6 +2133,11 @@ impl Evaluator {
                                 .push(child_entry_scopes.get(entry_index).cloned().unwrap_or(None));
                         }
                         combined_evaluated_properties.extend(src.evaluated_properties);
+                        // Keep the ObjectSource invariant used by amendment
+                        // seeding: every evaluated property name resolves to
+                        // that property's value in `scope`, even when a child
+                        // module has a same-named lexical binding.
+                        src.scope.extend(inherited_property_values);
                         src.entries = combined_entries;
                         src.entry_scopes = combined_entry_scopes;
                         src.evaluated_properties = combined_evaluated_properties;

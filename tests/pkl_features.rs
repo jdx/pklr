@@ -1832,6 +1832,107 @@ result = (Middle.item) {
 }
 
 #[tokio::test]
+async fn derived_class_amendment_seeds_inherited_property_values() {
+    let temp = TestTempDir::new("pklr_test_derived_class_inherited_property_values");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Base.pkl"),
+        r#"
+open class Parent {
+    later = "parent property"
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Middle.pkl"),
+        r#"
+import "Base.pkl"
+local later = "child module"
+open class Child extends Base.Parent {}
+item = new Child { selected = later }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "Middle.pkl"
+result = Middle.item
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        json["result"],
+        serde_json::json!({"later": "parent property", "selected": "parent property"})
+    );
+}
+
+#[tokio::test]
+async fn nested_class_inheritance_keeps_each_definition_scope() {
+    let temp = TestTempDir::new("pklr_test_nested_class_inheritance_scope");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Base.pkl"),
+        r#"
+local collision = "parent"
+open class Parent {
+    fromParent = collision
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Middle.pkl"),
+        r#"
+import "Base.pkl"
+local collision = "middle"
+open class Middle extends Base.Parent {
+    fromMiddle = collision
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Leaf.pkl"),
+        r#"
+import "Middle.pkl"
+local collision = "leaf"
+open class Leaf extends Middle.Middle {
+    fromLeaf = collision
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "Leaf.pkl"
+local collision = "main"
+result = (new Leaf.Leaf {}) { fromMain = collision }
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        json["result"],
+        serde_json::json!({
+            "fromParent": "parent",
+            "fromMiddle": "middle",
+            "fromLeaf": "leaf",
+            "fromMain": "main"
+        })
+    );
+}
+
+#[tokio::test]
 async fn unassigned_inherited_property_does_not_shadow_amendment_scope() {
     let temp = TestTempDir::new("pklr_test_unassigned_inherited_property_scope");
     let dir = temp.path();
