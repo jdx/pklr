@@ -823,7 +823,7 @@ impl Evaluator {
                     )
                     .await?
                 };
-                scope.set(alias, imported_val);
+                bind_import(&mut scope, alias, imported_val);
                 continue;
             }
 
@@ -853,7 +853,7 @@ impl Evaluator {
                         let imported_val = self
                             .eval_file_with_requested_fields(&local_path, depth + 1, requested)
                             .await?;
-                        scope.set(alias, imported_val);
+                        bind_import(&mut scope, alias, imported_val);
                         continue;
                     }
                     #[cfg(not(feature = "package-zip-core"))]
@@ -884,7 +884,7 @@ impl Evaluator {
                     )
                     .await?
                 };
-                scope.set(alias, imported_val);
+                bind_import(&mut scope, alias, imported_val);
                 continue;
             }
 
@@ -943,7 +943,7 @@ impl Evaluator {
                 let imported_val = self
                     .eval_file_with_requested_fields(&import_path, depth + 1, requested)
                     .await?;
-                scope.set(alias, imported_val);
+                bind_import(&mut scope, alias, imported_val);
             }
         }
 
@@ -2159,6 +2159,10 @@ impl Evaluator {
                 let class_name = base.trim_end_matches('?').split('<').next().unwrap_or(base);
                 let base_matches = if base.ends_with('?') && is_null_value(val) {
                     true
+                } else if let Some(resolved) = scope.get_type_alias(class_name) {
+                    let resolved = resolved.clone();
+                    self.eval_type_check(val, &resolved, scope, depth + 1)
+                        .await?
                 } else {
                     value_is_class_type(val, class_name, scope)
                         .unwrap_or_else(|| value_is_named_type(val, base))
@@ -5688,8 +5692,38 @@ fn value_is_class_type(val: &Value, name: &str, scope: &Scope) -> Option<bool> {
     Some(actual.iter().any(|actual_name| {
         expected
             .iter()
-            .any(|expected_name| type_names_match(actual_name, expected_name))
+            .any(|expected_name| actual_name == expected_name)
     }))
+}
+
+fn bind_import(scope: &mut Scope, alias: String, mut value: Value) {
+    qualify_imported_type_names(&mut value, &alias);
+    scope.set(alias, value);
+}
+
+fn qualify_imported_type_names(value: &mut Value, qualifier: &str) {
+    match value {
+        Value::Object(map, source) => {
+            for value in Arc::make_mut(map).values_mut() {
+                qualify_imported_type_names(value, qualifier);
+            }
+            if let Some(source) = source {
+                let source = Arc::make_mut(source);
+                if let Some(name) = &mut source.type_name {
+                    *name = format!("{qualifier}.{name}");
+                }
+                for name in &mut source.parent_type_names {
+                    *name = format!("{qualifier}.{name}");
+                }
+            }
+        }
+        Value::List(items) => {
+            for value in items {
+                qualify_imported_type_names(value, qualifier);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn type_is_runtime_checkable(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
