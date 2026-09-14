@@ -2661,6 +2661,9 @@ impl Evaluator {
                         let mut source_scope = scope.flatten();
                         source_scope.shift_remove("outer");
                         source_scope.shift_remove("this");
+                        let mut source_module_identities = scope.flatten_module_identities();
+                        source_module_identities.shift_remove("outer");
+                        source_module_identities.shift_remove("this");
                         let deprecated = collect_deprecated(&src_entries);
                         let source = ObjectSource {
                             entries: src_entries,
@@ -2670,7 +2673,7 @@ impl Evaluator {
                             type_identity: None,
                             parent_type_names: Vec::new(),
                             parent_type_identities: Vec::new(),
-                            scope_module_identities: IndexMap::new(),
+                            scope_module_identities: source_module_identities,
                             mapping_value_types: generic_params.iter().skip(1).cloned().collect(),
                             deprecated,
                         };
@@ -6144,6 +6147,38 @@ mod requested_field_tests {
         };
         assert_eq!(fields.len(), 1);
         assert_eq!(fields["wanted"], Value::Int(3));
+
+        std::fs::remove_dir_all(test_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn mapping_source_captures_import_identities() {
+        let test_dir = std::env::temp_dir().join(format!(
+            "pklr-mapping-source-imports-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&test_dir).unwrap();
+        std::fs::write(test_dir.join("Config.pkl"), "class Item {}\n").unwrap();
+        let main_path = test_dir.join("main.pkl");
+        std::fs::write(
+            &main_path,
+            "import \"Config.pkl\"\nresult = new Mapping { [\"item\"] = new Config.Item {} }\n",
+        )
+        .unwrap();
+
+        let value = Evaluator::default()
+            .eval_file_pub(&main_path)
+            .await
+            .unwrap();
+        let Value::Object(fields, _) = value else {
+            panic!("expected module object");
+        };
+        let Value::Object(_, Some(source)) = &fields["result"] else {
+            panic!("expected mapping object source");
+        };
+        assert!(source.scope.contains_key("Config"));
+        assert!(source.scope_module_identities.contains_key("Config"));
 
         std::fs::remove_dir_all(test_dir).unwrap();
     }
