@@ -196,8 +196,22 @@ fn string_multiline() {
 }
 
 #[test]
+fn string_multiline_with_crlf_line_endings() {
+    let src = "x = \"\"\"\r\n  hello\r\n  world\r\n  \"\"\"";
+    let json = eval(src);
+    assert_eq!(json["x"], "hello\nworld\n");
+}
+
+#[test]
 fn string_raw_multiline() {
     let src = "x = #\"\"\"\n  hello\\n\n  world\n  \"\"\"#";
+    let json = eval(src);
+    assert_eq!(json["x"], "hello\\n\nworld\n");
+}
+
+#[test]
+fn string_raw_multiline_with_crlf_line_endings() {
+    let src = "x = #\"\"\"\r\n  hello\\n\r\n  world\r\n  \"\"\"#";
     let json = eval(src);
     assert_eq!(json["x"], "hello\\n\nworld\n");
 }
