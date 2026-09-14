@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.4](https://github.com/jdx/pklr/compare/v2.0.3...v2.0.4) - 2026-09-14
+
+### Fixed
+
+- *(eval)* preserve lexical scope across object amendments ([#184](https://github.com/jdx/pklr/pull/184))
+
 ## [2.0.3](https://github.com/jdx/pklr/compare/v2.0.2...v2.0.3) - 2026-09-14
 
 ### Fixed
