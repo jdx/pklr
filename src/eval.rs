@@ -153,6 +153,18 @@ impl Evaluator {
         current_path.parent().unwrap_or(Path::new(".")).join(uri)
     }
 
+    async fn module_type_namespace(&mut self, path: &Path) -> String {
+        if path.to_string_lossy().contains("://") {
+            return path.display().to_string();
+        }
+        self.capabilities
+            .canonicalize(path)
+            .await
+            .unwrap_or_else(|_| path.to_path_buf())
+            .display()
+            .to_string()
+    }
+
     /// Persist downloaded package content under `path`.
     pub fn set_package_cache_dir(&mut self, path: impl Into<PathBuf>) {
         self.package_cache_dir = Some(path.into());
@@ -727,7 +739,11 @@ impl Evaluator {
         {
             return Err(Error::Eval("Invalid property definition".into()));
         }
-        let mut scope = Scope::default();
+        let type_namespace = self.module_type_namespace(path).await;
+        let mut scope = Scope {
+            type_namespace: Some(type_namespace),
+            ..Scope::default()
+        };
         seed_builtins(&mut scope);
         if let Some(inherited_scope) = inherited_scope {
             for (key, value) in inherited_scope.flatten() {
@@ -1065,14 +1081,14 @@ impl Evaluator {
         if let Some(amends_uri) = &module.amends {
             let resolved_amends = resolve_remote_relative(path, amends_uri);
             let uri: &str = resolved_amends.as_deref().unwrap_or(amends_uri);
-            let base_source = self
-                .load_module_source(uri, path)
-                .await?
-                .map(|(source, _)| source);
-            if let Some(src) = base_source
+            let base_source = self.load_module_source(uri, path).await?;
+            if let Some((src, source_path)) = base_source
                 && let Ok(tokens) = lexer::lex(&src)
                 && let Ok(base_module) = parser::parse(&tokens)
             {
+                let mut base_scope = scope.clone();
+                base_scope.type_namespace =
+                    Some(self.module_type_namespace(Path::new(&source_path)).await);
                 for entry in &base_module.body {
                     if let Entry::ClassDef(name, class_mods, parent, body) = entry {
                         let defaults = self
@@ -1081,7 +1097,7 @@ impl Evaluator {
                                 class_mods,
                                 parent.as_deref(),
                                 body,
-                                &scope,
+                                &base_scope,
                                 depth,
                             )
                             .await?;
@@ -1142,6 +1158,9 @@ impl Evaluator {
                         .await?;
                         base_obj = (**m).clone();
                     }
+                    let mut base_scope = scope.clone();
+                    base_scope.type_namespace =
+                        Some(self.module_type_namespace(&extends_path).await);
                     // Also evaluate the base module's scope (classes, locals) into our scope
                     // by re-processing its body entries
                     for entry in &ext_module.body {
@@ -1153,7 +1172,7 @@ impl Evaluator {
                                         cls_mods,
                                         parent.as_deref(),
                                         body,
-                                        &scope,
+                                        &base_scope,
                                         depth,
                                     )
                                     .await?;
@@ -1199,6 +1218,8 @@ impl Evaluator {
                 if let Value::Object(m, _) = ext_val {
                     base_obj = (*m).clone();
                 }
+                let mut base_scope = scope.clone();
+                base_scope.type_namespace = Some(self.module_type_namespace(Path::new(uri)).await);
                 // Inject class definitions from HTTP base into scope
                 for entry in &ext_module.body {
                     if let Entry::ClassDef(cls_name, cls_mods, parent, body) = entry {
@@ -1208,7 +1229,7 @@ impl Evaluator {
                                 cls_mods,
                                 parent.as_deref(),
                                 body,
-                                &scope,
+                                &base_scope,
                                 depth,
                             )
                             .await?;
@@ -1566,7 +1587,9 @@ impl Evaluator {
                 scope: IndexMap::new(),
                 is_open: true,
                 type_name: None,
+                type_identity: None,
                 parent_type_names: Vec::new(),
+                parent_type_identities: Vec::new(),
                 mapping_value_types: Vec::new(),
                 deprecated,
             }))
@@ -1688,7 +1711,7 @@ impl Evaluator {
                 }
                 let base_entries = src.entries.clone();
                 let base_scope = src.scope.clone();
-                let base_type_name = src.type_name.clone();
+                let base_type = object_type_metadata(src);
                 return Ok(Some(
                     self.eval_amended_object(
                         &base_entries,
@@ -1696,7 +1719,7 @@ impl Evaluator {
                         body,
                         scope,
                         depth,
-                        base_type_name.map(|name| (name, src.parent_type_names.clone())),
+                        base_type,
                     )
                     .await?,
                 ));
@@ -1854,9 +1877,7 @@ impl Evaluator {
                                 body,
                                 &child_scope,
                                 depth,
-                                src.type_name
-                                    .clone()
-                                    .map(|name| (name, src.parent_type_names.clone())),
+                                object_type_metadata(src),
                             )
                             .await?;
                         // Propagate the template's type_name so converters can match.
@@ -1874,7 +1895,9 @@ impl Evaluator {
                                     scope: IndexMap::new(),
                                     is_open: true,
                                     type_name: Some(tn.clone()),
-                                    parent_type_names: Vec::new(),
+                                    type_identity: src.type_identity.clone(),
+                                    parent_type_names: src.parent_type_names.clone(),
+                                    parent_type_identities: src.parent_type_identities.clone(),
                                     mapping_value_types: Vec::new(),
                                     deprecated: merge_deprecated(&src.deprecated, body),
                                 },
@@ -1955,7 +1978,9 @@ impl Evaluator {
             scope: child_scope.flatten(),
             is_open: true, // default: allow new properties
             type_name: None,
+            type_identity: None,
             parent_type_names: Vec::new(),
+            parent_type_identities: Vec::new(),
             mapping_value_types: Vec::new(),
             deprecated: collect_deprecated(entries),
         };
@@ -1978,14 +2003,23 @@ impl Evaluator {
         depth: usize,
     ) -> Result<Value> {
         let parent_val = parent_name.and_then(|name| resolve_dotted(scope, name));
-        let parent_type_names = match &parent_val {
-            Some(Value::Object(_, Some(source))) => source
-                .type_name
-                .iter()
-                .cloned()
-                .chain(source.parent_type_names.iter().cloned())
-                .collect(),
-            _ => Vec::new(),
+        let (parent_type_names, parent_type_identities) = match &parent_val {
+            Some(Value::Object(_, Some(source))) => {
+                let names = source
+                    .type_name
+                    .iter()
+                    .cloned()
+                    .chain(source.parent_type_names.iter().cloned())
+                    .collect();
+                let identities = source
+                    .type_identity
+                    .iter()
+                    .cloned()
+                    .chain(source.parent_type_identities.iter().cloned())
+                    .collect();
+                (names, identities)
+            }
+            _ => (Vec::new(), Vec::new()),
         };
 
         let mut child_scope = scope.child();
@@ -2077,7 +2111,9 @@ impl Evaluator {
                 let mut new_src = (*src).clone();
                 new_src.is_open = is_open;
                 new_src.type_name = Some(class_name.to_string());
+                new_src.type_identity = Some(scope.runtime_type_identity(class_name));
                 new_src.parent_type_names = parent_type_names;
+                new_src.parent_type_identities = parent_type_identities;
                 Value::Object(map, Some(Arc::new(new_src)))
             } else {
                 val
@@ -2141,12 +2177,26 @@ impl Evaluator {
                     let resolved = resolved.clone();
                     return self.eval_type_check(val, &resolved, scope, depth + 1).await;
                 }
+                if let Some(matches) = value_is_class_type(val, name, scope) {
+                    return Ok(matches);
+                }
                 // Otherwise, plain type check
                 Ok(value_is_type(val, ty))
             }
             TypeExpr::Constrained(base, constraint) => {
                 // First check the base type
-                if !value_is_named_type(val, base) {
+                let class_name = base.trim_end_matches('?').split('<').next().unwrap_or(base);
+                let base_matches = if base.ends_with('?') && is_null_value(val) {
+                    true
+                } else if let Some(resolved) = scope.get_type_alias(class_name) {
+                    let resolved = resolved.clone();
+                    self.eval_type_check(val, &resolved, scope, depth + 1)
+                        .await?
+                } else {
+                    value_is_class_type(val, class_name, scope)
+                        .unwrap_or_else(|| value_is_named_type(val, base))
+                };
+                if !base_matches {
                     return Ok(false);
                 }
                 // Evaluate the constraint with `this` bound to the value
@@ -2206,7 +2256,7 @@ impl Evaluator {
         overlay_entries: &[Entry],
         current_scope: &Scope,
         depth: usize,
-        base_type: Option<(String, Vec<String>)>,
+        base_type: Option<ObjectTypeMetadata>,
     ) -> Result<Value> {
         // Build merged entry list preserving base order.
         // Overridden properties are replaced in-place so that later
@@ -2347,10 +2397,12 @@ impl Evaluator {
         // output converters still match). eval_entries does not know the base
         // type, so re-tag the result here.
         match (base_type, result) {
-            (Some((type_name, parent_type_names)), Value::Object(map, Some(src))) => {
+            (Some(base_type), Value::Object(map, Some(src))) => {
                 let mut new_src = (*src).clone();
-                new_src.type_name = Some(type_name);
-                new_src.parent_type_names = parent_type_names;
+                new_src.type_name = Some(base_type.name);
+                new_src.type_identity = base_type.identity;
+                new_src.parent_type_names = base_type.parent_names;
+                new_src.parent_type_identities = base_type.parent_identities;
                 Ok(Value::Object(map, Some(Arc::new(new_src))))
             }
             (_, other) => Ok(other),
@@ -2600,7 +2652,9 @@ impl Evaluator {
                             scope: source_scope,
                             is_open: true,
                             type_name: None,
+                            type_identity: None,
                             parent_type_names: Vec::new(),
+                            parent_type_identities: Vec::new(),
                             mapping_value_types: generic_params.iter().skip(1).cloned().collect(),
                             deprecated,
                         };
@@ -2669,16 +2723,15 @@ impl Evaluator {
                                     entries,
                                     scope,
                                     depth,
-                                    base_src
-                                        .type_name
-                                        .clone()
-                                        .map(|name| (name, base_src.parent_type_names.clone())),
+                                    object_type_metadata(base_src),
                                 )
                                 .await?;
                             // Preserve the base class's is_open flag and tag the
                             // type_name so output.renderer.converters can match it.
                             if let Value::Object(_, ref mut src_slot) = result {
-                                let tn = type_name.clone();
+                                // Keep the identity resolved from the class value, including
+                                // when the constructor expression uses an imported class.
+                                let tn = base_src.type_name.clone().or_else(|| type_name.clone());
                                 let new_src = if let Some(src) = src_slot.as_ref() {
                                     let mut s = (**src).clone();
                                     if s.is_open != is_open {
@@ -2693,7 +2746,11 @@ impl Evaluator {
                                         scope: IndexMap::new(),
                                         is_open,
                                         type_name: tn,
-                                        parent_type_names: Vec::new(),
+                                        type_identity: base_src.type_identity.clone(),
+                                        parent_type_names: base_src.parent_type_names.clone(),
+                                        parent_type_identities: base_src
+                                            .parent_type_identities
+                                            .clone(),
                                         mapping_value_types: Vec::new(),
                                         deprecated: merge_deprecated(&base_src.deprecated, entries),
                                     }
@@ -2724,7 +2781,9 @@ impl Evaluator {
                                 scope: IndexMap::new(),
                                 is_open: true,
                                 type_name: type_name.clone(),
+                                type_identity: None,
                                 parent_type_names: Vec::new(),
+                                parent_type_identities: Vec::new(),
                                 mapping_value_types: Vec::new(),
                                 deprecated,
                             };
@@ -3428,10 +3487,7 @@ impl Evaluator {
                     overlay_entries,
                     scope,
                     depth,
-                    base_src
-                        .type_name
-                        .clone()
-                        .map(|name| (name, base_src.parent_type_names.clone())),
+                    object_type_metadata(base_src),
                 )
                 .await;
         }
@@ -3743,9 +3799,7 @@ impl Evaluator {
                                         &overlay_entries,
                                         &entry_scope,
                                         depth,
-                                        src.type_name
-                                            .clone()
-                                            .map(|name| (name, src.parent_type_names.clone())),
+                                        object_type_metadata(src),
                                     )
                                     .await?
                                 } else if !is_typed_new
@@ -3782,9 +3836,7 @@ impl Evaluator {
                                         body,
                                         &entry_scope,
                                         depth,
-                                        explicit_src.type_name.clone().map(|name| {
-                                            (name, explicit_src.parent_type_names.clone())
-                                        }),
+                                        object_type_metadata(explicit_src),
                                     )
                                     .await?
                                 } else if explicit_default.is_some() && type_default.is_some() {
@@ -3803,9 +3855,7 @@ impl Evaluator {
                                         body,
                                         &entry_scope,
                                         depth,
-                                        src.type_name
-                                            .clone()
-                                            .map(|name| (name, src.parent_type_names.clone())),
+                                        object_type_metadata(src),
                                     )
                                     .await?
                                 };
@@ -3824,7 +3874,9 @@ impl Evaluator {
                                         scope: IndexMap::new(),
                                         is_open: true,
                                         type_name: Some(tn.to_string()),
-                                        parent_type_names: Vec::new(),
+                                        type_identity: src.type_identity.clone(),
+                                        parent_type_names: src.parent_type_names.clone(),
+                                        parent_type_identities: src.parent_type_identities.clone(),
                                         mapping_value_types: Vec::new(),
                                         deprecated: merge_deprecated(&src.deprecated, body),
                                     },
@@ -4293,7 +4345,9 @@ fn apply_mapping_type_annotation(value: &mut Value, type_ann: Option<&crate::par
             scope: IndexMap::new(),
             is_open: true,
             type_name: None,
+            type_identity: None,
             parent_type_names: Vec::new(),
+            parent_type_identities: Vec::new(),
             mapping_value_types: Vec::new(),
             deprecated: IndexMap::new(),
         });
@@ -5099,11 +5153,29 @@ fn declared_entry_roots(entries: &[Entry]) -> HashSet<String> {
 
 // --- Scope ---
 
+#[derive(Clone)]
+struct ObjectTypeMetadata {
+    name: String,
+    identity: Option<String>,
+    parent_names: Vec<String>,
+    parent_identities: Vec<String>,
+}
+
+fn object_type_metadata(source: &ObjectSource) -> Option<ObjectTypeMetadata> {
+    Some(ObjectTypeMetadata {
+        name: source.type_name.clone()?,
+        identity: source.type_identity.clone(),
+        parent_names: source.parent_type_names.clone(),
+        parent_identities: source.parent_type_identities.clone(),
+    })
+}
+
 #[derive(Debug, Default, Clone)]
 struct Scope {
     vars: IndexMap<String, Value>,
     type_aliases: IndexMap<String, crate::parser::TypeExpr>,
     poisoned: IndexMap<String, String>,
+    type_namespace: Option<String>,
     parent: Option<Rc<Scope>>,
 }
 
@@ -5113,8 +5185,16 @@ impl Scope {
             vars: IndexMap::new(),
             type_aliases: IndexMap::new(),
             poisoned: IndexMap::new(),
+            type_namespace: self.type_namespace.clone(),
             parent: Some(Rc::new(self.clone())),
         }
+    }
+
+    fn runtime_type_identity(&self, name: &str) -> String {
+        self.type_namespace
+            .as_ref()
+            .map(|namespace| format!("{namespace}.{name}"))
+            .unwrap_or_else(|| name.to_string())
     }
 
     fn set(&mut self, name: String, val: Value) {
@@ -5660,6 +5740,34 @@ fn value_is_named_type(val: &Value, name: &str) -> bool {
     )
 }
 
+/// Check a value against a user-defined class that is available in scope.
+///
+/// Class defaults and instances carry their concrete class and parent class
+/// names in `ObjectSource`. Resolve the requested name first so unresolved
+/// built-in object types can continue through `value_is_type`.
+fn value_is_class_type(val: &Value, name: &str, scope: &Scope) -> Option<bool> {
+    let expected_name = name.strip_prefix('*').unwrap_or(name);
+    let Some(Value::Object(_, Some(expected_source))) = resolve_dotted(scope, expected_name) else {
+        return None;
+    };
+    let expected_type_identity = expected_source.type_identity.as_ref()?;
+
+    let Value::Object(_, Some(source)) = val else {
+        return Some(false);
+    };
+    let Some(actual_type_identity) = source.type_identity.as_ref() else {
+        return Some(false);
+    };
+
+    Some(
+        actual_type_identity == expected_type_identity
+            || source
+                .parent_type_identities
+                .iter()
+                .any(|parent| parent == expected_type_identity),
+    )
+}
+
 fn type_is_runtime_checkable(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
     use crate::parser::TypeExpr;
     match ty {
@@ -5815,6 +5923,9 @@ fn merge_values(base: Value, overlay: Value) -> Value {
                 (Some(b), Some(o)) if b.type_name.is_none() && o.type_name.is_some() => {
                     let mut nb = (*b).clone();
                     nb.type_name = o.type_name.clone();
+                    nb.type_identity = o.type_identity.clone();
+                    nb.parent_type_names = o.parent_type_names.clone();
+                    nb.parent_type_identities = o.parent_type_identities.clone();
                     Some(Arc::new(nb))
                 }
                 (Some(b), _) => Some(b),

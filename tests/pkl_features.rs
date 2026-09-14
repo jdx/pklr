@@ -3787,6 +3787,202 @@ d = lst is Object
 }
 
 #[test]
+fn is_operator_user_defined_classes() {
+    let json = eval(
+        r#"
+local class Step { check: String = "true" }
+local class Ext { off: Boolean = false }
+local plain = new Step {}
+local ext = new Ext {}
+plainIsStep = plain is Step
+plainIsExt = plain is Ext
+extIsStep = ext is Step
+extIsExt = ext is Ext
+"#,
+    );
+    assert_eq!(json["plainIsStep"], true);
+    assert_eq!(json["plainIsExt"], false);
+    assert_eq!(json["extIsStep"], false);
+    assert_eq!(json["extIsExt"], true);
+}
+
+#[test]
+fn is_operator_user_defined_class_inheritance_and_aliases() {
+    let json = eval(
+        r#"
+open class Base { enabled: Boolean = true }
+class Derived extends Base { name: String = "derived" }
+class Other { name: String = "other" }
+typealias BaseAlias = Base
+local base = new Base {}
+local derived = new Derived {}
+local aliased = new BaseAlias {}
+baseIsDerived = base is Derived
+derivedIsBase = derived is Base
+derivedIsAlias = derived is BaseAlias
+derivedIsOther = derived is Other
+aliasedIsBase = aliased is Base
+constrainedBase = derived is Base(this.enabled)
+"#,
+    );
+    assert_eq!(json["baseIsDerived"], false);
+    assert_eq!(json["derivedIsBase"], true);
+    assert_eq!(json["derivedIsAlias"], true);
+    assert_eq!(json["derivedIsOther"], false);
+    assert_eq!(json["aliasedIsBase"], true);
+    assert_eq!(json["constrainedBase"], true);
+}
+
+#[test]
+fn constrained_type_checks_preserve_nullable_and_generic_bases() {
+    let json = eval(
+        r#"
+local items = List("one")
+local nothing = null
+typealias WholeNumber = Int
+genericMatches = items is List<String>(this.length > 0)
+nullableMatches = nothing is String?(this == null)
+innerNullableRejectsNull = nothing is List<String?>(this == null)
+aliasMatches = 42 is WholeNumber(this > 0)
+"#,
+    );
+    assert_eq!(json["genericMatches"], true);
+    assert_eq!(json["nullableMatches"], true);
+    assert_eq!(json["innerNullableRejectsNull"], false);
+    assert_eq!(json["aliasMatches"], true);
+}
+
+#[test]
+fn as_operator_rejects_unrelated_user_defined_class() {
+    let msg = eval_fails(
+        r#"
+class Left {}
+class Right {}
+result = new Left {} as Right
+"#,
+    );
+    assert!(msg.contains("cannot cast Object to Right"), "{msg}");
+}
+
+#[tokio::test]
+async fn is_operator_distinguishes_qualified_classes_with_the_same_name() {
+    let dir = TestTempDir::new("pklr_is_qualified_classes");
+    std::fs::write(
+        dir.path.join("left.pkl"),
+        "class Item { side = \"left\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path.join("right.pkl"),
+        "class Item { side = \"right\" }\n",
+    )
+    .unwrap();
+    let main = dir.path.join("main.pkl");
+    std::fs::write(
+        &main,
+        r#"
+import "left.pkl"
+import "right.pkl"
+local item = new left.Item {}
+same = item is left.Item
+different = item is right.Item
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&main).await.unwrap();
+    assert_eq!(json["same"], true);
+    assert_eq!(json["different"], false);
+}
+
+#[tokio::test]
+async fn is_operator_distinguishes_local_and_imported_classes_with_the_same_name() {
+    let dir = TestTempDir::new("pklr_is_local_and_imported_classes");
+    std::fs::write(
+        dir.path.join("imported.pkl"),
+        r#"
+open class Item {}
+class Derived extends Item {}
+instance = new Item {}
+derived = new Derived {}
+function make(): Item = new Item {}
+"#,
+    )
+    .unwrap();
+    let main = dir.path.join("main.pkl");
+    std::fs::write(
+        &main,
+        r#"
+import "imported.pkl"
+class Item {}
+local localItem = new Item {}
+local importedDirect = new imported.Item {}
+local importedValue = imported.instance
+local importedDerived = imported.derived
+local importedFromFunction = imported.make()
+localIsImported = localItem is imported.Item
+directIsImported = importedDirect is imported.Item
+valueIsImported = importedValue is imported.Item
+derivedIsImportedBase = importedDerived is imported.Item
+functionValueIsImported = importedFromFunction is imported.Item
+valueIsLocal = importedValue is Item
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&main).await.unwrap();
+    assert_eq!(json["localIsImported"], false);
+    assert_eq!(json["directIsImported"], true);
+    assert_eq!(json["valueIsImported"], true);
+    assert_eq!(json["derivedIsImportedBase"], true);
+    assert_eq!(json["functionValueIsImported"], true);
+    assert_eq!(json["valueIsLocal"], false);
+}
+
+#[tokio::test]
+async fn imported_class_identity_survives_reexports_and_captured_imports() {
+    let dir = TestTempDir::new("pklr_imported_class_identity");
+    std::fs::write(
+        dir.path.join("types.pkl"),
+        r#"
+class Item {}
+instance = new Item {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path.join("wrapper.pkl"),
+        r#"
+import "types.pkl"
+reexported = types.instance
+amended = (types.instance) {}
+function make(): types.Item = new types.Item {}
+function accepts(value): Boolean = value is types.Item
+"#,
+    )
+    .unwrap();
+    let main = dir.path.join("main.pkl");
+    std::fs::write(
+        &main,
+        r#"
+import "types.pkl"
+import "wrapper.pkl"
+reexportedMatches = wrapper.reexported is types.Item
+amendedMatches = wrapper.amended is types.Item
+functionResultMatches = wrapper.make() is types.Item
+capturedImportMatches = wrapper.accepts(types.instance)
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&main).await.unwrap();
+    assert_eq!(json["reexportedMatches"], true);
+    assert_eq!(json["amendedMatches"], true);
+    assert_eq!(json["functionResultMatches"], true);
+    assert_eq!(json["capturedImportMatches"], true);
+}
+
+#[test]
 fn is_operator_any() {
     let json = eval(
         r#"
@@ -4149,6 +4345,30 @@ x = new Config {
     let json = val.to_json();
     assert_eq!(json["x"]["debug"], true);
     assert_eq!(json["x"]["port"], 8080);
+}
+
+#[tokio::test]
+async fn inherited_class_identity_uses_canonical_module_path() {
+    let dir = TestTempDir::new("pklr_canonical_class_identity");
+    std::fs::write(dir.path.join("base.pkl"), "class Item {}\n").unwrap();
+    std::fs::write(
+        dir.path.join("wrapper.pkl"),
+        "extends \"./base.pkl\"\ninstance = new Item {}\n",
+    )
+    .unwrap();
+    let main = dir.path.join("main.pkl");
+    std::fs::write(
+        &main,
+        r#"
+import "base.pkl"
+import "wrapper.pkl"
+same = wrapper.instance is base.Item
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&main).await.unwrap();
+    assert_eq!(json["same"], true);
 }
 
 // ============================================================
