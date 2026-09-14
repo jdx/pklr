@@ -2323,9 +2323,16 @@ impl Evaluator {
         for (k, v) in base_scope {
             eval_scope.set(k.clone(), v.clone());
         }
-        // Layer in current scope values (imports, module-level locals, etc.)
+        // Layer in current scope values (imports, module-level locals, etc.).
+        // The same imported module can be field-pruned differently at its
+        // definition and use sites. Preserve both partial views so methods
+        // retain the classes captured by their definition-site import.
         for (k, v) in current_scope.flatten() {
-            eval_scope.set(k, v);
+            let value = eval_scope
+                .get(&k)
+                .and_then(|base| merge_partial_module_values(base, &v))
+                .unwrap_or(v);
+            eval_scope.set(k, value);
         }
         // Propagate type aliases so `is`/`as` constraints work inside amended objects
         for (k, ty) in current_scope.flatten_type_aliases() {
@@ -4315,6 +4322,43 @@ fn type_names_match(a: &str, b: &str) -> bool {
     a == b
         || (a.len() > b.len() && a.ends_with(b) && a.as_bytes()[a.len() - b.len() - 1] == b'.')
         || (b.len() > a.len() && b.ends_with(a) && b.as_bytes()[b.len() - a.len() - 1] == b'.')
+}
+
+fn merge_partial_module_values(base: &Value, current: &Value) -> Option<Value> {
+    let (Value::Object(base_map, base_source), Value::Object(current_map, current_source)) =
+        (base, current)
+    else {
+        return None;
+    };
+    let class_namespace = |map: &IndexMap<String, Value>| -> Option<String> {
+        map.iter().find_map(|(name, value)| {
+            let Value::Object(_, Some(source)) = value else {
+                return None;
+            };
+            if source.type_name.as_deref() != Some(name) {
+                return None;
+            }
+            source.type_identity.as_deref().and_then(|identity| {
+                identity
+                    .rsplit_once('.')
+                    .map(|(namespace, _)| namespace.to_string())
+            })
+        })
+    };
+    if class_namespace(base_map)? != class_namespace(current_map)? {
+        return None;
+    }
+
+    let mut merged = (**base_map).clone();
+    merged.extend(
+        current_map
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone())),
+    );
+    Some(Value::Object(
+        Arc::new(merged),
+        current_source.clone().or_else(|| base_source.clone()),
+    ))
 }
 
 fn mapping_entry_body(expr: &Expr) -> Option<&[Entry]> {

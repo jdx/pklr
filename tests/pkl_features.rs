@@ -3982,6 +3982,55 @@ capturedImportMatches = wrapper.accepts(types.instance)
     assert_eq!(json["capturedImportMatches"], true);
 }
 
+#[tokio::test]
+async fn imported_helper_preserves_nested_class_identity_in_returned_instance() {
+    let dir = TestTempDir::new("pklr_imported_helper_nested_class_identity");
+    std::fs::write(
+        dir.path.join("Config.pkl"),
+        r#"
+class Expect {
+    code: Int = 0
+}
+class Test {
+    expect: Expect = new Expect {}
+}
+class Container {
+    test: Test
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path.join("helpers.pkl"),
+        r#"
+import "Config.pkl"
+class TestMaker {
+    local function makeTest(code: Int): Config.Test = new Config.Test {
+        expect = new Config.Expect { code = code }
+    }
+    function make(code: Int): Config.Test = makeTest(code)
+}
+"#,
+    )
+    .unwrap();
+    let main = dir.path.join("main.pkl");
+    std::fs::write(
+        &main,
+        r#"
+import "Config.pkl"
+import "helpers.pkl"
+local maker = new helpers.TestMaker {}
+result = new Config.Container {
+    test = maker.make(1)
+}
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&main).await.unwrap();
+    assert_eq!(json["result"]["test"]["expect"]["code"], 1);
+}
+
 #[test]
 fn is_operator_any() {
     let json = eval(
