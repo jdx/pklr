@@ -1851,25 +1851,31 @@ impl Evaluator {
                     child_scope.set(name.clone(), defaults);
                 }
                 Entry::TypeAlias(name, ty) => {
-                    self.eval_type_alias(name, ty, &mut child_scope);
+                    let mut resolved_scope = active_scope;
+                    self.eval_type_alias(name, ty, &mut resolved_scope);
+                    child_scope.set_type_alias(name.clone(), ty.clone());
+                    if let Some(value) = resolved_scope.vars.get(name) {
+                        child_scope.set(name.clone(), value.clone());
+                    }
                 }
                 _ => {}
             }
         }
 
-        let default_template = if let Some((entry_index, prop)) =
-            entries.iter().enumerate().find_map(|(entry_index, entry)| {
-                let Entry::Property(prop) = entry else {
-                    return None;
-                };
-                (prop.name == "default" && !has_modifier(&prop.modifiers, Modifier::Local))
-                    .then_some((entry_index, prop))
-            }) {
-            let active_scope = scope_for_object_entry(entry_index, &child_scope, entry_scopes);
-            self.eval_property(prop, &active_scope, depth).await?
-        } else {
-            None
-        };
+        let mut default_template: Option<Value> = None;
+        for (entry_index, entry) in entries.iter().enumerate() {
+            let Entry::Property(prop) = entry else {
+                continue;
+            };
+            if prop.name != "default" || has_modifier(&prop.modifiers, Modifier::Local) {
+                continue;
+            }
+            let mut active_scope = scope_for_object_entry(entry_index, &child_scope, entry_scopes);
+            if let Some(template) = &default_template {
+                active_scope.set("default".into(), template.clone());
+            }
+            default_template = self.eval_property(prop, &active_scope, depth).await?;
+        }
 
         let mut map: IndexMap<String, Value> = IndexMap::new();
         for (entry_index, entry) in entries.iter().enumerate() {
@@ -2411,7 +2417,10 @@ impl Evaluator {
         }
 
         // Build scope: start with the base's captured scope, then layer current scope
-        let mut eval_scope = Scope::default();
+        let mut eval_scope = Scope {
+            type_namespace: capture_object_source_scope(base_source).type_namespace,
+            ..Scope::default()
+        };
         for (k, v) in base_scope {
             eval_scope.set(k.clone(), v.clone());
         }

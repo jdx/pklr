@@ -1701,6 +1701,127 @@ result = (Lib.value) {
 }
 
 #[tokio::test]
+async fn amended_object_applies_default_body_amendments() {
+    let temp = TestTempDir::new("pklr_test_amended_object_default_body");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Lib.pkl"),
+        r#"
+value = new {
+    default = new {
+        inherited = "base"
+        changed = "base"
+    }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "Lib.pkl"
+result = (Lib.value) {
+    default {
+        changed = "amendment"
+        added = "amendment"
+    }
+    ["entry"] {}
+}
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        json["result"],
+        serde_json::json!({
+            "entry": {
+                "inherited": "base",
+                "changed": "amendment",
+                "added": "amendment"
+            }
+        })
+    );
+}
+
+#[tokio::test]
+async fn amendment_type_alias_uses_amendment_scope() {
+    let temp = TestTempDir::new("pklr_test_amendment_type_alias_scope");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Lib.pkl"),
+        r#"
+open class Foo {
+    origin = "definition"
+}
+value = new {
+    inherited: Foo = new Foo {}
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "Lib.pkl"
+open class Foo {
+    origin = "amendment"
+}
+result = (Lib.value) {
+    typealias Alias = Foo
+    selected = new Alias {}
+}
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        json["result"],
+        serde_json::json!({
+            "inherited": {"origin": "definition"},
+            "selected": {"origin": "amendment"}
+        })
+    );
+}
+
+#[tokio::test]
+async fn amended_object_reconstructs_classes_in_definition_namespace() {
+    let temp = TestTempDir::new("pklr_test_amended_object_class_namespace");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Lib.pkl"),
+        r#"
+open class Container {
+    class Inner {
+        value = "ok"
+    }
+    item: Inner = new Inner {}
+}
+item = new Container {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "Lib.pkl"
+result = (Lib.item) {}
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(json["result"], serde_json::json!({"item": {"value": "ok"}}));
+}
+
+#[tokio::test]
 async fn amended_object_overlay_can_reference_later_inherited_sibling() {
     let temp = TestTempDir::new("pklr_test_amended_object_later_sibling");
     let dir = temp.path();
