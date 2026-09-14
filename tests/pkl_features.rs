@@ -3703,6 +3703,96 @@ d = lst is Object
 }
 
 #[test]
+fn is_operator_user_defined_classes() {
+    let json = eval(
+        r#"
+local class Step { check: String = "true" }
+local class Ext { off: Boolean = false }
+local plain = new Step {}
+local ext = new Ext {}
+plainIsStep = plain is Step
+plainIsExt = plain is Ext
+extIsStep = ext is Step
+extIsExt = ext is Ext
+"#,
+    );
+    assert_eq!(json["plainIsStep"], true);
+    assert_eq!(json["plainIsExt"], false);
+    assert_eq!(json["extIsStep"], false);
+    assert_eq!(json["extIsExt"], true);
+}
+
+#[test]
+fn is_operator_user_defined_class_inheritance_and_aliases() {
+    let json = eval(
+        r#"
+open class Base { enabled: Boolean = true }
+class Derived extends Base { name: String = "derived" }
+class Other { name: String = "other" }
+typealias BaseAlias = Base
+local base = new Base {}
+local derived = new Derived {}
+local aliased = new BaseAlias {}
+baseIsDerived = base is Derived
+derivedIsBase = derived is Base
+derivedIsAlias = derived is BaseAlias
+derivedIsOther = derived is Other
+aliasedIsBase = aliased is Base
+constrainedBase = derived is Base(this.enabled)
+"#,
+    );
+    assert_eq!(json["baseIsDerived"], false);
+    assert_eq!(json["derivedIsBase"], true);
+    assert_eq!(json["derivedIsAlias"], true);
+    assert_eq!(json["derivedIsOther"], false);
+    assert_eq!(json["aliasedIsBase"], true);
+    assert_eq!(json["constrainedBase"], true);
+}
+
+#[test]
+fn as_operator_rejects_unrelated_user_defined_class() {
+    let msg = eval_fails(
+        r#"
+class Left {}
+class Right {}
+result = new Left {} as Right
+"#,
+    );
+    assert!(msg.contains("cannot cast Object to Right"), "{msg}");
+}
+
+#[tokio::test]
+async fn is_operator_distinguishes_qualified_classes_with_the_same_name() {
+    let dir = TestTempDir::new("pklr_is_qualified_classes");
+    std::fs::write(
+        dir.path.join("left.pkl"),
+        "class Item { side = \"left\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path.join("right.pkl"),
+        "class Item { side = \"right\" }\n",
+    )
+    .unwrap();
+    let main = dir.path.join("main.pkl");
+    std::fs::write(
+        &main,
+        r#"
+import "left.pkl"
+import "right.pkl"
+local item = new left.Item {}
+same = item is left.Item
+different = item is right.Item
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&main).await.unwrap();
+    assert_eq!(json["same"], true);
+    assert_eq!(json["different"], false);
+}
+
+#[test]
 fn is_operator_any() {
     let json = eval(
         r#"

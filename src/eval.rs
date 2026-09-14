@@ -2148,12 +2148,18 @@ impl Evaluator {
                     let resolved = resolved.clone();
                     return self.eval_type_check(val, &resolved, scope, depth + 1).await;
                 }
+                if let Some(matches) = value_is_class_type(val, name, scope) {
+                    return Ok(matches);
+                }
                 // Otherwise, plain type check
                 Ok(value_is_type(val, ty))
             }
             TypeExpr::Constrained(base, constraint) => {
                 // First check the base type
-                if !value_is_named_type(val, base) {
+                if !self
+                    .eval_type_check(val, &TypeExpr::Named(base.clone()), scope, depth + 1)
+                    .await?
+                {
                     return Ok(false);
                 }
                 // Evaluate the constraint with `this` bound to the value
@@ -5647,6 +5653,39 @@ fn value_is_named_type(val: &Value, name: &str) -> bool {
                 .to_string(),
         ),
     )
+}
+
+/// Check a value against a user-defined class that is available in scope.
+///
+/// Class defaults and instances carry their concrete class and parent class
+/// names in `ObjectSource`. Resolve the requested name first so unresolved
+/// built-in object types can continue through `value_is_type`.
+fn value_is_class_type(val: &Value, name: &str, scope: &Scope) -> Option<bool> {
+    let expected_name = name.strip_prefix('*').unwrap_or(name);
+    if !matches!(
+        resolve_dotted(scope, expected_name),
+        Some(Value::Object(_, Some(source))) if source.type_name.is_some()
+    ) {
+        return None;
+    }
+
+    let Value::Object(_, Some(source)) = val else {
+        return Some(false);
+    };
+    let Some(actual_name) = source.type_name.as_ref() else {
+        return Some(false);
+    };
+
+    let expected = expand_type_alias_names(&[expected_name.to_string()], scope);
+    let actual = std::iter::once(actual_name.clone())
+        .chain(source.parent_type_names.iter().cloned())
+        .collect::<Vec<_>>();
+    let actual = expand_type_alias_names(&actual, scope);
+    Some(actual.iter().any(|actual_name| {
+        expected
+            .iter()
+            .any(|expected_name| type_names_match(actual_name, expected_name))
+    }))
 }
 
 fn type_is_runtime_checkable(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
