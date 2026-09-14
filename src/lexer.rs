@@ -786,7 +786,10 @@ impl<'a> Lexer<'a> {
 }
 
 fn normalize_multiline_string(s: &str) -> Result<String> {
-    let s = s.strip_prefix('\n').unwrap_or(s);
+    let s = s
+        .strip_prefix("\r\n")
+        .or_else(|| s.strip_prefix('\n'))
+        .unwrap_or(s);
     dedent(s)
 }
 
