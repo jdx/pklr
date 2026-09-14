@@ -1701,6 +1701,83 @@ result = (Lib.value) {
 }
 
 #[tokio::test]
+async fn amended_object_overlay_can_reference_later_inherited_sibling() {
+    let temp = TestTempDir::new("pklr_test_amended_object_later_sibling");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Lib.pkl"),
+        r#"
+open class Item {
+    selected = "initial"
+    later = "inherited"
+}
+item = new Item {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "Lib.pkl"
+local later = "module"
+result = (Lib.item) { selected = later }
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        json["result"],
+        serde_json::json!({"selected": "inherited", "later": "inherited"})
+    );
+}
+
+#[tokio::test]
+async fn repeated_amendment_keeps_each_entries_lexical_scope() {
+    let temp = TestTempDir::new("pklr_test_repeated_amendment_scope");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Lib.pkl"),
+        r#"
+local collision = "definition"
+open class Item {
+    inherited = collision
+}
+item = new Item {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Middle.pkl"),
+        r#"
+import "Lib.pkl"
+local collision = "middle"
+item = (Lib.item) { overlay = collision }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "Middle.pkl"
+local collision = "main"
+result = (Middle.item) {}
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        json["result"],
+        serde_json::json!({"inherited": "definition", "overlay": "middle"})
+    );
+}
+
+#[tokio::test]
 async fn scoped_inherited_base_does_not_pollute_import_cache() {
     let temp = TestTempDir::new("pklr_test_scoped_base_cache");
     let dir = temp.path();

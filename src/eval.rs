@@ -10,7 +10,7 @@ use crate::capabilities::EvalCapabilities;
 use crate::error::{Error, Result};
 use crate::lexer;
 use crate::parser::{self, BinOp, Entry, Expr, Modifier, Module, Property, StringInterpPart, UnOp};
-use crate::value::{ObjectSource, Value};
+use crate::value::{CapturedScope, ObjectSource, Value};
 
 const DYNAMIC_SIBLING_REF: &str = "\0pklr:dynamic-sibling";
 
@@ -1601,6 +1601,7 @@ impl Evaluator {
                 parent_type_identities: Vec::new(),
                 scope_module_identities: IndexMap::new(),
                 scope_type_aliases: IndexMap::new(),
+                entry_scopes: Vec::new(),
                 mapping_value_types: Vec::new(),
                 deprecated,
             }))
@@ -1761,10 +1762,20 @@ impl Evaluator {
         entries: &[Entry],
         scope: &Scope,
         depth: usize,
-        amendment_scope: Option<&Scope>,
-        amendment_entries: Option<&[bool]>,
+        entry_scopes: Option<&[Option<Arc<CapturedScope>>]>,
+        inherited_source: Option<&ObjectSource>,
     ) -> Result<Value> {
         let mut child_scope = scope.child();
+        if let Some(source) = inherited_source {
+            for entry in &source.entries {
+                if let Entry::Property(prop) = entry
+                    && !has_modifier(&prop.modifiers, Modifier::Local)
+                    && let Some(value) = source.scope.get(&prop.name)
+                {
+                    child_scope.set(prop.name.clone(), value.clone());
+                }
+            }
+        }
         // Set `outer` to a snapshot of the parent scope's variables as an object.
         // Also insert Null for any nullable-no-default properties declared in these
         // entries but absent from the parent scope, so that `outer.optionalProp`
@@ -1794,16 +1805,9 @@ impl Evaluator {
         // declaration order so they can reference each other correctly.
         // Non-lambda locals are evaluated eagerly; lambda locals are deferred
         // to a second pass so they capture the fully-populated scope.
-        let mut deferred_lambdas: Vec<(String, &crate::parser::Expr, bool)> = Vec::new();
+        let mut deferred_lambdas: Vec<(String, &crate::parser::Expr, usize)> = Vec::new();
         for (entry_index, entry) in entries.iter().enumerate() {
-            let uses_amendment_scope = amendment_entries
-                .and_then(|origins| origins.get(entry_index))
-                .copied()
-                .unwrap_or(false);
-            let active_scope = amendment_scope
-                .filter(|_| uses_amendment_scope)
-                .map(|lexical| scope_with_object_bindings(lexical, &child_scope))
-                .unwrap_or_else(|| child_scope.clone());
+            let active_scope = scope_for_object_entry(entry_index, &child_scope, entry_scopes);
             match entry {
                 Entry::Property(prop)
                     if has_modifier(&prop.modifiers, Modifier::Local) && prop.value.is_some() =>
@@ -1828,7 +1832,7 @@ impl Evaluator {
                         // does not run the body. Bind once for declaration-order
                         // visibility, then re-bind after properties for late
                         // binding of overrides.
-                        deferred_lambdas.push((prop.name.clone(), expr, uses_amendment_scope));
+                        deferred_lambdas.push((prop.name.clone(), expr, entry_index));
                     }
                 }
                 Entry::ClassDef(name, class_mods, parent, body) => {
@@ -1859,14 +1863,7 @@ impl Evaluator {
                 (prop.name == "default" && !has_modifier(&prop.modifiers, Modifier::Local))
                     .then_some((entry_index, prop))
             }) {
-            let uses_amendment_scope = amendment_entries
-                .and_then(|origins| origins.get(entry_index))
-                .copied()
-                .unwrap_or(false);
-            let active_scope = amendment_scope
-                .filter(|_| uses_amendment_scope)
-                .map(|lexical| scope_with_object_bindings(lexical, &child_scope))
-                .unwrap_or_else(|| child_scope.clone());
+            let active_scope = scope_for_object_entry(entry_index, &child_scope, entry_scopes);
             self.eval_property(prop, &active_scope, depth).await?
         } else {
             None
@@ -1874,10 +1871,6 @@ impl Evaluator {
 
         let mut map: IndexMap<String, Value> = IndexMap::new();
         for (entry_index, entry) in entries.iter().enumerate() {
-            let uses_amendment_scope = amendment_entries
-                .and_then(|origins| origins.get(entry_index))
-                .copied()
-                .unwrap_or(false);
             match entry {
                 Entry::Property(prop) => {
                     let mods = &prop.modifiers;
@@ -1895,10 +1888,8 @@ impl Evaluator {
                         continue; // abstract without value — skip (must be overridden)
                     }
                     refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
-                    let active_scope = amendment_scope
-                        .filter(|_| uses_amendment_scope)
-                        .map(|lexical| scope_with_object_bindings(lexical, &child_scope))
-                        .unwrap_or_else(|| child_scope.clone());
+                    let active_scope =
+                        scope_for_object_entry(entry_index, &child_scope, entry_scopes);
                     if let Some(v) = self.eval_property(prop, &active_scope, depth).await? {
                         child_scope.set(prop.name.clone(), v.clone());
                         all_props.insert(prop.name.clone(), v.clone());
@@ -1909,10 +1900,8 @@ impl Evaluator {
                     }
                 }
                 Entry::DynProperty(key_expr, val_expr) => {
-                    let active_scope = amendment_scope
-                        .filter(|_| uses_amendment_scope)
-                        .map(|lexical| scope_with_object_bindings(lexical, &child_scope))
-                        .unwrap_or_else(|| child_scope.clone());
+                    let active_scope =
+                        scope_for_object_entry(entry_index, &child_scope, entry_scopes);
                     let key = self.eval_expr(key_expr, &active_scope, depth).await?;
                     let val = if let Some(Value::Object(_, Some(src))) = &default_template
                         && let Expr::ObjectBody(body) = val_expr
@@ -1942,6 +1931,7 @@ impl Evaluator {
                                     parent_type_identities: src.parent_type_identities.clone(),
                                     scope_module_identities: IndexMap::new(),
                                     scope_type_aliases: IndexMap::new(),
+                                    entry_scopes: Vec::new(),
                                     mapping_value_types: Vec::new(),
                                     deprecated: merge_deprecated(&src.deprecated, body),
                                 },
@@ -1962,10 +1952,8 @@ impl Evaluator {
                     refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                 }
                 Entry::Spread(expr) => {
-                    let active_scope = amendment_scope
-                        .filter(|_| uses_amendment_scope)
-                        .map(|lexical| scope_with_object_bindings(lexical, &child_scope))
-                        .unwrap_or_else(|| child_scope.clone());
+                    let active_scope =
+                        scope_for_object_entry(entry_index, &child_scope, entry_scopes);
                     let val = self.eval_expr(expr, &active_scope, depth).await?;
                     if let Value::Object(m, _) = val {
                         all_props.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
@@ -1974,10 +1962,8 @@ impl Evaluator {
                     }
                 }
                 Entry::ForGenerator(fgen) => {
-                    let active_scope = amendment_scope
-                        .filter(|_| uses_amendment_scope)
-                        .map(|lexical| scope_with_object_bindings(lexical, &child_scope))
-                        .unwrap_or_else(|| child_scope.clone());
+                    let active_scope =
+                        scope_for_object_entry(entry_index, &child_scope, entry_scopes);
                     let collection = self
                         .eval_expr(&fgen.collection, &active_scope, depth)
                         .await?;
@@ -1997,10 +1983,8 @@ impl Evaluator {
                     }
                 }
                 Entry::WhenGenerator(wgen) => {
-                    let active_scope = amendment_scope
-                        .filter(|_| uses_amendment_scope)
-                        .map(|lexical| scope_with_object_bindings(lexical, &child_scope))
-                        .unwrap_or_else(|| child_scope.clone());
+                    let active_scope =
+                        scope_for_object_entry(entry_index, &child_scope, entry_scopes);
                     let cond = self
                         .eval_expr(&wgen.condition, &active_scope, depth)
                         .await?;
@@ -2027,11 +2011,8 @@ impl Evaluator {
         // Evaluate deferred local lambdas (function definitions) AFTER all
         // properties so they capture overridden values (late binding).
         refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
-        for (name, expr, uses_amendment_scope) in deferred_lambdas {
-            let active_scope = amendment_scope
-                .filter(|_| uses_amendment_scope)
-                .map(|lexical| scope_with_object_bindings(lexical, &child_scope))
-                .unwrap_or_else(|| child_scope.clone());
+        for (name, expr, entry_index) in deferred_lambdas {
+            let active_scope = scope_for_object_entry(entry_index, &child_scope, entry_scopes);
             let val = self.eval_expr(expr, &active_scope, depth).await?;
             child_scope.set(name, val);
         }
@@ -2045,6 +2026,7 @@ impl Evaluator {
             parent_type_identities: Vec::new(),
             scope_module_identities: child_scope.flatten_module_identities(),
             scope_type_aliases: child_scope.flatten_type_aliases(),
+            entry_scopes: Vec::new(),
             mapping_value_types: Vec::new(),
             deprecated: collect_deprecated(entries),
         };
@@ -2326,7 +2308,8 @@ impl Evaluator {
         // Overridden properties are replaced in-place so that later
         // properties that reference them see the new value.
         let mut merged: Vec<Entry> = Vec::new();
-        let mut amendment_entries = Vec::new();
+        let mut merged_entry_scopes = Vec::new();
+        let amendment_entry_scope = Some(Arc::new(capture_scope(current_scope)));
         let mut overlay_by_name: IndexMap<String, &Entry> = IndexMap::new();
         for entry in overlay_entries {
             if let Entry::Property(prop) = entry {
@@ -2338,7 +2321,12 @@ impl Evaluator {
         // If the overlay has a body amendment (no `=`), keep the base entry first
         // so its value is in scope, then add the overlay body entry after.
         let mut used_overlay: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for entry in base_entries {
+        for (entry_index, entry) in base_entries.iter().enumerate() {
+            let inherited_entry_scope = base_source
+                .entry_scopes
+                .get(entry_index)
+                .cloned()
+                .unwrap_or(None);
             if let Entry::Property(prop) = entry
                 && let Some(replacement) = overlay_by_name.get(&prop.name)
             {
@@ -2351,7 +2339,7 @@ impl Evaluator {
                     // entry (for body amendment). eval_property will see the base
                     // value in scope and amend it.
                     merged.push(entry.clone());
-                    amendment_entries.push(false);
+                    merged_entry_scopes.push(inherited_entry_scope.clone());
                 }
                 let mut replacement = (*replacement).clone();
                 if let Entry::Property(overlay_prop) = &mut replacement {
@@ -2368,12 +2356,12 @@ impl Evaluator {
                     }
                 }
                 merged.push(replacement);
-                amendment_entries.push(true);
+                merged_entry_scopes.push(amendment_entry_scope.clone());
                 used_overlay.insert(prop.name.clone());
                 continue;
             }
             merged.push(entry.clone());
-            amendment_entries.push(false);
+            merged_entry_scopes.push(inherited_entry_scope);
         }
 
         // Append overlay entries that are genuinely new (not replacing a base entry)
@@ -2384,7 +2372,7 @@ impl Evaluator {
                 continue; // already placed in-order above
             }
             merged.push(entry.clone());
-            amendment_entries.push(true);
+            merged_entry_scopes.push(amendment_entry_scope.clone());
         }
 
         // Build scope: start with the base's captured scope, then layer current scope
@@ -2454,15 +2442,20 @@ impl Evaluator {
 
         // Evaluate the merged entries (eval_entries handles locals, classes,
         // and evaluates properties in order with each added to scope)
-        let result = self
+        let mut result = self
             .eval_entries_with_lexical_scopes(
                 &merged,
                 &eval_scope,
                 depth + 1,
-                Some(current_scope),
-                Some(&amendment_entries),
+                Some(&merged_entry_scopes),
+                Some(base_source),
             )
             .await?;
+        if let Value::Object(map, Some(source)) = result {
+            let mut source = (*source).clone();
+            source.entry_scopes = merged_entry_scopes;
+            result = Value::Object(map, Some(Arc::new(source)));
+        }
         let assigned_property_names = merged
             .iter()
             .filter_map(|entry| match entry {
@@ -2774,6 +2767,7 @@ impl Evaluator {
                             parent_type_identities: Vec::new(),
                             scope_module_identities: source_module_identities,
                             scope_type_aliases: scope.flatten_type_aliases(),
+                            entry_scopes: Vec::new(),
                             mapping_value_types: generic_params.iter().skip(1).cloned().collect(),
                             deprecated,
                         };
@@ -2865,6 +2859,7 @@ impl Evaluator {
                                             .clone(),
                                         scope_module_identities: IndexMap::new(),
                                         scope_type_aliases: IndexMap::new(),
+                                        entry_scopes: Vec::new(),
                                         mapping_value_types: Vec::new(),
                                         deprecated: merge_deprecated(&base_src.deprecated, entries),
                                     }
@@ -2900,6 +2895,7 @@ impl Evaluator {
                                 parent_type_identities: Vec::new(),
                                 scope_module_identities: IndexMap::new(),
                                 scope_type_aliases: IndexMap::new(),
+                                entry_scopes: Vec::new(),
                                 mapping_value_types: Vec::new(),
                                 deprecated,
                             };
@@ -3968,6 +3964,7 @@ impl Evaluator {
                                         parent_type_identities: src.parent_type_identities.clone(),
                                         scope_module_identities: IndexMap::new(),
                                         scope_type_aliases: IndexMap::new(),
+                                        entry_scopes: Vec::new(),
                                         mapping_value_types: Vec::new(),
                                         deprecated: merge_deprecated(&src.deprecated, body),
                                     },
@@ -4459,6 +4456,7 @@ fn apply_mapping_type_annotation(value: &mut Value, type_ann: Option<&crate::par
             parent_type_identities: Vec::new(),
             scope_module_identities: IndexMap::new(),
             scope_type_aliases: IndexMap::new(),
+            entry_scopes: Vec::new(),
             mapping_value_types: Vec::new(),
             deprecated: IndexMap::new(),
         });
@@ -5394,6 +5392,45 @@ impl Scope {
         result.extend(self.type_aliases.clone());
         result
     }
+}
+
+fn capture_scope(scope: &Scope) -> CapturedScope {
+    CapturedScope {
+        values: scope.flatten(),
+        module_identities: scope.flatten_module_identities(),
+        type_aliases: scope.flatten_type_aliases(),
+        type_namespace: scope.type_namespace.clone(),
+    }
+}
+
+fn restore_scope(captured: &CapturedScope) -> Scope {
+    let mut scope = Scope {
+        type_namespace: captured.type_namespace.clone(),
+        ..Scope::default()
+    };
+    for (name, value) in &captured.values {
+        scope.set(name.clone(), value.clone());
+    }
+    for (name, identity) in &captured.module_identities {
+        scope.set_module_identity(name.clone(), identity.clone());
+    }
+    for (name, ty) in &captured.type_aliases {
+        scope.set_type_alias(name.clone(), ty.clone());
+    }
+    scope
+}
+
+fn scope_for_object_entry(
+    entry_index: usize,
+    object: &Scope,
+    entry_scopes: Option<&[Option<Arc<CapturedScope>>]>,
+) -> Scope {
+    entry_scopes
+        .and_then(|scopes| scopes.get(entry_index))
+        .and_then(Option::as_deref)
+        .map(restore_scope)
+        .map(|lexical| scope_with_object_bindings(&lexical, object))
+        .unwrap_or_else(|| object.clone())
 }
 
 /// Evaluate an object entry in its lexical module while keeping the locals and
