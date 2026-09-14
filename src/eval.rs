@@ -2019,7 +2019,6 @@ impl Evaluator {
             let val = self.eval_expr(expr, &active_scope, depth).await?;
             child_scope.set(name, val);
         }
-        let default_entry_scope = Some(Arc::new(capture_scope(scope)));
         let source = ObjectSource {
             entries: entries.to_vec(),
             scope: child_scope.flatten(),
@@ -2030,9 +2029,7 @@ impl Evaluator {
             parent_type_identities: Vec::new(),
             scope_module_identities: child_scope.flatten_module_identities(),
             scope_type_aliases: child_scope.flatten_type_aliases(),
-            entry_scopes: entry_scopes
-                .map(<[_]>::to_vec)
-                .unwrap_or_else(|| vec![default_entry_scope; entries.len()]),
+            entry_scopes: entry_scopes.map(<[_]>::to_vec).unwrap_or_default(),
             evaluated_properties: all_props.keys().cloned().collect(),
             mapping_value_types: Vec::new(),
             deprecated: collect_deprecated(entries),
@@ -2081,7 +2078,6 @@ impl Evaluator {
         }
 
         let child_defaults = self.eval_entries(body, &child_scope, depth + 1).await?;
-
         if let Some(Value::Object(parent_map, parent_src)) = parent_val {
             // Merge: parent defaults first, child overrides on top
             let mut merged: IndexMap<String, Value> = (*parent_map).clone();
@@ -2121,8 +2117,13 @@ impl Evaluator {
                                 }
                             }
                         }
-                        combined_entries.extend(src.entries);
-                        combined_entry_scopes.extend(src.entry_scopes);
+                        let child_entries = std::mem::take(&mut src.entries);
+                        let child_entry_scopes = std::mem::take(&mut src.entry_scopes);
+                        for (entry_index, entry) in child_entries.into_iter().enumerate() {
+                            combined_entries.push(entry);
+                            combined_entry_scopes
+                                .push(child_entry_scopes.get(entry_index).cloned().unwrap_or(None));
+                        }
                         combined_evaluated_properties.extend(src.evaluated_properties);
                         src.entries = combined_entries;
                         src.entry_scopes = combined_entry_scopes;
@@ -2778,8 +2779,6 @@ impl Evaluator {
                         source_module_identities.shift_remove("outer");
                         source_module_identities.shift_remove("this");
                         let deprecated = collect_deprecated(&src_entries);
-                        let entry_scopes =
-                            vec![Some(Arc::new(capture_scope(scope))); src_entries.len()];
                         let source = ObjectSource {
                             entries: src_entries,
                             scope: source_scope,
@@ -2790,7 +2789,7 @@ impl Evaluator {
                             parent_type_identities: Vec::new(),
                             scope_module_identities: source_module_identities,
                             scope_type_aliases: scope.flatten_type_aliases(),
-                            entry_scopes,
+                            entry_scopes: Vec::new(),
                             evaluated_properties: map.keys().cloned().collect(),
                             mapping_value_types: generic_params.iter().skip(1).cloned().collect(),
                             deprecated,

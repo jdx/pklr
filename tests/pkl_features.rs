@@ -1865,6 +1865,60 @@ result = (Lib.item) {
 }
 
 #[tokio::test]
+async fn amended_typed_property_keeps_definition_site_class_identity() {
+    let temp = TestTempDir::new("pklr_test_amended_typed_property_identity");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Config.pkl"),
+        r#"
+class Test {
+    expect: Expect = new Expect {}
+}
+class Expect {
+    stdout: String?
+}
+open class Step {
+    tests: Mapping<String, Test> = new Mapping<String, Test> {}
+}
+open class Group {}
+class Hook {
+    steps: Mapping<String, Step | Group> = new Mapping<String, Step> {}
+}
+hooks: Mapping<String, Hook> = new Mapping<String, Hook> {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+amends "Config.pkl"
+hooks {
+    ["check"] {
+        steps {
+            ["demo"] {
+                tests {
+                    ["case"] {
+                        expect { stdout = "ok" }
+                    }
+                }
+            }
+        }
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        json["hooks"]["check"]["steps"]["demo"]["tests"],
+        serde_json::json!({"case": {"expect": {"stdout": "ok"}}})
+    );
+}
+
+#[tokio::test]
 async fn scoped_inherited_base_does_not_pollute_import_cache() {
     let temp = TestTempDir::new("pklr_test_scoped_base_cache");
     let dir = temp.path();
