@@ -843,7 +843,7 @@ impl Evaluator {
                     .await?
                 };
                 scope.set(alias.clone(), imported_val);
-                scope.set_module_identity(alias, uri.to_string());
+                scope.set_module_identity(alias, canonical_remote_module_identity(uri));
                 continue;
             }
 
@@ -6221,9 +6221,15 @@ fn resolve_http_relative(base: &str, uri: &str) -> Option<String> {
         .map(|url| url.to_string())
 }
 
+fn canonical_remote_module_identity(uri: &str) -> String {
+    url::Url::parse(uri)
+        .map(|url| url.to_string())
+        .unwrap_or_else(|_| uri.to_string())
+}
+
 #[cfg(test)]
 mod remote_relative_tests {
-    use super::resolve_http_relative;
+    use super::{canonical_remote_module_identity, resolve_http_relative};
 
     #[test]
     fn http_relative_resolves_against_base_directory() {
@@ -6284,6 +6290,17 @@ mod remote_relative_tests {
                 .as_deref(),
             Some("https://cdn.example/Lib.pkl")
         );
+    }
+
+    #[test]
+    fn remote_module_identity_normalizes_dot_segments() {
+        let absolute =
+            canonical_remote_module_identity("https://example.com/cfg/../shared/Lib.pkl");
+        let relative =
+            resolve_http_relative("https://example.com/cfg/Main.pkl", "../shared/Lib.pkl").unwrap();
+
+        assert_eq!(absolute, relative);
+        assert_eq!(absolute, "https://example.com/shared/Lib.pkl");
     }
 }
 
