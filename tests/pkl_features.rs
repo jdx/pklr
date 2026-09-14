@@ -3855,6 +3855,49 @@ valueIsLocal = importedValue is Item
     assert_eq!(json["valueIsLocal"], false);
 }
 
+#[tokio::test]
+async fn imported_class_identity_survives_reexports_and_captured_imports() {
+    let dir = TestTempDir::new("pklr_imported_class_identity");
+    std::fs::write(
+        dir.path.join("types.pkl"),
+        r#"
+class Item {}
+instance = new Item {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path.join("wrapper.pkl"),
+        r#"
+import "types.pkl"
+reexported = types.instance
+amended = (types.instance) {}
+function make(): types.Item = new types.Item {}
+function accepts(value): Boolean = value is types.Item
+"#,
+    )
+    .unwrap();
+    let main = dir.path.join("main.pkl");
+    std::fs::write(
+        &main,
+        r#"
+import "types.pkl"
+import "wrapper.pkl"
+reexportedMatches = wrapper.reexported is types.Item
+amendedMatches = wrapper.amended is types.Item
+functionResultMatches = wrapper.make() is types.Item
+capturedImportMatches = wrapper.accepts(types.instance)
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&main).await.unwrap();
+    assert_eq!(json["reexportedMatches"], true);
+    assert_eq!(json["amendedMatches"], true);
+    assert_eq!(json["functionResultMatches"], true);
+    assert_eq!(json["capturedImportMatches"], true);
+}
+
 #[test]
 fn is_operator_any() {
     let json = eval(
