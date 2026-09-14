@@ -1931,6 +1931,76 @@ steps = other.STEPS
     assert!(val["steps"]["original"].get("Script").is_none(), "{val}");
 }
 
+#[tokio::test]
+async fn nested_imported_mapping_amendments_preserve_entries() {
+    let temp = TestTempDir::new("pklr_test_nested_imported_mapping_amendments");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Config.pkl"),
+        r#"
+class Step {
+  check: String?
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Shared.pkl"),
+        r#"
+import "./Config.pkl"
+prettier = new Config.Step { check = "prettier" }
+extra = new Config.Step { check = "extra" }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Core.pkl"),
+        r#"
+import "./Config.pkl"
+import "./Shared.pkl"
+steps = new Mapping<String, Config.Step> {
+  ["prettier"] = Shared.prettier
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Default.pkl"),
+        r#"
+import "./Config.pkl"
+import "./Core.pkl"
+steps = (Core.steps) {
+  ["terraform"] = new Config.Step { check = "terraform" }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("All.pkl"),
+        r#"
+import "./Config.pkl"
+import "./Shared.pkl"
+import "./Default.pkl"
+steps = (Default.steps) {
+  ["extra"] = Shared.extra
+}
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("All.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        val["steps"],
+        serde_json::json!({
+            "prettier": {"check": "prettier"},
+            "terraform": {"check": "terraform"},
+            "extra": {"check": "extra"},
+        })
+    );
+}
+
 #[test]
 fn typed_mapping_amendment_preserves_existing_keyed_entries() {
     let json = eval(

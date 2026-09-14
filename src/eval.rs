@@ -1643,30 +1643,23 @@ impl Evaluator {
                     // `default` and dynamic keys. Rebuild the entry map with the
                     // type-aware evaluator so single-type and union mappings both keep
                     // mapping defaults plus converter type metadata after amendment.
-                    let mut type_scope = Scope::default();
-                    for (key, value) in &src.scope {
-                        type_scope.set(key.clone(), value.clone());
-                    }
-                    for (key, value) in scope.flatten() {
-                        type_scope.set(key, value);
-                    }
-                    for (key, ty) in scope.flatten_type_aliases() {
-                        type_scope.set_type_alias(key, ty);
-                    }
+                    let (inherited_scope, amendment_scope) =
+                        mapping_amendment_scopes(&src.scope, scope);
                     let value_type_defaults = src
                         .mapping_value_types
                         .iter()
                         .filter_map(|name| {
-                            resolve_dotted(&type_scope, name).map(|value| (name.clone(), value))
+                            resolve_dotted(&inherited_scope, name)
+                                .map(|value| (name.clone(), value))
                         })
                         .collect::<Vec<_>>();
                     let inherited_default = self
-                        .find_default_template(&src.entries, &type_scope, depth)
+                        .find_default_template(&src.entries, &inherited_scope, depth)
                         .await?;
                     let mut amended = IndexMap::new();
                     self.eval_mapping_entries_with_type_default(
                         &src.entries,
-                        &type_scope,
+                        &inherited_scope,
                         depth,
                         &mut amended,
                         &value_type_defaults,
@@ -1677,7 +1670,7 @@ impl Evaluator {
                     amended.extend(existing_map.iter().map(|(k, v)| (k.clone(), v.clone())));
                     self.eval_mapping_entries_with_type_default(
                         body,
-                        &type_scope,
+                        &amendment_scope,
                         depth,
                         &mut amended,
                         &value_type_defaults,
@@ -3387,30 +3380,22 @@ impl Evaluator {
         }
         if let Value::Object(_, Some(base_src)) = &base {
             if !base_src.mapping_value_types.is_empty() {
-                let mut type_scope = Scope::default();
-                for (key, value) in &base_src.scope {
-                    type_scope.set(key.clone(), value.clone());
-                }
-                for (key, value) in scope.flatten() {
-                    type_scope.set(key, value);
-                }
-                for (key, ty) in scope.flatten_type_aliases() {
-                    type_scope.set_type_alias(key, ty);
-                }
+                let (inherited_scope, amendment_scope) =
+                    mapping_amendment_scopes(&base_src.scope, scope);
                 let value_type_defaults = base_src
                     .mapping_value_types
                     .iter()
                     .filter_map(|name| {
-                        resolve_dotted(&type_scope, name).map(|value| (name.clone(), value))
+                        resolve_dotted(&inherited_scope, name).map(|value| (name.clone(), value))
                     })
                     .collect::<Vec<_>>();
                 let inherited_default = self
-                    .find_default_template(&base_src.entries, &type_scope, depth)
+                    .find_default_template(&base_src.entries, &inherited_scope, depth)
                     .await?;
                 let mut amended = IndexMap::new();
                 self.eval_mapping_entries_with_type_default(
                     &base_src.entries,
-                    &type_scope,
+                    &inherited_scope,
                     depth,
                     &mut amended,
                     &value_type_defaults,
@@ -3423,7 +3408,7 @@ impl Evaluator {
                 }
                 self.eval_mapping_entries_with_type_default(
                     overlay_entries,
-                    &type_scope,
+                    &amendment_scope,
                     depth,
                     &mut amended,
                     &value_type_defaults,
@@ -5190,6 +5175,32 @@ impl Scope {
         result.extend(self.type_aliases.clone());
         result
     }
+}
+
+/// Keep inherited entries bound to the imports they captured while letting an
+/// amendment resolve names in the scope where the amendment was declared.
+fn mapping_amendment_scopes(captured: &IndexMap<String, Value>, current: &Scope) -> (Scope, Scope) {
+    let mut inherited = Scope::default();
+    for (key, value) in captured {
+        inherited.set(key.clone(), value.clone());
+    }
+    for (key, value) in current.flatten() {
+        if inherited.get(&key).is_none() {
+            inherited.set(key, value);
+        }
+    }
+    for (key, ty) in current.flatten_type_aliases() {
+        inherited.set_type_alias(key, ty);
+    }
+
+    let mut amendment = inherited.clone();
+    for (key, value) in current.flatten() {
+        amendment.set(key, value);
+    }
+    for (key, ty) in current.flatten_type_aliases() {
+        amendment.set_type_alias(key, ty);
+    }
+    (inherited, amendment)
 }
 
 // --- Helpers ---
