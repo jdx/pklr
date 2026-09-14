@@ -1469,6 +1469,171 @@ baseName = Base.name
 }
 
 #[tokio::test]
+async fn amended_object_keeps_definition_site_import_scope() {
+    let temp = TestTempDir::new("pklr_test_amended_object_import_scope");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Base.pkl"),
+        r#"
+class Spec {
+    abstract command: String
+}
+open class Step {
+    check: (String | Spec)?
+    prefix: String?
+}
+steps: Mapping<String, Step> = new Mapping<String, Step> {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Lib.pkl"),
+        r#"
+import "Base.pkl" as Config
+step = new Config.Step {
+    check = new Config.Spec { command = "lint" }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("Config.pkl"), "amends \"Base.pkl\"\n").unwrap();
+    std::fs::write(
+        dir.join("Shared.pkl"),
+        r#"
+import "Lib.pkl"
+import "Config.pkl"
+a = (Lib.step) { prefix = "x" }
+b = new Config.Step { check = "true" }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+amends "Config.pkl"
+import "Shared.pkl"
+steps {
+    ["a"] = Shared.a
+    ["b"] = Shared.b
+}
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "steps": {
+                "a": {"check": {"command": "lint"}, "prefix": "x"},
+                "b": {"check": "true", "prefix": null}
+            }
+        })
+    );
+}
+
+#[tokio::test]
+async fn amended_object_keeps_definition_site_scope_when_local_shadows_import() {
+    let temp = TestTempDir::new("pklr_test_amended_object_local_scope");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Base.pkl"),
+        r#"
+class Spec {
+    abstract command: String
+}
+open class Step {
+    check: (String | Spec)?
+    prefix: String?
+}
+steps: Mapping<String, Step> = new Mapping<String, Step> {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Lib.pkl"),
+        r#"
+import "Base.pkl" as Config
+step = new Config.Step {
+    check = new Config.Spec { command = "lint" }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Shared.pkl"),
+        r#"
+import "Lib.pkl"
+local Config = 1
+a = (Lib.step) { prefix = "x" }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+amends "Base.pkl"
+import "Shared.pkl"
+steps { ["a"] = Shared.a }
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "steps": {
+                "a": {"check": {"command": "lint"}, "prefix": "x"}
+            }
+        })
+    );
+}
+
+#[tokio::test]
+async fn amended_object_uses_amendment_site_scope_for_overlay_entries() {
+    let temp = TestTempDir::new("pklr_test_amended_object_overlay_scope");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Lib.pkl"),
+        r#"
+local collision = "definition"
+open class Item {
+    inherited = collision
+}
+value = new Item {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "Lib.pkl"
+local collision = "amendment"
+result = (Lib.value) {
+    overlay = collision
+}
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        json["result"],
+        serde_json::json!({
+            "inherited": "definition",
+            "overlay": "amendment"
+        })
+    );
+}
+
+#[tokio::test]
 async fn scoped_inherited_base_does_not_pollute_import_cache() {
     let temp = TestTempDir::new("pklr_test_scoped_base_cache");
     let dir = temp.path();
@@ -4071,8 +4236,8 @@ result = (base.holder) {}
     .unwrap();
 
     let json = pklr::eval_to_json_async(&main).await.unwrap();
-    assert_eq!(json["result"]["selected"], "current");
-    assert_eq!(json["result"]["hasStale"], false);
+    assert_eq!(json["result"]["selected"], "base");
+    assert_eq!(json["result"]["hasStale"], true);
 }
 
 #[tokio::test]
@@ -4179,8 +4344,8 @@ result = (helper.holder) {}
 
     let json = pklr::eval_to_json_async(&main).await.unwrap();
     assert_eq!(json["selected"], true);
-    assert_eq!(json["result"]["hasBase"], false);
-    assert_eq!(json["result"]["hasCurrent"], true);
+    assert_eq!(json["result"]["hasBase"], true);
+    assert_eq!(json["result"]["hasCurrent"], false);
 }
 
 #[test]
