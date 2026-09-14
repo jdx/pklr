@@ -3,7 +3,15 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 use serde_json::json;
 
-use crate::parser::{Entry, Expr};
+use crate::parser::{Entry, Expr, TypeExpr};
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CapturedScope {
+    pub values: IndexMap<String, Value>,
+    pub module_identities: IndexMap<String, String>,
+    pub type_aliases: IndexMap<String, TypeExpr>,
+    pub type_namespace: Option<String>,
+}
 
 /// Captures the original AST entries and scope for an object, enabling
 /// late binding: when this object is amended, its entries can be merged
@@ -27,6 +35,15 @@ pub struct ObjectSource {
     pub(crate) parent_type_identities: Vec<String>,
     /// Canonical module identities for imports captured in `scope`.
     pub(crate) scope_module_identities: IndexMap<String, String>,
+    /// Type aliases captured alongside `scope` at the object's definition site.
+    pub(crate) scope_type_aliases: IndexMap<String, TypeExpr>,
+    /// Lexical scopes for entries introduced by earlier amendments. `None`
+    /// entries use this object's definition-site `scope`.
+    pub(crate) entry_scopes: Vec<Option<Arc<CapturedScope>>>,
+    /// Property names that produced values when this object was evaluated.
+    /// Kept separate from `scope`, which can contain unrelated same-named
+    /// lexical bindings.
+    pub(crate) evaluated_properties: Vec<String>,
     /// Possible value type names for mapping entries, e.g. `Step | Group` from
     /// `Mapping<String, Step | Group>`. Used when amending mappings so bare
     /// entries inherit the right class template.

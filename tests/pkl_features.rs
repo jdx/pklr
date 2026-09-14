@@ -1469,6 +1469,728 @@ baseName = Base.name
 }
 
 #[tokio::test]
+async fn amended_object_keeps_definition_site_import_scope() {
+    let temp = TestTempDir::new("pklr_test_amended_object_import_scope");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Base.pkl"),
+        r#"
+class Spec {
+    abstract command: String
+}
+open class Step {
+    check: (String | Spec)?
+    prefix: String?
+}
+steps: Mapping<String, Step> = new Mapping<String, Step> {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Lib.pkl"),
+        r#"
+import "Base.pkl" as Config
+step = new Config.Step {
+    check = new Config.Spec { command = "lint" }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("Config.pkl"), "amends \"Base.pkl\"\n").unwrap();
+    std::fs::write(
+        dir.join("Shared.pkl"),
+        r#"
+import "Lib.pkl"
+import "Config.pkl"
+a = (Lib.step) { prefix = "x" }
+b = new Config.Step { check = "true" }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+amends "Config.pkl"
+import "Shared.pkl"
+steps {
+    ["a"] = Shared.a
+    ["b"] = Shared.b
+}
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "steps": {
+                "a": {"check": {"command": "lint"}, "prefix": "x"},
+                "b": {"check": "true", "prefix": null}
+            }
+        })
+    );
+}
+
+#[tokio::test]
+async fn amended_object_keeps_definition_site_scope_when_local_shadows_import() {
+    let temp = TestTempDir::new("pklr_test_amended_object_local_scope");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Base.pkl"),
+        r#"
+class Spec {
+    abstract command: String
+}
+open class Step {
+    check: (String | Spec)?
+    prefix: String?
+}
+steps: Mapping<String, Step> = new Mapping<String, Step> {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Lib.pkl"),
+        r#"
+import "Base.pkl" as Config
+step = new Config.Step {
+    check = new Config.Spec { command = "lint" }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Shared.pkl"),
+        r#"
+import "Lib.pkl"
+local Config = 1
+a = (Lib.step) { prefix = "x" }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+amends "Base.pkl"
+import "Shared.pkl"
+steps { ["a"] = Shared.a }
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "steps": {
+                "a": {"check": {"command": "lint"}, "prefix": "x"}
+            }
+        })
+    );
+}
+
+#[tokio::test]
+async fn amended_object_uses_amendment_site_scope_for_overlay_entries() {
+    let temp = TestTempDir::new("pklr_test_amended_object_overlay_scope");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Lib.pkl"),
+        r#"
+local collision = "definition"
+open class Item {
+    inherited = collision
+}
+value = new Item {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "Lib.pkl"
+local collision = "amendment"
+result = (Lib.value) {
+    overlay = collision
+}
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        json["result"],
+        serde_json::json!({
+            "inherited": "definition",
+            "overlay": "amendment"
+        })
+    );
+}
+
+#[tokio::test]
+async fn amended_object_keeps_definition_site_type_alias_scope() {
+    let temp = TestTempDir::new("pklr_test_amended_object_type_alias_scope");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Lib.pkl"),
+        r#"
+typealias Check = String
+open class Item {
+    value: Check = "ok"
+}
+item = new Item {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "Lib.pkl"
+typealias Check = Int
+result = (Lib.item) {}
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(json["result"], serde_json::json!({"value": "ok"}));
+}
+
+#[tokio::test]
+async fn amended_object_uses_amendment_scope_for_replaced_default() {
+    let temp = TestTempDir::new("pklr_test_amended_object_default_scope");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Lib.pkl"),
+        r#"
+local collision = "definition"
+value = new {
+    default = new { selected = collision }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "Lib.pkl"
+local collision = "amendment"
+result = (Lib.value) {
+    default = new { selected = collision }
+    ["entry"] {}
+}
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        json["result"],
+        serde_json::json!({"entry": {"selected": "amendment"}})
+    );
+}
+
+#[tokio::test]
+async fn amended_object_applies_default_body_amendments() {
+    let temp = TestTempDir::new("pklr_test_amended_object_default_body");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Lib.pkl"),
+        r#"
+value = new {
+    default = new {
+        inherited = "base"
+        changed = "base"
+    }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "Lib.pkl"
+result = (Lib.value) {
+    default {
+        changed = "amendment"
+        added = "amendment"
+    }
+    ["entry"] {}
+}
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        json["result"],
+        serde_json::json!({
+            "entry": {
+                "inherited": "base",
+                "changed": "amendment",
+                "added": "amendment"
+            }
+        })
+    );
+}
+
+#[tokio::test]
+async fn repeated_default_body_amendments_apply_once() {
+    let temp = TestTempDir::new("pklr_test_repeated_default_body_amendments");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Lib.pkl"),
+        r#"
+value = new {
+    default = new {
+        items = List()
+    }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Middle.pkl"),
+        r#"
+import "Lib.pkl"
+value = (Lib.value) {
+    default {
+        items { "middle" }
+    }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "Middle.pkl"
+result = (Middle.value) {
+    default {
+        items { "main" }
+    }
+    ["entry"] {}
+}
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        json["result"]["entry"]["items"],
+        serde_json::json!(["middle", "main"])
+    );
+}
+
+#[tokio::test]
+async fn amendment_type_alias_uses_amendment_scope() {
+    let temp = TestTempDir::new("pklr_test_amendment_type_alias_scope");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Lib.pkl"),
+        r#"
+open class Foo {
+    origin = "definition"
+}
+value = new {
+    inherited: Foo = new Foo {}
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "Lib.pkl"
+open class Foo {
+    origin = "amendment"
+}
+result = (Lib.value) {
+    typealias Alias = Foo
+    selected = new Alias {}
+}
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        json["result"],
+        serde_json::json!({
+            "inherited": {"origin": "definition"},
+            "selected": {"origin": "amendment"}
+        })
+    );
+}
+
+#[tokio::test]
+async fn amended_object_reconstructs_classes_in_definition_namespace() {
+    let temp = TestTempDir::new("pklr_test_amended_object_class_namespace");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Lib.pkl"),
+        r#"
+open class Container {
+    class Inner {
+        value = "ok"
+    }
+    item: Inner = new Inner {}
+}
+item = new Container {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "Lib.pkl"
+result = (Lib.item) {}
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(json["result"], serde_json::json!({"item": {"value": "ok"}}));
+}
+
+#[tokio::test]
+async fn amended_object_overlay_can_reference_later_inherited_sibling() {
+    let temp = TestTempDir::new("pklr_test_amended_object_later_sibling");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Lib.pkl"),
+        r#"
+open class Item {
+    selected = "initial"
+    later = "inherited"
+}
+item = new Item {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "Lib.pkl"
+local later = "module"
+result = (Lib.item) { selected = later }
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        json["result"],
+        serde_json::json!({"selected": "inherited", "later": "inherited"})
+    );
+}
+
+#[tokio::test]
+async fn repeated_amendment_keeps_each_entries_lexical_scope() {
+    let temp = TestTempDir::new("pklr_test_repeated_amendment_scope");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Lib.pkl"),
+        r#"
+local collision = "definition"
+open class Item {
+    inherited = collision
+}
+item = new Item {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Middle.pkl"),
+        r#"
+import "Lib.pkl"
+local collision = "middle"
+item = (Lib.item) { overlay = collision }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "Middle.pkl"
+local collision = "main"
+result = (Middle.item) {}
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        json["result"],
+        serde_json::json!({"inherited": "definition", "overlay": "middle"})
+    );
+}
+
+#[tokio::test]
+async fn derived_class_amendment_keeps_parent_and_child_lexical_scopes() {
+    let temp = TestTempDir::new("pklr_test_derived_class_amendment_scope");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Base.pkl"),
+        r#"
+local collision = "parent"
+open class Parent {
+    fromParent = collision
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Middle.pkl"),
+        r#"
+import "Base.pkl"
+local collision = "child"
+open class Child extends Base.Parent {
+    fromChild = collision
+}
+item = (new Child {}) {
+    fromMiddle = collision
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "Middle.pkl"
+local collision = "main"
+result = (Middle.item) {
+    fromMain = collision
+}
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        json["result"],
+        serde_json::json!({
+            "fromParent": "parent",
+            "fromChild": "child",
+            "fromMiddle": "child",
+            "fromMain": "main"
+        })
+    );
+}
+
+#[tokio::test]
+async fn derived_class_amendment_seeds_inherited_property_values() {
+    let temp = TestTempDir::new("pklr_test_derived_class_inherited_property_values");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Base.pkl"),
+        r#"
+open class Parent {
+    later = "parent property"
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Middle.pkl"),
+        r#"
+import "Base.pkl"
+local later = "child module"
+open class Child extends Base.Parent {}
+item = new Child { selected = later }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "Middle.pkl"
+result = Middle.item
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        json["result"],
+        serde_json::json!({"later": "parent property", "selected": "parent property"})
+    );
+}
+
+#[tokio::test]
+async fn nested_class_inheritance_keeps_each_definition_scope() {
+    let temp = TestTempDir::new("pklr_test_nested_class_inheritance_scope");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Base.pkl"),
+        r#"
+local collision = "parent"
+open class Parent {
+    fromParent = collision
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Middle.pkl"),
+        r#"
+import "Base.pkl"
+local collision = "middle"
+open class Middle extends Base.Parent {
+    fromMiddle = collision
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Leaf.pkl"),
+        r#"
+import "Middle.pkl"
+local collision = "leaf"
+open class Leaf extends Middle.Middle {
+    fromLeaf = collision
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "Leaf.pkl"
+local collision = "main"
+result = (new Leaf.Leaf {}) { fromMain = collision }
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        json["result"],
+        serde_json::json!({
+            "fromParent": "parent",
+            "fromMiddle": "middle",
+            "fromLeaf": "leaf",
+            "fromMain": "main"
+        })
+    );
+}
+
+#[tokio::test]
+async fn unassigned_inherited_property_does_not_shadow_amendment_scope() {
+    let temp = TestTempDir::new("pklr_test_unassigned_inherited_property_scope");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Lib.pkl"),
+        r#"
+local collision = "definition"
+open class Item {
+    collision: String
+}
+item = new Item {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "Lib.pkl"
+local collision = "amendment"
+result = (Lib.item) {
+    selected = collision
+}
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(json["result"], serde_json::json!({"selected": "amendment"}));
+}
+
+#[tokio::test]
+async fn amended_typed_property_keeps_definition_site_class_identity() {
+    let temp = TestTempDir::new("pklr_test_amended_typed_property_identity");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Config.pkl"),
+        r#"
+class Test {
+    expect: Expect = new Expect {}
+}
+class Expect {
+    stdout: String?
+}
+open class Step {
+    tests: Mapping<String, Test> = new Mapping<String, Test> {}
+}
+open class Group {}
+class Hook {
+    steps: Mapping<String, Step | Group> = new Mapping<String, Step> {}
+}
+hooks: Mapping<String, Hook> = new Mapping<String, Hook> {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+amends "Config.pkl"
+hooks {
+    ["check"] {
+        steps {
+            ["demo"] {
+                tests {
+                    ["case"] {
+                        expect { stdout = "ok" }
+                    }
+                }
+            }
+        }
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        json["hooks"]["check"]["steps"]["demo"]["tests"],
+        serde_json::json!({"case": {"expect": {"stdout": "ok"}}})
+    );
+}
+
+#[tokio::test]
 async fn scoped_inherited_base_does_not_pollute_import_cache() {
     let temp = TestTempDir::new("pklr_test_scoped_base_cache");
     let dir = temp.path();
@@ -4071,8 +4793,8 @@ result = (base.holder) {}
     .unwrap();
 
     let json = pklr::eval_to_json_async(&main).await.unwrap();
-    assert_eq!(json["result"]["selected"], "current");
-    assert_eq!(json["result"]["hasStale"], false);
+    assert_eq!(json["result"]["selected"], "base");
+    assert_eq!(json["result"]["hasStale"], true);
 }
 
 #[tokio::test]
@@ -4179,8 +4901,8 @@ result = (helper.holder) {}
 
     let json = pklr::eval_to_json_async(&main).await.unwrap();
     assert_eq!(json["selected"], true);
-    assert_eq!(json["result"]["hasBase"], false);
-    assert_eq!(json["result"]["hasCurrent"], true);
+    assert_eq!(json["result"]["hasBase"], true);
+    assert_eq!(json["result"]["hasCurrent"], false);
 }
 
 #[test]
