@@ -4075,6 +4075,114 @@ result = (base.holder) {}
     assert_eq!(json["result"]["hasStale"], false);
 }
 
+#[tokio::test]
+async fn partial_views_of_wrapper_with_distinct_reexports_are_merged() {
+    let dir = TestTempDir::new("pklr_partial_wrapper_reexports");
+    std::fs::write(
+        dir.path.join("left.pkl"),
+        "class Left { name = \"left\" }\ninstance = new Left {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path.join("right.pkl"),
+        "class Right { name = \"right\" }\ninstance = new Right {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path.join("wrapper.pkl"),
+        r#"
+import "left.pkl"
+import "right.pkl"
+Left = left.instance
+Right = right.instance
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path.join("helper.pkl"),
+        r#"
+import "wrapper.pkl" as Wrapper
+open class Holder {
+    left = Wrapper.Left.name
+}
+holder = new Holder {}
+"#,
+    )
+    .unwrap();
+    let main = dir.path.join("main.pkl");
+    std::fs::write(
+        &main,
+        r#"
+import "wrapper.pkl" as Wrapper
+import "helper.pkl"
+result = (helper.holder) {
+    right = Wrapper.Right.name
+}
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&main).await.unwrap();
+    assert_eq!(json["result"]["left"], "left");
+    assert_eq!(json["result"]["right"], "right");
+}
+
+#[tokio::test]
+async fn partial_views_of_distinct_wrappers_are_not_merged() {
+    let dir = TestTempDir::new("pklr_distinct_partial_wrappers");
+    std::fs::write(
+        dir.path.join("types.pkl"),
+        "class Item {}\ninstance = new Item {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path.join("wrapper_a.pkl"),
+        r#"
+import "types.pkl"
+Item = types.instance
+baseOnly = true
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path.join("wrapper_b.pkl"),
+        r#"
+import "types.pkl"
+Item = types.instance
+currentOnly = true
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path.join("helper.pkl"),
+        r#"
+import "wrapper_a.pkl" as Wrapper
+open class Holder {
+    hasBase = Wrapper.containsKey("baseOnly")
+    hasCurrent = Wrapper.containsKey("currentOnly")
+}
+holder = new Holder {}
+"#,
+    )
+    .unwrap();
+    let main = dir.path.join("main.pkl");
+    std::fs::write(
+        &main,
+        r#"
+import "wrapper_b.pkl" as Wrapper
+import "helper.pkl"
+selected = Wrapper.currentOnly
+result = (helper.holder) {}
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&main).await.unwrap();
+    assert_eq!(json["selected"], true);
+    assert_eq!(json["result"]["hasBase"], false);
+    assert_eq!(json["result"]["hasCurrent"], true);
+}
+
 #[test]
 fn is_operator_any() {
     let json = eval(
