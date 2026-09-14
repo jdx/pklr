@@ -3994,9 +3994,7 @@ class Expect {
 class Test {
     expect: Expect = new Expect {}
 }
-class Container {
-    test: Test
-}
+function marker(): Int = 1
 "#,
     )
     .unwrap();
@@ -4010,6 +4008,9 @@ class TestMaker {
     }
     function make(code: Int): Config.Test = makeTest(code)
 }
+class Container {
+    test: Config.Test
+}
 "#,
     )
     .unwrap();
@@ -4020,7 +4021,8 @@ class TestMaker {
 import "Config.pkl"
 import "helpers.pkl"
 local maker = new helpers.TestMaker {}
-result = new Config.Container {
+marker = Config.marker()
+result = new helpers.Container {
     test = maker.make(1)
 }
 "#,
@@ -4028,7 +4030,49 @@ result = new Config.Container {
     .unwrap();
 
     let json = pklr::eval_to_json_async(&main).await.unwrap();
+    assert_eq!(json["marker"], 1);
     assert_eq!(json["result"]["test"]["expect"]["code"], 1);
+}
+
+#[tokio::test]
+async fn ordinary_scope_objects_are_not_merged_as_partial_modules() {
+    let dir = TestTempDir::new("pklr_ordinary_scope_objects");
+    std::fs::write(dir.path.join("types.pkl"), "class Item {}\n").unwrap();
+    std::fs::write(
+        dir.path.join("base.pkl"),
+        r#"
+import "types.pkl"
+local Config = new {
+    ["Item"] = new types.Item {}
+    selected = "base"
+    stale = true
+}
+open class Holder {
+    selected = Config.selected
+    hasStale = Config.containsKey("stale")
+}
+holder = new Holder {}
+"#,
+    )
+    .unwrap();
+    let main = dir.path.join("main.pkl");
+    std::fs::write(
+        &main,
+        r#"
+import "types.pkl"
+import "base.pkl"
+local Config = new {
+    ["Item"] = new types.Item {}
+    selected = "current"
+}
+result = (base.holder) {}
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&main).await.unwrap();
+    assert_eq!(json["result"]["selected"], "current");
+    assert_eq!(json["result"]["hasStale"], false);
 }
 
 #[test]

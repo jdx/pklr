@@ -25,6 +25,8 @@ pub struct ObjectSource {
     pub parent_type_names: Vec<String>,
     /// Stable definition-site identities for parent classes, nearest first.
     pub(crate) parent_type_identities: Vec<String>,
+    /// Canonical module identities for imports captured in `scope`.
+    pub(crate) scope_module_identities: IndexMap<String, String>,
     /// Possible value type names for mapping entries, e.g. `Step | Group` from
     /// `Mapping<String, Step | Group>`. Used when amending mappings so bare
     /// entries inherit the right class template.

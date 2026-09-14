@@ -752,6 +752,9 @@ impl Evaluator {
             for (key, ty) in inherited_scope.flatten_type_aliases() {
                 scope.set_type_alias(key, ty);
             }
+            for (key, identity) in inherited_scope.flatten_module_identities() {
+                scope.set_module_identity(key, identity);
+            }
         }
         let requested_output_fields = requested_fields
             .as_ref()
@@ -839,7 +842,8 @@ impl Evaluator {
                     )
                     .await?
                 };
-                scope.set(alias, imported_val);
+                scope.set(alias.clone(), imported_val);
+                scope.set_module_identity(alias, uri.to_string());
                 continue;
             }
 
@@ -869,7 +873,9 @@ impl Evaluator {
                         let imported_val = self
                             .eval_file_with_requested_fields(&local_path, depth + 1, requested)
                             .await?;
-                        scope.set(alias, imported_val);
+                        let identity = self.module_type_namespace(&local_path).await;
+                        scope.set(alias.clone(), imported_val);
+                        scope.set_module_identity(alias, identity);
                         continue;
                     }
                     #[cfg(not(feature = "package-zip-core"))]
@@ -900,7 +906,8 @@ impl Evaluator {
                     )
                     .await?
                 };
-                scope.set(alias, imported_val);
+                scope.set(alias.clone(), imported_val);
+                scope.set_module_identity(alias, url);
                 continue;
             }
 
@@ -959,7 +966,9 @@ impl Evaluator {
                 let imported_val = self
                     .eval_file_with_requested_fields(&import_path, depth + 1, requested)
                     .await?;
-                scope.set(alias, imported_val);
+                let identity = self.module_type_namespace(&import_path).await;
+                scope.set(alias.clone(), imported_val);
+                scope.set_module_identity(alias, identity);
             }
         }
 
@@ -1590,6 +1599,7 @@ impl Evaluator {
                 type_identity: None,
                 parent_type_names: Vec::new(),
                 parent_type_identities: Vec::new(),
+                scope_module_identities: IndexMap::new(),
                 mapping_value_types: Vec::new(),
                 deprecated,
             }))
@@ -1709,19 +1719,8 @@ impl Evaluator {
                         Some(Arc::clone(src)),
                     )));
                 }
-                let base_entries = src.entries.clone();
-                let base_scope = src.scope.clone();
-                let base_type = object_type_metadata(src);
                 return Ok(Some(
-                    self.eval_amended_object(
-                        &base_entries,
-                        &base_scope,
-                        body,
-                        scope,
-                        depth,
-                        base_type,
-                    )
-                    .await?,
+                    self.eval_amended_object(src, body, scope, depth).await?,
                 ));
             }
             let val = self.eval_entries(body, scope, depth).await?;
@@ -1871,14 +1870,7 @@ impl Evaluator {
                         // Default template has ObjectSource — use eval_amended_object
                         // so nested property amendments work properly.
                         let mut result = self
-                            .eval_amended_object(
-                                &src.entries,
-                                &src.scope,
-                                body,
-                                &child_scope,
-                                depth,
-                                object_type_metadata(src),
-                            )
+                            .eval_amended_object(src, body, &child_scope, depth)
                             .await?;
                         // Propagate the template's type_name so converters can match.
                         if let Some(ref tn) = src.type_name
@@ -1898,6 +1890,7 @@ impl Evaluator {
                                     type_identity: src.type_identity.clone(),
                                     parent_type_names: src.parent_type_names.clone(),
                                     parent_type_identities: src.parent_type_identities.clone(),
+                                    scope_module_identities: IndexMap::new(),
                                     mapping_value_types: Vec::new(),
                                     deprecated: merge_deprecated(&src.deprecated, body),
                                 },
@@ -1981,6 +1974,7 @@ impl Evaluator {
             type_identity: None,
             parent_type_names: Vec::new(),
             parent_type_identities: Vec::new(),
+            scope_module_identities: child_scope.flatten_module_identities(),
             mapping_value_types: Vec::new(),
             deprecated: collect_deprecated(entries),
         };
@@ -2251,13 +2245,13 @@ impl Evaluator {
     #[async_recursion(?Send)]
     async fn eval_amended_object(
         &mut self,
-        base_entries: &[Entry],
-        base_scope: &IndexMap<String, Value>,
+        base_source: &ObjectSource,
         overlay_entries: &[Entry],
         current_scope: &Scope,
         depth: usize,
-        base_type: Option<ObjectTypeMetadata>,
     ) -> Result<Value> {
+        let base_entries = &base_source.entries;
+        let base_scope = &base_source.scope;
         // Build merged entry list preserving base order.
         // Overridden properties are replaced in-place so that later
         // properties that reference them see the new value.
@@ -2323,16 +2317,30 @@ impl Evaluator {
         for (k, v) in base_scope {
             eval_scope.set(k.clone(), v.clone());
         }
+        for (name, identity) in &base_source.scope_module_identities {
+            eval_scope.set_module_identity(name.clone(), identity.clone());
+        }
         // Layer in current scope values (imports, module-level locals, etc.).
         // The same imported module can be field-pruned differently at its
         // definition and use sites. Preserve both partial views so methods
         // retain the classes captured by their definition-site import.
         for (k, v) in current_scope.flatten() {
-            let value = eval_scope
-                .get(&k)
-                .and_then(|base| merge_partial_module_values(base, &v))
-                .unwrap_or(v);
+            let same_module = eval_scope
+                .module_identity(&k)
+                .zip(current_scope.module_identity(&k))
+                .is_some_and(|(base, current)| base == current);
+            let value = if same_module {
+                eval_scope
+                    .get(&k)
+                    .and_then(|base| merge_partial_module_values(base, &v))
+                    .unwrap_or(v)
+            } else {
+                v
+            };
             eval_scope.set(k, value);
+        }
+        for (name, identity) in current_scope.flatten_module_identities() {
+            eval_scope.set_module_identity(name, identity);
         }
         // Propagate type aliases so `is`/`as` constraints work inside amended objects
         for (k, ty) in current_scope.flatten_type_aliases() {
@@ -2403,7 +2411,7 @@ impl Evaluator {
         // Amending an object preserves its class identity (so `is Foo` and
         // output converters still match). eval_entries does not know the base
         // type, so re-tag the result here.
-        match (base_type, result) {
+        match (object_type_metadata(base_source), result) {
             (Some(base_type), Value::Object(map, Some(src))) => {
                 let mut new_src = (*src).clone();
                 new_src.type_name = Some(base_type.name);
@@ -2662,6 +2670,7 @@ impl Evaluator {
                             type_identity: None,
                             parent_type_names: Vec::new(),
                             parent_type_identities: Vec::new(),
+                            scope_module_identities: IndexMap::new(),
                             mapping_value_types: generic_params.iter().skip(1).cloned().collect(),
                             deprecated,
                         };
@@ -2724,14 +2733,7 @@ impl Evaluator {
                             let is_open = base_src.is_open;
                             // Late binding: re-evaluate merged base + overlay entries
                             let mut result = self
-                                .eval_amended_object(
-                                    &base_src.entries.clone(),
-                                    &base_src.scope.clone(),
-                                    entries,
-                                    scope,
-                                    depth,
-                                    object_type_metadata(base_src),
-                                )
+                                .eval_amended_object(base_src, entries, scope, depth)
                                 .await?;
                             // Preserve the base class's is_open flag and tag the
                             // type_name so output.renderer.converters can match it.
@@ -2758,6 +2760,7 @@ impl Evaluator {
                                         parent_type_identities: base_src
                                             .parent_type_identities
                                             .clone(),
+                                        scope_module_identities: IndexMap::new(),
                                         mapping_value_types: Vec::new(),
                                         deprecated: merge_deprecated(&base_src.deprecated, entries),
                                     }
@@ -2791,6 +2794,7 @@ impl Evaluator {
                                 type_identity: None,
                                 parent_type_names: Vec::new(),
                                 parent_type_identities: Vec::new(),
+                                scope_module_identities: IndexMap::new(),
                                 mapping_value_types: Vec::new(),
                                 deprecated,
                             };
@@ -3488,14 +3492,7 @@ impl Evaluator {
                 return Ok(Value::Object(Arc::new(amended), Some(Arc::clone(base_src))));
             }
             return self
-                .eval_amended_object(
-                    &base_src.entries.clone(),
-                    &base_src.scope.clone(),
-                    overlay_entries,
-                    scope,
-                    depth,
-                    object_type_metadata(base_src),
-                )
+                .eval_amended_object(base_src, overlay_entries, scope, depth)
                 .await;
         }
         let mut amendment_scope = scope.child();
@@ -3796,76 +3793,56 @@ impl Evaluator {
                             if let Expr::New(Some(type_name), _, _) = val_expr {
                                 validate_new_object_body(type_name, body, src)?;
                             }
-                            let mut result =
-                                if let Some(default_entries) = explicit_default_entries.as_ref() {
-                                    let mut overlay_entries = default_entries.clone();
-                                    overlay_entries.extend(body.iter().cloned());
-                                    self.eval_amended_object(
-                                        &src.entries,
-                                        &src.scope,
-                                        &overlay_entries,
-                                        &entry_scope,
-                                        depth,
-                                        object_type_metadata(src),
-                                    )
+                            let mut result = if let Some(default_entries) =
+                                explicit_default_entries.as_ref()
+                            {
+                                let mut overlay_entries = default_entries.clone();
+                                overlay_entries.extend(body.iter().cloned());
+                                self.eval_amended_object(src, &overlay_entries, &entry_scope, depth)
                                     .await?
-                                } else if !is_typed_new
-                                    && let Some(Value::Object(_, Some(explicit_src))) =
-                                        explicit_default.as_ref()
-                                    && type_default.is_some()
-                                    && default_type_name.is_some_and(|expected| {
-                                        let chain = explicit_src
-                                            .type_name
-                                            .iter()
-                                            .chain(explicit_src.parent_type_names.iter())
-                                            .cloned()
-                                            .collect::<Vec<_>>();
-                                        let expected = expand_type_alias_names(
-                                            std::slice::from_ref(&expected.to_string()),
-                                            &entry_scope,
-                                        );
-                                        expand_type_alias_names(&chain, &entry_scope).iter().any(
-                                            |actual| {
-                                                expected.iter().any(|expected| {
-                                                    type_names_match(actual, expected)
-                                                })
-                                            },
-                                        )
-                                    })
-                                {
-                                    // The `default` is itself an instance of the selected
-                                    // value type (for example the synthetic `new Step {}`
-                                    // of a typed mapping literal). Amend its entries so the
-                                    // body's assignments late-bind sibling properties.
-                                    self.eval_amended_object(
-                                        &explicit_src.entries,
-                                        &explicit_src.scope,
-                                        body,
+                            } else if !is_typed_new
+                                && let Some(Value::Object(_, Some(explicit_src))) =
+                                    explicit_default.as_ref()
+                                && type_default.is_some()
+                                && default_type_name.is_some_and(|expected| {
+                                    let chain = explicit_src
+                                        .type_name
+                                        .iter()
+                                        .chain(explicit_src.parent_type_names.iter())
+                                        .cloned()
+                                        .collect::<Vec<_>>();
+                                    let expected = expand_type_alias_names(
+                                        std::slice::from_ref(&expected.to_string()),
                                         &entry_scope,
-                                        depth,
-                                        object_type_metadata(explicit_src),
+                                    );
+                                    expand_type_alias_names(&chain, &entry_scope).iter().any(
+                                        |actual| {
+                                            expected
+                                                .iter()
+                                                .any(|expected| type_names_match(actual, expected))
+                                        },
                                     )
+                                })
+                            {
+                                // The `default` is itself an instance of the selected
+                                // value type (for example the synthetic `new Step {}`
+                                // of a typed mapping literal). Amend its entries so the
+                                // body's assignments late-bind sibling properties.
+                                self.eval_amended_object(explicit_src, body, &entry_scope, depth)
                                     .await?
-                                } else if explicit_default.is_some() && type_default.is_some() {
-                                    self.eval_object_body_over_template(
-                                        template_map,
-                                        src,
-                                        body,
-                                        &entry_scope,
-                                        depth,
-                                    )
+                            } else if explicit_default.is_some() && type_default.is_some() {
+                                self.eval_object_body_over_template(
+                                    template_map,
+                                    src,
+                                    body,
+                                    &entry_scope,
+                                    depth,
+                                )
+                                .await?
+                            } else {
+                                self.eval_amended_object(src, body, &entry_scope, depth)
                                     .await?
-                                } else {
-                                    self.eval_amended_object(
-                                        &src.entries,
-                                        &src.scope,
-                                        body,
-                                        &entry_scope,
-                                        depth,
-                                        object_type_metadata(src),
-                                    )
-                                    .await?
-                                };
+                            };
                             let type_name = src.type_name.as_deref().or(*default_type_name);
                             if let Some(tn) = type_name
                                 && let Value::Object(_, ref mut result_src) = result
@@ -3884,6 +3861,7 @@ impl Evaluator {
                                         type_identity: src.type_identity.clone(),
                                         parent_type_names: src.parent_type_names.clone(),
                                         parent_type_identities: src.parent_type_identities.clone(),
+                                        scope_module_identities: IndexMap::new(),
                                         mapping_value_types: Vec::new(),
                                         deprecated: merge_deprecated(&src.deprecated, body),
                                     },
@@ -4330,25 +4308,6 @@ fn merge_partial_module_values(base: &Value, current: &Value) -> Option<Value> {
     else {
         return None;
     };
-    let class_namespace = |map: &IndexMap<String, Value>| -> Option<String> {
-        map.iter().find_map(|(name, value)| {
-            let Value::Object(_, Some(source)) = value else {
-                return None;
-            };
-            if source.type_name.as_deref() != Some(name) {
-                return None;
-            }
-            source.type_identity.as_deref().and_then(|identity| {
-                identity
-                    .rsplit_once('.')
-                    .map(|(namespace, _)| namespace.to_string())
-            })
-        })
-    };
-    if class_namespace(base_map)? != class_namespace(current_map)? {
-        return None;
-    }
-
     let mut merged = (**base_map).clone();
     merged.extend(
         current_map
@@ -4392,6 +4351,7 @@ fn apply_mapping_type_annotation(value: &mut Value, type_ann: Option<&crate::par
             type_identity: None,
             parent_type_names: Vec::new(),
             parent_type_identities: Vec::new(),
+            scope_module_identities: IndexMap::new(),
             mapping_value_types: Vec::new(),
             deprecated: IndexMap::new(),
         });
@@ -5218,6 +5178,7 @@ fn object_type_metadata(source: &ObjectSource) -> Option<ObjectTypeMetadata> {
 struct Scope {
     vars: IndexMap<String, Value>,
     type_aliases: IndexMap<String, crate::parser::TypeExpr>,
+    module_identities: IndexMap<String, String>,
     poisoned: IndexMap<String, String>,
     type_namespace: Option<String>,
     parent: Option<Rc<Scope>>,
@@ -5228,6 +5189,7 @@ impl Scope {
         Self {
             vars: IndexMap::new(),
             type_aliases: IndexMap::new(),
+            module_identities: IndexMap::new(),
             poisoned: IndexMap::new(),
             type_namespace: self.type_namespace.clone(),
             parent: Some(Rc::new(self.clone())),
@@ -5243,7 +5205,33 @@ impl Scope {
 
     fn set(&mut self, name: String, val: Value) {
         self.poisoned.shift_remove(&name);
+        self.module_identities.shift_remove(&name);
         self.vars.insert(name, val);
+    }
+
+    fn set_module_identity(&mut self, name: String, identity: String) {
+        self.module_identities.insert(name, identity);
+    }
+
+    fn module_identity(&self, name: &str) -> Option<&String> {
+        if self.vars.contains_key(name) {
+            self.module_identities.get(name)
+        } else {
+            self.parent.as_ref()?.module_identity(name)
+        }
+    }
+
+    fn flatten_module_identities(&self) -> IndexMap<String, String> {
+        let mut identities = self
+            .parent
+            .as_ref()
+            .map(|parent| parent.flatten_module_identities())
+            .unwrap_or_default();
+        for name in self.vars.keys() {
+            identities.shift_remove(name);
+        }
+        identities.extend(self.module_identities.clone());
+        identities
     }
 
     fn poison(&mut self, name: String, message: String) {
@@ -6327,6 +6315,8 @@ impl Evaluator {
         for (alias, alias_path) in deferred {
             if self.same_local_path(alias_path, inherited_path).await? {
                 scope.set(alias.clone(), inherited_val.clone());
+                let identity = self.module_type_namespace(alias_path).await;
+                scope.set_module_identity(alias.clone(), identity);
             }
         }
         Ok(())
