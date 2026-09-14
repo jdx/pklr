@@ -667,7 +667,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "pklr"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "async-recursion",
  "indexmap",
