@@ -3758,11 +3758,13 @@ local nothing = null
 typealias WholeNumber = Int
 genericMatches = items is List<String>(this.length > 0)
 nullableMatches = nothing is String?(this == null)
+innerNullableRejectsNull = nothing is List<String?>(this == null)
 aliasMatches = 42 is WholeNumber(this > 0)
 "#,
     );
     assert_eq!(json["genericMatches"], true);
     assert_eq!(json["nullableMatches"], true);
+    assert_eq!(json["innerNullableRejectsNull"], false);
     assert_eq!(json["aliasMatches"], true);
 }
 
@@ -3819,6 +3821,7 @@ open class Item {}
 class Derived extends Item {}
 instance = new Item {}
 derived = new Derived {}
+function make(): Item = new Item {}
 "#,
     )
     .unwrap();
@@ -3832,10 +3835,12 @@ local localItem = new Item {}
 local importedDirect = new imported.Item {}
 local importedValue = imported.instance
 local importedDerived = imported.derived
+local importedFromFunction = imported.make()
 localIsImported = localItem is imported.Item
 directIsImported = importedDirect is imported.Item
 valueIsImported = importedValue is imported.Item
 derivedIsImportedBase = importedDerived is imported.Item
+functionValueIsImported = importedFromFunction is imported.Item
 valueIsLocal = importedValue is Item
 "#,
     )
@@ -3846,6 +3851,7 @@ valueIsLocal = importedValue is Item
     assert_eq!(json["directIsImported"], true);
     assert_eq!(json["valueIsImported"], true);
     assert_eq!(json["derivedIsImportedBase"], true);
+    assert_eq!(json["functionValueIsImported"], true);
     assert_eq!(json["valueIsLocal"], false);
 }
 

@@ -2699,7 +2699,10 @@ impl Evaluator {
                             // Preserve the base class's is_open flag and tag the
                             // type_name so output.renderer.converters can match it.
                             if let Value::Object(_, ref mut src_slot) = result {
-                                let tn = type_name.clone();
+                                // Keep the identity resolved from the class value. Imported
+                                // class values carry their module qualifier, even when the
+                                // constructor expression inside that module uses a short name.
+                                let tn = base_src.type_name.clone().or_else(|| type_name.clone());
                                 let new_src = if let Some(src) = src_slot.as_ref() {
                                     let mut s = (**src).clone();
                                     if s.is_open != is_open {
@@ -5702,10 +5705,22 @@ fn bind_import(scope: &mut Scope, alias: String, mut value: Value) {
 }
 
 fn qualify_imported_type_names(value: &mut Value, qualifier: &str) {
+    let mut visited = HashSet::new();
+    qualify_imported_type_names_inner(value, qualifier, &mut visited);
+}
+
+fn qualify_imported_type_names_inner(
+    value: &mut Value,
+    qualifier: &str,
+    visited: &mut HashSet<usize>,
+) {
     match value {
         Value::Object(map, source) => {
+            if !visited.insert(Arc::as_ptr(map) as usize) {
+                return;
+            }
             for value in Arc::make_mut(map).values_mut() {
-                qualify_imported_type_names(value, qualifier);
+                qualify_imported_type_names_inner(value, qualifier, visited);
             }
             if let Some(source) = source {
                 let source = Arc::make_mut(source);
@@ -5719,7 +5734,15 @@ fn qualify_imported_type_names(value: &mut Value, qualifier: &str) {
         }
         Value::List(items) => {
             for value in items {
-                qualify_imported_type_names(value, qualifier);
+                qualify_imported_type_names_inner(value, qualifier, visited);
+            }
+        }
+        Value::Lambda(_, _, captured) => {
+            if !visited.insert(Arc::as_ptr(captured) as usize) {
+                return;
+            }
+            for value in Arc::make_mut(captured).values_mut() {
+                qualify_imported_type_names_inner(value, qualifier, visited);
             }
         }
         _ => {}
