@@ -3750,6 +3750,20 @@ constrainedBase = derived is Base(this.enabled)
 }
 
 #[test]
+fn constrained_type_checks_preserve_nullable_and_generic_bases() {
+    let json = eval(
+        r#"
+local items = List("one")
+local nothing = null
+genericMatches = items is List<String>(this.length > 0)
+nullableMatches = nothing is String?(this == null)
+"#,
+    );
+    assert_eq!(json["genericMatches"], true);
+    assert_eq!(json["nullableMatches"], true);
+}
+
+#[test]
 fn as_operator_rejects_unrelated_user_defined_class() {
     let msg = eval_fails(
         r#"

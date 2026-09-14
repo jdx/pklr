@@ -2156,10 +2156,14 @@ impl Evaluator {
             }
             TypeExpr::Constrained(base, constraint) => {
                 // First check the base type
-                if !self
-                    .eval_type_check(val, &TypeExpr::Named(base.clone()), scope, depth + 1)
-                    .await?
-                {
+                let class_name = base.trim_end_matches('?').split('<').next().unwrap_or(base);
+                let base_matches = if base.ends_with('?') && is_null_value(val) {
+                    true
+                } else {
+                    value_is_class_type(val, class_name, scope)
+                        .unwrap_or_else(|| value_is_named_type(val, base))
+                };
+                if !base_matches {
                     return Ok(false);
                 }
                 // Evaluate the constraint with `this` bound to the value
