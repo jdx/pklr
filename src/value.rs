@@ -3,7 +3,7 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 use serde_json::json;
 
-use crate::parser::{Entry, Expr};
+use crate::parser::{Entry, Expr, TypeExpr};
 
 /// Captures the original AST entries and scope for an object, enabling
 /// late binding: when this object is amended, its entries can be merged
@@ -27,6 +27,8 @@ pub struct ObjectSource {
     pub(crate) parent_type_identities: Vec<String>,
     /// Canonical module identities for imports captured in `scope`.
     pub(crate) scope_module_identities: IndexMap<String, String>,
+    /// Type aliases captured alongside `scope` at the object's definition site.
+    pub(crate) scope_type_aliases: IndexMap<String, TypeExpr>,
     /// Possible value type names for mapping entries, e.g. `Step | Group` from
     /// `Mapping<String, Step | Group>`. Used when amending mappings so bare
     /// entries inherit the right class template.

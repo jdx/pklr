@@ -1600,6 +1600,7 @@ impl Evaluator {
                 parent_type_names: Vec::new(),
                 parent_type_identities: Vec::new(),
                 scope_module_identities: IndexMap::new(),
+                scope_type_aliases: IndexMap::new(),
                 mapping_value_types: Vec::new(),
                 deprecated,
             }))
@@ -1850,9 +1851,26 @@ impl Evaluator {
             }
         }
 
-        let default_template = self
-            .find_default_template(entries, &child_scope, depth)
-            .await?;
+        let default_template = if let Some((entry_index, prop)) =
+            entries.iter().enumerate().find_map(|(entry_index, entry)| {
+                let Entry::Property(prop) = entry else {
+                    return None;
+                };
+                (prop.name == "default" && !has_modifier(&prop.modifiers, Modifier::Local))
+                    .then_some((entry_index, prop))
+            }) {
+            let uses_amendment_scope = amendment_entries
+                .and_then(|origins| origins.get(entry_index))
+                .copied()
+                .unwrap_or(false);
+            let active_scope = amendment_scope
+                .filter(|_| uses_amendment_scope)
+                .map(|lexical| scope_with_object_bindings(lexical, &child_scope))
+                .unwrap_or_else(|| child_scope.clone());
+            self.eval_property(prop, &active_scope, depth).await?
+        } else {
+            None
+        };
 
         let mut map: IndexMap<String, Value> = IndexMap::new();
         for (entry_index, entry) in entries.iter().enumerate() {
@@ -1923,6 +1941,7 @@ impl Evaluator {
                                     parent_type_names: src.parent_type_names.clone(),
                                     parent_type_identities: src.parent_type_identities.clone(),
                                     scope_module_identities: IndexMap::new(),
+                                    scope_type_aliases: IndexMap::new(),
                                     mapping_value_types: Vec::new(),
                                     deprecated: merge_deprecated(&src.deprecated, body),
                                 },
@@ -2025,6 +2044,7 @@ impl Evaluator {
             parent_type_names: Vec::new(),
             parent_type_identities: Vec::new(),
             scope_module_identities: child_scope.flatten_module_identities(),
+            scope_type_aliases: child_scope.flatten_type_aliases(),
             mapping_value_types: Vec::new(),
             deprecated: collect_deprecated(entries),
         };
@@ -2375,6 +2395,9 @@ impl Evaluator {
         for (name, identity) in &base_source.scope_module_identities {
             eval_scope.set_module_identity(name.clone(), identity.clone());
         }
+        for (name, ty) in &base_source.scope_type_aliases {
+            eval_scope.set_type_alias(name.clone(), ty.clone());
+        }
         // Layer in current scope values (imports, module-level locals, etc.).
         // The same imported module can be field-pruned differently at its
         // definition and use sites. Preserve both partial views so methods
@@ -2407,9 +2430,12 @@ impl Evaluator {
                 eval_scope.set_module_identity(name, identity);
             }
         }
-        // Propagate type aliases so `is`/`as` constraints work inside amended objects
+        // Preserve definition-site aliases used by inherited entries. Overlay
+        // entries are evaluated against `current_scope` separately below.
         for (k, ty) in current_scope.flatten_type_aliases() {
-            eval_scope.set_type_alias(k, ty);
+            if !inherited_references.contains(&k) || eval_scope.get_type_alias(&k).is_none() {
+                eval_scope.set_type_alias(k, ty);
+            }
         }
         // Seed Null for nullable-no-default base properties absent from eval_scope.
         // This ensures `outer.optProp` resolves to Null rather than "field not found"
@@ -2747,6 +2773,7 @@ impl Evaluator {
                             parent_type_names: Vec::new(),
                             parent_type_identities: Vec::new(),
                             scope_module_identities: source_module_identities,
+                            scope_type_aliases: scope.flatten_type_aliases(),
                             mapping_value_types: generic_params.iter().skip(1).cloned().collect(),
                             deprecated,
                         };
@@ -2837,6 +2864,7 @@ impl Evaluator {
                                             .parent_type_identities
                                             .clone(),
                                         scope_module_identities: IndexMap::new(),
+                                        scope_type_aliases: IndexMap::new(),
                                         mapping_value_types: Vec::new(),
                                         deprecated: merge_deprecated(&base_src.deprecated, entries),
                                     }
@@ -2871,6 +2899,7 @@ impl Evaluator {
                                 parent_type_names: Vec::new(),
                                 parent_type_identities: Vec::new(),
                                 scope_module_identities: IndexMap::new(),
+                                scope_type_aliases: IndexMap::new(),
                                 mapping_value_types: Vec::new(),
                                 deprecated,
                             };
@@ -3938,6 +3967,7 @@ impl Evaluator {
                                         parent_type_names: src.parent_type_names.clone(),
                                         parent_type_identities: src.parent_type_identities.clone(),
                                         scope_module_identities: IndexMap::new(),
+                                        scope_type_aliases: IndexMap::new(),
                                         mapping_value_types: Vec::new(),
                                         deprecated: merge_deprecated(&src.deprecated, body),
                                     },
@@ -4428,6 +4458,7 @@ fn apply_mapping_type_annotation(value: &mut Value, type_ann: Option<&crate::par
             parent_type_names: Vec::new(),
             parent_type_identities: Vec::new(),
             scope_module_identities: IndexMap::new(),
+            scope_type_aliases: IndexMap::new(),
             mapping_value_types: Vec::new(),
             deprecated: IndexMap::new(),
         });

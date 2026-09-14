@@ -1634,6 +1634,73 @@ result = (Lib.value) {
 }
 
 #[tokio::test]
+async fn amended_object_keeps_definition_site_type_alias_scope() {
+    let temp = TestTempDir::new("pklr_test_amended_object_type_alias_scope");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Lib.pkl"),
+        r#"
+typealias Check = String
+open class Item {
+    value: Check = "ok"
+}
+item = new Item {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "Lib.pkl"
+typealias Check = Int
+result = (Lib.item) {}
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(json["result"], serde_json::json!({"value": "ok"}));
+}
+
+#[tokio::test]
+async fn amended_object_uses_amendment_scope_for_replaced_default() {
+    let temp = TestTempDir::new("pklr_test_amended_object_default_scope");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Lib.pkl"),
+        r#"
+local collision = "definition"
+value = new {
+    default = new { selected = collision }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "Lib.pkl"
+local collision = "amendment"
+result = (Lib.value) {
+    default = new { selected = collision }
+    ["entry"] {}
+}
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        json["result"],
+        serde_json::json!({"entry": {"selected": "amendment"}})
+    );
+}
+
+#[tokio::test]
 async fn scoped_inherited_base_does_not_pollute_import_cache() {
     let temp = TestTempDir::new("pklr_test_scoped_base_cache");
     let dir = temp.path();
