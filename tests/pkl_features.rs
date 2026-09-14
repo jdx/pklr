@@ -4003,8 +4003,8 @@ function marker(): Int = 1
         r#"
 import "Config.pkl"
 class TestMaker {
-    local function makeTest(code: Int): Config.Test = new Config.Test {
-        expect = new Config.Expect { code = code }
+    local function makeTest(expectedCode: Int): Config.Test = new Config.Test {
+        expect = new Config.Expect { code = expectedCode }
     }
     function make(code: Int): Config.Test = makeTest(code)
 }
