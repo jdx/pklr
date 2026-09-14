@@ -1778,6 +1778,93 @@ result = (Middle.item) {}
 }
 
 #[tokio::test]
+async fn derived_class_amendment_keeps_parent_and_child_lexical_scopes() {
+    let temp = TestTempDir::new("pklr_test_derived_class_amendment_scope");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Base.pkl"),
+        r#"
+local collision = "parent"
+open class Parent {
+    fromParent = collision
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Middle.pkl"),
+        r#"
+import "Base.pkl"
+local collision = "child"
+open class Child extends Base.Parent {
+    fromChild = collision
+}
+item = (new Child {}) {
+    fromMiddle = collision
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "Middle.pkl"
+local collision = "main"
+result = (Middle.item) {
+    fromMain = collision
+}
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        json["result"],
+        serde_json::json!({
+            "fromParent": "parent",
+            "fromChild": "child",
+            "fromMiddle": "child",
+            "fromMain": "main"
+        })
+    );
+}
+
+#[tokio::test]
+async fn unassigned_inherited_property_does_not_shadow_amendment_scope() {
+    let temp = TestTempDir::new("pklr_test_unassigned_inherited_property_scope");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Lib.pkl"),
+        r#"
+local collision = "definition"
+open class Item {
+    collision: String
+}
+item = new Item {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "Lib.pkl"
+local collision = "amendment"
+result = (Lib.item) {
+    selected = collision
+}
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(json["result"], serde_json::json!({"selected": "amendment"}));
+}
+
+#[tokio::test]
 async fn scoped_inherited_base_does_not_pollute_import_cache() {
     let temp = TestTempDir::new("pklr_test_scoped_base_cache");
     let dir = temp.path();

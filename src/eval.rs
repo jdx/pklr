@@ -1602,6 +1602,7 @@ impl Evaluator {
                 scope_module_identities: IndexMap::new(),
                 scope_type_aliases: IndexMap::new(),
                 entry_scopes: Vec::new(),
+                evaluated_properties: Vec::new(),
                 mapping_value_types: Vec::new(),
                 deprecated,
             }))
@@ -1770,6 +1771,7 @@ impl Evaluator {
             for entry in &source.entries {
                 if let Entry::Property(prop) = entry
                     && !has_modifier(&prop.modifiers, Modifier::Local)
+                    && source.evaluated_properties.contains(&prop.name)
                     && let Some(value) = source.scope.get(&prop.name)
                 {
                     child_scope.set(prop.name.clone(), value.clone());
@@ -1932,6 +1934,7 @@ impl Evaluator {
                                     scope_module_identities: IndexMap::new(),
                                     scope_type_aliases: IndexMap::new(),
                                     entry_scopes: Vec::new(),
+                                    evaluated_properties: Vec::new(),
                                     mapping_value_types: Vec::new(),
                                     deprecated: merge_deprecated(&src.deprecated, body),
                                 },
@@ -2016,6 +2019,7 @@ impl Evaluator {
             let val = self.eval_expr(expr, &active_scope, depth).await?;
             child_scope.set(name, val);
         }
+        let default_entry_scope = Some(Arc::new(capture_scope(scope)));
         let source = ObjectSource {
             entries: entries.to_vec(),
             scope: child_scope.flatten(),
@@ -2026,7 +2030,10 @@ impl Evaluator {
             parent_type_identities: Vec::new(),
             scope_module_identities: child_scope.flatten_module_identities(),
             scope_type_aliases: child_scope.flatten_type_aliases(),
-            entry_scopes: Vec::new(),
+            entry_scopes: entry_scopes
+                .map(<[_]>::to_vec)
+                .unwrap_or_else(|| vec![default_entry_scope; entries.len()]),
+            evaluated_properties: all_props.keys().cloned().collect(),
             mapping_value_types: Vec::new(),
             deprecated: collect_deprecated(entries),
         };
@@ -2097,15 +2104,29 @@ impl Evaluator {
                         .collect();
                     if let Some(psrc) = parent_src {
                         let mut combined_entries = Vec::new();
-                        for pe in &psrc.entries {
+                        let mut combined_entry_scopes = Vec::new();
+                        let mut combined_evaluated_properties = Vec::new();
+                        for (entry_index, pe) in psrc.entries.iter().enumerate() {
                             if let Entry::Property(p) = pe
                                 && !child_names.contains(&p.name)
                             {
                                 combined_entries.push(pe.clone());
+                                combined_entry_scopes.push(
+                                    psrc.entry_scopes.get(entry_index).cloned().unwrap_or_else(
+                                        || Some(Arc::new(capture_object_source_scope(&psrc))),
+                                    ),
+                                );
+                                if psrc.evaluated_properties.contains(&p.name) {
+                                    combined_evaluated_properties.push(p.name.clone());
+                                }
                             }
                         }
                         combined_entries.extend(src.entries);
+                        combined_entry_scopes.extend(src.entry_scopes);
+                        combined_evaluated_properties.extend(src.evaluated_properties);
                         src.entries = combined_entries;
+                        src.entry_scopes = combined_entry_scopes;
+                        src.evaluated_properties = combined_evaluated_properties;
                     }
                     Some(Arc::new(src))
                 } else {
@@ -2757,6 +2778,8 @@ impl Evaluator {
                         source_module_identities.shift_remove("outer");
                         source_module_identities.shift_remove("this");
                         let deprecated = collect_deprecated(&src_entries);
+                        let entry_scopes =
+                            vec![Some(Arc::new(capture_scope(scope))); src_entries.len()];
                         let source = ObjectSource {
                             entries: src_entries,
                             scope: source_scope,
@@ -2767,7 +2790,8 @@ impl Evaluator {
                             parent_type_identities: Vec::new(),
                             scope_module_identities: source_module_identities,
                             scope_type_aliases: scope.flatten_type_aliases(),
-                            entry_scopes: Vec::new(),
+                            entry_scopes,
+                            evaluated_properties: map.keys().cloned().collect(),
                             mapping_value_types: generic_params.iter().skip(1).cloned().collect(),
                             deprecated,
                         };
@@ -2860,6 +2884,7 @@ impl Evaluator {
                                         scope_module_identities: IndexMap::new(),
                                         scope_type_aliases: IndexMap::new(),
                                         entry_scopes: Vec::new(),
+                                        evaluated_properties: Vec::new(),
                                         mapping_value_types: Vec::new(),
                                         deprecated: merge_deprecated(&base_src.deprecated, entries),
                                     }
@@ -2896,6 +2921,7 @@ impl Evaluator {
                                 scope_module_identities: IndexMap::new(),
                                 scope_type_aliases: IndexMap::new(),
                                 entry_scopes: Vec::new(),
+                                evaluated_properties: Vec::new(),
                                 mapping_value_types: Vec::new(),
                                 deprecated,
                             };
@@ -3965,6 +3991,7 @@ impl Evaluator {
                                         scope_module_identities: IndexMap::new(),
                                         scope_type_aliases: IndexMap::new(),
                                         entry_scopes: Vec::new(),
+                                        evaluated_properties: Vec::new(),
                                         mapping_value_types: Vec::new(),
                                         deprecated: merge_deprecated(&src.deprecated, body),
                                     },
@@ -4457,6 +4484,7 @@ fn apply_mapping_type_annotation(value: &mut Value, type_ann: Option<&crate::par
             scope_module_identities: IndexMap::new(),
             scope_type_aliases: IndexMap::new(),
             entry_scopes: Vec::new(),
+            evaluated_properties: Vec::new(),
             mapping_value_types: Vec::new(),
             deprecated: IndexMap::new(),
         });
@@ -5400,6 +5428,21 @@ fn capture_scope(scope: &Scope) -> CapturedScope {
         module_identities: scope.flatten_module_identities(),
         type_aliases: scope.flatten_type_aliases(),
         type_namespace: scope.type_namespace.clone(),
+    }
+}
+
+fn capture_object_source_scope(source: &ObjectSource) -> CapturedScope {
+    let type_namespace = source
+        .type_name
+        .as_deref()
+        .zip(source.type_identity.as_deref())
+        .and_then(|(name, identity)| identity.strip_suffix(&format!(".{name}")))
+        .map(str::to_owned);
+    CapturedScope {
+        values: source.scope.clone(),
+        module_identities: source.scope_module_identities.clone(),
+        type_aliases: source.scope_type_aliases.clone(),
+        type_namespace,
     }
 }
 

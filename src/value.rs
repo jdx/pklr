@@ -40,6 +40,10 @@ pub struct ObjectSource {
     /// Lexical scopes for entries introduced by earlier amendments. `None`
     /// entries use this object's definition-site `scope`.
     pub(crate) entry_scopes: Vec<Option<Arc<CapturedScope>>>,
+    /// Property names that produced values when this object was evaluated.
+    /// Kept separate from `scope`, which can contain unrelated same-named
+    /// lexical bindings.
+    pub(crate) evaluated_properties: Vec<String>,
     /// Possible value type names for mapping entries, e.g. `Step | Group` from
     /// `Mapping<String, Step | Group>`. Used when amending mappings so bare
     /// entries inherit the right class template.
