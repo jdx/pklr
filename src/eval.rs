@@ -153,6 +153,18 @@ impl Evaluator {
         current_path.parent().unwrap_or(Path::new(".")).join(uri)
     }
 
+    async fn module_type_namespace(&mut self, path: &Path) -> String {
+        if path.to_string_lossy().contains("://") {
+            return path.display().to_string();
+        }
+        self.capabilities
+            .canonicalize(path)
+            .await
+            .unwrap_or_else(|_| path.to_path_buf())
+            .display()
+            .to_string()
+    }
+
     /// Persist downloaded package content under `path`.
     pub fn set_package_cache_dir(&mut self, path: impl Into<PathBuf>) {
         self.package_cache_dir = Some(path.into());
@@ -727,8 +739,9 @@ impl Evaluator {
         {
             return Err(Error::Eval("Invalid property definition".into()));
         }
+        let type_namespace = self.module_type_namespace(path).await;
         let mut scope = Scope {
-            type_namespace: Some(path.display().to_string()),
+            type_namespace: Some(type_namespace),
             ..Scope::default()
         };
         seed_builtins(&mut scope);
@@ -1074,7 +1087,8 @@ impl Evaluator {
                 && let Ok(base_module) = parser::parse(&tokens)
             {
                 let mut base_scope = scope.clone();
-                base_scope.type_namespace = Some(source_path);
+                base_scope.type_namespace =
+                    Some(self.module_type_namespace(Path::new(&source_path)).await);
                 for entry in &base_module.body {
                     if let Entry::ClassDef(name, class_mods, parent, body) = entry {
                         let defaults = self
@@ -1145,7 +1159,8 @@ impl Evaluator {
                         base_obj = (**m).clone();
                     }
                     let mut base_scope = scope.clone();
-                    base_scope.type_namespace = Some(name);
+                    base_scope.type_namespace =
+                        Some(self.module_type_namespace(&extends_path).await);
                     // Also evaluate the base module's scope (classes, locals) into our scope
                     // by re-processing its body entries
                     for entry in &ext_module.body {
@@ -1204,7 +1219,7 @@ impl Evaluator {
                     base_obj = (*m).clone();
                 }
                 let mut base_scope = scope.clone();
-                base_scope.type_namespace = Some(uri.to_string());
+                base_scope.type_namespace = Some(self.module_type_namespace(Path::new(uri)).await);
                 // Inject class definitions from HTTP base into scope
                 for entry in &ext_module.body {
                     if let Entry::ClassDef(cls_name, cls_mods, parent, body) = entry {

@@ -4263,6 +4263,30 @@ x = new Config {
     assert_eq!(json["x"]["port"], 8080);
 }
 
+#[tokio::test]
+async fn inherited_class_identity_uses_canonical_module_path() {
+    let dir = TestTempDir::new("pklr_canonical_class_identity");
+    std::fs::write(dir.path.join("base.pkl"), "class Item {}\n").unwrap();
+    std::fs::write(
+        dir.path.join("wrapper.pkl"),
+        "extends \"./base.pkl\"\ninstance = new Item {}\n",
+    )
+    .unwrap();
+    let main = dir.path.join("main.pkl");
+    std::fs::write(
+        &main,
+        r#"
+import "base.pkl"
+import "wrapper.pkl"
+same = wrapper.instance is base.Item
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&main).await.unwrap();
+    assert_eq!(json["same"], true);
+}
+
 // ============================================================
 // read() and read?()
 // ============================================================
