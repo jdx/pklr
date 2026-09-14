@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.2](https://github.com/jdx/pklr/compare/v2.0.1...v2.0.2) - 2026-09-14
+
+### Fixed
+
+- *(lexer)* strip CRLF from multiline strings ([#180](https://github.com/jdx/pklr/pull/180))
+- *(eval)* preserve imports across nested mapping amendments ([#177](https://github.com/jdx/pklr/pull/177))
+
 ## [2.0.1](https://github.com/jdx/pklr/compare/v2.0.0...v2.0.1) - 2026-09-12
 
 ### Fixed
