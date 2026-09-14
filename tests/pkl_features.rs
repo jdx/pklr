@@ -1747,6 +1747,56 @@ result = (Lib.value) {
 }
 
 #[tokio::test]
+async fn repeated_default_body_amendments_apply_once() {
+    let temp = TestTempDir::new("pklr_test_repeated_default_body_amendments");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Lib.pkl"),
+        r#"
+value = new {
+    default = new {
+        items = List()
+    }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Middle.pkl"),
+        r#"
+import "Lib.pkl"
+value = (Lib.value) {
+    default {
+        items { "middle" }
+    }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "Middle.pkl"
+result = (Middle.value) {
+    default {
+        items { "main" }
+    }
+    ["entry"] {}
+}
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        json["result"]["entry"]["items"],
+        serde_json::json!(["middle", "main"])
+    );
+}
+
+#[tokio::test]
 async fn amendment_type_alias_uses_amendment_scope() {
     let temp = TestTempDir::new("pklr_test_amendment_type_alias_scope");
     let dir = temp.path();

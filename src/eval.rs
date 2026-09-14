@@ -2357,6 +2357,14 @@ impl Evaluator {
                 overlay_by_name.insert(prop.name.clone(), entry);
             }
         }
+        let last_base_property_index = base_entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| match entry {
+                Entry::Property(prop) => Some((prop.name.clone(), index)),
+                _ => None,
+            })
+            .collect::<HashMap<_, _>>();
 
         // Walk base entries: substitute overridden properties in-place.
         // If the overlay has a body amendment (no `=`), keep the base entry first
@@ -2381,6 +2389,12 @@ impl Evaluator {
                     // value in scope and amend it.
                     merged.push(entry.clone());
                     merged_entry_scopes.push(inherited_entry_scope.clone());
+                    // A prior amendment leaves the original property and its
+                    // body entry in ObjectSource. Preserve that chain, but add
+                    // this amendment only once after its final entry.
+                    if last_base_property_index.get(&prop.name) != Some(&entry_index) {
+                        continue;
+                    }
                 }
                 let mut replacement = (*replacement).clone();
                 if let Entry::Property(overlay_prop) = &mut replacement {
