@@ -819,6 +819,43 @@ x = new Mapping<String, Mapping<String, Int>> {
     assert_eq!(json["x"]["outer"]["inner"], 42);
 }
 
+#[test]
+fn untyped_mapping_entry_amendment_keeps_inherited_members() {
+    let json = eval(
+        r#"
+local base = new Mapping { ["check"] { steps { ["alpha"] = 1 } } }
+local function identity(m) = m
+direct = (base) { ["check"] { steps { ["beta"] = 2 } } }
+viaCall = (identity(base)) { ["check"] { steps { ["beta"] = 2 } } }
+replaced = (base) { ["check"] = new Dynamic { steps { ["beta"] = 2 } } }
+"#,
+    );
+    for name in ["direct", "viaCall"] {
+        assert_eq!(json[name]["check"]["steps"]["alpha"], 1, "{name}: {json}");
+        assert_eq!(json[name]["check"]["steps"]["beta"], 2, "{name}: {json}");
+    }
+    assert!(json["replaced"]["check"]["steps"].get("alpha").is_none());
+}
+
+#[test]
+fn function_built_mapping_entry_amendment_keeps_inherited_members() {
+    let json = eval(
+        r#"
+class Step { check: String? }
+class Hook { steps: Mapping<String, Step> = new {} }
+local base = new Mapping<String, Step> { ["alpha"] { check = "a" } }
+local function hooksFor(input: Mapping<String, Step>): Mapping<String, Hook> = new {
+  ["check"] { steps { ...input } }
+}
+hooks: Mapping<String, Hook> = (hooksFor(base)) {
+  ["check"] { steps { ["beta"] { check = "b" } } }
+}
+"#,
+    );
+    assert_eq!(json["hooks"]["check"]["steps"]["alpha"]["check"], "a");
+    assert_eq!(json["hooks"]["check"]["steps"]["beta"]["check"], "b");
+}
+
 // ============================================================
 // Spread operator
 // ============================================================

@@ -1911,6 +1911,22 @@ impl Evaluator {
                     let active_scope =
                         scope_for_object_entry(entry_index, &child_scope, entry_scopes);
                     let key = self.eval_expr(key_expr, &active_scope, depth).await?;
+                    let key_str = value_to_key(&key)?;
+                    // `["key"] { ... }` amends an entry inherited from the parent
+                    // (for example when amending an untyped `Mapping`) rather than
+                    // replacing it.
+                    if let Expr::ObjectBody(body) = val_expr
+                        && let Some(existing @ (Value::Object(..) | Value::List(_))) =
+                            map.get(&key_str).cloned()
+                    {
+                        let val = self
+                            .eval_value_amendment(existing, body, &active_scope, depth)
+                            .await?;
+                        all_props.insert(key_str.clone(), val.clone());
+                        map.insert(key_str, val);
+                        refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
+                        continue;
+                    }
                     let val = if let Some(Value::Object(_, Some(src))) = &default_template
                         && let Expr::ObjectBody(body) = val_expr
                     {
@@ -1955,7 +1971,6 @@ impl Evaluator {
                         }
                         val
                     };
-                    let key_str = value_to_key(&key)?;
                     all_props.insert(key_str.clone(), val.clone());
                     map.insert(key_str, val);
                     refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
