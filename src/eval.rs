@@ -1911,6 +1911,32 @@ impl Evaluator {
                     let active_scope =
                         scope_for_object_entry(entry_index, &child_scope, entry_scopes);
                     let key = self.eval_expr(key_expr, &active_scope, depth).await?;
+                    let key_str = value_to_key(&key)?;
+                    // `["key"] { ... }` amends an entry inherited from the parent
+                    // (for example when amending an untyped `Mapping`) rather than
+                    // replacing it.
+                    if let Expr::ObjectBody(body) = val_expr
+                        && let Some(existing @ (Value::Object(..) | Value::List(_))) =
+                            map.get(&key_str).cloned()
+                    {
+                        // A listing amendment only takes elements, so a property
+                        // would otherwise be dropped silently. Reject it as Pkl does.
+                        if matches!(existing, Value::List(_))
+                            && let Some(name) = find_listing_body_property(body)
+                        {
+                            return Err(Error::Eval(format!(
+                                "cannot amend listing entry '{key_str}' with property '{name}': \
+                                 object of type Listing cannot have a property (other than default)"
+                            )));
+                        }
+                        let val = self
+                            .eval_value_amendment(existing, body, &active_scope, depth)
+                            .await?;
+                        all_props.insert(key_str.clone(), val.clone());
+                        map.insert(key_str, val);
+                        refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
+                        continue;
+                    }
                     let val = if let Some(Value::Object(_, Some(src))) = &default_template
                         && let Expr::ObjectBody(body) = val_expr
                     {
@@ -1955,7 +1981,6 @@ impl Evaluator {
                         }
                         val
                     };
-                    let key_str = value_to_key(&key)?;
                     all_props.insert(key_str.clone(), val.clone());
                     map.insert(key_str, val);
                     refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
@@ -4654,6 +4679,28 @@ fn validate_new_object_body(
     }
 
     Ok(())
+}
+
+/// Finds a property (other than `local`s and `default`) that a listing body
+/// assigns, including inside `for` and `when` generators.
+fn find_listing_body_property(entries: &[Entry]) -> Option<&str> {
+    entries.iter().find_map(|entry| match entry {
+        Entry::Property(prop)
+            if prop.name != "default" && !has_modifier(&prop.modifiers, Modifier::Local) =>
+        {
+            Some(prop.name.as_str())
+        }
+        Entry::ForGenerator(generator) => find_listing_body_property(&generator.body),
+        Entry::WhenGenerator(generator) => {
+            find_listing_body_property(&generator.body).or_else(|| {
+                generator
+                    .else_body
+                    .as_deref()
+                    .and_then(find_listing_body_property)
+            })
+        }
+        _ => None,
+    })
 }
 
 fn find_default_body_entries(entries: &[Entry]) -> Option<Vec<Entry>> {

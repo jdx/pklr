@@ -819,6 +819,75 @@ x = new Mapping<String, Mapping<String, Int>> {
     assert_eq!(json["x"]["outer"]["inner"], 42);
 }
 
+#[test]
+fn untyped_mapping_entry_amendment_keeps_inherited_members() {
+    let json = eval(
+        r#"
+local base = new Mapping { ["check"] { steps { ["alpha"] = 1 } } }
+local function identity(m) = m
+direct = (base) { ["check"] { steps { ["beta"] = 2 } } }
+viaCall = (identity(base)) { ["check"] { steps { ["beta"] = 2 } } }
+replaced = (base) { ["check"] = new Dynamic { steps { ["beta"] = 2 } } }
+"#,
+    );
+    for name in ["direct", "viaCall"] {
+        assert_eq!(json[name]["check"]["steps"]["alpha"], 1, "{name}: {json}");
+        assert_eq!(json[name]["check"]["steps"]["beta"], 2, "{name}: {json}");
+    }
+    assert!(json["replaced"]["check"]["steps"].get("alpha").is_none());
+}
+
+#[test]
+fn untyped_mapping_listing_entry_amendment() {
+    let json = eval(
+        r#"
+local base = new Mapping { ["k"] = new Listing { 1 2 } }
+appended = (base) { ["k"] { 3 } }
+indexed = (base) { ["k"] { [0] = 9 } }
+"#,
+    );
+    assert_eq!(json["appended"]["k"], serde_json::json!([1, 2, 3]));
+    assert_eq!(json["indexed"]["k"], serde_json::json!([9, 2]));
+
+    let err = eval_fails(
+        r#"
+local base = new Mapping { ["k"] = new Listing { 1 2 } }
+x = (base) { ["k"] { prop = 3 } }
+"#,
+    );
+    assert!(err.contains("cannot have a property"), "{err}");
+
+    for body in [
+        "for (n in List(1)) { prop = n }",
+        "when (true) { prop = 3 }",
+        "when (false) { 3 } else { prop = 3 }",
+    ] {
+        let err = eval_fails(&format!(
+            "local base = new Mapping {{ [\"k\"] = new Listing {{ 1 2 }} }}\nx = (base) {{ [\"k\"] {{ {body} }} }}\n"
+        ));
+        assert!(err.contains("cannot have a property"), "{body}: {err}");
+    }
+}
+
+#[test]
+fn function_built_mapping_entry_amendment_keeps_inherited_members() {
+    let json = eval(
+        r#"
+class Step { check: String? }
+class Hook { steps: Mapping<String, Step> = new {} }
+local base = new Mapping<String, Step> { ["alpha"] { check = "a" } }
+local function hooksFor(input: Mapping<String, Step>): Mapping<String, Hook> = new {
+  ["check"] { steps { ...input } }
+}
+hooks: Mapping<String, Hook> = (hooksFor(base)) {
+  ["check"] { steps { ["beta"] { check = "b" } } }
+}
+"#,
+    );
+    assert_eq!(json["hooks"]["check"]["steps"]["alpha"]["check"], "a");
+    assert_eq!(json["hooks"]["check"]["steps"]["beta"]["check"], "b");
+}
+
 // ============================================================
 // Spread operator
 // ============================================================
