@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.5](https://github.com/jdx/pklr/compare/v2.0.4...v2.0.5) - 2026-09-19
+
+### Fixed
+
+- *(eval)* amend inherited entries of untyped mappings instead of replacing them ([#189](https://github.com/jdx/pklr/pull/189))
+
 ## [2.0.4](https://github.com/jdx/pklr/compare/v2.0.3...v2.0.4) - 2026-09-14
 
 ### Fixed
