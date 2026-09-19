@@ -1922,15 +1922,7 @@ impl Evaluator {
                         // A listing amendment only takes elements, so a property
                         // would otherwise be dropped silently. Reject it as Pkl does.
                         if matches!(existing, Value::List(_))
-                            && let Some(name) = body.iter().find_map(|entry| match entry {
-                                Entry::Property(prop)
-                                    if prop.name != "default"
-                                        && !has_modifier(&prop.modifiers, Modifier::Local) =>
-                                {
-                                    Some(&prop.name)
-                                }
-                                _ => None,
-                            })
+                            && let Some(name) = find_listing_body_property(body)
                         {
                             return Err(Error::Eval(format!(
                                 "cannot amend listing entry '{key_str}' with property '{name}': \
@@ -4687,6 +4679,28 @@ fn validate_new_object_body(
     }
 
     Ok(())
+}
+
+/// Finds a property (other than `local`s and `default`) that a listing body
+/// assigns, including inside `for` and `when` generators.
+fn find_listing_body_property(entries: &[Entry]) -> Option<&str> {
+    entries.iter().find_map(|entry| match entry {
+        Entry::Property(prop)
+            if prop.name != "default" && !has_modifier(&prop.modifiers, Modifier::Local) =>
+        {
+            Some(prop.name.as_str())
+        }
+        Entry::ForGenerator(generator) => find_listing_body_property(&generator.body),
+        Entry::WhenGenerator(generator) => {
+            find_listing_body_property(&generator.body).or_else(|| {
+                generator
+                    .else_body
+                    .as_deref()
+                    .and_then(find_listing_body_property)
+            })
+        }
+        _ => None,
+    })
 }
 
 fn find_default_body_entries(entries: &[Entry]) -> Option<Vec<Entry>> {

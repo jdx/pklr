@@ -856,6 +856,17 @@ x = (base) { ["k"] { prop = 3 } }
 "#,
     );
     assert!(err.contains("cannot have a property"), "{err}");
+
+    for body in [
+        "for (n in List(1)) { prop = n }",
+        "when (true) { prop = 3 }",
+        "when (false) { 3 } else { prop = 3 }",
+    ] {
+        let err = eval_fails(&format!(
+            "local base = new Mapping {{ [\"k\"] = new Listing {{ 1 2 }} }}\nx = (base) {{ [\"k\"] {{ {body} }} }}\n"
+        ));
+        assert!(err.contains("cannot have a property"), "{body}: {err}");
+    }
 }
 
 #[test]
