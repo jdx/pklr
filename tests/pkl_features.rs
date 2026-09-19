@@ -838,6 +838,27 @@ replaced = (base) { ["check"] = new Dynamic { steps { ["beta"] = 2 } } }
 }
 
 #[test]
+fn untyped_mapping_listing_entry_amendment() {
+    let json = eval(
+        r#"
+local base = new Mapping { ["k"] = new Listing { 1 2 } }
+appended = (base) { ["k"] { 3 } }
+indexed = (base) { ["k"] { [0] = 9 } }
+"#,
+    );
+    assert_eq!(json["appended"]["k"], serde_json::json!([1, 2, 3]));
+    assert_eq!(json["indexed"]["k"], serde_json::json!([9, 2]));
+
+    let err = eval_fails(
+        r#"
+local base = new Mapping { ["k"] = new Listing { 1 2 } }
+x = (base) { ["k"] { prop = 3 } }
+"#,
+    );
+    assert!(err.contains("cannot have a property"), "{err}");
+}
+
+#[test]
 fn function_built_mapping_entry_amendment_keeps_inherited_members() {
     let json = eval(
         r#"

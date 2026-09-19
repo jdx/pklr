@@ -1919,6 +1919,24 @@ impl Evaluator {
                         && let Some(existing @ (Value::Object(..) | Value::List(_))) =
                             map.get(&key_str).cloned()
                     {
+                        // A listing amendment only takes elements, so a property
+                        // would otherwise be dropped silently. Reject it as Pkl does.
+                        if matches!(existing, Value::List(_))
+                            && let Some(name) = body.iter().find_map(|entry| match entry {
+                                Entry::Property(prop)
+                                    if prop.name != "default"
+                                        && !has_modifier(&prop.modifiers, Modifier::Local) =>
+                                {
+                                    Some(&prop.name)
+                                }
+                                _ => None,
+                            })
+                        {
+                            return Err(Error::Eval(format!(
+                                "cannot amend listing entry '{key_str}' with property '{name}': \
+                                 object of type Listing cannot have a property (other than default)"
+                            )));
+                        }
                         let val = self
                             .eval_value_amendment(existing, body, &active_scope, depth)
                             .await?;
