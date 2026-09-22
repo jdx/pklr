@@ -8,6 +8,7 @@ No external binary or CLI required.
 - Lexer, parser, and evaluator written entirely in Rust
 - Evaluates `.pkl` files to `serde_json::Value`
 - Import and amends resolution for local files
+- Glob imports, as `import* "dir/*.pkl" as Mods` declarations and `import*("dir/*.pkl")` expressions
 - Persistent caching, cache preloading, and offline evaluation for `package://` imports
 - String interpolation, lambdas, higher-order methods
 - Rich error diagnostics via [miette](https://crates.io/crates/miette)

@@ -1411,6 +1411,229 @@ has_broken = Index.containsKey("broken.pkl")
 }
 
 #[tokio::test]
+async fn import_glob_expression_binds_matched_modules() {
+    let temp = TestTempDir::new("pklr_test_import_glob_expr");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("generated")).unwrap();
+    std::fs::write(dir.join("generated/alpha.pkl"), r#"value = "alpha""#).unwrap();
+    std::fs::write(dir.join("generated/beta.pkl"), r#"value = "beta""#).unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+local generated = import*("generated/*.pkl")
+keys = generated.keys.toList()
+values = generated.toMap().values.map((m) -> m.value)
+alpha = generated["generated/alpha.pkl"].value
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        val["keys"],
+        serde_json::json!(["generated/alpha.pkl", "generated/beta.pkl"])
+    );
+    assert_eq!(val["values"], serde_json::json!(["alpha", "beta"]));
+    assert_eq!(val["alpha"], "alpha");
+}
+
+#[tokio::test]
+async fn import_glob_expression_without_matches_is_empty() {
+    let temp = TestTempDir::new("pklr_test_import_glob_expr_empty");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+local generated = import*("generated/*.pkl")
+count = generated.length
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["count"], 0);
+}
+
+#[tokio::test]
+async fn import_glob_expression_skips_the_enclosing_module() {
+    let temp = TestTempDir::new("pklr_test_import_glob_expr_self");
+    let dir = temp.path();
+    std::fs::write(dir.join("other.pkl"), r#"value = "other""#).unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+local siblings = import*("*.pkl")
+keys = siblings.keys.toList()
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["keys"], serde_json::json!(["other.pkl"]));
+}
+
+#[tokio::test]
+async fn import_glob_expression_resolves_against_its_own_module() {
+    let temp = TestTempDir::new("pklr_test_import_glob_expr_own_module");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("lib/generated")).unwrap();
+    std::fs::write(dir.join("lib/generated/one.pkl"), r#"value = "one""#).unwrap();
+    std::fs::write(
+        dir.join("lib/index.pkl"),
+        r#"
+matched = import*("generated/*.pkl").keys.toList()
+nested {
+    matched = import*("generated/*.pkl").keys.toList()
+}
+fromLambda = ((n) -> import*("generated/*.pkl").length).apply(0)
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "lib/index.pkl" as Index
+fromModule = Index.matched
+fromObjectBody = Index.nested.matched
+fromLambda = Index.fromLambda
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        val["fromModule"],
+        serde_json::json!(["generated/one.pkl"]),
+        "{val}"
+    );
+    assert_eq!(
+        val["fromObjectBody"],
+        serde_json::json!(["generated/one.pkl"]),
+        "{val}"
+    );
+    assert_eq!(val["fromLambda"], 1, "{val}");
+}
+
+#[tokio::test]
+async fn inherited_import_glob_expression_resolves_against_the_base_module() {
+    let temp = TestTempDir::new("pklr_test_import_glob_expr_amends");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("base/generated")).unwrap();
+    std::fs::create_dir_all(dir.join("own")).unwrap();
+    std::fs::write(dir.join("base/generated/one.pkl"), r#"value = "base""#).unwrap();
+    std::fs::write(dir.join("own/one.pkl"), r#"value = "own""#).unwrap();
+    std::fs::write(
+        dir.join("base/Base.pkl"),
+        r#"
+fromBase = import*("generated/*.pkl").keys.toList()
+fromChild = List()
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("child.pkl"),
+        r#"
+amends "base/Base.pkl"
+fromChild = import*("own/*.pkl").keys.toList()
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("child.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        val["fromBase"],
+        serde_json::json!(["generated/one.pkl"]),
+        "{val}"
+    );
+    assert_eq!(
+        val["fromChild"],
+        serde_json::json!(["own/one.pkl"]),
+        "{val}"
+    );
+}
+
+#[tokio::test]
+async fn import_expression_evaluates_a_single_module() {
+    let temp = TestTempDir::new("pklr_test_import_expr");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("generated")).unwrap();
+    std::fs::write(dir.join("generated/alpha.pkl"), r#"value = "alpha""#).unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+value = import("generated/alpha.pkl").value
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["value"], "alpha");
+}
+
+#[tokio::test]
+async fn import_expression_reports_missing_modules() {
+    let temp = TestTempDir::new("pklr_test_import_expr_missing");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"value = import("generated/alpha.pkl").value"#,
+    )
+    .unwrap();
+
+    let err = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("alpha.pkl"), "{err}");
+}
+
+#[test]
+fn import_expression_imports_the_standard_library() {
+    let json = eval(r#"regex = import("pkl:base").Regex"#);
+    assert_eq!(json["regex"], "Regex");
+}
+
+#[test]
+fn import_expression_requires_a_string_literal() {
+    let err = eval_fails(
+        r#"
+local uri = "generated/alpha.pkl"
+value = import(uri)
+"#,
+    );
+    assert!(
+        err.contains("import() requires a string literal URI"),
+        "{err}"
+    );
+}
+
+#[test]
+fn import_glob_expression_requires_a_string_literal() {
+    let err = eval_fails(
+        r#"
+local pattern = "generated/*.pkl"
+value = import*(pattern)
+"#,
+    );
+    assert!(
+        err.contains("import*() requires a string literal URI"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
 async fn unused_import_is_not_evaluated() {
     let temp = TestTempDir::new("pklr_test_unused_import");
     let dir = temp.path();

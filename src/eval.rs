@@ -717,6 +717,76 @@ impl Evaluator {
             .unwrap_or_default()
     }
 
+    /// Resolve a glob import pattern to a mapping of matched module paths to
+    /// their evaluated values. Shared by `import* "glob" as Alias` declarations
+    /// and `import*("glob")` expressions.
+    ///
+    /// Keys are the matched paths relative to `path`'s directory, matching pkl.
+    /// The enclosing module is skipped: pklr evaluates matched modules eagerly,
+    /// so including it would recurse until the import depth limit.
+    #[async_recursion(?Send)]
+    async fn eval_glob_import(&mut self, uri: &str, path: &Path, depth: usize) -> Result<Value> {
+        // Non-local glob imports resolve to an empty mapping.
+        if uri.contains("://") {
+            return Ok(Value::Object(Arc::new(IndexMap::new()), None));
+        }
+        let base_dir = path.parent().unwrap_or(Path::new("."));
+        let matched = self.capabilities.glob(base_dir, uri).await?;
+        let mut mapping = IndexMap::new();
+        for matched_path in matched {
+            if self.same_local_path(&matched_path, path).await? {
+                continue;
+            }
+            let rel_key = pathdiff_or_full(&matched_path, base_dir);
+            let val = self
+                .eval_file_with_requested_fields(&matched_path, depth + 1, None)
+                .await?;
+            mapping.insert(rel_key, val);
+        }
+        Ok(Value::Object(Arc::new(mapping), None))
+    }
+
+    /// Evaluate a single `import("uri")` expression, resolving `uri` the same way
+    /// an `import "uri"` declaration in `path` would.
+    #[async_recursion(?Send)]
+    async fn eval_import_expr(&mut self, uri: &str, path: &Path, depth: usize) -> Result<Value> {
+        let resolved = resolve_remote_relative(path, uri);
+        let uri: &str = resolved.as_deref().unwrap_or(uri);
+
+        if let Some(module_name) = uri.strip_prefix("pkl:") {
+            return Ok(stdlib_module(module_name));
+        }
+
+        if !uri.contains("://") || uri.starts_with("file://") {
+            let import_path = if let Some(rel) = uri.strip_prefix("file://") {
+                PathBuf::from(rel)
+            } else {
+                self.resolve_local_path(path, uri)
+            };
+            if !self.capabilities.path_exists(&import_path).await? {
+                return Err(Error::ImportNotFound(import_path.display().to_string()));
+            }
+            return self
+                .eval_file_with_requested_fields(&import_path, depth + 1, None)
+                .await;
+        }
+
+        let Some((source, name)) = self.load_module_source(uri, path).await? else {
+            return Err(Error::ImportNotFound(uri.to_string()));
+        };
+        // Package zips extract to a local file, so evaluate those through the
+        // shared import cache like any other local import.
+        if !name.contains("://") {
+            return self
+                .eval_file_with_requested_fields(Path::new(&name), depth + 1, None)
+                .await;
+        }
+        let tokens = lexer::lex_named(&source, &name)?;
+        let imported = parser::parse_named(&tokens, &source, &name)?;
+        self.eval_module_with_scope(&imported, Path::new(&name), depth + 1, None, None)
+            .await
+    }
+
     #[async_recursion(?Send)]
     async fn eval_module_with_scope(
         &mut self,
@@ -792,26 +862,8 @@ impl Evaluator {
                     continue;
                 }
 
-                // Non-local glob imports bind an empty mapping
-                if uri.contains("://") {
-                    scope.set(alias, Value::Object(Arc::new(IndexMap::new()), None));
-                    continue;
-                }
-
-                let base_dir = path.parent().unwrap_or(Path::new("."));
-                let matched = self.capabilities.glob(base_dir, uri).await?;
-                let mut mapping = IndexMap::new();
-                for matched_path in matched {
-                    if self.same_local_path(&matched_path, path).await? {
-                        continue;
-                    }
-                    let rel_key = pathdiff_or_full(&matched_path, base_dir);
-                    let val = self
-                        .eval_file_with_requested_fields(&matched_path, depth + 1, None)
-                        .await?;
-                    mapping.insert(rel_key, val);
-                }
-                scope.set(alias, Value::Object(Arc::new(mapping), None));
+                let mapping = self.eval_glob_import(uri, path, depth).await?;
+                scope.set(alias, mapping);
                 continue;
             }
 
@@ -1092,8 +1144,8 @@ impl Evaluator {
             let uri: &str = resolved_amends.as_deref().unwrap_or(amends_uri);
             let base_source = self.load_module_source(uri, path).await?;
             if let Some((src, source_path)) = base_source
-                && let Ok(tokens) = lexer::lex(&src)
-                && let Ok(base_module) = parser::parse(&tokens)
+                && let Ok(tokens) = lexer::lex_named(&src, &source_path)
+                && let Ok(base_module) = parser::parse_named(&tokens, &src, &source_path)
             {
                 let mut base_scope = scope.clone();
                 base_scope.type_namespace =
@@ -3147,6 +3199,16 @@ impl Evaluator {
                 let uri_str = value_to_display(&uri);
                 self.read_resource(&uri_str).await
             }
+            Expr::Import(uri, module_path) => {
+                self.eval_import_expr(uri, Path::new(module_path), depth)
+                    .await
+            }
+            Expr::ImportGlob(pattern, module_path) => {
+                let module_path = Path::new(module_path);
+                let resolved = resolve_remote_relative(module_path, pattern);
+                let pattern: &str = resolved.as_deref().unwrap_or(pattern);
+                self.eval_glob_import(pattern, module_path, depth).await
+            }
             Expr::ReadOrNull(uri_expr) => {
                 let uri = self.eval_expr(uri_expr, scope, depth + 1).await?;
                 let uri_str = value_to_display(&uri);
@@ -4905,7 +4967,13 @@ fn collect_expr_import_field_uses(
                 }
             }
         }
-        Expr::Null | Expr::Bool(_) | Expr::Int(_) | Expr::Float(_) | Expr::String(_) => {}
+        Expr::Null
+        | Expr::Bool(_)
+        | Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::String(_)
+        | Expr::Import(..)
+        | Expr::ImportGlob(..) => {}
     }
 }
 
@@ -5157,6 +5225,8 @@ fn collect_sibling_field_refs_expr(expr: &Expr, refs: &mut HashSet<String>, incl
             }
         }
         Expr::Ident(_)
+        | Expr::Import(..)
+        | Expr::ImportGlob(..)
         | Expr::Null
         | Expr::Bool(_)
         | Expr::Int(_)
@@ -5305,7 +5375,13 @@ fn collect_expr_refs(expr: &Expr, refs: &mut HashSet<String>, shadows: &HashSet<
                 }
             }
         }
-        Expr::Null | Expr::Bool(_) | Expr::Int(_) | Expr::Float(_) | Expr::String(_) => {}
+        Expr::Null
+        | Expr::Bool(_)
+        | Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::String(_)
+        | Expr::Import(..)
+        | Expr::ImportGlob(..) => {}
     }
 }
 
