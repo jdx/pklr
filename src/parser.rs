@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use crate::lexer::{Token, TokenKind};
+use crate::lexer::{StringPart, Token, TokenKind};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StringInterpPart {
@@ -207,6 +207,11 @@ pub struct WhenGenerator {
 /// Collect all import URIs from a token stream (fast path, no full parse needed).
 pub fn collect_imports(tokens: &[Token]) -> Vec<String> {
     let mut imports = Vec::new();
+    collect_imports_into(tokens, &mut imports);
+    imports
+}
+
+fn collect_imports_into(tokens: &[Token], imports: &mut Vec<String>) {
     let mut i = 0;
     while i < tokens.len() {
         match &tokens[i].kind {
@@ -228,10 +233,19 @@ pub fn collect_imports(tokens: &[Token]) -> Vec<String> {
                     _ => i += 2,
                 }
             }
+            // An `import(...)` expression inside `"\(...)"` is lexed into the
+            // interpolation's own token list, not the flat one scanned here.
+            TokenKind::InterpolatedString(parts) => {
+                for part in parts {
+                    if let StringPart::Tokens(nested) = part {
+                        collect_imports_into(nested, imports);
+                    }
+                }
+                i += 1;
+            }
             _ => i += 1,
         }
     }
-    imports
 }
 
 pub fn parse(tokens: &[Token]) -> Result<Module> {

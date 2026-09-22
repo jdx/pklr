@@ -637,6 +637,35 @@ count = generated.length + single.x
 }
 
 #[tokio::test]
+async fn analyze_imports_includes_interpolated_import_expressions() {
+    let dir = std::env::temp_dir().join(format!(
+        "pklr_test_analyze_imports_interpolated_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("generated")).unwrap();
+    std::fs::write(dir.join("generated/alpha.pkl"), r#"value = "alpha""#).unwrap();
+    std::fs::write(dir.join("nested.pkl"), r#"value = "nested""#).unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"single = "got \(import("generated/alpha.pkl").value)"
+nested = "got \(new Listing { "\(import("nested.pkl").value)" })"
+"#,
+    )
+    .unwrap();
+
+    let mut imports = pklr::analyze_imports_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    imports.sort();
+    assert_eq!(
+        imports,
+        vec![dir.join("generated/alpha.pkl"), dir.join("nested.pkl")]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn analyze_imports_excludes_missing_files() {
     let dir = std::env::temp_dir().join(format!(
         "pklr_test_analyze_imports_missing_{}",
