@@ -887,6 +887,8 @@ impl<'a> Parser<'a> {
                         | TokenKind::BoolLit(_)
                         | TokenKind::Null
                         | TokenKind::KwNew
+                        | TokenKind::KwImport
+                        | TokenKind::KwImportStar
                         | TokenKind::LParen
                 );
                 let is_bare_ident = matches!(self.peek(), TokenKind::Ident(_))

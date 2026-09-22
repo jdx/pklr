@@ -1563,6 +1563,37 @@ fromChild = import*("own/*.pkl").keys.toList()
 }
 
 #[tokio::test]
+async fn import_expressions_are_listing_elements() {
+    let temp = TestTempDir::new("pklr_test_import_expr_listing");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("generated")).unwrap();
+    std::fs::write(dir.join("generated/alpha.pkl"), r#"value = "alpha""#).unwrap();
+    std::fs::write(dir.join("generated/beta.pkl"), r#"value = "beta""#).unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+single = new Listing { import("generated/alpha.pkl") }
+globbed = new Listing { ...import*("generated/*.pkl").toMap().values }
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        val["single"],
+        serde_json::json!([{"value": "alpha"}]),
+        "{val}"
+    );
+    assert_eq!(
+        val["globbed"],
+        serde_json::json!([{"value": "alpha"}, {"value": "beta"}]),
+        "{val}"
+    );
+}
+
+#[tokio::test]
 async fn import_expression_evaluates_a_single_module() {
     let temp = TestTempDir::new("pklr_test_import_expr");
     let dir = temp.path();
