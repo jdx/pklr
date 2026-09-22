@@ -1,12 +1,14 @@
 use crate::error::{Error, Result};
 
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum StringPart {
     Literal(String),
     Tokens(Vec<Token>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum TokenKind {
     // Literals
     Ident(String),
