@@ -2,6 +2,7 @@ use crate::error::{Error, Result};
 use crate::lexer::{StringPart, Token, TokenKind};
 
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum StringInterpPart {
     Literal(String),
     Expr(Expr),
@@ -35,6 +36,7 @@ pub struct Import {
 
 /// A top-level or object entry.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Entry {
     /// `key = expr` or `key: Type = expr`
     Property(Property),
@@ -67,6 +69,7 @@ pub struct Property {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Modifier {
     Local,
     Const,
@@ -78,6 +81,7 @@ pub enum Modifier {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum TypeExpr {
     Named(String),
     Nullable(Box<TypeExpr>),
@@ -107,6 +111,7 @@ fn type_expr_runtime_name(ty: &TypeExpr) -> String {
 
 /// An expression.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Expr {
     Null,
     Bool(bool),
@@ -162,6 +167,7 @@ pub enum Expr {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub enum BinOp {
     Add,
     Sub,
@@ -183,6 +189,7 @@ pub enum BinOp {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub enum UnOp {
     Neg,
     Not,

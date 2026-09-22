@@ -11,6 +11,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[cfg_attr(feature = "miette-diagnostics", derive(miette::Diagnostic))]
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     #[error("IO error reading {0}: {1}")]
     Io(PathBuf, #[source] std::io::Error),
