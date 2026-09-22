@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use crate::lexer::{Token, TokenKind};
+use crate::lexer::{StringPart, Token, TokenKind};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StringInterpPart {
@@ -151,6 +151,14 @@ pub enum Expr {
     Read(Box<Expr>),
     /// `read?("uri")` — returns null on failure
     ReadOrNull(Box<Expr>),
+    /// `import("uri")` — evaluates the imported module as a value.
+    /// Fields: the URI, and the path of the module the expression was written in,
+    /// which relative URIs resolve against.
+    Import(String, String),
+    /// `import*("glob")` — Mapping of matched module paths to their values.
+    /// Fields: the glob pattern, and the path of the module the expression was
+    /// written in, which relative patterns resolve against.
+    ImportGlob(String, String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -199,19 +207,45 @@ pub struct WhenGenerator {
 /// Collect all import URIs from a token stream (fast path, no full parse needed).
 pub fn collect_imports(tokens: &[Token]) -> Vec<String> {
     let mut imports = Vec::new();
+    collect_imports_into(tokens, &mut imports);
+    imports
+}
+
+fn collect_imports_into(tokens: &[Token], imports: &mut Vec<String>) {
     let mut i = 0;
     while i < tokens.len() {
         match &tokens[i].kind {
             TokenKind::KwAmends | TokenKind::KwImport | TokenKind::KwImportStar => {
-                if let Some(TokenKind::StringLit(uri)) = tokens.get(i + 1).map(|t| &t.kind) {
-                    imports.push(uri.clone());
+                match tokens.get(i + 1).map(|t| &t.kind) {
+                    // Declaration form: `import "uri"` / `import* "glob"` / `amends "uri"`
+                    Some(TokenKind::StringLit(uri)) => {
+                        imports.push(uri.clone());
+                        i += 2;
+                    }
+                    // Expression form: `import("uri")` / `import*("glob")`
+                    Some(TokenKind::LParen) => {
+                        if let Some(TokenKind::StringLit(uri)) = tokens.get(i + 2).map(|t| &t.kind)
+                        {
+                            imports.push(uri.clone());
+                        }
+                        i += 2;
+                    }
+                    _ => i += 2,
                 }
-                i += 2;
+            }
+            // An `import(...)` expression inside `"\(...)"` is lexed into the
+            // interpolation's own token list, not the flat one scanned here.
+            TokenKind::InterpolatedString(parts) => {
+                for part in parts {
+                    if let StringPart::Tokens(nested) = part {
+                        collect_imports_into(nested, imports);
+                    }
+                }
+                i += 1;
             }
             _ => i += 1,
         }
     }
-    imports
 }
 
 pub fn parse(tokens: &[Token]) -> Result<Module> {
@@ -867,6 +901,8 @@ impl<'a> Parser<'a> {
                         | TokenKind::BoolLit(_)
                         | TokenKind::Null
                         | TokenKind::KwNew
+                        | TokenKind::KwImport
+                        | TokenKind::KwImportStar
                         | TokenKind::LParen
                 );
                 let is_bare_ident = matches!(self.peek(), TokenKind::Ident(_))
@@ -1392,6 +1428,16 @@ impl<'a> Parser<'a> {
                 self.expect(&TokenKind::RParen)?;
                 Ok(Expr::ReadOrNull(Box::new(e)))
             }
+            TokenKind::KwImport => {
+                self.advance();
+                let uri = self.parse_import_expr_uri("import")?;
+                Ok(Expr::Import(uri, self.name.clone()))
+            }
+            TokenKind::KwImportStar => {
+                self.advance();
+                let uri = self.parse_import_expr_uri("import*")?;
+                Ok(Expr::ImportGlob(uri, self.name.clone()))
+            }
             TokenKind::Ident(name) => {
                 self.advance();
                 Ok(Expr::Ident(name))
@@ -1410,6 +1456,21 @@ impl<'a> Parser<'a> {
             }
             tok => Err(self.parse_error(format!("unexpected token in expression: {:?}", tok))),
         }
+    }
+
+    /// Parse the `("uri")` part of an `import(...)` / `import*(...)` expression.
+    /// pkl requires the URI to be a constant string literal.
+    fn parse_import_expr_uri(&mut self, keyword: &str) -> Result<String> {
+        self.expect(&TokenKind::LParen)?;
+        if !matches!(self.peek(), TokenKind::StringLit(_)) {
+            let tok = self.peek().clone();
+            return Err(self.parse_error(format!(
+                "{keyword}() requires a string literal URI, got {tok:?}"
+            )));
+        }
+        let uri = self.expect_string()?;
+        self.expect(&TokenKind::RParen)?;
+        Ok(uri)
     }
 
     /// Try to parse `ident, ident, ...) ` — returns None if not a valid lambda param list.
