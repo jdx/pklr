@@ -748,8 +748,18 @@ impl Evaluator {
 
     /// Evaluate a single `import("uri")` expression, resolving `uri` the same way
     /// an `import "uri"` declaration in `path` would.
+    ///
+    /// `requested` narrows evaluation to the module properties the expression
+    /// actually reads, matching how an import alias used as `Alias.field` is
+    /// narrowed. `None` evaluates the whole module.
     #[async_recursion(?Send)]
-    async fn eval_import_expr(&mut self, uri: &str, path: &Path, depth: usize) -> Result<Value> {
+    async fn eval_import_expr(
+        &mut self,
+        uri: &str,
+        path: &Path,
+        depth: usize,
+        requested: Option<HashSet<String>>,
+    ) -> Result<Value> {
         let resolved = resolve_remote_relative(path, uri);
         let uri: &str = resolved.as_deref().unwrap_or(uri);
 
@@ -767,7 +777,7 @@ impl Evaluator {
                 return Err(Error::ImportNotFound(import_path.display().to_string()));
             }
             return self
-                .eval_file_with_requested_fields(&import_path, depth + 1, None)
+                .eval_file_with_requested_fields(&import_path, depth + 1, requested)
                 .await;
         }
 
@@ -778,13 +788,35 @@ impl Evaluator {
         // shared import cache like any other local import.
         if !name.contains("://") {
             return self
-                .eval_file_with_requested_fields(Path::new(&name), depth + 1, None)
+                .eval_file_with_requested_fields(Path::new(&name), depth + 1, requested)
                 .await;
         }
         let tokens = lexer::lex_named(&source, &name)?;
         let imported = parser::parse_named(&tokens, &source, &name)?;
-        self.eval_module_with_scope(&imported, Path::new(&name), depth + 1, None, None)
+        self.eval_module_with_scope(&imported, Path::new(&name), depth + 1, None, requested)
             .await
+    }
+
+    /// Evaluate the object an `expr.field` / `expr?.field` access reads from.
+    ///
+    /// An `import("uri")` base is narrowed to the single field being read, so
+    /// `import("mod.pkl").field` leaves the module's other properties
+    /// unevaluated just as `import "mod.pkl" as Mod` + `Mod.field` does.
+    #[async_recursion(?Send)]
+    async fn eval_field_base(
+        &mut self,
+        obj_expr: &Expr,
+        field: &str,
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<Value> {
+        if let Expr::Import(uri, module_path) = obj_expr {
+            let requested = HashSet::from([field.to_string()]);
+            return self
+                .eval_import_expr(uri, Path::new(module_path), depth, Some(requested))
+                .await;
+        }
+        self.eval_expr(obj_expr, scope, depth + 1).await
     }
 
     #[async_recursion(?Send)]
@@ -3046,7 +3078,7 @@ impl Evaluator {
             }
             Expr::ObjectBody(entries) => self.eval_entries(entries, scope, depth + 1).await,
             Expr::Field(obj_expr, field) => {
-                let obj = self.eval_expr(obj_expr, scope, depth + 1).await?;
+                let obj = self.eval_field_base(obj_expr, field, scope, depth).await?;
                 // Built-in properties
                 match (&obj, field.as_str()) {
                     (Value::List(items), "length") => return Ok(Value::Int(items.len() as i64)),
@@ -3103,7 +3135,7 @@ impl Evaluator {
                 }
             }
             Expr::NullSafeField(obj_expr, field) => {
-                let obj = self.eval_expr(obj_expr, scope, depth + 1).await?;
+                let obj = self.eval_field_base(obj_expr, field, scope, depth).await?;
                 match &obj {
                     Value::Null => Ok(Value::Null),
                     Value::Object(map, source) => {
@@ -3200,7 +3232,7 @@ impl Evaluator {
                 self.read_resource(&uri_str).await
             }
             Expr::Import(uri, module_path) => {
-                self.eval_import_expr(uri, Path::new(module_path), depth)
+                self.eval_import_expr(uri, Path::new(module_path), depth, None)
                     .await
             }
             Expr::ImportGlob(pattern, module_path) => {

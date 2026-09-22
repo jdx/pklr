@@ -1614,6 +1614,39 @@ value = import("generated/alpha.pkl").value
 }
 
 #[tokio::test]
+async fn import_expression_field_access_only_evaluates_that_field() {
+    let temp = TestTempDir::new("pklr_test_import_expr_narrowing");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("mod.pkl"),
+        r#"
+local helper = "h"
+working = "\(helper)-ok"
+derived = working + "-derived"
+nested { inner = "deep" }
+broken = missingThing.x
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+plain = import("mod.pkl").working
+derived = import("mod.pkl").derived
+chained = import("mod.pkl").nested.inner
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["plain"], "h-ok");
+    assert_eq!(val["derived"], "h-ok-derived");
+    assert_eq!(val["chained"], "deep");
+}
+
+#[tokio::test]
 async fn import_expression_reports_missing_modules() {
     let temp = TestTempDir::new("pklr_test_import_expr_missing");
     let dir = temp.path();
