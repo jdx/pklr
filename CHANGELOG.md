@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0](https://github.com/jdx/pklr/compare/v2.0.5...v3.0.0) - 2026-09-22
+
+### Added
+
+- *(eval)* [**breaking**] support import() and import*() expressions ([#195](https://github.com/jdx/pklr/pull/195))
+
+### Other
+
+- [**breaking**] mark the lexer, AST, and error enums non_exhaustive ([#197](https://github.com/jdx/pklr/pull/197))
+
 ## [2.0.5](https://github.com/jdx/pklr/compare/v2.0.4...v2.0.5) - 2026-09-19
 
 ### Fixed
