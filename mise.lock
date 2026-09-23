@@ -43,10 +43,30 @@ url = "https://github.com/cargo-bins/cargo-binstall/releases/download/v1.23.0/ca
 url_api = "https://api.github.com/repos/cargo-bins/cargo-binstall/releases/assets/546062212"
 provenance = "github-attestations"
 
-[[tools."cargo:cargo-msrv"]]
+[[tools.cargo-msrv]]
 version = "0.19.3"
-backend = "cargo:cargo-msrv"
+backend = "aqua:foresterre/cargo-msrv"
 specifiers = ["latest"]
+
+[tools.cargo-msrv."platforms.linux-x64"]
+checksum = "sha256:6f9a0011ca8ad959d304185b9090390fd1ad87e2d764007fbb0abe043afa9ff5"
+url = "https://github.com/foresterre/cargo-msrv/releases/download/v0.19.3/cargo-msrv-x86_64-unknown-linux-gnu-v0.19.3.tgz"
+url_api = "https://api.github.com/repos/foresterre/cargo-msrv/releases/assets/380850047"
+
+[tools.cargo-msrv."platforms.linux-x64-musl"]
+checksum = "sha256:441ddbf85c589062029ac33fcfcfc33ddd4e87f04984d91b16ea4ae02e4d779d"
+url = "https://github.com/foresterre/cargo-msrv/releases/download/v0.19.3/cargo-msrv-x86_64-unknown-linux-musl-v0.19.3.tgz"
+url_api = "https://api.github.com/repos/foresterre/cargo-msrv/releases/assets/380849992"
+
+[tools.cargo-msrv."platforms.macos-arm64"]
+checksum = "sha256:bf42f653b5a7c426972f728b38a3756529a105b6598c2fdc89bc25ac056726f1"
+url = "https://github.com/foresterre/cargo-msrv/releases/download/v0.19.3/cargo-msrv-aarch64-apple-darwin-v0.19.3.tgz"
+url_api = "https://api.github.com/repos/foresterre/cargo-msrv/releases/assets/380850630"
+
+[tools.cargo-msrv."platforms.windows-x64"]
+checksum = "sha256:e437443331865218763d44089680f4d36547353e8c3c8b394c24859203e6cd05"
+url = "https://github.com/foresterre/cargo-msrv/releases/download/v0.19.3/cargo-msrv-x86_64-pc-windows-msvc-v0.19.3.zip"
+url_api = "https://api.github.com/repos/foresterre/cargo-msrv/releases/assets/380851496"
 
 [[tools.communique]]
 version = "1.4.2"
