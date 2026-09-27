@@ -7571,6 +7571,92 @@ fromLocal = new Outer {
 }
 
 #[test]
+fn amended_typed_mapping_entry_resolves_outer_names_before_inherited_members() {
+    let json = eval(
+        r#"
+class T { label: String?; seen: Any }
+open class S {
+    label: String? = "S inherited"
+    m: Mapping<String, T> = new Mapping<String, T> { ["a"] { seen = "base" } }
+}
+local label = "outer"
+declared = new S { m { ["a"] { seen = label } } }
+amended = (new S {}) { m { ["a"] { seen = label } } }
+"#,
+    );
+    assert_eq!(json["declared"]["m"]["a"]["seen"], "outer");
+    assert_eq!(json["amended"]["m"]["a"]["seen"], "outer");
+}
+
+#[test]
+fn replaced_member_still_belongs_to_the_body_that_declared_it() {
+    // `b = a + 1` refers to the object's own `a`, not the module's, even
+    // after a later amendment replaces `a`.
+    let json = eval(
+        r#"
+a = 100
+open class C { a: Int = 0; b: Int = 0 }
+s = new C { a = 1; b = a + 1 }
+s2 = (s) { a = 5 }
+"#,
+    );
+    assert_eq!(json["s"]["b"], 2);
+    assert_eq!(json["s2"]["b"], 6);
+}
+
+#[tokio::test]
+async fn parent_class_entries_resolve_their_module_names_before_inherited_members() {
+    let temp = TestTempDir::new("pklr_test_parent_class_entry_lexical_names");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Parent.pkl"),
+        r#"
+local const label = "parent module"
+open class Inner { label: String?; seen: Any }
+open class Parent { inner: Inner = new Inner { seen = label } }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "Parent.pkl"
+class Child extends Parent.Parent { extra: Int = 0 }
+plain = new Child {}
+amended = new Child { extra = 1 }
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(json["plain"]["inner"]["seen"], "parent module");
+    assert_eq!(json["amended"]["inner"]["seen"], "parent module");
+}
+
+#[tokio::test]
+async fn import_resolves_before_same_named_inherited_member() {
+    let temp = TestTempDir::new("pklr_test_import_before_inherited_member");
+    let dir = temp.path();
+    std::fs::write(dir.join("lib.pkl"), "x = \"import\"\n").unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "lib.pkl"
+open class T { lib: Dynamic = new Dynamic { x = "member" }; seen: Any }
+t = new T { seen = lib.x }
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(json["t"]["seen"], "import");
+}
+
+#[test]
 fn mapping_local_lambda_is_visible_to_sibling_local() {
     // A lambda local must be in scope for a later (non-lambda) local that uses it.
     let json = eval(

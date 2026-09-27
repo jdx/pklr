@@ -895,7 +895,7 @@ impl Evaluator {
                 }
 
                 let mapping = self.eval_glob_import(uri, path, depth).await?;
-                scope.set(alias, mapping);
+                scope.declare(alias, mapping);
                 continue;
             }
 
@@ -926,7 +926,7 @@ impl Evaluator {
                     )
                     .await?
                 };
-                scope.set(alias.clone(), imported_val);
+                scope.declare(alias.clone(), imported_val);
                 scope.set_module_identity(alias, canonical_remote_module_identity(uri));
                 continue;
             }
@@ -958,7 +958,7 @@ impl Evaluator {
                             .eval_file_with_requested_fields(&local_path, depth + 1, requested)
                             .await?;
                         let identity = self.module_type_namespace(&local_path).await;
-                        scope.set(alias.clone(), imported_val);
+                        scope.declare(alias.clone(), imported_val);
                         scope.set_module_identity(alias, identity);
                         continue;
                     }
@@ -990,7 +990,7 @@ impl Evaluator {
                     )
                     .await?
                 };
-                scope.set(alias.clone(), imported_val);
+                scope.declare(alias.clone(), imported_val);
                 scope.set_module_identity(alias, url);
                 continue;
             }
@@ -1005,7 +1005,7 @@ impl Evaluator {
                 if !referenced_imports.contains(&alias) {
                     continue;
                 }
-                scope.set(alias, stdlib_val);
+                scope.declare(alias, stdlib_val);
                 continue;
             }
 
@@ -1051,7 +1051,7 @@ impl Evaluator {
                     .eval_file_with_requested_fields(&import_path, depth + 1, requested)
                     .await?;
                 let identity = self.module_type_namespace(&import_path).await;
-                scope.set(alias.clone(), imported_val);
+                scope.declare(alias.clone(), imported_val);
                 scope.set_module_identity(alias, identity);
             }
         }
@@ -1680,6 +1680,7 @@ impl Evaluator {
             Some(Arc::new(ObjectSource {
                 entries: Vec::new(),
                 scope: IndexMap::new(),
+                scope_declared: HashSet::new(),
                 is_open: true,
                 type_name: None,
                 type_identity: None,
@@ -1766,7 +1767,7 @@ impl Evaluator {
                     // type-aware evaluator so single-type and union mappings both keep
                     // mapping defaults plus converter type metadata after amendment.
                     let (inherited_scope, amendment_scope) =
-                        mapping_amendment_scopes(&src.scope, scope);
+                        mapping_amendment_scopes(&src.scope, &src.scope_declared, scope);
                     let value_type_defaults = src
                         .mapping_value_types
                         .iter()
@@ -1853,7 +1854,7 @@ impl Evaluator {
         inherited_source: Option<&ObjectSource>,
     ) -> Result<Value> {
         let mut child_scope = scope.child();
-        let entry_owners = entry_scope_owners(entries, entry_scopes);
+        let entry_owners = entry_scope_owners(entries, entry_scopes, inherited_source);
         if let Some(source) = inherited_source {
             for entry in &source.entries {
                 if let Entry::Property(prop) = entry
@@ -2057,6 +2058,7 @@ impl Evaluator {
                                 None => ObjectSource {
                                     entries: vec![],
                                     scope: IndexMap::new(),
+                                    scope_declared: HashSet::new(),
                                     is_open: true,
                                     type_name: Some(tn.clone()),
                                     type_identity: src.type_identity.clone(),
@@ -2165,6 +2167,7 @@ impl Evaluator {
         let source = ObjectSource {
             entries: entries.to_vec(),
             scope: child_scope.flatten(),
+            scope_declared: child_scope.flatten_declared(),
             is_open: true, // default: allow new properties
             type_name: None,
             type_identity: None,
@@ -2246,6 +2249,9 @@ impl Evaluator {
                         let mut combined_entry_scopes = Vec::new();
                         let mut combined_evaluated_properties = Vec::new();
                         let mut inherited_property_values = IndexMap::new();
+                        // One snapshot for every entry of the parent's body, so
+                        // they resolve each other as members of the same body.
+                        let parent_scope = Arc::new(capture_object_source_scope(&psrc));
                         for (entry_index, pe) in psrc.entries.iter().enumerate() {
                             if let Entry::Property(p) = pe
                                 && !child_names.contains(&p.name)
@@ -2255,9 +2261,7 @@ impl Evaluator {
                                     psrc.entry_scopes
                                         .get(entry_index)
                                         .and_then(Clone::clone)
-                                        .or_else(|| {
-                                            Some(Arc::new(capture_object_source_scope(&psrc)))
-                                        }),
+                                        .or_else(|| Some(Arc::clone(&parent_scope))),
                                 );
                                 if psrc.evaluated_properties.contains(&p.name) {
                                     combined_evaluated_properties.push(p.name.clone());
@@ -2280,6 +2284,9 @@ impl Evaluator {
                         // seeding: every evaluated property name resolves to
                         // that property's value in `scope`, even when a child
                         // module has a same-named lexical binding.
+                        for name in inherited_property_values.keys() {
+                            src.scope_declared.remove(name);
+                        }
                         src.scope.extend(inherited_property_values);
                         src.entries = combined_entries;
                         src.entry_scopes = combined_entry_scopes;
@@ -2356,7 +2363,7 @@ impl Evaluator {
             crate::parser::TypeExpr::Named(target) => {
                 // Alias to a class or another alias already in scope
                 if let Some(val) = scope.get(target) {
-                    scope.set(name.to_string(), val.clone());
+                    scope.declare(name.to_string(), val.clone());
                 }
             }
             crate::parser::TypeExpr::Nullable(inner) => {
@@ -2364,7 +2371,7 @@ impl Evaluator {
                 if let crate::parser::TypeExpr::Named(target) = inner.as_ref()
                     && let Some(val) = scope.get(target)
                 {
-                    scope.set(name.to_string(), val.clone());
+                    scope.declare(name.to_string(), val.clone());
                 }
             }
             crate::parser::TypeExpr::Constrained(base, _) => {
@@ -2377,7 +2384,7 @@ impl Evaluator {
 
     fn bind_type_alias_value(&self, name: &str, target: &str, scope: &mut Scope) {
         if let Some(val) = scope.get(target.trim_end_matches('?')).cloned() {
-            scope.set(name.to_string(), val);
+            scope.declare(name.to_string(), val);
         }
     }
 
@@ -2952,6 +2959,7 @@ impl Evaluator {
                         let mut source_scope = scope.flatten();
                         source_scope.shift_remove("outer");
                         source_scope.shift_remove("this");
+                        let source_declared = scope.flatten_declared();
                         let mut source_module_identities = scope.flatten_module_identities();
                         source_module_identities.shift_remove("outer");
                         source_module_identities.shift_remove("this");
@@ -2959,6 +2967,7 @@ impl Evaluator {
                         let source = ObjectSource {
                             entries: src_entries,
                             scope: source_scope,
+                            scope_declared: source_declared,
                             is_open: true,
                             type_name: None,
                             type_identity: None,
@@ -3050,6 +3059,7 @@ impl Evaluator {
                                     ObjectSource {
                                         entries: Vec::new(),
                                         scope: IndexMap::new(),
+                                        scope_declared: HashSet::new(),
                                         is_open,
                                         type_name: tn,
                                         type_identity: base_src.type_identity.clone(),
@@ -3089,6 +3099,7 @@ impl Evaluator {
                             let src = ObjectSource {
                                 entries: Vec::new(),
                                 scope: IndexMap::new(),
+                                scope_declared: HashSet::new(),
                                 is_open: true,
                                 type_name: type_name.clone(),
                                 type_identity: None,
@@ -3764,7 +3775,7 @@ impl Evaluator {
         if let Value::Object(_, Some(base_src)) = &base {
             if !base_src.mapping_value_types.is_empty() {
                 let (inherited_scope, amendment_scope) =
-                    mapping_amendment_scopes(&base_src.scope, scope);
+                    mapping_amendment_scopes(&base_src.scope, &base_src.scope_declared, scope);
                 let value_type_defaults = base_src
                     .mapping_value_types
                     .iter()
@@ -4169,6 +4180,7 @@ impl Evaluator {
                                     None => ObjectSource {
                                         entries: vec![],
                                         scope: IndexMap::new(),
+                                        scope_declared: HashSet::new(),
                                         is_open: true,
                                         type_name: Some(tn.to_string()),
                                         type_identity: src.type_identity.clone(),
@@ -4662,6 +4674,7 @@ fn apply_mapping_type_annotation(value: &mut Value, type_ann: Option<&crate::par
         .unwrap_or_else(|| ObjectSource {
             entries: Vec::new(),
             scope: IndexMap::new(),
+            scope_declared: HashSet::new(),
             is_open: true,
             type_name: None,
             type_identity: None,
@@ -5710,7 +5723,7 @@ fn capture_object_source_scope(source: &ObjectSource) -> CapturedScope {
         .map(str::to_owned);
     CapturedScope {
         values: source.scope.clone(),
-        declared: HashSet::new(),
+        declared: source.scope_declared.clone(),
         module_identities: source.scope_module_identities.clone(),
         type_aliases: source.scope_type_aliases.clone(),
         type_namespace,
@@ -5755,15 +5768,22 @@ fn scope_for_object_entry(
 
 /// For each entry evaluated in a captured lexical scope, the names declared by
 /// the entries written in the same body (those sharing that captured scope).
+/// `inherited` is the object being amended: its entries count too, since a body
+/// still declares a member that a later amendment replaces.
 fn entry_scope_owners(
     entries: &[Entry],
     entry_scopes: Option<&[Option<Arc<CapturedScope>>]>,
+    inherited: Option<&ObjectSource>,
 ) -> Vec<Rc<HashSet<String>>> {
     let Some(entry_scopes) = entry_scopes else {
         return Vec::new();
     };
+    let inherited_entries = inherited
+        .map(|source| source.entries.iter().zip(&source.entry_scopes))
+        .into_iter()
+        .flatten();
     let mut groups: HashMap<*const CapturedScope, HashSet<String>> = HashMap::new();
-    for (entry, captured) in entries.iter().zip(entry_scopes) {
+    for (entry, captured) in entries.iter().zip(entry_scopes).chain(inherited_entries) {
         let Some(captured) = captured else {
             continue;
         };
@@ -5828,14 +5848,29 @@ fn scope_with_object_bindings(lexical: &Scope, object: &Scope, owned: &HashSet<S
 
 /// Keep inherited entries bound to the imports they captured while letting an
 /// amendment resolve names in the scope where the amendment was declared.
-fn mapping_amendment_scopes(captured: &IndexMap<String, Value>, current: &Scope) -> (Scope, Scope) {
+/// Both scopes keep which of their names were declared in a body, so an entry's
+/// inherited members still resolve after those names.
+fn mapping_amendment_scopes(
+    captured: &IndexMap<String, Value>,
+    captured_declared: &HashSet<String>,
+    current: &Scope,
+) -> (Scope, Scope) {
+    let current_declared = current.flatten_declared();
     let mut inherited = Scope::default();
     for (key, value) in captured {
-        inherited.set(key.clone(), value.clone());
+        if captured_declared.contains(key) {
+            inherited.declare(key.clone(), value.clone());
+        } else {
+            inherited.set(key.clone(), value.clone());
+        }
     }
     for (key, value) in current.flatten() {
         if inherited.get(&key).is_none() {
-            inherited.set(key, value);
+            if current_declared.contains(&key) {
+                inherited.declare(key, value);
+            } else {
+                inherited.set(key, value);
+            }
         }
     }
     for (key, ty) in current.flatten_type_aliases() {
@@ -5844,7 +5879,12 @@ fn mapping_amendment_scopes(captured: &IndexMap<String, Value>, current: &Scope)
 
     let mut amendment = inherited.clone();
     for (key, value) in current.flatten() {
-        amendment.set(key, value);
+        if current_declared.contains(&key) {
+            amendment.declare(key, value);
+        } else {
+            amendment.declared.remove(&key);
+            amendment.set(key, value);
+        }
     }
     for (key, ty) in current.flatten_type_aliases() {
         amendment.set_type_alias(key, ty);
@@ -6900,7 +6940,7 @@ impl Evaluator {
     ) -> Result<()> {
         for (alias, alias_path) in deferred {
             if self.same_local_path(alias_path, inherited_path).await? {
-                scope.set(alias.clone(), inherited_val.clone());
+                scope.declare(alias.clone(), inherited_val.clone());
                 let identity = self.module_type_namespace(alias_path).await;
                 scope.set_module_identity(alias.clone(), identity);
             }

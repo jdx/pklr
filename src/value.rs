@@ -24,6 +24,9 @@ pub(crate) struct CapturedScope {
 pub struct ObjectSource {
     pub entries: Vec<Entry>,
     pub scope: IndexMap<String, Value>,
+    /// Names in `scope` declared in a lexically enclosing body, which an
+    /// inherited member of an inner object must not shadow.
+    pub(crate) scope_declared: HashSet<String>,
     /// Whether the class was declared `open` (allows adding new properties)
     pub is_open: bool,
     /// The pkl class name this object was instantiated from (e.g., "Step", "Group").
