@@ -2246,6 +2246,16 @@ item = new Item {}
         dir.join("main.pkl"),
         r#"
 import "Lib.pkl"
+result = (Lib.item) { selected = later }
+"#,
+    )
+    .unwrap();
+    // A local of the amending module is resolved before the object's
+    // inherited members, as in Pkl.
+    std::fs::write(
+        dir.join("shadowed.pkl"),
+        r#"
+import "Lib.pkl"
 local later = "module"
 result = (Lib.item) { selected = later }
 "#,
@@ -2258,6 +2268,13 @@ result = (Lib.item) { selected = later }
     assert_eq!(
         json["result"],
         serde_json::json!({"selected": "inherited", "later": "inherited"})
+    );
+    let json = pklr::eval_to_json_async(&dir.join("shadowed.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        json["result"],
+        serde_json::json!({"selected": "module", "later": "inherited"})
     );
 }
 
@@ -2366,6 +2383,7 @@ async fn derived_class_amendment_seeds_inherited_property_values() {
         dir.join("Base.pkl"),
         r#"
 open class Parent {
+    selected = "parent default"
     later = "parent property"
 }
 "#,
@@ -2395,7 +2413,7 @@ result = Middle.item
         .unwrap();
     assert_eq!(
         json["result"],
-        serde_json::json!({"later": "parent property", "selected": "parent property"})
+        serde_json::json!({"later": "parent property", "selected": "child module"})
     );
 }
 
@@ -7479,6 +7497,277 @@ values = new Mapping<String, String> {
 "#,
     );
     assert_eq!(json["values"]["message"], "[value:ok]");
+}
+
+#[test]
+fn mapping_local_const_wins_over_same_named_member_of_typed_entry() {
+    // Pkl resolves a name in the lexically enclosing bodies before the
+    // object's inherited members, so `after` is the local, not the
+    // `StepTest.after` property (which is null), with or without amending
+    // the enclosing object.
+    let json = eval(
+        r#"
+class StepTest {
+    before: String?
+    after: String?
+    write: Mapping<String, String> = new Mapping<String, String> {}
+}
+open class Step {
+    glob: String?
+    tests: Mapping<String, StepTest> = new Mapping<String, StepTest> {}
+}
+step = new Step {
+    tests {
+        local const after = "formatted"
+        ["nested"] { write { ["a.json"] = after } }
+        ["direct"] { before = after }
+    }
+}
+amended = (step) { glob = "*.json" }
+"#,
+    );
+    for name in ["step", "amended"] {
+        let tests = &json[name]["tests"];
+        assert_eq!(tests["nested"]["write"]["a.json"], "formatted", "{name}");
+        assert_eq!(tests["direct"]["before"], "formatted", "{name}");
+    }
+    assert_eq!(json["amended"]["glob"], "*.json");
+}
+
+#[test]
+fn only_members_declared_in_an_enclosing_body_shadow_inherited_members() {
+    let json = eval(
+        r#"
+open class Inner {
+    name: String = "inner default"
+    label: String?
+    seen: Any
+}
+open class Outer {
+    name: String = "outer default"
+    label: String? = "outer label"
+    inner: Any
+}
+name = "module"
+fromModule = new Inner { seen = name }
+inherited = new Outer { inner = new Inner { seen = label } }
+declared = new Outer {
+    label = "outer body"
+    inner = new Inner { seen = label }
+}
+fromLocal = new Outer {
+    local label = "outer local"
+    inner = new Inner { seen = label }
+}
+"#,
+    );
+    // A module property is declared in the module body.
+    assert_eq!(json["fromModule"]["seen"], "module");
+    // `Outer.label` is inherited by the outer object, so `label` resolves
+    // through the inner object's implicit `this`.
+    assert_eq!(json["inherited"]["inner"]["seen"], serde_json::Value::Null);
+    assert_eq!(json["declared"]["inner"]["seen"], "outer body");
+    assert_eq!(json["fromLocal"]["inner"]["seen"], "outer local");
+}
+
+#[test]
+fn amended_typed_mapping_entry_resolves_outer_names_before_inherited_members() {
+    let json = eval(
+        r#"
+class T { label: String?; seen: Any }
+open class S {
+    label: String? = "S inherited"
+    m: Mapping<String, T> = new Mapping<String, T> { ["a"] { seen = "base" } }
+}
+local label = "outer"
+declared = new S { m { ["a"] { seen = label } } }
+amended = (new S {}) { m { ["a"] { seen = label } } }
+"#,
+    );
+    assert_eq!(json["declared"]["m"]["a"]["seen"], "outer");
+    assert_eq!(json["amended"]["m"]["a"]["seen"], "outer");
+}
+
+#[test]
+fn replaced_member_still_belongs_to_the_body_that_declared_it() {
+    // `b = a + 1` refers to the object's own `a`, not the module's, even
+    // after a later amendment replaces `a`.
+    let json = eval(
+        r#"
+a = 100
+open class C { a: Int = 0; b: Int = 0 }
+s = new C { a = 1; b = a + 1 }
+s2 = (s) { a = 5 }
+"#,
+    );
+    assert_eq!(json["s"]["b"], 2);
+    assert_eq!(json["s2"]["b"], 6);
+}
+
+#[tokio::test]
+async fn parent_class_entries_resolve_their_module_names_before_inherited_members() {
+    let temp = TestTempDir::new("pklr_test_parent_class_entry_lexical_names");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Parent.pkl"),
+        r#"
+local const label = "parent module"
+open class Inner { label: String?; seen: Any }
+open class Parent { inner: Inner = new Inner { seen = label } }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "Parent.pkl"
+class Child extends Parent.Parent { extra: Int = 0 }
+plain = new Child {}
+amended = new Child { extra = 1 }
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(json["plain"]["inner"]["seen"], "parent module");
+    assert_eq!(json["amended"]["inner"]["seen"], "parent module");
+}
+
+#[tokio::test]
+async fn import_resolves_before_same_named_inherited_member() {
+    let temp = TestTempDir::new("pklr_test_import_before_inherited_member");
+    let dir = temp.path();
+    std::fs::write(dir.join("lib.pkl"), "x = \"import\"\n").unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "lib.pkl"
+open class T { lib: Dynamic = new Dynamic { x = "member" }; seen: Any }
+t = new T { seen = lib.x }
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(json["t"]["seen"], "import");
+}
+
+#[test]
+fn class_body_member_is_lexical_to_its_nested_objects() {
+    // `a` is written in `C`'s body, so the nested object reads the instance's
+    // `a` rather than `Inner.a`, including after an amendment replaces it.
+    let json = eval(
+        r#"
+open class Inner { a: Int = 0; seen: Any }
+open class C { a: Int = 1; inner: Inner = new Inner { seen = a } }
+plain = new C {}
+amended = new C { a = 5 }
+class D extends C { b: Int = 0 }
+sub = new D { a = 7 }
+"#,
+    );
+    assert_eq!(json["plain"]["inner"]["seen"], 1);
+    assert_eq!(json["amended"]["inner"]["seen"], 5);
+    assert_eq!(json["sub"]["inner"]["seen"], 7);
+}
+
+#[test]
+fn member_inherited_from_a_parent_class_is_not_lexical_to_nested_objects() {
+    // `Child`'s body does not declare `label`, so the nested object's own
+    // inherited `label` wins over the one `Child` inherits from `Parent`.
+    let json = eval(
+        r#"
+open class Inner { label: String? = "inner"; seen: Any }
+open class Parent { label: String? = "parent" }
+class Child extends Parent { inner: Inner = new Inner { seen = label } }
+plain = new Child {}
+amended = new Child { label = "amended" }
+"#,
+    );
+    assert_eq!(json["plain"]["inner"]["seen"], "inner");
+    assert_eq!(json["amended"]["inner"]["seen"], "inner");
+}
+
+#[test]
+fn replaced_member_stays_in_its_body_across_later_amendments() {
+    let json = eval(
+        r#"
+a = 100
+open class Inner { a: Int = 0; seen: Any }
+open class C { a: Int = 1; b: Int = 0; c: Int = 0; inner: Inner = new Inner { seen = a } }
+s = new C { a = 5 }
+s2 = (s) { b = 2 }
+s3 = (s2) { b = 3 }
+t = (new C {}) { a = 1; b = a + 1 }
+t2 = (t) { a = 7 }
+t3 = (t2) { c = 3 }
+"#,
+    );
+    // `a` is declared in `C`'s body, so its nested object keeps reading the
+    // instance's `a` however many amendments follow the one that replaced it.
+    for name in ["s", "s2", "s3"] {
+        assert_eq!(json[name]["inner"]["seen"], 5, "{name}");
+    }
+    // Likewise `b = a + 1` keeps reading its own body's `a`, not the module's.
+    assert_eq!(json["t2"]["b"], 8);
+    assert_eq!(json["t3"]["b"], 8);
+}
+
+#[test]
+fn member_added_by_an_amendment_does_not_shadow_the_definitions_scope() {
+    // The amendment's `x` is not declared in `e`'s body, so `e`'s nested
+    // object still reads the module's `x`, before `Inner.x`.
+    let json = eval(
+        r#"
+local const x = "module"
+open class Inner { x: String = "inner member"; seen: Any }
+e = new Dynamic { inner = new Inner { seen = x } }
+e2 = (e) { x = "overlay" }
+"#,
+    );
+    assert_eq!(json["e"]["inner"]["seen"], "module");
+    assert_eq!(json["e2"]["inner"]["seen"], "module");
+}
+
+#[tokio::test]
+async fn shared_import_stays_declared_when_amending_an_imported_object() {
+    // The amending module imports `lib.pkl` too, so the two views of the
+    // import are merged. The merged binding is still `defs.pkl`'s import and
+    // must keep resolving before `Inner.lib`.
+    let temp = TestTempDir::new("pklr_test_shared_import_stays_declared");
+    let dir = temp.path();
+    std::fs::write(dir.join("lib.pkl"), "x = \"import\"\n").unwrap();
+    std::fs::write(
+        dir.join("defs.pkl"),
+        r#"
+import "lib.pkl"
+open class Inner { lib: Any = "member"; seen: Any }
+open class C {
+    extra: Int = 0
+    inner: Inner = new Inner { seen = if (extra > 0) lib.x else "none" }
+}
+c = new C {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "lib.pkl"
+import "defs.pkl"
+result = (defs.c) { extra = 1 }
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(json["result"]["inner"]["seen"], "import");
 }
 
 #[test]

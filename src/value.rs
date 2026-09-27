@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use indexmap::IndexMap;
@@ -8,6 +9,11 @@ use crate::parser::{Entry, Expr, TypeExpr};
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CapturedScope {
     pub values: IndexMap<String, Value>,
+    /// Names in `values` declared in a lexically enclosing body.
+    pub declared: HashSet<String>,
+    /// Members declared by the body whose entries are evaluated in this scope,
+    /// kept so an amendment that replaces one does not drop it from the body.
+    pub body_members: HashSet<String>,
     pub module_identities: IndexMap<String, String>,
     pub type_aliases: IndexMap<String, TypeExpr>,
     pub type_namespace: Option<String>,
@@ -21,6 +27,12 @@ pub(crate) struct CapturedScope {
 pub struct ObjectSource {
     pub entries: Vec<Entry>,
     pub scope: IndexMap<String, Value>,
+    /// Names in `scope` declared in a lexically enclosing body, which an
+    /// inherited member of an inner object must not shadow.
+    pub(crate) scope_declared: HashSet<String>,
+    /// Members declared by the object's own definition body, including ones an
+    /// amendment has since replaced.
+    pub(crate) body_members: HashSet<String>,
     /// Whether the class was declared `open` (allows adding new properties)
     pub is_open: bool,
     /// The pkl class name this object was instantiated from (e.g., "Step", "Group").
