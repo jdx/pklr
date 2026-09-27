@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.1](https://github.com/jdx/pklr/compare/v3.0.0...v3.0.1) - 2026-09-27
+
+### Fixed
+
+- *(eval)* resolve names in enclosing bodies before an object's inherited members ([#200](https://github.com/jdx/pklr/pull/200))
+
 ## [3.0.0](https://github.com/jdx/pklr/compare/v2.0.5...v3.0.0) - 2026-09-22
 
 ### Added
