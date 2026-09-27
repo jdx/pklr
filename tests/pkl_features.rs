@@ -7733,6 +7733,43 @@ e2 = (e) { x = "overlay" }
     assert_eq!(json["e2"]["inner"]["seen"], "module");
 }
 
+#[tokio::test]
+async fn shared_import_stays_declared_when_amending_an_imported_object() {
+    // The amending module imports `lib.pkl` too, so the two views of the
+    // import are merged. The merged binding is still `defs.pkl`'s import and
+    // must keep resolving before `Inner.lib`.
+    let temp = TestTempDir::new("pklr_test_shared_import_stays_declared");
+    let dir = temp.path();
+    std::fs::write(dir.join("lib.pkl"), "x = \"import\"\n").unwrap();
+    std::fs::write(
+        dir.join("defs.pkl"),
+        r#"
+import "lib.pkl"
+open class Inner { lib: Any = "member"; seen: Any }
+open class C {
+    extra: Int = 0
+    inner: Inner = new Inner { seen = if (extra > 0) lib.x else "none" }
+}
+c = new C {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "lib.pkl"
+import "defs.pkl"
+result = (defs.c) { extra = 1 }
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(json["result"]["inner"]["seen"], "import");
+}
+
 #[test]
 fn mapping_local_lambda_is_visible_to_sibling_local() {
     // A lambda local must be in scope for a later (non-lambda) local that uses it.

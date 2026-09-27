@@ -2676,6 +2676,7 @@ impl Evaluator {
                 .zip(current_scope.module_identity(&k))
                 .is_some_and(|(base, current)| base == current);
             let value = if same_module {
+                // Still the base's own import, so it keeps the base's mark.
                 eval_scope
                     .get(&k)
                     .and_then(|base| merge_partial_module_values(base, &v))
@@ -2684,10 +2685,10 @@ impl Evaluator {
                 preserved_inherited_bindings.insert(k.clone());
                 continue;
             } else {
+                // A use-site binding is not declared in the base's body.
+                eval_scope.declared.remove(&k);
                 v
             };
-            // A use-site binding is not declared in the base's body.
-            eval_scope.declared.remove(&k);
             eval_scope.set(k, value);
         }
         for (name, identity) in current_scope.flatten_module_identities() {
