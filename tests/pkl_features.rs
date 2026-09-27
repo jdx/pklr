@@ -7657,6 +7657,42 @@ t = new T { seen = lib.x }
 }
 
 #[test]
+fn class_body_member_is_lexical_to_its_nested_objects() {
+    // `a` is written in `C`'s body, so the nested object reads the instance's
+    // `a` rather than `Inner.a`, including after an amendment replaces it.
+    let json = eval(
+        r#"
+open class Inner { a: Int = 0; seen: Any }
+open class C { a: Int = 1; inner: Inner = new Inner { seen = a } }
+plain = new C {}
+amended = new C { a = 5 }
+class D extends C { b: Int = 0 }
+sub = new D { a = 7 }
+"#,
+    );
+    assert_eq!(json["plain"]["inner"]["seen"], 1);
+    assert_eq!(json["amended"]["inner"]["seen"], 5);
+    assert_eq!(json["sub"]["inner"]["seen"], 7);
+}
+
+#[test]
+fn member_inherited_from_a_parent_class_is_not_lexical_to_nested_objects() {
+    // `Child`'s body does not declare `label`, so the nested object's own
+    // inherited `label` wins over the one `Child` inherits from `Parent`.
+    let json = eval(
+        r#"
+open class Inner { label: String? = "inner"; seen: Any }
+open class Parent { label: String? = "parent" }
+class Child extends Parent { inner: Inner = new Inner { seen = label } }
+plain = new Child {}
+amended = new Child { label = "amended" }
+"#,
+    );
+    assert_eq!(json["plain"]["inner"]["seen"], "inner");
+    assert_eq!(json["amended"]["inner"]["seen"], "inner");
+}
+
+#[test]
 fn mapping_local_lambda_is_visible_to_sibling_local() {
     // A lambda local must be in scope for a later (non-lambda) local that uses it.
     let json = eval(

@@ -1855,6 +1855,13 @@ impl Evaluator {
     ) -> Result<Value> {
         let mut child_scope = scope.child();
         let entry_owners = entry_scope_owners(entries, entry_scopes, inherited_source);
+        let own_body = own_body_names(entries, entry_scopes, inherited_source);
+        // Entries without a captured scope belong to the object's own
+        // definition body. Bindings they see as declared are that body's
+        // members; members the object inherits from elsewhere (a parent class
+        // or an amendment) are not, so a nested object's inherited member of
+        // the same name still resolves through its own `this`.
+        let binds_declared = |name: &str| own_body.as_ref().is_none_or(|own| own.contains(name));
         if let Some(source) = inherited_source {
             for entry in &source.entries {
                 if let Entry::Property(prop) = entry
@@ -1909,15 +1916,20 @@ impl Evaluator {
                     // calls a lambda local defined just above it).
                     match self.eval_expr(expr, &active_scope, depth).await {
                         Ok(val) => {
-                            child_scope.declare(prop.name.clone(), val);
+                            if binds_declared(&prop.name) {
+                                child_scope.declare(prop.name.clone(), val);
+                            } else {
+                                child_scope.set(prop.name.clone(), val);
+                            }
                             if matches!(expr, Expr::Ident(name) if name == "this" || this_aliases.contains(name))
                             {
                                 this_aliases.push(prop.name.clone());
                             }
                         }
-                        Err(Error::Eval(message)) => {
+                        Err(Error::Eval(message)) if binds_declared(&prop.name) => {
                             child_scope.declare_poisoned(prop.name.clone(), message)
                         }
+                        Err(Error::Eval(message)) => child_scope.poison(prop.name.clone(), message),
                         Err(error) => return Err(error),
                     }
                     if matches!(expr, crate::parser::Expr::Lambda(..)) {
@@ -1939,7 +1951,11 @@ impl Evaluator {
                             depth,
                         )
                         .await?;
-                    child_scope.declare(name.clone(), defaults);
+                    if binds_declared(name) {
+                        child_scope.declare(name.clone(), defaults);
+                    } else {
+                        child_scope.set(name.clone(), defaults);
+                    }
                 }
                 Entry::TypeAlias(name, ty) => {
                     let mut resolved_scope = active_scope;
@@ -1995,7 +2011,11 @@ impl Evaluator {
                         &entry_owners,
                     );
                     if let Some(v) = self.eval_property(prop, &active_scope, depth).await? {
-                        child_scope.declare(prop.name.clone(), v.clone());
+                        if binds_declared(&prop.name) {
+                            child_scope.declare(prop.name.clone(), v.clone());
+                        } else {
+                            child_scope.set(prop.name.clone(), v.clone());
+                        }
                         all_props.insert(prop.name.clone(), v.clone());
                         if !has_modifier(mods, Modifier::Hidden) {
                             map.insert(prop.name.clone(), v);
@@ -5811,6 +5831,34 @@ fn entry_scope_owners(
                 .unwrap_or_default()
         })
         .collect()
+}
+
+/// Names declared by the object's own definition body: the entries without a
+/// captured scope, including ones a later amendment replaced. `None` when the
+/// entries have no captured scopes at all, so every entry is the object's own.
+fn own_body_names(
+    entries: &[Entry],
+    entry_scopes: Option<&[Option<Arc<CapturedScope>>]>,
+    inherited: Option<&ObjectSource>,
+) -> Option<HashSet<String>> {
+    let entry_scopes = entry_scopes?;
+    let own = |entries: &[Entry], scopes: &[Option<Arc<CapturedScope>>]| {
+        entries
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| scopes.get(*index).is_none_or(Option::is_none))
+            .filter_map(|(_, entry)| match entry {
+                Entry::Property(prop) => Some(prop.name.clone()),
+                Entry::ClassDef(name, ..) | Entry::TypeAlias(name, _) => Some(name.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut names: HashSet<String> = own(entries, entry_scopes).into_iter().collect();
+    if let Some(source) = inherited {
+        names.extend(own(&source.entries, &source.entry_scopes));
+    }
+    Some(names)
 }
 
 /// Evaluate an object entry in its lexical module while keeping the locals and
