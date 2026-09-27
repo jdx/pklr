@@ -7693,6 +7693,47 @@ amended = new Child { label = "amended" }
 }
 
 #[test]
+fn replaced_member_stays_in_its_body_across_later_amendments() {
+    let json = eval(
+        r#"
+a = 100
+open class Inner { a: Int = 0; seen: Any }
+open class C { a: Int = 1; b: Int = 0; c: Int = 0; inner: Inner = new Inner { seen = a } }
+s = new C { a = 5 }
+s2 = (s) { b = 2 }
+s3 = (s2) { b = 3 }
+t = (new C {}) { a = 1; b = a + 1 }
+t2 = (t) { a = 7 }
+t3 = (t2) { c = 3 }
+"#,
+    );
+    // `a` is declared in `C`'s body, so its nested object keeps reading the
+    // instance's `a` however many amendments follow the one that replaced it.
+    for name in ["s", "s2", "s3"] {
+        assert_eq!(json[name]["inner"]["seen"], 5, "{name}");
+    }
+    // Likewise `b = a + 1` keeps reading its own body's `a`, not the module's.
+    assert_eq!(json["t2"]["b"], 8);
+    assert_eq!(json["t3"]["b"], 8);
+}
+
+#[test]
+fn member_added_by_an_amendment_does_not_shadow_the_definitions_scope() {
+    // The amendment's `x` is not declared in `e`'s body, so `e`'s nested
+    // object still reads the module's `x`, before `Inner.x`.
+    let json = eval(
+        r#"
+local const x = "module"
+open class Inner { x: String = "inner member"; seen: Any }
+e = new Dynamic { inner = new Inner { seen = x } }
+e2 = (e) { x = "overlay" }
+"#,
+    );
+    assert_eq!(json["e"]["inner"]["seen"], "module");
+    assert_eq!(json["e2"]["inner"]["seen"], "module");
+}
+
+#[test]
 fn mapping_local_lambda_is_visible_to_sibling_local() {
     // A lambda local must be in scope for a later (non-lambda) local that uses it.
     let json = eval(
