@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use indexmap::IndexMap;
@@ -8,6 +9,8 @@ use crate::parser::{Entry, Expr, TypeExpr};
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CapturedScope {
     pub values: IndexMap<String, Value>,
+    /// Names in `values` declared in a lexically enclosing body.
+    pub declared: HashSet<String>,
     pub module_identities: IndexMap<String, String>,
     pub type_aliases: IndexMap<String, TypeExpr>,
     pub type_namespace: Option<String>,

@@ -2246,6 +2246,16 @@ item = new Item {}
         dir.join("main.pkl"),
         r#"
 import "Lib.pkl"
+result = (Lib.item) { selected = later }
+"#,
+    )
+    .unwrap();
+    // A local of the amending module is resolved before the object's
+    // inherited members, as in Pkl.
+    std::fs::write(
+        dir.join("shadowed.pkl"),
+        r#"
+import "Lib.pkl"
 local later = "module"
 result = (Lib.item) { selected = later }
 "#,
@@ -2258,6 +2268,13 @@ result = (Lib.item) { selected = later }
     assert_eq!(
         json["result"],
         serde_json::json!({"selected": "inherited", "later": "inherited"})
+    );
+    let json = pklr::eval_to_json_async(&dir.join("shadowed.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        json["result"],
+        serde_json::json!({"selected": "module", "later": "inherited"})
     );
 }
 
@@ -2366,6 +2383,7 @@ async fn derived_class_amendment_seeds_inherited_property_values() {
         dir.join("Base.pkl"),
         r#"
 open class Parent {
+    selected = "parent default"
     later = "parent property"
 }
 "#,
@@ -2395,7 +2413,7 @@ result = Middle.item
         .unwrap();
     assert_eq!(
         json["result"],
-        serde_json::json!({"later": "parent property", "selected": "parent property"})
+        serde_json::json!({"later": "parent property", "selected": "child module"})
     );
 }
 
@@ -7479,6 +7497,77 @@ values = new Mapping<String, String> {
 "#,
     );
     assert_eq!(json["values"]["message"], "[value:ok]");
+}
+
+#[test]
+fn mapping_local_const_wins_over_same_named_member_of_typed_entry() {
+    // Pkl resolves a name in the lexically enclosing bodies before the
+    // object's inherited members, so `after` is the local, not the
+    // `StepTest.after` property (which is null), with or without amending
+    // the enclosing object.
+    let json = eval(
+        r#"
+class StepTest {
+    before: String?
+    after: String?
+    write: Mapping<String, String> = new Mapping<String, String> {}
+}
+open class Step {
+    glob: String?
+    tests: Mapping<String, StepTest> = new Mapping<String, StepTest> {}
+}
+step = new Step {
+    tests {
+        local const after = "formatted"
+        ["nested"] { write { ["a.json"] = after } }
+        ["direct"] { before = after }
+    }
+}
+amended = (step) { glob = "*.json" }
+"#,
+    );
+    for name in ["step", "amended"] {
+        let tests = &json[name]["tests"];
+        assert_eq!(tests["nested"]["write"]["a.json"], "formatted", "{name}");
+        assert_eq!(tests["direct"]["before"], "formatted", "{name}");
+    }
+    assert_eq!(json["amended"]["glob"], "*.json");
+}
+
+#[test]
+fn only_members_declared_in_an_enclosing_body_shadow_inherited_members() {
+    let json = eval(
+        r#"
+open class Inner {
+    name: String = "inner default"
+    label: String?
+    seen: Any
+}
+open class Outer {
+    name: String = "outer default"
+    label: String? = "outer label"
+    inner: Any
+}
+name = "module"
+fromModule = new Inner { seen = name }
+inherited = new Outer { inner = new Inner { seen = label } }
+declared = new Outer {
+    label = "outer body"
+    inner = new Inner { seen = label }
+}
+fromLocal = new Outer {
+    local label = "outer local"
+    inner = new Inner { seen = label }
+}
+"#,
+    );
+    // A module property is declared in the module body.
+    assert_eq!(json["fromModule"]["seen"], "module");
+    // `Outer.label` is inherited by the outer object, so `label` resolves
+    // through the inner object's implicit `this`.
+    assert_eq!(json["inherited"]["inner"]["seen"], serde_json::Value::Null);
+    assert_eq!(json["declared"]["inner"]["seen"], "outer body");
+    assert_eq!(json["fromLocal"]["inner"]["seen"], "outer local");
 }
 
 #[test]

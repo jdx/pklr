@@ -1369,8 +1369,10 @@ impl Evaluator {
                         .eval_expr(prop.value.as_ref().unwrap(), &scope, depth)
                         .await
                     {
-                        Ok(val) => scope.set(prop.name.clone(), val),
-                        Err(Error::Eval(message)) => scope.poison(prop.name.clone(), message),
+                        Ok(val) => scope.declare(prop.name.clone(), val),
+                        Err(Error::Eval(message)) => {
+                            scope.declare_poisoned(prop.name.clone(), message)
+                        }
                         Err(error) => return Err(error),
                     }
                 }
@@ -1378,7 +1380,7 @@ impl Evaluator {
                     let defaults = self
                         .eval_class_def(name, class_mods, parent.as_deref(), body, &scope, depth)
                         .await?;
-                    scope.set(name.clone(), defaults);
+                    scope.declare(name.clone(), defaults);
                 }
                 Entry::TypeAlias(name, ty) => {
                     self.eval_type_alias(name, ty, &mut scope);
@@ -1499,7 +1501,7 @@ impl Evaluator {
                         )));
                     }
                     // Always add to scope so other properties can reference it
-                    scope.set(prop.name.clone(), v.clone());
+                    scope.declare(prop.name.clone(), v.clone());
                     // Track in all_props (including hidden) for `this`/`module`
                     all_props.insert(prop.name.clone(), v.clone());
                     if !has_modifier(mods, Modifier::Hidden)
@@ -1851,6 +1853,7 @@ impl Evaluator {
         inherited_source: Option<&ObjectSource>,
     ) -> Result<Value> {
         let mut child_scope = scope.child();
+        let entry_owners = entry_scope_owners(entries, entry_scopes);
         if let Some(source) = inherited_source {
             for entry in &source.entries {
                 if let Entry::Property(prop) = entry
@@ -1893,7 +1896,8 @@ impl Evaluator {
         // to a second pass so they capture the fully-populated scope.
         let mut deferred_lambdas: Vec<(String, &crate::parser::Expr, usize)> = Vec::new();
         for (entry_index, entry) in entries.iter().enumerate() {
-            let active_scope = scope_for_object_entry(entry_index, &child_scope, entry_scopes);
+            let active_scope =
+                scope_for_object_entry(entry_index, &child_scope, entry_scopes, &entry_owners);
             match entry {
                 Entry::Property(prop)
                     if has_modifier(&prop.modifiers, Modifier::Local) && prop.value.is_some() =>
@@ -1904,13 +1908,15 @@ impl Evaluator {
                     // calls a lambda local defined just above it).
                     match self.eval_expr(expr, &active_scope, depth).await {
                         Ok(val) => {
-                            child_scope.set(prop.name.clone(), val);
+                            child_scope.declare(prop.name.clone(), val);
                             if matches!(expr, Expr::Ident(name) if name == "this" || this_aliases.contains(name))
                             {
                                 this_aliases.push(prop.name.clone());
                             }
                         }
-                        Err(Error::Eval(message)) => child_scope.poison(prop.name.clone(), message),
+                        Err(Error::Eval(message)) => {
+                            child_scope.declare_poisoned(prop.name.clone(), message)
+                        }
                         Err(error) => return Err(error),
                     }
                     if matches!(expr, crate::parser::Expr::Lambda(..)) {
@@ -1932,7 +1938,7 @@ impl Evaluator {
                             depth,
                         )
                         .await?;
-                    child_scope.set(name.clone(), defaults);
+                    child_scope.declare(name.clone(), defaults);
                 }
                 Entry::TypeAlias(name, ty) => {
                     let mut resolved_scope = active_scope;
@@ -1954,7 +1960,8 @@ impl Evaluator {
             if prop.name != "default" || has_modifier(&prop.modifiers, Modifier::Local) {
                 continue;
             }
-            let mut active_scope = scope_for_object_entry(entry_index, &child_scope, entry_scopes);
+            let mut active_scope =
+                scope_for_object_entry(entry_index, &child_scope, entry_scopes, &entry_owners);
             if let Some(template) = &default_template {
                 active_scope.set("default".into(), template.clone());
             }
@@ -1980,10 +1987,14 @@ impl Evaluator {
                         continue; // abstract without value — skip (must be overridden)
                     }
                     refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
-                    let active_scope =
-                        scope_for_object_entry(entry_index, &child_scope, entry_scopes);
+                    let active_scope = scope_for_object_entry(
+                        entry_index,
+                        &child_scope,
+                        entry_scopes,
+                        &entry_owners,
+                    );
                     if let Some(v) = self.eval_property(prop, &active_scope, depth).await? {
-                        child_scope.set(prop.name.clone(), v.clone());
+                        child_scope.declare(prop.name.clone(), v.clone());
                         all_props.insert(prop.name.clone(), v.clone());
                         if !has_modifier(mods, Modifier::Hidden) {
                             map.insert(prop.name.clone(), v);
@@ -1992,8 +2003,12 @@ impl Evaluator {
                     }
                 }
                 Entry::DynProperty(key_expr, val_expr) => {
-                    let active_scope =
-                        scope_for_object_entry(entry_index, &child_scope, entry_scopes);
+                    let active_scope = scope_for_object_entry(
+                        entry_index,
+                        &child_scope,
+                        entry_scopes,
+                        &entry_owners,
+                    );
                     let key = self.eval_expr(key_expr, &active_scope, depth).await?;
                     let key_str = value_to_key(&key)?;
                     // `["key"] { ... }` amends an entry inherited from the parent
@@ -2070,8 +2085,12 @@ impl Evaluator {
                     refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                 }
                 Entry::Spread(expr) => {
-                    let active_scope =
-                        scope_for_object_entry(entry_index, &child_scope, entry_scopes);
+                    let active_scope = scope_for_object_entry(
+                        entry_index,
+                        &child_scope,
+                        entry_scopes,
+                        &entry_owners,
+                    );
                     let val = self.eval_expr(expr, &active_scope, depth).await?;
                     if let Value::Object(m, _) = val {
                         all_props.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
@@ -2080,8 +2099,12 @@ impl Evaluator {
                     }
                 }
                 Entry::ForGenerator(fgen) => {
-                    let active_scope =
-                        scope_for_object_entry(entry_index, &child_scope, entry_scopes);
+                    let active_scope = scope_for_object_entry(
+                        entry_index,
+                        &child_scope,
+                        entry_scopes,
+                        &entry_owners,
+                    );
                     let collection = self
                         .eval_expr(&fgen.collection, &active_scope, depth)
                         .await?;
@@ -2101,8 +2124,12 @@ impl Evaluator {
                     }
                 }
                 Entry::WhenGenerator(wgen) => {
-                    let active_scope =
-                        scope_for_object_entry(entry_index, &child_scope, entry_scopes);
+                    let active_scope = scope_for_object_entry(
+                        entry_index,
+                        &child_scope,
+                        entry_scopes,
+                        &entry_owners,
+                    );
                     let cond = self
                         .eval_expr(&wgen.condition, &active_scope, depth)
                         .await?;
@@ -2130,7 +2157,8 @@ impl Evaluator {
         // properties so they capture overridden values (late binding).
         refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
         for (name, expr, entry_index) in deferred_lambdas {
-            let active_scope = scope_for_object_entry(entry_index, &child_scope, entry_scopes);
+            let active_scope =
+                scope_for_object_entry(entry_index, &child_scope, entry_scopes, &entry_owners);
             let val = self.eval_expr(expr, &active_scope, depth).await?;
             child_scope.set(name, val);
         }
@@ -2694,7 +2722,11 @@ impl Evaluator {
     ) -> Result<Value> {
         let mut template_scope = scope.child();
         for (key, value) in template_map.iter() {
-            template_scope.set(key.clone(), value.clone());
+            // Template members are inherited, so a name declared in an
+            // enclosing body takes precedence (see `scope_with_object_bindings`).
+            if !scope.is_declared(key) {
+                template_scope.set(key.clone(), value.clone());
+            }
         }
         let mut overlay = self.eval_entries(body, &template_scope, depth + 1).await?;
         // Properties the template's class declares `hidden` stay out of the
@@ -2737,7 +2769,7 @@ impl Evaluator {
                 Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {
                     if let Some(expr) = &prop.value {
                         let value = self.eval_expr(expr, &listing_scope, depth + 1).await?;
-                        listing_scope.set(prop.name.clone(), value);
+                        listing_scope.declare(prop.name.clone(), value);
                     }
                 }
                 Entry::Elem(expr) => {
@@ -3963,7 +3995,7 @@ impl Evaluator {
                     // entries can reference it (e.g. a non-lambda local that
                     // calls a lambda local defined just above it).
                     let val = self.eval_expr(expr, &entry_scope, depth).await?;
-                    entry_scope.set(prop.name.clone(), val);
+                    entry_scope.declare(prop.name.clone(), val);
                     if matches!(expr, crate::parser::Expr::Lambda(..)) {
                         // Lambda evaluation only captures the current scope; it
                         // does not run the body. Bind once for declaration-order
@@ -3978,7 +4010,7 @@ impl Evaluator {
                     let val = self
                         .eval_entries(prop.body.as_ref().unwrap(), &entry_scope, depth)
                         .await?;
-                    entry_scope.set(prop.name.clone(), val);
+                    entry_scope.declare(prop.name.clone(), val);
                 }
                 Entry::ClassDef(name, class_mods, parent, body) => {
                     let defaults = self
@@ -5503,6 +5535,12 @@ struct Scope {
     type_aliases: IndexMap<String, crate::parser::TypeExpr>,
     module_identities: IndexMap<String, String>,
     poisoned: IndexMap<String, String>,
+    /// Names in `vars` or `poisoned` declared by an entry written in the body
+    /// that owns this scope, as opposed to members an object inherits from its
+    /// class or parent. Pkl resolves a name in lexically enclosing bodies
+    /// before falling back to the object's inherited members, so only these
+    /// declared names may win over an inherited member of an inner object.
+    declared: HashSet<String>,
     type_namespace: Option<String>,
     parent: Option<Rc<Scope>>,
 }
@@ -5514,6 +5552,7 @@ impl Scope {
             type_aliases: IndexMap::new(),
             module_identities: IndexMap::new(),
             poisoned: IndexMap::new(),
+            declared: HashSet::new(),
             type_namespace: self.type_namespace.clone(),
             parent: Some(Rc::new(self.clone())),
         }
@@ -5530,6 +5569,46 @@ impl Scope {
         self.poisoned.shift_remove(&name);
         self.module_identities.shift_remove(&name);
         self.vars.insert(name, val);
+    }
+
+    /// Bind a name declared in the body that owns this scope.
+    fn declare(&mut self, name: String, val: Value) {
+        self.declared.insert(name.clone());
+        self.set(name, val);
+    }
+
+    /// Poison a local declared in the body that owns this scope.
+    fn declare_poisoned(&mut self, name: String, message: String) {
+        self.declared.insert(name.clone());
+        self.poison(name, message);
+    }
+
+    /// Whether the innermost binding of `name` was declared in a body rather
+    /// than inherited from a class or parent object.
+    fn is_declared(&self, name: &str) -> bool {
+        if self.vars.contains_key(name) || self.poisoned.contains_key(name) {
+            self.declared.contains(name)
+        } else {
+            self.parent
+                .as_ref()
+                .is_some_and(|parent| parent.is_declared(name))
+        }
+    }
+
+    fn flatten_declared(&self) -> HashSet<String> {
+        let mut declared = self
+            .parent
+            .as_ref()
+            .map(|parent| parent.flatten_declared())
+            .unwrap_or_default();
+        for name in self.vars.keys().chain(self.poisoned.keys()) {
+            if self.declared.contains(name) {
+                declared.insert(name.clone());
+            } else {
+                declared.remove(name);
+            }
+        }
+        declared
     }
 
     fn set_module_identity(&mut self, name: String, identity: String) {
@@ -5615,6 +5694,7 @@ impl Scope {
 fn capture_scope(scope: &Scope) -> CapturedScope {
     CapturedScope {
         values: scope.flatten(),
+        declared: scope.flatten_declared(),
         module_identities: scope.flatten_module_identities(),
         type_aliases: scope.flatten_type_aliases(),
         type_namespace: scope.type_namespace.clone(),
@@ -5630,6 +5710,7 @@ fn capture_object_source_scope(source: &ObjectSource) -> CapturedScope {
         .map(str::to_owned);
     CapturedScope {
         values: source.scope.clone(),
+        declared: HashSet::new(),
         module_identities: source.scope_module_identities.clone(),
         type_aliases: source.scope_type_aliases.clone(),
         type_namespace,
@@ -5644,6 +5725,7 @@ fn restore_scope(captured: &CapturedScope) -> Scope {
     for (name, value) in &captured.values {
         scope.set(name.clone(), value.clone());
     }
+    scope.declared = captured.declared.clone();
     for (name, identity) in &captured.module_identities {
         scope.set_module_identity(name.clone(), identity.clone());
     }
@@ -5657,24 +5739,83 @@ fn scope_for_object_entry(
     entry_index: usize,
     object: &Scope,
     entry_scopes: Option<&[Option<Arc<CapturedScope>>]>,
+    entry_owners: &[Rc<HashSet<String>>],
 ) -> Scope {
     entry_scopes
         .and_then(|scopes| scopes.get(entry_index))
         .and_then(Option::as_deref)
         .map(restore_scope)
-        .map(|lexical| scope_with_object_bindings(&lexical, object))
+        .map(|lexical| {
+            let none = HashSet::new();
+            let owned = entry_owners.get(entry_index).map_or(&none, Rc::as_ref);
+            scope_with_object_bindings(&lexical, object, owned)
+        })
         .unwrap_or_else(|| object.clone())
+}
+
+/// For each entry evaluated in a captured lexical scope, the names declared by
+/// the entries written in the same body (those sharing that captured scope).
+fn entry_scope_owners(
+    entries: &[Entry],
+    entry_scopes: Option<&[Option<Arc<CapturedScope>>]>,
+) -> Vec<Rc<HashSet<String>>> {
+    let Some(entry_scopes) = entry_scopes else {
+        return Vec::new();
+    };
+    let mut groups: HashMap<*const CapturedScope, HashSet<String>> = HashMap::new();
+    for (entry, captured) in entries.iter().zip(entry_scopes) {
+        let Some(captured) = captured else {
+            continue;
+        };
+        let name = match entry {
+            Entry::Property(prop) => &prop.name,
+            Entry::ClassDef(name, ..) | Entry::TypeAlias(name, _) => name,
+            _ => continue,
+        };
+        groups
+            .entry(Arc::as_ptr(captured))
+            .or_default()
+            .insert(name.clone());
+    }
+    let groups = groups
+        .into_iter()
+        .map(|(ptr, names)| (ptr, Rc::new(names)))
+        .collect::<HashMap<_, _>>();
+    entry_scopes
+        .iter()
+        .map(|captured| {
+            captured
+                .as_ref()
+                .and_then(|captured| groups.get(&Arc::as_ptr(captured)))
+                .cloned()
+                .unwrap_or_default()
+        })
+        .collect()
 }
 
 /// Evaluate an object entry in its lexical module while keeping the locals and
 /// sibling properties accumulated for the object instance itself.
-fn scope_with_object_bindings(lexical: &Scope, object: &Scope) -> Scope {
+///
+/// `owned` names the members declared by the body the entry was written in.
+/// The object's other members are inherited, and Pkl only resolves those
+/// through implicit `this` after the lexically enclosing bodies, so a name
+/// declared in an enclosing body (such as a `local` of an outer object) is not
+/// shadowed by an inherited member of the same name.
+fn scope_with_object_bindings(lexical: &Scope, object: &Scope, owned: &HashSet<String>) -> Scope {
     let mut scope = lexical.child();
     for (name, value) in &object.vars {
-        scope.set(name.clone(), value.clone());
+        if owned.contains(name) {
+            scope.declare(name.clone(), value.clone());
+        } else if !lexical.is_declared(name) {
+            scope.set(name.clone(), value.clone());
+        }
     }
     for (name, message) in &object.poisoned {
-        scope.poison(name.clone(), message.clone());
+        if owned.contains(name) {
+            scope.declare_poisoned(name.clone(), message.clone());
+        } else if !lexical.is_declared(name) {
+            scope.poison(name.clone(), message.clone());
+        }
     }
     for (name, ty) in &object.type_aliases {
         scope.set_type_alias(name.clone(), ty.clone());
