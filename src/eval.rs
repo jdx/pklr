@@ -808,6 +808,19 @@ impl Evaluator {
         if depth > self.max_depth {
             return Err(Error::Eval("maximum recursion depth exceeded".into()));
         }
+        if let Some(Value::List(items)) = scope.get("super") {
+            let mut length = scope.receiver_list_base.unwrap_or(items.len());
+            if let Some(entries) = &scope.receiver_entries {
+                self.eval_listing_length(entries, scope, depth + 1, &mut length)
+                    .await?;
+            }
+            return match field {
+                "length" => Ok(Value::Int(length as i64)),
+                "isEmpty" => Ok(Value::Bool(length == 0)),
+                "isNotEmpty" => Ok(Value::Bool(length != 0)),
+                _ => Err(Error::Eval(format!("field not found: {field}"))),
+            };
+        }
         let Some(Value::Object(map, source)) = scope.get("super") else {
             return Err(Error::Eval("undefined variable: super".into()));
         };
@@ -868,7 +881,12 @@ impl Evaluator {
             }
         }
         match field {
-            "length" | "keys" | "isEmpty" | "isNotEmpty" if property_access => {
+            "length" | "keys" | "isEmpty" | "isNotEmpty"
+                if property_access
+                    && source
+                        .as_ref()
+                        .is_none_or(|source| source.type_name.is_none()) =>
+            {
                 let mut keys = IndexMap::new();
                 if let Some(entries) = &scope.receiver_entries {
                     self.eval_receiver_keys(entries, scope, depth + 1, &mut keys)
@@ -961,6 +979,77 @@ impl Evaluator {
                     };
                     if let Some(body) = selected {
                         self.eval_receiver_keys(body, &scope, depth + 1, keys)
+                            .await?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Count listing members without evaluating element values, so metadata
+    /// can be read by an element itself without recursing into that element.
+    #[async_recursion(?Send)]
+    async fn eval_listing_length(
+        &mut self,
+        entries: &[Entry],
+        scope: &Scope,
+        depth: usize,
+        length: &mut usize,
+    ) -> Result<()> {
+        if depth > self.max_depth {
+            return Err(Error::Eval("maximum recursion depth exceeded".into()));
+        }
+        let mut scope = scope.child();
+        for entry in entries {
+            match entry {
+                Entry::Elem(_) => *length += 1,
+                Entry::DynProperty(index, _) => {
+                    let index = self.eval_expr(index, &scope, depth + 1).await?;
+                    if let Value::Int(index) = index
+                        && usize::try_from(index).ok() == Some(*length)
+                    {
+                        *length += 1;
+                    }
+                }
+                Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {
+                    if let Some(value) = self.eval_property(prop, &scope, depth + 1).await? {
+                        scope.declare(prop.name.clone(), value);
+                    }
+                }
+                Entry::Spread(expr) => {
+                    *length += match self.eval_expr(expr, &scope, depth + 1).await? {
+                        Value::List(items) => items.len(),
+                        Value::Object(items, _) => items.len(),
+                        _ => 1,
+                    };
+                }
+                Entry::ForGenerator(generator) => {
+                    let collection = self
+                        .eval_expr(&generator.collection, &scope, depth + 1)
+                        .await?;
+                    for (key, value) in collection_to_items(collection) {
+                        let mut iter = scope.child();
+                        iter.set(generator.val_var.clone(), value);
+                        if let Some(name) = &generator.key_var {
+                            iter.set(name.clone(), key);
+                        }
+                        self.eval_listing_length(&generator.body, &iter, depth + 1, length)
+                            .await?;
+                    }
+                }
+                Entry::WhenGenerator(generator) => {
+                    let condition = self
+                        .eval_expr(&generator.condition, &scope, depth + 1)
+                        .await?;
+                    let selected = if is_truthy(&condition) {
+                        Some(generator.body.as_slice())
+                    } else {
+                        generator.else_body.as_deref()
+                    };
+                    if let Some(body) = selected {
+                        self.eval_listing_length(body, &scope, depth + 1, length)
                             .await?;
                     }
                 }
@@ -1929,6 +2018,8 @@ impl Evaluator {
                 };
                 let mut amendment_scope = scope.child();
                 amendment_scope.set("super".into(), Value::List(items.clone()));
+                amendment_scope.receiver_entries = Some(Arc::new(body.to_vec()));
+                amendment_scope.receiver_list_base = Some(items.len());
                 self.eval_listing_entries(body, &amendment_scope, depth, &mut items)
                     .await?;
                 return Ok(Some(Value::List(items)));
@@ -1948,7 +2039,10 @@ impl Evaluator {
                         "super".into(),
                         Value::Object(Arc::clone(existing_map), Some(Arc::clone(src))),
                     );
-                    let mut receiver_entries = src.entries.clone();
+                    let mut receiver_entries = existing_map
+                        .keys()
+                        .map(|key| Entry::DynProperty(Expr::String(key.clone()), Expr::Null))
+                        .collect::<Vec<_>>();
                     receiver_entries.extend_from_slice(body);
                     amendment_scope.receiver_entries = Some(Arc::new(receiver_entries));
                     let value_type_defaults = src
@@ -2029,7 +2123,10 @@ impl Evaluator {
         scope: &Scope,
         depth: usize,
     ) -> Result<Value> {
-        self.eval_entries_with_lexical_scopes(entries, scope, depth, None, None)
+        let mut receiver_scope = scope.clone();
+        receiver_scope.receiver_entries = Some(Arc::new(entries.to_vec()));
+        receiver_scope.receiver_list_base = None;
+        self.eval_entries_with_lexical_scopes(entries, &receiver_scope, depth, None, None)
             .await
     }
 
@@ -2043,7 +2140,6 @@ impl Evaluator {
         inherited_source: Option<&ObjectSource>,
     ) -> Result<Value> {
         let mut child_scope = scope.child();
-        child_scope.receiver_entries = Some(Arc::new(entries.to_vec()));
         let entry_owners = entry_scope_owners(entries, entry_scopes, inherited_source);
         let own_body = own_body_names(entries, entry_scopes, inherited_source);
         // Entries without a captured scope belong to the object's own
@@ -2344,7 +2440,15 @@ impl Evaluator {
                         if let Some(key_var) = &fgen.key_var {
                             iter_scope.set(key_var.clone(), k);
                         }
-                        let body_val = self.eval_entries(&fgen.body, &iter_scope, depth).await?;
+                        let body_val = self
+                            .eval_entries_with_lexical_scopes(
+                                &fgen.body,
+                                &iter_scope,
+                                depth,
+                                None,
+                                None,
+                            )
+                            .await?;
                         if let Value::Object(m, _) = body_val {
                             all_props.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
                             map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
@@ -2364,14 +2468,30 @@ impl Evaluator {
                         .eval_expr(&wgen.condition, &active_scope, depth)
                         .await?;
                     if is_truthy(&cond) {
-                        let body_val = self.eval_entries(&wgen.body, &active_scope, depth).await?;
+                        let body_val = self
+                            .eval_entries_with_lexical_scopes(
+                                &wgen.body,
+                                &active_scope,
+                                depth,
+                                None,
+                                None,
+                            )
+                            .await?;
                         if let Value::Object(m, _) = body_val {
                             all_props.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
                             map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
                             refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                         }
                     } else if let Some(else_body) = &wgen.else_body {
-                        let else_val = self.eval_entries(else_body, &active_scope, depth).await?;
+                        let else_val = self
+                            .eval_entries_with_lexical_scopes(
+                                else_body,
+                                &active_scope,
+                                depth,
+                                None,
+                                None,
+                            )
+                            .await?;
                         if let Value::Object(m, _) = else_val {
                             all_props.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
                             map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
@@ -2935,6 +3055,7 @@ impl Evaluator {
 
         // Evaluate the merged entries (eval_entries handles locals, classes,
         // and evaluates properties in order with each added to scope)
+        eval_scope.receiver_entries = Some(Arc::new(merged.clone()));
         let mut result = self
             .eval_entries_with_lexical_scopes(
                 &merged,
@@ -3205,11 +3326,15 @@ impl Evaluator {
                     Value::Object(Arc::new(IndexMap::new()), None),
                 );
                 constructor_scope.receiver_entries = Some(Arc::new(entries.clone()));
+                constructor_scope.receiver_list_base = None;
                 let scope = &constructor_scope;
                 match type_name.as_deref() {
                     Some("Listing") => {
+                        let mut listing_scope = scope.child();
+                        listing_scope.set("super".into(), Value::List(Vec::new()));
+                        listing_scope.receiver_list_base = Some(0);
                         let mut items = Vec::new();
-                        self.eval_listing_entries(entries, scope, depth + 1, &mut items)
+                        self.eval_listing_entries(entries, &listing_scope, depth + 1, &mut items)
                             .await?;
                         Ok(Value::List(items))
                     }
@@ -4110,6 +4235,8 @@ impl Evaluator {
             let mut amended = existing;
             let mut amendment_scope = scope.child();
             amendment_scope.set("super".into(), Value::List(amended.clone()));
+            amendment_scope.receiver_entries = Some(Arc::new(overlay_entries.to_vec()));
+            amendment_scope.receiver_list_base = Some(amended.len());
             self.eval_listing_entries(overlay_entries, &amendment_scope, depth + 1, &mut amended)
                 .await?;
             return Ok(Value::List(amended));
@@ -4119,7 +4246,10 @@ impl Evaluator {
                 let (inherited_scope, mut amendment_scope) =
                     mapping_amendment_scopes(&base_src.scope, &base_src.scope_declared, scope);
                 amendment_scope.set("super".into(), base.clone());
-                let mut receiver_entries = base_src.entries.clone();
+                let mut receiver_entries = base_map
+                    .keys()
+                    .map(|key| Entry::DynProperty(Expr::String(key.clone()), Expr::Null))
+                    .collect::<Vec<_>>();
                 receiver_entries.extend_from_slice(overlay_entries);
                 amendment_scope.receiver_entries = Some(Arc::new(receiver_entries));
                 let value_type_defaults = base_src
@@ -5921,6 +6051,7 @@ struct Scope {
     declared: HashSet<String>,
     type_namespace: Option<String>,
     receiver_entries: Option<Arc<Vec<Entry>>>,
+    receiver_list_base: Option<usize>,
     parent: Option<Rc<Scope>>,
 }
 
@@ -5934,6 +6065,7 @@ impl Scope {
             declared: HashSet::new(),
             type_namespace: self.type_namespace.clone(),
             receiver_entries: self.receiver_entries.clone(),
+            receiver_list_base: self.receiver_list_base,
             parent: Some(Rc::new(self.clone())),
         }
     }
@@ -6234,6 +6366,7 @@ fn own_body_names(
 fn scope_with_object_bindings(lexical: &Scope, object: &Scope, owned: &HashSet<String>) -> Scope {
     let mut scope = lexical.child();
     scope.receiver_entries = object.receiver_entries.clone();
+    scope.receiver_list_base = object.receiver_list_base;
     for (name, value) in &object.vars {
         // `super` belongs to the body that declared the entry. A later
         // amendment must not replace an inherited entry's parent binding.

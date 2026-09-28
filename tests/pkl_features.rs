@@ -8773,3 +8773,70 @@ result = new Base { length = super.length + 1 }
     );
     assert_eq!(v["result"]["length"], 11);
 }
+
+#[test]
+fn super_metadata_is_not_available_on_typed_objects() {
+    for name in ["length", "keys", "isEmpty", "isNotEmpty"] {
+        let source = format!(
+            r#"
+class Base {{ value: Int = 1; result: Any }}
+result = new Base {{ result = super.{name} }}
+"#
+        );
+        assert!(eval_fails(&source).contains(&format!("field not found: {name}")));
+    }
+}
+
+#[test]
+fn super_metadata_inside_generators_uses_complete_receiver() {
+    let v = eval(
+        r#"
+local base = new Mapping { ["base"] = 1 }
+result = (base) {
+  for (name in List("one", "two")) {
+    when (true) { [name] = super.length }
+  }
+  when (false) { ["notUsed"] = 0 } else { ["allKeys"] = super.keys }
+  ["end"] = 2
+}
+"#,
+    );
+    assert_eq!(v["result"]["one"], 5);
+    assert_eq!(v["result"]["two"], 5);
+    assert_eq!(
+        v["result"]["allKeys"],
+        serde_json::json!(["base", "one", "two", "allKeys", "end"])
+    );
+}
+
+#[test]
+fn super_metadata_keeps_all_typed_mapping_amendment_keys() {
+    let v = eval(
+        r#"
+local base = new Mapping<String, Any> { ["a"] = 1 }
+local middle = (base) { ["b"] = 2 }
+result = (middle) { ["count"] = super.length; ["allKeys"] = super.keys }
+local object = new { m = middle }
+nested = (object) { m { ["count"] = super.length; ["allKeys"] = super.keys } }
+"#,
+    );
+    let expected = serde_json::json!({"a":1,"b":2,"count":4,"allKeys":["a","b","count","allKeys"]});
+    assert_eq!(v["result"], expected);
+    assert_eq!(v["nested"]["m"], expected);
+}
+
+#[test]
+fn super_listing_metadata_uses_amended_receiver() {
+    let v = eval(
+        r#"
+local base = new Listing { 1; 2 }
+result = (base) { super.length; super.isEmpty }
+local object = new { xs = base }
+nested = (object) { xs { [0] = super.length } }
+generated = (base) { for (i in List(1,2)) { when (true) { super.length } } }
+"#,
+    );
+    assert_eq!(v["result"], serde_json::json!([1, 2, 4, false]));
+    assert_eq!(v["nested"]["xs"], serde_json::json!([2, 2]));
+    assert_eq!(v["generated"], serde_json::json!([1, 2, 4, 4]));
+}

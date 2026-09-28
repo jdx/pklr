@@ -908,6 +908,7 @@ impl<'a> Parser<'a> {
                         | TokenKind::BoolLit(_)
                         | TokenKind::Null
                         | TokenKind::KwNew
+                        | TokenKind::KwSuper
                         | TokenKind::KwImport
                         | TokenKind::KwImportStar
                         | TokenKind::LParen
