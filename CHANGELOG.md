@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.3](https://github.com/jdx/pklr/compare/v3.0.2...v3.0.3) - 2026-09-28
+
+### Fixed
+
+- *(eval)* preserve function parameter precedence in typed objects ([#212](https://github.com/jdx/pklr/pull/212))
+
+### Other
+
+- split evaluator, parser, lexer, and feature tests into modules ([#213](https://github.com/jdx/pklr/pull/213))
+
 ## [3.0.2](https://github.com/jdx/pklr/compare/v3.0.1...v3.0.2) - 2026-09-28
 
 ### Fixed
