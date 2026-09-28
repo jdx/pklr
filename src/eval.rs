@@ -833,6 +833,7 @@ impl Evaluator {
                             target,
                             &mut position,
                             &mut value,
+                            &[],
                         )
                         .await?;
                     }
@@ -3157,13 +3158,48 @@ impl Evaluator {
         scope: &Scope,
         depth: usize,
     ) -> Result<Value> {
-        self.eval_amended_object(template_map, template_src, body, scope, depth)
+        // This template combines already-evaluated type and explicit defaults.
+        // Its original source describes only the type default, so retain the
+        // merged values as source bindings before applying the entry body.
+        let mut source = (**template_src).clone();
+        for (key, value) in template_map.iter() {
+            let binding = format!("\0mapping_template:{key}");
+            source.scope.insert(binding.clone(), value.clone());
+            let mut replaced = false;
+            for (index, entry) in source.entries.iter_mut().enumerate() {
+                if let Entry::Property(prop) = entry
+                    && prop.name == *key
+                    && !has_modifier(&prop.modifiers, Modifier::Local)
+                {
+                    prop.value = Some(Expr::Ident(binding.clone()));
+                    prop.body = None;
+                    if let Some(entry_scope) = source.entry_scopes.get_mut(index) {
+                        *entry_scope = None;
+                    }
+                    replaced = true;
+                }
+            }
+            if !replaced {
+                source.entries.push(Entry::Property(Property {
+                    annotations: Vec::new(),
+                    modifiers: Vec::new(),
+                    name: key.clone(),
+                    type_ann: None,
+                    value: Some(Expr::Ident(binding)),
+                    body: None,
+                }));
+                source.entry_scopes.resize(source.entries.len(), None);
+            }
+            source.body_members.insert(key.clone());
+        }
+        self.eval_amended_object(template_map, &source, body, scope, depth)
             .await
     }
 
     /// Read one member of the amended receiver without forcing unrelated
     /// elements (which may themselves reference super.first or super.last).
     #[async_recursion(?Send)]
+    #[allow(clippy::too_many_arguments)]
     async fn eval_listing_member(
         &mut self,
         entries: &[Entry],
@@ -3172,12 +3208,13 @@ impl Evaluator {
         target: usize,
         position: &mut usize,
         value: &mut Option<Value>,
+        inherited_locals: &[(String, Expr)],
     ) -> Result<()> {
         if depth > self.max_depth {
             return Err(Error::Eval("maximum recursion depth exceeded".into()));
         }
         let scope = scope.child();
-        let mut locals = Vec::new();
+        let mut locals = inherited_locals.to_vec();
         for entry in entries {
             match entry {
                 Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {
@@ -3206,8 +3243,20 @@ impl Evaluator {
                     if index == target {
                         *value = Some(
                             if let (Some(base), Expr::ObjectBody(body)) = (value.as_ref(), expr) {
-                                self.eval_value_amendment(base.clone(), body, &scope, depth + 1)
-                                    .await?
+                                let mut amendment_scope = scope.child();
+                                let base_name = "\0listing_endpoint_base".to_string();
+                                amendment_scope.set(base_name.clone(), base.clone());
+                                let amendment = Expr::Binop(
+                                    BinOp::Add,
+                                    Box::new(Expr::Ident(base_name)),
+                                    Box::new(Expr::ObjectBody(body.clone())),
+                                );
+                                self.eval_expr(
+                                    &with_listing_locals(&amendment, &locals),
+                                    &amendment_scope,
+                                    depth + 1,
+                                )
+                                .await?
                             } else {
                                 self.eval_expr(
                                     &with_listing_locals(expr, &locals),
@@ -3248,6 +3297,7 @@ impl Evaluator {
                             target,
                             position,
                             value,
+                            &locals,
                         )
                         .await?;
                     }
@@ -3269,6 +3319,7 @@ impl Evaluator {
                             target,
                             position,
                             value,
+                            &locals,
                         )
                         .await?;
                     }
@@ -4664,7 +4715,7 @@ impl Evaluator {
                         && let Expr::ObjectBody(body) = val_expr
                     {
                         let val = self
-                            .eval_object_body_over_template(
+                            .eval_amended_object(
                                 existing_map,
                                 existing_src,
                                 body,

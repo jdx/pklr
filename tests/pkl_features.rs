@@ -9204,3 +9204,61 @@ amended = (base) { super.last; local n = 7; n }
     assert_eq!(v["last"], serde_json::json!([2, 2]));
     assert_eq!(v["amended"], serde_json::json!([1, 7, 7]));
 }
+
+#[test]
+fn mapping_explicit_value_default_survives_entry_body() {
+    let v = eval(
+        r#"
+class Item { shared: Boolean = false; name: String = "" }
+result = new Mapping<String, Item> {
+  default = new { shared = true; extra = 7 }
+  ["a"] { name = "a" }
+}
+"#,
+    );
+    assert_eq!(
+        v["result"]["a"],
+        serde_json::json!({"shared":true,"name":"a","extra":7})
+    );
+}
+
+#[test]
+fn listing_super_endpoints_keep_locals_in_generator_bodies() {
+    let v = eval(
+        r#"
+first = new Listing { local n = 7; for (x in List(1)) { n }; super.first }
+last = new Listing { local n = 8; super.last; when (true) { n } }
+"#,
+    );
+    assert_eq!(v["first"], serde_json::json!([7, 7]));
+    assert_eq!(v["last"], serde_json::json!([8, 8]));
+}
+
+#[test]
+fn listing_super_endpoint_index_amendments_keep_locals() {
+    let v = eval(
+        r#"
+local base = new Listing { new { x = 1 } }
+result = (base) { local n = 7; [0] { x = n }; super.first }
+"#,
+    );
+    assert_eq!(v["result"], serde_json::json!([{"x":7},{"x":7}]));
+}
+
+#[test]
+fn mapping_explicit_value_defaults_survive_further_amendments() {
+    let v = eval(
+        r#"
+class Item { shared: Boolean = false; name: String = "" }
+local base = new Mapping<String, Item> {
+  default = new { shared = true; extra = 7 }
+  ["a"] { name = "a" }
+}
+result = (base) { ["a"] { name = super.name + "b"; extra = super.extra + 1 } }
+"#,
+    );
+    assert_eq!(
+        v["result"]["a"],
+        serde_json::json!({"shared":true,"name":"ab","extra":8})
+    );
+}
