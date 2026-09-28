@@ -9082,3 +9082,49 @@ aliasTyped = aliased()["a"] is Step
     assert_eq!(v["typed"], true);
     assert_eq!(v["aliasTyped"], true);
 }
+
+#[test]
+fn mapping_value_amendments_bind_their_own_super() {
+    let v = eval(
+        r#"
+class Item { x: Int; hidden secret = 7 }
+local base = new Mapping<String, Item> { ["a"] { x = 1 } }
+local middle = (base) { ["a"] { x = super.x + 1 } }
+result = (middle) { ["a"] { x = super.x + super.secret } }
+"#,
+    );
+    assert_eq!(v["result"], serde_json::json!({"a":{"x":9}}));
+}
+
+#[test]
+fn listing_super_first_and_last_read_the_amended_receiver() {
+    let v = eval(
+        r#"
+local base = new Listing { 1; 2 }
+first = (base) { [0] = 3; super.first }
+last = (base) { super.last; 4 }
+generated = new Listing { for (x in List(7, 8)) { x }; super.first }
+spread = new Listing { super.last; ...List(4, 5) }
+"#,
+    );
+    assert_eq!(v["first"], serde_json::json!([3, 2, 3]));
+    assert_eq!(v["last"], serde_json::json!([1, 2, 4, 4]));
+    assert_eq!(v["generated"], serde_json::json!([7, 8, 7]));
+    assert_eq!(v["spread"], serde_json::json!([5, 4, 5]));
+    assert!(eval_fails("x = new Listing { super.last }").contains("maximum recursion depth"));
+}
+
+#[test]
+fn listing_super_endpoints_do_not_force_unrelated_locals() {
+    let v = eval(
+        r#"
+first = new Listing { 1; local x = super.first; x }
+last = new Listing { local x = super.last; x; 2 }
+local base = new Listing { 1 }
+amended = (base) { super.last; local n = 7; n }
+"#,
+    );
+    assert_eq!(v["first"], serde_json::json!([1, 1]));
+    assert_eq!(v["last"], serde_json::json!([2, 2]));
+    assert_eq!(v["amended"], serde_json::json!([1, 7, 7]));
+}

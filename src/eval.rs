@@ -818,6 +818,28 @@ impl Evaluator {
                 "length" => Ok(Value::Int(length as i64)),
                 "isEmpty" => Ok(Value::Bool(length == 0)),
                 "isNotEmpty" => Ok(Value::Bool(length != 0)),
+                "first" | "last" => {
+                    if length == 0 {
+                        return Err(Error::Eval(format!("{field} called on an empty Listing")));
+                    }
+                    let target = if field == "first" { 0 } else { length - 1 };
+                    let mut value = items.get(target).cloned();
+                    if let Some(entries) = &scope.receiver_entries {
+                        let mut position = scope.receiver_list_base.unwrap_or(items.len());
+                        self.eval_listing_member(
+                            entries,
+                            scope,
+                            depth + 1,
+                            target,
+                            &mut position,
+                            &mut value,
+                        )
+                        .await?;
+                    }
+                    value.ok_or_else(|| {
+                        Error::Eval(format!("listing index {target} is out of bounds"))
+                    })
+                }
                 _ => Err(Error::Eval(format!("field not found: {field}"))),
             };
         }
@@ -3135,39 +3157,126 @@ impl Evaluator {
         scope: &Scope,
         depth: usize,
     ) -> Result<Value> {
-        let mut template_scope = scope.child();
-        for (key, value) in template_map.iter() {
-            // Template members are inherited, so a name declared in an
-            // enclosing body takes precedence (see `scope_with_object_bindings`).
-            if !scope.is_declared(key) {
-                template_scope.set(key.clone(), value.clone());
-            }
+        self.eval_amended_object(template_map, template_src, body, scope, depth)
+            .await
+    }
+
+    /// Read one member of the amended receiver without forcing unrelated
+    /// elements (which may themselves reference super.first or super.last).
+    #[async_recursion(?Send)]
+    async fn eval_listing_member(
+        &mut self,
+        entries: &[Entry],
+        scope: &Scope,
+        depth: usize,
+        target: usize,
+        position: &mut usize,
+        value: &mut Option<Value>,
+    ) -> Result<()> {
+        if depth > self.max_depth {
+            return Err(Error::Eval("maximum recursion depth exceeded".into()));
         }
-        let mut overlay = self.eval_entries(body, &template_scope, depth + 1).await?;
-        // Properties the template's class declares `hidden` stay out of the
-        // output even when the body assigns them.
-        if let Value::Object(overlay_map, _) = &mut overlay {
-            let hidden = template_src
-                .entries
-                .iter()
-                .filter_map(|entry| match entry {
-                    Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Hidden) => {
-                        Some(prop.name.as_str())
+        let scope = scope.child();
+        let mut locals = Vec::new();
+        for entry in entries {
+            match entry {
+                Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {
+                    if let Some(expr) = &prop.value {
+                        locals.push((prop.name.clone(), expr.clone()));
                     }
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            if !hidden.is_empty() {
-                let overlay_map = Arc::make_mut(overlay_map);
-                for name in hidden {
-                    overlay_map.shift_remove(name);
                 }
+                Entry::Elem(expr) => {
+                    if *position == target {
+                        *value = Some(
+                            self.eval_expr(&with_listing_locals(expr, &locals), &scope, depth + 1)
+                                .await?,
+                        );
+                    }
+                    *position += 1;
+                }
+                Entry::DynProperty(index, expr) => {
+                    let index = self.eval_expr(index, &scope, depth + 1).await?;
+                    let Value::Int(index) = index else {
+                        return Err(Error::Eval(
+                            "listing index amendment requires an Int index".into(),
+                        ));
+                    };
+                    let index = usize::try_from(index)
+                        .map_err(|_| Error::Eval("listing index cannot be negative".into()))?;
+                    if index == target {
+                        *value = Some(
+                            if let (Some(base), Expr::ObjectBody(body)) = (value.as_ref(), expr) {
+                                self.eval_value_amendment(base.clone(), body, &scope, depth + 1)
+                                    .await?
+                            } else {
+                                self.eval_expr(
+                                    &with_listing_locals(expr, &locals),
+                                    &scope,
+                                    depth + 1,
+                                )
+                                .await?
+                            },
+                        );
+                    }
+                    *position = (*position).max(index + 1);
+                }
+                Entry::Spread(expr) => {
+                    let values = match self.eval_expr(expr, &scope, depth + 1).await? {
+                        Value::List(values) => values,
+                        Value::Object(values, _) => values.values().cloned().collect(),
+                        value => vec![value],
+                    };
+                    if target >= *position && target - *position < values.len() {
+                        *value = Some(values[target - *position].clone());
+                    }
+                    *position += values.len();
+                }
+                Entry::ForGenerator(generator) => {
+                    let collection = self
+                        .eval_expr(&generator.collection, &scope, depth + 1)
+                        .await?;
+                    for (key, item) in collection_to_items(collection) {
+                        let mut iter_scope = scope.child();
+                        iter_scope.set(generator.val_var.clone(), item);
+                        if let Some(key_var) = &generator.key_var {
+                            iter_scope.set(key_var.clone(), key);
+                        }
+                        self.eval_listing_member(
+                            &generator.body,
+                            &iter_scope,
+                            depth + 1,
+                            target,
+                            position,
+                            value,
+                        )
+                        .await?;
+                    }
+                }
+                Entry::WhenGenerator(generator) => {
+                    let condition = self
+                        .eval_expr(&generator.condition, &scope, depth + 1)
+                        .await?;
+                    let selected = if is_truthy(&condition) {
+                        Some(generator.body.as_slice())
+                    } else {
+                        generator.else_body.as_deref()
+                    };
+                    if let Some(selected) = selected {
+                        self.eval_listing_member(
+                            selected,
+                            &scope,
+                            depth + 1,
+                            target,
+                            position,
+                            value,
+                        )
+                        .await?;
+                    }
+                }
+                _ => {}
             }
         }
-        Ok(merge_values(
-            Value::Object(Arc::clone(template_map), Some(Arc::clone(template_src))),
-            overlay,
-        ))
+        Ok(())
     }
 
     #[async_recursion(?Send)]
@@ -5894,6 +6003,21 @@ fn collect_entry_refs(entries: &[Entry], refs: &mut HashSet<String>, shadows: &H
             Entry::TypeAlias(_, ty) => collect_type_refs(ty, refs, &entry_shadows),
         }
     }
+}
+
+// Wrap only the locals needed by the selected element. Forcing unrelated
+// locals here can recurse when a local itself reads super.first or super.last.
+fn with_listing_locals(expr: &Expr, locals: &[(String, Expr)]) -> Expr {
+    let mut expr = expr.clone();
+    let mut refs = HashSet::new();
+    collect_expr_refs(&expr, &mut refs, &HashSet::new());
+    for (name, value) in locals.iter().rev() {
+        if refs.remove(name) {
+            collect_expr_refs(value, &mut refs, &HashSet::new());
+            expr = Expr::Let(name.clone(), Box::new(value.clone()), Box::new(expr));
+        }
+    }
+    expr
 }
 
 fn collect_expr_refs(expr: &Expr, refs: &mut HashSet<String>, shadows: &HashSet<String>) {
