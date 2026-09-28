@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.2](https://github.com/jdx/pklr/compare/v3.0.1...v3.0.2) - 2026-09-28
+
+### Fixed
+
+- resolve super in object amendments ([#210](https://github.com/jdx/pklr/pull/210))
+- implement String.replaceLast for literal patterns ([#208](https://github.com/jdx/pklr/pull/208))
+- evaluate when generators in mappings ([#207](https://github.com/jdx/pklr/pull/207))
+- preserve class identity in inferred function results ([#209](https://github.com/jdx/pklr/pull/209))
+
 ## [3.0.1](https://github.com/jdx/pklr/compare/v3.0.0...v3.0.1) - 2026-09-27
 
 ### Fixed
