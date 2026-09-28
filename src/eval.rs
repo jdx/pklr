@@ -2972,16 +2972,27 @@ impl Evaluator {
             Expr::Lambda(params, body) => {
                 // Capture current scope values (Arc-wrapped for O(1) clone)
                 let captured = Arc::new(scope.flatten());
+                let mut body = (**body).clone();
+                capture_method_result_types(&mut body, scope);
                 let mut refs = HashSet::new();
                 let shadows = params.iter().cloned().collect::<HashSet<_>>();
-                collect_expr_refs(body, &mut refs, &shadows);
+                collect_expr_refs(&body, &mut refs, &shadows);
                 let captured_body = refs
                     .iter()
                     .filter(|name| scope.get(name).is_none())
                     .find_map(|name| scope.poison_of(name))
                     .map(|message| Expr::Throw(Box::new(Expr::String(message.clone()))))
-                    .unwrap_or_else(|| (**body).clone());
+                    .unwrap_or(body);
                 Ok(Value::Lambda(params.clone(), captured_body, captured))
+            }
+            Expr::InferredNew(ty, entries) => {
+                let (name, params) = inferred_new_type(ty, scope, 0)?;
+                self.eval_expr(
+                    &Expr::New(Some(name), entries.clone(), params),
+                    scope,
+                    depth + 1,
+                )
+                .await
             }
             Expr::New(type_name, entries, generic_params) => {
                 match type_name.as_deref() {
@@ -5131,6 +5142,10 @@ fn collect_expr_import_field_uses(
         | Expr::Trace(value)
         | Expr::Read(value)
         | Expr::ReadOrNull(value) => collect_expr_import_field_uses(value, uses, shadows),
+        Expr::InferredNew(ty, entries) => {
+            collect_type_import_field_uses(ty, uses, shadows);
+            collect_entry_import_field_uses(entries, uses, shadows);
+        }
         Expr::ObjectBody(entries) => collect_entry_import_field_uses(entries, uses, shadows),
         Expr::StringInterpolation(parts) => {
             for part in parts {
@@ -5360,7 +5375,7 @@ fn collect_sibling_field_refs_expr(expr: &Expr, refs: &mut HashSet<String>, incl
             collect_sibling_field_refs_expr(left, refs, include_this);
             collect_sibling_field_refs_expr(right, refs, include_this);
         }
-        Expr::New(_, entries, _) | Expr::ObjectBody(entries) => {
+        Expr::New(_, entries, _) | Expr::InferredNew(_, entries) | Expr::ObjectBody(entries) => {
             collect_sibling_field_refs_entries(entries, refs);
         }
         Expr::Call(callee, args) => {
@@ -5539,6 +5554,10 @@ fn collect_expr_refs(expr: &Expr, refs: &mut HashSet<String>, shadows: &HashSet<
         | Expr::Trace(value)
         | Expr::Read(value)
         | Expr::ReadOrNull(value) => collect_expr_refs(value, refs, shadows),
+        Expr::InferredNew(ty, entries) => {
+            collect_type_refs(ty, refs, shadows);
+            collect_entry_refs(entries, refs, shadows);
+        }
         Expr::ObjectBody(entries) => collect_entry_refs(entries, refs, shadows),
         Expr::StringInterpolation(parts) => {
             for part in parts {
@@ -6239,7 +6258,83 @@ fn merge_deprecated(
     out
 }
 
-/// Resolve a potentially dotted name (e.g. "Foo.Bar") in scope.
+/// Resolve return-type aliases while their definition scope is available.
+/// Value::Lambda captures values, so type aliases would otherwise be lost at
+/// invocation. Keep inference errors lazy until the selected branch is called.
+fn capture_method_result_types(expr: &mut Expr, scope: &Scope) {
+    match expr {
+        Expr::InferredNew(ty, entries) => {
+            *expr = match inferred_new_type(ty, scope, 0) {
+                Ok((name, params)) => Expr::New(Some(name), std::mem::take(entries), params),
+                Err(error) => Expr::Throw(Box::new(Expr::String(error.to_string()))),
+            };
+        }
+        Expr::If(_, then_expr, else_expr) => {
+            capture_method_result_types(then_expr, scope);
+            capture_method_result_types(else_expr, scope);
+        }
+        Expr::Let(_, _, body) | Expr::Trace(body) => capture_method_result_types(body, scope),
+        _ => {}
+    }
+}
+
+/// Resolve an implicit method-result constructor without dropping generic
+/// arguments or the default alternative of a union.
+fn inferred_new_type(
+    ty: &crate::parser::TypeExpr,
+    scope: &Scope,
+    depth: usize,
+) -> Result<(String, Vec<String>)> {
+    use crate::parser::TypeExpr;
+    if depth > 32 {
+        return Err(Error::Eval("recursive inferred return type".into()));
+    }
+    match ty {
+        TypeExpr::Nullable(inner) => inferred_new_type(inner, scope, depth + 1),
+        TypeExpr::Named(name) => {
+            let name = name.trim_start_matches('*');
+            if let Some(alias) = scope.get_type_alias(name) {
+                return inferred_new_type(alias, scope, depth + 1);
+            }
+            // Default union alternatives are stored as Named("*Type<...>").
+            if name.contains('<') || name.ends_with('?') {
+                let ty = crate::parser::parse_type_name(name)?;
+                return inferred_new_type(&ty, scope, depth + 1);
+            }
+            Ok((name.to_string(), Vec::new()))
+        }
+        TypeExpr::Generic(name, args) => Ok((
+            name.trim_start_matches('*').to_string(),
+            args.iter()
+                .enumerate()
+                .flat_map(|(index, arg)| {
+                    // The mapping constructor reserves one slot for its key
+                    // type, followed by all value-type alternatives.
+                    if index == 0 && matches!(name.as_str(), "Mapping" | "Map") {
+                        return vec![display_type_expr(arg)];
+                    }
+                    let mut names = Vec::new();
+                    collect_type_expr_class_names(arg, scope, &mut names, 0);
+                    names
+                })
+                .collect(),
+        )),
+        TypeExpr::Union(types) => {
+            let selected = types
+                .iter()
+                .find(|ty| is_default_type(ty))
+                .ok_or_else(|| Error::Eval("Cannot tell which parent to amend".into()))?;
+            inferred_new_type(selected, scope, depth + 1)
+        }
+        TypeExpr::Constrained(name, _) => {
+            // Constraints store the underlying type as a runtime name. Parse
+            // that name back into a type to retain any generic arguments.
+            let ty = crate::parser::parse_type_name(name.trim_start_matches('*'))?;
+            inferred_new_type(&ty, scope, depth + 1)
+        }
+    }
+}
+
 fn type_default_value(ty: &crate::parser::TypeExpr, scope: &Scope) -> Option<Value> {
     use crate::parser::TypeExpr;
     match ty {
