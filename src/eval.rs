@@ -2972,15 +2972,17 @@ impl Evaluator {
             Expr::Lambda(params, body) => {
                 // Capture current scope values (Arc-wrapped for O(1) clone)
                 let captured = Arc::new(scope.flatten());
+                let mut body = (**body).clone();
+                capture_method_result_types(&mut body, scope);
                 let mut refs = HashSet::new();
                 let shadows = params.iter().cloned().collect::<HashSet<_>>();
-                collect_expr_refs(body, &mut refs, &shadows);
+                collect_expr_refs(&body, &mut refs, &shadows);
                 let captured_body = refs
                     .iter()
                     .filter(|name| scope.get(name).is_none())
                     .find_map(|name| scope.poison_of(name))
                     .map(|message| Expr::Throw(Box::new(Expr::String(message.clone()))))
-                    .unwrap_or_else(|| (**body).clone());
+                    .unwrap_or(body);
                 Ok(Value::Lambda(params.clone(), captured_body, captured))
             }
             Expr::InferredNew(ty, entries) => {
@@ -6247,6 +6249,26 @@ fn merge_deprecated(
     out
 }
 
+/// Resolve return-type aliases while their definition scope is available.
+/// Value::Lambda captures values, so type aliases would otherwise be lost at
+/// invocation. Keep inference errors lazy until the selected branch is called.
+fn capture_method_result_types(expr: &mut Expr, scope: &Scope) {
+    match expr {
+        Expr::InferredNew(ty, entries) => {
+            *expr = match inferred_new_type(ty, scope, 0) {
+                Ok((name, params)) => Expr::New(Some(name), std::mem::take(entries), params),
+                Err(error) => Expr::Throw(Box::new(Expr::String(error.to_string()))),
+            };
+        }
+        Expr::If(_, then_expr, else_expr) => {
+            capture_method_result_types(then_expr, scope);
+            capture_method_result_types(else_expr, scope);
+        }
+        Expr::Let(_, _, body) => capture_method_result_types(body, scope),
+        _ => {}
+    }
+}
+
 /// Resolve an implicit method-result constructor without dropping generic
 /// arguments or the default alternative of a union.
 fn inferred_new_type(
@@ -6254,7 +6276,7 @@ fn inferred_new_type(
     scope: &Scope,
     depth: usize,
 ) -> Result<(String, Vec<String>)> {
-    use crate::parser::{TypeExpr, type_expr_runtime_name};
+    use crate::parser::TypeExpr;
     if depth > 32 {
         return Err(Error::Eval("recursive inferred return type".into()));
     }
@@ -6265,11 +6287,22 @@ fn inferred_new_type(
             if let Some(alias) = scope.get_type_alias(name) {
                 return inferred_new_type(alias, scope, depth + 1);
             }
+            // Default union alternatives are stored as Named("*Type<...>").
+            if name.contains('<') || name.ends_with('?') {
+                let ty = crate::parser::parse_type_name(name)?;
+                return inferred_new_type(&ty, scope, depth + 1);
+            }
             Ok((name.to_string(), Vec::new()))
         }
         TypeExpr::Generic(name, args) => Ok((
             name.trim_start_matches('*').to_string(),
-            args.iter().map(type_expr_runtime_name).collect(),
+            args.iter()
+                .flat_map(|arg| {
+                    let mut names = Vec::new();
+                    collect_type_expr_class_names(arg, scope, &mut names, 0);
+                    names
+                })
+                .collect(),
         )),
         TypeExpr::Union(types) => {
             let selected = types
@@ -6281,13 +6314,8 @@ fn inferred_new_type(
         TypeExpr::Constrained(name, _) => {
             // Constraints store the underlying type as a runtime name. Parse
             // that name back into a type to retain any generic arguments.
-            let source = format!("value: {}", name.trim_start_matches('*'));
-            let tokens = crate::lexer::lex(&source)?;
-            let module = crate::parser::parse(&tokens)?;
-            let Entry::Property(prop) = &module.body[0] else {
-                unreachable!()
-            };
-            inferred_new_type(prop.type_ann.as_ref().unwrap(), scope, depth + 1)
+            let ty = crate::parser::parse_type_name(name.trim_start_matches('*'))?;
+            inferred_new_type(&ty, scope, depth + 1)
         }
     }
 }

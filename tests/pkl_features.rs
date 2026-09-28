@@ -8788,3 +8788,48 @@ typed = holder.step is types.Step
     );
     assert_eq!(v["typed"], true);
 }
+
+#[test]
+fn inferred_function_result_generic_aliases_and_union_defaults() {
+    let v = eval(
+        r#"
+class Step { check: String?; glob: String? }
+class Group { label: String }
+typealias Steps = Mapping<String, Step>
+typealias Items = Listing<String>
+typealias Choice = *Step | String
+local function aliases(): Steps = new { ["a"] { check = "alias" } }
+local function items(): Items = new { "one" }
+local function choice(): Choice = new { check = "choice" }
+local function nullable(): Mapping<String, Step?> = new { ["a"] { check = "nullable" } }
+local function union(): Mapping<String, *Step | Group> = new { ["a"] { check = "union" }; ["b"] = new Group { label = "group" } }
+local function defaultList(): *Listing<String> | String = new { "default" }
+local function defaultNullable(): *Step? | String = new { check = "default nullable" }
+aliased = (aliases()["a"]) { glob = "*" }
+optional = (nullable()["a"]) { glob = "*" }
+combined = (union()["a"]) { glob = "*" }
+list = items()
+selected = choice()
+defaults = defaultList()
+optionalDefault = defaultNullable()
+typed = union()["b"] is Group
+"#,
+    );
+    assert_eq!(
+        v["aliased"],
+        serde_json::json!({"check":"alias", "glob":"*"})
+    );
+    assert_eq!(
+        v["optional"],
+        serde_json::json!({"check":"nullable", "glob":"*"})
+    );
+    assert_eq!(
+        v["combined"],
+        serde_json::json!({"check":"union", "glob":"*"})
+    );
+    assert_eq!(v["list"], serde_json::json!(["one"]));
+    assert_eq!(v["defaults"], serde_json::json!(["default"]));
+    assert_eq!(v["selected"]["check"], "choice");
+    assert_eq!(v["optionalDefault"]["check"], "default nullable");
+    assert_eq!(v["typed"], true);
+}

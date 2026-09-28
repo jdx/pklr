@@ -92,7 +92,7 @@ pub enum TypeExpr {
     Constrained(String, Box<Expr>),
 }
 
-pub(crate) fn type_expr_runtime_name(ty: &TypeExpr) -> String {
+fn type_expr_runtime_name(ty: &TypeExpr) -> String {
     match ty {
         TypeExpr::Named(name) => name.clone(),
         TypeExpr::Nullable(inner) => format!("{}?", type_expr_runtime_name(inner)),
@@ -285,6 +285,11 @@ pub fn parse_named(tokens: &[Token], source: &str, name: &str) -> Result<Module>
 pub fn parse_expr_tokens(tokens: &[Token], source: &str, name: &str) -> Result<Expr> {
     let mut p = Parser::new(tokens, source, name);
     p.parse_expr()
+}
+
+pub(crate) fn parse_type_name(name: &str) -> Result<TypeExpr> {
+    let tokens = crate::lexer::lex(name)?;
+    Parser::new(&tokens, name, "<type>").parse_type()
 }
 
 struct Parser<'a> {
