@@ -4075,7 +4075,7 @@ impl Evaluator {
                 evaled_args.push(self.eval_expr(a, scope, depth + 1).await?);
             }
             for (param, arg) in params.iter().zip(evaled_args) {
-                call_scope.set(param.clone(), arg);
+                call_scope.declare(param.clone(), arg);
             }
             return self.eval_expr(&body, &call_scope, depth + 1).await;
         }
@@ -4143,7 +4143,7 @@ impl Evaluator {
             call_scope.set("this".into(), obj.clone());
             for (i, param) in params.iter().enumerate() {
                 if let Some(arg) = evaled_args.get(i) {
-                    call_scope.set(param.clone(), arg.clone());
+                    call_scope.declare(param.clone(), arg.clone());
                 }
             }
             return Ok(Some(self.eval_expr(body, &call_scope, depth + 1).await?));
@@ -4383,7 +4383,7 @@ impl Evaluator {
                     call_scope.set(k.clone(), v.clone());
                 }
                 for (param, arg) in params.iter().zip(args.iter()) {
-                    call_scope.set(param.clone(), arg.clone());
+                    call_scope.declare(param.clone(), arg.clone());
                 }
                 Ok(Some(self.eval_expr(body, &call_scope, depth + 1).await?))
             }
@@ -4405,7 +4405,7 @@ impl Evaluator {
                 scope.set(k.clone(), v.clone());
             }
             for (param, arg) in params.iter().zip(args.iter()) {
-                scope.set(param.clone(), arg.clone());
+                scope.declare(param.clone(), arg.clone());
             }
             self.eval_expr(body, &scope, depth + 1).await
         } else {
@@ -4618,7 +4618,7 @@ impl Evaluator {
                         for (k, v) in captured.iter() {
                             call_scope.set(k.clone(), v.clone());
                         }
-                        call_scope.set(params[0].clone(), l);
+                        call_scope.declare(params[0].clone(), l);
                         self.eval_expr(&body, &call_scope, depth + 1).await
                     }
                     _ => Err(Error::Eval(
@@ -5081,7 +5081,7 @@ impl Evaluator {
                                 }
                                 // Bind the object as the first parameter
                                 if let Some(param) = params.first() {
-                                    call_scope.set(
+                                    call_scope.declare(
                                         param.clone(),
                                         Value::Object(map.clone(), src.clone()),
                                     );
