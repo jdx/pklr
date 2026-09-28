@@ -109,6 +109,22 @@ fn type_expr_runtime_name(ty: &TypeExpr) -> String {
     }
 }
 
+/// Propagate the method's expected result type through result expressions only.
+/// Nested members and call arguments have their own inference contexts.
+fn infer_method_return_new(expr: &mut Expr, return_type: &TypeExpr) {
+    match expr {
+        Expr::New(None, entries, _) => {
+            *expr = Expr::InferredNew(return_type.clone(), std::mem::take(entries));
+        }
+        Expr::If(_, then_expr, else_expr) => {
+            infer_method_return_new(then_expr, return_type);
+            infer_method_return_new(else_expr, return_type);
+        }
+        Expr::Let(_, _, body) | Expr::Trace(body) => infer_method_return_new(body, return_type),
+        _ => {}
+    }
+}
+
 /// An expression.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -122,6 +138,8 @@ pub enum Expr {
     /// `new TypeName? { entries... }`
     /// The third field holds optional generic type parameter names (e.g., `<String, Step>`).
     New(Option<String>, Vec<Entry>, Vec<String>),
+    /// An implicit `new` whose parent is inferred from a method return type.
+    InferredNew(TypeExpr, Vec<Entry>),
     /// `expr.field`
     Field(Box<Expr>, String),
     /// `expr[key]`
@@ -267,6 +285,11 @@ pub fn parse_named(tokens: &[Token], source: &str, name: &str) -> Result<Module>
 pub fn parse_expr_tokens(tokens: &[Token], source: &str, name: &str) -> Result<Expr> {
     let mut p = Parser::new(tokens, source, name);
     p.parse_expr()
+}
+
+pub(crate) fn parse_type_name(name: &str) -> Result<TypeExpr> {
+    let tokens = crate::lexer::lex(name)?;
+    Parser::new(&tokens, name, "<type>").parse_type()
 }
 
 struct Parser<'a> {
@@ -734,11 +757,12 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect(&TokenKind::RParen)?;
-        // Skip optional return type annotation: `: ReturnType`
-        if matches!(self.peek(), TokenKind::Colon) {
+        let return_type = if matches!(self.peek(), TokenKind::Colon) {
             self.advance();
-            let _ = self.parse_type()?;
-        }
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
         // Parse body: `= expr`
         if !matches!(self.peek(), TokenKind::Equals) {
             // No body — skip rest
@@ -748,7 +772,10 @@ impl<'a> Parser<'a> {
             return Ok(None);
         }
         self.advance(); // consume =
-        let body = self.parse_expr()?;
+        let mut body = self.parse_expr()?;
+        if let Some(return_type) = return_type {
+            infer_method_return_new(&mut body, &return_type);
+        }
         Ok(Some(Entry::Property(Property {
             name,
             type_ann: None,
