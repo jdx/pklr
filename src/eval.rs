@@ -4348,6 +4348,31 @@ impl Evaluator {
                         .await?;
                     }
                 }
+                Entry::WhenGenerator(generator) => {
+                    let condition = self
+                        .eval_expr(&generator.condition, &entry_scope, depth + 1)
+                        .await?;
+                    let selected = if is_truthy(&condition) {
+                        Some(generator.body.as_slice())
+                    } else {
+                        generator.else_body.as_deref()
+                    };
+                    if let Some(selected) = selected {
+                        self.eval_mapping_entries_with_type_default(
+                            selected,
+                            &entry_scope,
+                            depth + 1,
+                            map,
+                            type_defaults,
+                            value_type_names,
+                            MappingInheritedDefault {
+                                value: explicit_default.clone(),
+                                entries: explicit_default_entries.clone(),
+                            },
+                        )
+                        .await?;
+                    }
+                }
                 _ => {}
             }
         }

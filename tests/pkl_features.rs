@@ -8685,6 +8685,51 @@ fn string_replace_last_requires_string_arguments() {
 }
 
 #[test]
+fn mapping_when_inside_for() {
+    let v = eval(
+        r#"
+local cmds = new Mapping<String, String?> { ["a"] = "echo a"; ["b"] = null }
+result = new Mapping<String, String> {
+  for (name, cmd in cmds) {
+    when (cmd != null) { [name] = cmd }
+  }
+}
+"#,
+    );
+    assert_eq!(v["result"], serde_json::json!({"a": "echo a"}));
+}
+
+#[test]
+fn mapping_when_branches_preserve_defaults_and_iteration_scope() {
+    let v = eval(
+        r#"
+class Step { command: String; enabled: Boolean = true }
+result = new Mapping<String, Step> {
+  default { enabled = false }
+  when (false) { ["unselected"] { command = missing } }
+  for (name in List("a", "b")) {
+    when (name == "a") {
+      when (true) { [name] { command = "echo a" } }
+    } else {
+      for (suffix in List("1", "2")) {
+        [name + suffix] { command = "echo " + name + suffix }
+      }
+    }
+  }
+}
+"#,
+    );
+    assert_eq!(
+        v["result"],
+        serde_json::json!({
+            "a": {"command": "echo a", "enabled": false},
+            "b1": {"command": "echo b1", "enabled": false},
+            "b2": {"command": "echo b2", "enabled": false}
+        })
+    );
+}
+
+#[test]
 fn inferred_function_result_keeps_class_in_property() {
     let v = eval(
         r#"
