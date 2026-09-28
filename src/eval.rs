@@ -3622,6 +3622,15 @@ impl Evaluator {
                 let arg = require_str_arg(args, 0, "endsWith")?;
                 Ok(Some(Value::Bool(s.ends_with(arg))))
             }
+            (Value::String(s), "replaceLast") => {
+                let from = require_str_arg(args, 0, "replaceLast")?;
+                let to = require_str_arg(args, 1, "replaceLast")?;
+                let mut result = s.clone();
+                if let Some(start) = s.rfind(from) {
+                    result.replace_range(start..start + from.len(), to);
+                }
+                Ok(Some(Value::String(result)))
+            }
             (Value::String(s), "replaceAll") => {
                 let from = require_str_arg(args, 0, "replaceAll")?;
                 let to = require_str_arg(args, 1, "replaceAll")?;
