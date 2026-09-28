@@ -8652,3 +8652,58 @@ fn offline_package_cache_miss_is_actionable() {
     assert!(error.contains("package is not cached and offline mode is enabled"));
     assert!(error.contains("https://example.com/pkg@1.0.0.zip"));
 }
+
+#[test]
+fn super_in_object_amendment_of_function_result() {
+    let v = eval(
+        r#"
+class Step { check: String? }
+local function run(cmd: String): Step = new { check = cmd }
+local defs = new Mapping<String, Step> { ["a"] = (run("echo a")) { check = "\(super.check) b" } }
+result = defs
+"#,
+    );
+    assert_eq!(v["result"], serde_json::json!({"a":{"check":"echo a b"}}));
+}
+
+#[test]
+fn super_in_object_amendment_chain_and_nested_bodies() {
+    let v = eval(
+        r#"
+local base = new { value = "a"; child { value = "inner" } }
+local middle = (base) { value = super.value + "b" }
+result = (middle) { value = super.value + "c" }
+inherited = (middle) { other = true }
+nested = (base) { value = super.value + "!"; child { value = super.value + "?" } }
+indexed = (base) { value = super["value"] + "i" }
+"#,
+    );
+    assert_eq!(v["result"]["value"], "abc");
+    assert_eq!(v["inherited"]["value"], "ab");
+    assert_eq!(v["nested"]["value"], "a!");
+    assert_eq!(v["nested"]["child"]["value"], "inner?");
+    assert_eq!(v["indexed"]["value"], "ai");
+}
+
+#[test]
+fn super_in_object_amendment_keeps_child_receiver() {
+    let v = eval(
+        r#"
+local base = new { x = 1; y = x; z = this.x }
+result = (base) { x = 2; y = super.y; z = super.z }
+"#,
+    );
+    assert_eq!(v["result"], serde_json::json!({"x":2,"y":2,"z":2}));
+}
+
+#[test]
+fn super_in_object_amendment_reads_amended_parent_member_once() {
+    let v = eval(
+        r#"
+local base = new { child { value = "a" } }
+local middle = (base) { child { value = super.value + "b" } }
+result = (middle) { child = super.child }
+"#,
+    );
+    assert_eq!(v["result"]["child"]["value"], "ab");
+}

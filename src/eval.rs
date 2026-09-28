@@ -797,6 +797,76 @@ impl Evaluator {
             .await
     }
 
+    #[async_recursion(?Send)]
+    async fn eval_super_member(
+        &mut self,
+        field: &str,
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<Value> {
+        if depth > self.max_depth {
+            return Err(Error::Eval("maximum recursion depth exceeded".into()));
+        }
+        let Some(Value::Object(map, source)) = scope.get("super") else {
+            return Err(Error::Eval("undefined variable: super".into()));
+        };
+        if let Some(source) = source {
+            let entry = source
+                .entries
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(index, entry)| match entry {
+                    Entry::Property(prop)
+                        if prop.name == field
+                            && !has_modifier(&prop.modifiers, Modifier::Local) =>
+                    {
+                        Some((index, prop))
+                    }
+                    _ => None,
+                });
+            if let Some((index, prop)) = entry {
+                let definition = restore_scope(&capture_object_source_scope(source));
+                let owners =
+                    entry_scope_owners(&source.entries, Some(&source.entry_scopes), Some(source));
+                let mut receiver = Scope::default();
+                if let Some(Value::Object(members, _)) = scope.get("this") {
+                    for (name, value) in members.iter() {
+                        receiver.set(name.clone(), value.clone());
+                    }
+                }
+                if let Some(this) = scope.get("this") {
+                    receiver.set("this".into(), this.clone());
+                }
+                let mut active = scope_for_object_entry(
+                    index,
+                    &receiver,
+                    Some(&source.entry_scopes),
+                    &owners,
+                    Some((&definition, &source.body_members)),
+                );
+                // Reconstruct a body amendment from its own parent, rather
+                // than reapplying it to the already-amended cached member.
+                if prop.body.is_some() {
+                    let has_parent_member = matches!(active.get("super"),
+                        Some(Value::Object(parent, _)) if parent.contains_key(field));
+                    let inherited = if has_parent_member {
+                        self.eval_super_member(field, &active, depth + 1).await?
+                    } else {
+                        Value::Null
+                    };
+                    active.set(field.to_string(), inherited);
+                }
+                if let Some(value) = self.eval_property(prop, &active, depth + 1).await? {
+                    return Ok(value);
+                }
+            }
+        }
+        map.get(field)
+            .cloned()
+            .ok_or_else(|| Error::Eval(format!("field not found: {field}")))
+    }
+
     /// Evaluate the object an `expr.field` / `expr?.field` access reads from.
     ///
     /// An `import("uri")` base is narrowed to the single field being read, so
@@ -2556,13 +2626,31 @@ impl Evaluator {
         // properties that reference them see the new value.
         let mut merged: Vec<Entry> = Vec::new();
         let mut merged_entry_scopes = Vec::new();
+        let mut amendment_scope = capture_scope(current_scope);
+        let parent_members = base_source
+            .evaluated_properties
+            .iter()
+            .filter_map(|name| {
+                base_source
+                    .scope
+                    .get(name)
+                    .map(|value| (name.clone(), value.clone()))
+            })
+            .collect();
+        amendment_scope.values.insert(
+            "super".into(),
+            Value::Object(
+                Arc::new(parent_members),
+                Some(Arc::new(base_source.clone())),
+            ),
+        );
         let amendment_entry_scope = Some(Arc::new(CapturedScope {
             body_members: overlay_entries
                 .iter()
                 .filter_map(entry_member_name)
                 .cloned()
                 .collect(),
-            ..capture_scope(current_scope)
+            ..amendment_scope
         }));
         let mut overlay_by_name: IndexMap<String, &Entry> = IndexMap::new();
         for entry in overlay_entries {
@@ -2671,6 +2759,11 @@ impl Evaluator {
         let inherited_references = referenced_roots(base_entries);
         let mut preserved_inherited_bindings = HashSet::new();
         for (k, v) in current_scope.flatten() {
+            // Inherited entries retain their original parent. The overlay's
+            // parent is captured separately in amendment_entry_scope.
+            if k == "super" {
+                continue;
+            }
             let same_module = eval_scope
                 .module_identity(&k)
                 .zip(current_scope.module_identity(&k))
@@ -3205,6 +3298,9 @@ impl Evaluator {
             }
             Expr::ObjectBody(entries) => self.eval_entries(entries, scope, depth + 1).await,
             Expr::Field(obj_expr, field) => {
+                if matches!(obj_expr.as_ref(), Expr::Ident(name) if name == "super") {
+                    return self.eval_super_member(field, scope, depth + 1).await;
+                }
                 let obj = self.eval_field_base(obj_expr, field, scope, depth).await?;
                 // Built-in properties
                 match (&obj, field.as_str()) {
@@ -3279,6 +3375,12 @@ impl Evaluator {
                 }
             }
             Expr::Index(obj_expr, key_expr) => {
+                if matches!(obj_expr.as_ref(), Expr::Ident(name) if name == "super") {
+                    let key = self.eval_expr(key_expr, scope, depth + 1).await?;
+                    return self
+                        .eval_super_member(&value_to_key(&key)?, scope, depth + 1)
+                        .await;
+                }
                 let obj = self.eval_expr(obj_expr, scope, depth + 1).await?;
                 let key = self.eval_expr(key_expr, scope, depth + 1).await?;
                 let key_str = value_to_key(&key)?;
@@ -5953,6 +6055,11 @@ fn own_body_names(
 fn scope_with_object_bindings(lexical: &Scope, object: &Scope, owned: &HashSet<String>) -> Scope {
     let mut scope = lexical.child();
     for (name, value) in &object.vars {
+        // `super` belongs to the body that declared the entry. A later
+        // amendment must not replace an inherited entry's parent binding.
+        if name == "super" {
+            continue;
+        }
         if owned.contains(name) {
             scope.declare(name.clone(), value.clone());
         } else if !lexical.is_declared(name) {
