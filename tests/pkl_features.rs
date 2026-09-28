@@ -8953,6 +8953,20 @@ typed = holder.step is Step
 }
 
 #[test]
+fn inferred_function_result_uses_parameter_over_class_property() {
+    let v = eval(
+        r#"
+class Step { stage: String?; check: String? }
+local function precommit(stage: String): Step = new {
+  check = "run --hook-stage \(stage)" + (if (stage == "pre-commit") " --files" else "")
+}
+result = precommit("pre-commit")
+"#,
+    );
+    assert_eq!(v["result"]["check"], "run --hook-stage pre-commit --files");
+}
+
+#[test]
 fn inferred_function_result_keeps_members_through_mapping() {
     let v = eval(
         r#"
