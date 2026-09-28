@@ -6264,7 +6264,7 @@ fn capture_method_result_types(expr: &mut Expr, scope: &Scope) {
             capture_method_result_types(then_expr, scope);
             capture_method_result_types(else_expr, scope);
         }
-        Expr::Let(_, _, body) => capture_method_result_types(body, scope),
+        Expr::Let(_, _, body) | Expr::Trace(body) => capture_method_result_types(body, scope),
         _ => {}
     }
 }

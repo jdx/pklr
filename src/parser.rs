@@ -120,7 +120,7 @@ fn infer_method_return_new(expr: &mut Expr, return_type: &TypeExpr) {
             infer_method_return_new(then_expr, return_type);
             infer_method_return_new(else_expr, return_type);
         }
-        Expr::Let(_, _, body) => infer_method_return_new(body, return_type),
+        Expr::Let(_, _, body) | Expr::Trace(body) => infer_method_return_new(body, return_type),
         _ => {}
     }
 }

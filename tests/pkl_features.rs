@@ -8833,3 +8833,23 @@ typed = union()["b"] is Group
     assert_eq!(v["optionalDefault"]["check"], "default nullable");
     assert_eq!(v["typed"], true);
 }
+
+#[test]
+fn inferred_function_result_through_trace() {
+    let v = eval(
+        r#"
+class Step { check: String?; glob: String? }
+typealias Steps = Mapping<String, Step>
+class Holder { step: Step }
+local function run(): Step = trace(new { check = "a" })
+local function steps(): Steps = trace(new { ["a"] = run() })
+local holder = new Holder { step = run() }
+result = (holder.step) { glob = "*" }
+mapped = (steps()["a"]) { glob = "*" }
+typed = holder.step is Step
+"#,
+    );
+    assert_eq!(v["result"], serde_json::json!({"check":"a", "glob":"*"}));
+    assert_eq!(v["mapped"], v["result"]);
+    assert_eq!(v["typed"], true);
+}
