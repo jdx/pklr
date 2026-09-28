@@ -4108,6 +4108,15 @@ impl Evaluator {
                 let arg = require_str_arg(args, 0, "endsWith")?;
                 Ok(Some(Value::Bool(s.ends_with(arg))))
             }
+            (Value::String(s), "replaceLast") => {
+                let from = require_str_arg(args, 0, "replaceLast")?;
+                let to = require_str_arg(args, 1, "replaceLast")?;
+                let mut result = s.clone();
+                if let Some(start) = s.rfind(from) {
+                    result.replace_range(start..start + from.len(), to);
+                }
+                Ok(Some(Value::String(result)))
+            }
             (Value::String(s), "replaceAll") => {
                 let from = require_str_arg(args, 0, "replaceAll")?;
                 let to = require_str_arg(args, 1, "replaceAll")?;
@@ -4841,6 +4850,31 @@ impl Evaluator {
                         self.eval_mapping_entries_with_type_default(
                             &fgen.body,
                             &iter_scope,
+                            depth + 1,
+                            map,
+                            type_defaults,
+                            value_type_names,
+                            MappingInheritedDefault {
+                                value: explicit_default.clone(),
+                                entries: explicit_default_entries.clone(),
+                            },
+                        )
+                        .await?;
+                    }
+                }
+                Entry::WhenGenerator(generator) => {
+                    let condition = self
+                        .eval_expr(&generator.condition, &entry_scope, depth + 1)
+                        .await?;
+                    let selected = if is_truthy(&condition) {
+                        Some(generator.body.as_slice())
+                    } else {
+                        generator.else_body.as_deref()
+                    };
+                    if let Some(selected) = selected {
+                        self.eval_mapping_entries_with_type_default(
+                            selected,
+                            &entry_scope,
                             depth + 1,
                             map,
                             type_defaults,

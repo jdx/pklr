@@ -8858,6 +8858,82 @@ entries = (mapping) { local count = super.length; ["count"] = count }
 }
 
 #[test]
+fn string_replace_last() {
+    let v = eval(
+        r#"
+result = "a/*".replaceLast("*", "*.txt")
+repeated = "ababa".replaceLast("aba", "X")
+unicode = "é猫é猫".replaceLast("猫", "犬")
+absent = "abc".replaceLast("z", "X")
+emptyPattern = "abc".replaceLast("", "!")
+emptyString = "".replaceLast("", "!")
+removed = "abcabc".replaceLast("abc", "")
+literal = "a.*b.*".replaceLast(".*", "$1")
+"#,
+    );
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "result": "a/*.txt", "repeated": "abX", "unicode": "é猫é犬",
+            "absent": "abc", "emptyPattern": "abc!", "emptyString": "!",
+            "removed": "abc", "literal": "a.*b$1"
+        })
+    );
+}
+
+#[test]
+fn string_replace_last_requires_string_arguments() {
+    assert!(eval_fails(r#"result = "abc".replaceLast(1, "x")"#).contains("replaceLast"));
+    assert!(eval_fails(r#"result = "abc".replaceLast("a", 1)"#).contains("replaceLast"));
+    assert!(eval_fails(r#"result = "abc".replaceLast("a")"#).contains("replaceLast"));
+}
+
+#[test]
+fn mapping_when_inside_for() {
+    let v = eval(
+        r#"
+local cmds = new Mapping<String, String?> { ["a"] = "echo a"; ["b"] = null }
+result = new Mapping<String, String> {
+  for (name, cmd in cmds) {
+    when (cmd != null) { [name] = cmd }
+  }
+}
+"#,
+    );
+    assert_eq!(v["result"], serde_json::json!({"a": "echo a"}));
+}
+
+#[test]
+fn mapping_when_branches_preserve_defaults_and_iteration_scope() {
+    let v = eval(
+        r#"
+class Step { command: String; enabled: Boolean = true }
+result = new Mapping<String, Step> {
+  default { enabled = false }
+  when (false) { ["unselected"] { command = missing } }
+  for (name in List("a", "b")) {
+    when (name == "a") {
+      when (true) { [name] { command = "echo a" } }
+    } else {
+      for (suffix in List("1", "2")) {
+        [name + suffix] { command = "echo " + name + suffix }
+      }
+    }
+  }
+}
+"#,
+    );
+    assert_eq!(
+        v["result"],
+        serde_json::json!({
+            "a": {"command": "echo a", "enabled": false},
+            "b1": {"command": "echo b1", "enabled": false},
+            "b2": {"command": "echo b2", "enabled": false}
+        })
+    );
+}
+
+#[test]
 fn inferred_function_result_keeps_class_in_property() {
     let v = eval(
         r#"
