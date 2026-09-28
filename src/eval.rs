@@ -797,6 +797,287 @@ impl Evaluator {
             .await
     }
 
+    #[async_recursion(?Send)]
+    async fn eval_super_member(
+        &mut self,
+        field: &str,
+        scope: &Scope,
+        depth: usize,
+        property_access: bool,
+    ) -> Result<Value> {
+        if depth > self.max_depth {
+            return Err(Error::Eval("maximum recursion depth exceeded".into()));
+        }
+        if let Some(Value::List(items)) = scope.get("super") {
+            let mut length = scope.receiver_list_base.unwrap_or(items.len());
+            if let Some(entries) = &scope.receiver_entries {
+                self.eval_listing_length(entries, scope, depth + 1, &mut length)
+                    .await?;
+            }
+            return match field {
+                "length" => Ok(Value::Int(length as i64)),
+                "isEmpty" => Ok(Value::Bool(length == 0)),
+                "isNotEmpty" => Ok(Value::Bool(length != 0)),
+                "first" | "last" => {
+                    if length == 0 {
+                        return Err(Error::Eval(format!("{field} called on an empty Listing")));
+                    }
+                    let target = if field == "first" { 0 } else { length - 1 };
+                    let mut value = items.get(target).cloned();
+                    if let Some(entries) = &scope.receiver_entries {
+                        let mut position = scope.receiver_list_base.unwrap_or(items.len());
+                        self.eval_listing_member(
+                            entries,
+                            scope,
+                            depth + 1,
+                            target,
+                            &mut position,
+                            &mut value,
+                            &[],
+                        )
+                        .await?;
+                    }
+                    value.ok_or_else(|| {
+                        Error::Eval(format!("listing index {target} is out of bounds"))
+                    })
+                }
+                _ => Err(Error::Eval(format!("field not found: {field}"))),
+            };
+        }
+        let Some(Value::Object(map, source)) = scope.get("super") else {
+            return Err(Error::Eval("undefined variable: super".into()));
+        };
+        if let Some(source) = source {
+            let entry = source
+                .entries
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(index, entry)| match entry {
+                    Entry::Property(prop)
+                        if prop.name == field
+                            && !has_modifier(&prop.modifiers, Modifier::Local) =>
+                    {
+                        Some((index, prop))
+                    }
+                    _ => None,
+                });
+            if let Some((index, prop)) = entry {
+                let definition = restore_scope(&capture_object_source_scope(source));
+                let owners =
+                    entry_scope_owners(&source.entries, Some(&source.entry_scopes), Some(source));
+                let mut receiver = Scope {
+                    receiver_entries: scope.receiver_entries.clone(),
+                    ..Scope::default()
+                };
+                if let Some(Value::Object(members, _)) = scope.get("this") {
+                    for (name, value) in members.iter() {
+                        receiver.set(name.clone(), value.clone());
+                    }
+                }
+                if let Some(this) = scope.get("this") {
+                    receiver.set("this".into(), this.clone());
+                }
+                let mut active = scope_for_object_entry(
+                    index,
+                    &receiver,
+                    Some(&source.entry_scopes),
+                    &owners,
+                    Some((&definition, &source.body_members)),
+                );
+                // Reconstruct a body amendment from its own parent, rather
+                // than reapplying it to the already-amended cached member.
+                if prop.body.is_some() {
+                    let has_parent_member = matches!(active.get("super"),
+                        Some(Value::Object(parent, _)) if parent.contains_key(field));
+                    let inherited = if has_parent_member {
+                        self.eval_super_member(field, &active, depth + 1, true)
+                            .await?
+                    } else {
+                        Value::Null
+                    };
+                    active.set(field.to_string(), inherited);
+                }
+                if let Some(value) = self.eval_property(prop, &active, depth + 1).await? {
+                    return Ok(value);
+                }
+            }
+        }
+        match field {
+            "length" | "keys" | "isEmpty" | "isNotEmpty"
+                if property_access
+                    && source
+                        .as_ref()
+                        .is_none_or(|source| source.type_name.is_none()) =>
+            {
+                let mut keys = IndexMap::new();
+                if let Some(entries) = &scope.receiver_entries {
+                    self.eval_receiver_keys(entries, scope, depth + 1, &mut keys)
+                        .await?;
+                } else {
+                    keys.extend(map.keys().map(|key| (key.clone(), ())));
+                }
+                return Ok(match field {
+                    "length" => Value::Int(keys.len() as i64),
+                    "keys" => Value::List(keys.into_keys().map(Value::String).collect()),
+                    "isEmpty" => Value::Bool(keys.is_empty()),
+                    _ => Value::Bool(!keys.is_empty()),
+                });
+            }
+            _ => {}
+        }
+        if let Some(value) = map.get(field) {
+            return Ok(value.clone());
+        }
+        // An untyped object's prototype supplies an empty Dynamic default
+        // for a newly declared property, never a member of an outer object.
+        if property_access
+            && source
+                .as_ref()
+                .is_none_or(|source| source.type_name.is_none())
+        {
+            return Ok(Value::Object(Arc::new(IndexMap::new()), None));
+        }
+        Err(Error::Eval(format!("field not found: {field}")))
+    }
+
+    /// Enumerate receiver members without evaluating their values. Mapping
+    /// metadata such as super.length includes entries after the current one.
+    #[async_recursion(?Send)]
+    async fn eval_receiver_keys(
+        &mut self,
+        entries: &[Entry],
+        scope: &Scope,
+        depth: usize,
+        keys: &mut IndexMap<String, ()>,
+    ) -> Result<()> {
+        if depth > self.max_depth {
+            return Err(Error::Eval("maximum recursion depth exceeded".into()));
+        }
+        let scope = scope.child();
+        for entry in entries {
+            match entry {
+                // Locals are values, not members. Evaluating a local that
+                // reads super.length while counting would re-enter this walk.
+                Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {}
+                Entry::Property(prop)
+                    if prop.name != "default"
+                        && !has_modifier(&prop.modifiers, Modifier::Hidden) =>
+                {
+                    keys.insert(prop.name.clone(), ());
+                }
+                Entry::DynProperty(key, _) => {
+                    let key = self.eval_expr(key, &scope, depth + 1).await?;
+                    keys.insert(value_to_key(&key)?, ());
+                }
+                Entry::Spread(expr) => {
+                    if let Value::Object(map, _) = self.eval_expr(expr, &scope, depth + 1).await? {
+                        keys.extend(map.keys().map(|key| (key.clone(), ())));
+                    }
+                }
+                Entry::ForGenerator(generator) => {
+                    let collection = self
+                        .eval_expr(&generator.collection, &scope, depth + 1)
+                        .await?;
+                    for (key, value) in collection_to_items(collection) {
+                        let mut iter = scope.child();
+                        iter.set(generator.val_var.clone(), value);
+                        if let Some(name) = &generator.key_var {
+                            iter.set(name.clone(), key);
+                        }
+                        self.eval_receiver_keys(&generator.body, &iter, depth + 1, keys)
+                            .await?;
+                    }
+                }
+                Entry::WhenGenerator(generator) => {
+                    let condition = self
+                        .eval_expr(&generator.condition, &scope, depth + 1)
+                        .await?;
+                    let selected = if is_truthy(&condition) {
+                        Some(generator.body.as_slice())
+                    } else {
+                        generator.else_body.as_deref()
+                    };
+                    if let Some(body) = selected {
+                        self.eval_receiver_keys(body, &scope, depth + 1, keys)
+                            .await?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Count listing members without evaluating element values, so metadata
+    /// can be read by an element itself without recursing into that element.
+    #[async_recursion(?Send)]
+    async fn eval_listing_length(
+        &mut self,
+        entries: &[Entry],
+        scope: &Scope,
+        depth: usize,
+        length: &mut usize,
+    ) -> Result<()> {
+        if depth > self.max_depth {
+            return Err(Error::Eval("maximum recursion depth exceeded".into()));
+        }
+        let scope = scope.child();
+        for entry in entries {
+            match entry {
+                Entry::Elem(_) => *length += 1,
+                Entry::DynProperty(index, _) => {
+                    let index = self.eval_expr(index, &scope, depth + 1).await?;
+                    if let Value::Int(index) = index
+                        && usize::try_from(index).ok() == Some(*length)
+                    {
+                        *length += 1;
+                    }
+                }
+                // Locals are values, not members. Evaluating a local that
+                // reads super.length while counting would re-enter this walk.
+                Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {}
+                Entry::Spread(expr) => {
+                    *length += match self.eval_expr(expr, &scope, depth + 1).await? {
+                        Value::List(items) => items.len(),
+                        Value::Object(items, _) => items.len(),
+                        _ => 1,
+                    };
+                }
+                Entry::ForGenerator(generator) => {
+                    let collection = self
+                        .eval_expr(&generator.collection, &scope, depth + 1)
+                        .await?;
+                    for (key, value) in collection_to_items(collection) {
+                        let mut iter = scope.child();
+                        iter.set(generator.val_var.clone(), value);
+                        if let Some(name) = &generator.key_var {
+                            iter.set(name.clone(), key);
+                        }
+                        self.eval_listing_length(&generator.body, &iter, depth + 1, length)
+                            .await?;
+                    }
+                }
+                Entry::WhenGenerator(generator) => {
+                    let condition = self
+                        .eval_expr(&generator.condition, &scope, depth + 1)
+                        .await?;
+                    let selected = if is_truthy(&condition) {
+                        Some(generator.body.as_slice())
+                    } else {
+                        generator.else_body.as_deref()
+                    };
+                    if let Some(body) = selected {
+                        self.eval_listing_length(body, &scope, depth + 1, length)
+                            .await?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     /// Evaluate the object an `expr.field` / `expr?.field` access reads from.
     ///
     /// An `import("uri")` base is narrowed to the single field being read, so
@@ -1754,7 +2035,11 @@ impl Evaluator {
                     Some(Value::List(existing)) => existing.clone(),
                     _ => Vec::new(),
                 };
-                self.eval_listing_entries(body, scope, depth, &mut items)
+                let mut amendment_scope = scope.child();
+                amendment_scope.set("super".into(), Value::List(items.clone()));
+                amendment_scope.receiver_entries = Some(Arc::new(body.to_vec()));
+                amendment_scope.receiver_list_base = Some(items.len());
+                self.eval_listing_entries(body, &amendment_scope, depth, &mut items)
                     .await?;
                 return Ok(Some(Value::List(items)));
             }
@@ -1767,8 +2052,18 @@ impl Evaluator {
                     // `default` and dynamic keys. Rebuild the entry map with the
                     // type-aware evaluator so single-type and union mappings both keep
                     // mapping defaults plus converter type metadata after amendment.
-                    let (inherited_scope, amendment_scope) =
+                    let (inherited_scope, mut amendment_scope) =
                         mapping_amendment_scopes(&src.scope, &src.scope_declared, scope);
+                    amendment_scope.set(
+                        "super".into(),
+                        Value::Object(Arc::clone(existing_map), Some(Arc::clone(src))),
+                    );
+                    let mut receiver_entries = existing_map
+                        .keys()
+                        .map(|key| Entry::DynProperty(Expr::String(key.clone()), Expr::Null))
+                        .collect::<Vec<_>>();
+                    receiver_entries.extend_from_slice(body);
+                    amendment_scope.receiver_entries = Some(Arc::new(receiver_entries));
                     let value_type_defaults = src
                         .mapping_value_types
                         .iter()
@@ -1811,10 +2106,16 @@ impl Evaluator {
                     )));
                 }
                 return Ok(Some(
-                    self.eval_amended_object(src, body, scope, depth).await?,
+                    self.eval_amended_object(existing_map, src, body, scope, depth)
+                        .await?,
                 ));
             }
-            let val = self.eval_entries(body, scope, depth).await?;
+            let mut body_scope = scope.child();
+            body_scope.set(
+                "super".into(),
+                Value::Object(Arc::new(IndexMap::new()), None),
+            );
+            let val = self.eval_entries(body, &body_scope, depth).await?;
             return Ok(Some(val));
         }
         if let Some(ty) = &prop.type_ann {
@@ -1841,7 +2142,10 @@ impl Evaluator {
         scope: &Scope,
         depth: usize,
     ) -> Result<Value> {
-        self.eval_entries_with_lexical_scopes(entries, scope, depth, None, None)
+        let mut receiver_scope = scope.clone();
+        receiver_scope.receiver_entries = Some(Arc::new(entries.to_vec()));
+        receiver_scope.receiver_list_base = None;
+        self.eval_entries_with_lexical_scopes(entries, &receiver_scope, depth, None, None)
             .await
     }
 
@@ -2071,13 +2375,14 @@ impl Evaluator {
                         refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                         continue;
                     }
-                    let val = if let Some(Value::Object(_, Some(src))) = &default_template
+                    let val = if let Some(Value::Object(template_map, Some(src))) =
+                        &default_template
                         && let Expr::ObjectBody(body) = val_expr
                     {
                         // Default template has ObjectSource — use eval_amended_object
                         // so nested property amendments work properly.
                         let mut result = self
-                            .eval_amended_object(src, body, &active_scope, depth)
+                            .eval_amended_object(template_map, src, body, &active_scope, depth)
                             .await?;
                         // Propagate the template's type_name so converters can match.
                         if let Some(ref tn) = src.type_name
@@ -2154,7 +2459,15 @@ impl Evaluator {
                         if let Some(key_var) = &fgen.key_var {
                             iter_scope.set(key_var.clone(), k);
                         }
-                        let body_val = self.eval_entries(&fgen.body, &iter_scope, depth).await?;
+                        let body_val = self
+                            .eval_entries_with_lexical_scopes(
+                                &fgen.body,
+                                &iter_scope,
+                                depth,
+                                None,
+                                None,
+                            )
+                            .await?;
                         if let Value::Object(m, _) = body_val {
                             all_props.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
                             map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
@@ -2174,14 +2487,30 @@ impl Evaluator {
                         .eval_expr(&wgen.condition, &active_scope, depth)
                         .await?;
                     if is_truthy(&cond) {
-                        let body_val = self.eval_entries(&wgen.body, &active_scope, depth).await?;
+                        let body_val = self
+                            .eval_entries_with_lexical_scopes(
+                                &wgen.body,
+                                &active_scope,
+                                depth,
+                                None,
+                                None,
+                            )
+                            .await?;
                         if let Value::Object(m, _) = body_val {
                             all_props.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
                             map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
                             refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                         }
                     } else if let Some(else_body) = &wgen.else_body {
-                        let else_val = self.eval_entries(else_body, &active_scope, depth).await?;
+                        let else_val = self
+                            .eval_entries_with_lexical_scopes(
+                                else_body,
+                                &active_scope,
+                                depth,
+                                None,
+                                None,
+                            )
+                            .await?;
                         if let Value::Object(m, _) = else_val {
                             all_props.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
                             map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
@@ -2544,6 +2873,7 @@ impl Evaluator {
     #[async_recursion(?Send)]
     async fn eval_amended_object(
         &mut self,
+        base_map: &Arc<IndexMap<String, Value>>,
         base_source: &ObjectSource,
         overlay_entries: &[Entry],
         current_scope: &Scope,
@@ -2556,13 +2886,32 @@ impl Evaluator {
         // properties that reference them see the new value.
         let mut merged: Vec<Entry> = Vec::new();
         let mut merged_entry_scopes = Vec::new();
+        let mut amendment_scope = capture_scope(current_scope);
+        let mut parent_members = (**base_map).clone();
+        // Hidden properties are absent from the rendered map but still
+        // accessible through super. Mapping keys, in contrast, need the map:
+        // they need not have a binding in the lexical scope.
+        for name in &base_source.evaluated_properties {
+            if !parent_members.contains_key(name)
+                && let Some(value) = base_source.scope.get(name)
+            {
+                parent_members.insert(name.clone(), value.clone());
+            }
+        }
+        amendment_scope.values.insert(
+            "super".into(),
+            Value::Object(
+                Arc::new(parent_members),
+                Some(Arc::new(base_source.clone())),
+            ),
+        );
         let amendment_entry_scope = Some(Arc::new(CapturedScope {
             body_members: overlay_entries
                 .iter()
                 .filter_map(entry_member_name)
                 .cloned()
                 .collect(),
-            ..capture_scope(current_scope)
+            ..amendment_scope
         }));
         let mut overlay_by_name: IndexMap<String, &Entry> = IndexMap::new();
         for entry in overlay_entries {
@@ -2671,6 +3020,11 @@ impl Evaluator {
         let inherited_references = referenced_roots(base_entries);
         let mut preserved_inherited_bindings = HashSet::new();
         for (k, v) in current_scope.flatten() {
+            // Inherited entries retain their original parent. The overlay's
+            // parent is captured separately in amendment_entry_scope.
+            if k == "super" {
+                continue;
+            }
             let same_module = eval_scope
                 .module_identity(&k)
                 .zip(current_scope.module_identity(&k))
@@ -2720,6 +3074,7 @@ impl Evaluator {
 
         // Evaluate the merged entries (eval_entries handles locals, classes,
         // and evaluates properties in order with each added to scope)
+        eval_scope.receiver_entries = Some(Arc::new(merged.clone()));
         let mut result = self
             .eval_entries_with_lexical_scopes(
                 &merged,
@@ -2799,43 +3154,194 @@ impl Evaluator {
         &mut self,
         template_map: &Arc<IndexMap<String, Value>>,
         template_src: &Arc<ObjectSource>,
+        explicit_map: &IndexMap<String, Value>,
         body: &[Entry],
         scope: &Scope,
         depth: usize,
     ) -> Result<Value> {
-        let mut template_scope = scope.child();
-        for (key, value) in template_map.iter() {
-            // Template members are inherited, so a name declared in an
-            // enclosing body takes precedence (see `scope_with_object_bindings`).
-            if !scope.is_declared(key) {
-                template_scope.set(key.clone(), value.clone());
-            }
-        }
-        let mut overlay = self.eval_entries(body, &template_scope, depth + 1).await?;
-        // Properties the template's class declares `hidden` stay out of the
-        // output even when the body assigns them.
-        if let Value::Object(overlay_map, _) = &mut overlay {
-            let hidden = template_src
-                .entries
-                .iter()
-                .filter_map(|entry| match entry {
-                    Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Hidden) => {
-                        Some(prop.name.as_str())
+        // This template combines already-evaluated type and explicit defaults.
+        // Its original source describes only the type default, so retain the
+        // explicit values as source bindings before applying the entry body.
+        // Keep untouched class expressions for late binding to entry overrides.
+        let mut source = (**template_src).clone();
+        for key in explicit_map.keys() {
+            let Some(value) = template_map.get(key) else {
+                continue;
+            };
+            let binding = format!("\0mapping_template:{key}");
+            source.scope.insert(binding.clone(), value.clone());
+            let mut replaced = false;
+            for (index, entry) in source.entries.iter_mut().enumerate() {
+                if let Entry::Property(prop) = entry
+                    && prop.name == *key
+                    && !has_modifier(&prop.modifiers, Modifier::Local)
+                {
+                    prop.value = Some(Expr::Ident(binding.clone()));
+                    prop.body = None;
+                    if let Some(entry_scope) = source.entry_scopes.get_mut(index) {
+                        *entry_scope = None;
                     }
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            if !hidden.is_empty() {
-                let overlay_map = Arc::make_mut(overlay_map);
-                for name in hidden {
-                    overlay_map.shift_remove(name);
+                    replaced = true;
                 }
             }
+            if !replaced {
+                source.entries.push(Entry::Property(Property {
+                    annotations: Vec::new(),
+                    modifiers: Vec::new(),
+                    name: key.clone(),
+                    type_ann: None,
+                    value: Some(Expr::Ident(binding)),
+                    body: None,
+                }));
+                source.entry_scopes.resize(source.entries.len(), None);
+            }
+            source.body_members.insert(key.clone());
         }
-        Ok(merge_values(
-            Value::Object(Arc::clone(template_map), Some(Arc::clone(template_src))),
-            overlay,
-        ))
+        self.eval_amended_object(template_map, &source, body, scope, depth)
+            .await
+    }
+
+    /// Read one member of the amended receiver without forcing unrelated
+    /// elements (which may themselves reference super.first or super.last).
+    #[async_recursion(?Send)]
+    #[allow(clippy::too_many_arguments)]
+    async fn eval_listing_member(
+        &mut self,
+        entries: &[Entry],
+        scope: &Scope,
+        depth: usize,
+        target: usize,
+        position: &mut usize,
+        value: &mut Option<Value>,
+        inherited_locals: &[(String, Expr)],
+    ) -> Result<()> {
+        if depth > self.max_depth {
+            return Err(Error::Eval("maximum recursion depth exceeded".into()));
+        }
+        let scope = scope.child();
+        let mut locals = inherited_locals.to_vec();
+        for entry in entries {
+            match entry {
+                Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {
+                    if let Some(expr) = &prop.value {
+                        locals.push((prop.name.clone(), expr.clone()));
+                    }
+                }
+                Entry::Elem(expr) => {
+                    if *position == target {
+                        *value = Some(
+                            self.eval_expr(&with_listing_locals(expr, &locals), &scope, depth + 1)
+                                .await?,
+                        );
+                    }
+                    *position += 1;
+                }
+                Entry::DynProperty(index, expr) => {
+                    let index = self.eval_expr(index, &scope, depth + 1).await?;
+                    let Value::Int(index) = index else {
+                        return Err(Error::Eval(
+                            "listing index amendment requires an Int index".into(),
+                        ));
+                    };
+                    let index = usize::try_from(index)
+                        .map_err(|_| Error::Eval("listing index cannot be negative".into()))?;
+                    if index == target {
+                        *value = Some(
+                            if let (Some(base), Expr::ObjectBody(body)) = (value.as_ref(), expr) {
+                                let mut amendment_scope = scope.child();
+                                let base_name = "\0listing_endpoint_base".to_string();
+                                amendment_scope.set(base_name.clone(), base.clone());
+                                let amendment = Expr::Binop(
+                                    BinOp::Add,
+                                    Box::new(Expr::Ident(base_name)),
+                                    Box::new(Expr::ObjectBody(body.clone())),
+                                );
+                                self.eval_expr(
+                                    &with_listing_locals(&amendment, &locals),
+                                    &amendment_scope,
+                                    depth + 1,
+                                )
+                                .await?
+                            } else {
+                                self.eval_expr(
+                                    &with_listing_locals(expr, &locals),
+                                    &scope,
+                                    depth + 1,
+                                )
+                                .await?
+                            },
+                        );
+                    }
+                    *position = (*position).max(index + 1);
+                }
+                Entry::Spread(expr) => {
+                    let values = match self.eval_expr(expr, &scope, depth + 1).await? {
+                        Value::List(values) => values,
+                        Value::Object(values, _) => values.values().cloned().collect(),
+                        value => vec![value],
+                    };
+                    if target >= *position && target - *position < values.len() {
+                        *value = Some(values[target - *position].clone());
+                    }
+                    *position += values.len();
+                }
+                Entry::ForGenerator(generator) => {
+                    let collection = self
+                        .eval_expr(&generator.collection, &scope, depth + 1)
+                        .await?;
+                    for (key, item) in collection_to_items(collection) {
+                        let mut iter_scope = scope.child();
+                        let mut iter_locals = locals.clone();
+                        // Bind generator variables after enclosing locals so
+                        // shadowing does not change those locals' definitions.
+                        let value_binding = format!("\0listing_generator_value:{depth}");
+                        iter_scope.set(value_binding.clone(), item.clone());
+                        iter_scope.set(generator.val_var.clone(), item);
+                        iter_locals.push((generator.val_var.clone(), Expr::Ident(value_binding)));
+                        if let Some(key_var) = &generator.key_var {
+                            let key_binding = format!("\0listing_generator_key:{depth}");
+                            iter_scope.set(key_binding.clone(), key.clone());
+                            iter_scope.set(key_var.clone(), key);
+                            iter_locals.push((key_var.clone(), Expr::Ident(key_binding)));
+                        }
+                        self.eval_listing_member(
+                            &generator.body,
+                            &iter_scope,
+                            depth + 1,
+                            target,
+                            position,
+                            value,
+                            &iter_locals,
+                        )
+                        .await?;
+                    }
+                }
+                Entry::WhenGenerator(generator) => {
+                    let condition = self
+                        .eval_expr(&generator.condition, &scope, depth + 1)
+                        .await?;
+                    let selected = if is_truthy(&condition) {
+                        Some(generator.body.as_slice())
+                    } else {
+                        generator.else_body.as_deref()
+                    };
+                    if let Some(selected) = selected {
+                        self.eval_listing_member(
+                            selected,
+                            &scope,
+                            depth + 1,
+                            target,
+                            position,
+                            value,
+                            &locals,
+                        )
+                        .await?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     #[async_recursion(?Send)]
@@ -2995,10 +3501,21 @@ impl Evaluator {
                 .await
             }
             Expr::New(type_name, entries, generic_params) => {
+                let mut constructor_scope = scope.child();
+                constructor_scope.set(
+                    "super".into(),
+                    Value::Object(Arc::new(IndexMap::new()), None),
+                );
+                constructor_scope.receiver_entries = Some(Arc::new(entries.clone()));
+                constructor_scope.receiver_list_base = None;
+                let scope = &constructor_scope;
                 match type_name.as_deref() {
                     Some("Listing") => {
+                        let mut listing_scope = scope.child();
+                        listing_scope.set("super".into(), Value::List(Vec::new()));
+                        listing_scope.receiver_list_base = Some(0);
                         let mut items = Vec::new();
-                        self.eval_listing_entries(entries, scope, depth + 1, &mut items)
+                        self.eval_listing_entries(entries, &listing_scope, depth + 1, &mut items)
                             .await?;
                         Ok(Value::List(items))
                     }
@@ -3132,7 +3649,7 @@ impl Evaluator {
                             let is_open = base_src.is_open;
                             // Late binding: re-evaluate merged base + overlay entries
                             let mut result = self
-                                .eval_amended_object(base_src, entries, scope, depth)
+                                .eval_amended_object(base_map, base_src, entries, scope, depth)
                                 .await?;
                             // Preserve the base class's is_open flag and tag the
                             // type_name so output.renderer.converters can match it.
@@ -3214,8 +3731,24 @@ impl Evaluator {
                     }
                 }
             }
-            Expr::ObjectBody(entries) => self.eval_entries(entries, scope, depth + 1).await,
+            Expr::ObjectBody(entries) => {
+                let mut body_scope = scope.child();
+                body_scope.set(
+                    "super".into(),
+                    Value::Object(Arc::new(IndexMap::new()), None),
+                );
+                self.eval_entries(entries, &body_scope, depth + 1).await
+            }
             Expr::Field(obj_expr, field) => {
+                if matches!(obj_expr.as_ref(), Expr::Ident(name) if name == "super") {
+                    let value = self
+                        .eval_super_member(field, scope, depth + 1, true)
+                        .await?;
+                    if let Some(Value::Object(_, source)) = scope.get("super") {
+                        self.warn_if_deprecated_access(source, field);
+                    }
+                    return Ok(value);
+                }
                 let obj = self.eval_field_base(obj_expr, field, scope, depth).await?;
                 // Built-in properties
                 match (&obj, field.as_str()) {
@@ -3290,6 +3823,24 @@ impl Evaluator {
                 }
             }
             Expr::Index(obj_expr, key_expr) => {
+                if matches!(obj_expr.as_ref(), Expr::Ident(name) if name == "super") {
+                    let key = self.eval_expr(key_expr, scope, depth + 1).await?;
+                    if let Some(Value::List(items)) = scope.get("super") {
+                        return match key {
+                            Value::Int(index) => usize::try_from(index)
+                                .ok()
+                                .and_then(|index| items.get(index))
+                                .cloned()
+                                .ok_or_else(|| {
+                                    Error::Eval(format!("index out of bounds: {index}"))
+                                }),
+                            _ => Err(Error::Eval("listing index must be an Int".into())),
+                        };
+                    }
+                    return self
+                        .eval_super_member(&value_to_key(&key)?, scope, depth + 1, false)
+                        .await;
+                }
                 let obj = self.eval_expr(obj_expr, scope, depth + 1).await?;
                 let key = self.eval_expr(key_expr, scope, depth + 1).await?;
                 let key_str = value_to_key(&key)?;
@@ -3872,14 +4423,25 @@ impl Evaluator {
     ) -> Result<Value> {
         if let Value::List(existing) = base {
             let mut amended = existing;
-            self.eval_listing_entries(overlay_entries, scope, depth + 1, &mut amended)
+            let mut amendment_scope = scope.child();
+            amendment_scope.set("super".into(), Value::List(amended.clone()));
+            amendment_scope.receiver_entries = Some(Arc::new(overlay_entries.to_vec()));
+            amendment_scope.receiver_list_base = Some(amended.len());
+            self.eval_listing_entries(overlay_entries, &amendment_scope, depth + 1, &mut amended)
                 .await?;
             return Ok(Value::List(amended));
         }
-        if let Value::Object(_, Some(base_src)) = &base {
+        if let Value::Object(base_map, Some(base_src)) = &base {
             if !base_src.mapping_value_types.is_empty() {
-                let (inherited_scope, amendment_scope) =
+                let (inherited_scope, mut amendment_scope) =
                     mapping_amendment_scopes(&base_src.scope, &base_src.scope_declared, scope);
+                amendment_scope.set("super".into(), base.clone());
+                let mut receiver_entries = base_map
+                    .keys()
+                    .map(|key| Entry::DynProperty(Expr::String(key.clone()), Expr::Null))
+                    .collect::<Vec<_>>();
+                receiver_entries.extend_from_slice(overlay_entries);
+                amendment_scope.receiver_entries = Some(Arc::new(receiver_entries));
                 let value_type_defaults = base_src
                     .mapping_value_types
                     .iter()
@@ -3920,7 +4482,7 @@ impl Evaluator {
                 return Ok(Value::Object(Arc::new(amended), Some(Arc::clone(base_src))));
             }
             return self
-                .eval_amended_object(base_src, overlay_entries, scope, depth)
+                .eval_amended_object(base_map, base_src, overlay_entries, scope, depth)
                 .await;
         }
         let mut amendment_scope = scope.child();
@@ -4167,7 +4729,7 @@ impl Evaluator {
                         && let Expr::ObjectBody(body) = val_expr
                     {
                         let val = self
-                            .eval_object_body_over_template(
+                            .eval_amended_object(
                                 existing_map,
                                 existing_src,
                                 body,
@@ -4221,56 +4783,77 @@ impl Evaluator {
                             if let Expr::New(Some(type_name), _, _) = val_expr {
                                 validate_new_object_body(type_name, body, src)?;
                             }
-                            let mut result = if let Some(default_entries) =
-                                explicit_default_entries.as_ref()
-                            {
-                                let mut overlay_entries = default_entries.clone();
-                                overlay_entries.extend(body.iter().cloned());
-                                self.eval_amended_object(src, &overlay_entries, &entry_scope, depth)
-                                    .await?
-                            } else if !is_typed_new
-                                && let Some(Value::Object(_, Some(explicit_src))) =
-                                    explicit_default.as_ref()
-                                && type_default.is_some()
-                                && default_type_name.is_some_and(|expected| {
-                                    let chain = explicit_src
-                                        .type_name
-                                        .iter()
-                                        .chain(explicit_src.parent_type_names.iter())
-                                        .cloned()
-                                        .collect::<Vec<_>>();
-                                    let expected = expand_type_alias_names(
-                                        std::slice::from_ref(&expected.to_string()),
+                            let mut result =
+                                if let Some(default_entries) = explicit_default_entries.as_ref() {
+                                    let mut overlay_entries = default_entries.clone();
+                                    overlay_entries.extend(body.iter().cloned());
+                                    self.eval_amended_object(
+                                        template_map,
+                                        src,
+                                        &overlay_entries,
                                         &entry_scope,
-                                    );
-                                    expand_type_alias_names(&chain, &entry_scope).iter().any(
-                                        |actual| {
-                                            expected
-                                                .iter()
-                                                .any(|expected| type_names_match(actual, expected))
-                                        },
+                                        depth,
                                     )
-                                })
-                            {
-                                // The `default` is itself an instance of the selected
-                                // value type (for example the synthetic `new Step {}`
-                                // of a typed mapping literal). Amend its entries so the
-                                // body's assignments late-bind sibling properties.
-                                self.eval_amended_object(explicit_src, body, &entry_scope, depth)
                                     .await?
-                            } else if explicit_default.is_some() && type_default.is_some() {
-                                self.eval_object_body_over_template(
-                                    template_map,
-                                    src,
-                                    body,
-                                    &entry_scope,
-                                    depth,
-                                )
-                                .await?
-                            } else {
-                                self.eval_amended_object(src, body, &entry_scope, depth)
+                                } else if !is_typed_new
+                                    && let Some(Value::Object(explicit_map, Some(explicit_src))) =
+                                        explicit_default.as_ref()
+                                    && type_default.is_some()
+                                    && default_type_name.is_some_and(|expected| {
+                                        let chain = explicit_src
+                                            .type_name
+                                            .iter()
+                                            .chain(explicit_src.parent_type_names.iter())
+                                            .cloned()
+                                            .collect::<Vec<_>>();
+                                        let expected = expand_type_alias_names(
+                                            std::slice::from_ref(&expected.to_string()),
+                                            &entry_scope,
+                                        );
+                                        expand_type_alias_names(&chain, &entry_scope).iter().any(
+                                            |actual| {
+                                                expected.iter().any(|expected| {
+                                                    type_names_match(actual, expected)
+                                                })
+                                            },
+                                        )
+                                    })
+                                {
+                                    // The `default` is itself an instance of the selected
+                                    // value type (for example the synthetic `new Step {}`
+                                    // of a typed mapping literal). Amend its entries so the
+                                    // body's assignments late-bind sibling properties.
+                                    self.eval_amended_object(
+                                        explicit_map,
+                                        explicit_src,
+                                        body,
+                                        &entry_scope,
+                                        depth,
+                                    )
                                     .await?
-                            };
+                                } else if let Some(Value::Object(explicit_map, _)) =
+                                    explicit_default.as_ref()
+                                    && type_default.is_some()
+                                {
+                                    self.eval_object_body_over_template(
+                                        template_map,
+                                        src,
+                                        explicit_map,
+                                        body,
+                                        &entry_scope,
+                                        depth,
+                                    )
+                                    .await?
+                                } else {
+                                    self.eval_amended_object(
+                                        template_map,
+                                        src,
+                                        body,
+                                        &entry_scope,
+                                        depth,
+                                    )
+                                    .await?
+                                };
                             let type_name = src.type_name.as_deref().or(*default_type_name);
                             if let Some(tn) = type_name
                                 && let Value::Object(_, ref mut result_src) = result
@@ -5525,6 +6108,21 @@ fn collect_entry_refs(entries: &[Entry], refs: &mut HashSet<String>, shadows: &H
     }
 }
 
+// Wrap only the locals needed by the selected element. Forcing unrelated
+// locals here can recurse when a local itself reads super.first or super.last.
+fn with_listing_locals(expr: &Expr, locals: &[(String, Expr)]) -> Expr {
+    let mut expr = expr.clone();
+    let mut refs = HashSet::new();
+    collect_expr_refs(&expr, &mut refs, &HashSet::new());
+    for (name, value) in locals.iter().rev() {
+        if refs.remove(name) {
+            collect_expr_refs(value, &mut refs, &HashSet::new());
+            expr = Expr::Let(name.clone(), Box::new(value.clone()), Box::new(expr));
+        }
+    }
+    expr
+}
+
 fn collect_expr_refs(expr: &Expr, refs: &mut HashSet<String>, shadows: &HashSet<String>) {
     match expr {
         Expr::Ident(name) => {
@@ -5694,6 +6292,8 @@ struct Scope {
     /// declared names may win over an inherited member of an inner object.
     declared: HashSet<String>,
     type_namespace: Option<String>,
+    receiver_entries: Option<Arc<Vec<Entry>>>,
+    receiver_list_base: Option<usize>,
     parent: Option<Rc<Scope>>,
 }
 
@@ -5706,6 +6306,8 @@ impl Scope {
             poisoned: IndexMap::new(),
             declared: HashSet::new(),
             type_namespace: self.type_namespace.clone(),
+            receiver_entries: self.receiver_entries.clone(),
+            receiver_list_base: self.receiver_list_base,
             parent: Some(Rc::new(self.clone())),
         }
     }
@@ -6005,7 +6607,14 @@ fn own_body_names(
 /// shadowed by an inherited member of the same name.
 fn scope_with_object_bindings(lexical: &Scope, object: &Scope, owned: &HashSet<String>) -> Scope {
     let mut scope = lexical.child();
+    scope.receiver_entries = object.receiver_entries.clone();
+    scope.receiver_list_base = object.receiver_list_base;
     for (name, value) in &object.vars {
+        // `super` belongs to the body that declared the entry. A later
+        // amendment must not replace an inherited entry's parent binding.
+        if name == "super" {
+            continue;
+        }
         if owned.contains(name) {
             scope.declare(name.clone(), value.clone());
         } else if !lexical.is_declared(name) {
@@ -7384,5 +7993,30 @@ mod package_uri_tests {
                 .unwrap_err()
                 .to_string();
         assert!(err.contains("unsupported package URI"));
+    }
+}
+
+#[cfg(all(test, feature = "blocking"))]
+mod super_deprecation_tests {
+    #[test]
+    fn super_property_access_warns_once() {
+        let mut evaluator = super::Evaluator::default();
+        let source = r#"
+local base = new {
+  @Deprecated { message = "use replacement" }
+  old = 1
+}
+result = (base) { old = super.old + super.old }
+"#;
+        let value =
+            pollster::block_on(evaluator.eval_source(source, std::path::Path::new("super.pkl")))
+                .unwrap();
+        assert_eq!(value.to_json()["result"]["old"], 2);
+        assert_eq!(evaluator.warned_deprecated.len(), 1);
+        assert!(
+            evaluator
+                .warned_deprecated
+                .contains(&("old".into(), Some("use replacement".into())))
+        );
     }
 }

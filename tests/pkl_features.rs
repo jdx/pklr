@@ -8654,6 +8654,210 @@ fn offline_package_cache_miss_is_actionable() {
 }
 
 #[test]
+fn super_in_object_amendment_of_function_result() {
+    let v = eval(
+        r#"
+class Step { check: String? }
+local function run(cmd: String): Step = new { check = cmd }
+local defs = new Mapping<String, Step> { ["a"] = (run("echo a")) { check = "\(super.check) b" } }
+result = defs
+"#,
+    );
+    assert_eq!(v["result"], serde_json::json!({"a":{"check":"echo a b"}}));
+}
+
+#[test]
+fn super_in_object_amendment_chain_and_nested_bodies() {
+    let v = eval(
+        r#"
+local base = new { value = "a"; child { value = "inner" } }
+local middle = (base) { value = super.value + "b" }
+result = (middle) { value = super.value + "c" }
+inherited = (middle) { other = true }
+nested = (base) { value = super.value + "!"; child { value = super.value + "?" } }
+indexed = (base) { value = super["value"] + "i" }
+"#,
+    );
+    assert_eq!(v["result"]["value"], "abc");
+    assert_eq!(v["inherited"]["value"], "ab");
+    assert_eq!(v["nested"]["value"], "a!");
+    assert_eq!(v["nested"]["child"]["value"], "inner?");
+    assert_eq!(v["indexed"]["value"], "ai");
+}
+
+#[test]
+fn super_in_object_amendment_keeps_child_receiver() {
+    let v = eval(
+        r#"
+local base = new { x = 1; y = x; z = this.x }
+result = (base) { x = 2; y = super.y; z = super.z }
+"#,
+    );
+    assert_eq!(v["result"], serde_json::json!({"x":2,"y":2,"z":2}));
+}
+
+#[test]
+fn super_in_object_amendment_reads_amended_parent_member_once() {
+    let v = eval(
+        r#"
+local base = new { child { value = "a" } }
+local middle = (base) { child { value = super.value + "b" } }
+result = (middle) { child = super.child }
+"#,
+    );
+    assert_eq!(v["result"]["child"]["value"], "ab");
+}
+
+#[test]
+fn super_in_mapping_keeps_parent_keys_and_receiver_metadata() {
+    let v = eval(
+        r#"
+local base = new Mapping { ["a"] = 1; ["length"] = 42 }
+result = (base) {
+  ["b"] = super["a"]
+  ["parentLengthKey"] = super["length"]
+  ["count"] = super.length
+  ["allKeys"] = super.keys
+  ["empty"] = super.isEmpty
+  ["last"] = 9
+}
+"#,
+    );
+    assert_eq!(v["result"]["b"], 1);
+    assert_eq!(v["result"]["parentLengthKey"], 42);
+    assert_eq!(v["result"]["count"], 8);
+    assert_eq!(
+        v["result"]["allKeys"],
+        serde_json::json!([
+            "a",
+            "length",
+            "b",
+            "parentLengthKey",
+            "count",
+            "allKeys",
+            "empty",
+            "last"
+        ])
+    );
+    assert_eq!(v["result"]["empty"], false);
+}
+
+#[test]
+fn super_in_nested_collections_uses_their_own_parent() {
+    let v = eval(
+        r#"
+local base = new {
+  a = 99
+  xs = new Listing { 1; 2 }
+  m = new Mapping<String, Int> { ["a"] = 1 }
+}
+result = (base) {
+  xs { [0] = super[1] }
+  m { ["b"] = super["a"] }
+  fresh = new { a = super.a }
+}
+"#,
+    );
+    assert_eq!(v["result"]["xs"], serde_json::json!([2, 2]));
+    assert_eq!(v["result"]["m"], serde_json::json!({"a":1,"b":1}));
+    assert_eq!(v["result"]["fresh"]["a"], serde_json::json!({}));
+}
+
+#[test]
+fn super_declared_property_takes_precedence_over_builtin_name() {
+    let v = eval(
+        r#"
+class Base { length: Int = 10 }
+result = new Base { length = super.length + 1 }
+"#,
+    );
+    assert_eq!(v["result"]["length"], 11);
+}
+
+#[test]
+fn super_metadata_is_not_available_on_typed_objects() {
+    for name in ["length", "keys", "isEmpty", "isNotEmpty"] {
+        let source = format!(
+            r#"
+class Base {{ value: Int = 1; result: Any }}
+result = new Base {{ result = super.{name} }}
+"#
+        );
+        assert!(eval_fails(&source).contains(&format!("field not found: {name}")));
+    }
+}
+
+#[test]
+fn super_metadata_inside_generators_uses_complete_receiver() {
+    let v = eval(
+        r#"
+local base = new Mapping { ["base"] = 1 }
+result = (base) {
+  for (name in List("one", "two")) {
+    when (true) { [name] = super.length }
+  }
+  when (false) { ["notUsed"] = 0 } else { ["allKeys"] = super.keys }
+  ["end"] = 2
+}
+"#,
+    );
+    assert_eq!(v["result"]["one"], 5);
+    assert_eq!(v["result"]["two"], 5);
+    assert_eq!(
+        v["result"]["allKeys"],
+        serde_json::json!(["base", "one", "two", "allKeys", "end"])
+    );
+}
+
+#[test]
+fn super_metadata_keeps_all_typed_mapping_amendment_keys() {
+    let v = eval(
+        r#"
+local base = new Mapping<String, Any> { ["a"] = 1 }
+local middle = (base) { ["b"] = 2 }
+result = (middle) { ["count"] = super.length; ["allKeys"] = super.keys }
+local object = new { m = middle }
+nested = (object) { m { ["count"] = super.length; ["allKeys"] = super.keys } }
+"#,
+    );
+    let expected = serde_json::json!({"a":1,"b":2,"count":4,"allKeys":["a","b","count","allKeys"]});
+    assert_eq!(v["result"], expected);
+    assert_eq!(v["nested"]["m"], expected);
+}
+
+#[test]
+fn super_listing_metadata_uses_amended_receiver() {
+    let v = eval(
+        r#"
+local base = new Listing { 1; 2 }
+result = (base) { super.length; super.isEmpty }
+local object = new { xs = base }
+nested = (object) { xs { [0] = super.length } }
+generated = (base) { for (i in List(1,2)) { when (true) { super.length } } }
+"#,
+    );
+    assert_eq!(v["result"], serde_json::json!([1, 2, 4, false]));
+    assert_eq!(v["nested"]["xs"], serde_json::json!([2, 2]));
+    assert_eq!(v["generated"], serde_json::json!([1, 2, 4, 4]));
+}
+
+#[test]
+fn super_metadata_does_not_evaluate_local_values_while_counting() {
+    let v = eval(
+        r#"
+local base = new Listing { 1 }
+result = (base) { local count = super.length; count }
+unused = (base) { local count = super.length; super.length }
+local mapping = new Mapping { ["a"] = 1 }
+entries = (mapping) { local count = super.length; ["count"] = count }
+"#,
+    );
+    assert_eq!(v["result"], serde_json::json!([1, 2]));
+    assert_eq!(v["unused"], serde_json::json!([1, 2]));
+    assert_eq!(v["entries"], serde_json::json!({"a":1,"count":2}));
+}
+
+#[test]
 fn string_replace_last() {
     let v = eval(
         r#"
@@ -8953,4 +9157,141 @@ aliasTyped = aliased()["a"] is Step
     assert_eq!(v["first"], serde_json::json!({"check":"a", "glob":"*"}));
     assert_eq!(v["typed"], true);
     assert_eq!(v["aliasTyped"], true);
+}
+
+#[test]
+fn mapping_value_amendments_bind_their_own_super() {
+    let v = eval(
+        r#"
+class Item { x: Int; hidden secret = 7 }
+local base = new Mapping<String, Item> { ["a"] { x = 1 } }
+local middle = (base) { ["a"] { x = super.x + 1 } }
+result = (middle) { ["a"] { x = super.x + super.secret } }
+"#,
+    );
+    assert_eq!(v["result"], serde_json::json!({"a":{"x":9}}));
+}
+
+#[test]
+fn listing_super_first_and_last_read_the_amended_receiver() {
+    let v = eval(
+        r#"
+local base = new Listing { 1; 2 }
+first = (base) { [0] = 3; super.first }
+last = (base) { super.last; 4 }
+generated = new Listing { for (x in List(7, 8)) { x }; super.first }
+spread = new Listing { super.last; ...List(4, 5) }
+"#,
+    );
+    assert_eq!(v["first"], serde_json::json!([3, 2, 3]));
+    assert_eq!(v["last"], serde_json::json!([1, 2, 4, 4]));
+    assert_eq!(v["generated"], serde_json::json!([7, 8, 7]));
+    assert_eq!(v["spread"], serde_json::json!([5, 4, 5]));
+    assert!(eval_fails("x = new Listing { super.last }").contains("maximum recursion depth"));
+}
+
+#[test]
+fn listing_super_endpoints_do_not_force_unrelated_locals() {
+    let v = eval(
+        r#"
+first = new Listing { 1; local x = super.first; x }
+last = new Listing { local x = super.last; x; 2 }
+local base = new Listing { 1 }
+amended = (base) { super.last; local n = 7; n }
+"#,
+    );
+    assert_eq!(v["first"], serde_json::json!([1, 1]));
+    assert_eq!(v["last"], serde_json::json!([2, 2]));
+    assert_eq!(v["amended"], serde_json::json!([1, 7, 7]));
+}
+
+#[test]
+fn mapping_explicit_value_default_survives_entry_body() {
+    let v = eval(
+        r#"
+class Item { shared: Boolean = false; name: String = "" }
+result = new Mapping<String, Item> {
+  default = new { shared = true; extra = 7 }
+  ["a"] { name = "a" }
+}
+"#,
+    );
+    assert_eq!(
+        v["result"]["a"],
+        serde_json::json!({"shared":true,"name":"a","extra":7})
+    );
+}
+
+#[test]
+fn listing_super_endpoints_keep_locals_in_generator_bodies() {
+    let v = eval(
+        r#"
+first = new Listing { local n = 7; for (x in List(1)) { n }; super.first }
+last = new Listing { local n = 8; super.last; when (true) { n } }
+"#,
+    );
+    assert_eq!(v["first"], serde_json::json!([7, 7]));
+    assert_eq!(v["last"], serde_json::json!([8, 8]));
+}
+
+#[test]
+fn listing_super_endpoint_index_amendments_keep_locals() {
+    let v = eval(
+        r#"
+local base = new Listing { new { x = 1 } }
+result = (base) { local n = 7; [0] { x = n }; super.first }
+"#,
+    );
+    assert_eq!(v["result"], serde_json::json!([{"x":7},{"x":7}]));
+}
+
+#[test]
+fn mapping_explicit_value_defaults_survive_further_amendments() {
+    let v = eval(
+        r#"
+class Item { shared: Boolean = false; name: String = "" }
+local base = new Mapping<String, Item> {
+  default = new { shared = true; extra = 7 }
+  ["a"] { name = "a" }
+}
+result = (base) { ["a"] { name = super.name + "b"; extra = super.extra + 1 } }
+"#,
+    );
+    assert_eq!(
+        v["result"]["a"],
+        serde_json::json!({"shared":true,"name":"ab","extra":8})
+    );
+}
+
+#[test]
+fn mapping_explicit_defaults_keep_class_expressions_late_bound() {
+    let v = eval(
+        r#"
+class Item { x: Int = 1; computed: Int = x + 1; shared: Boolean = false }
+local base = new Mapping<String, Item> {
+  default = new { shared = true; extra = 7 }
+  ["a"] { x = 5 }
+}
+result = (base) { ["a"] { x = 9 } }
+initial = base["a"]
+"#,
+    );
+    assert_eq!(
+        v["initial"],
+        serde_json::json!({"x":5,"computed":6,"shared":true,"extra":7})
+    );
+    assert_eq!(
+        v["result"]["a"],
+        serde_json::json!({"x":9,"computed":10,"shared":true,"extra":7})
+    );
+}
+
+#[test]
+fn listing_super_endpoints_preserve_generator_shadowing() {
+    let v = eval(
+        r#"
+result = new Listing { local n = 7; local m = n; for (n in List(2)) { m + n }; super.first }
+"#,
+    );
+    assert_eq!(v["result"], serde_json::json!([9, 9]));
 }
