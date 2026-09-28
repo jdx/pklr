@@ -8840,3 +8840,19 @@ generated = (base) { for (i in List(1,2)) { when (true) { super.length } } }
     assert_eq!(v["nested"]["xs"], serde_json::json!([2, 2]));
     assert_eq!(v["generated"], serde_json::json!([1, 2, 4, 4]));
 }
+
+#[test]
+fn super_metadata_does_not_evaluate_local_values_while_counting() {
+    let v = eval(
+        r#"
+local base = new Listing { 1 }
+result = (base) { local count = super.length; count }
+unused = (base) { local count = super.length; super.length }
+local mapping = new Mapping { ["a"] = 1 }
+entries = (mapping) { local count = super.length; ["count"] = count }
+"#,
+    );
+    assert_eq!(v["result"], serde_json::json!([1, 2]));
+    assert_eq!(v["unused"], serde_json::json!([1, 2]));
+    assert_eq!(v["entries"], serde_json::json!({"a":1,"count":2}));
+}

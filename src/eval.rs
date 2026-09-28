@@ -931,14 +931,12 @@ impl Evaluator {
         if depth > self.max_depth {
             return Err(Error::Eval("maximum recursion depth exceeded".into()));
         }
-        let mut scope = scope.child();
+        let scope = scope.child();
         for entry in entries {
             match entry {
-                Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {
-                    if let Some(value) = self.eval_property(prop, &scope, depth + 1).await? {
-                        scope.declare(prop.name.clone(), value);
-                    }
-                }
+                // Locals are values, not members. Evaluating a local that
+                // reads super.length while counting would re-enter this walk.
+                Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {}
                 Entry::Property(prop)
                     if prop.name != "default"
                         && !has_modifier(&prop.modifiers, Modifier::Hidden) =>
@@ -1001,7 +999,7 @@ impl Evaluator {
         if depth > self.max_depth {
             return Err(Error::Eval("maximum recursion depth exceeded".into()));
         }
-        let mut scope = scope.child();
+        let scope = scope.child();
         for entry in entries {
             match entry {
                 Entry::Elem(_) => *length += 1,
@@ -1013,11 +1011,9 @@ impl Evaluator {
                         *length += 1;
                     }
                 }
-                Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {
-                    if let Some(value) = self.eval_property(prop, &scope, depth + 1).await? {
-                        scope.declare(prop.name.clone(), value);
-                    }
-                }
+                // Locals are values, not members. Evaluating a local that
+                // reads super.length while counting would re-enter this walk.
+                Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {}
                 Entry::Spread(expr) => {
                     *length += match self.eval_expr(expr, &scope, depth + 1).await? {
                         Value::List(items) => items.len(),
