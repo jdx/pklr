@@ -8652,3 +8652,34 @@ fn offline_package_cache_miss_is_actionable() {
     assert!(error.contains("package is not cached and offline mode is enabled"));
     assert!(error.contains("https://example.com/pkg@1.0.0.zip"));
 }
+
+#[test]
+fn string_replace_last() {
+    let v = eval(
+        r#"
+result = "a/*".replaceLast("*", "*.txt")
+repeated = "ababa".replaceLast("aba", "X")
+unicode = "é猫é猫".replaceLast("猫", "犬")
+absent = "abc".replaceLast("z", "X")
+emptyPattern = "abc".replaceLast("", "!")
+emptyString = "".replaceLast("", "!")
+removed = "abcabc".replaceLast("abc", "")
+literal = "a.*b.*".replaceLast(".*", "$1")
+"#,
+    );
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "result": "a/*.txt", "repeated": "abX", "unicode": "é猫é犬",
+            "absent": "abc", "emptyPattern": "abc!", "emptyString": "!",
+            "removed": "abc", "literal": "a.*b$1"
+        })
+    );
+}
+
+#[test]
+fn string_replace_last_requires_string_arguments() {
+    assert!(eval_fails(r#"result = "abc".replaceLast(1, "x")"#).contains("replaceLast"));
+    assert!(eval_fails(r#"result = "abc".replaceLast("a", 1)"#).contains("replaceLast"));
+    assert!(eval_fails(r#"result = "abc".replaceLast("a")"#).contains("replaceLast"));
+}
