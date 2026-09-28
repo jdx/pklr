@@ -8652,3 +8652,48 @@ fn offline_package_cache_miss_is_actionable() {
     assert!(error.contains("package is not cached and offline mode is enabled"));
     assert!(error.contains("https://example.com/pkg@1.0.0.zip"));
 }
+
+#[test]
+fn mapping_when_inside_for() {
+    let v = eval(
+        r#"
+local cmds = new Mapping<String, String?> { ["a"] = "echo a"; ["b"] = null }
+result = new Mapping<String, String> {
+  for (name, cmd in cmds) {
+    when (cmd != null) { [name] = cmd }
+  }
+}
+"#,
+    );
+    assert_eq!(v["result"], serde_json::json!({"a": "echo a"}));
+}
+
+#[test]
+fn mapping_when_branches_preserve_defaults_and_iteration_scope() {
+    let v = eval(
+        r#"
+class Step { command: String; enabled: Boolean = true }
+result = new Mapping<String, Step> {
+  default { enabled = false }
+  when (false) { ["unselected"] { command = missing } }
+  for (name in List("a", "b")) {
+    when (name == "a") {
+      when (true) { [name] { command = "echo a" } }
+    } else {
+      for (suffix in List("1", "2")) {
+        [name + suffix] { command = "echo " + name + suffix }
+      }
+    }
+  }
+}
+"#,
+    );
+    assert_eq!(
+        v["result"],
+        serde_json::json!({
+            "a": {"command": "echo a", "enabled": false},
+            "b1": {"command": "echo b1", "enabled": false},
+            "b2": {"command": "echo b2", "enabled": false}
+        })
+    );
+}
