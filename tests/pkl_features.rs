@@ -8967,6 +8967,46 @@ result = precommit("pre-commit")
 }
 
 #[test]
+fn lambda_parameters_override_class_properties_across_call_forms() {
+    let v = eval(
+        r#"
+class Step { stage: String?; check: String? }
+local make = (stage) -> new Step { check = stage }
+local holder = new {
+  function makeStep(stage: String): Step = new Step { check = stage }
+}
+applied = make.apply("apply")
+method = holder.makeStep("method")
+callback = (new Listing { "callback" }).map(make)
+piped = "pipe" |> make
+"#,
+    );
+    assert_eq!(v["applied"]["check"], "apply");
+    assert_eq!(v["method"]["check"], "method");
+    assert_eq!(v["callback"][0]["check"], "callback");
+    assert_eq!(v["piped"]["check"], "pipe");
+}
+
+#[test]
+fn converter_parameter_overrides_class_property() {
+    let v = eval_with_converters(
+        r#"
+class Step { check: String = "" }
+class Converted { stage: String?; check: String? }
+output {
+  renderer {
+    converters {
+      [Step] = (stage) -> new Converted { check = stage.check }
+    }
+  }
+}
+item = new Step { check = "input" }
+"#,
+    );
+    assert_eq!(v["item"]["check"], "input");
+}
+
+#[test]
 fn inferred_function_result_keeps_members_through_mapping() {
     let v = eval(
         r#"

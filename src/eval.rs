@@ -5081,7 +5081,7 @@ impl Evaluator {
                                 }
                                 // Bind the object as the first parameter
                                 if let Some(param) = params.first() {
-                                    call_scope.set(
+                                    call_scope.declare(
                                         param.clone(),
                                         Value::Object(map.clone(), src.clone()),
                                     );
