@@ -3291,9 +3291,18 @@ impl Evaluator {
                         .await?;
                     for (key, item) in collection_to_items(collection) {
                         let mut iter_scope = scope.child();
+                        let mut iter_locals = locals.clone();
+                        // Bind generator variables after enclosing locals so
+                        // shadowing does not change those locals' definitions.
+                        let value_binding = format!("\0listing_generator_value:{depth}");
+                        iter_scope.set(value_binding.clone(), item.clone());
                         iter_scope.set(generator.val_var.clone(), item);
+                        iter_locals.push((generator.val_var.clone(), Expr::Ident(value_binding)));
                         if let Some(key_var) = &generator.key_var {
+                            let key_binding = format!("\0listing_generator_key:{depth}");
+                            iter_scope.set(key_binding.clone(), key.clone());
                             iter_scope.set(key_var.clone(), key);
+                            iter_locals.push((key_var.clone(), Expr::Ident(key_binding)));
                         }
                         self.eval_listing_member(
                             &generator.body,
@@ -3302,7 +3311,7 @@ impl Evaluator {
                             target,
                             position,
                             value,
-                            &locals,
+                            &iter_locals,
                         )
                         .await?;
                     }

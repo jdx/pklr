@@ -9285,3 +9285,13 @@ initial = base["a"]
         serde_json::json!({"x":9,"computed":10,"shared":true,"extra":7})
     );
 }
+
+#[test]
+fn listing_super_endpoints_preserve_generator_shadowing() {
+    let v = eval(
+        r#"
+result = new Listing { local n = 7; local m = n; for (n in List(2)) { m + n }; super.first }
+"#,
+    );
+    assert_eq!(v["result"], serde_json::json!([9, 9]));
+}
