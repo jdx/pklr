@@ -8853,3 +8853,28 @@ typed = holder.step is Step
     assert_eq!(v["mapped"], v["result"]);
     assert_eq!(v["typed"], true);
 }
+
+#[test]
+fn inferred_function_mapping_union_keys_keep_value_type_slot() {
+    let v = eval(
+        r#"
+class Step { check: String?; glob: String? }
+typealias Key = String | Int
+local function make(): Mapping<String | Int, Step> = new {
+  ["a"] { check = "a" }
+  [1] { check = "one" }
+}
+local function aliased(): Mapping<Key, Step> = new { ["a"] { check = "alias" } }
+local original = make()
+local extended = (original) { ["b"] { check = "b" } }
+result = (extended["b"]) { glob = "*" }
+first = (original["a"]) { glob = "*" }
+typed = extended["b"] is Step
+aliasTyped = aliased()["a"] is Step
+"#,
+    );
+    assert_eq!(v["result"], serde_json::json!({"check":"b", "glob":"*"}));
+    assert_eq!(v["first"], serde_json::json!({"check":"a", "glob":"*"}));
+    assert_eq!(v["typed"], true);
+    assert_eq!(v["aliasTyped"], true);
+}

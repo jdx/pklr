@@ -6297,7 +6297,13 @@ fn inferred_new_type(
         TypeExpr::Generic(name, args) => Ok((
             name.trim_start_matches('*').to_string(),
             args.iter()
-                .flat_map(|arg| {
+                .enumerate()
+                .flat_map(|(index, arg)| {
+                    // The mapping constructor reserves one slot for its key
+                    // type, followed by all value-type alternatives.
+                    if index == 0 && matches!(name.as_str(), "Mapping" | "Map") {
+                        return vec![display_type_expr(arg)];
+                    }
                     let mut names = Vec::new();
                     collect_type_expr_class_names(arg, scope, &mut names, 0);
                     names
