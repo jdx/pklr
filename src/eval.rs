@@ -803,6 +803,7 @@ impl Evaluator {
         field: &str,
         scope: &Scope,
         depth: usize,
+        property_access: bool,
     ) -> Result<Value> {
         if depth > self.max_depth {
             return Err(Error::Eval("maximum recursion depth exceeded".into()));
@@ -829,7 +830,10 @@ impl Evaluator {
                 let definition = restore_scope(&capture_object_source_scope(source));
                 let owners =
                     entry_scope_owners(&source.entries, Some(&source.entry_scopes), Some(source));
-                let mut receiver = Scope::default();
+                let mut receiver = Scope {
+                    receiver_entries: scope.receiver_entries.clone(),
+                    ..Scope::default()
+                };
                 if let Some(Value::Object(members, _)) = scope.get("this") {
                     for (name, value) in members.iter() {
                         receiver.set(name.clone(), value.clone());
@@ -851,7 +855,8 @@ impl Evaluator {
                     let has_parent_member = matches!(active.get("super"),
                         Some(Value::Object(parent, _)) if parent.contains_key(field));
                     let inherited = if has_parent_member {
-                        self.eval_super_member(field, &active, depth + 1).await?
+                        self.eval_super_member(field, &active, depth + 1, true)
+                            .await?
                     } else {
                         Value::Null
                     };
@@ -862,9 +867,107 @@ impl Evaluator {
                 }
             }
         }
-        map.get(field)
-            .cloned()
-            .ok_or_else(|| Error::Eval(format!("field not found: {field}")))
+        match field {
+            "length" | "keys" | "isEmpty" | "isNotEmpty" if property_access => {
+                let mut keys = IndexMap::new();
+                if let Some(entries) = &scope.receiver_entries {
+                    self.eval_receiver_keys(entries, scope, depth + 1, &mut keys)
+                        .await?;
+                } else {
+                    keys.extend(map.keys().map(|key| (key.clone(), ())));
+                }
+                return Ok(match field {
+                    "length" => Value::Int(keys.len() as i64),
+                    "keys" => Value::List(keys.into_keys().map(Value::String).collect()),
+                    "isEmpty" => Value::Bool(keys.is_empty()),
+                    _ => Value::Bool(!keys.is_empty()),
+                });
+            }
+            _ => {}
+        }
+        if let Some(value) = map.get(field) {
+            return Ok(value.clone());
+        }
+        // An untyped object's prototype supplies an empty Dynamic default
+        // for a newly declared property, never a member of an outer object.
+        if property_access
+            && source
+                .as_ref()
+                .is_none_or(|source| source.type_name.is_none())
+        {
+            return Ok(Value::Object(Arc::new(IndexMap::new()), None));
+        }
+        Err(Error::Eval(format!("field not found: {field}")))
+    }
+
+    /// Enumerate receiver members without evaluating their values. Mapping
+    /// metadata such as super.length includes entries after the current one.
+    #[async_recursion(?Send)]
+    async fn eval_receiver_keys(
+        &mut self,
+        entries: &[Entry],
+        scope: &Scope,
+        depth: usize,
+        keys: &mut IndexMap<String, ()>,
+    ) -> Result<()> {
+        if depth > self.max_depth {
+            return Err(Error::Eval("maximum recursion depth exceeded".into()));
+        }
+        let mut scope = scope.child();
+        for entry in entries {
+            match entry {
+                Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {
+                    if let Some(value) = self.eval_property(prop, &scope, depth + 1).await? {
+                        scope.declare(prop.name.clone(), value);
+                    }
+                }
+                Entry::Property(prop)
+                    if prop.name != "default"
+                        && !has_modifier(&prop.modifiers, Modifier::Hidden) =>
+                {
+                    keys.insert(prop.name.clone(), ());
+                }
+                Entry::DynProperty(key, _) => {
+                    let key = self.eval_expr(key, &scope, depth + 1).await?;
+                    keys.insert(value_to_key(&key)?, ());
+                }
+                Entry::Spread(expr) => {
+                    if let Value::Object(map, _) = self.eval_expr(expr, &scope, depth + 1).await? {
+                        keys.extend(map.keys().map(|key| (key.clone(), ())));
+                    }
+                }
+                Entry::ForGenerator(generator) => {
+                    let collection = self
+                        .eval_expr(&generator.collection, &scope, depth + 1)
+                        .await?;
+                    for (key, value) in collection_to_items(collection) {
+                        let mut iter = scope.child();
+                        iter.set(generator.val_var.clone(), value);
+                        if let Some(name) = &generator.key_var {
+                            iter.set(name.clone(), key);
+                        }
+                        self.eval_receiver_keys(&generator.body, &iter, depth + 1, keys)
+                            .await?;
+                    }
+                }
+                Entry::WhenGenerator(generator) => {
+                    let condition = self
+                        .eval_expr(&generator.condition, &scope, depth + 1)
+                        .await?;
+                    let selected = if is_truthy(&condition) {
+                        Some(generator.body.as_slice())
+                    } else {
+                        generator.else_body.as_deref()
+                    };
+                    if let Some(body) = selected {
+                        self.eval_receiver_keys(body, &scope, depth + 1, keys)
+                            .await?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     /// Evaluate the object an `expr.field` / `expr?.field` access reads from.
@@ -1824,7 +1927,9 @@ impl Evaluator {
                     Some(Value::List(existing)) => existing.clone(),
                     _ => Vec::new(),
                 };
-                self.eval_listing_entries(body, scope, depth, &mut items)
+                let mut amendment_scope = scope.child();
+                amendment_scope.set("super".into(), Value::List(items.clone()));
+                self.eval_listing_entries(body, &amendment_scope, depth, &mut items)
                     .await?;
                 return Ok(Some(Value::List(items)));
             }
@@ -1837,8 +1942,15 @@ impl Evaluator {
                     // `default` and dynamic keys. Rebuild the entry map with the
                     // type-aware evaluator so single-type and union mappings both keep
                     // mapping defaults plus converter type metadata after amendment.
-                    let (inherited_scope, amendment_scope) =
+                    let (inherited_scope, mut amendment_scope) =
                         mapping_amendment_scopes(&src.scope, &src.scope_declared, scope);
+                    amendment_scope.set(
+                        "super".into(),
+                        Value::Object(Arc::clone(existing_map), Some(Arc::clone(src))),
+                    );
+                    let mut receiver_entries = src.entries.clone();
+                    receiver_entries.extend_from_slice(body);
+                    amendment_scope.receiver_entries = Some(Arc::new(receiver_entries));
                     let value_type_defaults = src
                         .mapping_value_types
                         .iter()
@@ -1881,10 +1993,16 @@ impl Evaluator {
                     )));
                 }
                 return Ok(Some(
-                    self.eval_amended_object(src, body, scope, depth).await?,
+                    self.eval_amended_object(existing_map, src, body, scope, depth)
+                        .await?,
                 ));
             }
-            let val = self.eval_entries(body, scope, depth).await?;
+            let mut body_scope = scope.child();
+            body_scope.set(
+                "super".into(),
+                Value::Object(Arc::new(IndexMap::new()), None),
+            );
+            let val = self.eval_entries(body, &body_scope, depth).await?;
             return Ok(Some(val));
         }
         if let Some(ty) = &prop.type_ann {
@@ -1925,6 +2043,7 @@ impl Evaluator {
         inherited_source: Option<&ObjectSource>,
     ) -> Result<Value> {
         let mut child_scope = scope.child();
+        child_scope.receiver_entries = Some(Arc::new(entries.to_vec()));
         let entry_owners = entry_scope_owners(entries, entry_scopes, inherited_source);
         let own_body = own_body_names(entries, entry_scopes, inherited_source);
         // Entries without a captured scope belong to the object's own
@@ -2141,13 +2260,14 @@ impl Evaluator {
                         refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                         continue;
                     }
-                    let val = if let Some(Value::Object(_, Some(src))) = &default_template
+                    let val = if let Some(Value::Object(template_map, Some(src))) =
+                        &default_template
                         && let Expr::ObjectBody(body) = val_expr
                     {
                         // Default template has ObjectSource — use eval_amended_object
                         // so nested property amendments work properly.
                         let mut result = self
-                            .eval_amended_object(src, body, &active_scope, depth)
+                            .eval_amended_object(template_map, src, body, &active_scope, depth)
                             .await?;
                         // Propagate the template's type_name so converters can match.
                         if let Some(ref tn) = src.type_name
@@ -2614,6 +2734,7 @@ impl Evaluator {
     #[async_recursion(?Send)]
     async fn eval_amended_object(
         &mut self,
+        base_map: &Arc<IndexMap<String, Value>>,
         base_source: &ObjectSource,
         overlay_entries: &[Entry],
         current_scope: &Scope,
@@ -2627,16 +2748,17 @@ impl Evaluator {
         let mut merged: Vec<Entry> = Vec::new();
         let mut merged_entry_scopes = Vec::new();
         let mut amendment_scope = capture_scope(current_scope);
-        let parent_members = base_source
-            .evaluated_properties
-            .iter()
-            .filter_map(|name| {
-                base_source
-                    .scope
-                    .get(name)
-                    .map(|value| (name.clone(), value.clone()))
-            })
-            .collect();
+        let mut parent_members = (**base_map).clone();
+        // Hidden properties are absent from the rendered map but still
+        // accessible through super. Mapping keys, in contrast, need the map:
+        // they need not have a binding in the lexical scope.
+        for name in &base_source.evaluated_properties {
+            if !parent_members.contains_key(name)
+                && let Some(value) = base_source.scope.get(name)
+            {
+                parent_members.insert(name.clone(), value.clone());
+            }
+        }
         amendment_scope.values.insert(
             "super".into(),
             Value::Object(
@@ -3077,6 +3199,13 @@ impl Evaluator {
                 Ok(Value::Lambda(params.clone(), captured_body, captured))
             }
             Expr::New(type_name, entries, generic_params) => {
+                let mut constructor_scope = scope.child();
+                constructor_scope.set(
+                    "super".into(),
+                    Value::Object(Arc::new(IndexMap::new()), None),
+                );
+                constructor_scope.receiver_entries = Some(Arc::new(entries.clone()));
+                let scope = &constructor_scope;
                 match type_name.as_deref() {
                     Some("Listing") => {
                         let mut items = Vec::new();
@@ -3214,7 +3343,7 @@ impl Evaluator {
                             let is_open = base_src.is_open;
                             // Late binding: re-evaluate merged base + overlay entries
                             let mut result = self
-                                .eval_amended_object(base_src, entries, scope, depth)
+                                .eval_amended_object(base_map, base_src, entries, scope, depth)
                                 .await?;
                             // Preserve the base class's is_open flag and tag the
                             // type_name so output.renderer.converters can match it.
@@ -3296,10 +3425,23 @@ impl Evaluator {
                     }
                 }
             }
-            Expr::ObjectBody(entries) => self.eval_entries(entries, scope, depth + 1).await,
+            Expr::ObjectBody(entries) => {
+                let mut body_scope = scope.child();
+                body_scope.set(
+                    "super".into(),
+                    Value::Object(Arc::new(IndexMap::new()), None),
+                );
+                self.eval_entries(entries, &body_scope, depth + 1).await
+            }
             Expr::Field(obj_expr, field) => {
                 if matches!(obj_expr.as_ref(), Expr::Ident(name) if name == "super") {
-                    return self.eval_super_member(field, scope, depth + 1).await;
+                    let value = self
+                        .eval_super_member(field, scope, depth + 1, true)
+                        .await?;
+                    if let Some(Value::Object(_, source)) = scope.get("super") {
+                        self.warn_if_deprecated_access(source, field);
+                    }
+                    return Ok(value);
                 }
                 let obj = self.eval_field_base(obj_expr, field, scope, depth).await?;
                 // Built-in properties
@@ -3377,8 +3519,20 @@ impl Evaluator {
             Expr::Index(obj_expr, key_expr) => {
                 if matches!(obj_expr.as_ref(), Expr::Ident(name) if name == "super") {
                     let key = self.eval_expr(key_expr, scope, depth + 1).await?;
+                    if let Some(Value::List(items)) = scope.get("super") {
+                        return match key {
+                            Value::Int(index) => usize::try_from(index)
+                                .ok()
+                                .and_then(|index| items.get(index))
+                                .cloned()
+                                .ok_or_else(|| {
+                                    Error::Eval(format!("index out of bounds: {index}"))
+                                }),
+                            _ => Err(Error::Eval("listing index must be an Int".into())),
+                        };
+                    }
                     return self
-                        .eval_super_member(&value_to_key(&key)?, scope, depth + 1)
+                        .eval_super_member(&value_to_key(&key)?, scope, depth + 1, false)
                         .await;
                 }
                 let obj = self.eval_expr(obj_expr, scope, depth + 1).await?;
@@ -3954,14 +4108,20 @@ impl Evaluator {
     ) -> Result<Value> {
         if let Value::List(existing) = base {
             let mut amended = existing;
-            self.eval_listing_entries(overlay_entries, scope, depth + 1, &mut amended)
+            let mut amendment_scope = scope.child();
+            amendment_scope.set("super".into(), Value::List(amended.clone()));
+            self.eval_listing_entries(overlay_entries, &amendment_scope, depth + 1, &mut amended)
                 .await?;
             return Ok(Value::List(amended));
         }
-        if let Value::Object(_, Some(base_src)) = &base {
+        if let Value::Object(base_map, Some(base_src)) = &base {
             if !base_src.mapping_value_types.is_empty() {
-                let (inherited_scope, amendment_scope) =
+                let (inherited_scope, mut amendment_scope) =
                     mapping_amendment_scopes(&base_src.scope, &base_src.scope_declared, scope);
+                amendment_scope.set("super".into(), base.clone());
+                let mut receiver_entries = base_src.entries.clone();
+                receiver_entries.extend_from_slice(overlay_entries);
+                amendment_scope.receiver_entries = Some(Arc::new(receiver_entries));
                 let value_type_defaults = base_src
                     .mapping_value_types
                     .iter()
@@ -4002,7 +4162,7 @@ impl Evaluator {
                 return Ok(Value::Object(Arc::new(amended), Some(Arc::clone(base_src))));
             }
             return self
-                .eval_amended_object(base_src, overlay_entries, scope, depth)
+                .eval_amended_object(base_map, base_src, overlay_entries, scope, depth)
                 .await;
         }
         let mut amendment_scope = scope.child();
@@ -4303,56 +4463,73 @@ impl Evaluator {
                             if let Expr::New(Some(type_name), _, _) = val_expr {
                                 validate_new_object_body(type_name, body, src)?;
                             }
-                            let mut result = if let Some(default_entries) =
-                                explicit_default_entries.as_ref()
-                            {
-                                let mut overlay_entries = default_entries.clone();
-                                overlay_entries.extend(body.iter().cloned());
-                                self.eval_amended_object(src, &overlay_entries, &entry_scope, depth)
-                                    .await?
-                            } else if !is_typed_new
-                                && let Some(Value::Object(_, Some(explicit_src))) =
-                                    explicit_default.as_ref()
-                                && type_default.is_some()
-                                && default_type_name.is_some_and(|expected| {
-                                    let chain = explicit_src
-                                        .type_name
-                                        .iter()
-                                        .chain(explicit_src.parent_type_names.iter())
-                                        .cloned()
-                                        .collect::<Vec<_>>();
-                                    let expected = expand_type_alias_names(
-                                        std::slice::from_ref(&expected.to_string()),
+                            let mut result =
+                                if let Some(default_entries) = explicit_default_entries.as_ref() {
+                                    let mut overlay_entries = default_entries.clone();
+                                    overlay_entries.extend(body.iter().cloned());
+                                    self.eval_amended_object(
+                                        template_map,
+                                        src,
+                                        &overlay_entries,
                                         &entry_scope,
-                                    );
-                                    expand_type_alias_names(&chain, &entry_scope).iter().any(
-                                        |actual| {
-                                            expected
-                                                .iter()
-                                                .any(|expected| type_names_match(actual, expected))
-                                        },
+                                        depth,
                                     )
-                                })
-                            {
-                                // The `default` is itself an instance of the selected
-                                // value type (for example the synthetic `new Step {}`
-                                // of a typed mapping literal). Amend its entries so the
-                                // body's assignments late-bind sibling properties.
-                                self.eval_amended_object(explicit_src, body, &entry_scope, depth)
                                     .await?
-                            } else if explicit_default.is_some() && type_default.is_some() {
-                                self.eval_object_body_over_template(
-                                    template_map,
-                                    src,
-                                    body,
-                                    &entry_scope,
-                                    depth,
-                                )
-                                .await?
-                            } else {
-                                self.eval_amended_object(src, body, &entry_scope, depth)
+                                } else if !is_typed_new
+                                    && let Some(Value::Object(explicit_map, Some(explicit_src))) =
+                                        explicit_default.as_ref()
+                                    && type_default.is_some()
+                                    && default_type_name.is_some_and(|expected| {
+                                        let chain = explicit_src
+                                            .type_name
+                                            .iter()
+                                            .chain(explicit_src.parent_type_names.iter())
+                                            .cloned()
+                                            .collect::<Vec<_>>();
+                                        let expected = expand_type_alias_names(
+                                            std::slice::from_ref(&expected.to_string()),
+                                            &entry_scope,
+                                        );
+                                        expand_type_alias_names(&chain, &entry_scope).iter().any(
+                                            |actual| {
+                                                expected.iter().any(|expected| {
+                                                    type_names_match(actual, expected)
+                                                })
+                                            },
+                                        )
+                                    })
+                                {
+                                    // The `default` is itself an instance of the selected
+                                    // value type (for example the synthetic `new Step {}`
+                                    // of a typed mapping literal). Amend its entries so the
+                                    // body's assignments late-bind sibling properties.
+                                    self.eval_amended_object(
+                                        explicit_map,
+                                        explicit_src,
+                                        body,
+                                        &entry_scope,
+                                        depth,
+                                    )
                                     .await?
-                            };
+                                } else if explicit_default.is_some() && type_default.is_some() {
+                                    self.eval_object_body_over_template(
+                                        template_map,
+                                        src,
+                                        body,
+                                        &entry_scope,
+                                        depth,
+                                    )
+                                    .await?
+                                } else {
+                                    self.eval_amended_object(
+                                        template_map,
+                                        src,
+                                        body,
+                                        &entry_scope,
+                                        depth,
+                                    )
+                                    .await?
+                                };
                             let type_name = src.type_name.as_deref().or(*default_type_name);
                             if let Some(tn) = type_name
                                 && let Value::Object(_, ref mut result_src) = result
@@ -5743,6 +5920,7 @@ struct Scope {
     /// declared names may win over an inherited member of an inner object.
     declared: HashSet<String>,
     type_namespace: Option<String>,
+    receiver_entries: Option<Arc<Vec<Entry>>>,
     parent: Option<Rc<Scope>>,
 }
 
@@ -5755,6 +5933,7 @@ impl Scope {
             poisoned: IndexMap::new(),
             declared: HashSet::new(),
             type_namespace: self.type_namespace.clone(),
+            receiver_entries: self.receiver_entries.clone(),
             parent: Some(Rc::new(self.clone())),
         }
     }
@@ -6054,6 +6233,7 @@ fn own_body_names(
 /// shadowed by an inherited member of the same name.
 fn scope_with_object_bindings(lexical: &Scope, object: &Scope, owned: &HashSet<String>) -> Scope {
     let mut scope = lexical.child();
+    scope.receiver_entries = object.receiver_entries.clone();
     for (name, value) in &object.vars {
         // `super` belongs to the body that declared the entry. A later
         // amendment must not replace an inherited entry's parent binding.
@@ -7362,5 +7542,30 @@ mod package_uri_tests {
                 .unwrap_err()
                 .to_string();
         assert!(err.contains("unsupported package URI"));
+    }
+}
+
+#[cfg(all(test, feature = "blocking"))]
+mod super_deprecation_tests {
+    #[test]
+    fn super_property_access_warns_once() {
+        let mut evaluator = super::Evaluator::default();
+        let source = r#"
+local base = new {
+  @Deprecated { message = "use replacement" }
+  old = 1
+}
+result = (base) { old = super.old + super.old }
+"#;
+        let value =
+            pollster::block_on(evaluator.eval_source(source, std::path::Path::new("super.pkl")))
+                .unwrap();
+        assert_eq!(value.to_json()["result"]["old"], 2);
+        assert_eq!(evaluator.warned_deprecated.len(), 1);
+        assert!(
+            evaluator
+                .warned_deprecated
+                .contains(&("old".into(), Some("use replacement".into())))
+        );
     }
 }

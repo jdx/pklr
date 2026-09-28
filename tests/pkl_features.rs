@@ -8707,3 +8707,69 @@ result = (middle) { child = super.child }
     );
     assert_eq!(v["result"]["child"]["value"], "ab");
 }
+
+#[test]
+fn super_in_mapping_keeps_parent_keys_and_receiver_metadata() {
+    let v = eval(
+        r#"
+local base = new Mapping { ["a"] = 1; ["length"] = 42 }
+result = (base) {
+  ["b"] = super["a"]
+  ["parentLengthKey"] = super["length"]
+  ["count"] = super.length
+  ["allKeys"] = super.keys
+  ["empty"] = super.isEmpty
+  ["last"] = 9
+}
+"#,
+    );
+    assert_eq!(v["result"]["b"], 1);
+    assert_eq!(v["result"]["parentLengthKey"], 42);
+    assert_eq!(v["result"]["count"], 8);
+    assert_eq!(
+        v["result"]["allKeys"],
+        serde_json::json!([
+            "a",
+            "length",
+            "b",
+            "parentLengthKey",
+            "count",
+            "allKeys",
+            "empty",
+            "last"
+        ])
+    );
+    assert_eq!(v["result"]["empty"], false);
+}
+
+#[test]
+fn super_in_nested_collections_uses_their_own_parent() {
+    let v = eval(
+        r#"
+local base = new {
+  a = 99
+  xs = new Listing { 1; 2 }
+  m = new Mapping<String, Int> { ["a"] = 1 }
+}
+result = (base) {
+  xs { [0] = super[1] }
+  m { ["b"] = super["a"] }
+  fresh = new { a = super.a }
+}
+"#,
+    );
+    assert_eq!(v["result"]["xs"], serde_json::json!([2, 2]));
+    assert_eq!(v["result"]["m"], serde_json::json!({"a":1,"b":1}));
+    assert_eq!(v["result"]["fresh"]["a"], serde_json::json!({}));
+}
+
+#[test]
+fn super_declared_property_takes_precedence_over_builtin_name() {
+    let v = eval(
+        r#"
+class Base { length: Int = 10 }
+result = new Base { length = super.length + 1 }
+"#,
+    );
+    assert_eq!(v["result"]["length"], 11);
+}
