@@ -3154,15 +3154,20 @@ impl Evaluator {
         &mut self,
         template_map: &Arc<IndexMap<String, Value>>,
         template_src: &Arc<ObjectSource>,
+        explicit_map: &IndexMap<String, Value>,
         body: &[Entry],
         scope: &Scope,
         depth: usize,
     ) -> Result<Value> {
         // This template combines already-evaluated type and explicit defaults.
         // Its original source describes only the type default, so retain the
-        // merged values as source bindings before applying the entry body.
+        // explicit values as source bindings before applying the entry body.
+        // Keep untouched class expressions for late binding to entry overrides.
         let mut source = (**template_src).clone();
-        for (key, value) in template_map.iter() {
+        for key in explicit_map.keys() {
+            let Some(value) = template_map.get(key) else {
+                continue;
+            };
             let binding = format!("\0mapping_template:{key}");
             source.scope.insert(binding.clone(), value.clone());
             let mut replaced = false;
@@ -4817,10 +4822,14 @@ impl Evaluator {
                                         depth,
                                     )
                                     .await?
-                                } else if explicit_default.is_some() && type_default.is_some() {
+                                } else if let Some(Value::Object(explicit_map, _)) =
+                                    explicit_default.as_ref()
+                                    && type_default.is_some()
+                                {
                                     self.eval_object_body_over_template(
                                         template_map,
                                         src,
+                                        explicit_map,
                                         body,
                                         &entry_scope,
                                         depth,

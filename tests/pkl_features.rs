@@ -9262,3 +9262,26 @@ result = (base) { ["a"] { name = super.name + "b"; extra = super.extra + 1 } }
         serde_json::json!({"shared":true,"name":"ab","extra":8})
     );
 }
+
+#[test]
+fn mapping_explicit_defaults_keep_class_expressions_late_bound() {
+    let v = eval(
+        r#"
+class Item { x: Int = 1; computed: Int = x + 1; shared: Boolean = false }
+local base = new Mapping<String, Item> {
+  default = new { shared = true; extra = 7 }
+  ["a"] { x = 5 }
+}
+result = (base) { ["a"] { x = 9 } }
+initial = base["a"]
+"#,
+    );
+    assert_eq!(
+        v["initial"],
+        serde_json::json!({"x":5,"computed":6,"shared":true,"extra":7})
+    );
+    assert_eq!(
+        v["result"]["a"],
+        serde_json::json!({"x":9,"computed":10,"shared":true,"extra":7})
+    );
+}
