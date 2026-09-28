@@ -8652,3 +8652,139 @@ fn offline_package_cache_miss_is_actionable() {
     assert!(error.contains("package is not cached and offline mode is enabled"));
     assert!(error.contains("https://example.com/pkg@1.0.0.zip"));
 }
+
+#[test]
+fn inferred_function_result_keeps_class_in_property() {
+    let v = eval(
+        r#"
+class Step { check: String?; glob: String? }
+class Holder { step: Step }
+local function run(cmd: String): Step = new { check = cmd }
+local holder = new Holder { step = run("echo a") }
+result = (holder.step) { glob = "*" }
+typed = holder.step is Step
+"#,
+    );
+    assert_eq!(
+        v["result"],
+        serde_json::json!({"check":"echo a", "glob":"*"})
+    );
+    assert_eq!(v["typed"], true);
+}
+
+#[test]
+fn inferred_function_result_keeps_members_through_mapping() {
+    let v = eval(
+        r#"
+class Step { check: String?; glob: String?; summary = "cmd: \(check)" }
+local function run(cmd: String): Step = new { check = cmd }
+local steps = new Mapping<String, Step> { ["a"] = run("echo a"); ["b"] = run("echo b") }
+result = (steps["a"]) { glob = "*" }
+changed = (steps["b"]) { check = "echo c" }
+typed = steps["a"] is Step
+"#,
+    );
+    assert_eq!(
+        v["result"],
+        serde_json::json!({"check":"echo a", "glob":"*", "summary":"cmd: echo a"})
+    );
+    assert_eq!(
+        v["changed"],
+        serde_json::json!({"check":"echo c", "glob":null, "summary":"cmd: echo c"})
+    );
+    assert_eq!(v["typed"], true);
+}
+
+#[test]
+fn inferred_function_result_branches_and_generic_types() {
+    let v = eval(
+        r#"
+class Step { check: String? }
+typealias Alias = Step
+local function choose(flag: Boolean): Step = if (flag) new { check = "a" } else let (cmd = "b") new { check = cmd }
+local function optional(): Step? = new { check = "optional" }
+local function aliased(): Alias = new { check = "alias" }
+local function listing(): Listing<String> = new { "one"; "two" }
+local function mapping(): Mapping<String, Step> = new { ["a"] { check = "mapped" } }
+a = choose(true)
+b = choose(false)
+c = optional()
+d = aliased()
+items = listing()
+steps = mapping()
+typed = steps["a"] is Step
+"#,
+    );
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "a":{"check":"a"}, "b":{"check":"b"}, "c":{"check":"optional"},
+            "d":{"check":"alias"}, "items":["one","two"],
+            "steps":{"a":{"check":"mapped"}}, "typed":true
+        })
+    );
+}
+
+#[test]
+fn inferred_function_result_union_default() {
+    let v = eval(
+        r#"
+class Step { check: String? }
+local function run(): *Step | String = new { check = "a" }
+result = run()
+typed = result is Step
+"#,
+    );
+    assert_eq!(v["result"], serde_json::json!({"check":"a"}));
+    assert_eq!(v["typed"], true);
+    assert!(
+        eval_fails(
+            r#"
+class Step { check: String? }
+local function run(): Step | String = new { check = "a" }
+result = run()
+"#
+        )
+        .contains("Cannot tell which parent to amend")
+    );
+}
+
+#[tokio::test]
+async fn inferred_function_result_imported_class() {
+    let dir = TestTempDir::new("inferred_function_result");
+    std::fs::write(
+        dir.path().join("types.pkl"),
+        r#"
+class Step { check: String?; glob: String? }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("factory.pkl"),
+        r#"
+import "types.pkl"
+function run(cmd: String): types.Step = new { check = cmd }
+"#,
+    )
+    .unwrap();
+    let path = dir.path().join("main.pkl");
+    let source = r#"
+import "types.pkl"
+import "factory.pkl"
+class Holder { step: types.Step }
+local holder = new Holder { step = factory.run("echo a") }
+result = (holder.step) { glob = "*" }
+typed = holder.step is types.Step
+"#;
+    let mut evaluator = Evaluator::new_async();
+    let v = evaluator
+        .eval_source(source, &path)
+        .await
+        .unwrap()
+        .to_json();
+    assert_eq!(
+        v["result"],
+        serde_json::json!({"check":"echo a", "glob":"*"})
+    );
+    assert_eq!(v["typed"], true);
+}

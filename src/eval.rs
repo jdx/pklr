@@ -2983,6 +2983,15 @@ impl Evaluator {
                     .unwrap_or_else(|| (**body).clone());
                 Ok(Value::Lambda(params.clone(), captured_body, captured))
             }
+            Expr::InferredNew(ty, entries) => {
+                let (name, params) = inferred_new_type(ty, scope, 0)?;
+                self.eval_expr(
+                    &Expr::New(Some(name), entries.clone(), params),
+                    scope,
+                    depth + 1,
+                )
+                .await
+            }
             Expr::New(type_name, entries, generic_params) => {
                 match type_name.as_deref() {
                     Some("Listing") => {
@@ -5122,6 +5131,10 @@ fn collect_expr_import_field_uses(
         | Expr::Trace(value)
         | Expr::Read(value)
         | Expr::ReadOrNull(value) => collect_expr_import_field_uses(value, uses, shadows),
+        Expr::InferredNew(ty, entries) => {
+            collect_type_import_field_uses(ty, uses, shadows);
+            collect_entry_import_field_uses(entries, uses, shadows);
+        }
         Expr::ObjectBody(entries) => collect_entry_import_field_uses(entries, uses, shadows),
         Expr::StringInterpolation(parts) => {
             for part in parts {
@@ -5351,7 +5364,7 @@ fn collect_sibling_field_refs_expr(expr: &Expr, refs: &mut HashSet<String>, incl
             collect_sibling_field_refs_expr(left, refs, include_this);
             collect_sibling_field_refs_expr(right, refs, include_this);
         }
-        Expr::New(_, entries, _) | Expr::ObjectBody(entries) => {
+        Expr::New(_, entries, _) | Expr::InferredNew(_, entries) | Expr::ObjectBody(entries) => {
             collect_sibling_field_refs_entries(entries, refs);
         }
         Expr::Call(callee, args) => {
@@ -5530,6 +5543,10 @@ fn collect_expr_refs(expr: &Expr, refs: &mut HashSet<String>, shadows: &HashSet<
         | Expr::Trace(value)
         | Expr::Read(value)
         | Expr::ReadOrNull(value) => collect_expr_refs(value, refs, shadows),
+        Expr::InferredNew(ty, entries) => {
+            collect_type_refs(ty, refs, shadows);
+            collect_entry_refs(entries, refs, shadows);
+        }
         Expr::ObjectBody(entries) => collect_entry_refs(entries, refs, shadows),
         Expr::StringInterpolation(parts) => {
             for part in parts {
@@ -6230,7 +6247,51 @@ fn merge_deprecated(
     out
 }
 
-/// Resolve a potentially dotted name (e.g. "Foo.Bar") in scope.
+/// Resolve an implicit method-result constructor without dropping generic
+/// arguments or the default alternative of a union.
+fn inferred_new_type(
+    ty: &crate::parser::TypeExpr,
+    scope: &Scope,
+    depth: usize,
+) -> Result<(String, Vec<String>)> {
+    use crate::parser::{TypeExpr, type_expr_runtime_name};
+    if depth > 32 {
+        return Err(Error::Eval("recursive inferred return type".into()));
+    }
+    match ty {
+        TypeExpr::Nullable(inner) => inferred_new_type(inner, scope, depth + 1),
+        TypeExpr::Named(name) => {
+            let name = name.trim_start_matches('*');
+            if let Some(alias) = scope.get_type_alias(name) {
+                return inferred_new_type(alias, scope, depth + 1);
+            }
+            Ok((name.to_string(), Vec::new()))
+        }
+        TypeExpr::Generic(name, args) => Ok((
+            name.trim_start_matches('*').to_string(),
+            args.iter().map(type_expr_runtime_name).collect(),
+        )),
+        TypeExpr::Union(types) => {
+            let selected = types
+                .iter()
+                .find(|ty| is_default_type(ty))
+                .ok_or_else(|| Error::Eval("Cannot tell which parent to amend".into()))?;
+            inferred_new_type(selected, scope, depth + 1)
+        }
+        TypeExpr::Constrained(name, _) => {
+            // Constraints store the underlying type as a runtime name. Parse
+            // that name back into a type to retain any generic arguments.
+            let source = format!("value: {}", name.trim_start_matches('*'));
+            let tokens = crate::lexer::lex(&source)?;
+            let module = crate::parser::parse(&tokens)?;
+            let Entry::Property(prop) = &module.body[0] else {
+                unreachable!()
+            };
+            inferred_new_type(prop.type_ann.as_ref().unwrap(), scope, depth + 1)
+        }
+    }
+}
+
 fn type_default_value(ty: &crate::parser::TypeExpr, scope: &Scope) -> Option<Value> {
     use crate::parser::TypeExpr;
     match ty {
