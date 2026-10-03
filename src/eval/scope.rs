@@ -120,7 +120,7 @@ impl Scope {
         }
     }
 
-    pub(super) fn flatten_declared(&self) -> HashSet<String> {
+    pub(super) fn flatten_declared(&self) -> NameSet {
         let mut declared = self
             .parent
             .as_ref()
@@ -128,9 +128,9 @@ impl Scope {
             .unwrap_or_default();
         for name in self.vars.keys().chain(self.poisoned.keys()) {
             if self.declared.contains(name) {
-                declared.insert(name.to_string());
+                declared.insert(name.clone());
             } else {
-                declared.remove(&**name);
+                declared.remove(name);
             }
         }
         declared
@@ -284,13 +284,7 @@ pub(super) fn restore_scope(captured: &CapturedScope) -> Scope {
     for (name, value) in &captured.values {
         scope.set_name(name.clone(), value.clone());
     }
-    scope.declared = Rc::new(
-        captured
-            .declared
-            .iter()
-            .map(|name| Name::from(name.as_str()))
-            .collect(),
-    );
+    scope.declared = Rc::new(captured.declared.clone());
     for (name, identity) in &captured.module_identities {
         scope.set_module_identity(name.clone(), identity.clone());
     }
@@ -494,7 +488,7 @@ pub(super) fn scope_with_object_bindings(
 /// inherited members still resolve after those names.
 pub(super) fn mapping_amendment_scopes(
     captured: &ScopeMap,
-    captured_declared: &HashSet<String>,
+    captured_declared: &NameSet,
     current: &Scope,
 ) -> (Scope, Scope) {
     let current_declared = current.flatten_declared();

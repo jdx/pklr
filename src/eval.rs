@@ -10,7 +10,7 @@ use crate::capabilities::EvalCapabilities;
 use crate::error::{Error, Result};
 use crate::lexer;
 use crate::parser::{self, BinOp, Entry, Expr, Modifier, Module, Property, StringInterpPart, UnOp};
-use crate::value::{CapturedScope, ObjectSource, ScopeMap, Value};
+use crate::value::{CapturedScope, NameSet, ObjectSource, ScopeMap, Value};
 
 mod analysis;
 mod glob;
@@ -2041,7 +2041,7 @@ impl Evaluator {
             Some(Arc::new(ObjectSource {
                 entries: Vec::new(),
                 scope: ScopeMap::default(),
-                scope_declared: HashSet::new(),
+                scope_declared: NameSet::default(),
                 body_members: HashSet::new(),
                 is_open: true,
                 type_name: None,
@@ -2509,7 +2509,7 @@ impl Evaluator {
                                 None => ObjectSource {
                                     entries: vec![],
                                     scope: ScopeMap::default(),
-                                    scope_declared: HashSet::new(),
+                                    scope_declared: NameSet::default(),
                                     body_members: HashSet::new(),
                                     is_open: true,
                                     type_name: Some(tn.clone()),
@@ -2816,7 +2816,7 @@ impl Evaluator {
                         // that property's value in `scope`, even when a child
                         // module has a same-named lexical binding.
                         for name in inherited_property_values.keys() {
-                            src.scope_declared.remove(name);
+                            src.scope_declared.remove(name.as_str());
                         }
                         src.scope.extend(
                             inherited_property_values
@@ -3826,7 +3826,7 @@ impl Evaluator {
                                     ObjectSource {
                                         entries: Vec::new(),
                                         scope: ScopeMap::default(),
-                                        scope_declared: HashSet::new(),
+                                        scope_declared: NameSet::default(),
                                         body_members: HashSet::new(),
                                         is_open,
                                         type_name: tn,
@@ -3867,7 +3867,7 @@ impl Evaluator {
                             let src = ObjectSource {
                                 entries: Vec::new(),
                                 scope: ScopeMap::default(),
-                                scope_declared: HashSet::new(),
+                                scope_declared: NameSet::default(),
                                 body_members: HashSet::new(),
                                 is_open: true,
                                 type_name: type_name.clone(),
@@ -5024,7 +5024,7 @@ impl Evaluator {
                                     None => ObjectSource {
                                         entries: vec![],
                                         scope: ScopeMap::default(),
-                                        scope_declared: HashSet::new(),
+                                        scope_declared: NameSet::default(),
                                         body_members: HashSet::new(),
                                         is_open: true,
                                         type_name: Some(tn.to_string()),

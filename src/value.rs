@@ -10,11 +10,14 @@ use crate::parser::{Entry, Expr, TypeExpr};
 /// not allocate a string per binding.
 pub type ScopeMap = IndexMap<Arc<str>, Value, rustc_hash::FxBuildHasher>;
 
+/// A set of binding names, shared with the scopes they came from.
+pub(crate) type NameSet = rustc_hash::FxHashSet<Arc<str>>;
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CapturedScope {
     pub values: ScopeMap,
     /// Names in `values` declared in a lexically enclosing body.
-    pub declared: HashSet<String>,
+    pub declared: NameSet,
     /// Members declared by the body whose entries are evaluated in this scope,
     /// kept so an amendment that replaces one does not drop it from the body.
     pub body_members: HashSet<String>,
@@ -33,7 +36,7 @@ pub struct ObjectSource {
     pub scope: ScopeMap,
     /// Names in `scope` declared in a lexically enclosing body, which an
     /// inherited member of an inner object must not shadow.
-    pub(crate) scope_declared: HashSet<String>,
+    pub(crate) scope_declared: NameSet,
     /// Members declared by the object's own definition body, including ones an
     /// amendment has since replaced.
     pub(crate) body_members: HashSet<String>,
