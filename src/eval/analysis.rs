@@ -703,12 +703,9 @@ pub(super) fn collect_unshadowed_names(expr: &Expr, names: &mut HashSet<String>)
             names.insert(name.clone());
         }
         Expr::New(type_name, entries, generic_params) => {
-            names.extend(
-                type_name
-                    .iter()
-                    .chain(generic_params)
-                    .map(|name| name_root(name)),
-            );
+            for name in type_name.iter().chain(generic_params) {
+                insert_name_roots(names, name);
+            }
             collect_unshadowed_entry_names(entries, names);
         }
         Expr::Field(base, _) | Expr::NullSafeField(base, _) => {
@@ -796,7 +793,9 @@ fn collect_unshadowed_entry_names(entries: &[Entry], names: &mut HashSet<String>
             }
             Entry::Spread(expr) | Entry::Elem(expr) => collect_unshadowed_names(expr, names),
             Entry::ClassDef(_, _, parent, body) => {
-                names.extend(parent.iter().map(|name| name_root(name)));
+                if let Some(parent) = parent {
+                    insert_name_roots(names, parent);
+                }
                 collect_unshadowed_entry_names(body, names);
             }
             Entry::TypeAlias(_, ty) => collect_unshadowed_type_names(ty, names),
@@ -807,7 +806,7 @@ fn collect_unshadowed_entry_names(entries: &[Entry], names: &mut HashSet<String>
 fn collect_unshadowed_type_names(ty: &crate::parser::TypeExpr, names: &mut HashSet<String>) {
     match ty {
         crate::parser::TypeExpr::Named(name) => {
-            names.insert(name_root(name));
+            insert_name_roots(names, name);
         }
         crate::parser::TypeExpr::Nullable(inner) => collect_unshadowed_type_names(inner, names),
         crate::parser::TypeExpr::Union(types) => {
@@ -816,21 +815,26 @@ fn collect_unshadowed_type_names(ty: &crate::parser::TypeExpr, names: &mut HashS
             }
         }
         crate::parser::TypeExpr::Generic(name, params) => {
-            names.insert(name_root(name));
+            insert_name_roots(names, name);
             for param in params {
                 collect_unshadowed_type_names(param, names);
             }
         }
         crate::parser::TypeExpr::Constrained(base, constraint) => {
-            names.extend(constrained_type_components(base).map(name_root));
+            for component in constrained_type_components(base) {
+                insert_name_roots(names, component);
+            }
             collect_unshadowed_names(constraint, names);
         }
     }
 }
 
-/// The binding a (possibly dotted) name resolves through. A type written as a
-/// default (`*Step`) or with a nullable suffix still resolves `Step`.
-fn name_root(name: &str) -> String {
-    let name = name.trim_start_matches('*').trim_end_matches('?');
-    name.split('.').next().unwrap_or(name).to_string()
+/// Insert the binding a (possibly dotted) name resolves through. A type
+/// written as a default (`*Step`) or with a nullable suffix resolves `Step`,
+/// but a quoted identifier may contain those characters itself (`` `Step?` ``),
+/// so both forms are kept.
+fn insert_name_roots(names: &mut HashSet<String>, name: &str) {
+    for name in [name, name.trim_start_matches('*').trim_end_matches('?')] {
+        names.insert(name.split('.').next().unwrap_or(name).to_string());
+    }
 }

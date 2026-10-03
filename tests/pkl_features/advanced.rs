@@ -3059,3 +3059,15 @@ result = make.apply()
     );
     assert_eq!(json["result"]["selected"]["value"], 42);
 }
+
+#[test]
+fn lambda_keeps_quoted_class_name() {
+    let json = eval(
+        r#"
+class `Step?` { value = 42 }
+local make = () -> new `Step?` {}
+result = make.apply()
+"#,
+    );
+    assert_eq!(json["result"]["value"], 42);
+}
