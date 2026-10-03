@@ -2492,9 +2492,9 @@ impl Evaluator {
                         if let Some(ref tn) = src.type_name
                             && let Value::Object(_, ref mut result_src) = result
                         {
-                            let new_src = match result_src.as_ref() {
+                            let new_src = match result_src.take() {
                                 Some(s) => {
-                                    let mut ns = (**s).clone();
+                                    let mut ns = Arc::unwrap_or_clone(s);
                                     ns.type_name = Some(tn.clone());
                                     ns
                                 }
@@ -2862,7 +2862,7 @@ impl Evaluator {
                 let mut map = map;
                 Arc::make_mut(&mut map)
                     .retain(|key, _| !schema_member_names.contains(key.as_str()));
-                let mut new_src = (*src).clone();
+                let mut new_src = Arc::unwrap_or_clone(src);
                 new_src.is_open = is_open;
                 new_src.type_name = Some(class_name.to_string());
                 new_src.type_identity = Some(scope.runtime_type_identity(class_name));
@@ -3217,7 +3217,7 @@ impl Evaluator {
             )
             .await?;
         if let Value::Object(map, Some(source)) = result {
-            let mut source = (*source).clone();
+            let mut source = Arc::unwrap_or_clone(source);
             source.entry_scopes = merged_entry_scopes;
             result = Value::Object(map, Some(Arc::new(source)));
         }
@@ -3270,7 +3270,7 @@ impl Evaluator {
         // type, so re-tag the result here.
         match (object_type_metadata(base_source), result) {
             (Some(base_type), Value::Object(map, Some(src))) => {
-                let mut new_src = (*src).clone();
+                let mut new_src = Arc::unwrap_or_clone(src);
                 new_src.type_name = Some(base_type.name);
                 new_src.type_identity = base_type.identity;
                 new_src.parent_type_names = base_type.parent_names;
@@ -3789,8 +3789,8 @@ impl Evaluator {
                                 // Keep the identity resolved from the class value, including
                                 // when the constructor expression uses an imported class.
                                 let tn = base_src.type_name.clone().or_else(|| type_name.clone());
-                                let new_src = if let Some(src) = src_slot.as_ref() {
-                                    let mut s = (**src).clone();
+                                let new_src = if let Some(src) = src_slot.take() {
+                                    let mut s = Arc::unwrap_or_clone(src);
                                     if s.is_open != is_open {
                                         s.is_open = is_open;
                                     }
@@ -4990,9 +4990,9 @@ impl Evaluator {
                             if let Some(tn) = type_name
                                 && let Value::Object(_, ref mut result_src) = result
                             {
-                                let new_src = match result_src.as_ref() {
+                                let new_src = match result_src.take() {
                                     Some(s) => {
-                                        let mut ns = (**s).clone();
+                                        let mut ns = Arc::unwrap_or_clone(s);
                                         ns.type_name = Some(tn.to_string());
                                         ns
                                     }
