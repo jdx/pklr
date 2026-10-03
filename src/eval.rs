@@ -3645,17 +3645,24 @@ impl Evaluator {
                 let mut refs = HashSet::new();
                 let shadows = params.iter().cloned().collect::<HashSet<_>>();
                 collect_expr_refs(&body, &mut refs, &shadows);
-                // Capture only the bindings the body can reach: the free names
-                // it references plus the implicit receivers. Flattening the
-                // whole scope for every lambda value, and restoring all of it
-                // on every call, dominated evaluation.
-                let captured = Arc::new(
+                // Capture only the bindings the body can reach: every name it
+                // mentions, ignoring shadowing, plus the implicit receivers.
+                // Flattening the whole scope for every lambda value, and
+                // restoring all of it on every call, dominated evaluation. An
+                // object built in the body sees its enclosing bindings through
+                // `outer`, so a body that mentions `outer` keeps everything.
+                let mut names = HashSet::new();
+                collect_unshadowed_names(&body, &mut names);
+                let captured = Arc::new(if names.contains("outer") {
+                    scope.flatten()
+                } else {
                     scope.flatten_names(
-                        refs.iter()
+                        names
+                            .iter()
                             .map(String::as_str)
-                            .chain(["this", "module", "outer", "super"]),
-                    ),
-                );
+                            .chain(["this", "module", "super"]),
+                    )
+                });
                 let captured_body = refs
                     .iter()
                     .filter(|name| scope.get(name).is_none())

@@ -3013,3 +3013,35 @@ result = new Listing { local n = 7; local m = n; for (n in List(2)) { m + n }; s
     );
     assert_eq!(v["result"], serde_json::json!([9, 9]));
 }
+
+#[test]
+fn lambda_object_reads_enclosing_bindings_through_outer() {
+    let json = eval(
+        r#"
+local x = 42
+local make = () -> new Dynamic {
+  value = outer.x
+  indexed = outer["x"]
+}
+result = make.apply()
+"#,
+    );
+    assert_eq!(json["result"]["value"], 42);
+    assert_eq!(json["result"]["indexed"], 42);
+}
+
+#[test]
+fn lambda_object_local_reads_enclosing_binding_before_its_own() {
+    let json = eval(
+        r#"
+local x = 41
+local make = () -> new Dynamic {
+  local y = x
+  local x = 0
+  value = y
+}
+result = make.apply()
+"#,
+    );
+    assert_eq!(json["result"]["value"], 41);
+}
