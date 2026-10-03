@@ -216,16 +216,19 @@ impl Scope {
         names.dedup();
         names
             .into_iter()
-            .filter_map(|name| Some((name.into(), self.flattened(name)?.clone())))
+            .filter_map(|name| {
+                let (key, value) = self.flattened(name)?;
+                Some((key.clone(), value.clone()))
+            })
             .collect()
     }
 
-    /// The value `flatten` would hold for `name`: an inner binding wins, and a
-    /// name poisoned at a level hides outer bindings unless that same level
-    /// also binds it.
-    fn flattened(&self, name: &str) -> Option<&Value> {
-        if let Some(value) = self.vars.get(name) {
-            return Some(value);
+    /// The binding `flatten` would hold for `name`, with the scope's stored
+    /// key: an inner binding wins, and a name poisoned at a level hides outer
+    /// bindings unless that same level also binds it.
+    fn flattened(&self, name: &str) -> Option<(&Name, &Value)> {
+        if let Some(binding) = self.vars.get_key_value(name) {
+            return Some(binding);
         }
         if self.poisoned.contains_key(name) {
             return None;
