@@ -74,19 +74,19 @@ pub(crate) fn parse_type_name(name: &str) -> Result<TypeExpr> {
 
 struct Parser<'a> {
     tokens: &'a [Token],
-    source: String,
-    name: String,
+    source: &'a str,
+    name: &'a str,
     pos: usize,
     /// Line of the last consumed token (used for newline-sensitive parsing).
     last_line: usize,
 }
 
 impl<'a> Parser<'a> {
-    fn new(tokens: &'a [Token], source: &str, name: &str) -> Self {
+    fn new(tokens: &'a [Token], source: &'a str, name: &'a str) -> Self {
         Self {
             tokens,
-            source: source.to_string(),
-            name: name.to_string(),
+            source,
+            name,
             pos: 0,
             last_line: 1,
         }
@@ -94,7 +94,7 @@ impl<'a> Parser<'a> {
 
     fn parse_error(&self, message: impl Into<String>) -> Error {
         let tok = self.peek_tok();
-        Error::parse(&self.name, &self.source, tok.offset, message.into())
+        Error::parse(self.name, self.source, tok.offset, message.into())
     }
 
     fn peek(&self) -> &TokenKind {
@@ -1136,7 +1136,7 @@ impl<'a> Parser<'a> {
                             interp_parts.push(StringInterpPart::Literal(s));
                         }
                         crate::lexer::StringPart::Tokens(tokens) => {
-                            let expr = parse_expr_tokens(&tokens, &self.source, &self.name)?;
+                            let expr = parse_expr_tokens(&tokens, self.source, self.name)?;
                             interp_parts.push(StringInterpPart::Expr(expr));
                         }
                     }
@@ -1246,12 +1246,12 @@ impl<'a> Parser<'a> {
             TokenKind::KwImport => {
                 self.advance();
                 let uri = self.parse_import_expr_uri("import")?;
-                Ok(Expr::Import(uri, self.name.clone()))
+                Ok(Expr::Import(uri, self.name.to_string()))
             }
             TokenKind::KwImportStar => {
                 self.advance();
                 let uri = self.parse_import_expr_uri("import*")?;
-                Ok(Expr::ImportGlob(uri, self.name.clone()))
+                Ok(Expr::ImportGlob(uri, self.name.to_string()))
             }
             TokenKind::Ident(name) => {
                 self.advance();
@@ -1337,8 +1337,8 @@ impl<'a> Parser<'a> {
             Ok(s)
         } else {
             Err(Error::parse(
-                &self.name,
-                &self.source,
+                self.name,
+                self.source,
                 offset,
                 format!("expected string, got {:?}", kind),
             ))
@@ -1358,8 +1358,8 @@ impl<'a> Parser<'a> {
             TokenKind::KwNew => Ok("new".into()),
             TokenKind::KwModule => Ok("module".into()),
             other => Err(Error::parse(
-                &self.name,
-                &self.source,
+                self.name,
+                self.source,
                 offset,
                 format!("expected identifier, got {:?}", other),
             )),
