@@ -318,6 +318,41 @@ data {
 }
 
 #[test]
+fn this_alias_reachable_from_nested_objects() {
+    // Nested objects leave out `this` aliases they never name; every way of
+    // still reaching the alias (directly, from a deeper body, from a lambda,
+    // through `outer`, or through a property holding `this`) must keep it.
+    let json = eval(
+        r#"
+obj {
+  local self = this
+  a = 1
+  me = this
+  plain { x = 0 }
+  direct { y = self.a }
+  deep { inner { z = self.a } }
+  viaOuter { w = outer.a }
+  viaMember { w = outer.me.a }
+  fn { local f = (n) -> n + self.a; r = f.apply(1) }
+  b = 2
+}
+amended = (obj.plain) { q = obj.b }
+reamended = (obj.deep) { extra = 3 }
+"#,
+    );
+    assert_eq!(json["obj"]["direct"]["y"], 1);
+    assert_eq!(json["obj"]["deep"]["inner"]["z"], 1);
+    assert_eq!(json["obj"]["viaOuter"]["w"], 1);
+    assert_eq!(json["obj"]["viaMember"]["w"], 1);
+    assert_eq!(json["obj"]["fn"]["r"], 2);
+    assert_eq!(json["amended"], serde_json::json!({"x": 0, "q": 2}));
+    assert_eq!(
+        json["reamended"],
+        serde_json::json!({"inner": {"z": 1}, "extra": 3})
+    );
+}
+
+#[test]
 fn this_snapshot_unaffected_by_later_entries() {
     let json = eval(
         r#"
