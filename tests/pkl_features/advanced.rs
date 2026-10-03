@@ -3045,3 +3045,17 @@ result = make.apply()
     );
     assert_eq!(json["result"]["value"], 41);
 }
+
+#[test]
+fn lambda_object_keeps_default_type_binding() {
+    let json = eval(
+        r#"
+class Step { value = 42 }
+local make = () -> new Dynamic {
+  selected: *Step | String
+}
+result = make.apply()
+"#,
+    );
+    assert_eq!(json["result"]["selected"]["value"], 42);
+}

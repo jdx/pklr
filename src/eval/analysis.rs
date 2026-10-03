@@ -828,6 +828,9 @@ fn collect_unshadowed_type_names(ty: &crate::parser::TypeExpr, names: &mut HashS
     }
 }
 
+/// The binding a (possibly dotted) name resolves through. A type written as a
+/// default (`*Step`) or with a nullable suffix still resolves `Step`.
 fn name_root(name: &str) -> String {
+    let name = name.trim_start_matches('*').trim_end_matches('?');
     name.split('.').next().unwrap_or(name).to_string()
 }
