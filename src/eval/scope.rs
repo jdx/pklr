@@ -1,6 +1,10 @@
 use super::*;
 use std::cell::RefCell;
 
+use rustc_hash::{FxBuildHasher, FxHashSet};
+
+pub(super) type FxIndexMap<K, V> = IndexMap<K, V, FxBuildHasher>;
+
 // --- Scope ---
 
 #[derive(Clone)]
@@ -24,16 +28,18 @@ pub(super) fn object_type_metadata(source: &ObjectSource) -> Option<ObjectTypeMe
 pub(super) struct Scope {
     // The maps are shared copy-on-write so cloning a scope, which `child`
     // does for every nested body, does not copy its bindings.
-    pub(super) vars: Rc<IndexMap<String, Value>>,
-    pub(super) type_aliases: Rc<IndexMap<String, crate::parser::TypeExpr>>,
-    pub(super) module_identities: Rc<IndexMap<String, String>>,
-    pub(super) poisoned: Rc<IndexMap<String, String>>,
+    // They also use a fast non-cryptographic hasher: lookups and inserts on
+    // these maps dominate evaluation, and the keys come from trusted source.
+    pub(super) vars: Rc<FxIndexMap<String, Value>>,
+    pub(super) type_aliases: Rc<FxIndexMap<String, crate::parser::TypeExpr>>,
+    pub(super) module_identities: Rc<FxIndexMap<String, String>>,
+    pub(super) poisoned: Rc<FxIndexMap<String, String>>,
     /// Names in `vars` or `poisoned` declared by an entry written in the body
     /// that owns this scope, as opposed to members an object inherits from its
     /// class or parent. Pkl resolves a name in lexically enclosing bodies
     /// before falling back to the object's inherited members, so only these
     /// declared names may win over an inherited member of an inner object.
-    pub(super) declared: Rc<HashSet<String>>,
+    pub(super) declared: Rc<FxHashSet<String>>,
     pub(super) type_namespace: Option<String>,
     pub(super) receiver_entries: Option<Arc<Vec<Entry>>>,
     pub(super) receiver_list_base: Option<usize>,
@@ -240,7 +246,7 @@ pub(super) fn restore_scope(captured: &CapturedScope) -> Scope {
     for (name, value) in &captured.values {
         scope.set(name.clone(), value.clone());
     }
-    scope.declared = Rc::new(captured.declared.clone());
+    scope.declared = Rc::new(captured.declared.iter().cloned().collect());
     for (name, identity) in &captured.module_identities {
         scope.set_module_identity(name.clone(), identity.clone());
     }
@@ -404,8 +410,8 @@ pub(super) fn scope_with_object_bindings(
     // `scope` starts empty, so the bindings can be collected directly instead
     // of going through `declare`/`set`, which also clear stale poison and
     // module identities for each name.
-    let mut vars = IndexMap::with_capacity(object.vars.len());
-    let mut declared = HashSet::new();
+    let mut vars = FxIndexMap::with_capacity_and_hasher(object.vars.len(), FxBuildHasher);
+    let mut declared = FxHashSet::default();
     for (name, value) in object.vars.iter() {
         // `super` belongs to the body that declared the entry. A later
         // amendment must not replace an inherited entry's parent binding.

@@ -674,6 +674,7 @@ dependencies = [
  "miette",
  "pollster",
  "reqwest",
+ "rustc-hash",
  "rustls",
  "serde_json",
  "thiserror",
