@@ -3608,13 +3608,22 @@ impl Evaluator {
                 )
             }),
             Expr::Lambda(params, body) => {
-                // Capture current scope values (Arc-wrapped for O(1) clone)
-                let captured = Arc::new(scope.flatten());
                 let mut body = (**body).clone();
                 capture_method_result_types(&mut body, scope);
                 let mut refs = HashSet::new();
                 let shadows = params.iter().cloned().collect::<HashSet<_>>();
                 collect_expr_refs(&body, &mut refs, &shadows);
+                // Capture only the bindings the body can reach: the free names
+                // it references plus the implicit receivers. Flattening the
+                // whole scope for every lambda value, and restoring all of it
+                // on every call, dominated evaluation.
+                let captured = Arc::new(
+                    scope.flatten_names(
+                        refs.iter()
+                            .map(String::as_str)
+                            .chain(["this", "module", "outer", "super"]),
+                    ),
+                );
                 let captured_body = refs
                     .iter()
                     .filter(|name| scope.get(name).is_none())

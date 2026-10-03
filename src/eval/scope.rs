@@ -209,6 +209,33 @@ impl Scope {
         result
     }
 
+    /// The subset of `flatten` for `names`, sorted by name.
+    pub(super) fn flatten_names<'a>(
+        &self,
+        names: impl IntoIterator<Item = &'a str>,
+    ) -> IndexMap<String, Value> {
+        let mut names = names.into_iter().collect::<Vec<_>>();
+        names.sort_unstable();
+        names.dedup();
+        names
+            .into_iter()
+            .filter_map(|name| Some((name.to_string(), self.flattened(name)?.clone())))
+            .collect()
+    }
+
+    /// The value `flatten` would hold for `name`: an inner binding wins, and a
+    /// name poisoned at a level hides outer bindings unless that same level
+    /// also binds it.
+    fn flattened(&self, name: &str) -> Option<&Value> {
+        if let Some(value) = self.vars.get(name) {
+            return Some(value);
+        }
+        if self.poisoned.contains_key(name) {
+            return None;
+        }
+        self.parent.as_ref()?.flattened(name)
+    }
+
     pub(super) fn flatten_type_aliases(&self) -> IndexMap<String, crate::parser::TypeExpr> {
         let mut result = self
             .parent
