@@ -3110,7 +3110,7 @@ impl Evaluator {
                 continue;
             } else {
                 // A use-site binding is not declared in the base's body.
-                eval_scope.declared.remove(&k);
+                Rc::make_mut(&mut eval_scope.declared).remove(&k);
                 v
             };
             eval_scope.set(k, value);

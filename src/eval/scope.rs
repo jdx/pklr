@@ -21,16 +21,18 @@ pub(super) fn object_type_metadata(source: &ObjectSource) -> Option<ObjectTypeMe
 
 #[derive(Debug, Default, Clone)]
 pub(super) struct Scope {
-    pub(super) vars: IndexMap<String, Value>,
-    pub(super) type_aliases: IndexMap<String, crate::parser::TypeExpr>,
-    pub(super) module_identities: IndexMap<String, String>,
-    pub(super) poisoned: IndexMap<String, String>,
+    // The maps are shared copy-on-write so cloning a scope, which `child`
+    // does for every nested body, does not copy its bindings.
+    pub(super) vars: Rc<IndexMap<String, Value>>,
+    pub(super) type_aliases: Rc<IndexMap<String, crate::parser::TypeExpr>>,
+    pub(super) module_identities: Rc<IndexMap<String, String>>,
+    pub(super) poisoned: Rc<IndexMap<String, String>>,
     /// Names in `vars` or `poisoned` declared by an entry written in the body
     /// that owns this scope, as opposed to members an object inherits from its
     /// class or parent. Pkl resolves a name in lexically enclosing bodies
     /// before falling back to the object's inherited members, so only these
     /// declared names may win over an inherited member of an inner object.
-    pub(super) declared: HashSet<String>,
+    pub(super) declared: Rc<HashSet<String>>,
     pub(super) type_namespace: Option<String>,
     pub(super) receiver_entries: Option<Arc<Vec<Entry>>>,
     pub(super) receiver_list_base: Option<usize>,
@@ -40,11 +42,11 @@ pub(super) struct Scope {
 impl Scope {
     pub(super) fn child(&self) -> Self {
         Self {
-            vars: IndexMap::new(),
-            type_aliases: IndexMap::new(),
-            module_identities: IndexMap::new(),
-            poisoned: IndexMap::new(),
-            declared: HashSet::new(),
+            vars: Rc::default(),
+            type_aliases: Rc::default(),
+            module_identities: Rc::default(),
+            poisoned: Rc::default(),
+            declared: Rc::default(),
             type_namespace: self.type_namespace.clone(),
             receiver_entries: self.receiver_entries.clone(),
             receiver_list_base: self.receiver_list_base,
@@ -60,20 +62,28 @@ impl Scope {
     }
 
     pub(super) fn set(&mut self, name: String, val: Value) {
-        self.poisoned.shift_remove(&name);
-        self.module_identities.shift_remove(&name);
-        self.vars.insert(name, val);
+        if self.poisoned.contains_key(&name) {
+            Rc::make_mut(&mut self.poisoned).shift_remove(&name);
+        }
+        if self.module_identities.contains_key(&name) {
+            Rc::make_mut(&mut self.module_identities).shift_remove(&name);
+        }
+        Rc::make_mut(&mut self.vars).insert(name, val);
     }
 
     /// Bind a name declared in the body that owns this scope.
     pub(super) fn declare(&mut self, name: String, val: Value) {
-        self.declared.insert(name.clone());
+        if !self.declared.contains(&name) {
+            Rc::make_mut(&mut self.declared).insert(name.clone());
+        }
         self.set(name, val);
     }
 
     /// Poison a local declared in the body that owns this scope.
     pub(super) fn declare_poisoned(&mut self, name: String, message: String) {
-        self.declared.insert(name.clone());
+        if !self.declared.contains(&name) {
+            Rc::make_mut(&mut self.declared).insert(name.clone());
+        }
         self.poison(name, message);
     }
 
@@ -106,7 +116,7 @@ impl Scope {
     }
 
     pub(super) fn set_module_identity(&mut self, name: String, identity: String) {
-        self.module_identities.insert(name, identity);
+        Rc::make_mut(&mut self.module_identities).insert(name, identity);
     }
 
     pub(super) fn module_identity(&self, name: &str) -> Option<&String> {
@@ -126,12 +136,16 @@ impl Scope {
         for name in self.vars.keys() {
             identities.shift_remove(name);
         }
-        identities.extend(self.module_identities.clone());
+        identities.extend(
+            self.module_identities
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone())),
+        );
         identities
     }
 
     pub(super) fn poison(&mut self, name: String, message: String) {
-        self.poisoned.insert(name, message);
+        Rc::make_mut(&mut self.poisoned).insert(name, message);
     }
 
     pub(super) fn poison_of(&self, name: &str) -> Option<&String> {
@@ -143,7 +157,7 @@ impl Scope {
     }
 
     pub(super) fn set_type_alias(&mut self, name: String, ty: crate::parser::TypeExpr) {
-        self.type_aliases.insert(name, ty);
+        Rc::make_mut(&mut self.type_aliases).insert(name, ty);
     }
 
     pub(super) fn get_type_alias(&self, name: &str) -> Option<&crate::parser::TypeExpr> {
@@ -170,7 +184,7 @@ impl Scope {
         for name in self.poisoned.keys() {
             result.shift_remove(name);
         }
-        result.extend(self.vars.clone());
+        result.extend(self.vars.iter().map(|(k, v)| (k.clone(), v.clone())));
         result
     }
 
@@ -180,7 +194,11 @@ impl Scope {
             .as_ref()
             .map(|p| p.flatten_type_aliases())
             .unwrap_or_default();
-        result.extend(self.type_aliases.clone());
+        result.extend(
+            self.type_aliases
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone())),
+        );
         result
     }
 }
@@ -221,7 +239,7 @@ pub(super) fn restore_scope(captured: &CapturedScope) -> Scope {
     for (name, value) in &captured.values {
         scope.set(name.clone(), value.clone());
     }
-    scope.declared = captured.declared.clone();
+    scope.declared = Rc::new(captured.declared.clone());
     for (name, identity) in &captured.module_identities {
         scope.set_module_identity(name.clone(), identity.clone());
     }
@@ -353,7 +371,7 @@ pub(super) fn scope_with_object_bindings(
     let mut scope = lexical.child();
     scope.receiver_entries = object.receiver_entries.clone();
     scope.receiver_list_base = object.receiver_list_base;
-    for (name, value) in &object.vars {
+    for (name, value) in object.vars.iter() {
         // `super` belongs to the body that declared the entry. A later
         // amendment must not replace an inherited entry's parent binding.
         if name == "super" {
@@ -365,17 +383,17 @@ pub(super) fn scope_with_object_bindings(
             scope.set(name.clone(), value.clone());
         }
     }
-    for (name, message) in &object.poisoned {
+    for (name, message) in object.poisoned.iter() {
         if owned.contains(name) {
             scope.declare_poisoned(name.clone(), message.clone());
         } else if !lexical.is_declared(name) {
             scope.poison(name.clone(), message.clone());
         }
     }
-    for (name, ty) in &object.type_aliases {
+    for (name, ty) in object.type_aliases.iter() {
         scope.set_type_alias(name.clone(), ty.clone());
     }
-    for (name, identity) in &object.module_identities {
+    for (name, identity) in object.module_identities.iter() {
         scope.set_module_identity(name.clone(), identity.clone());
     }
     scope
@@ -417,7 +435,7 @@ pub(super) fn mapping_amendment_scopes(
         if current_declared.contains(&key) {
             amendment.declare(key, value);
         } else {
-            amendment.declared.remove(&key);
+            Rc::make_mut(&mut amendment.declared).remove(&key);
             amendment.set(key, value);
         }
     }

@@ -17,7 +17,9 @@ pub(super) fn refresh_this_aliases(
 /// Callers refresh the snapshot after the insert.
 fn release_this_aliases(scope: &mut Scope, aliases: &[String]) {
     for name in std::iter::once("this").chain(aliases.iter().map(String::as_str)) {
-        if let Some(slot) = scope.vars.get_mut(name) {
+        if scope.vars.contains_key(name)
+            && let Some(slot) = Rc::make_mut(&mut scope.vars).get_mut(name)
+        {
             *slot = Value::Null;
         }
     }
