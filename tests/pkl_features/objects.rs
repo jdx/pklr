@@ -3189,3 +3189,17 @@ x {
     assert_eq!(val["x"]["files"], serde_json::json!(["a"]));
     assert_eq!(val["x"]["expect"]["files"], serde_json::json!({"a": "b"}));
 }
+
+#[test]
+fn body_amendment_ignores_inherited_property_of_enclosing_object() {
+    let val = eval(
+        r#"
+class Test { files: List<String> = List("a"); expect: Dynamic = new Dynamic {} }
+x = new Test {
+  expect { files { ["a"] = "b" } }
+}
+"#,
+    );
+    assert_eq!(val["x"]["files"], serde_json::json!(["a"]));
+    assert_eq!(val["x"]["expect"]["files"], serde_json::json!({"a": "b"}));
+}
