@@ -4,7 +4,7 @@ use crate::lexer::{StringPart, Token, TokenKind};
 mod ast;
 
 pub use ast::{
-    Annotation, BinOp, Entry, Expr, ForGenerator, Import, Modifier, Module, Property,
+    Annotation, BinOp, Body, Entry, Expr, ForGenerator, Import, Modifier, Module, Property,
     StringInterpPart, TypeExpr, UnOp, WhenGenerator,
 };
 use ast::{infer_method_return_new, type_expr_runtime_name};
@@ -238,7 +238,7 @@ impl<'a> Parser<'a> {
             extends,
             imports,
             annotations,
-            body,
+            body: body.into(),
         })
     }
 
@@ -287,7 +287,7 @@ impl<'a> Parser<'a> {
                     self.advance();
                     let body = self.parse_entries()?;
                     self.expect(&TokenKind::RBrace)?;
-                    entries.push(Entry::ClassDef(name, class_modifiers, parent, body));
+                    entries.push(Entry::ClassDef(name, class_modifiers, parent, body.into()));
                 }
                 continue;
             }
@@ -641,7 +641,7 @@ impl<'a> Parser<'a> {
                     self.advance();
                     let entries = self.parse_entries()?;
                     self.expect(&TokenKind::RBrace)?;
-                    Ok(Entry::DynProperty(key, Expr::ObjectBody(entries)))
+                    Ok(Entry::DynProperty(key, Expr::ObjectBody(entries.into())))
                 } else {
                     self.expect(&TokenKind::Equals)?;
                     let val = self.parse_expr()?;
@@ -672,7 +672,7 @@ impl<'a> Parser<'a> {
                     key_var,
                     val_var,
                     collection,
-                    body,
+                    body: body.into(),
                 }))
             }
             TokenKind::KwWhen => {
@@ -694,8 +694,8 @@ impl<'a> Parser<'a> {
                 };
                 Ok(Entry::WhenGenerator(WhenGenerator {
                     condition: cond,
-                    body,
-                    else_body,
+                    body: body.into(),
+                    else_body: else_body.map(Into::into),
                 }))
             }
             TokenKind::DotDotDot => {
@@ -795,7 +795,7 @@ impl<'a> Parser<'a> {
                     name,
                     type_ann,
                     value,
-                    body,
+                    body: body.map(Into::into),
                 }))
             }
         }
@@ -1082,7 +1082,7 @@ impl<'a> Parser<'a> {
                     expr = Expr::Binop(
                         BinOp::Add,
                         Box::new(expr),
-                        Box::new(Expr::ObjectBody(entries)),
+                        Box::new(Expr::ObjectBody(entries.into())),
                     );
                 }
                 TokenKind::KwIs => {
@@ -1167,7 +1167,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 let entries = self.parse_entries()?;
                 self.expect(&TokenKind::RBrace)?;
-                Ok(Expr::ObjectBody(entries))
+                Ok(Expr::ObjectBody(entries.into()))
             }
             TokenKind::KwNew => {
                 self.advance();
@@ -1193,7 +1193,7 @@ impl<'a> Parser<'a> {
                 self.expect(&TokenKind::LBrace)?;
                 let entries = self.parse_entries()?;
                 self.expect(&TokenKind::RBrace)?;
-                Ok(Expr::New(type_name, entries, generic_params))
+                Ok(Expr::New(type_name, entries.into(), generic_params))
             }
             TokenKind::KwIf => {
                 self.advance();

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 use serde_json::json;
 
-use crate::parser::{Entry, Expr, TypeExpr};
+use crate::parser::{Expr, TypeExpr};
 
 /// Captured lexical bindings, keyed by shared names so capturing a scope does
 /// not allocate a string per binding.
@@ -32,7 +32,7 @@ pub(crate) struct CapturedScope {
 /// properties pick up overridden values.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObjectSource {
-    pub entries: Vec<Entry>,
+    pub entries: crate::parser::Body,
     pub scope: ScopeMap,
     /// Names in `scope` declared in a lexically enclosing body, which an
     /// inherited member of an inner object must not shadow.

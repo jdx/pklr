@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 use crate::capabilities::EvalCapabilities;
 use crate::error::{Error, Result};
 use crate::lexer;
-use crate::parser::{self, BinOp, Entry, Expr, Modifier, Module, Property, StringInterpPart, UnOp};
+use crate::parser::{
+    self, BinOp, Body, Entry, Expr, Modifier, Module, Property, StringInterpPart, UnOp,
+};
 use crate::value::{CapturedScope, NameSet, ObjectSource, ScopeMap, Value};
 
 mod analysis;
@@ -85,7 +87,7 @@ pub struct Evaluator {
 #[derive(Clone, Default)]
 struct MappingInheritedDefault {
     value: Option<Value>,
-    entries: Option<Vec<Entry>>,
+    entries: Option<crate::parser::Body>,
 }
 
 #[derive(Clone, Default)]
@@ -1089,7 +1091,7 @@ impl Evaluator {
                     let selected = if is_truthy(&condition) {
                         Some(generator.body.as_slice())
                     } else {
-                        generator.else_body.as_deref()
+                        generator.else_body.as_deref().map(Vec::as_slice)
                     };
                     if let Some(body) = selected {
                         self.eval_receiver_keys(body, &scope, depth + 1, keys)
@@ -1158,7 +1160,7 @@ impl Evaluator {
                     let selected = if is_truthy(&condition) {
                         Some(generator.body.as_slice())
                     } else {
-                        generator.else_body.as_deref()
+                        generator.else_body.as_deref().map(Vec::as_slice)
                     };
                     if let Some(body) = selected {
                         self.eval_listing_length(body, &scope, depth + 1, length)
@@ -1556,7 +1558,7 @@ impl Evaluator {
                 let mut base_scope = scope.clone();
                 base_scope.type_namespace =
                     Some(self.module_type_namespace(Path::new(&source_path)).await);
-                for entry in &base_module.body {
+                for entry in base_module.body.iter() {
                     if let Entry::ClassDef(name, class_mods, parent, body) = entry {
                         let defaults = self
                             .eval_class_def(
@@ -1630,7 +1632,7 @@ impl Evaluator {
                         Some(self.module_type_namespace(&extends_path).await);
                     // Also evaluate the base module's scope (classes, locals) into our scope
                     // by re-processing its body entries
-                    for entry in &ext_module.body {
+                    for entry in ext_module.body.iter() {
                         match entry {
                             Entry::ClassDef(cls_name, cls_mods, parent, body) => {
                                 let defaults = self
@@ -1688,7 +1690,7 @@ impl Evaluator {
                 let mut base_scope = scope.clone();
                 base_scope.type_namespace = Some(self.module_type_namespace(Path::new(uri)).await);
                 // Inject class definitions from HTTP base into scope
-                for entry in &ext_module.body {
+                for entry in ext_module.body.iter() {
                     if let Entry::ClassDef(cls_name, cls_mods, parent, body) = entry {
                         let defaults = self
                             .eval_class_def(
@@ -1734,7 +1736,7 @@ impl Evaluator {
 
         // First pass: collect locals, class definitions, and type aliases in
         // declaration order so they can reference each other
-        for entry in &module.body {
+        for entry in module.body.iter() {
             match entry {
                 Entry::Property(prop)
                     if has_modifier(&prop.modifiers, Modifier::Local) && prop.value.is_some() =>
@@ -1767,7 +1769,7 @@ impl Evaluator {
         // (e.g., `import "helpers.pkl"` → `helpers.ClassName`).
         // Track class names to exclude from serialized output.
         let mut class_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for entry in &module.body {
+        for entry in module.body.iter() {
             if let Entry::ClassDef(name, ..) = entry
                 && let Some(cls_val) = scope.get(name)
             {
@@ -1796,7 +1798,7 @@ impl Evaluator {
             "module".into(),
             Value::Object(Arc::new(all_props.clone()), None),
         );
-        for entry in &module.body {
+        for entry in module.body.iter() {
             if let Entry::Property(prop) = entry {
                 let mods = &prop.modifiers;
                 if has_modifier(mods, Modifier::Local) {
@@ -2052,7 +2054,7 @@ impl Evaluator {
             None
         } else {
             Some(Arc::new(ObjectSource {
-                entries: Vec::new(),
+                entries: Vec::new().into(),
                 scope: ScopeMap::default(),
                 scope_declared: NameSet::default(),
                 body_members: HashSet::new(),
@@ -2135,7 +2137,7 @@ impl Evaluator {
                 };
                 let mut amendment_scope = scope.child();
                 amendment_scope.set("super".into(), Value::List(items.clone()));
-                amendment_scope.receiver_entries = Some(Arc::new(body.to_vec()));
+                amendment_scope.receiver_entries = Some(body.clone());
                 amendment_scope.receiver_list_base = Some(items.len());
                 self.eval_listing_entries(body, &amendment_scope, depth, &mut items)
                     .await?;
@@ -2234,14 +2236,9 @@ impl Evaluator {
         Ok(None)
     }
 
-    async fn eval_entries(
-        &mut self,
-        entries: &[Entry],
-        scope: &Scope,
-        depth: usize,
-    ) -> Result<Value> {
+    async fn eval_entries(&mut self, entries: &Body, scope: &Scope, depth: usize) -> Result<Value> {
         let mut receiver_scope = scope.clone();
-        receiver_scope.receiver_entries = Some(Arc::new(entries.to_vec()));
+        receiver_scope.receiver_entries = Some(entries.clone());
         receiver_scope.receiver_list_base = None;
         self.eval_entries_with_lexical_scopes(entries, &receiver_scope, depth, None, None)
             .await
@@ -2250,7 +2247,7 @@ impl Evaluator {
     #[async_recursion(?Send)]
     async fn eval_entries_with_lexical_scopes(
         &mut self,
-        entries: &[Entry],
+        entries: &Body,
         scope: &Scope,
         depth: usize,
         entry_scopes: Option<&[Option<Arc<CapturedScope>>]>,
@@ -2267,7 +2264,7 @@ impl Evaluator {
         let binds_declared = |name: &str| own_body.as_ref().is_none_or(|own| own.contains(name));
         let own_body_scope = own_body.as_ref().map(|own| (scope, own));
         if let Some(source) = inherited_source {
-            for entry in &source.entries {
+            for entry in source.entries.iter() {
                 if let Entry::Property(prop) = entry
                     && !has_modifier(&prop.modifiers, Modifier::Local)
                     && source.evaluated_properties.contains(&prop.name)
@@ -2310,7 +2307,7 @@ impl Evaluator {
         for name in &unused_this_aliases {
             outer_map.shift_remove(name.as_str());
         }
-        for entry in entries {
+        for entry in entries.iter() {
             if let Entry::Property(prop) = entry
                 && prop.value.is_none()
                 && prop.body.is_none()
@@ -2554,7 +2551,7 @@ impl Evaluator {
                                     ns
                                 }
                                 None => ObjectSource {
-                                    entries: vec![],
+                                    entries: vec![].into(),
                                     scope: ScopeMap::default(),
                                     scope_declared: NameSet::default(),
                                     body_members: HashSet::new(),
@@ -2733,7 +2730,7 @@ impl Evaluator {
             }
         }
         let source = ObjectSource {
-            entries: entries.to_vec(),
+            entries: entries.clone(),
             scope: source_scope,
             scope_declared: child_scope.flatten_declared(),
             body_members: own_body.clone().unwrap_or_else(|| {
@@ -2769,7 +2766,7 @@ impl Evaluator {
         class_name: &str,
         class_mods: &[Modifier],
         parent_name: Option<&str>,
-        body: &[Entry],
+        body: &Body,
         scope: &Scope,
         depth: usize,
     ) -> Result<Value> {
@@ -2861,7 +2858,9 @@ impl Evaluator {
                         }
                         let child_entries = std::mem::take(&mut src.entries);
                         let child_entry_scopes = std::mem::take(&mut src.entry_scopes);
-                        for (entry_index, entry) in child_entries.into_iter().enumerate() {
+                        for (entry_index, entry) in
+                            Arc::unwrap_or_clone(child_entries).into_iter().enumerate()
+                        {
                             combined_entries.push(entry);
                             combined_entry_scopes
                                 .push(child_entry_scopes.get(entry_index).cloned().unwrap_or(None));
@@ -2879,7 +2878,7 @@ impl Evaluator {
                                 .into_iter()
                                 .map(|(k, v)| (Arc::from(k), v)),
                         );
-                        src.entries = combined_entries;
+                        src.entries = combined_entries.into();
                         src.entry_scopes = combined_entry_scopes;
                         src.evaluated_properties = combined_evaluated_properties;
                     }
@@ -3257,7 +3256,7 @@ impl Evaluator {
         // Seed Null for nullable-no-default base properties absent from eval_scope.
         // This ensures `outer.optProp` resolves to Null rather than "field not found"
         // when the property was never assigned a value in the base class or any overlay.
-        for entry in base_entries {
+        for entry in base_entries.iter() {
             if let Entry::Property(prop) = entry
                 && prop.value.is_none()
                 && prop.body.is_none()
@@ -3271,7 +3270,8 @@ impl Evaluator {
 
         // Evaluate the merged entries (eval_entries handles locals, classes,
         // and evaluates properties in order with each added to scope)
-        eval_scope.receiver_entries = Some(Arc::new(merged.clone()));
+        let merged: Body = Arc::new(merged);
+        eval_scope.receiver_entries = Some(merged.clone());
         let mut result = self
             .eval_entries_with_lexical_scopes(
                 &merged,
@@ -3296,7 +3296,7 @@ impl Evaluator {
             })
             .collect::<HashSet<_>>();
         if let Value::Object(map, source) = &result {
-            for entry in base_entries {
+            for entry in base_entries.iter() {
                 let Entry::Property(prop) = entry else {
                     continue;
                 };
@@ -3368,7 +3368,7 @@ impl Evaluator {
             let binding = format!("\0mapping_template:{key}");
             source.scope.insert(binding.as_str().into(), value.clone());
             let mut replaced = false;
-            for (index, entry) in source.entries.iter_mut().enumerate() {
+            for (index, entry) in Arc::make_mut(&mut source.entries).iter_mut().enumerate() {
                 if let Entry::Property(prop) = entry
                     && prop.name == *key
                     && !has_modifier(&prop.modifiers, Modifier::Local)
@@ -3382,7 +3382,7 @@ impl Evaluator {
                 }
             }
             if !replaced {
-                source.entries.push(Entry::Property(Property {
+                Arc::make_mut(&mut source.entries).push(Entry::Property(Property {
                     annotations: Vec::new(),
                     modifiers: Vec::new(),
                     name: key.clone(),
@@ -3520,7 +3520,7 @@ impl Evaluator {
                     let selected = if is_truthy(&condition) {
                         Some(generator.body.as_slice())
                     } else {
-                        generator.else_body.as_deref()
+                        generator.else_body.as_deref().map(Vec::as_slice)
                     };
                     if let Some(selected) = selected {
                         self.eval_listing_member(
@@ -3627,7 +3627,7 @@ impl Evaluator {
                     let selected = if is_truthy(&condition) {
                         Some(generator.body.as_slice())
                     } else {
-                        generator.else_body.as_deref()
+                        generator.else_body.as_deref().map(Vec::as_slice)
                     };
                     if let Some(selected) = selected {
                         self.eval_listing_entries(selected, &listing_scope, depth + 1, items)
@@ -3723,7 +3723,7 @@ impl Evaluator {
                     "super".into(),
                     Value::Object(Arc::new(IndexMap::new()), None),
                 );
-                constructor_scope.receiver_entries = Some(Arc::new(entries.clone()));
+                constructor_scope.receiver_entries = Some(entries.clone());
                 constructor_scope.receiver_list_base = None;
                 let scope = &constructor_scope;
                 match type_name.as_deref() {
@@ -3773,7 +3773,7 @@ impl Evaluator {
                                 modifiers: vec![],
                                 name: "default".into(),
                                 type_ann: None,
-                                value: Some(Expr::New(Some(vt_name), vec![], vec![])),
+                                value: Some(Expr::New(Some(vt_name), vec![].into(), vec![])),
                                 body: None,
                             }));
                         }
@@ -3791,7 +3791,7 @@ impl Evaluator {
                         source_module_identities.shift_remove("this");
                         let deprecated = collect_deprecated(&src_entries);
                         let source = ObjectSource {
-                            entries: src_entries,
+                            entries: src_entries.into(),
                             scope: source_scope,
                             scope_declared: source_declared,
                             body_members: source_body_members,
@@ -3840,7 +3840,7 @@ impl Evaluator {
                                     })
                                     .chain(base_map.keys().cloned())
                                     .collect();
-                                for entry in entries {
+                                for entry in entries.iter() {
                                     match entry {
                                         Entry::Property(p)
                                             if !has_modifier(&p.modifiers, Modifier::Local)
@@ -3884,7 +3884,7 @@ impl Evaluator {
                                     s
                                 } else {
                                     ObjectSource {
-                                        entries: Vec::new(),
+                                        entries: Vec::new().into(),
                                         scope: ScopeMap::default(),
                                         scope_declared: NameSet::default(),
                                         body_members: HashSet::new(),
@@ -3925,7 +3925,7 @@ impl Evaluator {
                                 }
                             }
                             let src = ObjectSource {
-                                entries: Vec::new(),
+                                entries: Vec::new().into(),
                                 scope: ScopeMap::default(),
                                 scope_declared: NameSet::default(),
                                 body_members: HashSet::new(),
@@ -4634,7 +4634,7 @@ impl Evaluator {
     async fn eval_value_amendment(
         &mut self,
         base: Value,
-        overlay_entries: &[Entry],
+        overlay_entries: &Body,
         scope: &Scope,
         depth: usize,
     ) -> Result<Value> {
@@ -4642,7 +4642,7 @@ impl Evaluator {
             let mut amended = existing;
             let mut amendment_scope = scope.child();
             amendment_scope.set("super".into(), Value::List(amended.clone()));
-            amendment_scope.receiver_entries = Some(Arc::new(overlay_entries.to_vec()));
+            amendment_scope.receiver_entries = Some(overlay_entries.clone());
             amendment_scope.receiver_list_base = Some(amended.len());
             self.eval_listing_entries(overlay_entries, &amendment_scope, depth + 1, &mut amended)
                 .await?;
@@ -5002,7 +5002,7 @@ impl Evaluator {
                             }
                             let mut result =
                                 if let Some(default_entries) = explicit_default_entries.as_ref() {
-                                    let mut overlay_entries = default_entries.clone();
+                                    let mut overlay_entries = default_entries.to_vec();
                                     overlay_entries.extend(body.iter().cloned());
                                     self.eval_amended_object(
                                         template_map,
@@ -5082,7 +5082,7 @@ impl Evaluator {
                                         ns
                                     }
                                     None => ObjectSource {
-                                        entries: vec![],
+                                        entries: vec![].into(),
                                         scope: ScopeMap::default(),
                                         scope_declared: NameSet::default(),
                                         body_members: HashSet::new(),
@@ -5155,7 +5155,7 @@ impl Evaluator {
                     let selected = if is_truthy(&condition) {
                         Some(generator.body.as_slice())
                     } else {
-                        generator.else_body.as_deref()
+                        generator.else_body.as_deref().map(Vec::as_slice)
                     };
                     if let Some(selected) = selected {
                         self.eval_mapping_entries_with_type_default(
@@ -5193,7 +5193,7 @@ impl Evaluator {
             return;
         };
         let mut converter_scope = scope.child();
-        for entry in output_body {
+        for entry in output_body.iter() {
             if let Entry::Property(prop) = entry
                 && has_modifier(&prop.modifiers, Modifier::Local)
                 && let Some(expr) = &prop.value
@@ -5214,7 +5214,7 @@ impl Evaluator {
         }) else {
             return;
         };
-        for entry in renderer_body {
+        for entry in renderer_body.iter() {
             if let Entry::Property(prop) = entry
                 && has_modifier(&prop.modifiers, Modifier::Local)
                 && let Some(expr) = &prop.value
@@ -5235,7 +5235,7 @@ impl Evaluator {
             return;
         };
         // Each converter is a DynProperty: [ClassName] = (x) -> expr
-        for centry in converters_body {
+        for centry in converters_body.iter() {
             if let Entry::DynProperty(key_expr, val_expr) = centry {
                 // Extract the class name from the key expression
                 let class_name = match key_expr {

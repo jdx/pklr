@@ -193,7 +193,7 @@ pub(super) fn entries_are_listing_amendment(entries: &[Entry]) -> bool {
                 || generator
                     .else_body
                     .as_deref()
-                    .is_some_and(entries_are_listing_amendment)
+                    .is_some_and(|body| entries_are_listing_amendment(body))
         }
         _ => false,
     })

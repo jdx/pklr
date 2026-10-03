@@ -5,7 +5,10 @@ pub enum StringInterpPart {
     Expr(Expr),
 }
 
-/// A pkl module (top-level file).
+/// The entries of an object, class or generator body. Shared so the
+/// evaluator can hand a body to every object built from it without copying.
+pub type Body = std::sync::Arc<Vec<Entry>>;
+
 /// An annotation: `@Name { body }` or `@Name`
 #[derive(Debug, Clone, PartialEq)]
 pub struct Annotation {
@@ -20,7 +23,7 @@ pub struct Module {
     pub extends: Option<String>,
     pub imports: Vec<Import>,
     pub annotations: Vec<Annotation>,
-    pub body: Vec<Entry>,
+    pub body: Body,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -49,7 +52,7 @@ pub enum Entry {
     Elem(Expr),
     /// Class definition: `[modifiers] class Name [extends Parent] { properties... }`
     /// Fields: (name, modifiers, optional_parent, body)
-    ClassDef(String, Vec<Modifier>, Option<String>, Vec<Entry>),
+    ClassDef(String, Vec<Modifier>, Option<String>, Body),
     /// Type alias: `typealias Name = Type`
     TypeAlias(String, TypeExpr),
 }
@@ -62,7 +65,7 @@ pub struct Property {
     pub type_ann: Option<TypeExpr>,
     pub value: Option<Expr>,
     /// Object body amendment: `foo { ... }` (no `=`)
-    pub body: Option<Vec<Entry>>,
+    pub body: Option<Body>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -134,9 +137,9 @@ pub enum Expr {
     Ident(String),
     /// `new TypeName? { entries... }`
     /// The third field holds optional generic type parameter names (e.g., `<String, Step>`).
-    New(Option<String>, Vec<Entry>, Vec<String>),
+    New(Option<String>, Body, Vec<String>),
     /// An implicit `new` whose parent is inferred from a method return type.
-    InferredNew(TypeExpr, Vec<Entry>),
+    InferredNew(TypeExpr, Body),
     /// `expr.field`
     Field(Box<Expr>, String),
     /// `expr[key]`
@@ -156,7 +159,7 @@ pub enum Expr {
     /// Unary operation
     Unop(UnOp, Box<Expr>),
     /// Object/listing literal — anonymous `{ ... }`
-    ObjectBody(Vec<Entry>),
+    ObjectBody(Body),
     /// String interpolation: alternating literal strings and expressions
     StringInterpolation(Vec<StringInterpPart>),
     /// Null-safe field access: `expr?.field`
@@ -216,12 +219,12 @@ pub struct ForGenerator {
     pub key_var: Option<String>,
     pub val_var: String,
     pub collection: Expr,
-    pub body: Vec<Entry>,
+    pub body: Body,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct WhenGenerator {
     pub condition: Expr,
-    pub body: Vec<Entry>,
-    pub else_body: Option<Vec<Entry>>,
+    pub body: Body,
+    pub else_body: Option<Body>,
 }
