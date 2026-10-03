@@ -1,4 +1,5 @@
 use super::*;
+use std::cell::RefCell;
 
 // --- Scope ---
 
@@ -257,21 +258,46 @@ pub(super) fn scope_for_object_entry(
     entry_index: usize,
     object: &Scope,
     entry_scopes: Option<&[Option<Arc<CapturedScope>>]>,
-    entry_owners: &[Rc<HashSet<String>>],
+    entry_owners: &EntryOwners,
     own_body: Option<(&Scope, &HashSet<String>)>,
 ) -> Scope {
-    if let Some(lexical) = entry_scopes
+    if let Some(captured) = entry_scopes
         .and_then(|scopes| scopes.get(entry_index))
-        .and_then(Option::as_deref)
-        .map(restore_scope)
+        .and_then(Option::as_ref)
     {
+        let lexical = entry_owners.restored(captured);
         let none = HashSet::new();
-        let owned = entry_owners.get(entry_index).map_or(&none, Rc::as_ref);
+        let owned = entry_owners
+            .owners
+            .get(entry_index)
+            .map_or(&none, Rc::as_ref);
         return scope_with_object_bindings(&lexical, object, owned);
     }
     match own_body {
         Some((definition, owned)) => scope_with_object_bindings(definition, object, owned),
         None => object.clone(),
+    }
+}
+
+/// Per-entry lexical context for evaluating an object's entries.
+#[derive(Default)]
+pub(super) struct EntryOwners {
+    /// For each entry, the names declared by its body; see
+    /// [`entry_scope_owners`].
+    owners: Vec<Rc<HashSet<String>>>,
+    /// Captured scopes already restored, keyed by their address. Entries from
+    /// one body share a captured scope, so each is restored once rather than
+    /// once per entry.
+    restored: RefCell<HashMap<*const CapturedScope, Scope>>,
+}
+
+impl EntryOwners {
+    fn restored(&self, captured: &Arc<CapturedScope>) -> Scope {
+        self.restored
+            .borrow_mut()
+            .entry(Arc::as_ptr(captured))
+            .or_insert_with(|| restore_scope(captured))
+            .clone()
     }
 }
 
@@ -283,9 +309,9 @@ pub(super) fn entry_scope_owners(
     entries: &[Entry],
     entry_scopes: Option<&[Option<Arc<CapturedScope>>]>,
     inherited: Option<&ObjectSource>,
-) -> Vec<Rc<HashSet<String>>> {
+) -> EntryOwners {
     let Some(entry_scopes) = entry_scopes else {
-        return Vec::new();
+        return EntryOwners::default();
     };
     let inherited_entries = inherited
         .map(|source| source.entries.iter().zip(&source.entry_scopes))
@@ -308,7 +334,7 @@ pub(super) fn entry_scope_owners(
         .into_iter()
         .map(|(ptr, names)| (ptr, Rc::new(names)))
         .collect::<HashMap<_, _>>();
-    entry_scopes
+    let owners = entry_scopes
         .iter()
         .map(|captured| {
             captured
@@ -317,7 +343,11 @@ pub(super) fn entry_scope_owners(
                 .cloned()
                 .unwrap_or_default()
         })
-        .collect()
+        .collect();
+    EntryOwners {
+        owners,
+        restored: RefCell::default(),
+    }
 }
 
 /// The member name an entry declares in its body, if any.
