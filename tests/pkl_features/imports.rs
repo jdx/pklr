@@ -1924,3 +1924,142 @@ result = (hooks) {
         "echo hello"
     );
 }
+
+#[tokio::test]
+async fn module_imported_narrowly_by_many_modules() {
+    let temp = TestTempDir::new("pklr_test_shared_narrowed_import");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("parts")).unwrap();
+    std::fs::write(
+        dir.join("shared.pkl"),
+        r#"
+class Step {
+  name: String
+  cmd: String = "run"
+}
+greeting = "hi"
+count = 3
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("hub.pkl"),
+        r#"
+import* "parts/*.pkl" as Parts
+label = "hub"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("parts/one.pkl"),
+        r#"
+import "../shared.pkl"
+import "../hub.pkl"
+step = new shared.Step { name = "one" }
+hello = shared.greeting
+hubSeen = hub
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("parts/two.pkl"),
+        r#"
+import "../shared.pkl"
+step = new shared.Step { name = "two"; cmd = "go" }
+n = shared.count
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "hub.pkl"
+import "parts/one.pkl"
+import "parts/two.pkl"
+import "shared.pkl"
+oneHub = one.hubSeen.label
+oneStep = one.step
+oneHello = one.hello
+twoStep = two.step
+twoN = two.n
+direct = shared.greeting
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["oneHub"], "hub");
+    assert_eq!(
+        val["oneStep"],
+        serde_json::json!({"name": "one", "cmd": "run"})
+    );
+    assert_eq!(val["oneHello"], "hi");
+    assert_eq!(
+        val["twoStep"],
+        serde_json::json!({"name": "two", "cmd": "go"})
+    );
+    assert_eq!(val["twoN"], 3);
+    assert_eq!(val["direct"], "hi");
+}
+
+#[tokio::test]
+async fn reused_evaluator_rereads_changed_imports() {
+    let temp = TestTempDir::new("pklr_test_reused_evaluator_imports");
+    let dir = temp.path();
+    std::fs::write(dir.join("dep.pkl"), "value = 1\nother = 2\n").unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\"\nwhole = dep\nnarrow = dep.value\n",
+    )
+    .unwrap();
+
+    let mut ev = pklr::eval::Evaluator::new_async();
+    let first = ev
+        .eval_file_pub(&dir.join("main.pkl"))
+        .await
+        .unwrap()
+        .to_json();
+    assert_eq!(first["narrow"], 1);
+    assert_eq!(first["whole"]["other"], 2);
+
+    std::fs::write(dir.join("dep.pkl"), "value = 10\nother = 20\n").unwrap();
+    let second = ev
+        .eval_file_pub(&dir.join("main.pkl"))
+        .await
+        .unwrap()
+        .to_json();
+    assert_eq!(second["narrow"], 10);
+    assert_eq!(second["whole"]["other"], 20);
+}
+
+#[tokio::test]
+async fn narrowed_import_that_read_a_cycle_placeholder_is_not_reused() {
+    let temp = TestTempDir::new("pklr_test_cycle_narrowed_reuse");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "import \"hub.pkl\"\nseen = hub?.title ?? \"placeholder\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("hub.pkl"),
+        "import \"dep.pkl\"\ntitle = \"T\"\nduring = dep.seen\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"hub.pkl\"\nimport \"dep.pkl\"\nhubDuring = hub.during\nafter = dep.seen\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    // While hub is being imported, dep sees hub's placeholder. Once hub is
+    // done, the same narrowed import of dep must see its real value rather
+    // than a result cached during the cycle.
+    assert_eq!(val["hubDuring"], "placeholder");
+    assert_eq!(val["after"], "T");
+}
