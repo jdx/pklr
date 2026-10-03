@@ -89,9 +89,10 @@ pub enum Value {
     /// Listing (ordered list).
     List(Vec<Value>),
     /// Lambda function: param names + body expression + captured scope values.
-    /// Captures are Arc-wrapped so cloning a Lambda is O(1) even when scopes
-    /// contain many nested Lambdas (e.g. TestMaker with checkPass/checkFail/etc.).
-    Lambda(Vec<String>, Expr, Arc<IndexMap<String, Value>>),
+    /// All three are Arc-wrapped so cloning a Lambda is O(1): lambdas are
+    /// copied whenever a scope holding them is captured, and deep-copying the
+    /// body each time dominated evaluation.
+    Lambda(Arc<[String]>, Arc<Expr>, Arc<IndexMap<String, Value>>),
 }
 
 impl Value {

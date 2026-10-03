@@ -3621,7 +3621,11 @@ impl Evaluator {
                     .find_map(|name| scope.poison_of(name))
                     .map(|message| Expr::Throw(Box::new(Expr::String(message.clone()))))
                     .unwrap_or(body);
-                Ok(Value::Lambda(params.clone(), captured_body, captured))
+                Ok(Value::Lambda(
+                    params.as_slice().into(),
+                    Arc::new(captured_body),
+                    captured,
+                ))
             }
             Expr::InferredNew(ty, entries) => {
                 let (name, params) = inferred_new_type(ty, scope, 0)?;
