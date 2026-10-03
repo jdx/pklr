@@ -40,6 +40,11 @@ pub(super) struct Scope {
     /// before falling back to the object's inherited members, so only these
     /// declared names may win over an inherited member of an inner object.
     pub(super) declared: Rc<FxHashSet<String>>,
+    /// Names in `vars` bound by a `local` that aliases the `this` of the
+    /// object owning this scope (`local self = this`). Unlike a property such
+    /// as `me = this`, such a local is not a member, so a nested object whose
+    /// body never names it can leave it out of what it captures.
+    pub(super) this_aliases: Rc<FxHashSet<String>>,
     pub(super) type_namespace: Option<String>,
     pub(super) receiver_entries: Option<Arc<Vec<Entry>>>,
     pub(super) receiver_list_base: Option<usize>,
@@ -54,6 +59,7 @@ impl Scope {
             module_identities: Rc::default(),
             poisoned: Rc::default(),
             declared: Rc::default(),
+            this_aliases: Rc::default(),
             type_namespace: self.type_namespace.clone(),
             receiver_entries: self.receiver_entries.clone(),
             receiver_list_base: self.receiver_list_base,
@@ -75,7 +81,46 @@ impl Scope {
         if self.module_identities.contains_key(&name) {
             Rc::make_mut(&mut self.module_identities).shift_remove(&name);
         }
+        if self.this_aliases.contains(&name) {
+            Rc::make_mut(&mut self.this_aliases).remove(&name);
+        }
         Rc::make_mut(&mut self.vars).insert(name, val);
+    }
+
+    /// Mark the binding of `name` in this scope as a local alias of `this`.
+    pub(super) fn mark_this_alias(&mut self, name: &str) {
+        if !self.this_aliases.contains(name) {
+            Rc::make_mut(&mut self.this_aliases).insert(name.to_string());
+        }
+    }
+
+    /// Local `this` aliases visible from this scope: names whose innermost
+    /// binding is marked by [`Scope::mark_this_alias`].
+    pub(super) fn visible_this_aliases(&self) -> Vec<String> {
+        // Walk the chain once, innermost first. A marked name counts only if
+        // no inner level binds it; marks are few, so checking the inner levels
+        // per mark stays cheap however many bindings each level holds.
+        let mut names = Vec::new();
+        let mut seen = FxHashSet::default();
+        let mut inner: Vec<&Scope> = Vec::new();
+        let mut level = Some(self);
+        while let Some(scope) = level {
+            for name in scope.this_aliases.iter() {
+                if scope.binds(name)
+                    && seen.insert(name.as_str())
+                    && !inner.iter().any(|inner| inner.binds(name))
+                {
+                    names.push(name.clone());
+                }
+            }
+            inner.push(scope);
+            level = scope.parent.as_deref();
+        }
+        names
+    }
+
+    fn binds(&self, name: &str) -> bool {
+        self.vars.contains_key(name) || self.poisoned.contains_key(name)
     }
 
     /// Bind a name declared in the body that owns this scope.
@@ -427,6 +472,7 @@ pub(super) fn scope_with_object_bindings(
     }
     scope.vars = Rc::new(vars);
     scope.declared = Rc::new(declared);
+    scope.this_aliases = object.this_aliases.clone();
     for (name, message) in object.poisoned.iter() {
         if owned.contains(name) {
             scope.declare_poisoned(name.clone(), message.clone());
