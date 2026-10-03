@@ -3,13 +3,45 @@ use super::*;
 pub(super) fn refresh_this_aliases(
     scope: &mut Scope,
     aliases: &[String],
-    properties: &IndexMap<String, Value>,
+    properties: &Arc<IndexMap<String, Value>>,
 ) {
-    let snapshot = Value::Object(Arc::new(properties.clone()), None);
+    let snapshot = Value::Object(Arc::clone(properties), None);
     scope.set("this".into(), snapshot.clone());
     for alias in aliases {
         scope.set(alias.clone(), snapshot.clone());
     }
+}
+
+/// Drop the scope's references to the current `this` snapshot so the property
+/// map is uniquely owned again and can grow in place instead of being copied.
+/// Callers refresh the snapshot after the insert.
+fn release_this_aliases(scope: &mut Scope, aliases: &[String]) {
+    for name in std::iter::once("this").chain(aliases.iter().map(String::as_str)) {
+        if let Some(slot) = scope.vars.get_mut(name) {
+            *slot = Value::Null;
+        }
+    }
+}
+
+pub(super) fn props_insert(
+    scope: &mut Scope,
+    aliases: &[String],
+    properties: &mut Arc<IndexMap<String, Value>>,
+    key: String,
+    value: Value,
+) {
+    release_this_aliases(scope, aliases);
+    Arc::make_mut(properties).insert(key, value);
+}
+
+pub(super) fn props_extend(
+    scope: &mut Scope,
+    aliases: &[String],
+    properties: &mut Arc<IndexMap<String, Value>>,
+    entries: impl Iterator<Item = (String, Value)>,
+) {
+    release_this_aliases(scope, aliases);
+    Arc::make_mut(properties).extend(entries);
 }
 
 /// Apply a mapping's default template to an `["key"] = expr` entry.
