@@ -8,7 +8,7 @@ pub(super) type FxIndexMap<K, V> = IndexMap<K, V, FxBuildHasher>;
 /// A binding name in a [`Scope`]. Reference-counted so copying bindings
 /// between scopes, which happens for every evaluated entry, does not
 /// allocate.
-pub(super) type Name = Rc<str>;
+pub(super) type Name = Arc<str>;
 
 // --- Scope ---
 
@@ -196,7 +196,7 @@ impl Scope {
             .or_else(|| self.parent.as_ref().and_then(|p| p.get(name)))
     }
 
-    pub(super) fn flatten(&self) -> IndexMap<String, Value> {
+    pub(super) fn flatten(&self) -> ScopeMap {
         let mut result = self
             .parent
             .as_ref()
@@ -205,21 +205,18 @@ impl Scope {
         for name in self.poisoned.keys() {
             result.shift_remove(&**name);
         }
-        result.extend(self.vars.iter().map(|(k, v)| (k.to_string(), v.clone())));
+        result.extend(self.vars.iter().map(|(k, v)| (k.clone(), v.clone())));
         result
     }
 
     /// The subset of `flatten` for `names`, sorted by name.
-    pub(super) fn flatten_names<'a>(
-        &self,
-        names: impl IntoIterator<Item = &'a str>,
-    ) -> IndexMap<String, Value> {
+    pub(super) fn flatten_names<'a>(&self, names: impl IntoIterator<Item = &'a str>) -> ScopeMap {
         let mut names = names.into_iter().collect::<Vec<_>>();
         names.sort_unstable();
         names.dedup();
         names
             .into_iter()
-            .filter_map(|name| Some((name.to_string(), self.flattened(name)?.clone())))
+            .filter_map(|name| Some((name.into(), self.flattened(name)?.clone())))
             .collect()
     }
 
@@ -285,7 +282,7 @@ pub(super) fn restore_scope(captured: &CapturedScope) -> Scope {
         ..Scope::default()
     };
     for (name, value) in &captured.values {
-        scope.set(name.clone(), value.clone());
+        scope.set_name(name.clone(), value.clone());
     }
     scope.declared = Rc::new(
         captured
@@ -496,25 +493,25 @@ pub(super) fn scope_with_object_bindings(
 /// Both scopes keep which of their names were declared in a body, so an entry's
 /// inherited members still resolve after those names.
 pub(super) fn mapping_amendment_scopes(
-    captured: &IndexMap<String, Value>,
+    captured: &ScopeMap,
     captured_declared: &HashSet<String>,
     current: &Scope,
 ) -> (Scope, Scope) {
     let current_declared = current.flatten_declared();
     let mut inherited = Scope::default();
     for (key, value) in captured {
-        if captured_declared.contains(key) {
-            inherited.declare(key.clone(), value.clone());
+        if captured_declared.contains(&**key) {
+            inherited.declare_name(key.clone(), value.clone());
         } else {
-            inherited.set(key.clone(), value.clone());
+            inherited.set_name(key.clone(), value.clone());
         }
     }
     for (key, value) in current.flatten() {
         if inherited.get(&key).is_none() {
-            if current_declared.contains(&key) {
-                inherited.declare(key, value);
+            if current_declared.contains(&*key) {
+                inherited.declare_name(key, value);
             } else {
-                inherited.set(key, value);
+                inherited.set_name(key, value);
             }
         }
     }
@@ -524,11 +521,11 @@ pub(super) fn mapping_amendment_scopes(
 
     let mut amendment = inherited.clone();
     for (key, value) in current.flatten() {
-        if current_declared.contains(&key) {
-            amendment.declare(key, value);
+        if current_declared.contains(&*key) {
+            amendment.declare_name(key, value);
         } else {
-            Rc::make_mut(&mut amendment.declared).remove(key.as_str());
-            amendment.set(key, value);
+            Rc::make_mut(&mut amendment.declared).remove(&*key);
+            amendment.set_name(key, value);
         }
     }
     for (key, ty) in current.flatten_type_aliases() {
