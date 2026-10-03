@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.4](https://github.com/jdx/pklr/compare/v3.0.3...v3.0.4) - 2026-10-03
+
+### Fixed
+
+- *(eval)* don't amend an enclosing object's same-named property ([#218](https://github.com/jdx/pklr/pull/218))
+
 ## [3.0.3](https://github.com/jdx/pklr/compare/v3.0.2...v3.0.3) - 2026-09-28
 
 ### Fixed
