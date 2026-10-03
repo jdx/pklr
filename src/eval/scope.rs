@@ -401,6 +401,11 @@ pub(super) fn scope_with_object_bindings(
     let mut scope = lexical.child();
     scope.receiver_entries = object.receiver_entries.clone();
     scope.receiver_list_base = object.receiver_list_base;
+    // `scope` starts empty, so the bindings can be collected directly instead
+    // of going through `declare`/`set`, which also clear stale poison and
+    // module identities for each name.
+    let mut vars = IndexMap::with_capacity(object.vars.len());
+    let mut declared = HashSet::new();
     for (name, value) in object.vars.iter() {
         // `super` belongs to the body that declared the entry. A later
         // amendment must not replace an inherited entry's parent binding.
@@ -408,11 +413,14 @@ pub(super) fn scope_with_object_bindings(
             continue;
         }
         if owned.contains(name) {
-            scope.declare(name.clone(), value.clone());
+            declared.insert(name.clone());
+            vars.insert(name.clone(), value.clone());
         } else if !lexical.is_declared(name) {
-            scope.set(name.clone(), value.clone());
+            vars.insert(name.clone(), value.clone());
         }
     }
+    scope.vars = Rc::new(vars);
+    scope.declared = Rc::new(declared);
     for (name, message) in object.poisoned.iter() {
         if owned.contains(name) {
             scope.declare_poisoned(name.clone(), message.clone());
