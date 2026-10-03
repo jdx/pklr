@@ -97,27 +97,30 @@ impl Scope {
     /// Local `this` aliases visible from this scope: names whose innermost
     /// binding is marked by [`Scope::mark_this_alias`].
     pub(super) fn visible_this_aliases(&self) -> Vec<String> {
+        // Walk the chain once, innermost first. A marked name counts only if
+        // no inner level binds it; marks are few, so checking the inner levels
+        // per mark stays cheap however many bindings each level holds.
         let mut names = Vec::new();
+        let mut seen = FxHashSet::default();
+        let mut inner: Vec<&Scope> = Vec::new();
         let mut level = Some(self);
         while let Some(scope) = level {
             for name in scope.this_aliases.iter() {
-                if !names.contains(name) && self.is_this_alias(name) {
+                if scope.binds(name)
+                    && seen.insert(name.as_str())
+                    && !inner.iter().any(|inner| inner.binds(name))
+                {
                     names.push(name.clone());
                 }
             }
+            inner.push(scope);
             level = scope.parent.as_deref();
         }
         names
     }
 
-    fn is_this_alias(&self, name: &str) -> bool {
-        if self.vars.contains_key(name) || self.poisoned.contains_key(name) {
-            self.this_aliases.contains(name)
-        } else {
-            self.parent
-                .as_ref()
-                .is_some_and(|parent| parent.is_this_alias(name))
-        }
+    fn binds(&self, name: &str) -> bool {
+        self.vars.contains_key(name) || self.poisoned.contains_key(name)
     }
 
     /// Bind a name declared in the body that owns this scope.
