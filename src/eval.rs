@@ -603,20 +603,33 @@ impl Evaluator {
     }
 
     async fn eval_source_inner(&mut self, source: &str, path: &Path) -> Result<Value> {
-        // Seed import cache for the entry file so circular back-references work
-        if let Ok(canonical) = self.capabilities.canonicalize(path).await {
-            self.import_cache
-                .insert(canonical, Value::Object(Arc::new(IndexMap::new()), None));
+        // Seed import cache for the entry file so circular back-references work.
+        // Mark it in flight too, so a narrowed import that reads this
+        // placeholder is not cached.
+        let canonical = self.capabilities.canonicalize(path).await.ok();
+        if let Some(canonical) = &canonical {
+            self.import_cache.insert(
+                canonical.clone(),
+                Value::Object(Arc::new(IndexMap::new()), None),
+            );
+            self.imports_in_flight.insert(canonical.clone());
         }
+        let result = self.eval_entry_module(source, path).await;
+        if let Some(canonical) = canonical {
+            self.imports_in_flight.remove(&canonical);
+            // Update cache with real value
+            if let Ok(val) = &result {
+                self.import_cache.insert(canonical, val.clone());
+            }
+        }
+        result
+    }
+
+    async fn eval_entry_module(&mut self, source: &str, path: &Path) -> Result<Value> {
         let name = path.display().to_string();
         let tokens = lexer::lex_named(source, &name)?;
         let module = parser::parse_named(&tokens, source, &name)?;
-        let val = self.eval_module(&module, path, 0).await?;
-        // Update cache with real value
-        if let Ok(canonical) = self.capabilities.canonicalize(path).await {
-            self.import_cache.insert(canonical, val.clone());
-        }
-        Ok(val)
+        self.eval_module(&module, path, 0).await
     }
 
     /// Evaluate a local pkl file by path (public entry point).
