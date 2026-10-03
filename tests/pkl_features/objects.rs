@@ -318,6 +318,41 @@ data {
 }
 
 #[test]
+fn this_snapshot_unaffected_by_later_entries() {
+    let json = eval(
+        r#"
+obj {
+  local self = this
+  a = 1
+  early = self.a
+  inner { y = outer.a }
+  snap = this
+  b = 2
+  late = self.b
+}
+m {
+  ["one"] = 1
+  ["nested"] { v = 5 }
+  held = this
+  ["two"] = this["one"] + 1
+}
+"#,
+    );
+    assert_eq!(json["obj"]["early"], 1);
+    assert_eq!(json["obj"]["inner"]["y"], 1);
+    assert_eq!(json["obj"]["late"], 2);
+    assert_eq!(
+        json["obj"]["snap"],
+        serde_json::json!({"a": 1, "early": 1, "inner": {"y": 1}})
+    );
+    assert_eq!(json["m"]["two"], 2);
+    assert_eq!(
+        json["m"]["held"],
+        serde_json::json!({"one": 1, "nested": {"v": 5}})
+    );
+}
+
+#[test]
 fn this_keyword_basic() {
     // `this` refers to the current object
     let json = eval(

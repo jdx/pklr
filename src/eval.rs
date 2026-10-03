@@ -2202,6 +2202,11 @@ impl Evaluator {
         // entries but absent from the parent scope, so that `outer.optionalProp`
         // resolves to Null rather than failing with "field not found".
         let mut outer_map = scope.flatten();
+        // `this` inside the body is rebound to the new object, so the parent's
+        // `this` snapshot is unreachable through `outer`. Leaving it out keeps
+        // nested objects from holding a reference to the parent's property map,
+        // which would otherwise force a full copy on every parent insert.
+        outer_map.shift_remove("this");
         for entry in entries {
             if let Entry::Property(prop) = entry
                 && prop.value.is_none()
@@ -2219,7 +2224,7 @@ impl Evaluator {
         // output properties can close over the amended instance. Bind `this`
         // before locals are evaluated, then keep direct aliases synchronized as
         // properties populate the instance.
-        let mut all_props: IndexMap<String, Value> = IndexMap::new();
+        let mut all_props: Arc<IndexMap<String, Value>> = Arc::default();
         let mut this_aliases = Vec::new();
         refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
         // First pass: collect locals, class definitions, and type aliases in
@@ -2351,7 +2356,14 @@ impl Evaluator {
                         } else {
                             child_scope.set(prop.name.clone(), v.clone());
                         }
-                        all_props.insert(prop.name.clone(), v.clone());
+                        drop(active_scope);
+                        props_insert(
+                            &mut child_scope,
+                            &this_aliases,
+                            &mut all_props,
+                            prop.name.clone(),
+                            v.clone(),
+                        );
                         if !has_modifier(mods, Modifier::Hidden) {
                             map.insert(prop.name.clone(), v);
                         }
@@ -2388,7 +2400,14 @@ impl Evaluator {
                         let val = self
                             .eval_value_amendment(existing, body, &active_scope, depth)
                             .await?;
-                        all_props.insert(key_str.clone(), val.clone());
+                        drop(active_scope);
+                        props_insert(
+                            &mut child_scope,
+                            &this_aliases,
+                            &mut all_props,
+                            key_str.clone(),
+                            val.clone(),
+                        );
                         map.insert(key_str, val);
                         refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                         continue;
@@ -2440,7 +2459,14 @@ impl Evaluator {
                         }
                         val
                     };
-                    all_props.insert(key_str.clone(), val.clone());
+                    drop(active_scope);
+                    props_insert(
+                        &mut child_scope,
+                        &this_aliases,
+                        &mut all_props,
+                        key_str.clone(),
+                        val.clone(),
+                    );
                     map.insert(key_str, val);
                     refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                 }
@@ -2454,7 +2480,13 @@ impl Evaluator {
                     );
                     let val = self.eval_expr(expr, &active_scope, depth).await?;
                     if let Value::Object(m, _) = val {
-                        all_props.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                        drop(active_scope);
+                        props_extend(
+                            &mut child_scope,
+                            &this_aliases,
+                            &mut all_props,
+                            m.iter().map(|(k, v)| (k.clone(), v.clone())),
+                        );
                         map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
                         refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                     }
@@ -2487,7 +2519,12 @@ impl Evaluator {
                             )
                             .await?;
                         if let Value::Object(m, _) = body_val {
-                            all_props.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                            props_extend(
+                                &mut child_scope,
+                                &this_aliases,
+                                &mut all_props,
+                                m.iter().map(|(k, v)| (k.clone(), v.clone())),
+                            );
                             map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
                             refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                         }
@@ -2515,7 +2552,12 @@ impl Evaluator {
                             )
                             .await?;
                         if let Value::Object(m, _) = body_val {
-                            all_props.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                            props_extend(
+                                &mut child_scope,
+                                &this_aliases,
+                                &mut all_props,
+                                m.iter().map(|(k, v)| (k.clone(), v.clone())),
+                            );
                             map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
                             refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                         }
@@ -2530,7 +2572,12 @@ impl Evaluator {
                             )
                             .await?;
                         if let Value::Object(m, _) = else_val {
-                            all_props.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                            props_extend(
+                                &mut child_scope,
+                                &this_aliases,
+                                &mut all_props,
+                                m.iter().map(|(k, v)| (k.clone(), v.clone())),
+                            );
                             map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
                             refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                         }
