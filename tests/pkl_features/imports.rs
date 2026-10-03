@@ -2035,35 +2035,31 @@ async fn reused_evaluator_rereads_changed_imports() {
 }
 
 #[tokio::test]
-async fn narrowed_import_of_entry_cycle_is_not_cached_early() {
-    let temp = TestTempDir::new("pklr_test_entry_cycle_narrowed");
+async fn narrowed_import_that_read_a_cycle_placeholder_is_not_reused() {
+    let temp = TestTempDir::new("pklr_test_cycle_narrowed_reuse");
     let dir = temp.path();
     std::fs::write(
         dir.join("dep.pkl"),
-        r#"
-import "main.pkl"
-seen = main?.title ?? "placeholder"
-label = "dep"
-"#,
+        "import \"hub.pkl\"\nseen = hub?.title ?? \"placeholder\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("hub.pkl"),
+        "import \"dep.pkl\"\ntitle = \"T\"\nduring = dep.seen\n",
     )
     .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        r#"
-import "dep.pkl"
-title = "T"
-first = dep.seen
-second = dep.label
-"#,
+        "import \"hub.pkl\"\nimport \"dep.pkl\"\nhubDuring = hub.during\nafter = dep.seen\n",
     )
     .unwrap();
 
     let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
         .await
         .unwrap();
-    // pklr evaluates imports eagerly, so the cycle sees the entry module's
-    // placeholder, as it does without the narrowed import cache.
-    assert_eq!(val["first"], "placeholder");
-    assert_eq!(val["second"], "dep");
-    assert_eq!(val["title"], "T");
+    // While hub is being imported, dep sees hub's placeholder. Once hub is
+    // done, the same narrowed import of dep must see its real value rather
+    // than a result cached during the cycle.
+    assert_eq!(val["hubDuring"], "placeholder");
+    assert_eq!(val["after"], "T");
 }
