@@ -2287,6 +2287,29 @@ impl Evaluator {
         // nested objects from holding a reference to the parent's property map,
         // which would otherwise force a full copy on every parent insert.
         outer_map.shift_remove("this");
+        // Locals of an enclosing object that alias its `this` (`local self =
+        // this`) hold the same snapshot. Drop the ones this body never names so
+        // they are not captured by the object built here; `outer` keeps them
+        // when the body uses `outer`, since `outer.self` would still reach them.
+        let unused_this_aliases = {
+            let aliases = scope.visible_this_aliases();
+            if aliases.is_empty() {
+                aliases
+            } else {
+                let refs = referenced_roots(entries);
+                if refs.contains("outer") {
+                    Vec::new()
+                } else {
+                    aliases
+                        .into_iter()
+                        .filter(|name| !refs.contains(name))
+                        .collect()
+                }
+            }
+        };
+        for name in &unused_this_aliases {
+            outer_map.shift_remove(name.as_str());
+        }
         for entry in entries {
             if let Entry::Property(prop) = entry
                 && prop.value.is_none()
@@ -2356,6 +2379,7 @@ impl Evaluator {
                             if matches!(expr, Expr::Ident(name) if name == "this" || this_aliases.contains(name))
                             {
                                 this_aliases.push(prop.name.clone());
+                                child_scope.mark_this_alias(&prop.name);
                             }
                         }
                         Err(Error::Eval(message)) if binds_declared(&prop.name) => {
@@ -2699,9 +2723,18 @@ impl Evaluator {
             let val = self.eval_expr(expr, &active_scope, depth).await?;
             child_scope.set(name, val);
         }
+        let mut source_scope = child_scope.flatten();
+        for name in &unused_this_aliases {
+            // A binding of the same name made by this body shadows the alias.
+            if !child_scope.vars.contains_key(name.as_str())
+                && !child_scope.poisoned.contains_key(name.as_str())
+            {
+                source_scope.shift_remove(name.as_str());
+            }
+        }
         let source = ObjectSource {
             entries: entries.to_vec(),
-            scope: child_scope.flatten(),
+            scope: source_scope,
             scope_declared: child_scope.flatten_declared(),
             body_members: own_body.clone().unwrap_or_else(|| {
                 entries

@@ -9,6 +9,7 @@ pub(super) fn refresh_this_aliases(
     scope.set("this".into(), snapshot.clone());
     for alias in aliases {
         scope.set(alias.clone(), snapshot.clone());
+        scope.mark_this_alias(alias);
     }
 }
 
