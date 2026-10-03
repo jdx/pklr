@@ -2106,7 +2106,7 @@ impl Evaluator {
             // inherited, is a different member and must not become the base.
             let scoped = scope
                 .get(&prop.name)
-                .filter(|_| scope.vars.contains_key(&prop.name));
+                .filter(|_| scope.vars.contains_key(prop.name.as_str()));
             let amendment_base = scoped
                 .filter(|value| !is_null_value(value))
                 .or(nullable_default.as_ref())
@@ -2362,7 +2362,7 @@ impl Evaluator {
                     let mut resolved_scope = active_scope;
                     self.eval_type_alias(name, ty, &mut resolved_scope);
                     child_scope.set_type_alias(name.clone(), ty.clone());
-                    if let Some(value) = resolved_scope.vars.get(name) {
+                    if let Some(value) = resolved_scope.vars.get(name.as_str()) {
                         child_scope.set(name.clone(), value.clone());
                     }
                 }
@@ -3172,7 +3172,7 @@ impl Evaluator {
                 continue;
             } else {
                 // A use-site binding is not declared in the base's body.
-                Rc::make_mut(&mut eval_scope.declared).remove(&k);
+                Rc::make_mut(&mut eval_scope.declared).remove(k.as_str());
                 v
             };
             eval_scope.set(k, value);
