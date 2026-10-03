@@ -41,6 +41,18 @@ pub struct Evaluator {
     http_cache: HashMap<String, String>,
     /// Cache for evaluated local imports (canonical path → Value)
     import_cache: HashMap<PathBuf, Value>,
+    /// Local imports whose `import_cache` entry is still the placeholder that
+    /// breaks circular imports.
+    imports_in_flight: HashSet<PathBuf>,
+    /// Number of times evaluation saw an in-flight placeholder instead of a
+    /// module's real value. A result computed while this moved may be
+    /// incomplete and is not cached.
+    placeholder_reads: u64,
+    /// Narrowed evaluations of local imports, keyed by canonical path and the
+    /// sorted requested fields.
+    narrowed_import_cache: HashMap<(PathBuf, Vec<String>), Value>,
+    /// Parsed local modules (canonical path → AST)
+    parse_cache: HashMap<PathBuf, Arc<Module>>,
     /// Final scopes for modules evaluated in this run, used to preserve inherited locals.
     module_scopes: HashMap<PathBuf, ModuleScopeSnapshot>,
     /// Environment variables read during evaluation (name → observed value).
@@ -98,6 +110,10 @@ impl Default for Evaluator {
             max_depth: 32,
             http_cache: HashMap::new(),
             import_cache: HashMap::new(),
+            imports_in_flight: HashSet::new(),
+            placeholder_reads: 0,
+            narrowed_import_cache: HashMap::new(),
+            parse_cache: HashMap::new(),
             module_scopes: HashMap::new(),
             env_reads: BTreeMap::new(),
             scoped_imports_in_flight: HashSet::new(),
@@ -136,6 +152,10 @@ impl Evaluator {
             max_depth: 32,
             http_cache: HashMap::new(),
             import_cache: HashMap::new(),
+            imports_in_flight: HashSet::new(),
+            placeholder_reads: 0,
+            narrowed_import_cache: HashMap::new(),
+            parse_cache: HashMap::new(),
             module_scopes: HashMap::new(),
             env_reads: BTreeMap::new(),
             scoped_imports_in_flight: HashSet::new(),
@@ -209,6 +229,10 @@ impl Evaluator {
     fn begin_evaluation(&mut self) {
         self.env_reads.clear();
         self.import_cache.clear();
+        self.imports_in_flight.clear();
+        self.placeholder_reads = 0;
+        self.narrowed_import_cache.clear();
+        self.parse_cache.clear();
         self.module_scopes.clear();
         self.scoped_imports_in_flight.clear();
         self.converters.clear();
@@ -606,15 +630,17 @@ impl Evaluator {
     /// Inserts a placeholder before evaluation to break circular imports.
     async fn eval_file(&mut self, path: &Path, depth: usize) -> Result<Value> {
         let canonical = self.capabilities.canonicalize(path).await?;
-        if let Some(cached) = self.import_cache.get(&canonical) {
-            return Ok(cached.clone());
+        if let Some(cached) = self.cached_import(&canonical) {
+            return Ok(cached);
         }
         // Insert empty placeholder to break circular imports
         self.import_cache.insert(
             canonical.clone(),
             Value::Object(Arc::new(IndexMap::new()), None),
         );
+        self.imports_in_flight.insert(canonical.clone());
         let result = self.eval_file_inner(path, &canonical, depth).await;
+        self.imports_in_flight.remove(&canonical);
         if result.is_err() {
             // Remove stale placeholder on failure so retries can re-evaluate
             self.import_cache.remove(&canonical);
@@ -632,18 +658,45 @@ impl Evaluator {
             return self.eval_file(path, depth).await;
         }
         let canonical = self.capabilities.canonicalize(path).await?;
-        if let Some(cached) = self.import_cache.get(&canonical) {
+        if let Some(cached) = self.cached_import(&canonical) {
+            return Ok(cached);
+        }
+        let mut fields: Vec<String> = requested_fields.iter().flatten().cloned().collect();
+        fields.sort_unstable();
+        let key = (canonical.clone(), fields);
+        if let Some(cached) = self.narrowed_import_cache.get(&key) {
             return Ok(cached.clone());
         }
         self.import_cache.insert(
             canonical.clone(),
             Value::Object(Arc::new(IndexMap::new()), None),
         );
+        self.imports_in_flight.insert(canonical.clone());
+        let placeholder_reads = self.placeholder_reads;
         let result = self
             .eval_file_requested_fields_inner(path, depth, requested_fields)
             .await;
+        self.imports_in_flight.remove(&canonical);
         self.import_cache.remove(&canonical);
+        // A module evaluated while one of its imports was still in flight may
+        // have seen that import's placeholder, so only cache self-contained
+        // results.
+        if let Ok(value) = &result
+            && self.placeholder_reads == placeholder_reads
+        {
+            self.narrowed_import_cache.insert(key, value.clone());
+        }
         result
+    }
+
+    /// The cached value of a local import, counting reads of an in-flight
+    /// placeholder.
+    fn cached_import(&mut self, canonical: &Path) -> Option<Value> {
+        let cached = self.import_cache.get(canonical)?.clone();
+        if self.imports_in_flight.contains(canonical) {
+            self.placeholder_reads += 1;
+        }
+        Some(cached)
     }
 
     async fn eval_file_requested_fields_inner(
@@ -680,6 +733,7 @@ impl Evaluator {
         }
         let canonical = self.capabilities.canonicalize(path).await?;
         if !self.scoped_imports_in_flight.insert(canonical.clone()) {
+            self.placeholder_reads += 1;
             return Ok(Value::Object(Arc::new(IndexMap::new()), None));
         }
         let result = self
@@ -702,11 +756,19 @@ impl Evaluator {
         Ok(val)
     }
 
-    async fn parse_file(&mut self, path: &Path) -> Result<Module> {
+    async fn parse_file(&mut self, path: &Path) -> Result<Arc<Module>> {
+        let canonical = self.capabilities.canonicalize(path).await.ok();
+        if let Some(module) = canonical.as_ref().and_then(|c| self.parse_cache.get(c)) {
+            return Ok(Arc::clone(module));
+        }
         let source = self.capabilities.read_to_string(path).await?;
         let name = path.display().to_string();
         let tokens = lexer::lex_named(&source, &name)?;
-        parser::parse_named(&tokens, &source, &name)
+        let module = Arc::new(parser::parse_named(&tokens, &source, &name)?);
+        if let Some(canonical) = canonical {
+            self.parse_cache.insert(canonical, Arc::clone(&module));
+        }
+        Ok(module)
     }
 
     async fn eval_module(&mut self, module: &Module, path: &Path, depth: usize) -> Result<Value> {
