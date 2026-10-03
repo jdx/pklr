@@ -2033,3 +2033,37 @@ async fn reused_evaluator_rereads_changed_imports() {
     assert_eq!(second["narrow"], 10);
     assert_eq!(second["whole"]["other"], 20);
 }
+
+#[tokio::test]
+async fn narrowed_import_of_entry_cycle_is_not_cached_early() {
+    let temp = TestTempDir::new("pklr_test_entry_cycle_narrowed");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("dep.pkl"),
+        r#"
+import "main.pkl"
+seen = main?.title ?? "placeholder"
+label = "dep"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "dep.pkl"
+title = "T"
+first = dep.seen
+second = dep.label
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    // pklr evaluates imports eagerly, so the cycle sees the entry module's
+    // placeholder, as it does without the narrowed import cache.
+    assert_eq!(val["first"], "placeholder");
+    assert_eq!(val["second"], "dep");
+    assert_eq!(val["title"], "T");
+}
