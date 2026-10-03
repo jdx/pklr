@@ -2039,7 +2039,12 @@ impl Evaluator {
             if let Some(default) = &mut nullable_default {
                 apply_mapping_type_annotation(default, prop.type_ann.as_ref());
             }
-            let scoped = scope.get(&prop.name);
+            // A body amendment amends a member the receiver itself holds. A
+            // same-named property of an enclosing object, declared or
+            // inherited, is a different member and must not become the base.
+            let scoped = scope
+                .get(&prop.name)
+                .filter(|_| scope.vars.contains_key(&prop.name));
             let amendment_base = scoped
                 .filter(|value| !is_null_value(value))
                 .or(nullable_default.as_ref())

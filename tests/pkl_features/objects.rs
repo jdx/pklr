@@ -3175,3 +3175,31 @@ result = testMaker.checkFail("bad", 1)
     let val = pklr::eval_to_json_async(&path).await.unwrap();
     assert_eq!(val["result"], "check:main.rs");
 }
+
+#[test]
+fn body_amendment_ignores_same_named_property_of_enclosing_object() {
+    let val = eval(
+        r#"
+x {
+  files = List("a")
+  expect { files { ["a"] = "b" } }
+}
+"#,
+    );
+    assert_eq!(val["x"]["files"], serde_json::json!(["a"]));
+    assert_eq!(val["x"]["expect"]["files"], serde_json::json!({"a": "b"}));
+}
+
+#[test]
+fn body_amendment_ignores_inherited_property_of_enclosing_object() {
+    let val = eval(
+        r#"
+class Test { files: List<String> = List("a"); expect: Dynamic = new Dynamic {} }
+x = new Test {
+  expect { files { ["a"] = "b" } }
+}
+"#,
+    );
+    assert_eq!(val["x"]["files"], serde_json::json!(["a"]));
+    assert_eq!(val["x"]["expect"]["files"], serde_json::json!({"a": "b"}));
+}
