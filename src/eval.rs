@@ -2308,6 +2308,16 @@ impl Evaluator {
         // to a second pass so they capture the fully-populated scope.
         let mut deferred_lambdas: Vec<(String, &crate::parser::Expr, usize)> = Vec::new();
         for (entry_index, entry) in entries.iter().enumerate() {
+            // Only locals, classes and type aliases are handled in this pass,
+            // so build the entry's scope only for those.
+            if !matches!(
+                entry,
+                Entry::Property(prop)
+                    if has_modifier(&prop.modifiers, Modifier::Local) && prop.value.is_some()
+            ) && !matches!(entry, Entry::ClassDef(..) | Entry::TypeAlias(..))
+            {
+                continue;
+            }
             let active_scope = scope_for_object_entry(
                 entry_index,
                 &child_scope,
