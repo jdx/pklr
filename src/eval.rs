@@ -3028,7 +3028,7 @@ impl Evaluator {
     async fn eval_amended_object(
         &mut self,
         base_map: &Arc<IndexMap<String, Value>>,
-        base_source: &ObjectSource,
+        base_source: &Arc<ObjectSource>,
         overlay_entries: &[Entry],
         current_scope: &Scope,
         depth: usize,
@@ -3054,10 +3054,7 @@ impl Evaluator {
         }
         amendment_scope.values.insert(
             "super".into(),
-            Value::Object(
-                Arc::new(parent_members),
-                Some(Arc::new(base_source.clone())),
-            ),
+            Value::Object(Arc::new(parent_members), Some(Arc::clone(base_source))),
         );
         let amendment_entry_scope = Some(Arc::new(CapturedScope {
             body_members: overlay_entries
@@ -3351,7 +3348,7 @@ impl Evaluator {
             }
             source.body_members.insert(key.clone());
         }
-        self.eval_amended_object(template_map, &source, body, scope, depth)
+        self.eval_amended_object(template_map, &Arc::new(source), body, scope, depth)
             .await
     }
 
