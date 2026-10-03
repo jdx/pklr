@@ -820,19 +820,44 @@ impl Evaluator {
     /// The enclosing module is skipped: pklr evaluates matched modules eagerly,
     /// so including it would recurse until the import depth limit.
     #[async_recursion(?Send)]
-    async fn eval_glob_import(&mut self, uri: &str, path: &Path, depth: usize) -> Result<Value> {
+    ///
+    /// `requested` is the set of keys the importing code reads, when it only
+    /// reads the mapping as `Alias["key"]`. Then only those modules are
+    /// evaluated. A requested name that is not a matched key (such as `keys`
+    /// or `length`) needs the whole mapping, so every module is evaluated.
+    async fn eval_glob_import(
+        &mut self,
+        uri: &str,
+        path: &Path,
+        depth: usize,
+        requested: Option<&HashSet<String>>,
+    ) -> Result<Value> {
         // Non-local glob imports resolve to an empty mapping.
         if uri.contains("://") {
             return Ok(Value::Object(Arc::new(IndexMap::new()), None));
         }
         let base_dir = path.parent().unwrap_or(Path::new("."));
         let matched = self.capabilities.glob(base_dir, uri).await?;
+        let matched = matched
+            .into_iter()
+            .map(|matched_path| {
+                let rel_key = pathdiff_or_full(&matched_path, base_dir);
+                (matched_path, rel_key)
+            })
+            .collect::<Vec<_>>();
+        let requested = requested.filter(|requested| {
+            requested
+                .iter()
+                .all(|key| matched.iter().any(|(_, rel_key)| rel_key == key))
+        });
         let mut mapping = IndexMap::new();
-        for matched_path in matched {
+        for (matched_path, rel_key) in matched {
+            if requested.is_some_and(|requested| !requested.contains(&rel_key)) {
+                continue;
+            }
             if self.same_local_path(&matched_path, path).await? {
                 continue;
             }
-            let rel_key = pathdiff_or_full(&matched_path, base_dir);
             let val = self
                 .eval_file_with_requested_fields(&matched_path, depth + 1, None)
                 .await?;
@@ -1270,7 +1295,10 @@ impl Evaluator {
                     continue;
                 }
 
-                let mapping = self.eval_glob_import(uri, path, depth).await?;
+                let requested = requested_fields_for_import(&import_field_uses, &alias);
+                let mapping = self
+                    .eval_glob_import(uri, path, depth, requested.as_ref())
+                    .await?;
                 scope.declare(alias, mapping);
                 continue;
             }
@@ -4145,7 +4173,8 @@ impl Evaluator {
                 let module_path = Path::new(module_path);
                 let resolved = resolve_remote_relative(module_path, pattern);
                 let pattern: &str = resolved.as_deref().unwrap_or(pattern);
-                self.eval_glob_import(pattern, module_path, depth).await
+                self.eval_glob_import(pattern, module_path, depth, None)
+                    .await
             }
             Expr::ReadOrNull(uri_expr) => {
                 let uri = self.eval_expr(uri_expr, scope, depth + 1).await?;

@@ -116,6 +116,16 @@ pub(super) fn collect_expr_import_field_uses(
                 collect_expr_import_field_uses(base, uses, shadows);
             }
         }
+        // `Alias["key"]` reads one member, like `Alias.key`. For a glob import
+        // the key names one matched module.
+        Expr::Index(base, index)
+            if matches!(base.as_ref(), Expr::Ident(_))
+                && matches!(index.as_ref(), Expr::String(_)) =>
+        {
+            if let (Expr::Ident(name), Expr::String(key)) = (base.as_ref(), index.as_ref()) {
+                record_field_import_use(uses, shadows, name, key);
+            }
+        }
         Expr::Index(base, index) | Expr::Binop(_, base, index) => {
             collect_expr_import_field_uses(base, uses, shadows);
             collect_expr_import_field_uses(index, uses, shadows);

@@ -2063,3 +2063,47 @@ async fn narrowed_import_that_read_a_cycle_placeholder_is_not_reused() {
     assert_eq!(val["hubDuring"], "placeholder");
     assert_eq!(val["after"], "T");
 }
+
+#[tokio::test]
+async fn import_glob_evaluates_only_referenced_modules() {
+    let temp = TestTempDir::new("pklr_test_glob_referenced_only");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("parts")).unwrap();
+    std::fs::write(dir.join("parts/used.pkl"), "value = \"used\"\n").unwrap();
+    // Evaluating this module fails, so it must not be evaluated unless read.
+    std::fs::write(
+        dir.join("parts/unused.pkl"),
+        "value = throw(\"unused module was evaluated\")\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import* \"parts/*.pkl\" as Parts\nresult = Parts[\"parts/used.pkl\"].value\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["result"], "used");
+}
+
+#[tokio::test]
+async fn import_glob_keys_still_see_every_module() {
+    let temp = TestTempDir::new("pklr_test_glob_keys_all");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("parts")).unwrap();
+    std::fs::write(dir.join("parts/a.pkl"), "value = \"a\"\n").unwrap();
+    std::fs::write(dir.join("parts/b.pkl"), "value = \"b\"\n").unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import* \"parts/*.pkl\" as Parts\na = Parts[\"parts/a.pkl\"].value\ncount = Parts.length\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["a"], "a");
+    assert_eq!(val["count"], 2);
+}
