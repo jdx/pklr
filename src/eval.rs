@@ -2427,15 +2427,17 @@ impl Evaluator {
 
         // Check declarations only after this module's final scope is complete:
         // constraints and aliases may refer to members declared later.
-        for entry in module.body.iter() {
-            if let Entry::Property(prop) = entry
-                && !has_modifier(&prop.modifiers, Modifier::Local)
-                && (prop.value.is_some() || prop.body.is_some())
-                && prop.type_ann.is_some()
-                && scope.is_declared(&prop.name)
-                && let Some(value) = scope.get(&prop.name)
-            {
-                self.check_declared_property_type(prop, value, &scope, depth)?;
+        if !evaluated_as_base {
+            for entry in module.body.iter() {
+                if let Entry::Property(prop) = entry
+                    && !has_modifier(&prop.modifiers, Modifier::Local)
+                    && (prop.value.is_some() || prop.body.is_some())
+                    && prop.type_ann.is_some()
+                    && scope.is_declared(&prop.name)
+                    && let Some(value) = scope.get(&prop.name)
+                {
+                    self.check_declared_property_type(prop, value, &scope, depth)?;
+                }
             }
         }
 
@@ -3731,14 +3733,18 @@ impl Evaluator {
                 self.eval_type_check_in(val, inner, scope, depth, resolving)
             }
             TypeExpr::Union(variants) => {
+                // A type pklr does not model cannot be disproved at runtime.
+                // Check every modeled variant first, but preserve that
+                // conservative acceptance only if none of them matches.
+                let mut has_uncheckable_variant = false;
                 for v in variants {
-                    if !type_is_runtime_checkable(v, scope)
-                        || self.eval_type_check_in(val, v, scope, depth, resolving)?
-                    {
+                    if !type_is_runtime_checkable(v, scope) {
+                        has_uncheckable_variant = true;
+                    } else if self.eval_type_check_in(val, v, scope, depth, resolving)? {
                         return Ok(true);
                     }
                 }
-                Ok(false)
+                Ok(has_uncheckable_variant)
             }
             TypeExpr::Generic(name, _) => {
                 if let Some(resolved) = scope.get_type_alias(name) {

@@ -3982,3 +3982,14 @@ function: Function1<Int, Int> = (x) -> x
     let body = eval_fails("items: Listing(this.length == 1) { 1; 2 }\n");
     assert!(body.contains("property 'items'"), "{body}");
 }
+
+#[test]
+fn amended_module_checks_the_final_declared_property_value() {
+    let temp = TestTempDir::new("pklr_amended_declared_property_type");
+    std::fs::write(temp.path().join("Base.pkl"), "foo: Int(this > 0) = -1\n").unwrap();
+    let child = temp.path().join("Child.pkl");
+    std::fs::write(&child, "amends \"Base.pkl\"\nfoo = 5\n").unwrap();
+
+    let json = pklr::EvaluatorBuilder::new().eval_to_json(&child).unwrap();
+    assert_eq!(json["foo"], 5);
+}
