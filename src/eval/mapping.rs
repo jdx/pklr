@@ -258,7 +258,7 @@ pub(super) fn select_mapping_type_default<'a>(
         Entry::Property(prop) if !has_modifier(&prop.modifiers, Modifier::Local) => {
             Some(prop.name.as_str())
         }
-        Entry::DynProperty(Expr::String(name), _) => Some(name.as_str()),
+        Entry::DynProperty(Expr::String(name), _) => Some(&**name),
         _ => None,
     });
 
@@ -506,7 +506,7 @@ pub(super) fn validate_new_object_body(
                     prop.name
                 )));
             }
-            Entry::DynProperty(Expr::String(key), _) if !base_names.contains(key) => {
+            Entry::DynProperty(Expr::String(key), _) if !base_names.contains(&**key) => {
                 return Err(Error::Eval(format!(
                     "cannot add property '{key}' to non-open class {type_name}"
                 )));
@@ -560,7 +560,7 @@ pub(super) fn object_declares_field(value: &Value, field: &str) -> bool {
         || source.as_ref().is_some_and(|source| {
             source.entries.iter().any(|entry| match entry {
                 Entry::Property(prop) => prop.name == field,
-                Entry::DynProperty(Expr::String(name), _) => name == field,
+                Entry::DynProperty(Expr::String(name), _) => **name == *field,
                 _ => false,
             })
         })

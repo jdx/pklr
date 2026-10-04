@@ -187,6 +187,12 @@ impl ListValue {
         self
     }
 
+    /// The address of the shared items, which identifies them while they are
+    /// alive.
+    pub(crate) fn items_ptr(&self) -> *const Vec<Value> {
+        Arc::as_ptr(&self.items)
+    }
+
     /// Mutable access to the items, copying them first if they are shared.
     pub fn make_mut(&mut self) -> &mut Vec<Value> {
         Arc::make_mut(&mut self.items)

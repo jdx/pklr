@@ -150,13 +150,15 @@ impl Scope {
     }
 
     pub(super) fn set_name(&mut self, name: Name, val: Value) {
-        if self.poisoned.contains_key(&*name) {
+        // These maps are almost always empty; checking that first skips
+        // hashing the name for each of them.
+        if !self.poisoned.is_empty() && self.poisoned.contains_key(&*name) {
             Arc::make_mut(&mut self.poisoned).shift_remove(&*name);
         }
-        if self.module_identities.contains_key(&*name) {
+        if !self.module_identities.is_empty() && self.module_identities.contains_key(&*name) {
             Arc::make_mut(&mut self.module_identities).shift_remove(&*name);
         }
-        if self.this_aliases.contains(&*name) {
+        if !self.this_aliases.is_empty() && self.this_aliases.contains(&*name) {
             Arc::make_mut(&mut self.this_aliases).remove(&*name);
         }
         Arc::make_mut(&mut self.vars).insert(name, val);
@@ -361,11 +363,12 @@ impl Scope {
     }
 
     pub(super) fn flatten(&self) -> ScopeMap {
-        let mut result = self
-            .parent
-            .as_ref()
-            .map(|p| p.flatten())
-            .unwrap_or_default();
+        // The outermost levels (the module scope) usually hold most bindings:
+        // cloning that map whole is much cheaper than reinserting each one.
+        let mut result = match self.parent.as_ref().map(|p| p.flatten()) {
+            Some(result) if !result.is_empty() => result,
+            _ => return (*self.vars).clone(),
+        };
         for name in self.poisoned.keys() {
             result.shift_remove(&**name);
         }
@@ -401,11 +404,10 @@ impl Scope {
     }
 
     pub(super) fn flatten_type_aliases(&self) -> TypeAliasMap {
-        let mut result = self
-            .parent
-            .as_ref()
-            .map(|p| p.flatten_type_aliases())
-            .unwrap_or_default();
+        let mut result = match self.parent.as_ref().map(|p| p.flatten_type_aliases()) {
+            Some(result) if !result.is_empty() => result,
+            _ => return (*self.type_aliases).clone(),
+        };
         result.extend(
             self.type_aliases
                 .iter()
@@ -701,19 +703,22 @@ pub(super) fn capture_object_source_scope(source: &ObjectSource) -> CapturedScop
 }
 
 pub(super) fn restore_scope(captured: &CapturedScope) -> Scope {
+    // A fresh scope has no poisoned names, module identities or `this`
+    // aliases for `set_name` to clear, so the captured maps can be copied
+    // whole instead of rehashing every binding into a new map.
     let mut scope = Scope {
         type_namespace: captured.type_namespace.clone(),
         ..Scope::default()
     };
-    for (name, value) in &captured.values {
-        scope.set_name(name.clone(), value.clone());
+    if !captured.values.is_empty() {
+        scope.vars = Arc::new(captured.values.clone());
     }
     scope.declared = Arc::new(captured.declared.clone());
     for (name, identity) in &captured.module_identities {
         scope.set_module_identity(name.clone(), identity.clone());
     }
-    for (name, ty) in &captured.type_aliases {
-        scope.set_type_alias(name.clone(), ty.clone());
+    if !captured.type_aliases.is_empty() {
+        scope.type_aliases = Arc::new(captured.type_aliases.clone());
     }
     scope
 }
@@ -774,6 +779,11 @@ struct ObjectBindings {
     scope: Scope,
     /// Object members hidden because the lexical scope declares the name.
     hidden: FxHashSet<Name>,
+    /// For each member of the object already seen, by its index in the
+    /// object's bindings: its name, and where it is bound in `scope` (`None`
+    /// when it is skipped). An object only gains members or rebinds them in
+    /// place, so later updates compare by index instead of by name.
+    seen: Vec<(Name, Option<usize>)>,
 }
 
 impl EntryOwners {
@@ -791,6 +801,7 @@ impl EntryOwners {
         let cached = cache.entry(key).or_insert_with(|| ObjectBindings {
             scope: lexical.child(),
             hidden: FxHashSet::default(),
+            seen: Vec::new(),
         });
         update_object_bindings(cached, lexical, object, owned);
         cached.scope.clone()
@@ -924,23 +935,54 @@ fn update_object_bindings(
     object: &Scope,
     owned: &HashSet<String>,
 ) {
-    let ObjectBindings { scope, hidden } = bindings;
+    let ObjectBindings {
+        scope,
+        hidden,
+        seen,
+    } = bindings;
     scope.receiver_entries = object.receiver_entries.clone();
     scope.receiver_list_base = object.receiver_list_base;
+    // A member removed from the object (or moved) invalidates the positions.
+    if seen.len() > object.vars.len()
+        || seen
+            .iter()
+            .zip(object.vars.keys())
+            .any(|((seen, _), name)| !Arc::ptr_eq(seen, name) && seen != name)
+    {
+        seen.clear();
+    }
     // The scope's own bindings come only from the object, so they can be
     // written directly instead of going through `declare`/`set`, which also
     // clear stale poison and module identities for each name.
-    for (name, value) in object.vars.iter() {
+    for (index, (name, value)) in object.vars.iter().enumerate() {
+        if let Some((_, position)) = seen.get(index) {
+            // Already seen: skipped names stay skipped (see below), and a
+            // bound one only needs rebinding if its value changed.
+            let Some(position) = *position else {
+                continue;
+            };
+            let (_, bound) = scope.vars.get_index(position).expect("bound when seen");
+            if !same_value(bound, value) {
+                if owned.contains(&**name) && !scope.declared.contains(&**name) {
+                    Arc::make_mut(&mut scope.declared).insert(name.clone());
+                }
+                let (_, bound) = Arc::make_mut(&mut scope.vars)
+                    .get_index_mut(position)
+                    .expect("bound when seen");
+                *bound = value.clone();
+            }
+            continue;
+        }
         // `super` belongs to the body that declared the entry. A later
         // amendment must not replace an inherited entry's parent binding.
         if &**name == "super" || hidden.contains(&**name) {
+            seen.push((name.clone(), None));
             continue;
         }
-        if scope
-            .vars
-            .get(&**name)
-            .is_some_and(|bound| same_value(bound, value))
+        if let Some((position, _, bound)) = scope.vars.get_full(&**name)
+            && same_value(bound, value)
         {
+            seen.push((name.clone(), Some(position)));
             continue;
         }
         if owned.contains(&**name) {
@@ -951,9 +993,11 @@ fn update_object_bindings(
             // `lexical` is fixed for this cache entry and `owned` for its key,
             // so a hidden name stays hidden for the life of the cache.
             hidden.insert(name.clone());
+            seen.push((name.clone(), None));
             continue;
         }
-        Arc::make_mut(&mut scope.vars).insert(name.clone(), value.clone());
+        let (position, _) = Arc::make_mut(&mut scope.vars).insert_full(name.clone(), value.clone());
+        seen.push((name.clone(), Some(position)));
     }
     // Rebuilt whenever either side has poisoned names, so names no longer
     // poisoned on the object are dropped from the scope.

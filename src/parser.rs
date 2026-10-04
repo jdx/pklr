@@ -331,7 +331,7 @@ impl<'a> Parser<'a> {
             if !entry_annotations.is_empty()
                 && let Entry::Property(ref mut prop) = entry
             {
-                prop.annotations = entry_annotations;
+                std::sync::Arc::make_mut(prop).annotations = entry_annotations;
             }
             entries.push(entry);
             while matches!(self.peek(), TokenKind::Comma | TokenKind::Semicolon) {
@@ -557,15 +557,15 @@ impl<'a> Parser<'a> {
         if let Some(return_type) = return_type {
             infer_method_return_new(&mut body, &return_type);
         }
-        Ok(Some(Entry::Property(Property {
+        Ok(Some(Entry::Property(std::sync::Arc::new(Property {
             name,
             type_ann: None,
-            value: Some(Expr::Lambda(params, Box::new(body))),
+            value: Some(Expr::Lambda(params.into(), std::sync::Arc::new(body))),
             body: None,
             modifiers,
             annotations: Vec::new(),
             is_method: true,
-        })))
+        }))))
     }
 
     /// Skip a class, typealias, or function declaration.
@@ -801,7 +801,7 @@ impl<'a> Parser<'a> {
                     (None, None)
                 };
 
-                Ok(Entry::Property(Property {
+                Ok(Entry::Property(std::sync::Arc::new(Property {
                     annotations: Vec::new(), // filled by parse_entries if present
                     modifiers,
                     name,
@@ -809,7 +809,7 @@ impl<'a> Parser<'a> {
                     value,
                     body: body.map(Into::into),
                     is_method: false,
-                }))
+                })))
             }
         }
     }
@@ -1138,7 +1138,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::StringLit(s) => {
                 self.advance();
-                Ok(Expr::String(s))
+                Ok(Expr::String(s.into()))
             }
             TokenKind::InterpolatedString(parts) => {
                 self.advance();
@@ -1166,7 +1166,7 @@ impl<'a> Parser<'a> {
                 {
                     self.advance(); // consume ->
                     let body = self.parse_expr()?;
-                    return Ok(Expr::Lambda(params, Box::new(body)));
+                    return Ok(Expr::Lambda(params.into(), std::sync::Arc::new(body)));
                 }
                 // Not a lambda — restore and parse as parenthesized expression
                 self.pos = saved_pos;
