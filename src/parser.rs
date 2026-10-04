@@ -190,17 +190,22 @@ impl<'a> Parser<'a> {
                 });
             }
         }
-        // Skip `module <name>` declaration if present
+        // `module <name>` declaration (the name may be dotted like `hk.Config`)
+        let mut name = None;
         if matches!(self.peek(), TokenKind::KwModule) {
             self.advance();
-            // Skip module name (may be dotted like `hk.Config`)
-            while matches!(self.peek(), TokenKind::Ident(_)) {
+            let mut parts = Vec::new();
+            while let TokenKind::Ident(part) = self.peek() {
+                parts.push(part.clone());
                 self.advance();
                 if matches!(self.peek(), TokenKind::Dot) {
                     self.advance();
                 } else {
                     break;
                 }
+            }
+            if !parts.is_empty() {
+                name = Some(parts.join("."));
             }
         }
 
@@ -242,6 +247,7 @@ impl<'a> Parser<'a> {
         }
 
         self.check_module_modifiers(module_modifiers_offset, &module_modifiers, amends.is_some())?;
+        self.check_min_pkl_version(&annotations, name.as_deref())?;
         let kind = if amends.is_some() {
             BodyKind::AmendingModule
         } else {
@@ -253,6 +259,7 @@ impl<'a> Parser<'a> {
         }
         let body = self.parse_body(scope)?;
         Ok(Module {
+            name,
             amends,
             extends,
             imports,
@@ -318,12 +325,16 @@ impl<'a> Parser<'a> {
                 } else {
                     None
                 };
-                if matches!(self.peek(), TokenKind::LBrace) {
+                // `class Foo` without a body declares an empty class.
+                let body = if matches!(self.peek(), TokenKind::LBrace) {
                     self.advance();
                     let body = self.parse_body(BodyScope::new(BodyKind::Class, None))?;
                     self.expect(&TokenKind::RBrace)?;
-                    entries.push(Entry::ClassDef(name, class_modifiers, parent, body.into()));
-                }
+                    body
+                } else {
+                    Vec::new()
+                };
+                entries.push(Entry::ClassDef(name, class_modifiers, parent, body.into()));
                 continue;
             }
             if matches!(self.peek(), TokenKind::KwTypeAlias) {

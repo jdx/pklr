@@ -1251,6 +1251,47 @@ impl Evaluator {
         Ok(module)
     }
 
+    /// The name pkl gives the class of a module that amends another: the
+    /// name of the module at the root of its amends chain.
+    fn amended_module_name(&mut self, module: &Module, path: &Path) -> String {
+        let mut name = module_display_name(module, path);
+        let mut current = (module.amends.clone(), path.to_path_buf());
+        for _ in 0..self.max_depth {
+            let (Some(uri), from) = current else { break };
+            if uri.contains("://") {
+                break;
+            }
+            let base_path = self.resolve_local_path(&from, &uri);
+            let Ok(base) = self.parse_file(&base_path) else {
+                break;
+            };
+            name = module_display_name(&base, &base_path);
+            current = (base.amends.clone(), base_path);
+        }
+        name
+    }
+
+    /// Reject a module that amends or extends itself.
+    fn check_not_self(
+        &mut self,
+        module: &Module,
+        path: &Path,
+        base_path: &Path,
+        verb: &str,
+    ) -> Result<()> {
+        let same = match (self.canonicalize_io(path), self.canonicalize_io(base_path)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => path == base_path,
+        };
+        if same {
+            return Err(Error::Eval(format!(
+                "Module `{}` cannot {verb} itself.",
+                module_display_name(module, path)
+            )));
+        }
+        Ok(())
+    }
+
     fn eval_module(&mut self, module: &Module, path: &Path, depth: usize) -> Result<Value> {
         self.eval_module_with_scope(module, path, depth, None, None)
     }
@@ -1995,6 +2036,7 @@ impl Evaluator {
                     self.resolve_local_path(path, uri)
                 };
                 if self.path_exists_io(&amends_path)? {
+                    self.check_not_self(module, path, &amends_path, "amend")?;
                     let base_val =
                         self.eval_file_with_scope(&amends_path, depth + 1, Some(scope.clone()))?;
                     self.layer_evaluated_module_scope(&amends_path, &mut scope);
@@ -2074,6 +2116,14 @@ impl Evaluator {
                     self.resolve_local_path(path, uri)
                 };
                 if self.path_exists_io(&extends_path)? {
+                    self.check_not_self(module, path, &extends_path, "extend")?;
+                    let base_module = self.parse_file(&extends_path)?;
+                    if base_module.amends.is_some() {
+                        return Err(Error::Eval(format!(
+                            "Module `{}` cannot be extended or used as type because it amends another module.",
+                            self.amended_module_name(&base_module, &extends_path)
+                        )));
+                    }
                     let ext_val =
                         self.eval_file_with_scope(&extends_path, depth + 1, Some(scope.clone()))?;
                     self.layer_evaluated_module_scope(&extends_path, &mut scope);
@@ -2610,6 +2660,7 @@ impl Evaluator {
                 captured: SourceScope::default(),
                 body_members: HashSet::default(),
                 is_open: true,
+                is_abstract: false,
                 type_name: None,
                 type_identity: None,
                 parent_type_names: Vec::new(),
@@ -3118,6 +3169,7 @@ impl Evaluator {
                                     captured: SourceScope::default(),
                                     body_members: HashSet::default(),
                                     is_open: true,
+                                    is_abstract: false,
                                     type_name: Some(tn.clone()),
                                     type_identity: src.type_identity.clone(),
                                     parent_type_names: src.parent_type_names.clone(),
@@ -3301,6 +3353,7 @@ impl Evaluator {
                     .collect()
             }),
             is_open: true, // default: allow new properties
+            is_abstract: false,
             type_name: None,
             type_identity: None,
             parent_type_names: Vec::new(),
@@ -3501,6 +3554,9 @@ impl Evaluator {
         depth: usize,
     ) -> Result<Value> {
         let parent_val = parent_name.and_then(|name| resolve_dotted(scope, name));
+        if let Some(parent_name) = parent_name {
+            check_supertype(scope, class_name, parent_name, parent_val.as_ref())?;
+        }
         // A parent class that failed to evaluate fails its subclasses too,
         // rather than leaving them without the inherited members.
         if parent_val.is_none()
@@ -3667,6 +3723,7 @@ impl Evaluator {
                 Arc::make_mut(&mut map).retain(|key, _| !schema_member_names.contains(&**key));
                 let mut new_src = Arc::unwrap_or_clone(src);
                 new_src.is_open = is_open;
+                new_src.is_abstract = has_modifier(class_mods, Modifier::Abstract);
                 new_src.type_name = Some(class_name.to_string());
                 new_src.type_identity = Some(scope.runtime_type_identity(class_name));
                 new_src.parent_type_names = parent_type_names;
@@ -4551,7 +4608,7 @@ impl Evaluator {
                         self.eval_listing_entries(entries, &listing_scope, depth + 1, &mut items)?;
                         Ok(Value::List(ListValue::new(ListKind::Listing, items)))
                     }
-                    Some("Mapping") | Some("Map") => {
+                    Some("Mapping") => {
                         // If the Mapping has a value type param (e.g., Mapping<String, Step>),
                         // resolve it as a default template so entries inherit the class type.
                         let value_type_defaults = generic_params
@@ -4607,6 +4664,7 @@ impl Evaluator {
                             ),
                             body_members: source_body_members,
                             is_open: true,
+                            is_abstract: false,
                             type_name: None,
                             type_identity: None,
                             parent_type_names: Vec::new(),
@@ -4644,6 +4702,7 @@ impl Evaluator {
                         {
                             return Err(Error::Eval(message));
                         }
+                        check_instantiable(scope, type_name.as_deref(), base.as_ref())?;
                         if let Some(Value::Object(ref base_map, Some(ref base_src))) = base {
                             // Enforce open modifier: non-open classes reject new properties
                             if !base_src.is_open {
@@ -4708,6 +4767,7 @@ impl Evaluator {
                                         captured: SourceScope::default(),
                                         body_members: HashSet::default(),
                                         is_open,
+                                        is_abstract: false,
                                         type_name: tn,
                                         type_identity: base_src.type_identity.clone(),
                                         parent_type_names: base_src.parent_type_names.clone(),
@@ -4748,6 +4808,7 @@ impl Evaluator {
                                 captured: SourceScope::default(),
                                 body_members: HashSet::default(),
                                 is_open: true,
+                                is_abstract: false,
                                 type_name: type_name.clone(),
                                 type_identity: None,
                                 parent_type_names: Vec::new(),
@@ -5837,6 +5898,7 @@ impl Evaluator {
                                         captured: SourceScope::default(),
                                         body_members: HashSet::default(),
                                         is_open: true,
+                                        is_abstract: false,
                                         type_name: Some(tn.to_string()),
                                         type_identity: src.type_identity.clone(),
                                         parent_type_names: src.parent_type_names.clone(),
@@ -6372,6 +6434,144 @@ fn bind_listing_member(scope: &mut Scope, prop: &Property, value: Value) {
     } else {
         scope.set(&prop.name, value);
     }
+}
+
+/// Standard library classes declared `external`. User code can neither
+/// instantiate nor extend them.
+const EXTERNAL_CLASSES: &[&str] = &[
+    "Any",
+    "Null",
+    "Class",
+    "TypeAlias",
+    "Module",
+    "Number",
+    "Int",
+    "Float",
+    "Boolean",
+    "String",
+    "Regex",
+    "Duration",
+    "DataSize",
+    "Object",
+    "Function",
+    "Function0",
+    "Function1",
+    "Function2",
+    "Function3",
+    "Function4",
+    "Function5",
+    "Pair",
+    "Collection",
+    "IntSeq",
+    "VarArgs",
+    "List",
+    "Set",
+    "Map",
+    "Bytes",
+];
+
+/// Standard library classes that are neither `open` nor `abstract`.
+const CLOSED_STDLIB_CLASSES: &[&str] = &["Dynamic", "Listing", "Mapping"];
+
+/// A class name as pkl reports it, `module#Class`, from the class's
+/// definition-site identity (`<module path>.<Class>`).
+fn qualified_class_name(identity: Option<&str>, name: &str) -> String {
+    let simple = name.rsplit('.').next().unwrap_or(name);
+    let module = identity
+        .and_then(|identity| identity.strip_suffix(simple))
+        .and_then(|path| path.strip_suffix('.'))
+        .and_then(|path| Path::new(path).file_stem())
+        .map(|stem| stem.to_string_lossy().into_owned());
+    match module {
+        Some(module) => format!("{module}#{simple}"),
+        None => simple.to_string(),
+    }
+}
+
+/// Check that `class class_name extends parent_name` names a class pkl lets
+/// user code extend.
+fn check_supertype(
+    scope: &Scope,
+    class_name: &str,
+    parent_name: &str,
+    parent: Option<&Value>,
+) -> Result<()> {
+    if parent_name == class_name {
+        return Err(Error::Eval(format!(
+            "Class `{}` cannot extend itself.",
+            qualified_class_name(Some(&scope.runtime_type_identity(class_name)), class_name)
+        )));
+    }
+    if scope.get_type_alias(parent_name).is_some() {
+        return Err(Error::Eval(format!(
+            "`{parent_name}` is not a valid supertype."
+        )));
+    }
+    match parent {
+        Some(Value::Object(_, Some(source)))
+            if source.type_name.is_some() && !source.is_open && !source.is_abstract =>
+        {
+            Err(Error::Eval(format!(
+                "Cannot extend non-open class `{}`.",
+                qualified_class_name(source.type_identity.as_deref(), parent_name)
+            )))
+        }
+        // Built-ins are bound to a marker string of their own name.
+        None | Some(Value::String(_)) => {
+            if EXTERNAL_CLASSES.contains(&parent_name) {
+                Err(Error::Eval(format!(
+                    "Cannot extend external class `{parent_name}`."
+                )))
+            } else if CLOSED_STDLIB_CLASSES.contains(&parent_name) {
+                Err(Error::Eval(format!(
+                    "Cannot extend non-open class `{parent_name}`."
+                )))
+            } else {
+                Ok(())
+            }
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Check that `new type_name { ... }` names a class user code can
+/// instantiate.
+fn check_instantiable(scope: &Scope, type_name: Option<&str>, class: Option<&Value>) -> Result<()> {
+    let Some(type_name) = type_name else {
+        return Ok(());
+    };
+    match class {
+        // A class is bound under its own name, or under a type alias of it.
+        // Any other binding of an object (`local Foo2 = Foo`) is a value.
+        Some(Value::Object(_, Some(source)))
+            if !type_name.contains('.')
+                && source.type_name.as_deref() != Some(type_name)
+                && scope.get_type_alias(type_name).is_none() =>
+        {
+            Err(Error::Eval(format!(
+                "Expected `{type_name}` to be a type, but it is not."
+            )))
+        }
+        Some(Value::Object(_, Some(source))) if source.is_abstract => Err(Error::Eval(format!(
+            "Cannot instantiate abstract class `{}`.",
+            qualified_class_name(source.type_identity.as_deref(), type_name)
+        ))),
+        // Built-ins are bound to a marker string of their own name.
+        None | Some(Value::String(_)) if EXTERNAL_CLASSES.contains(&type_name) => Err(Error::Eval(
+            format!("Cannot instantiate, or amend an instance of, external class `{type_name}`."),
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// A module's name as pkl reports it: the name from its `module`
+/// declaration, else its file name without the extension.
+fn module_display_name(module: &Module, path: &Path) -> String {
+    module.name.clone().unwrap_or_else(|| {
+        path.file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string())
+    })
 }
 
 fn stdlib_module(name: &str) -> Value {

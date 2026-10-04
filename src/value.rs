@@ -49,6 +49,9 @@ pub struct ObjectSource {
     pub(crate) body_members: HashSet<String>,
     /// Whether the class was declared `open` (allows adding new properties)
     pub(crate) is_open: bool,
+    /// Whether the object is an `abstract` class, which can be extended but
+    /// not instantiated.
+    pub(crate) is_abstract: bool,
     /// The pkl class name this object was instantiated from (e.g., "Step", "Group").
     /// Used by `output.renderer.converters` to apply type-specific transforms.
     pub(crate) type_name: Option<String>,

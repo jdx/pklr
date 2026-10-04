@@ -19,6 +19,8 @@ pub struct Annotation {
 /// A pkl module (top-level file).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Module {
+    /// The name from the `module` declaration, if any.
+    pub name: Option<String>,
     pub amends: Option<String>,
     pub extends: Option<String>,
     pub imports: Vec<Import>,
