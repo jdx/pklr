@@ -376,7 +376,11 @@ pub(super) fn type_default_value(ty: &crate::parser::TypeExpr, scope: &Scope) ->
         }
         TypeExpr::Generic(name, _) => match name.as_str() {
             "Collection" | "List" | "Set" | "Listing" => Some(empty_collection(name)),
-            "Map" | "Mapping" => Some(Value::Object(Arc::default(), None)),
+            "Mapping" => Some(Value::Object(
+                Arc::default(),
+                Some(Arc::new(mapping_source())),
+            )),
+            "Map" => Some(Value::Object(Arc::default(), None)),
             _ => resolve_dotted(scope, name).map(as_instance),
         },
         TypeExpr::Union(variants) => variants
@@ -392,7 +396,11 @@ pub(super) fn type_default_for_name(name: &str, scope: &Scope) -> Option<Value> 
     match base_name {
         "Null" => Some(Value::Null),
         "Collection" | "List" | "Set" | "Listing" => Some(empty_collection(base_name)),
-        "Map" | "Mapping" => Some(Value::Object(Arc::default(), None)),
+        "Mapping" => Some(Value::Object(
+            Arc::default(),
+            Some(Arc::new(mapping_source())),
+        )),
+        "Map" => Some(Value::Object(Arc::default(), None)),
         "String" | "Boolean" | "Bool" | "Int" | "Float" | "Number" | "Any" | "Dynamic"
         | "Duration" | "DataSize" | "Pair" | "Regex" => None,
         other => resolve_dotted(scope, other).map(as_instance),
@@ -824,6 +832,22 @@ pub(super) fn add_values(l: Value, r: Value) -> Result<Value> {
         (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 + b)),
         (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a + b as f64)),
         (Value::String(a), Value::String(b)) => Ok(Value::String(format!("{a}{b}").into())),
+        // `+` takes a `List` or `Set` on each side; the result has the left
+        // side's kind. Listings can't be added.
+        (Value::List(a), Value::List(b))
+            if a.kind() == ListKind::Listing || b.kind() == ListKind::Listing =>
+        {
+            let name = |kind| match kind {
+                ListKind::Listing => "Listing",
+                ListKind::Set => "Set",
+                _ => "List",
+            };
+            Err(Error::Eval(format!(
+                "Operator `+` is not defined for operand types `{}` and `{}`.",
+                name(a.kind()),
+                name(b.kind())
+            )))
+        }
         (Value::List(mut a), Value::List(b)) => {
             let set = a.kind() == ListKind::Set;
             let items = a.make_mut();

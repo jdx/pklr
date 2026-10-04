@@ -631,6 +631,48 @@ list = List(1, 2).filter((x) -> true) == List(1, 2)
 }
 
 #[test]
+fn listing_locals_and_default_see_each_other_in_any_order() {
+    let json = eval(
+        r#"
+local x = "outer"
+shadowed = new Listing { y; local y = x; local x = "inner" }
+before = new Listing { z; local z = default.apply(0); default = (_) -> 9 }
+viaFunction = new Listing { f.apply(); local f = () -> default.apply(0); default = (_) -> 7 }
+"#,
+    );
+    assert_eq!(json["shadowed"], serde_json::json!(["inner"]));
+    assert_eq!(json["before"], serde_json::json!([9]));
+    assert_eq!(json["viaFunction"], serde_json::json!([7]));
+}
+
+#[test]
+fn adding_collections_keeps_the_left_kind() {
+    let json = eval(
+        r#"
+listPlusSet = (List(1, 2) + Set(2, 3)) == List(1, 2, 2, 3)
+setPlusList = (Set(1, 2) + List(2, 3)) == Set(1, 2, 3)
+"#,
+    );
+    assert_eq!(json["listPlusSet"], true);
+    assert_eq!(json["setPlusList"], true);
+    let msg = eval_fails("x = List(1) + new Listing { 2 }");
+    assert!(msg.contains("Operator `+` is not defined for operand types `List` and `Listing`."));
+}
+
+#[test]
+fn bare_mapping_default_is_a_mapping() {
+    let json = eval(
+        r#"
+class C { m: Mapping }
+mapping = new C {}.m == new Mapping {}
+dynamic = new C {}.m == new Dynamic {}
+"#,
+    );
+    assert_eq!(json["mapping"], true);
+    assert_eq!(json["dynamic"], false);
+}
+
+#[test]
 fn mapping_typed_default_is_a_mapping() {
     let json = eval(
         r#"

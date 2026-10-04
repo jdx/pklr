@@ -346,13 +346,17 @@ pub(super) fn apply_mapping_type_annotation(
     let Some(type_ann) = type_ann else {
         return;
     };
+    let Value::Object(_, src_slot) = value else {
+        return;
+    };
+    // An untagged object declared a `Mapping` is a mapping.
+    if src_slot.is_none() && is_mapping_type(type_ann) {
+        *src_slot = Some(Arc::new(mapping_source()));
+    }
     let type_names = mapping_value_type_names(type_ann);
     if type_names.is_empty() {
         return;
     }
-    let Value::Object(_, src_slot) = value else {
-        return;
-    };
 
     // Usually the source already records these types (a property's value
     // re-tagged on every evaluation); copying it would duplicate its whole
@@ -364,29 +368,45 @@ pub(super) fn apply_mapping_type_annotation(
     {
         return;
     }
-    let src = src_slot.get_or_insert_with(|| {
-        Arc::new(ObjectSource {
-            entries: Vec::new().into(),
-            captured: SourceScope::default(),
-            body_members: HashSet::default(),
-            is_open: true,
-            type_name: None,
-            type_identity: None,
-            parent_type_names: Vec::new(),
-            parent_type_identities: Vec::new(),
-            entry_scopes: Vec::new(),
-            evaluated_properties: Vec::new(),
-            mapping_value_types: Vec::new(),
-            deprecated: IndexMap::new(),
-            poisoned_members: None,
-            kind: ObjectKind::Mapping,
-        })
-    });
+    let src = src_slot.get_or_insert_with(|| Arc::new(mapping_source()));
     let src = Arc::make_mut(src);
     for name in type_names {
         if !src.mapping_value_types.contains(&name) {
             src.mapping_value_types.push(name);
         }
+    }
+}
+
+/// The source of a mapping known only by its type: no entries to rebuild it
+/// from, just its kind.
+pub(super) fn mapping_source() -> ObjectSource {
+    ObjectSource {
+        entries: Vec::new().into(),
+        captured: SourceScope::default(),
+        body_members: HashSet::default(),
+        is_open: true,
+        type_name: None,
+        type_identity: None,
+        parent_type_names: Vec::new(),
+        parent_type_identities: Vec::new(),
+        entry_scopes: Vec::new(),
+        evaluated_properties: Vec::new(),
+        mapping_value_types: Vec::new(),
+        deprecated: IndexMap::new(),
+        poisoned_members: None,
+        kind: ObjectKind::Mapping,
+    }
+}
+
+/// Whether `ty` is `Mapping`, `Mapping<K, V>` or a nullable one.
+fn is_mapping_type(ty: &crate::parser::TypeExpr) -> bool {
+    use crate::parser::TypeExpr;
+    match ty {
+        TypeExpr::Named(name) | TypeExpr::Generic(name, _) => {
+            name.trim_start_matches('*').trim_end_matches('?') == "Mapping"
+        }
+        TypeExpr::Nullable(inner) => is_mapping_type(inner),
+        _ => false,
     }
 }
 

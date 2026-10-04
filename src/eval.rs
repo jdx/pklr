@@ -4335,26 +4335,40 @@ impl Evaluator {
         items: &mut Vec<Value>,
     ) -> Result<()> {
         let mut listing_scope = scope.child();
-        // A body's locals are visible to all of its entries, including ones
-        // written before them.
-        for entry in entries {
-            if let Entry::Property(prop) = entry
-                && has_modifier(&prop.modifiers, Modifier::Local)
-                && let Some(expr) = &prop.value
-            {
-                let value = self.eval_expr(expr, &listing_scope, depth + 1)?;
-                listing_scope.declare(&prop.name, value);
-            }
+        // A body's locals and properties (`default`) are visible to all of
+        // its entries, including ones written before them, and to each other
+        // regardless of order. Bind each once the members of this body it
+        // reads are bound, so a function captures them too.
+        let mut pending: Vec<_> = entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Property(prop) => Some((prop, prop.value.as_ref()?)),
+                _ => None,
+            })
+            .collect();
+        let mut unbound: HashSet<String> =
+            pending.iter().map(|(prop, _)| prop.name.clone()).collect();
+        while !pending.is_empty() {
+            let ready = pending
+                .iter()
+                .position(|(prop, expr)| {
+                    let mut refs = HashSet::default();
+                    collect_expr_refs(expr, &mut refs, &HashSet::default());
+                    !refs
+                        .iter()
+                        .any(|name| *name != prop.name && unbound.contains(name))
+                })
+                // A cycle: bind in declaration order.
+                .unwrap_or(0);
+            let (prop, expr) = pending.remove(ready);
+            let value = self.eval_expr(expr, &listing_scope, depth + 1)?;
+            bind_listing_member(&mut listing_scope, prop, value);
+            unbound.remove(&prop.name);
         }
         for entry in entries {
             match entry {
-                Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {}
+                Entry::Property(_) => {}
                 Entry::Elem(expr) => items.push(self.eval_expr(expr, &listing_scope, depth + 1)?),
-                Entry::Property(prop) if prop.value.is_some() => {
-                    let value =
-                        self.eval_expr(prop.value.as_ref().unwrap(), &listing_scope, depth + 1)?;
-                    listing_scope.set(&prop.name, value);
-                }
                 Entry::DynProperty(index, value) => {
                     let index = self.eval_expr(index, &listing_scope, depth + 1)?;
                     let Value::Int(index) = index else {
@@ -6348,6 +6362,15 @@ impl Evaluator {
             }
         }
         Ok(())
+    }
+}
+
+/// Bind a local or property of a listing body for the body's entries.
+fn bind_listing_member(scope: &mut Scope, prop: &Property, value: Value) {
+    if has_modifier(&prop.modifiers, Modifier::Local) {
+        scope.declare(&prop.name, value);
+    } else {
+        scope.set(&prop.name, value);
     }
 }
 
