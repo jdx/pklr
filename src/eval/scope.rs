@@ -357,7 +357,7 @@ pub(super) fn poisoned_member(scope: &Scope, name: &str) -> Option<String> {
             None => {
                 if let Some(message) = source
                     .as_ref()
-                    .and_then(|source| source.poisoned_members.get(part))
+                    .and_then(|source| source.poisoned_members.as_ref()?.get(part))
                 {
                     return Some(message.clone());
                 }

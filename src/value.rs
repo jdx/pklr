@@ -77,14 +77,14 @@ pub struct ObjectSource {
     /// error: a class whose defaults read a `module` property that never
     /// resolved. Reading or instantiating such a member reports the error
     /// instead of treating it as absent.
-    pub(crate) poisoned_members: IndexMap<String, String>,
+    pub(crate) poisoned_members: Option<Arc<IndexMap<String, String>>>,
 }
 
 impl ObjectSource {
     /// Whether this source only carries a module object's failed members,
     /// with no entries to rebuild the object from on amendment.
     pub(crate) fn is_metadata_only(&self) -> bool {
-        !self.poisoned_members.is_empty()
+        self.poisoned_members.is_some()
             && self.entries.is_empty()
             && self.evaluated_properties.is_empty()
             && self.type_name.is_none()

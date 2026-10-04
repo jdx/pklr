@@ -1935,7 +1935,8 @@ impl Evaluator {
         // Classes whose bodies read `module` resolve it to this module's
         // properties, which are only available once the property pass has
         // evaluated them. Such classes, and the classes and locals built on
-        // them, are evaluated again whenever the `module` snapshot changes.
+        // them, are evaluated again before a property that can read them,
+        // when the `module` snapshot has changed since they last were.
         let module_members = module_dependent_members(&module.body);
         let mut module_members_stale = !module_members.is_empty();
 
@@ -2054,7 +2055,7 @@ impl Evaluator {
                     }
                     continue;
                 }
-                if module_members_stale {
+                if module_members_stale && reads_module_members(prop, &module_members) {
                     self.refresh_module_members(
                         module,
                         &module_members,
@@ -2190,7 +2191,7 @@ impl Evaluator {
                 if child_property_names.contains(prop.name.as_str()) {
                     continue;
                 }
-                if module_members_stale {
+                if module_members_stale && reads_module_members(prop, &module_members) {
                     self.refresh_module_members(
                         module,
                         &module_members,
@@ -2232,7 +2233,7 @@ impl Evaluator {
                 }
             }
             for prop in &late_child_properties {
-                if module_members_stale {
+                if module_members_stale && reads_module_members(prop, &module_members) {
                     self.refresh_module_members(
                         module,
                         &module_members,
@@ -2284,8 +2285,10 @@ impl Evaluator {
         // still fail is not exported. As in Pkl, the module itself still
         // evaluates, and the class's error is kept so an importer that reads
         // or instantiates it gets that error instead of a missing member.
+        // The top-level module (depth 0) has no importers and its output
+        // leaves classes and functions out, so it skips this.
         let mut poisoned_members = IndexMap::new();
-        if !module_members.is_empty() {
+        if depth > 0 && !module_members.is_empty() {
             if module_members_stale {
                 self.refresh_module_members(
                     module,
@@ -2362,7 +2365,8 @@ impl Evaluator {
                 evaluated_properties: Vec::new(),
                 mapping_value_types: Vec::new(),
                 deprecated,
-                poisoned_members,
+                poisoned_members: (!poisoned_members.is_empty())
+                    .then(|| Arc::new(poisoned_members)),
             }))
         };
         let mut effective_late_properties = IndexMap::new();
@@ -2866,7 +2870,7 @@ impl Evaluator {
                                     evaluated_properties: Vec::new(),
                                     mapping_value_types: Vec::new(),
                                     deprecated: merge_deprecated(&src.deprecated, body),
-                                    poisoned_members: IndexMap::new(),
+                                    poisoned_members: None,
                                 },
                             };
                             *result_src = Some(std::sync::Arc::new(new_src));
@@ -3057,7 +3061,7 @@ impl Evaluator {
             evaluated_properties: all_props.keys().cloned().collect(),
             mapping_value_types: Vec::new(),
             deprecated: collect_deprecated(entries),
-            poisoned_members: IndexMap::new(),
+            poisoned_members: None,
         };
         Ok(Value::Object(Arc::new(map), Some(Arc::new(source))))
     }
@@ -3075,7 +3079,20 @@ impl Evaluator {
         module_props: &mut Arc<IndexMap<String, Value>>,
         depth: usize,
     ) -> Result<()> {
+        // New values of the module object's members, written to the map
+        // behind `this`/`module` in one batch: the map is shared with the
+        // scopes the classes captured, so each write copies it. A member that
+        // reads a pending member as `module.C` gets the batch written first.
+        let mut pending: Vec<(String, Option<Value>)> = Vec::new();
         for entry in module.body.iter() {
+            if !pending.is_empty()
+                && entry_member_name(entry).is_some_and(|name| members.contains(name))
+            {
+                let refs = qualified_module_member_refs(entry);
+                if pending.iter().any(|(name, _)| refs.contains(name)) {
+                    flush_module_members(scope, module_props, &mut pending);
+                }
+            }
             // Classes and module functions are also members of the module
             // object behind `this`/`module`; locals and type aliases are not.
             let (name, result, module_member) = match entry {
@@ -3122,21 +3139,12 @@ impl Evaluator {
                 }
                 Err(error) => return Err(error),
             };
-            if !module_member {
-                continue;
-            }
             // Keep `this.C` and `module.C` in step with the bare name.
-            match module_value {
-                Some(value) => module_props_insert(scope, module_props, name.clone(), value),
-                None if module_props.contains_key(name) => {
-                    module_props_remove(scope, module_props, name);
-                }
-                None => continue,
+            if module_member && (module_value.is_some() || module_props.contains_key(name)) {
+                pending.push((name.clone(), module_value));
             }
-            let snapshot = Value::Object(Arc::clone(module_props), None);
-            scope.set("this".into(), snapshot.clone());
-            scope.set("module".into(), snapshot);
         }
+        flush_module_members(scope, module_props, &mut pending);
         Ok(())
     }
 
@@ -4224,7 +4232,7 @@ impl Evaluator {
                             evaluated_properties: map.keys().cloned().collect(),
                             mapping_value_types: generic_params.iter().skip(1).cloned().collect(),
                             deprecated,
-                            poisoned_members: IndexMap::new(),
+                            poisoned_members: None,
                         };
                         Ok(Value::Object(Arc::new(map), Some(Arc::new(source))))
                     }
@@ -4330,7 +4338,7 @@ impl Evaluator {
                                         evaluated_properties: Vec::new(),
                                         mapping_value_types: Vec::new(),
                                         deprecated: merge_deprecated(&base_src.deprecated, entries),
-                                        poisoned_members: IndexMap::new(),
+                                        poisoned_members: None,
                                     }
                                 };
                                 *src_slot = Some(Arc::new(new_src));
@@ -4370,7 +4378,7 @@ impl Evaluator {
                                 evaluated_properties: Vec::new(),
                                 mapping_value_types: Vec::new(),
                                 deprecated,
-                                poisoned_members: IndexMap::new(),
+                                poisoned_members: None,
                             };
                             Ok(Value::Object(Arc::new(merged), Some(Arc::new(src))))
                         } else {
@@ -4444,7 +4452,9 @@ impl Evaluator {
                             Error::Eval(
                                 source
                                     .as_ref()
-                                    .and_then(|source| source.poisoned_members.get(field.as_str()))
+                                    .and_then(|source| {
+                                        source.poisoned_members.as_ref()?.get(field.as_str())
+                                    })
                                     .cloned()
                                     .unwrap_or_else(|| format!("field not found: {field}")),
                             )
@@ -5510,7 +5520,7 @@ impl Evaluator {
                                         evaluated_properties: Vec::new(),
                                         mapping_value_types: Vec::new(),
                                         deprecated: merge_deprecated(&src.deprecated, body),
-                                        poisoned_members: IndexMap::new(),
+                                        poisoned_members: None,
                                     },
                                 };
                                 *result_src = Some(std::sync::Arc::new(new_src));

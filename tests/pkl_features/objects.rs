@@ -3410,6 +3410,28 @@ viaThis = this.make()
 }
 
 #[test]
+fn class_reading_module_is_refreshed_only_where_used() {
+    // Classes are refreshed lazily, before a property that can reach them:
+    // by bare name, through a nested body, via a function, or `module.C`.
+    let val = eval(
+        r#"
+open class C { v = module.expected }
+function make() = new C {}
+expected = "b"
+unrelated = expected + "!"
+holder { c = new C {} }
+viaFunction = module.make()
+later = "c"
+direct = new C { w = module.later }
+"#,
+    );
+    assert_eq!(val["unrelated"], "b!");
+    assert_eq!(val["holder"]["c"], serde_json::json!({"v": "b"}));
+    assert_eq!(val["viaFunction"], serde_json::json!({"v": "b"}));
+    assert_eq!(val["direct"], serde_json::json!({"v": "b", "w": "c"}));
+}
+
+#[test]
 fn failed_class_reports_error_through_module_and_this() {
     for src in [
         "class C { v = module.missing }\nresult = new module.C {}\n",

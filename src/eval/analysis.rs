@@ -362,6 +362,17 @@ pub(super) fn expand_requested_fields(
             _ => None,
         })
         .collect();
+    // An importer reading `dep.ClassName` needs the module properties the
+    // class reads through `module` (it is evaluated against them). Other
+    // definitions don't see module properties, so they need nothing more.
+    let module_reading_definitions = if requested
+        .iter()
+        .any(|name| definitions.contains_key(name.as_str()))
+    {
+        module_dependent_members(entries)
+    } else {
+        indexmap::IndexSet::new()
+    };
     let mut expanded = requested.clone();
     let mut changed = true;
     while changed {
@@ -386,7 +397,7 @@ pub(super) fn expand_requested_fields(
                 // A requested class or type alias (an importer reading
                 // `dep.ClassName`) depends on what its definition reads.
                 Entry::ClassDef(name, ..) | Entry::TypeAlias(name, _)
-                    if expanded.contains(name) =>
+                    if expanded.contains(name) && module_reading_definitions.contains(name) =>
                 {
                     refs.insert(name.clone());
                 }
@@ -631,6 +642,14 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
         (root == "module" || (include_this && root == "this"))
             .then(|| rest.split('.').next().unwrap_or(rest))
     }
+    // Only a class that mentions `module` starts a dependency chain. Most
+    // modules have none, so check that without collecting any names.
+    if !entries
+        .iter()
+        .any(|entry| matches!(entry, Entry::ClassDef(..)) && entry_mentions(entry, "module"))
+    {
+        return indexmap::IndexSet::new();
+    }
     let members: Vec<(&String, bool, HashSet<String>)> = entries
         .iter()
         .filter_map(|entry| match entry {
@@ -691,6 +710,42 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
         .filter(|(name, ..)| dependent.contains(name.as_str()))
         .map(|(name, ..)| name.clone())
         .collect()
+}
+
+/// The module members `entry` (a module-level class, alias, local or
+/// function) reads through the module object, as `module.C` (or `this.C`
+/// outside a class body, where `this` is the module).
+pub(super) fn qualified_module_member_refs(entry: &Entry) -> HashSet<String> {
+    let mut refs = HashSet::new();
+    match entry {
+        Entry::ClassDef(_, _, parent, body) => {
+            collect_sibling_field_refs_entries(body, &mut refs);
+            if let Some((root, rest)) = parent.as_deref().and_then(|name| name.split_once('.'))
+                && root == "module"
+            {
+                refs.insert(rest.split('.').next().unwrap_or(rest).to_string());
+            }
+        }
+        Entry::Property(prop) => {
+            if let Some(value) = &prop.value {
+                collect_sibling_field_refs_expr(value, &mut refs, true);
+            }
+        }
+        _ => {}
+    }
+    refs
+}
+
+/// Whether evaluating module property `prop` can read one of `members` (see
+/// `module_dependent_members`): by bare name, as `module.C`/`this.C`, through
+/// a dynamic `module[...]` read, or in its type annotation. Members are only
+/// refreshed before such a property, so other properties cost nothing extra.
+pub(super) fn reads_module_members(prop: &Property, members: &indexmap::IndexSet<String>) -> bool {
+    let mut refs = property_reference_names(prop);
+    if let Some(ty) = &prop.type_ann {
+        collect_type_refs(ty, &mut refs, &HashSet::new());
+    }
+    refs.contains(DYNAMIC_SIBLING_REF) || refs.iter().any(|name| members.contains(name))
 }
 
 /// The class or alias a type alias binds to at runtime (`typealias A = C`,
