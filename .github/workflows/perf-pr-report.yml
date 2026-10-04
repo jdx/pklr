@@ -10,9 +10,15 @@ on: # zizmor: ignore[dangerous-triggers] checks out and runs nothing from the pu
 
 permissions: {}
 
+# Reports for one branch post in the order their runs finished.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
 jobs:
   report:
-    if: github.event.workflow_run.event == 'pull_request'
+    # A cancelled run was superseded by a newer push, whose run reports.
+    if: github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion != 'cancelled'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
