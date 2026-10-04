@@ -3159,7 +3159,11 @@ impl Evaluator {
         let mut retrying = false;
         let mut retried = false;
         let mut fallbacks: HashMap<usize, Value> = HashMap::default();
+        // Each retry pass covers only the previous pass's failures, so it
+        // makes progress or stops; at most one pass per entry is needed.
+        let mut passes = 0;
         let failed = loop {
+            passes += 1;
             let mut failed: Vec<(usize, String)> = Vec::new();
             // Properties set aside in this pass. A later entry for the same
             // property (a body amendment of it) waits for it.
@@ -3464,7 +3468,10 @@ impl Evaluator {
                 }
                 key_entries.resize(map.len().max(map_len), entry_index);
             }
-            if failed.is_empty() || (retrying && failed.len() == pass.len()) {
+            if failed.is_empty()
+                || (retrying && failed.len() == pass.len())
+                || passes > entries.len()
+            {
                 // Keep the values that only hold failed members; their
                 // errors surface where those members are read or rendered.
                 let mut remaining = Vec::new();
