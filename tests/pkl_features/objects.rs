@@ -3347,3 +3347,33 @@ fn unused_class_reading_missing_module_property_is_not_an_error() {
     let val = eval("class C { v = module.missing }\nresult = 1\n");
     assert_eq!(val, serde_json::json!({"result": 1}));
 }
+
+#[test]
+fn outer_in_type_position_is_bound() {
+    let json = eval(
+        r#"
+class Step { v = 1 }
+obj {
+  inner { s = new outer.Step {} }
+  x: outer.Step = new Step {}
+  ok = x is outer.Step
+}
+"#,
+    );
+    assert_eq!(json["obj"]["inner"]["s"]["v"], 1);
+    assert_eq!(json["obj"]["ok"], true);
+}
+
+#[test]
+fn outer_is_bound_for_type_alias_constraints_checked_in_body() {
+    let json = eval(
+        r#"
+limit = 5
+typealias Checked = Int(this < outer.limit)
+obj {
+  ok = 3 is Checked
+}
+"#,
+    );
+    assert_eq!(json["obj"]["ok"], true);
+}
