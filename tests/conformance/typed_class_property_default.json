@@ -1,0 +1,7 @@
+{
+  "defaultPort": 8080,
+  "s": {
+    "host": "example.com",
+    "port": 8080
+  }
+}

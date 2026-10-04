@@ -2419,68 +2419,37 @@ async fn narrowed_import_ignores_class_properties_named_like_module_properties()
 async fn narrowed_import_follows_module_reads_named_like_inherited_properties() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_inherited_name");
     let dir = temp.path();
-    // `min` in `Child` is the inherited property, but `Child`'s defaults are
-    // first evaluated before `Parent`'s members are merged in, so the class
-    // must still be refreshed once the module's `min` exists.
+    // As in Pkl, `min` in `Child`'s body is the module property: names
+    // declared around a class body win over members it inherits.
     std::fs::write(
         dir.join("dep.pkl"),
-        "min = 1\nopen class Parent { min = 2 }\nclass Child extends Parent { a = min }\nout = new Child {}\n",
+        "min = 1\nopen class Parent { min = 2 }\nclass Child extends Parent { a = min }\nres = new Child {}\n",
     )
     .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"dep.pkl\" as D\nout = D.out\n",
+        "import \"dep.pkl\" as D\nres = D.res\n",
     )
     .unwrap();
 
     let dep = pklr::eval_to_json_async(&dir.join("dep.pkl"))
         .await
         .unwrap();
-    assert_eq!(dep["out"], serde_json::json!({"min": 2, "a": 2}));
+    assert_eq!(dep["res"], serde_json::json!({"min": 2, "a": 1}));
     let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
         .await
         .unwrap();
-    assert_eq!(val, serde_json::json!({"out": {"min": 2, "a": 2}}));
-}
-
-#[tokio::test]
-async fn narrowed_import_skips_module_properties_named_like_inherited_method_reads() {
-    let temp = TestTempDir::new("pklr_test_narrowed_import_inherited_method");
-    let dir = temp.path();
-    // A method body runs on a built instance, where `min` is the inherited
-    // property, so the unused module `min` is not needed.
-    std::fs::write(
-        dir.join("inherited.pkl"),
-        "min = throw(\"unused\")\nopen class Parent { min = 2 }\nclass Child extends Parent { function getMin() = min }\n",
-    )
-    .unwrap();
-    // A module property the instance doesn't have is still read by a method.
-    std::fs::write(
-        dir.join("module.pkl"),
-        "max = 3\nopen class Parent { min = 2 }\nclass Child extends Parent { function getMax() = max }\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("main.pkl"),
-        "import \"inherited.pkl\" as I\nimport \"module.pkl\" as M\nmin = (new I.Child {}).getMin()\nmax = (new M.Child {}).getMax()\n",
-    )
-    .unwrap();
-
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
-    assert_eq!(val["min"], 2);
-    assert_eq!(val["max"], 3);
+    assert_eq!(val, serde_json::json!({"res": {"min": 2, "a": 1}}));
 }
 
 #[tokio::test]
 async fn narrowed_import_follows_methods_called_by_class_defaults() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_default_method_call");
     let dir = temp.path();
-    // `a` calls `getMin` while `Child`'s defaults are first evaluated, before
-    // `Parent`'s `min` is merged in, so the class must still be refreshed,
-    // also when the method is called through an alias of `this` or through
-    // a nested object's `outer` (or `outer.outer` from deeper down).
+    // A default that calls a method, by name or through `this`, an alias of
+    // it or a nested object's `outer`, runs the method's body, which reads
+    // the module's `min` (not the inherited one), so the narrowed import
+    // must evaluate it.
     std::fs::write(
         dir.join("dep.pkl"),
         "min = 1\nopen class Parent { min = 2 }\nclass Child extends Parent {\n  function getMin() = min\n  a = getMin()\n}\nclass ThisChild extends Parent {\n  function getMin() = min\n  a = this.getMin()\n}\nclass AliasChild extends Parent {\n  function getMin() = min\n  a = let (self = this) self.getMin()\n}\nclass OuterChild extends Parent {\n  function getMin() = min\n  obj { a = outer.getMin() }\n  deep { inner { a = outer.outer.getMin() } }\n}\nchild = new Child {}\nthisChild = new ThisChild {}\naliasChild = new AliasChild {}\nouterChild = new OuterChild {}\n",
@@ -2492,32 +2461,22 @@ async fn narrowed_import_follows_methods_called_by_class_defaults() {
     )
     .unwrap();
 
-    let dep = pklr::eval_to_json_async(&dir.join("dep.pkl"))
-        .await
-        .unwrap();
-    assert_eq!(dep["child"]["a"], 2);
-    assert_eq!(dep["thisChild"]["a"], 2);
-    assert_eq!(dep["aliasChild"]["a"], 2);
-    assert_eq!(dep["outerChild"]["obj"]["a"], 2);
-    assert_eq!(dep["outerChild"]["deep"]["inner"]["a"], 2);
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
-    assert_eq!(val["child"]["a"], 2);
-    assert_eq!(val["thisChild"]["a"], 2);
-    assert_eq!(val["aliasChild"]["a"], 2);
-    assert_eq!(val["outerChild"]["obj"]["a"], 2);
-    assert_eq!(val["outerChild"]["deep"]["inner"]["a"], 2);
+    for file in ["dep.pkl", "main.pkl"] {
+        let val = pklr::eval_to_json_async(&dir.join(file)).await.unwrap();
+        assert_eq!(val["child"]["a"], 1, "{file}");
+        assert_eq!(val["thisChild"]["a"], 1, "{file}");
+        assert_eq!(val["aliasChild"]["a"], 1, "{file}");
+        assert_eq!(val["outerChild"]["obj"]["a"], 1, "{file}");
+        assert_eq!(val["outerChild"]["deep"]["inner"]["a"], 1, "{file}");
+    }
 }
 
 #[tokio::test]
 async fn narrowed_import_skips_methods_class_defaults_do_not_call() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_default_this_read");
     let dir = temp.path();
-    // `a` reads `this.x` and `obj` reads `outer.x` but neither calls a
-    // method, and `this` in `obj` (or `outer` deeper down) is not the
-    // instance, so `getMin` only runs on the built instance, where `min` is
-    // the inherited property.
+    // No default calls `getMin`, so the failing module `min` it reads is
+    // never needed.
     std::fs::write(
         dir.join("dep.pkl"),
         "min = throw(\"unused\")\nopen class Parent { min = 2 }\nclass Child extends Parent {\n  x = 3\n  a = this.x\n  obj { y = 4; b = this.y; c = outer.x; inner { d = outer.y; e = (outer) } }\n  function getMin() = min\n}\n",
@@ -2525,7 +2484,7 @@ async fn narrowed_import_skips_methods_class_defaults_do_not_call() {
     .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"dep.pkl\" as D\nchild = new D.Child {}\na = child.a\nb = child.obj.b\nc = child.obj.c\nmin = child.getMin()\n",
+        "import \"dep.pkl\" as D\nchild = new D.Child {}\na = child.a\nb = child.obj.b\nc = child.obj.c\n",
     )
     .unwrap();
 
@@ -2535,7 +2494,6 @@ async fn narrowed_import_skips_methods_class_defaults_do_not_call() {
     assert_eq!(val["a"], 3);
     assert_eq!(val["b"], 4);
     assert_eq!(val["c"], 3);
-    assert_eq!(val["min"], 2);
 }
 
 #[tokio::test]
@@ -2953,7 +2911,7 @@ async fn module_in_imported_class_body_means_the_class_module() {
 }
 
 #[tokio::test]
-async fn imported_class_reading_missing_module_property_reports_error() {
+async fn imported_class_reading_missing_module_property_fails_when_instantiated() {
     let temp = TestTempDir::new("pklr_test_imported_poisoned_class");
     let dir = temp.path();
     std::fs::write(dir.join("dep.pkl"), "class C { v = module.missing }\n").unwrap();
@@ -2962,15 +2920,37 @@ async fn imported_class_reading_missing_module_property_reports_error() {
         "import \"dep.pkl\"\nresult = new dep.C {}\n",
     )
     .unwrap();
-    std::fs::write(dir.join("read.pkl"), "import \"dep.pkl\"\nresult = dep.C\n").unwrap();
 
     // The module defining the class still evaluates; the class is unused.
     let val = pklr::eval_to_json_async(&dir.join("dep.pkl"))
         .await
         .unwrap();
     assert_eq!(val, serde_json::json!({}));
-    // The failed class's error metadata must not stop amending the module
-    // object from keeping its evaluated members.
+    // As in Pkl, a class's defaults are evaluated for an instance, so only
+    // building one reports the error; reading the class does not.
+    let err = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("missing"), "{err}");
+    for (name, read) in [
+        ("read", "dep.C"),
+        ("nullsafe", "dep?.C"),
+        ("index", "dep[\"C\"]"),
+    ] {
+        let file = dir.join(format!("{name}.pkl"));
+        std::fs::write(
+            &file,
+            format!("import \"dep.pkl\"\nlocal c = {read}\nresult = new c {{}}\n"),
+        )
+        .unwrap();
+        let err = pklr::eval_to_json_async(&file)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("missing"), "{read}: {err}");
+    }
+    // Amending the module object keeps its evaluated members.
     std::fs::write(
         dir.join("depx.pkl"),
         "x = 1\nclass C { v = module.missing }\n",
@@ -2984,26 +2964,10 @@ async fn imported_class_reading_missing_module_property_reports_error() {
     let val = pklr::eval_to_json_async(&dir.join("amend.pkl"))
         .await
         .unwrap();
-    assert_eq!(val["result"], serde_json::json!({"x": 1, "y": 2}));
-    assert_eq!(val["r2"], serde_json::json!({"x": 1, "y": 3}));
-    // Null-safe and index reads report the saved error too.
-    std::fs::write(
-        dir.join("nullsafe.pkl"),
-        "import \"dep.pkl\"\nresult = dep?.C\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("index.pkl"),
-        "import \"dep.pkl\"\nresult = dep[\"C\"]\n",
-    )
-    .unwrap();
-    for importer in ["main.pkl", "read.pkl", "nullsafe.pkl", "index.pkl"] {
-        let err = pklr::eval_to_json_async(&dir.join(importer))
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("missing"), "{importer}: {err}");
-    }
+    assert_eq!(val["result"]["x"], 1);
+    assert_eq!(val["result"]["y"], 2);
+    assert_eq!(val["r2"]["x"], 1);
+    assert_eq!(val["r2"]["y"], 3);
 }
 
 #[tokio::test]

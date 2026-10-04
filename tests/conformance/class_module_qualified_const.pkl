@@ -1,0 +1,3 @@
+const limit = 4
+class C { x = module.limit }
+r = new C {}

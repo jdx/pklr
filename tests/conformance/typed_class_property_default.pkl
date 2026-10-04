@@ -1,0 +1,6 @@
+const defaultPort = 8080
+class Server {
+  host: String = "localhost"
+  port: Int = defaultPort
+}
+s = new Server { host = "example.com" }

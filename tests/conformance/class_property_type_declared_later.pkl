@@ -1,0 +1,9 @@
+class Step {
+  name: String = "step"
+  tests: Mapping<String, StepTest> = new Mapping<String, StepTest> {}
+}
+class StepTest {
+  run: String = "check"
+  env: Mapping<String, String> = new Mapping<String, String> {}
+}
+s = new Step { tests { ["a"] { run = "fix" }; ["b"] {} } }

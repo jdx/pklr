@@ -75,6 +75,10 @@ pub(super) struct Scope {
     pub(super) type_namespace: Option<String>,
     pub(super) receiver_entries: Option<Arc<Vec<Entry>>>,
     pub(super) receiver_list_base: Option<usize>,
+    /// Whether this level holds the members of an object being evaluated,
+    /// as an entry scope built over the object (see `scope_for_object_entry`).
+    /// Its parents are the entry's lexical scope.
+    pub(super) object_members: bool,
     pub(super) parent: Option<Arc<Scope>>,
 }
 
@@ -135,6 +139,7 @@ impl Default for Scope {
             type_namespace: None,
             receiver_entries: None,
             receiver_list_base: None,
+            object_members: false,
             parent: None,
         }
     }
@@ -163,6 +168,19 @@ impl Scope {
             parent: Some(Arc::new(self.clone())),
             ..Self::default()
         }
+    }
+
+    /// The members of the innermost object being evaluated that are visible
+    /// from this scope (see `Scope::object_members`).
+    pub(super) fn object_member_bindings(&self) -> Option<&FxIndexMap<Name, Value>> {
+        let mut level = Some(self);
+        while let Some(scope) = level {
+            if scope.object_members {
+                return Some(&scope.vars);
+            }
+            level = scope.parent.as_deref();
+        }
+        None
     }
 
     pub(super) fn runtime_type_identity(&self, name: &str) -> String {
@@ -301,15 +319,6 @@ impl Scope {
                 .map(|(k, v)| (k.to_string(), v.clone())),
         );
         identities
-    }
-
-    /// Replace a binding declared in the body that owns this scope with a
-    /// poisoned one, dropping any value it held.
-    pub(super) fn redeclare_poisoned(&mut self, name: String, message: String) {
-        if self.vars.contains_key(name.as_str()) {
-            Arc::make_mut(&mut self.vars).shift_remove(name.as_str());
-        }
-        self.declare_poisoned(name, message);
     }
 
     /// Key recording the error of a module member (a class, type alias or
@@ -660,11 +669,11 @@ pub(super) fn missing_member_error(
     name: &str,
     scope: &Scope,
 ) -> Option<String> {
-    if let Some(message) = source
+    if let Some(member) = source
         .as_ref()
         .and_then(|source| source.poisoned_members.as_ref()?.get(name))
     {
-        return Some(message.clone());
+        return Some(member.message.clone());
     }
     match obj_expr {
         Expr::Ident(root) if root == "module" || root == "this" => {
@@ -702,11 +711,11 @@ pub(super) fn poisoned_member(scope: &Scope, name: &str) -> Option<String> {
         match map.get(part) {
             Some(member) => value = member,
             None => {
-                if let Some(message) = source
+                if let Some(member) = source
                     .as_ref()
                     .and_then(|source| source.poisoned_members.as_ref()?.get(part))
                 {
-                    return Some(message.clone());
+                    return Some(member.message.clone());
                 }
                 return (index == 0 && names_current_module)
                     .then(|| scope.poison_of(&Scope::member_poison_key(part)).cloned())
@@ -839,7 +848,10 @@ impl EntryOwners {
     ) -> Scope {
         let mut cache = self.bindings.borrow_mut();
         let cached = cache.entry(key).or_insert_with(|| ObjectBindings {
-            scope: lexical.child(),
+            scope: Scope {
+                object_members: true,
+                ..lexical.child()
+            },
             hidden: FxHashSet::default(),
         });
         update_object_bindings(cached, lexical, object, owned);

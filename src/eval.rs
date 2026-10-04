@@ -15,7 +15,7 @@ use crate::parser::{
     self, BinOp, Body, Entry, Expr, Modifier, Module, Property, StringInterpPart, UnOp,
 };
 use crate::value::{
-    CapturedScope, NameSet, ObjectMap, ObjectSource, ScopeMap, TypeAliasMap, Value,
+    CapturedScope, NameSet, ObjectMap, ObjectSource, PoisonedMember, ScopeMap, TypeAliasMap, Value,
 };
 
 mod analysis;
@@ -64,8 +64,16 @@ pub struct Evaluator {
     /// `referenced_roots` of object bodies amended in this run, keyed by the
     /// body's address. Each entry holds its body so the address stays unique.
     body_roots_cache: HashMap<usize, (crate::parser::Body, Arc<HashSet<String>>)>,
+    /// `module_evaluation_plan` of module bodies evaluated in this run, keyed
+    /// like `body_roots_cache`. A module evaluated for different requested
+    /// fields is planned once.
+    plan_cache: HashMap<usize, (crate::parser::Body, Arc<EvaluationPlan>)>,
     /// Final scopes for modules evaluated in this run, used to preserve inherited locals.
     module_scopes: HashMap<PathBuf, ModuleScopeSnapshot>,
+    /// Whether a module evaluated in this run has a failed property that
+    /// rendering it would output (see `PoisonedMember::rendered`), so the
+    /// output must be checked for one.
+    rendered_member_failed: bool,
     /// Environment variables read during evaluation (name → observed value).
     env_reads: BTreeMap<String, Option<String>>,
     /// Local files currently being evaluated with inherited scope.
@@ -1021,6 +1029,85 @@ fn constraint_reads_members(
     )
 }
 
+/// Key in a function's captured bindings listing the captured names that
+/// were members of the object the function was defined in (see
+/// `record_captured_object_members`). It is not a valid identifier, so no
+/// code can name it.
+const CAPTURED_OBJECT_MEMBERS: &str = "\0pklr:object-members";
+
+/// Record which of the bindings a function captures from `scope` are members
+/// of the object being evaluated there, as opposed to names lexically
+/// declared around it. Calls resolve those members against the instance they
+/// run on (see `bind_instance_members`).
+fn record_captured_object_members(captured: &mut ScopeMap, scope: &Scope) {
+    let Some(members) = scope.object_member_bindings() else {
+        return;
+    };
+    let names: Vec<Value> = captured
+        .keys()
+        .filter(|name| members.contains_key(&***name))
+        .filter(|name| !matches!(&***name, "this" | "super" | "outer"))
+        .map(|name| Value::String(Arc::clone(name)))
+        .collect();
+    if !names.is_empty() {
+        captured.insert(
+            name_of(CAPTURED_OBJECT_MEMBERS),
+            Value::List(Arc::new(names)),
+        );
+    }
+}
+
+/// Bind the members of `instance` that a call of a function with `captured`
+/// bindings reads through the instance: the object members it captured,
+/// which take the instance's current values, and members it captured no
+/// binding for, reached through implicit `this`. A name it captured from the
+/// lexical scope around its definition is left alone: Pkl resolves lexical
+/// names before the members an object inherits.
+fn bind_instance_members(call_scope: &mut Scope, captured: &ScopeMap, instance: &ObjectMap) {
+    let members = match captured.get(CAPTURED_OBJECT_MEMBERS) {
+        Some(Value::List(names)) => names.as_slice(),
+        _ => &[],
+    };
+    for (name, value) in instance.iter() {
+        if !captured.contains_key(&**name)
+            || members
+                .iter()
+                .any(|member| matches!(member, Value::String(member) if **member == **name))
+        {
+            call_scope.set(name, value.clone());
+        }
+    }
+}
+
+/// The error of the first member of `value`, an object, that failed to
+/// evaluate, rendered or not.
+fn first_member_failure(value: &Value) -> Option<&str> {
+    match value {
+        Value::Object(_, Some(source)) => source
+            .poisoned_members
+            .as_ref()?
+            .values()
+            .next()
+            .map(|member| member.message.as_str()),
+        _ => None,
+    }
+}
+
+/// The error of the first failed member rendering `value` would output: a
+/// failed property of a module object it contains.
+fn rendered_member_failure(value: &Value) -> Option<&str> {
+    match value {
+        Value::Object(map, source) => source
+            .as_ref()
+            .and_then(|source| source.poisoned_members.as_ref())
+            .and_then(|members| members.values().find(|member| member.rendered))
+            .map(|member| member.message.as_str())
+            .or_else(|| map.values().find_map(rendered_member_failure)),
+        Value::List(items) => items.iter().find_map(rendered_member_failure),
+        _ => None,
+    }
+}
+
 /// The value of a literal or a plain name, or `None` for any expression that
 /// needs the full evaluator. Must agree with `Evaluator::eval_expr_boxed`.
 fn eval_simple_expr(
@@ -1198,7 +1285,9 @@ impl Default for Evaluator {
             narrowed_import_cache: HashMap::default(),
             parse_cache: HashMap::default(),
             body_roots_cache: HashMap::default(),
+            plan_cache: HashMap::default(),
             module_scopes: HashMap::default(),
+            rendered_member_failed: false,
             env_reads: BTreeMap::new(),
             scoped_imports_in_flight: HashSet::default(),
             #[cfg(feature = "blocking")]
@@ -1459,7 +1548,9 @@ impl Evaluator {
             narrowed_import_cache: HashMap::default(),
             parse_cache: HashMap::default(),
             body_roots_cache: HashMap::default(),
+            plan_cache: HashMap::default(),
             module_scopes: HashMap::default(),
+            rendered_member_failed: false,
             env_reads: BTreeMap::new(),
             scoped_imports_in_flight: HashSet::default(),
             capabilities: Box::new(capabilities),
@@ -1539,8 +1630,10 @@ impl Evaluator {
         self.narrowed_import_cache.clear();
         self.parse_cache.clear();
         self.body_roots_cache.clear();
+        self.plan_cache.clear();
         clear_names();
         self.module_scopes.clear();
+        self.rendered_member_failed = false;
         self.scoped_imports_in_flight.clear();
         self.converters.clear();
     }
@@ -3108,247 +3201,337 @@ impl Evaluator {
             expand_requested_fields(&dependency_entries, fields, &inherited_builtins)
         });
 
-        // Locals are evaluated before the main property pass, but `this` and
-        // `module` must already expose inherited members at that point.
-        let inherited_snapshot = Value::Object(Arc::new(base_obj.clone()), None);
-        scope.set("this", inherited_snapshot.clone());
-        scope.set("module", inherited_snapshot);
+        // Inherited members are visible by name and through `this`/`module`
+        // from the start; this module's members join them as they evaluate.
+        let mut all_props = Arc::new(base_obj.clone());
+        for (k, v) in &base_obj {
+            scope.set(k, v.clone());
+        }
+        scope.set("this", Value::Object(Arc::clone(&all_props), None));
+        scope.set("module", Value::Object(Arc::clone(&all_props), None));
 
         // Typed locals whose check waits for the module to be complete: their
         // constraint reads a module member, or their type is an alias declared
         // later (type aliases are registered in declaration order).
         // Built only when the module has a typed local.
         let mut local_check_members: Option<FxHashSet<String>> = None;
-        let mut deferred_locals = Vec::new();
-        // Classes whose bodies read `module` resolve it to this module's
-        // properties, which are only available once the property pass has
-        // evaluated them. Such classes, and the classes and locals built on
-        // them, are evaluated again before a property that can read them,
-        // when the `module` snapshot has changed since they last were.
-        let module_members = module_dependent_members(&module.body);
-        let mut module_members_stale = !module_members.is_empty();
+        let mut deferred_locals: Vec<&Property> = Vec::new();
 
-        // First pass: collect locals, class definitions, and type aliases in
-        // declaration order so they can reference each other
-        for (entry_index, entry) in module.body.iter().enumerate() {
-            match entry {
-                Entry::Property(prop)
-                    if has_modifier(&prop.modifiers, Modifier::Local) && prop.value.is_some() =>
-                {
-                    if let Some(message) = poisoned_locals.get(&local_key(prop, &Rc::from([]))) {
-                        // Failed its check in an earlier pass.
-                        scope.declare_poisoned(prop.name.clone(), message.clone());
-                        continue;
-                    }
-                    match self.eval_expr(prop.value.as_ref().unwrap(), &scope, depth) {
-                        Ok(val) => match &prop.type_ann {
-                            Some(ty)
-                                if names_later_declaration(
-                                    ty,
-                                    &scope,
-                                    &module.body,
-                                    entry_index,
-                                    true,
-                                ) || constraint_reads_members(
-                                    ty,
-                                    &scope,
-                                    local_check_members.get_or_insert_with(|| {
-                                        let mut members = body_member_names(&module.body);
-                                        members.extend(
-                                            late_inherited_properties
-                                                .iter()
-                                                .map(|prop| prop.name.clone()),
-                                        );
-                                        members
-                                    }),
-                                ) =>
-                            {
-                                deferred_locals.push(prop);
-                                scope.declare(&prop.name, val);
-                            }
-                            Some(_) => match self.typed_local_failure(prop, &val, &scope, depth)? {
-                                LocalCheck::Failed(message) => {
-                                    scope.declare_poisoned(prop.name.clone(), message)
-                                }
-                                LocalCheck::Passed => scope.declare(&prop.name, val),
-                                LocalCheck::Unresolved => {
-                                    deferred_locals.push(prop);
-                                    scope.declare(&prop.name, val);
-                                }
-                            },
-                            None => scope.declare(&prop.name, val),
-                        },
-                        Err(Error::Eval(message)) => {
-                            scope.declare_poisoned(prop.name.clone(), message)
-                        }
-                        Err(error) => return Err(error),
-                    }
-                }
-                Entry::ClassDef(name, class_mods, parent, body) => {
-                    match self.eval_class_def(
-                        name,
-                        class_mods,
-                        parent.as_deref(),
-                        body,
-                        &scope,
-                        depth,
-                    ) {
-                        Ok(defaults) => scope.declare(name, defaults),
-                        // A class that reads `module` may need properties the
-                        // property pass has not evaluated yet.
-                        Err(Error::Eval(message)) if module_members.contains(name) => {
-                            scope.set_member_poison(name, Some(message.clone()));
-                            scope.declare_poisoned(name.clone(), message)
-                        }
-                        Err(error) => return Err(error),
-                    }
-                }
-                Entry::TypeAlias(name, ty) => {
-                    self.eval_type_alias(name, ty, &mut scope);
-                }
-                _ => {}
-            }
-        }
-
-        // Export class definitions so they're accessible via dotted paths
-        // (e.g., `import "helpers.pkl"` → `helpers.ClassName`).
-        // Track class names to exclude from serialized output.
+        // Evaluate locals, classes, type aliases and properties in dependency
+        // order, so a member can read one declared after it. A member that
+        // fails is poisoned rather than failing the module: as in Pkl, the
+        // error surfaces only where the member is used (or rendered, below).
         let mut class_names: std::collections::HashSet<String> =
             std::collections::HashSet::default();
+        let mut evaluated: HashMap<&str, Value> = HashMap::default();
+        let mut failed: HashMap<&str, String> = HashMap::default();
+        let mut failed_indices: HashSet<usize> = HashSet::default();
+        let plan = Arc::clone(
+            &self
+                .plan_cache
+                .entry(Arc::as_ptr(&module.body) as usize)
+                .or_insert_with(|| {
+                    (
+                        Arc::clone(&module.body),
+                        Arc::new(module_evaluation_plan(&module.body)),
+                    )
+                })
+                .1,
+        );
+        let mut todo = plan.order.clone();
+        // A member can fail because it read another before that one could be
+        // evaluated: through a dynamic `module[key]`, which the order can't
+        // account for. Members that failed are evaluated again, along with
+        // the members that read them, until a pass changes nothing. So are
+        // members whose value holds a failed member (a class whose default
+        // failed), though their value is kept: it is the member's value if
+        // evaluating it again doesn't help.
+        let mut holding_failures: HashSet<&str> = HashSet::default();
+        let mut previous_failures: Option<HashMap<&str, String>> = None;
+        for _ in 0..=plan.order.len() {
+            for index in todo {
+                let entry = &module.body[index];
+                if let Some(name) = module_member_name(entry) {
+                    failed.remove(name);
+                    failed_indices.remove(&index);
+                    holding_failures.remove(name);
+                }
+                match entry {
+                    Entry::Property(prop)
+                        if has_modifier(&prop.modifiers, Modifier::Local)
+                            && prop.value.is_some() =>
+                    {
+                        if let Some(message) = poisoned_locals.get(&local_key(prop, &Rc::from([])))
+                        {
+                            // Failed its check in an earlier pass.
+                            scope.declare_poisoned(prop.name.clone(), message.clone());
+                            continue;
+                        }
+                        match self.eval_expr(prop.value.as_ref().unwrap(), &scope, depth) {
+                            Ok(val) => match &prop.type_ann {
+                                Some(ty)
+                                    if names_later_declaration(
+                                        ty,
+                                        &scope,
+                                        &module.body,
+                                        index,
+                                        true,
+                                    ) || constraint_reads_members(
+                                        ty,
+                                        &scope,
+                                        local_check_members.get_or_insert_with(|| {
+                                            let mut members = body_member_names(&module.body);
+                                            members.extend(
+                                                late_inherited_properties
+                                                    .iter()
+                                                    .map(|prop| prop.name.clone()),
+                                            );
+                                            members
+                                        }),
+                                    ) =>
+                                {
+                                    // A failed member is evaluated again, so a
+                                    // local can be reached twice.
+                                    if !deferred_locals.iter().any(|p| std::ptr::eq(*p, prop)) {
+                                        deferred_locals.push(prop);
+                                    }
+                                    scope.declare(&prop.name, val);
+                                }
+                                Some(_) => {
+                                    match self.typed_local_failure(prop, &val, &scope, depth)? {
+                                        LocalCheck::Failed(message) => {
+                                            scope.declare_poisoned(prop.name.clone(), message)
+                                        }
+                                        LocalCheck::Passed => scope.declare(&prop.name, val),
+                                        LocalCheck::Unresolved => {
+                                            if !deferred_locals
+                                                .iter()
+                                                .any(|p| std::ptr::eq(*p, prop))
+                                            {
+                                                deferred_locals.push(prop);
+                                            }
+                                            scope.declare(&prop.name, val);
+                                        }
+                                    }
+                                }
+                                None => scope.declare(&prop.name, val),
+                            },
+                            Err(Error::Eval(message)) => {
+                                scope.declare_poisoned(prop.name.clone(), message);
+                                failed_indices.insert(index);
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    Entry::ClassDef(name, class_mods, parent, body) => {
+                        class_names.insert(name.clone());
+                        match self.eval_class_def(
+                            name,
+                            class_mods,
+                            parent.as_deref(),
+                            body,
+                            &scope,
+                            depth,
+                        ) {
+                            Ok(defaults) => {
+                                if let Some(message) = first_member_failure(&defaults) {
+                                    failed.insert(name, message.to_string());
+                                    failed_indices.insert(index);
+                                    holding_failures.insert(name);
+                                }
+                                scope.set_member_poison(name, None);
+                                scope.declare(name, defaults.clone());
+                                module_props_insert(
+                                    &mut scope,
+                                    &mut all_props,
+                                    name.clone(),
+                                    defaults,
+                                );
+                                let snapshot = Value::Object(Arc::clone(&all_props), None);
+                                scope.set("this", snapshot.clone());
+                                scope.set("module", snapshot);
+                            }
+                            Err(Error::Eval(message)) => {
+                                scope.set_member_poison(name, Some(message.clone()));
+                                scope.declare_poisoned(name.clone(), message.clone());
+                                failed.insert(name, message);
+                                failed_indices.insert(index);
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    Entry::TypeAlias(name, ty) => {
+                        self.eval_type_alias(name, ty, &mut scope);
+                    }
+                    Entry::Property(prop) => {
+                        let mods = &prop.modifiers;
+                        if has_modifier(mods, Modifier::Local) {
+                            continue;
+                        }
+                        // Extract renderer converters from the `output` block AST,
+                        // then skip it (it's not included in the output).
+                        // Clear any base-inherited converters so child overrides take precedence.
+                        if prop.name == "output" {
+                            if depth == 0 {
+                                self.converters.clear();
+                                self.extract_converters_from_ast(prop, &scope, depth);
+                            }
+                            continue;
+                        }
+                        if let Some(fields) = &requested_eval_fields
+                            && !fields.contains(&prop.name)
+                        {
+                            continue;
+                        }
+                        // abstract/external properties must have a value (or be overridden)
+                        if (has_modifier(mods, Modifier::Abstract)
+                            || has_modifier(mods, Modifier::External))
+                            && prop.value.is_none()
+                            && prop.body.is_none()
+                        {
+                            if let Some(v) = base_obj.get(prop.name.as_str()) {
+                                // Satisfied by base — add to scope so other properties can reference it
+                                scope.set(&prop.name, v.clone());
+                            } else if has_modifier(mods, Modifier::External) {
+                                return Err(Error::Eval(format!(
+                                    "external property '{}' must be assigned a value in {}",
+                                    prop.name,
+                                    path.display()
+                                )));
+                            } else if depth == 0 && !module_is_abstract(module) {
+                                return Err(Error::Eval(format!(
+                                    "abstract property '{}' must be assigned a value in {}",
+                                    prop.name,
+                                    path.display()
+                                )));
+                            }
+                            continue;
+                        }
+                        let val = match self.eval_property(prop, &scope, depth) {
+                            Ok(value) => value,
+                            // Module properties are late-bound. Keep an unresolved
+                            // template expression deferred until a consumer actually
+                            // requires it; poisoned locals still surface that error.
+                            Err(Error::Eval(message))
+                                if is_unresolved_template_error(&message)
+                                    && (module_is_abstract(module)
+                                        || property_reference_names(prop).iter().any(|name| {
+                                            late_inherited_properties
+                                                .iter()
+                                                .any(|inherited| inherited.name == *name)
+                                        })) =>
+                            {
+                                None
+                            }
+                            Err(Error::Eval(message)) => {
+                                scope.declare_poisoned(prop.name.clone(), message.clone());
+                                failed.insert(&prop.name, message);
+                                failed_indices.insert(index);
+                                continue;
+                            }
+                            Err(error) => return Err(error),
+                        };
+                        if let Some(v) = val {
+                            // const/fixed: error if overriding an immutable property from base
+                            if (has_modifier(mods, Modifier::Const)
+                                || has_modifier(mods, Modifier::Fixed))
+                                && base_obj.contains_key(prop.name.as_str())
+                            {
+                                let kind = if has_modifier(mods, Modifier::Const) {
+                                    "const"
+                                } else {
+                                    "fixed"
+                                };
+                                return Err(Error::Eval(format!(
+                                    "cannot override {kind} property '{}'",
+                                    prop.name
+                                )));
+                            }
+                            // Always add to scope so other properties can reference it
+                            scope.declare(&prop.name, v.clone());
+                            // Track in all_props (including hidden) for `this`/`module`
+                            module_props_insert(
+                                &mut scope,
+                                &mut all_props,
+                                prop.name.clone(),
+                                v.clone(),
+                            );
+                            // Update `this` and `module` with all properties (including hidden)
+                            let snapshot = Value::Object(Arc::clone(&all_props), None);
+                            scope.set("this", snapshot.clone());
+                            scope.set("module", snapshot);
+                            if self.rendered_member_failed
+                                && let Some(message) = rendered_member_failure(&v)
+                            {
+                                failed.insert(&prop.name, message.to_string());
+                                failed_indices.insert(index);
+                                holding_failures.insert(&prop.name);
+                            }
+                            evaluated.insert(&prop.name, v);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if failed_indices.is_empty() || previous_failures.as_ref() == Some(&failed) {
+                break;
+            }
+            previous_failures = Some(failed.clone());
+            todo = plan.affected_by(&failed_indices);
+        }
+        // Members that only hold failed members keep their values.
+        for name in holding_failures {
+            failed.remove(name);
+        }
+
+        // Assemble the module object in declaration order: inherited members,
+        // then classes (exported so they're accessible via dotted paths, e.g.
+        // `import "helpers.pkl"` → `helpers.ClassName`), then properties. A
+        // failed property that would be rendered fails the module.
+        let mut out = base_obj;
+        let mut poisoned_members = IndexMap::new();
         for entry in module.body.iter() {
             if let Entry::ClassDef(name, ..) = entry {
-                if let Some(cls_val) = scope.get(name) {
-                    base_obj.insert(name.as_str().into(), cls_val.clone());
-                    class_names.insert(name.clone());
-                } else if module_members.contains(name) {
-                    class_names.insert(name.clone());
+                if let Some(value) = scope.get(name) {
+                    out.insert(name.as_str().into(), value.clone());
+                } else if let Some(message) = failed.get(name.as_str()) {
+                    poisoned_members.insert(
+                        name.clone(),
+                        PoisonedMember {
+                            message: message.clone(),
+                            rendered: false,
+                        },
+                    );
                 }
             }
         }
-
-        // Second pass: evaluate non-local entries into output object
-        let mut out = base_obj;
-        // all_props includes hidden properties — used for `this`/`module`
-        // snapshots. It is shared with those snapshots and grown in place, as
-        // in `eval_entries_with_lexical_scopes`, rather than copied per property.
-        let mut all_props = Arc::new(out.clone());
-        // Seed scope with base properties so body amendments can find them
-        // (e.g., `hooks { ... }` needs to find the base hooks Mapping in scope
-        // to properly amend it with type-aware merging).
-        for (k, v) in &out {
-            scope.set(k, v.clone());
-        }
-        // Bind `this` at module level so properties can reference the module object
-        scope.set("this", Value::Object(Arc::clone(&all_props), None));
-        // Also bind `module` to the same value
-        scope.set("module", Value::Object(Arc::clone(&all_props), None));
         for entry in module.body.iter() {
-            if let Entry::Property(prop) = entry {
-                let mods = &prop.modifiers;
-                if has_modifier(mods, Modifier::Local) {
-                    continue; // already collected
+            let Entry::Property(prop) = entry else {
+                continue;
+            };
+            let rendered = !has_modifier(&prop.modifiers, Modifier::Hidden)
+                && requested_output_fields
+                    .as_ref()
+                    .is_none_or(|fields| fields.contains(&prop.name));
+            if let Some(message) = failed.get(prop.name.as_str()) {
+                if rendered && depth == 0 {
+                    return Err(Error::Eval(message.clone()));
                 }
-                // Extract renderer converters from the `output` block AST,
-                // then skip it (it's not included in the output).
-                // Clear any base-inherited converters so child overrides take precedence.
-                if prop.name == "output" {
-                    if depth == 0 {
-                        self.converters.clear();
-                        self.extract_converters_from_ast(prop, &scope, depth);
-                    }
-                    continue;
-                }
-                if let Some(fields) = &requested_eval_fields
-                    && !fields.contains(&prop.name)
-                {
-                    continue;
-                }
-                // abstract/external properties must have a value (or be overridden)
-                if (has_modifier(mods, Modifier::Abstract)
-                    || has_modifier(mods, Modifier::External))
-                    && prop.value.is_none()
-                    && prop.body.is_none()
-                {
-                    if let Some(v) = out.get(prop.name.as_str()) {
-                        // Satisfied by base — add to scope so other properties can reference it
-                        scope.set(&prop.name, v.clone());
-                    } else if has_modifier(mods, Modifier::External) {
-                        return Err(Error::Eval(format!(
-                            "external property '{}' must be assigned a value in {}",
-                            prop.name,
-                            path.display()
-                        )));
-                    } else if depth == 0 && !module_is_abstract(module) {
-                        return Err(Error::Eval(format!(
-                            "abstract property '{}' must be assigned a value in {}",
-                            prop.name,
-                            path.display()
-                        )));
-                    }
-                    continue;
-                }
-                if module_members_stale && reads_module_members(prop, &module_members) {
-                    self.refresh_module_members(
-                        module,
-                        &module_members,
-                        &mut scope,
-                        &mut all_props,
-                        poisoned_locals,
-                        depth,
-                    )?;
-                    module_members_stale = false;
-                }
-                let val = match self.eval_property(prop, &scope, depth) {
-                    Ok(value) => value,
-                    // Module properties are late-bound. Keep an unresolved
-                    // template expression deferred until a consumer actually
-                    // requires it; poisoned locals still surface that error.
-                    Err(Error::Eval(message))
-                        if is_unresolved_template_error(&message)
-                            && (module_is_abstract(module)
-                                || property_reference_names(prop).iter().any(|name| {
-                                    late_inherited_properties
-                                        .iter()
-                                        .any(|inherited| inherited.name == *name)
-                                })) =>
-                    {
-                        None
-                    }
-                    Err(error) => return Err(error),
-                };
-                if let Some(v) = val {
-                    // const/fixed: error if overriding an immutable property from base
-                    if (has_modifier(mods, Modifier::Const) || has_modifier(mods, Modifier::Fixed))
-                        && out.contains_key(prop.name.as_str())
-                    {
-                        let kind = if has_modifier(mods, Modifier::Const) {
-                            "const"
-                        } else {
-                            "fixed"
-                        };
-                        return Err(Error::Eval(format!(
-                            "cannot override {kind} property '{}'",
-                            prop.name
-                        )));
-                    }
-                    // Always add to scope so other properties can reference it
-                    scope.declare(&prop.name, v.clone());
-                    // Track in all_props (including hidden) for `this`/`module`
-                    module_props_insert(&mut scope, &mut all_props, prop.name.clone(), v.clone());
-                    if !has_modifier(mods, Modifier::Hidden)
-                        && (depth > 0 || should_render_property_value(prop, &v))
-                        && requested_output_fields
-                            .as_ref()
-                            .is_none_or(|fields| fields.contains(&prop.name))
-                    {
-                        out.insert(prop.name.as_str().into(), v);
-                    }
-                    // Update `this` and `module` with all properties (including hidden)
-                    let snapshot = Value::Object(Arc::clone(&all_props), None);
-                    scope.set("this", snapshot.clone());
-                    scope.set("module", snapshot);
-                    module_members_stale = !module_members.is_empty();
-                }
+                self.rendered_member_failed |= rendered;
+                poisoned_members.insert(
+                    prop.name.clone(),
+                    PoisonedMember {
+                        message: message.clone(),
+                        rendered,
+                    },
+                );
+                continue;
+            }
+            if let Some(value) = evaluated.remove(prop.name.as_str())
+                && rendered
+                && (depth > 0 || should_render_property_value(prop, &value))
+            {
+                out.insert(prop.name.as_str().into(), value);
             }
         }
 
@@ -3423,17 +3606,6 @@ impl Evaluator {
                 if child_property_names.contains(prop.name.as_str()) {
                     continue;
                 }
-                if module_members_stale && reads_module_members(prop, &module_members) {
-                    self.refresh_module_members(
-                        module,
-                        &module_members,
-                        &mut scope,
-                        &mut all_props,
-                        poisoned_locals,
-                        depth,
-                    )?;
-                    module_members_stale = false;
-                }
                 match self.eval_property(prop, &scope, depth) {
                     Ok(Some(value)) => {
                         scope.set(&prop.name, value.clone());
@@ -3454,7 +3626,6 @@ impl Evaluator {
                         let snapshot = Value::Object(Arc::clone(&all_props), None);
                         scope.set("this", snapshot.clone());
                         scope.set("module", snapshot);
-                        module_members_stale = !module_members.is_empty();
                     }
                     Ok(None) => {}
                     Err(Error::Eval(message))
@@ -3465,17 +3636,6 @@ impl Evaluator {
                 }
             }
             for prop in &late_child_properties {
-                if module_members_stale && reads_module_members(prop, &module_members) {
-                    self.refresh_module_members(
-                        module,
-                        &module_members,
-                        &mut scope,
-                        &mut all_props,
-                        poisoned_locals,
-                        depth,
-                    )?;
-                    module_members_stale = false;
-                }
                 match self.eval_property(prop, &scope, depth) {
                     Ok(Some(value)) => {
                         scope.set(&prop.name, value.clone());
@@ -3499,7 +3659,6 @@ impl Evaluator {
                         let snapshot = Value::Object(Arc::clone(&all_props), None);
                         scope.set("this", snapshot.clone());
                         scope.set("module", snapshot);
-                        module_members_stale = !module_members.is_empty();
                     }
                     Ok(None) => {}
                     Err(Error::Eval(message))
@@ -3507,44 +3666,6 @@ impl Evaluator {
                             || (module_is_abstract(module)
                                 && is_unresolved_template_error(&message)) => {}
                     Err(error) => return Err(error),
-                }
-            }
-        }
-
-        // Export the classes that read `module` as evaluated against the
-        // complete module, which is what `module` means to importers, along
-        // with the module functions re-bound to them. A class whose defaults
-        // still fail is not exported. As in Pkl, the module itself still
-        // evaluates, and the class's error is kept so an importer that reads
-        // or instantiates it gets that error instead of a missing member.
-        // The top-level module (depth 0) has no importers and its output
-        // leaves classes and functions out, so it skips this.
-        let mut poisoned_members = IndexMap::new();
-        if depth > 0 && !module_members.is_empty() {
-            if module_members_stale {
-                self.refresh_module_members(
-                    module,
-                    &module_members,
-                    &mut scope,
-                    &mut all_props,
-                    poisoned_locals,
-                    depth,
-                )?;
-            }
-            for name in &module_members {
-                if class_names.contains(name) {
-                    if let Some(value) = scope.get(name) {
-                        out.insert(name.as_str().into(), value.clone());
-                    } else {
-                        out.shift_remove(name.as_str());
-                        if let Some(message) = scope.poison_of(name) {
-                            poisoned_members.insert(name.clone(), message.clone());
-                        }
-                    }
-                } else if out.contains_key(name.as_str())
-                    && let Some(value) = scope.get(name)
-                {
-                    out.insert(name.as_str().into(), value.clone());
                 }
             }
         }
@@ -3679,7 +3800,7 @@ impl Evaluator {
                 parent_type_names: Vec::new(),
                 parent_type_identities: Vec::new(),
                 entry_scopes: Vec::new(),
-                evaluated_properties: Vec::new(),
+                evaluated_properties: Arc::default(),
                 mapping_value_types: Vec::new(),
                 deprecated,
                 poisoned_members: (!poisoned_members.is_empty())
@@ -3708,6 +3829,14 @@ impl Evaluator {
                 late_properties: effective_late_properties.into_values().collect(),
             },
         );
+        // An imported module whose failed property this output renders fails
+        // the output, as rendering that property directly would.
+        if depth == 0
+            && self.rendered_member_failed
+            && let Some(message) = out.values().find_map(rendered_member_failure)
+        {
+            return Err(Error::Eval(message.to_string()));
+        }
         Ok(BodyOutcome::Done(Value::Object(Arc::new(out), source)))
     }
 
@@ -4018,8 +4147,7 @@ impl Evaluator {
             for entry in source.entries.iter() {
                 if let Entry::Property(prop) = entry
                     && !has_modifier(&prop.modifiers, Modifier::Local)
-                    && source.evaluated_properties.contains(&prop.name)
-                    && let Some(value) = source.scope().get(prop.name.as_str())
+                    && let Some(value) = source.evaluated_properties.get(prop.name.as_str())
                 {
                     child_scope.set(&prop.name, value.clone());
                 }
@@ -4053,6 +4181,14 @@ impl Evaluator {
             // entries but absent from the parent scope, so that `outer.optionalProp`
             // resolves to Null rather than failing with "field not found".
             let mut outer_map = scope.flatten();
+            // `outer` is the enclosing object, so its members win over names
+            // lexically visible around it (which may hide inherited members).
+            if let Some(Value::Object(members, _)) = outer_map.get("this") {
+                let members = Arc::clone(members);
+                for (name, value) in members.iter() {
+                    outer_map.insert(name_of(name), value.clone());
+                }
+            }
             // `this` inside the body is rebound to the new object, so the parent's
             // `this` snapshot is unreachable through `outer`. Leaving it out keeps
             // nested objects from holding a reference to the parent's property map,
@@ -4236,95 +4372,205 @@ impl Evaluator {
         }
 
         let mut map: ObjectMap = ObjectMap::default();
-        for (entry_index, entry) in entries.iter().enumerate() {
-            match entry {
-                Entry::Property(prop) => {
-                    let mods = &prop.modifiers;
-                    if has_modifier(mods, Modifier::Local) {
-                        continue;
-                    }
-                    // Skip the `default` property — it's a template, not an output entry
-                    if prop.name == "default" && default_template.is_some() {
-                        continue;
-                    }
-                    if has_modifier(mods, Modifier::Abstract)
-                        && prop.value.is_none()
-                        && prop.body.is_none()
-                    {
-                        continue; // abstract without value — skip (must be overridden)
-                    }
-                    refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
-                    let mut active_scope = restore_shadowed(
-                        scope_for_object_entry(
-                            entry_index,
-                            &child_scope,
-                            entry_scopes,
-                            &entry_owners,
-                            own_body_scope,
-                        ),
-                        &shadowed,
-                        entry_index,
-                    );
-                    if checks.defers_nested(entry_index) {
-                        active_scope.defining_class = true;
-                    }
-                    let value = self.eval_property(prop, &active_scope, depth)?;
-                    // Release the entry scope first: it may share the object
-                    // scope's bindings, which binding the value would then copy.
-                    drop(active_scope);
-                    if let Some(v) = value {
-                        if binds_declared(&prop.name) {
-                            child_scope.declare(&prop.name, v.clone());
-                        } else {
-                            child_scope.set(&prop.name, v.clone());
+        // The entry that added each key of `map`, in insertion order.
+        let mut key_entries: Vec<usize> = Vec::new();
+        // A property that fails may have read a member declared after it,
+        // which Pkl allows (members are evaluated lazily). Failed properties
+        // are evaluated again once the other entries are, until a pass makes
+        // no progress; the ones that still fail are poisoned members of the
+        // object, whose errors surface where they are read or rendered.
+        let mut pass: Vec<usize> = (0..entries.len()).collect();
+        let mut retrying = false;
+        let mut retried = false;
+        let mut fallbacks: HashMap<usize, Value> = HashMap::default();
+        let failed = loop {
+            let mut failed: Vec<(usize, String)> = Vec::new();
+            // Properties set aside in this pass. A later entry for the same
+            // property (a body amendment of it) waits for it.
+            let mut set_aside: HashMap<&str, String> = HashMap::default();
+            for &entry_index in &pass {
+                let entry = &entries[entry_index];
+                if retrying && !matches!(entry, Entry::Property(_)) {
+                    continue;
+                }
+                let map_len = map.len();
+                match entry {
+                    Entry::Property(prop) => {
+                        let mods = &prop.modifiers;
+                        if has_modifier(mods, Modifier::Local) {
+                            continue;
                         }
-                        entry_owners.release_this(&this_aliases);
-                        props_insert(
-                            &mut child_scope,
-                            &this_aliases,
-                            &mut all_props,
-                            prop.name.clone(),
-                            v.clone(),
-                        );
-                        if !has_modifier(mods, Modifier::Hidden) {
-                            map.insert(prop.name.as_str().into(), v);
+                        // Skip the `default` property — it's a template, not an output entry
+                        if prop.name == "default" && default_template.is_some() {
+                            continue;
+                        }
+                        if has_modifier(mods, Modifier::Abstract)
+                            && prop.value.is_none()
+                            && prop.body.is_none()
+                        {
+                            continue; // abstract without value — skip (must be overridden)
+                        }
+                        if let Some(message) = set_aside.get(prop.name.as_str()) {
+                            failed.push((entry_index, message.clone()));
+                            continue;
                         }
                         refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
-                    }
-                }
-                Entry::DynProperty(key_expr, val_expr) => {
-                    let active_scope = restore_shadowed(
-                        scope_for_object_entry(
+                        let mut active_scope = restore_shadowed(
+                            scope_for_object_entry(
+                                entry_index,
+                                &child_scope,
+                                entry_scopes,
+                                &entry_owners,
+                                own_body_scope,
+                            ),
+                            &shadowed,
                             entry_index,
-                            &child_scope,
-                            entry_scopes,
-                            &entry_owners,
-                            own_body_scope,
-                        ),
-                        &shadowed,
-                        entry_index,
-                    );
-                    let key = self.eval_expr(key_expr, &active_scope, depth)?;
-                    let key_str = value_to_key(&key)?;
-                    // `["key"] { ... }` amends an entry inherited from the parent
-                    // (for example when amending an untyped `Mapping`) rather than
-                    // replacing it.
-                    if let Expr::ObjectBody(body) = val_expr
-                        && let Some(existing @ (Value::Object(..) | Value::List(_))) =
-                            map.get(&key_str).cloned()
-                    {
-                        // A listing amendment only takes elements, so a property
-                        // would otherwise be dropped silently. Reject it as Pkl does.
-                        if matches!(existing, Value::List(_))
-                            && let Some(name) = find_listing_body_property(body)
-                        {
-                            return Err(Error::Eval(format!(
-                                "cannot amend listing entry '{key_str}' with property '{name}': \
-                                 object of type Listing cannot have a property (other than default)"
-                            )));
+                        );
+                        if checks.defers_nested(entry_index) {
+                            active_scope.defining_class = true;
                         }
-                        let val =
-                            self.eval_value_amendment(existing, body, &active_scope, depth)?;
+                        let value = match self.eval_property(prop, &active_scope, depth) {
+                            // A value holding a failed member may also have read a member
+                            // not evaluated yet. It is evaluated again with the failed
+                            // properties, and kept if that doesn't help.
+                            Ok(Some(value))
+                                if self.rendered_member_failed
+                                    && rendered_member_failure(&value).is_some() =>
+                            {
+                                let message = rendered_member_failure(&value)
+                                    .unwrap_or_default()
+                                    .to_string();
+                                set_aside.insert(&prop.name, message.clone());
+                                failed.push((entry_index, message));
+                                fallbacks.insert(entry_index, value);
+                                continue;
+                            }
+                            Ok(value) => value,
+                            Err(Error::Eval(message)) => {
+                                set_aside.insert(&prop.name, message.clone());
+                                failed.push((entry_index, message));
+                                continue;
+                            }
+                            Err(error) => return Err(error),
+                        };
+                        // Release the entry scope first: it may share the object
+                        // scope's bindings, which binding the value would then copy.
+                        drop(active_scope);
+                        if let Some(v) = value {
+                            if binds_declared(&prop.name) {
+                                child_scope.declare(&prop.name, v.clone());
+                            } else {
+                                child_scope.set(&prop.name, v.clone());
+                            }
+                            entry_owners.release_this(&this_aliases);
+                            props_insert(
+                                &mut child_scope,
+                                &this_aliases,
+                                &mut all_props,
+                                prop.name.clone(),
+                                v.clone(),
+                            );
+                            if !has_modifier(mods, Modifier::Hidden) {
+                                map.insert(prop.name.as_str().into(), v);
+                            }
+                            refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
+                        }
+                    }
+                    Entry::DynProperty(key_expr, val_expr) => {
+                        let active_scope = restore_shadowed(
+                            scope_for_object_entry(
+                                entry_index,
+                                &child_scope,
+                                entry_scopes,
+                                &entry_owners,
+                                own_body_scope,
+                            ),
+                            &shadowed,
+                            entry_index,
+                        );
+                        let key = self.eval_expr(key_expr, &active_scope, depth)?;
+                        let key_str = value_to_key(&key)?;
+                        // `["key"] { ... }` amends an entry inherited from the parent
+                        // (for example when amending an untyped `Mapping`) rather than
+                        // replacing it.
+                        if let Expr::ObjectBody(body) = val_expr
+                            && let Some(existing @ (Value::Object(..) | Value::List(_))) =
+                                map.get(&key_str).cloned()
+                        {
+                            // A listing amendment only takes elements, so a property
+                            // would otherwise be dropped silently. Reject it as Pkl does.
+                            if matches!(existing, Value::List(_))
+                                && let Some(name) = find_listing_body_property(body)
+                            {
+                                return Err(Error::Eval(format!(
+                                    "cannot amend listing entry '{key_str}' with property '{name}': \
+                                 object of type Listing cannot have a property (other than default)"
+                                )));
+                            }
+                            let val =
+                                self.eval_value_amendment(existing, body, &active_scope, depth)?;
+                            drop(active_scope);
+                            entry_owners.release_this(&this_aliases);
+                            props_insert(
+                                &mut child_scope,
+                                &this_aliases,
+                                &mut all_props,
+                                key_str.clone(),
+                                val.clone(),
+                            );
+                            map.insert(key_str, val);
+                            refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
+                            continue;
+                        }
+                        let val = if let Some(Value::Object(template_map, Some(src))) =
+                            &default_template
+                            && let Expr::ObjectBody(body) = val_expr
+                        {
+                            // Default template has ObjectSource — use eval_amended_object
+                            // so nested property amendments work properly.
+                            let mut result = self.eval_amended_object(
+                                template_map,
+                                src,
+                                body,
+                                &active_scope,
+                                depth,
+                            )?;
+                            // Propagate the template's type_name so converters can match.
+                            if let Some(ref tn) = src.type_name
+                                && let Value::Object(_, ref mut result_src) = result
+                            {
+                                let new_src = match result_src.take() {
+                                    Some(s) => {
+                                        let mut ns = Arc::unwrap_or_clone(s);
+                                        ns.type_name = Some(tn.clone());
+                                        ns
+                                    }
+                                    None => ObjectSource {
+                                        entries: vec![].into(),
+                                        captured: SourceScope::default(),
+                                        body_members: HashSet::default(),
+                                        is_open: true,
+                                        type_name: Some(tn.clone()),
+                                        type_identity: src.type_identity.clone(),
+                                        parent_type_names: src.parent_type_names.clone(),
+                                        parent_type_identities: src.parent_type_identities.clone(),
+                                        entry_scopes: Vec::new(),
+                                        evaluated_properties: Arc::default(),
+                                        mapping_value_types: Vec::new(),
+                                        deprecated: merge_deprecated(&src.deprecated, body),
+                                        poisoned_members: None,
+                                    },
+                                };
+                                *result_src = Some(std::sync::Arc::new(new_src));
+                            }
+                            result
+                        } else {
+                            let mut val = self.eval_expr(val_expr, &active_scope, depth)?;
+                            if let Some(ref tpl) = default_template {
+                                val = merge_values(tpl.clone(), val);
+                            }
+                            val
+                        };
                         drop(active_scope);
                         entry_owners.release_this(&this_aliases);
                         props_insert(
@@ -4336,236 +4582,257 @@ impl Evaluator {
                         );
                         map.insert(key_str, val);
                         refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
-                        continue;
                     }
-                    let val = if let Some(Value::Object(template_map, Some(src))) =
-                        &default_template
-                        && let Expr::ObjectBody(body) = val_expr
-                    {
-                        // Default template has ObjectSource — use eval_amended_object
-                        // so nested property amendments work properly.
-                        let mut result = self.eval_amended_object(
-                            template_map,
-                            src,
-                            body,
-                            &active_scope,
-                            depth,
-                        )?;
-                        // Propagate the template's type_name so converters can match.
-                        if let Some(ref tn) = src.type_name
-                            && let Value::Object(_, ref mut result_src) = result
-                        {
-                            let new_src = match result_src.take() {
-                                Some(s) => {
-                                    let mut ns = Arc::unwrap_or_clone(s);
-                                    ns.type_name = Some(tn.clone());
-                                    ns
-                                }
-                                None => ObjectSource {
-                                    entries: vec![].into(),
-                                    captured: SourceScope::default(),
-                                    body_members: HashSet::default(),
-                                    is_open: true,
-                                    type_name: Some(tn.clone()),
-                                    type_identity: src.type_identity.clone(),
-                                    parent_type_names: src.parent_type_names.clone(),
-                                    parent_type_identities: src.parent_type_identities.clone(),
-                                    entry_scopes: Vec::new(),
-                                    evaluated_properties: Vec::new(),
-                                    mapping_value_types: Vec::new(),
-                                    deprecated: merge_deprecated(&src.deprecated, body),
-                                    poisoned_members: None,
-                                },
-                            };
-                            *result_src = Some(std::sync::Arc::new(new_src));
+                    Entry::Spread(expr) => {
+                        let active_scope = restore_shadowed(
+                            scope_for_object_entry(
+                                entry_index,
+                                &child_scope,
+                                entry_scopes,
+                                &entry_owners,
+                                own_body_scope,
+                            ),
+                            &shadowed,
+                            entry_index,
+                        );
+                        let val = self.eval_expr(expr, &active_scope, depth)?;
+                        if let Value::Object(m, _) = val {
+                            drop(active_scope);
+                            entry_owners.release_this(&this_aliases);
+                            props_extend(
+                                &mut child_scope,
+                                &this_aliases,
+                                &mut all_props,
+                                m.iter().map(|(k, v)| (k.clone(), v.clone())),
+                            );
+                            map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                            refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                         }
-                        result
-                    } else {
-                        let mut val = self.eval_expr(val_expr, &active_scope, depth)?;
-                        if let Some(ref tpl) = default_template {
-                            val = merge_values(tpl.clone(), val);
+                    }
+                    Entry::ForGenerator(fgen) => {
+                        let mut active_scope = restore_shadowed(
+                            scope_for_object_entry(
+                                entry_index,
+                                &child_scope,
+                                entry_scopes,
+                                &entry_owners,
+                                own_body_scope,
+                            ),
+                            &shadowed,
+                            entry_index,
+                        );
+                        // Objects it writes that a later entry amends are checked by
+                        // that amendment (see `TypeChecks::defers_nested`).
+                        if checks.defers_nested(entry_index) {
+                            active_scope.defining_class = true;
                         }
-                        val
+                        let collection = self.eval_expr(&fgen.collection, &active_scope, depth)?;
+                        let items = collection_to_items(collection);
+                        let body_typed = generator_body_has_typed_entries(&fgen.body);
+                        for (iteration, (k, v)) in items.into_iter().enumerate() {
+                            let mut iter_scope = active_scope.child();
+                            iter_scope.set(&fgen.val_var, v);
+                            if let Some(key_var) = &fgen.key_var {
+                                iter_scope.set(key_var, k);
+                            }
+                            let body_checks =
+                                checks.for_generator(entry_index, iteration, body_typed, || {
+                                    let mut names = generator_names.clone();
+                                    names.push(fgen.val_var.clone());
+                                    names.extend(fgen.key_var.iter().cloned());
+                                    names
+                                });
+                            let body_val = self.eval_entries_pending(
+                                &fgen.body,
+                                &iter_scope,
+                                depth,
+                                None,
+                                None,
+                                body_checks,
+                                pending,
+                                poisoned_locals,
+                            )?;
+                            // A generator's members join this object, which has no
+                            // entry to poison for one that failed: fail with it.
+                            if let Some(message) = first_member_failure(&body_val) {
+                                return Err(Error::Eval(message.to_string()));
+                            }
+                            if let Value::Object(m, _) = body_val {
+                                entry_owners.release_this(&this_aliases);
+                                props_extend(
+                                    &mut child_scope,
+                                    &this_aliases,
+                                    &mut all_props,
+                                    m.iter().map(|(k, v)| (k.clone(), v.clone())),
+                                );
+                                map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                                refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
+                            }
+                        }
+                    }
+                    Entry::WhenGenerator(wgen) => {
+                        let mut active_scope = restore_shadowed(
+                            scope_for_object_entry(
+                                entry_index,
+                                &child_scope,
+                                entry_scopes,
+                                &entry_owners,
+                                own_body_scope,
+                            ),
+                            &shadowed,
+                            entry_index,
+                        );
+                        // Objects it writes that a later entry amends are checked by
+                        // that amendment (see `TypeChecks::defers_nested`).
+                        if checks.defers_nested(entry_index) {
+                            active_scope.defining_class = true;
+                        }
+                        let cond = self.eval_expr(&wgen.condition, &active_scope, depth)?;
+                        if is_truthy(&cond) {
+                            let body_val = self.eval_entries_pending(
+                                &wgen.body,
+                                &active_scope,
+                                depth,
+                                None,
+                                None,
+                                checks.for_generator(
+                                    entry_index,
+                                    0,
+                                    generator_body_has_typed_entries(&wgen.body),
+                                    || generator_names.clone(),
+                                ),
+                                pending,
+                                poisoned_locals,
+                            )?;
+                            // A generator's members join this object, which has no
+                            // entry to poison for one that failed: fail with it.
+                            if let Some(message) = first_member_failure(&body_val) {
+                                return Err(Error::Eval(message.to_string()));
+                            }
+                            if let Value::Object(m, _) = body_val {
+                                entry_owners.release_this(&this_aliases);
+                                props_extend(
+                                    &mut child_scope,
+                                    &this_aliases,
+                                    &mut all_props,
+                                    m.iter().map(|(k, v)| (k.clone(), v.clone())),
+                                );
+                                map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                                refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
+                            }
+                        } else if let Some(else_body) = &wgen.else_body {
+                            let else_val = self.eval_entries_pending(
+                                else_body,
+                                &active_scope,
+                                depth,
+                                None,
+                                None,
+                                checks.for_generator(
+                                    entry_index,
+                                    1,
+                                    generator_body_has_typed_entries(else_body),
+                                    || generator_names.clone(),
+                                ),
+                                pending,
+                                poisoned_locals,
+                            )?;
+                            // A generator's members join this object, which has no
+                            // entry to poison for one that failed: fail with it.
+                            if let Some(message) = first_member_failure(&else_val) {
+                                return Err(Error::Eval(message.to_string()));
+                            }
+                            if let Value::Object(m, _) = else_val {
+                                entry_owners.release_this(&this_aliases);
+                                props_extend(
+                                    &mut child_scope,
+                                    &this_aliases,
+                                    &mut all_props,
+                                    m.iter().map(|(k, v)| (k.clone(), v.clone())),
+                                );
+                                map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                                refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
+                            }
+                        }
+                    }
+                    Entry::Elem(_) => {} // bare elements only valid in Listing bodies
+                    Entry::ClassDef(..) | Entry::TypeAlias(..) => {} // handled in scope setup
+                }
+                key_entries.resize(map.len().max(map_len), entry_index);
+                // Checks a generator entry handed up resolve names the way that
+                // entry does.
+                if !checks.is_generator() {
+                    for check in &mut pending[generator_mark..] {
+                        check.entry_index.get_or_insert(entry_index);
+                    }
+                }
+            }
+            if failed.is_empty() || (retrying && failed.len() == pass.len()) {
+                // Keep the values that only hold failed members; their
+                // errors surface where those members are read or rendered.
+                let mut remaining = Vec::new();
+                for (entry_index, message) in failed {
+                    let (Some(value), Entry::Property(prop)) =
+                        (fallbacks.remove(&entry_index), &entries[entry_index])
+                    else {
+                        remaining.push((entry_index, message));
+                        continue;
                     };
-                    drop(active_scope);
+                    if binds_declared(&prop.name) {
+                        child_scope.declare(&prop.name, value.clone());
+                    } else {
+                        child_scope.set(&prop.name, value.clone());
+                    }
                     entry_owners.release_this(&this_aliases);
                     props_insert(
                         &mut child_scope,
                         &this_aliases,
                         &mut all_props,
-                        key_str.clone(),
-                        val.clone(),
+                        prop.name.clone(),
+                        value.clone(),
                     );
-                    map.insert(key_str, val);
-                    refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
+                    if !has_modifier(&prop.modifiers, Modifier::Hidden) {
+                        let map_len = map.len();
+                        map.insert(prop.name.as_str().into(), value);
+                        key_entries.resize(map.len().max(map_len), entry_index);
+                    }
+                    retried = true;
                 }
-                Entry::Spread(expr) => {
-                    let active_scope = restore_shadowed(
-                        scope_for_object_entry(
-                            entry_index,
-                            &child_scope,
-                            entry_scopes,
-                            &entry_owners,
-                            own_body_scope,
-                        ),
-                        &shadowed,
-                        entry_index,
-                    );
-                    let val = self.eval_expr(expr, &active_scope, depth)?;
-                    if let Value::Object(m, _) = val {
-                        drop(active_scope);
-                        entry_owners.release_this(&this_aliases);
-                        props_extend(
-                            &mut child_scope,
-                            &this_aliases,
-                            &mut all_props,
-                            m.iter().map(|(k, v)| (k.clone(), v.clone())),
-                        );
-                        map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
-                        refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
-                    }
-                }
-                Entry::ForGenerator(fgen) => {
-                    let mut active_scope = restore_shadowed(
-                        scope_for_object_entry(
-                            entry_index,
-                            &child_scope,
-                            entry_scopes,
-                            &entry_owners,
-                            own_body_scope,
-                        ),
-                        &shadowed,
-                        entry_index,
-                    );
-                    // Objects it writes that a later entry amends are checked by
-                    // that amendment (see `TypeChecks::defers_nested`).
-                    if checks.defers_nested(entry_index) {
-                        active_scope.defining_class = true;
-                    }
-                    let collection = self.eval_expr(&fgen.collection, &active_scope, depth)?;
-                    let items = collection_to_items(collection);
-                    let body_typed = generator_body_has_typed_entries(&fgen.body);
-                    for (iteration, (k, v)) in items.into_iter().enumerate() {
-                        let mut iter_scope = active_scope.child();
-                        iter_scope.set(&fgen.val_var, v);
-                        if let Some(key_var) = &fgen.key_var {
-                            iter_scope.set(key_var, k);
-                        }
-                        let body_checks =
-                            checks.for_generator(entry_index, iteration, body_typed, || {
-                                let mut names = generator_names.clone();
-                                names.push(fgen.val_var.clone());
-                                names.extend(fgen.key_var.iter().cloned());
-                                names
-                            });
-                        let body_val = self.eval_entries_pending(
-                            &fgen.body,
-                            &iter_scope,
-                            depth,
-                            None,
-                            None,
-                            body_checks,
-                            pending,
-                            poisoned_locals,
-                        )?;
-                        if let Value::Object(m, _) = body_val {
-                            entry_owners.release_this(&this_aliases);
-                            props_extend(
-                                &mut child_scope,
-                                &this_aliases,
-                                &mut all_props,
-                                m.iter().map(|(k, v)| (k.clone(), v.clone())),
-                            );
-                            map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
-                            refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
-                        }
-                    }
-                }
-                Entry::WhenGenerator(wgen) => {
-                    let mut active_scope = restore_shadowed(
-                        scope_for_object_entry(
-                            entry_index,
-                            &child_scope,
-                            entry_scopes,
-                            &entry_owners,
-                            own_body_scope,
-                        ),
-                        &shadowed,
-                        entry_index,
-                    );
-                    // Objects it writes that a later entry amends are checked by
-                    // that amendment (see `TypeChecks::defers_nested`).
-                    if checks.defers_nested(entry_index) {
-                        active_scope.defining_class = true;
-                    }
-                    let cond = self.eval_expr(&wgen.condition, &active_scope, depth)?;
-                    if is_truthy(&cond) {
-                        let body_val = self.eval_entries_pending(
-                            &wgen.body,
-                            &active_scope,
-                            depth,
-                            None,
-                            None,
-                            checks.for_generator(
-                                entry_index,
-                                0,
-                                generator_body_has_typed_entries(&wgen.body),
-                                || generator_names.clone(),
-                            ),
-                            pending,
-                            poisoned_locals,
-                        )?;
-                        if let Value::Object(m, _) = body_val {
-                            entry_owners.release_this(&this_aliases);
-                            props_extend(
-                                &mut child_scope,
-                                &this_aliases,
-                                &mut all_props,
-                                m.iter().map(|(k, v)| (k.clone(), v.clone())),
-                            );
-                            map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
-                            refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
-                        }
-                    } else if let Some(else_body) = &wgen.else_body {
-                        let else_val = self.eval_entries_pending(
-                            else_body,
-                            &active_scope,
-                            depth,
-                            None,
-                            None,
-                            checks.for_generator(
-                                entry_index,
-                                1,
-                                generator_body_has_typed_entries(else_body),
-                                || generator_names.clone(),
-                            ),
-                            pending,
-                            poisoned_locals,
-                        )?;
-                        if let Value::Object(m, _) = else_val {
-                            entry_owners.release_this(&this_aliases);
-                            props_extend(
-                                &mut child_scope,
-                                &this_aliases,
-                                &mut all_props,
-                                m.iter().map(|(k, v)| (k.clone(), v.clone())),
-                            );
-                            map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
-                            refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
-                        }
-                    }
-                }
-                Entry::Elem(_) => {} // bare elements only valid in Listing bodies
-                Entry::ClassDef(..) | Entry::TypeAlias(..) => {} // handled in scope setup
+                break remaining;
             }
-            // Checks a generator entry handed up resolve names the way that
-            // entry does.
-            if !checks.is_generator() {
-                for check in &mut pending[generator_mark..] {
-                    check.entry_index.get_or_insert(entry_index);
-                }
-            }
+            retried = true;
+            retrying = true;
+            pass = failed.iter().map(|(index, _)| *index).collect();
+        };
+        // Properties evaluated on a retry were added to the map late; put the
+        // keys back in the order of the entries that added them.
+        if retried && key_entries.windows(2).any(|pair| pair[0] > pair[1]) {
+            let mut keyed: Vec<(usize, Arc<str>, Value)> = key_entries
+                .iter()
+                .copied()
+                .zip(std::mem::take(&mut map))
+                .map(|(entry, (key, value))| (entry, key, value))
+                .collect();
+            keyed.sort_by_key(|(entry, ..)| *entry);
+            map = keyed
+                .into_iter()
+                .map(|(_, key, value)| (key, value))
+                .collect();
         }
+        let poisoned_members = (!failed.is_empty()).then(|| {
+            Arc::new(
+                failed
+                    .into_iter()
+                    .filter_map(|(index, message)| {
+                        let Entry::Property(prop) = &entries[index] else {
+                            return None;
+                        };
+                        let rendered = !has_modifier(&prop.modifiers, Modifier::Hidden);
+                        self.rendered_member_failed |= rendered;
+                        Some((prop.name.clone(), PoisonedMember { message, rendered }))
+                    })
+                    .collect::<IndexMap<_, _>>(),
+            )
+        });
         // Evaluate deferred local lambdas (function definitions) AFTER all
         // properties so they capture overridden values (late binding).
         refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
@@ -4678,205 +4945,15 @@ impl Evaluator {
             parent_type_names: Vec::new(),
             parent_type_identities: Vec::new(),
             entry_scopes: entry_scopes.map(<[_]>::to_vec).unwrap_or_default(),
-            evaluated_properties: all_props.keys().map(|k| k.to_string()).collect(),
+            evaluated_properties: Arc::clone(&all_props),
             mapping_value_types: Vec::new(),
             deprecated: collect_deprecated(entries),
-            poisoned_members: None,
+            poisoned_members,
         };
         Ok(BodyOutcome::Done(Value::Object(
             Arc::new(map),
             Some(Arc::new(source)),
         )))
-    }
-
-    /// Re-evaluate the module members named in `members` (see
-    /// `module_dependent_members`) in declaration order against the current
-    /// module scope, so class bodies see the latest `module` snapshot and the
-    /// locals using those classes see the new class values. A member that
-    /// still fails is poisoned, which surfaces its error when it is used.
-    fn refresh_module_members(
-        &mut self,
-        module: &Module,
-        members: &indexmap::IndexSet<String>,
-        scope: &mut Scope,
-        module_props: &mut Arc<ObjectMap>,
-        poisoned_locals: &PoisonedLocals,
-        depth: usize,
-    ) -> Result<()> {
-        // New values of the module object's members, written to the map
-        // behind `this`/`module` in one batch: the map is shared with the
-        // scopes the classes captured, so each write copies it. A member that
-        // reads a pending member as `module.C` gets the batch written first.
-        let mut pending: Vec<(String, Option<Value>)> = Vec::new();
-        // `members` is in dependency order (see `module_dependent_members`).
-        let member_entries: HashMap<&str, &Entry> = module
-            .body
-            .iter()
-            .filter(|entry| {
-                matches!(
-                    entry,
-                    Entry::ClassDef(..) | Entry::TypeAlias(..) | Entry::Property(_)
-                )
-            })
-            .filter_map(|entry| Some((entry_member_name(entry)?.as_str(), entry)))
-            .filter(|(name, _)| members.contains(*name))
-            .collect();
-        let ordered: Vec<&Entry> = members
-            .iter()
-            .filter_map(|name| member_entries.get(name.as_str()).copied())
-            .collect();
-        let mut todo = ordered.clone();
-        // One pass normally suffices. If a cycle left a member that reads
-        // another one ahead of it, and that one recovered in this pass, the
-        // reader is refreshed again, for at most one pass per member. In those
-        // later passes every member that is re-bound counts as changed (a
-        // function re-bound to a lambda capturing a recovered class), so its
-        // readers are refreshed in turn.
-        for pass in 0..ordered.len() {
-            let mut position: HashMap<&str, usize> = HashMap::default();
-            let mut changed: Vec<(String, usize)> = Vec::new();
-            for entry in todo.iter().copied() {
-                if !pending.is_empty() && member_reads_pending(entry, &pending) {
-                    flush_module_members(scope, module_props, &mut pending);
-                }
-                let Some(entry_name) = entry_member_name(entry) else {
-                    continue;
-                };
-                let was_bound = scope.get(entry_name).is_some();
-                'entry: {
-                    // Classes and module functions are also members of the module
-                    // object behind `this`/`module`; locals and type aliases are not.
-                    let (name, result, module_member) = match entry {
-                        Entry::ClassDef(name, class_mods, parent, body)
-                            if members.contains(name) =>
-                        {
-                            (
-                                name,
-                                self.eval_class_def(
-                                    name,
-                                    class_mods,
-                                    parent.as_deref(),
-                                    body,
-                                    scope,
-                                    depth,
-                                ),
-                                true,
-                            )
-                        }
-                        Entry::TypeAlias(name, ty) if members.contains(name) => {
-                            match type_alias_target(ty)
-                                .and_then(|target| poisoned_member(scope, target))
-                            {
-                                Some(message) => {
-                                    scope.set_member_poison(name, Some(message.clone()));
-                                    scope.redeclare_poisoned(name.clone(), message);
-                                }
-                                None => {
-                                    scope.set_member_poison(name, None);
-                                    self.eval_type_alias(name, ty, scope);
-                                }
-                            }
-                            break 'entry;
-                        }
-                        Entry::Property(prop) if members.contains(&prop.name) => {
-                            let Some(expr) = &prop.value else {
-                                break 'entry;
-                            };
-                            // A module function is bound when the property pass
-                            // reaches it; only re-bind it once it has been.
-                            let is_local = has_modifier(&prop.modifiers, Modifier::Local);
-                            if !is_local && scope.get(&prop.name).is_none() {
-                                break 'entry;
-                            }
-                            // A typed local is checked as when first bound, and
-                            // one that failed its check against the finished
-                            // module (a poison-and-retry pass) stays failed:
-                            // a refresh must not rebind it unchecked.
-                            let result = match poisoned_locals.get(&local_key(prop, &Rc::from([])))
-                            {
-                                Some(message) if is_local => Err(Error::Eval(message.clone())),
-                                _ => match self.eval_expr(expr, scope, depth) {
-                                    Ok(value) if is_local && prop.type_ann.is_some() => {
-                                        match self
-                                            .typed_local_failure(prop, &value, scope, depth)?
-                                        {
-                                            LocalCheck::Failed(message) => {
-                                                Err(Error::Eval(message))
-                                            }
-                                            LocalCheck::Passed | LocalCheck::Unresolved => {
-                                                Ok(value)
-                                            }
-                                        }
-                                    }
-                                    other => other,
-                                },
-                            };
-                            (&prop.name, result, !is_local)
-                        }
-                        _ => break 'entry,
-                    };
-                    let module_value = match result {
-                        Ok(value) => {
-                            if module_member {
-                                scope.set_member_poison(name, None);
-                            }
-                            scope.declare(name, value.clone());
-                            Some(value)
-                        }
-                        Err(Error::Eval(message)) => {
-                            // Only members of the module object, not locals, are
-                            // reported through `module.C`/`module["C"]`.
-                            if module_member {
-                                scope.set_member_poison(name, Some(message.clone()));
-                            }
-                            scope.redeclare_poisoned(name.clone(), message);
-                            None
-                        }
-                        Err(error) => return Err(error),
-                    };
-                    // Keep `this.C` and `module.C` in step with the bare name.
-                    if module_member
-                        && (module_value.is_some() || module_props.contains_key(name.as_str()))
-                    {
-                        pending.push((name.clone(), module_value));
-                    }
-                }
-                let index = position.len();
-                position.insert(entry_name.as_str(), index);
-                if (pass > 0 || !was_bound) && scope.get(entry_name).is_some() {
-                    changed.push((entry_name.clone(), index));
-                }
-            }
-            flush_module_members(scope, module_props, &mut pending);
-            if changed.is_empty() {
-                break;
-            }
-            // Members that read a member which changed after they were
-            // refreshed (or that weren't refreshed in this pass) are stale.
-            let stale: Vec<&Entry> = ordered
-                .iter()
-                .copied()
-                .filter(|entry| {
-                    let Some(name) = entry_member_name(entry) else {
-                        return false;
-                    };
-                    let at = position.get(name.as_str()).copied();
-                    let missed: Vec<(String, Option<Value>)> = changed
-                        .iter()
-                        .filter(|(changed, index)| {
-                            changed != name && at.is_none_or(|at| at < *index)
-                        })
-                        .map(|(changed, _)| (changed.clone(), None))
-                        .collect();
-                    !missed.is_empty() && member_reads_pending(entry, &missed)
-                })
-                .collect();
-            if stale.is_empty() {
-                break;
-            }
-            todo = stale;
-        }
-        Ok(())
     }
 
     /// Evaluate a class definition, optionally inheriting from a parent class.
@@ -4932,104 +5009,26 @@ impl Evaluator {
         // are checked against their declared types when an instance is
         // built, not when the class is defined.
         child_scope.defining_class = true;
-        let child_defaults =
-            self.eval_entries_checked(body, &child_scope, depth + 1, TypeChecks::Nothing)?;
-        if let Some(Value::Object(parent_map, parent_src)) = parent_val {
-            // Merge: parent defaults first, child overrides on top
-            let mut merged: ObjectMap = (*parent_map).clone();
-            if let Value::Object(child_map, child_src) = child_defaults {
-                for (k, v) in child_map.iter() {
-                    merged.insert(k.clone(), v.clone());
-                }
-                // Preserve the child's ObjectSource for late binding,
-                // but prepend parent entries so inherited props are available
-                let source = if let Some(child_arc) = child_src {
-                    let mut src = (*child_arc).clone();
-                    // Collect child property names (including dynamic string-key entries)
-                    let child_names: std::collections::HashSet<String> = body
-                        .iter()
-                        .filter_map(|e| match e {
-                            Entry::Property(p) => Some(p.name.clone()),
-                            Entry::DynProperty(Expr::String(s), _) => Some(s.clone()),
-                            _ => None,
-                        })
-                        .collect();
-                    if let Some(psrc) = parent_src {
-                        let mut combined_entries = Vec::new();
-                        let mut combined_entry_scopes = Vec::new();
-                        let mut combined_evaluated_properties = Vec::new();
-                        let mut inherited_property_values = IndexMap::new();
-                        // One snapshot for every entry of the parent's body, so
-                        // they resolve each other as members of the same body.
-                        let parent_scope = Arc::new({
-                            let mut captured = capture_object_source_scope(&psrc);
-                            captured.body_members.extend(
-                                psrc.entries
-                                    .iter()
-                                    .enumerate()
-                                    .filter(|(index, _)| {
-                                        psrc.entry_scopes.get(*index).is_none_or(Option::is_none)
-                                    })
-                                    .filter_map(|(_, entry)| entry_member_name(entry).cloned()),
-                            );
-                            captured
-                        });
-                        for (entry_index, pe) in psrc.entries.iter().enumerate() {
-                            if let Entry::Property(p) = pe
-                                && !child_names.contains(&p.name)
-                            {
-                                combined_entries.push(pe.clone());
-                                combined_entry_scopes.push(
-                                    psrc.entry_scopes
-                                        .get(entry_index)
-                                        .and_then(Clone::clone)
-                                        .or_else(|| Some(Arc::clone(&parent_scope))),
-                                );
-                                if psrc.evaluated_properties.contains(&p.name) {
-                                    combined_evaluated_properties.push(p.name.clone());
-                                    if let Some(value) = psrc.scope().get(p.name.as_str()) {
-                                        inherited_property_values
-                                            .insert(p.name.clone(), value.clone());
-                                    }
-                                }
-                            }
-                        }
-                        let child_entries = std::mem::take(&mut src.entries);
-                        let child_entry_scopes = std::mem::take(&mut src.entry_scopes);
-                        for (entry_index, entry) in
-                            Arc::unwrap_or_clone(child_entries).into_iter().enumerate()
-                        {
-                            combined_entries.push(entry);
-                            combined_entry_scopes
-                                .push(child_entry_scopes.get(entry_index).cloned().unwrap_or(None));
-                        }
-                        combined_evaluated_properties.extend(src.evaluated_properties);
-                        // Keep the ObjectSource invariant used by amendment
-                        // seeding: every evaluated property name resolves to
-                        // that property's value in `scope`, even when a child
-                        // module has a same-named lexical binding.
-                        for name in inherited_property_values.keys() {
-                            src.captured.parts_mut().declared.remove(name.as_str());
-                        }
-                        src.captured.parts_mut().values.extend(
-                            inherited_property_values
-                                .into_iter()
-                                .map(|(k, v)| (Arc::from(k), v)),
-                        );
-                        src.entries = combined_entries.into();
-                        src.entry_scopes = combined_entry_scopes;
-                        src.evaluated_properties = combined_evaluated_properties;
+        // A subclass body is evaluated as an amendment of the parent's
+        // defaults: each entry resolves names in the body it was written in
+        // first, then through the instance's other (inherited) members.
+        match parent_val {
+            Some(Value::Object(parent_map, Some(parent_src))) => {
+                self.eval_amended_object(&parent_map, &parent_src, body, &child_scope, depth)
+            }
+            Some(Value::Object(parent_map, None)) => {
+                let child_defaults = self.eval_entries(body, &child_scope, depth + 1)?;
+                let mut merged: ObjectMap = (*parent_map).clone();
+                let source = match child_defaults {
+                    Value::Object(child_map, source) => {
+                        merged.extend(child_map.iter().map(|(k, v)| (k.clone(), v.clone())));
+                        source
                     }
-                    Some(Arc::new(src))
-                } else {
-                    None
+                    _ => None,
                 };
                 Ok(Value::Object(Arc::new(merged), source))
-            } else {
-                Ok(Value::Object(Arc::new(merged), None))
             }
-        } else {
-            Ok(child_defaults)
+            _ => self.eval_entries(body, &child_scope, depth + 1),
         }
         .map(|val| {
             // Set is_open flag and class_name on the result's ObjectSource
@@ -5067,6 +5066,13 @@ impl Evaluator {
                 let mut map = map;
                 Arc::make_mut(&mut map).retain(|key, _| !schema_member_names.contains(&**key));
                 let mut new_src = Arc::unwrap_or_clone(src);
+                // A class is not data: a default that failed matters only when
+                // an instance is built (which evaluates it again) or it is read.
+                if let Some(poisoned) = &mut new_src.poisoned_members {
+                    for member in Arc::make_mut(poisoned).values_mut() {
+                        member.rendered = false;
+                    }
+                }
                 new_src.is_open = is_open;
                 new_src.type_name = Some(class_name.to_string());
                 new_src.type_identity = Some(scope.runtime_type_identity(class_name));
@@ -5767,11 +5773,9 @@ impl Evaluator {
         // Hidden properties are absent from the rendered map but still
         // accessible through super. Mapping keys, in contrast, need the map:
         // they need not have a binding in the lexical scope.
-        for name in &base_source.evaluated_properties {
-            if !parent_members.contains_key(name.as_str())
-                && let Some(value) = base_source.scope().get(name.as_str())
-            {
-                parent_members.insert(name.as_str().into(), value.clone());
+        for (name, value) in base_source.evaluated_properties.iter() {
+            if !parent_members.contains_key(name) {
+                parent_members.insert(name.clone(), value.clone());
             }
         }
         amendment_scope.values.insert(
@@ -6429,17 +6433,18 @@ impl Evaluator {
                 // object built in the body sees its enclosing bindings through
                 // `outer`, so a body that mentions `outer` keeps everything, as
                 // does a body that names a type (see `NAMES_A_TYPE`).
-                let captured =
-                    Arc::new(if names.contains("outer") || names.contains(NAMES_A_TYPE) {
-                        scope.flatten()
-                    } else {
-                        scope.flatten_names(
-                            names
-                                .iter()
-                                .map(String::as_str)
-                                .chain(["this", "module", "super"]),
-                        )
-                    });
+                let mut captured = if names.contains("outer") || names.contains(NAMES_A_TYPE) {
+                    scope.flatten()
+                } else {
+                    scope.flatten_names(
+                        names
+                            .iter()
+                            .map(String::as_str)
+                            .chain(["this", "module", "super"]),
+                    )
+                };
+                record_captured_object_members(&mut captured, scope);
+                let captured = Arc::new(captured);
                 let captured_body = refs
                     .iter()
                     .filter(|name| scope.get(name).is_none())
@@ -6521,6 +6526,7 @@ impl Evaluator {
                             .cloned()
                             .collect();
                         let deprecated = collect_deprecated(&src_entries);
+                        let map = Arc::new(map);
                         let source = ObjectSource {
                             entries: src_entries.into(),
                             captured: SourceScope::lazy(
@@ -6535,12 +6541,12 @@ impl Evaluator {
                             parent_type_names: Vec::new(),
                             parent_type_identities: Vec::new(),
                             entry_scopes: Vec::new(),
-                            evaluated_properties: map.keys().map(|k| k.to_string()).collect(),
+                            evaluated_properties: Arc::clone(&map),
                             mapping_value_types: generic_params.iter().skip(1).cloned().collect(),
                             deprecated,
                             poisoned_members: None,
                         };
-                        Ok(Value::Object(Arc::new(map), Some(Arc::new(source))))
+                        Ok(Value::Object(map, Some(Arc::new(source))))
                     }
                     Some("Dynamic") => self.eval_entries(entries, scope, depth + 1),
                     _ => {
@@ -6637,7 +6643,7 @@ impl Evaluator {
                                             .parent_type_identities
                                             .clone(),
                                         entry_scopes: Vec::new(),
-                                        evaluated_properties: Vec::new(),
+                                        evaluated_properties: Arc::default(),
                                         mapping_value_types: Vec::new(),
                                         deprecated: merge_deprecated(&base_src.deprecated, entries),
                                         poisoned_members: None,
@@ -6674,7 +6680,7 @@ impl Evaluator {
                                 parent_type_names: Vec::new(),
                                 parent_type_identities: Vec::new(),
                                 entry_scopes: Vec::new(),
-                                evaluated_properties: Vec::new(),
+                                evaluated_properties: Arc::default(),
                                 mapping_value_types: Vec::new(),
                                 deprecated,
                                 poisoned_members: None,
@@ -7063,12 +7069,8 @@ impl Evaluator {
         // Lambda call
         if let Value::Lambda(params, body, captured) = func_val {
             let mut call_scope = Scope::for_call(&captured);
-            // If we're inside a method call context (scope has `this` as an Object),
-            // layer the instance's properties so local functions see overridden values
             if let Some(Value::Object(this_map, _)) = scope.get("this") {
-                for (k, v) in this_map.iter() {
-                    call_scope.set(k, v.clone());
-                }
+                bind_instance_members(&mut call_scope, &captured, this_map);
             }
             // Bind arguments to parameters
             let mut evaled_args = Vec::new();
@@ -7132,11 +7134,7 @@ impl Evaluator {
             && let Some(Value::Lambda(params, body, captured)) = map.get(method)
         {
             let mut call_scope = Scope::for_call(captured);
-            // Layer in all instance properties, including lambdas, so local
-            // functions called by this method see overrides.
-            for (k, v) in map.iter() {
-                call_scope.set(k, v.clone());
-            }
+            bind_instance_members(&mut call_scope, captured, map);
             call_scope.set("this", obj.clone());
             for (i, param) in params.iter().enumerate() {
                 if let Some(arg) = evaled_args.get(i) {
@@ -7753,7 +7751,7 @@ impl Evaluator {
                                         parent_type_names: src.parent_type_names.clone(),
                                         parent_type_identities: src.parent_type_identities.clone(),
                                         entry_scopes: Vec::new(),
-                                        evaluated_properties: Vec::new(),
+                                        evaluated_properties: Arc::default(),
                                         mapping_value_types: Vec::new(),
                                         deprecated: merge_deprecated(&src.deprecated, body),
                                         poisoned_members: None,

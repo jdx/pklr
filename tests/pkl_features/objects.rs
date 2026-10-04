@@ -4592,15 +4592,15 @@ lambda = mk("y")
 }
 
 #[test]
-fn module_in_class_body_before_property_is_evaluated_reports_error() {
-    let err = eval_fails(
+fn module_in_class_body_reads_property_declared_after_use() {
+    let val = eval(
         r#"
 class C { v = module.expected }
 result = new C {}
 expected = "b"
 "#,
     );
-    assert!(err.contains("expected"), "{err}");
+    assert_eq!(val["result"], serde_json::json!({"v": "b"}));
 }
 
 #[test]
@@ -4738,9 +4738,10 @@ fn functions_reading_module_dynamically_are_refreshed() {
 }
 
 #[test]
-fn failed_class_reports_error_through_every_member_read() {
+fn class_default_failure_surfaces_through_instances_from_every_member_read() {
     for read in ["module[\"C\"]", "this[\"C\"]", "module?.C", "this?.C"] {
-        let src = format!("class C {{ v = module.missing }}\nresult = {read}\n");
+        let src =
+            format!("class C {{ v = module.missing }}\nlocal c = {read}\nresult = new c {{}}\n");
         let err = eval_fails(&src);
         assert!(err.contains("missing"), "{read}: {err}");
     }

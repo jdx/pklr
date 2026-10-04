@@ -1,0 +1,3 @@
+a = 9
+m = new Mapping { ["k"] { a = 1 } }
+n = (m) { ["k"] { b = a } }

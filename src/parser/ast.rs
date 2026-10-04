@@ -78,6 +78,9 @@ pub enum Modifier {
     Abstract,
     Open,
     External,
+    /// Declared with `function`: a method, not a property, so it is never
+    /// rendered.
+    Function,
 }
 
 #[derive(Debug, Clone, PartialEq)]

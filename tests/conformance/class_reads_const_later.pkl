@@ -1,0 +1,3 @@
+class C { x = v }
+res = new C {}
+const v = 3
