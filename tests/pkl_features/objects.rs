@@ -1820,6 +1820,27 @@ obj { local checked: Int(this < limit) = 1; when (true) { limit = 2 }; out = che
 }
 
 #[test]
+fn deferred_local_check_prefers_enclosing_binding_over_inherited_member() {
+    // The enclosing `local limit = 2` wins over the inherited `limit = 10`.
+    let message = eval_fails(
+        r#"
+local limit = 2
+base { limit = 10 }
+obj = (base) { local checked: Int(this < limit) = 3; out = checked }
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+    let json = eval(
+        r#"
+local limit = 5
+base { limit = 1 }
+obj = (base) { local checked: Int(this < limit) = 3; out = checked }
+"#,
+    );
+    assert_eq!(json["obj"]["out"], 3);
+}
+
+#[test]
 fn amendment_keeps_inherited_typed_local_lazy() {
     let json = eval(
         r#"

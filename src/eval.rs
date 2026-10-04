@@ -3350,18 +3350,39 @@ impl Evaluator {
                 continue;
             };
             // Members a `for`/`when` produced are in `all_props` but not bound
-            // by name in the body's scope; layer every finished member over
-            // the local's scope so they replace outer bindings too.
-            let mut check_scope = scope_for_object_entry(
+            // by name in the body's scope. Layer the finished members over the
+            // local's scope: those written in the same body as the local
+            // (directly or by its generators) replace outer bindings, while
+            // members it inherits (from a base object or class) do not
+            // override a binding the entry's scope resolves, since Pkl looks
+            // up enclosing names before inherited members.
+            let entry_scope = scope_for_object_entry(
                 entry_index,
                 &child_scope,
                 entry_scopes,
                 &entry_owners,
                 own_body_scope,
-            )
-            .child();
+            );
+            let owner = |index: usize| {
+                entry_scopes
+                    .and_then(|scopes| scopes.get(index))
+                    .and_then(Option::as_ref)
+                    .map(Arc::as_ptr)
+            };
+            let local_owner = owner(entry_index);
+            let same_body_members = entries
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| owner(*index) == local_owner)
+                .flat_map(|(_, entry)| body_member_names(std::slice::from_ref(entry)))
+                .collect::<HashSet<_>>();
+            let mut check_scope = entry_scope.child();
             for (name, member) in all_props.iter() {
-                check_scope.set(name.clone(), member.clone());
+                let keeps_own_binding = !same_body_members.contains(name)
+                    && (entry_scope.get(name).is_some() || entry_scope.poison_of(name).is_some());
+                if !keeps_own_binding {
+                    check_scope.set(name.clone(), member.clone());
+                }
             }
             if let LocalCheck::Failed(message) = self
                 .typed_local_failure(prop, &value, &check_scope, depth)
