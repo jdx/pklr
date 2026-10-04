@@ -16,8 +16,7 @@ default = [
   "blocking",
   "miette-diagnostics",
 ]
-parse = []
-eval-core = ["parse", "dep:pollster", "dep:url"]
+eval-core = ["dep:indexmap", "dep:pollster", "dep:rustc-hash", "dep:serde_json", "dep:url"]
 native-io = ["eval-core"]
 http = ["eval-core", "dep:reqwest"]
 package-zip-core = ["native-io", "dep:zip"]
@@ -27,10 +26,10 @@ blocking = ["package-zip-core", "dep:rustls", "dep:ureq"]
 async = ["native-io", "http", "dep:async-recursion", "dep:tokio"]
 
 [dependencies]
-indexmap    = "2"
+indexmap    = { version = "2", optional = true }
 miette     = { version = "7", features = ["derive"], optional = true }
-rustc-hash = "2"
-serde_json = "1"
+rustc-hash = { version = "2", optional = true }
+serde_json = { version = "1", optional = true }
 thiserror  = "2"
 async-recursion = { version = "1", optional = true }
 pollster         = { version = "1", optional = true }

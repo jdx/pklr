@@ -354,7 +354,7 @@ pub(super) fn type_default_value(ty: &crate::parser::TypeExpr, scope: &Scope) ->
         TypeExpr::Named(name) if name == "Null" => Some(Value::Null),
         TypeExpr::Named(name) => {
             if let Some(value) = string_literal_type_value(name) {
-                return Some(Value::String(value.to_string()));
+                return Some(Value::String(value.into()));
             }
             if let Some(alias) = scope.get_type_alias(name).cloned() {
                 return type_default_value(&alias, scope);
@@ -362,8 +362,8 @@ pub(super) fn type_default_value(ty: &crate::parser::TypeExpr, scope: &Scope) ->
             type_default_for_name(name, scope)
         }
         TypeExpr::Generic(name, _) => match name.as_str() {
-            "Collection" | "List" | "Set" | "Listing" => Some(Value::List(Vec::new())),
-            "Map" | "Mapping" => Some(Value::Object(Arc::new(IndexMap::new()), None)),
+            "Collection" | "List" | "Set" | "Listing" => Some(Value::List(Vec::new().into())),
+            "Map" | "Mapping" => Some(Value::Object(Arc::default(), None)),
             _ => resolve_dotted(scope, name),
         },
         TypeExpr::Union(variants) => variants
@@ -378,8 +378,8 @@ pub(super) fn type_default_for_name(name: &str, scope: &Scope) -> Option<Value> 
     let base_name = name.split('<').next().unwrap_or(name);
     match base_name {
         "Null" => Some(Value::Null),
-        "Collection" | "List" | "Set" | "Listing" => Some(Value::List(Vec::new())),
-        "Map" | "Mapping" => Some(Value::Object(Arc::new(IndexMap::new()), None)),
+        "Collection" | "List" | "Set" | "Listing" => Some(Value::List(Vec::new().into())),
+        "Map" | "Mapping" => Some(Value::Object(Arc::default(), None)),
         "String" | "Boolean" | "Bool" | "Int" | "Float" | "Number" | "Any" | "Dynamic"
         | "Duration" | "DataSize" | "Pair" | "Regex" => None,
         other => resolve_dotted(scope, other),
@@ -457,7 +457,7 @@ pub(super) fn is_unresolved_template_error(message: &str) -> bool {
 
 pub(super) fn require_str_arg<'a>(args: &'a [Value], idx: usize, method: &str) -> Result<&'a str> {
     match args.get(idx) {
-        Some(Value::String(s)) => Ok(s.as_str()),
+        Some(Value::String(s)) => Ok(&**s),
         Some(other) => Err(Error::Eval(format!(
             "{method}() requires a String argument, got {}",
             value_type_name(other)
@@ -482,14 +482,14 @@ pub(super) fn value_type_name(v: &Value) -> &'static str {
     }
 }
 
-pub(super) fn value_to_key(v: &Value) -> Result<String> {
+pub(super) fn value_to_key(v: &Value) -> Result<Arc<str>> {
     match v {
-        Value::String(s) => Ok(s.clone()),
-        Value::Int(n) => Ok(n.to_string()),
-        Value::Bool(b) => Ok(b.to_string()),
-        Value::Float(f) => Ok(f.to_string()),
+        Value::String(s) => Ok(Arc::clone(s)),
+        Value::Int(n) => Ok(n.to_string().into()),
+        Value::Bool(b) => Ok(b.to_string().into()),
+        Value::Float(f) => Ok(f.to_string().into()),
         Value::Object(_, _) | Value::List(_) | Value::Lambda(..) | Value::Null => {
-            Ok(value_to_display(v))
+            Ok(value_to_display(v).into())
         }
     }
 }
@@ -500,7 +500,7 @@ pub(super) fn value_to_display(v: &Value) -> String {
         Value::Bool(b) => b.to_string(),
         Value::Int(n) => n.to_string(),
         Value::Float(f) => f.to_string(),
-        Value::String(s) => s.clone(),
+        Value::String(s) => s.to_string(),
         _ => format!("{v:?}"),
     }
 }
@@ -541,7 +541,7 @@ pub(super) fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
     use crate::parser::TypeExpr;
     match ty {
         TypeExpr::Named(name) if string_literal_type_value(name).is_some() => {
-            matches!(val, Value::String(actual) if Some(actual.as_str()) == string_literal_type_value(name))
+            matches!(val, Value::String(actual) if Some(&**actual) == string_literal_type_value(name))
         }
         TypeExpr::Named(name) => match name.strip_prefix('*').unwrap_or(name) {
             "Null" => is_null_value(val),
@@ -699,9 +699,9 @@ pub(super) fn add_values(l: Value, r: Value) -> Result<Value> {
         (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
         (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 + b)),
         (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a + b as f64)),
-        (Value::String(a), Value::String(b)) => Ok(Value::String(a + &b)),
+        (Value::String(a), Value::String(b)) => Ok(Value::String(format!("{a}{b}").into())),
         (Value::List(mut a), Value::List(b)) => {
-            a.extend(b);
+            Arc::make_mut(&mut a).extend(b.iter().cloned());
             Ok(Value::List(a))
         }
         (Value::Object(mut a, _), Value::Object(b, _)) => {
@@ -790,8 +790,8 @@ pub(super) fn merge_values(base: Value, overlay: Value) -> Value {
 }
 
 pub(super) fn make_unit_object(value: Value, unit: &str) -> Value {
-    let mut map = IndexMap::new();
-    map.insert("value".to_string(), value);
-    map.insert("unit".to_string(), Value::String(unit.to_string()));
+    let mut map = ObjectMap::default();
+    map.insert("value".into(), value);
+    map.insert("unit".into(), Value::String(unit.into()));
     Value::Object(Arc::new(map), None)
 }

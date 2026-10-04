@@ -3,7 +3,7 @@ use super::*;
 pub(super) fn refresh_this_aliases(
     scope: &mut Scope,
     aliases: &[String],
-    properties: &Arc<IndexMap<String, Value>>,
+    properties: &Arc<ObjectMap>,
 ) {
     let snapshot = Value::Object(Arc::clone(properties), None);
     scope.set("this", snapshot.clone());
@@ -30,8 +30,8 @@ pub(super) fn release_this_aliases(scope: &mut Scope, aliases: &[String]) {
 /// `module` snapshots of the property map so it grows in place.
 pub(super) fn module_props_insert(
     scope: &mut Scope,
-    properties: &mut Arc<IndexMap<String, Value>>,
-    key: String,
+    properties: &mut Arc<ObjectMap>,
+    key: impl Into<Arc<str>>,
     value: Value,
 ) {
     for name in ["this", "module"] {
@@ -41,7 +41,7 @@ pub(super) fn module_props_insert(
             *slot = Value::Null;
         }
     }
-    Arc::make_mut(properties).insert(key, value);
+    Arc::make_mut(properties).insert(key.into(), value);
 }
 
 /// Write refreshed module members (`None`: the member failed and is
@@ -50,7 +50,7 @@ pub(super) fn module_props_insert(
 /// both to the updated map.
 pub(super) fn flush_module_members(
     scope: &mut Scope,
-    properties: &mut Arc<IndexMap<String, Value>>,
+    properties: &mut Arc<ObjectMap>,
     pending: &mut Vec<(String, Option<Value>)>,
 ) {
     if pending.is_empty() {
@@ -67,10 +67,10 @@ pub(super) fn flush_module_members(
     for (name, value) in pending.drain(..) {
         match value {
             Some(value) => {
-                map.insert(name, value);
+                map.insert(name.into(), value);
             }
             None => {
-                map.shift_remove(&name);
+                map.shift_remove(name.as_str());
             }
         }
     }
@@ -82,19 +82,19 @@ pub(super) fn flush_module_members(
 pub(super) fn props_insert(
     scope: &mut Scope,
     aliases: &[String],
-    properties: &mut Arc<IndexMap<String, Value>>,
-    key: String,
+    properties: &mut Arc<ObjectMap>,
+    key: impl Into<Arc<str>>,
     value: Value,
 ) {
     release_this_aliases(scope, aliases);
-    Arc::make_mut(properties).insert(key, value);
+    Arc::make_mut(properties).insert(key.into(), value);
 }
 
 pub(super) fn props_extend(
     scope: &mut Scope,
     aliases: &[String],
-    properties: &mut Arc<IndexMap<String, Value>>,
-    entries: impl Iterator<Item = (String, Value)>,
+    properties: &mut Arc<ObjectMap>,
+    entries: impl Iterator<Item = (Arc<str>, Value)>,
 ) {
     release_this_aliases(scope, aliases);
     Arc::make_mut(properties).extend(entries);
