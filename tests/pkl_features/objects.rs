@@ -1316,6 +1316,109 @@ c = new C {}
 }
 
 #[test]
+fn module_constraint_reads_later_property() {
+    let json = eval(
+        r#"
+checked: Int(this < limit) = 1
+limit = 2
+"#,
+    );
+    assert_eq!(json["checked"], 1);
+    let message = eval_fails(
+        r#"
+checked: Int(this < limit) = 3
+limit = 2
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+}
+
+#[test]
+fn object_constraint_reads_later_property() {
+    let json = eval(
+        r#"
+obj {
+  checked: Int(this < limit) = 1
+  limit = 2
+}
+"#,
+    );
+    assert_eq!(json["obj"]["checked"], 1);
+    let message = eval_fails(
+        r#"
+obj {
+  checked: Int(this < limit) = 3
+  limit = 2
+}
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+}
+
+#[test]
+fn local_constraint_reads_later_property() {
+    let json = eval(
+        r#"
+local checked: Int(this < limit) = 1
+limit = 2
+out = checked
+obj {
+  local inner: Int(this < limit) = 1
+  limit = 2
+  out = inner
+}
+"#,
+    );
+    assert_eq!(json["out"], 1);
+    assert_eq!(json["obj"]["out"], 1);
+}
+
+#[test]
+fn alias_of_unmodeled_generic_is_not_checked() {
+    let json = eval(
+        r#"
+typealias F = Function1<String, String>
+f: F = (x) -> x
+out = f.apply("ok")
+"#,
+    );
+    assert_eq!(json["out"], "ok");
+}
+
+#[test]
+fn amendment_declared_property_is_checked() {
+    let message = eval_fails(
+        r#"
+base {}
+obj = (base) { checked: Int = "x" }
+"#,
+    );
+    assert!(
+        message.contains("property 'checked' expected Int"),
+        "{message}"
+    );
+    let json = eval(
+        r#"
+base { limit = 2 }
+obj = (base) { checked: Int(this < limit) = 1 }
+"#,
+    );
+    assert_eq!(json["obj"]["checked"], 1);
+}
+
+#[test]
+fn local_checked_against_alias_declared_later() {
+    let message = eval_fails(
+        r#"
+local bad: IsB = "x"
+typealias IsB = String(this == "b")
+out = bad
+"#,
+    );
+    assert!(message.contains("property 'bad' expected IsB"), "{message}");
+}
+
+#[test]
 fn type_defaults_cover_literals_unions_and_collections() {
     let json = eval(
         r#"

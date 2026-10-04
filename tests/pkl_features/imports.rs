@@ -2277,6 +2277,26 @@ async fn import_glob_in_a_base_keeps_modules_its_children_read() {
 }
 
 #[tokio::test]
+async fn module_imported_by_class_body_checks_declared_types() {
+    // Skipping class default checks must not skip the declared types of a
+    // module imported while the class body is evaluated.
+    let temp = TestTempDir::new("pklr_test_class_body_import_checks_types");
+    let dir = temp.path();
+    std::fs::write(dir.join("dep.pkl"), "checked: Int = \"x\"\n").unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "class C {\n  dep = import(\"dep.pkl\")\n}\nc = new C {}\n",
+    )
+    .unwrap();
+
+    let err = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("property 'checked' expected Int"), "{err}");
+}
+
+#[tokio::test]
 async fn narrowed_import_follows_type_alias_constraints() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_type_alias");
     let dir = temp.path();

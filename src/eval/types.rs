@@ -396,10 +396,29 @@ pub(super) fn value_is_class_type(val: &Value, name: &str, scope: &Scope) -> Opt
 }
 
 pub(super) fn type_is_runtime_checkable(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
+    type_is_runtime_checkable_inner(ty, scope, &mut Vec::new())
+}
+
+/// Type aliases are resolved (following chains, guarding against cycles)
+/// before deciding, so an alias is checkable exactly when its target is.
+fn type_is_runtime_checkable_inner(
+    ty: &crate::parser::TypeExpr,
+    scope: &Scope,
+    resolving: &mut Vec<String>,
+) -> bool {
     use crate::parser::TypeExpr;
     match ty {
         TypeExpr::Named(name) => {
             let runtime_name = name.strip_prefix('*').unwrap_or(name);
+            if let Some(alias) = scope.get_type_alias(runtime_name) {
+                if resolving.iter().any(|seen| seen == runtime_name) {
+                    return false;
+                }
+                resolving.push(runtime_name.to_string());
+                let checkable = type_is_runtime_checkable_inner(alias, scope, resolving);
+                resolving.pop();
+                return checkable;
+            }
             string_literal_type_value(name).is_some()
                 || matches!(
                     runtime_name,
@@ -420,13 +439,12 @@ pub(super) fn type_is_runtime_checkable(ty: &crate::parser::TypeExpr, scope: &Sc
                         | "Function"
                         | "Any"
                 )
-                || scope.get_type_alias(runtime_name).is_some()
                 || resolve_dotted(scope, runtime_name).is_some()
         }
-        TypeExpr::Nullable(inner) => type_is_runtime_checkable(inner, scope),
+        TypeExpr::Nullable(inner) => type_is_runtime_checkable_inner(inner, scope, resolving),
         TypeExpr::Union(variants) => variants
             .iter()
-            .all(|variant| type_is_runtime_checkable(variant, scope)),
+            .all(|variant| type_is_runtime_checkable_inner(variant, scope, resolving)),
         // Only collection generics have a runtime representation to check;
         // other generics (`Function1<...>`, `Pair<...>`) are not modeled.
         TypeExpr::Generic(name, _) => {
@@ -442,7 +460,7 @@ pub(super) fn type_is_runtime_checkable(ty: &crate::parser::TypeExpr, scope: &Sc
                 .split('<')
                 .next()
                 .unwrap_or(base);
-            type_is_runtime_checkable(&TypeExpr::Named(runtime_name.into()), scope)
+            type_is_runtime_checkable_inner(&TypeExpr::Named(runtime_name.into()), scope, resolving)
         }
     }
 }
