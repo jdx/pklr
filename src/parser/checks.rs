@@ -211,7 +211,7 @@ impl Parser<'_> {
             .flat_map(|annotation| &annotation.body)
             .find_map(|entry| match entry {
                 Entry::Property(prop) if prop.name == "minPklVersion" => match &prop.value {
-                    Some(Expr::String(version)) => Some(version.as_str()),
+                    Some(Expr::String(version)) => Some(&**version),
                     _ => None,
                 },
                 _ => None,
