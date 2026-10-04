@@ -3914,9 +3914,6 @@ impl Evaluator {
         current_scope: &Scope,
         depth: usize,
     ) -> Result<Value> {
-        // Every amendment of a class instance goes through here: `new C {}`,
-        // property bodies, and entries of typed Mappings and Listings.
-        check_no_elements(base_source, overlay_entries)?;
         // A module object's source can carry only error metadata. It has no
         // entries to rebuild the object from, so amend the evaluated members.
         if base_source.is_metadata_only() {
@@ -3927,6 +3924,9 @@ impl Evaluator {
                 depth,
             );
         }
+        // Every amendment of a class instance goes through here: `new C {}`,
+        // property bodies, and entries of typed Mappings and Listings.
+        check_no_elements(base_source, overlay_entries)?;
         let base_entries = &base_source.entries;
         let base_scope = base_source.scope();
         // Build merged entry list preserving base order.
