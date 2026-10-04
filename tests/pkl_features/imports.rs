@@ -2620,9 +2620,23 @@ async fn narrowed_import_respects_builtins_redeclared_in_nested_bodies() {
         "amends \"base.pkl\"\nlength = 1\nresult {\n  typealias String = List\n  ok = 1 is String(length == 1)\n}\n",
     )
     .unwrap();
+    // Only the built-ins a base actually redefines count: `String` checks
+    // under an empty base, or one redefining only `List`, still bind the
+    // string's own `length`, so the module's unused `length` isn't read.
+    std::fs::write(dir.join("base_empty.pkl"), "").unwrap();
+    std::fs::write(
+        dir.join("dep_inherited_empty.pkl"),
+        "amends \"base_empty.pkl\"\nlength = throw(\"unused\")\nresult {\n  ok = \"b\" is String(length == 1)\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep_inherited_other.pkl"),
+        "extends \"base.pkl\"\nlength = throw(\"unused\")\nresult {\n  ok = \"b\" is String(length == 1)\n}\n",
+    )
+    .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"dep.pkl\" as Dep\nimport \"dep_direct.pkl\" as DepDirect\nimport \"dep_deeper.pkl\" as DepDeeper\nimport \"dep_inherited.pkl\" as DepInherited\nimport \"dep_inherited_nested.pkl\" as DepInheritedNested\nimport \"dep_collection.pkl\" as DepCollection\nimport \"dep_same_name.pkl\" as DepSameName\nimport \"dep_alias_sibling.pkl\" as DepAliasSibling\nimport \"dep_identical_shadowed.pkl\" as DepIdenticalShadowed\nimport \"dep_local.pkl\" as DepLocal\nimport \"dep_identical.pkl\" as DepIdentical\nimport \"dep_listing.pkl\" as DepListing\nimport \"dep_sibling.pkl\" as DepSibling\nimport \"dep_class.pkl\" as DepClass\nout = Dep.result.ok\noutDirect = DepDirect.result.ok\noutListing = DepListing.result.inner.ok\noutSibling = DepSibling.result.ok\noutClass = DepClass.result.ok\noutLocal = DepLocal.result.inner.ok\noutIdentical = DepIdentical.result.ok\noutIdenticalShadowed = DepIdenticalShadowed.result.ok\noutIdenticalShadowedDirect = DepIdenticalShadowed.result.okDirect\noutAliasSibling = DepAliasSibling.result.ok\noutSameName = DepSameName.result.ok\noutCollection = DepCollection.result.ok\noutCollectionFollowed = DepCollection.result.okFollowed\noutDeeper = DepDeeper.result.inner.ok\noutInherited = DepInherited.result.ok\noutInheritedNested = DepInheritedNested.result.ok\n",
+        "import \"dep.pkl\" as Dep\nimport \"dep_direct.pkl\" as DepDirect\nimport \"dep_inherited_empty.pkl\" as DepInheritedEmpty\nimport \"dep_inherited_other.pkl\" as DepInheritedOther\nimport \"dep_deeper.pkl\" as DepDeeper\nimport \"dep_inherited.pkl\" as DepInherited\nimport \"dep_inherited_nested.pkl\" as DepInheritedNested\nimport \"dep_collection.pkl\" as DepCollection\nimport \"dep_same_name.pkl\" as DepSameName\nimport \"dep_alias_sibling.pkl\" as DepAliasSibling\nimport \"dep_identical_shadowed.pkl\" as DepIdenticalShadowed\nimport \"dep_local.pkl\" as DepLocal\nimport \"dep_identical.pkl\" as DepIdentical\nimport \"dep_listing.pkl\" as DepListing\nimport \"dep_sibling.pkl\" as DepSibling\nimport \"dep_class.pkl\" as DepClass\nout = Dep.result.ok\noutDirect = DepDirect.result.ok\noutListing = DepListing.result.inner.ok\noutSibling = DepSibling.result.ok\noutClass = DepClass.result.ok\noutLocal = DepLocal.result.inner.ok\noutIdentical = DepIdentical.result.ok\noutIdenticalShadowed = DepIdenticalShadowed.result.ok\noutIdenticalShadowedDirect = DepIdenticalShadowed.result.okDirect\noutAliasSibling = DepAliasSibling.result.ok\noutSameName = DepSameName.result.ok\noutCollection = DepCollection.result.ok\noutCollectionFollowed = DepCollection.result.okFollowed\noutDeeper = DepDeeper.result.inner.ok\noutInherited = DepInherited.result.ok\noutInheritedNested = DepInheritedNested.result.ok\noutInheritedEmpty = DepInheritedEmpty.result.ok\noutInheritedOther = DepInheritedOther.result.ok\n",
     )
     .unwrap();
 
@@ -2645,6 +2659,8 @@ async fn narrowed_import_respects_builtins_redeclared_in_nested_bodies() {
     assert_eq!(val["outDeeper"], true);
     assert_eq!(val["outInherited"], true);
     assert_eq!(val["outInheritedNested"], true);
+    assert_eq!(val["outInheritedEmpty"], true);
+    assert_eq!(val["outInheritedOther"], true);
 }
 
 #[tokio::test]

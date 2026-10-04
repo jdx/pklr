@@ -339,12 +339,14 @@ fn mark_other_use(uses: &mut HashMap<String, ImportUse>, name: &str) {
     }
 }
 
-/// `inherits` is whether the module amends or extends another, whose type
-/// aliases checks here also resolve but this analysis doesn't see.
+/// `inherited_builtins` are the built-in type names (of
+/// `BINDING_BUILTIN_TYPES`) that a module this one amends or extends may
+/// redefine: checks here also resolve its type aliases, which this analysis
+/// doesn't see.
 pub(super) fn expand_requested_fields(
     entries: &[Entry],
     requested: &HashSet<String>,
-    inherits: bool,
+    inherited_builtins: &[&str],
 ) -> HashSet<String> {
     let property_names: HashSet<String> = entries
         .iter()
@@ -383,12 +385,10 @@ pub(super) fn expand_requested_fields(
             _ => None,
         })
         .collect();
-    // An inherited alias may redefine a built-in, so leave the built-ins this
-    // module doesn't define unresolved.
-    if inherits {
-        for builtin in BINDING_BUILTIN_TYPES {
-            module_aliases.entry(builtin).or_insert(None);
-        }
+    // Leave the built-ins an inherited alias may redefine (and this module
+    // doesn't) unresolved.
+    for builtin in inherited_builtins {
+        module_aliases.entry(builtin).or_insert(None);
     }
     let aliases = Some(&module_aliases);
     // An importer reading `dep.ClassName` needs the module properties the
@@ -563,7 +563,7 @@ fn constraint_bound_names(base: &str) -> &'static [&'static str] {
 
 /// The built-in types whose constraints bind `length` and `isEmpty`; see
 /// `constraint_bound_names`.
-const BINDING_BUILTIN_TYPES: &[&str] = &[
+pub(super) const BINDING_BUILTIN_TYPES: &[&str] = &[
     "String",
     "List",
     "Listing",

@@ -741,11 +741,14 @@ impl Evaluator {
         Ok(body)
     }
 
+    /// The names the modules `module` amends or extends (transitively) read,
+    /// adding to `type_names` the type aliases and classes they declare.
     fn inherited_reference_roots(
         &mut self,
         module: &Module,
         path: &Path,
         depth: usize,
+        type_names: &mut HashSet<String>,
     ) -> Result<HashSet<String>> {
         let mut refs = HashSet::new();
         if depth > self.max_depth {
@@ -760,10 +763,15 @@ impl Evaluator {
                 && let Ok(base_module) = parser::parse_named(&tokens, &source, &source_path)
             {
                 refs.extend(referenced_roots(&base_module.body));
+                type_names.extend(base_module.body.iter().filter_map(|entry| match entry {
+                    Entry::TypeAlias(name, _) | Entry::ClassDef(name, ..) => Some(name.clone()),
+                    _ => None,
+                }));
                 refs.extend(self.inherited_reference_roots(
                     &base_module,
                     Path::new(&source_path),
                     depth + 1,
+                    type_names,
                 )?);
             }
         }
@@ -1627,17 +1635,23 @@ impl Evaluator {
                 scope.set_module_identity(key, identity);
             }
         }
-        let requested_output_fields = requested_fields.as_ref().map(|fields| {
-            expand_requested_fields(
-                &module.body,
-                fields,
-                module.amends.is_some() || module.extends.is_some(),
-            )
-        });
+        let mut inherited_type_names = HashSet::new();
+        let inherited_references =
+            self.inherited_reference_roots(module, path, depth + 1, &mut inherited_type_names)?;
+        // Checks here also resolve the type aliases of the modules this one
+        // amends or extends, which may redefine a built-in.
+        let inherited_builtins: Vec<&str> = BINDING_BUILTIN_TYPES
+            .iter()
+            .copied()
+            .filter(|name| inherited_type_names.contains(*name))
+            .collect();
+        let requested_output_fields = requested_fields
+            .as_ref()
+            .map(|fields| expand_requested_fields(&module.body, fields, &inherited_builtins));
         let analysis_entries =
             analysis_entries_for_requested_fields(&module.body, requested_output_fields.as_ref());
         let mut referenced_imports = referenced_roots(&analysis_entries);
-        referenced_imports.extend(self.inherited_reference_roots(module, path, depth + 1)?);
+        referenced_imports.extend(inherited_references);
         let import_field_uses = import_field_uses(&analysis_entries);
 
         let inherited_local_paths: Vec<_> = module
@@ -2106,11 +2120,7 @@ impl Evaluator {
                 .map(Entry::Property)
                 .collect::<Vec<_>>();
             dependency_entries.extend(module.body.iter().cloned());
-            expand_requested_fields(
-                &dependency_entries,
-                fields,
-                module.amends.is_some() || module.extends.is_some(),
-            )
+            expand_requested_fields(&dependency_entries, fields, &inherited_builtins)
         });
 
         // Locals are evaluated before the main property pass, but `this` and
