@@ -2955,9 +2955,16 @@ async fn narrowed_import_reads_values_named_as_types() {
         "class C {\n  v = module.expected\n}\nlocal x = module.C\nexpected = \"b\"\nresult = new x {}\n",
     )
     .unwrap();
+    // A local in the body binds the name, so the module property it shadows
+    // isn't read.
+    std::fs::write(
+        dir.join("dep_shadowed.pkl"),
+        "class Item {\n  a: Int = 1\n}\nFoo = throw(\"unused\")\nresult {\n  local Foo = Item\n  x = new Foo {}\n}\n",
+    )
+    .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"dep_property.pkl\" as DepProperty\nimport \"dep_local.pkl\" as DepLocal\noutProperty = DepProperty.result\noutLocal = DepLocal.result\n",
+        "import \"dep_property.pkl\" as DepProperty\nimport \"dep_local.pkl\" as DepLocal\nimport \"dep_shadowed.pkl\" as DepShadowed\noutProperty = DepProperty.result\noutLocal = DepLocal.result\noutShadowed = DepShadowed.result.x\n",
     )
     .unwrap();
 
@@ -2966,4 +2973,5 @@ async fn narrowed_import_reads_values_named_as_types() {
         .unwrap();
     assert_eq!(val["outProperty"], serde_json::json!({ "a": 1 }));
     assert_eq!(val["outLocal"], serde_json::json!({ "v": "b" }));
+    assert_eq!(val["outShadowed"], serde_json::json!({ "a": 1 }));
 }

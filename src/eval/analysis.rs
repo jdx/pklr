@@ -485,13 +485,15 @@ pub(super) fn expand_requested_fields(
 /// type reference, or through a value read of its name when no module
 /// property has that name; a local through a value read.
 ///
-/// A type reference that names none of the module's type aliases or classes
-/// may name a property or local holding a class (`new x {}` with
-/// `local x = module.C`), so it is added to `refs` as a value read too.
+/// A type reference that names none of the module's type aliases or classes,
+/// and that no value binding around it shadows, may name a property or local
+/// holding a class (`new x {}` with `local x = module.C`; also a built-in
+/// name such as `String`, which a property can rebind), so it is added to
+/// `refs` as a value read too.
 fn follow_definitions(definitions: &Definitions, refs: &mut Names, aliases: Option<&TypeAliases>) {
     let shadows = Names::default();
     let types_as_values: Vec<String> = refs
-        .types
+        .unbound_types
         .iter()
         .filter(|name| !definitions.types.contains_key(name.as_str()))
         .cloned()
@@ -559,11 +561,14 @@ fn follow_definitions(definitions: &Definitions, refs: &mut Names, aliases: Opti
             }
         }
         for (deps, module_scope) in [(definition_refs, module_scope), (local_refs, true)] {
-            for dep in deps.types {
+            for dep in deps.unbound_types {
                 if !definitions.types.contains_key(dep.as_str()) && refs.values.insert(dep.clone())
                 {
                     pending.push((dep.clone(), module_scope, false));
                 }
+                refs.unbound_types.insert(dep);
+            }
+            for dep in deps.types {
                 refs.types.insert(dep.clone());
                 pending.push((dep, module_scope, true));
             }
@@ -666,19 +671,25 @@ struct Names {
     /// Type names: roots of annotations, `new T` and class parents, or type
     /// aliases and classes declared.
     types: HashSet<String>,
+    /// The unqualified type names in `types` that no enclosing value binding
+    /// shadows. One that names none of the module's type aliases or classes
+    /// may still name a module property or local holding a class (see
+    /// `follow_definitions`).
+    unbound_types: HashSet<String>,
 }
 
 impl Names {
     fn values(values: &HashSet<String>) -> Self {
         Names {
             values: values.clone(),
-            types: HashSet::new(),
+            ..Names::default()
         }
     }
 
     fn extend(&mut self, other: Names) {
         self.values.extend(other.values);
         self.types.extend(other.types);
+        self.unbound_types.extend(other.unbound_types);
     }
 
     /// Adds every name in either namespace to `names`, for callers that only
@@ -1588,6 +1599,9 @@ fn collect_name_root(name: &str, refs: &mut Names, shadows: &Names) {
     let qualified = root.len() < name.len();
     if !shadows.types.contains(root) {
         refs.types.insert(root.to_string());
+        if !qualified && !shadows.values.contains(root) {
+            refs.unbound_types.insert(root.to_string());
+        }
     }
     // The root of a qualified name (`Dep.Item`) is a module, which may be a
     // property holding one (`Dep = import(...)`), so it's read as a value too.
