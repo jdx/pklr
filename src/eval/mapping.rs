@@ -6,9 +6,9 @@ pub(super) fn refresh_this_aliases(
     properties: &Arc<IndexMap<String, Value>>,
 ) {
     let snapshot = Value::Object(Arc::clone(properties), None);
-    scope.set("this".into(), snapshot.clone());
+    scope.set("this", snapshot.clone());
     for alias in aliases {
-        scope.set(alias.clone(), snapshot.clone());
+        scope.set(alias, snapshot.clone());
         scope.mark_this_alias(alias);
     }
 }
@@ -75,8 +75,8 @@ pub(super) fn flush_module_members(
         }
     }
     let snapshot = Value::Object(Arc::clone(properties), None);
-    scope.set("this".into(), snapshot.clone());
-    scope.set("module".into(), snapshot);
+    scope.set("this", snapshot.clone());
+    scope.set("module", snapshot);
 }
 
 pub(super) fn props_insert(
@@ -354,33 +354,39 @@ pub(super) fn apply_mapping_type_annotation(
         return;
     };
 
-    let mut src = src_slot
-        .as_ref()
-        .map(|src| (**src).clone())
-        .unwrap_or_else(|| ObjectSource {
+    // Usually the source already records these types (a property's value
+    // re-tagged on every evaluation); copying it would duplicate its whole
+    // captured scope for nothing.
+    if let Some(src) = src_slot
+        && type_names
+            .iter()
+            .all(|name| src.mapping_value_types.contains(name))
+    {
+        return;
+    }
+    let src = src_slot.get_or_insert_with(|| {
+        Arc::new(ObjectSource {
             entries: Vec::new().into(),
-            scope: ScopeMap::default(),
-            scope_declared: NameSet::default(),
-            body_members: HashSet::new(),
+            captured: SourceScope::default(),
+            body_members: HashSet::default(),
             is_open: true,
             type_name: None,
             type_identity: None,
             parent_type_names: Vec::new(),
             parent_type_identities: Vec::new(),
-            scope_module_identities: IndexMap::new(),
-            scope_type_aliases: IndexMap::new(),
             entry_scopes: Vec::new(),
             evaluated_properties: Vec::new(),
             mapping_value_types: Vec::new(),
             deprecated: IndexMap::new(),
             poisoned_members: None,
-        });
+        })
+    });
+    let src = Arc::make_mut(src);
     for name in type_names {
         if !src.mapping_value_types.contains(&name) {
             src.mapping_value_types.push(name);
         }
     }
-    *src_slot = Some(Arc::new(src));
 }
 
 pub(super) fn mapping_value_type_names(type_ann: &crate::parser::TypeExpr) -> Vec<String> {

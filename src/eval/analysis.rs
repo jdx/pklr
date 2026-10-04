@@ -68,8 +68,8 @@ fn index_reads_key(alias: &str) -> String {
 }
 
 pub(super) fn import_field_uses(entries: &[Entry]) -> HashMap<String, ImportUse> {
-    let mut uses = HashMap::new();
-    let shadows = HashSet::new();
+    let mut uses = HashMap::default();
+    let shadows = HashSet::default();
     collect_entry_import_field_uses(entries, &mut uses, &shadows);
     uses
 }
@@ -315,7 +315,7 @@ pub(super) fn record_field_import_use(
             }
         }
         std::collections::hash_map::Entry::Vacant(entry) => {
-            entry.insert(ImportUse::Fields(HashSet::from([field.to_string()])));
+            entry.insert(ImportUse::Fields(HashSet::from_iter([field.to_string()])));
         }
     }
 }
@@ -509,7 +509,7 @@ fn follow_definitions(definitions: &Definitions, refs: &mut Names, aliases: Opti
         .map(|name| (name.clone(), false, true))
         .chain(refs.values.iter().map(|name| (name.clone(), false, false)))
         .collect();
-    let mut visited = HashSet::new();
+    let mut visited = HashSet::default();
     while let Some((name, module_scope, is_type)) = pending.pop() {
         let definition = definitions
             .types
@@ -814,7 +814,7 @@ fn narrow_aliases<'a>(
         return None;
     }
     let affected = |start: &'a str| {
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         let mut pending = vec![start];
         while let Some(name) = pending.pop() {
             if declared.contains(name) {
@@ -924,7 +924,7 @@ fn constraint_bound_names_resolving(
         return constraint_bound_names(base);
     };
     let mut base = base;
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     loop {
         if base.ends_with('?') {
             return &["this"];
@@ -1056,8 +1056,8 @@ pub(super) fn collect_sibling_field_refs_expr(
 }
 
 pub(super) fn property_reference_names(prop: &Property) -> HashSet<String> {
-    let mut refs = HashSet::new();
-    let shadows = HashSet::new();
+    let mut refs = HashSet::default();
+    let shadows = HashSet::default();
     if let Some(expr) = &prop.value {
         collect_expr_refs(expr, &mut refs, &shadows);
         collect_sibling_field_refs_expr(expr, &mut refs, true);
@@ -1341,7 +1341,7 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
                 Some((name, true, refs))
             }
             Entry::TypeAlias(name, ty) => {
-                let mut refs = HashSet::new();
+                let mut refs = HashSet::default();
                 collect_type_names(ty, &mut refs);
                 // `typealias Ok = Int(module.C.v == "b")` reads `C` when a
                 // value is checked against it.
@@ -1359,8 +1359,8 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
                     || matches!(prop.value, Some(Expr::Lambda(..))) =>
             {
                 let value = prop.value.as_ref()?;
-                let mut refs = HashSet::new();
-                collect_expr_refs(value, &mut refs, &HashSet::new());
+                let mut refs = HashSet::default();
+                collect_expr_refs(value, &mut refs, &HashSet::default());
                 // At module level `this` is the module object too.
                 collect_sibling_field_refs_expr(value, &mut refs, true);
                 Some((&prop.name, false, refs))
@@ -1368,7 +1368,7 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
             _ => None,
         })
         .collect();
-    let mut dependent = HashSet::new();
+    let mut dependent = HashSet::default();
     loop {
         let before = dependent.len();
         for (name, is_class, refs) in &members {
@@ -1469,7 +1469,7 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
 /// function) reads through the module object, as `module.C` (or `this.C`
 /// outside a class body, where `this` is the module).
 pub(super) fn qualified_module_member_refs(entry: &Entry) -> HashSet<String> {
-    let mut refs = HashSet::new();
+    let mut refs = HashSet::default();
     match entry {
         Entry::ClassDef(_, _, parent, body) => {
             collect_sibling_field_refs_entries(body, &mut refs);
@@ -1536,8 +1536,8 @@ pub(super) fn type_alias_target(ty: &crate::parser::TypeExpr) -> Option<&str> {
 /// Every name `entries` read or name as a type (an import used only in a
 /// type annotation, such as `x is Dep.Foo`, is still referenced).
 pub(super) fn referenced_roots(entries: &[Entry]) -> HashSet<String> {
-    let mut refs = HashSet::new();
-    let shadows = HashSet::new();
+    let mut refs = HashSet::default();
+    let shadows = HashSet::default();
     collect_entry_refs(entries, &mut refs, &shadows);
     refs
 }
@@ -1571,10 +1571,10 @@ fn collect_entry_refs_in(
     // body declares (other than by an identical redeclaration), keeping the
     // conservative reading of their constraints, and leave a redeclared
     // built-in unresolved (even without module aliases).
-    let no_aliases = TypeAliases::new();
+    let no_aliases = TypeAliases::default();
     let narrowed = {
         let aliases = aliases.unwrap_or(&no_aliases);
-        let mut declared = HashSet::new();
+        let mut declared = HashSet::default();
         collect_entries_type_decls(entries, aliases, &mut declared);
         let narrowed = narrow_aliases(aliases, &declared);
         with_builtins_unresolved(narrowed.as_ref().unwrap_or(aliases), entries, &declared)
@@ -1680,11 +1680,11 @@ fn collect_entry_refs_unnarrowed(
 // locals here can recurse when a local itself reads super.first or super.last.
 pub(super) fn with_listing_locals(expr: &Expr, locals: &[(String, Expr)]) -> Expr {
     let mut expr = expr.clone();
-    let mut refs = HashSet::new();
-    collect_expr_refs(&expr, &mut refs, &HashSet::new());
+    let mut refs = HashSet::default();
+    collect_expr_refs(&expr, &mut refs, &HashSet::default());
     for (name, value) in locals.iter().rev() {
         if refs.remove(name) {
-            collect_expr_refs(value, &mut refs, &HashSet::new());
+            collect_expr_refs(value, &mut refs, &HashSet::default());
             expr = Expr::Let(name.clone(), Box::new(value.clone()), Box::new(expr));
         }
     }
