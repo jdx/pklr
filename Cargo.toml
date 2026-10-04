@@ -42,7 +42,7 @@ zip             = { version = "8", default-features = false, features = ["deflat
 url             = { version = "2", optional = true }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 
 [[test]]
 name = "integration"

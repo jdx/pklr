@@ -1636,3 +1636,74 @@ fn dropped_evaluation_leaves_evaluator_usable() {
         .to_json();
     assert_eq!(json["answer"], 42);
 }
+
+/// Capabilities whose HTTP fetch waits for another task to supply the body.
+struct ChannelCapabilities {
+    body: Option<tokio::sync::oneshot::Receiver<String>>,
+}
+
+impl EvalCapabilities for ChannelCapabilities {
+    fn read_to_string<'a>(&'a mut self, path: &'a Path) -> BoxFuture<'a, pklr::Result<String>> {
+        Box::pin(async move { Err(pklr::Error::ImportNotFound(path.display().to_string())) })
+    }
+
+    fn path_exists<'a>(&'a mut self, _path: &'a Path) -> BoxFuture<'a, pklr::Result<bool>> {
+        Box::pin(async move { Ok(false) })
+    }
+
+    fn canonicalize<'a>(&'a mut self, path: &'a Path) -> BoxFuture<'a, pklr::Result<PathBuf>> {
+        Box::pin(async move { Ok(path.to_path_buf()) })
+    }
+
+    fn read_env<'a>(&'a mut self, _name: &'a str) -> BoxFuture<'a, pklr::Result<Option<String>>> {
+        Box::pin(async move { Ok(None) })
+    }
+
+    fn fetch_text<'a>(&'a mut self, url: &'a str) -> BoxFuture<'a, pklr::Result<String>> {
+        let body = self.body.take();
+        Box::pin(async move {
+            match body {
+                Some(body) => Ok(body.await.unwrap()),
+                None => Err(pklr::Error::ImportNotFound(url.to_string())),
+            }
+        })
+    }
+
+    fn fetch_bytes<'a>(&'a mut self, url: &'a str) -> BoxFuture<'a, pklr::Result<Vec<u8>>> {
+        Box::pin(async move { Err(pklr::Error::ImportNotFound(url.to_string())) })
+    }
+
+    fn temp_dir<'a>(&'a mut self, prefix: &'a str) -> BoxFuture<'a, pklr::Result<PathBuf>> {
+        Box::pin(async move { Err(pklr::Error::Unsupported(prefix.to_string())) })
+    }
+
+    fn glob<'a>(
+        &'a mut self,
+        _base: &'a Path,
+        _pattern: &'a str,
+    ) -> BoxFuture<'a, pklr::Result<Vec<PathBuf>>> {
+        Box::pin(async move { Ok(Vec::new()) })
+    }
+}
+
+/// A capability that waits on a sibling future in the caller's `join!` must
+/// not deadlock on a multi-threaded runtime.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn capability_can_wait_on_sibling_future() {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let mut evaluator = pklr::Evaluator::with_capabilities(ChannelCapabilities {
+        body: Some(receiver),
+    });
+
+    let (result, ()) = tokio::join!(
+        evaluator.eval_source(
+            "import \"http://example.test/Main.pkl\" as Main\nresult = Main.value\n",
+            Path::new("entry.pkl"),
+        ),
+        async move {
+            sender.send("value = 42\n".to_string()).unwrap();
+        }
+    );
+
+    assert_eq!(result.unwrap().to_json()["result"], 42);
+}

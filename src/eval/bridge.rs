@@ -10,6 +10,7 @@
 
 use std::collections::VecDeque;
 use std::future::poll_fn;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, Waker};
@@ -39,9 +40,17 @@ struct State {
 #[derive(Clone)]
 pub(crate) struct Bridge {
     state: Arc<Mutex<State>>,
+    /// Set when the async caller's future is dropped.
+    cancelled: Arc<AtomicBool>,
 }
 
 impl Bridge {
+    /// Whether the async caller has stopped waiting for the result, so the
+    /// worker should stop evaluating.
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
+    }
+
     fn send(&self, message: Message) -> bool {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.closed {
@@ -76,7 +85,7 @@ impl Bridge {
     }
 }
 
-fn cancelled() -> Error {
+pub(crate) fn cancelled() -> Error {
     Error::Eval("evaluation was cancelled".to_string())
 }
 
@@ -91,10 +100,11 @@ impl Drop for DoneGuard {
 
 /// Stops the worker's pending and future capability calls if the async
 /// caller's future is dropped before the worker finishes.
-struct CloseGuard(Arc<Mutex<State>>);
+struct CloseGuard(Arc<Mutex<State>>, Arc<AtomicBool>);
 
 impl Drop for CloseGuard {
     fn drop(&mut self) {
+        self.1.store(true, Ordering::Relaxed);
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         state.closed = true;
         // Dropping queued requests drops their reply senders, which wakes the
@@ -119,9 +129,11 @@ where
     R: Send + 'static,
 {
     let state = Arc::new(Mutex::new(State::default()));
-    let _close = CloseGuard(state.clone());
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let _close = CloseGuard(state.clone(), cancelled.clone());
     let bridge = Bridge {
         state: state.clone(),
+        cancelled,
     };
     let worker = std::thread::Builder::new()
         .name("pklr-eval".to_string())

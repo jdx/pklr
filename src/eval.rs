@@ -408,20 +408,26 @@ impl Evaluator {
 
     /// Run the synchronous `work` for an async caller.
     ///
-    /// On a multi-threaded tokio runtime it runs in place under
-    /// `block_in_place`, with HTTP fetches blocking on the host capabilities
-    /// while the runtime's other workers drive them. Anywhere else it runs on a
-    /// worker thread (see [`Evaluator::run_on_worker`]).
+    /// On a multi-threaded tokio runtime, with capabilities that have a
+    /// blocking counterpart, it runs in place under `block_in_place`, with HTTP
+    /// fetches blocking on the host capabilities while the runtime's other
+    /// workers drive them. Anywhere else it runs on a worker thread (see
+    /// [`Evaluator::run_on_worker`]).
     async fn run_async<A, R>(&mut self, arg: A, work: fn(&mut Evaluator, A) -> R) -> R
     where
         A: Send + 'static,
         R: Send + 'static,
     {
+        // Only capabilities with a blocking counterpart run in place: their
+        // remaining calls are HTTP fetches the runtime drives by itself, while
+        // other capabilities may wait on tasks that blocking here would stall
+        // (for example a sibling in the caller's `join!`).
         #[cfg(feature = "async")]
         if let Ok(handle) = tokio::runtime::Handle::try_current()
             && handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+            && let Some(local) = self.capabilities.blocking_capabilities()
         {
-            self.local_capabilities = self.capabilities.blocking_capabilities();
+            self.local_capabilities = Some(local);
             let result = tokio::task::block_in_place(|| work(self, arg));
             self.local_capabilities = None;
             return result;
@@ -433,8 +439,10 @@ impl Evaluator {
     /// calls without a blocking counterpart, served by this task, so async
     /// capabilities run on the caller's executor.
     ///
-    /// If the returned future is dropped before it finishes, the evaluator
-    /// keeps its capabilities and configuration but loses its caches.
+    /// If the returned future is dropped before it finishes, the worker stops
+    /// at its next expression, and the evaluator keeps its
+    /// capabilities, configuration and download caches. Per-evaluation caches
+    /// are reset by the next evaluation anyway.
     async fn run_on_worker<A, R>(&mut self, arg: A, work: fn(&mut Evaluator, A) -> R) -> R
     where
         A: Send + 'static,
@@ -478,6 +486,15 @@ impl Evaluator {
         result
     }
 
+    /// Fail if the async caller this evaluation runs for has gone away.
+    #[inline]
+    fn check_cancelled(&self) -> Result<()> {
+        match &self.bridge {
+            Some(bridge) if bridge.is_cancelled() => Err(bridge::cancelled()),
+            _ => Ok(()),
+        }
+    }
+
     /// An evaluator with this one's configuration and no capabilities.
     fn detached_copy(&self) -> Evaluator {
         let mut copy = Evaluator::with_capabilities(bridge::Detached);
@@ -487,6 +504,7 @@ impl Evaluator {
         copy.package_http_roots = self.package_http_roots.clone();
         copy.offline = self.offline;
         copy.http_rewrites = self.http_rewrites.clone();
+        copy.http_cache = self.http_cache.clone();
         #[cfg(feature = "package-zip-core")]
         {
             copy.package_dirs = self.package_dirs.clone();
@@ -3998,6 +4016,7 @@ impl Evaluator {
         if depth > self.max_depth {
             return Err(Error::Eval("maximum recursion depth exceeded".into()));
         }
+        self.check_cancelled()?;
         match expr {
             Expr::Null => Ok(Value::Null),
             Expr::Bool(b) => Ok(Value::Bool(*b)),
