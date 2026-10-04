@@ -24,6 +24,9 @@ pub struct Module {
     pub amends: Option<String>,
     pub extends: Option<String>,
     pub imports: Vec<Import>,
+    /// URIs of the module's `import("...")` expressions, in source order.
+    /// Glob `import*(...)` expressions are not included.
+    pub import_exprs: Vec<String>,
     pub annotations: Vec<Annotation>,
     pub body: Body,
 }

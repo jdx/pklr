@@ -2,14 +2,12 @@ use crate::error::{Error, Result};
 use crate::lexer::{StringPart, Token, TokenKind};
 
 mod ast;
-mod checks;
 
 pub use ast::{
     Annotation, BinOp, Body, Entry, Expr, ForGenerator, Import, Modifier, Module, Property,
     StringInterpPart, TypeExpr, UnOp, WhenGenerator,
 };
 use ast::{infer_method_return_new, type_expr_runtime_name};
-use checks::{BodyKind, BodyScope};
 
 /// Collect all import URIs from a token stream (fast path, no full parse needed).
 pub fn collect_imports(tokens: &[Token]) -> Vec<String> {
@@ -88,13 +86,8 @@ struct Parser<'a> {
     pos: usize,
     /// Line of the last consumed token (used for newline-sensitive parsing).
     last_line: usize,
-    /// Members of the body being parsed, for static checks.
-    body: BodyScope,
-    /// Annotations at the start of a module without a module declaration,
-    /// which belong to its first member.
-    leading_annotations: Vec<Annotation>,
-    /// While parsing a type alias's type: the type names it uses.
-    type_refs: Option<Vec<String>>,
+    /// URIs of the `import(...)` expressions parsed so far.
+    import_exprs: Vec<String>,
 }
 
 impl<'a> Parser<'a> {
@@ -105,9 +98,7 @@ impl<'a> Parser<'a> {
             name,
             pos: 0,
             last_line: 1,
-            body: BodyScope::new(BodyKind::Object, None),
-            leading_annotations: Vec::new(),
-            type_refs: None,
+            import_exprs: Vec::new(),
         }
     }
 
@@ -190,50 +181,27 @@ impl<'a> Parser<'a> {
 
         // Parse module-level annotations (e.g. @ModuleInfo)
         let mut annotations = self.parse_annotations()?;
-        // Without a module declaration (`module`, `amends` or `extends`)
-        // they annotate the first member instead.
-        let declares_module = (self.peek_is_modifier()
-            && self.peek_past_modifiers_is(TokenKind::KwModule))
-            || matches!(
-                self.peek(),
-                TokenKind::KwModule
-                    | TokenKind::KwAmends
-                    | TokenKind::KwExtends
-                    | TokenKind::KwImport
-                    | TokenKind::KwImportStar
-            );
-        if !declares_module {
-            self.leading_annotations = std::mem::take(&mut annotations);
-        }
 
         // Parse header: module declaration, amends, imports
-        let module_modifiers_offset = self.peek_tok().offset;
-        let mut module_modifiers = Vec::new();
         if self.peek_is_modifier() && self.peek_past_modifiers_is(TokenKind::KwModule) {
-            module_modifiers = self.collect_modifiers();
-            for modifier in &module_modifiers {
+            for modifier in self.collect_modifiers() {
                 annotations.push(Annotation {
                     name: format!("pklr:module:{modifier:?}"),
                     body: Vec::new(),
                 });
             }
         }
-        // `module <name>` declaration (the name may be dotted like `hk.Config`)
-        let mut name = None;
+        // Skip `module <name>` declaration if present
         if matches!(self.peek(), TokenKind::KwModule) {
             self.advance();
-            let mut parts = Vec::new();
-            while let TokenKind::Ident(part) = self.peek() {
-                parts.push(part.clone());
+            // Skip module name (may be dotted like `hk.Config`)
+            while matches!(self.peek(), TokenKind::Ident(_)) {
                 self.advance();
                 if matches!(self.peek(), TokenKind::Dot) {
                     self.advance();
                 } else {
                     break;
                 }
-            }
-            if !parts.is_empty() {
-                name = Some(parts.join("."));
             }
         }
 
@@ -274,57 +242,25 @@ impl<'a> Parser<'a> {
             }
         }
 
-        self.check_module_modifiers(module_modifiers_offset, &module_modifiers, amends.is_some())?;
-        self.check_min_pkl_version(&annotations, name.as_deref())?;
-        let kind = if amends.is_some() {
-            BodyKind::AmendingModule
-        } else {
-            BodyKind::Module
-        };
-        let mut scope = BodyScope::new(kind, None);
-        if let Some(name) = scope.declare_imports(&imports) {
-            return Err(self.duplicate_error(self.peek_tok().offset, &name));
-        }
-        let body = self.parse_body(scope)?;
+        let body = self.parse_entries()?;
         Ok(Module {
-            name,
             amends,
             extends,
             imports,
+            import_exprs: std::mem::take(&mut self.import_exprs),
             annotations,
             body: body.into(),
         })
     }
 
     fn parse_entries(&mut self) -> Result<Vec<Entry>> {
-        self.parse_body(BodyScope::new(BodyKind::Object, None))
-    }
-
-    /// Parse the members of a body, checking them against the rules for the
-    /// kind of body `scope` describes.
-    fn parse_body(&mut self, scope: BodyScope) -> Result<Vec<Entry>> {
-        let saved = std::mem::replace(&mut self.body, scope);
-        let entries = self.parse_body_entries();
-        let scope = std::mem::replace(&mut self.body, saved);
-        let entries = entries?;
-        self.finish_body(&scope)?;
-        Ok(entries)
-    }
-
-    fn parse_body_entries(&mut self) -> Result<Vec<Entry>> {
         let mut entries = Vec::new();
         while !self.at_eof() && !matches!(self.peek(), TokenKind::RBrace) {
             if matches!(self.peek(), TokenKind::Comma | TokenKind::Semicolon) {
                 self.advance();
                 continue;
             }
-            let mut entry_annotations = self.parse_annotations()?;
-            if !self.leading_annotations.is_empty() {
-                let mut leading = std::mem::take(&mut self.leading_annotations);
-                leading.append(&mut entry_annotations);
-                entry_annotations = leading;
-            }
-            let member_offset = self.peek_tok().offset;
+            let entry_annotations = self.parse_annotations()?;
             // Parse class definitions (with optional modifiers); skip typealias/function declarations
             let class_modifiers =
                 if self.peek_is_modifier() && self.peek_past_modifiers_is(TokenKind::KwClass) {
@@ -335,9 +271,9 @@ impl<'a> Parser<'a> {
             if matches!(self.peek(), TokenKind::KwClass) {
                 self.advance(); // consume 'class'
                 let name = self.expect_ident()?;
-                self.check_class(member_offset, &class_modifiers, &name)?;
+                // Skip optional type params <...>
                 if matches!(self.peek(), TokenKind::Lt) {
-                    return Err(self.type_parameters_error());
+                    self.skip_generic_params()?;
                 }
                 // Parse optional extends clause
                 let parent = if matches!(self.peek(), TokenKind::KwExtends) {
@@ -358,29 +294,28 @@ impl<'a> Parser<'a> {
                 } else {
                     None
                 };
-                // `class Foo` without a body declares an empty class.
-                let body = if matches!(self.peek(), TokenKind::LBrace) {
+                if matches!(self.peek(), TokenKind::LBrace) {
                     self.advance();
-                    let body = self.parse_body(BodyScope::new(BodyKind::Class, None))?;
+                    let body = self.parse_entries()?;
                     self.expect(&TokenKind::RBrace)?;
-                    body
-                } else {
-                    Vec::new()
-                };
-                entries.push(Entry::ClassDef(name, class_modifiers, parent, body.into()));
+                    entries.push(Entry::ClassDef(name, class_modifiers, parent, body.into()));
+                }
                 continue;
             }
             if matches!(self.peek(), TokenKind::KwTypeAlias) {
-                entries.push(self.parse_type_alias(member_offset, &[])?);
+                self.advance(); // consume 'typealias'
+                let name = self.expect_ident()?;
+                // Skip optional generic params
+                if matches!(self.peek(), TokenKind::Lt) {
+                    self.skip_generic_params()?;
+                }
+                self.expect(&TokenKind::Equals)?;
+                let ty = self.parse_type()?;
+                entries.push(Entry::TypeAlias(name, ty));
                 continue;
             }
             if matches!(self.peek(), TokenKind::KwFunction) {
-                if let Some(mut entry) = self.try_parse_function_def(member_offset, Vec::new())? {
-                    if !entry_annotations.is_empty()
-                        && let Entry::Property(ref mut prop) = entry
-                    {
-                        std::sync::Arc::make_mut(prop).annotations = entry_annotations;
-                    }
+                if let Some(entry) = self.try_parse_function_def(Vec::new())? {
                     entries.push(entry);
                 }
                 continue;
@@ -389,16 +324,12 @@ impl<'a> Parser<'a> {
             if self.peek_is_modifier() && self.peek_past_modifiers_is_decl() {
                 let mods = self.collect_modifiers();
                 if matches!(self.peek(), TokenKind::KwFunction) {
-                    if let Some(mut entry) = self.try_parse_function_def(member_offset, mods)? {
-                        if !entry_annotations.is_empty()
-                            && let Entry::Property(ref mut prop) = entry
-                        {
-                            std::sync::Arc::make_mut(prop).annotations = entry_annotations;
-                        }
+                    if let Some(entry) = self.try_parse_function_def(mods)? {
                         entries.push(entry);
                     }
                 } else {
-                    entries.push(self.parse_type_alias(member_offset, &mods)?);
+                    // typealias — skip as before
+                    self.skip_declaration();
                 }
                 continue;
             }
@@ -406,19 +337,11 @@ impl<'a> Parser<'a> {
                 break;
             }
             let mut entry = self.parse_entry()?;
-            match &entry {
-                Entry::Property(prop) => self.check_property(member_offset, prop)?,
-                Entry::DynProperty(key, _) => self.check_entry_key(member_offset, key),
-                Entry::ForGenerator(_) | Entry::WhenGenerator(_) | Entry::Spread(_) => {
-                    self.body.set_has_generator();
-                }
-                _ => {}
-            }
             // Attach annotations to the parsed property
             if !entry_annotations.is_empty()
                 && let Entry::Property(ref mut prop) = entry
             {
-                std::sync::Arc::make_mut(prop).annotations = entry_annotations;
+                prop.annotations = entry_annotations;
             }
             entries.push(entry);
             while matches!(self.peek(), TokenKind::Comma | TokenKind::Semicolon) {
@@ -426,36 +349,6 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(entries)
-    }
-
-    /// Parse `typealias Name<Params> = Type`, with the `typealias` keyword
-    /// next, checking it like pkl does.
-    fn parse_type_alias(&mut self, offset: usize, modifiers: &[Modifier]) -> Result<Entry> {
-        self.advance(); // consume 'typealias'
-        let name = self.expect_ident()?;
-        self.check_type_alias(offset, modifiers, &name)?;
-        let mut params = Vec::new();
-        if matches!(self.peek(), TokenKind::Lt) {
-            params = self
-                .type_parameter_names(self.pos)
-                .into_iter()
-                .map(|(name, _)| name)
-                .collect();
-            self.check_type_parameters(self.pos)?;
-            self.skip_generic_params()?;
-        }
-        self.expect(&TokenKind::Equals)?;
-        // Record the type names the aliased type uses, for the cycle check.
-        let saved_refs = self.type_refs.replace(Vec::new());
-        let ty = self.parse_type();
-        let refs = std::mem::replace(&mut self.type_refs, saved_refs).unwrap_or_default();
-        let ty = ty?;
-        // pkl resolves a local alias only when something uses it, so only
-        // non-local aliases are checked for cycles up front.
-        if !modifiers.contains(&Modifier::Local) {
-            self.body.record_type_alias(offset, &name, refs, &params);
-        }
-        Ok(Entry::TypeAlias(name, ty))
     }
 
     /// Collect top-level generic type parameter names: `<Type, Type<Nested>, ...>`
@@ -620,11 +513,7 @@ impl<'a> Parser<'a> {
 
     /// Parse `function name(params...): ReturnType = body` into a Property with Lambda value.
     /// Returns None if the function body can't be parsed (falls back to skip).
-    fn try_parse_function_def(
-        &mut self,
-        offset: usize,
-        modifiers: Vec<Modifier>,
-    ) -> Result<Option<Entry>> {
+    fn try_parse_function_def(&mut self, modifiers: Vec<Modifier>) -> Result<Option<Entry>> {
         let saved_pos = self.pos;
         let saved_last_line = self.last_line;
         self.advance(); // consume `function`
@@ -638,10 +527,6 @@ impl<'a> Parser<'a> {
                 return Ok(None);
             }
         };
-        self.check_method(offset, &modifiers, &name)?;
-        if matches!(self.peek(), TokenKind::Lt) {
-            return Err(self.type_parameters_error());
-        }
         // Parse parameter list: (param1: Type, param2: Type, ...)
         if !matches!(self.peek(), TokenKind::LParen) {
             self.pos = saved_pos;
@@ -682,15 +567,14 @@ impl<'a> Parser<'a> {
         if let Some(return_type) = return_type {
             infer_method_return_new(&mut body, &return_type);
         }
-        Ok(Some(Entry::Property(std::sync::Arc::new(Property {
+        Ok(Some(Entry::Property(Property {
             name,
             type_ann: None,
-            value: Some(Expr::Lambda(params.into(), std::sync::Arc::new(body))),
+            value: Some(Expr::Lambda(params, Box::new(body))),
             body: None,
             modifiers,
             annotations: Vec::new(),
-            is_method: true,
-        }))))
+        })))
     }
 
     /// Skip a class, typealias, or function declaration.
@@ -776,18 +660,13 @@ impl<'a> Parser<'a> {
                 }
             }
             TokenKind::KwFor => {
-                let for_offset = self.peek_tok().offset;
                 self.advance(); // consume 'for'
                 self.expect(&TokenKind::LParen)?;
                 // for (k, v in collection) or (v in collection)
                 let first = self.expect_ident()?;
                 let (key_var, val_var, collection) = if matches!(self.peek(), TokenKind::Comma) {
                     self.advance();
-                    let v_offset = self.peek_tok().offset;
                     let v = self.expect_ident()?;
-                    if v == first {
-                        return Err(self.duplicate_error(v_offset, &v));
-                    }
                     self.expect(&TokenKind::KwIn)?;
                     let coll = self.parse_expr()?;
                     (Some(first), v, coll)
@@ -798,7 +677,7 @@ impl<'a> Parser<'a> {
                 };
                 self.expect(&TokenKind::RParen)?;
                 self.expect(&TokenKind::LBrace)?;
-                let body = self.parse_body(self.for_scope(for_offset))?;
+                let body = self.parse_entries()?;
                 self.expect(&TokenKind::RBrace)?;
                 Ok(Entry::ForGenerator(ForGenerator {
                     key_var,
@@ -813,12 +692,12 @@ impl<'a> Parser<'a> {
                 let cond = self.parse_expr()?;
                 self.expect(&TokenKind::RParen)?;
                 self.expect(&TokenKind::LBrace)?;
-                let body = self.parse_body(self.when_scope())?;
+                let body = self.parse_entries()?;
                 self.expect(&TokenKind::RBrace)?;
                 let else_body = if matches!(self.peek(), TokenKind::KwElse) {
                     self.advance();
                     self.expect(&TokenKind::LBrace)?;
-                    let eb = self.parse_body(self.when_scope())?;
+                    let eb = self.parse_entries()?;
                     self.expect(&TokenKind::RBrace)?;
                     Some(eb)
                 } else {
@@ -851,16 +730,6 @@ impl<'a> Parser<'a> {
                         | TokenKind::KwImport
                         | TokenKind::KwImportStar
                         | TokenKind::LParen
-                        | TokenKind::Bang
-                        | TokenKind::Minus
-                        | TokenKind::KwThis
-                        | TokenKind::KwModule
-                        | TokenKind::KwIf
-                        | TokenKind::KwLet
-                        | TokenKind::KwThrow
-                        | TokenKind::KwTrace
-                        | TokenKind::KwRead
-                        | TokenKind::KwReadOrNull
                 );
                 let is_bare_ident = matches!(self.peek(), TokenKind::Ident(_))
                     && self.pos + 1 < self.tokens.len()
@@ -931,28 +800,25 @@ impl<'a> Parser<'a> {
                     (None, None)
                 };
 
-                Ok(Entry::Property(std::sync::Arc::new(Property {
+                Ok(Entry::Property(Property {
                     annotations: Vec::new(), // filled by parse_entries if present
                     modifiers,
                     name,
                     type_ann,
                     value,
                     body: body.map(Into::into),
-                    is_method: false,
-                })))
+                }))
             }
         }
     }
 
     fn parse_type(&mut self) -> Result<TypeExpr> {
-        let offset = self.peek_tok().offset;
         let (first, first_is_default) = self.parse_type_member()?;
         let mut variants = vec![(first, first_is_default)];
         while matches!(self.peek(), TokenKind::Pipe) {
             self.advance();
             variants.push(self.parse_type_member()?);
         }
-        self.check_union_defaults(offset, &variants)?;
         if variants.len() == 1 {
             let (ty, is_default) = variants.pop().unwrap();
             Ok(if is_default {
@@ -1011,9 +877,6 @@ impl<'a> Parser<'a> {
                     name.push('.');
                     name.push_str(&part);
                 }
-                if let Some(refs) = &mut self.type_refs {
-                    refs.push(name.clone());
-                }
                 if matches!(self.peek(), TokenKind::Lt) {
                     self.advance();
                     let mut args = vec![self.parse_type()?];
@@ -1046,20 +909,6 @@ impl<'a> Parser<'a> {
             return Ok(base);
         }
         self.advance();
-        // Types named inside a constraint expression aren't part of the type.
-        let saved_refs = self.type_refs.take();
-        let constraint = self.parse_constraint_exprs();
-        self.type_refs = saved_refs;
-        let constraint = constraint?;
-        Ok(TypeExpr::Constrained(
-            type_expr_runtime_name(&base),
-            Box::new(constraint),
-        ))
-    }
-
-    /// The comma-separated constraints of `Type(c1, c2)`, conjoined, up to
-    /// and including the closing parenthesis.
-    fn parse_constraint_exprs(&mut self) -> Result<Expr> {
         let mut constraint = self.parse_expr()?;
         while matches!(self.peek(), TokenKind::Comma) {
             self.advance();
@@ -1067,7 +916,10 @@ impl<'a> Parser<'a> {
             constraint = Expr::Binop(BinOp::And, Box::new(constraint), Box::new(next));
         }
         self.expect(&TokenKind::RParen)?;
-        Ok(constraint)
+        Ok(TypeExpr::Constrained(
+            type_expr_runtime_name(&base),
+            Box::new(constraint),
+        ))
     }
 
     fn parse_expr(&mut self) -> Result<Expr> {
@@ -1284,7 +1136,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::StringLit(s) => {
                 self.advance();
-                Ok(Expr::String(s.into()))
+                Ok(Expr::String(s))
             }
             TokenKind::InterpolatedString(parts) => {
                 self.advance();
@@ -1295,7 +1147,9 @@ impl<'a> Parser<'a> {
                             interp_parts.push(StringInterpPart::Literal(s));
                         }
                         crate::lexer::StringPart::Tokens(tokens) => {
-                            let expr = parse_expr_tokens(&tokens, self.source, self.name)?;
+                            let mut nested = Parser::new(&tokens, self.source, self.name);
+                            let expr = nested.parse_expr()?;
+                            self.import_exprs.append(&mut nested.import_exprs);
                             interp_parts.push(StringInterpPart::Expr(expr));
                         }
                     }
@@ -1312,7 +1166,7 @@ impl<'a> Parser<'a> {
                 {
                     self.advance(); // consume ->
                     let body = self.parse_expr()?;
-                    return Ok(Expr::Lambda(params.into(), std::sync::Arc::new(body)));
+                    return Ok(Expr::Lambda(params, Box::new(body)));
                 }
                 // Not a lambda — restore and parse as parenthesized expression
                 self.pos = saved_pos;
@@ -1353,21 +1207,11 @@ impl<'a> Parser<'a> {
                         None => self.expect_ident()?,
                     };
                     // Handle dotted type names: new Config.Step { ... }
-                    let name_offset = self.peek_tok().offset;
                     while matches!(self.peek(), TokenKind::Dot) {
                         self.advance();
                         let part = self.expect_ident()?;
                         name.push('.');
                         name.push_str(&part);
-                    }
-                    // A type name is a type, or a module import and a type in it.
-                    if qualifier.is_none() && name.matches('.').count() > 1 {
-                        return Err(Error::parse(
-                            self.name,
-                            self.source,
-                            name_offset,
-                            format!("Invalid type name `{name}`."),
-                        ));
                     }
                     Some(name)
                 } else {
@@ -1435,6 +1279,7 @@ impl<'a> Parser<'a> {
             TokenKind::KwImport => {
                 self.advance();
                 let uri = self.parse_import_expr_uri("import")?;
+                self.import_exprs.push(uri.clone());
                 Ok(Expr::Import(uri, self.name.to_string()))
             }
             TokenKind::KwImportStar => {
