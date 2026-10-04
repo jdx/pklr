@@ -597,6 +597,8 @@ pub(super) fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
             match name.as_str() {
                 "List" | "Listing" | "Set" => matches!(val, Value::List(_)),
                 "Map" | "Mapping" => matches!(val, Value::Object(..)),
+                "Function" | "Function0" | "Function1" | "Function2" | "Function3"
+                | "Function4" | "Function5" => matches!(val, Value::Lambda(..)),
                 _ => matches!(val, Value::Object(..)),
             }
         }

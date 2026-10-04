@@ -2425,6 +2425,22 @@ impl Evaluator {
             }
         }
 
+        // Check declarations only after this module's final scope is complete:
+        // constraints and aliases may refer to members declared later.
+        if !evaluated_as_base {
+            for entry in module.body.iter() {
+                if let Entry::Property(prop) = entry
+                    && !has_modifier(&prop.modifiers, Modifier::Local)
+                    && (prop.value.is_some() || prop.body.is_some())
+                    && prop.type_ann.is_some()
+                    && scope.is_declared(&prop.name)
+                    && let Some(value) = scope.get(&prop.name)
+                {
+                    self.check_declared_property_type(prop, value, &scope, depth)?;
+                }
+            }
+        }
+
         // At the top level (depth 0), strip class definitions and lambdas from
         // the serialized output — they're schema/functions, not data.
         // Imported modules (depth > 0) keep them so dotted access works
@@ -3571,6 +3587,35 @@ impl Evaluator {
         }
     }
 
+    /// Check a concrete property value after its defining scope is complete.
+    /// Defaults and declarations without values are checked when they are
+    /// materialized, not merely declared.
+    fn check_declared_property_type(
+        &mut self,
+        prop: &Property,
+        value: &Value,
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<()> {
+        if prop.value.is_none() && prop.body.is_none() {
+            return Ok(());
+        }
+        let Some(ty) = &prop.type_ann else {
+            return Ok(());
+        };
+        if !type_is_runtime_checkable(ty, scope)
+            || self.eval_type_check(value, ty, scope, depth + 1)?
+        {
+            return Ok(());
+        }
+        Err(Error::Eval(format!(
+            "property '{}' expected {}, got {}",
+            prop.name,
+            display_type_expr(ty),
+            value_type_name(value)
+        )))
+    }
+
     /// Check if a value matches a type expression, including constraint evaluation.
     fn eval_type_check(
         &mut self,
@@ -3578,6 +3623,53 @@ impl Evaluator {
         ty: &crate::parser::TypeExpr,
         scope: &Scope,
         depth: usize,
+    ) -> Result<bool> {
+        self.eval_type_check_in(val, ty, scope, depth, &mut Vec::new())
+    }
+
+    /// Resolve aliases with a guard: malformed or recursively-expanded
+    /// aliases must report an evaluation error instead of recursing until the
+    /// process stack overflows.
+    fn eval_alias_check(
+        &mut self,
+        val: &Value,
+        name: &str,
+        resolved: &crate::parser::TypeExpr,
+        scope: &Scope,
+        depth: usize,
+        resolving: &mut Vec<String>,
+    ) -> Result<bool> {
+        if resolving.iter().any(|seen| seen == name) {
+            return Err(Error::Eval(format!("type alias '{name}' refers to itself")));
+        }
+        resolving.push(name.to_string());
+        // Long chains (`A0 = A1`, …) are valid Pkl and must not consume the
+        // Rust call stack once per alias.  Flatten the simple-name part here;
+        // compound targets still go through the regular checker below.
+        let mut target = resolved.clone();
+        while let crate::parser::TypeExpr::Named(next) = &target {
+            let Some(next_target) = scope.get_type_alias(next) else {
+                break;
+            };
+            if resolving.iter().any(|seen| seen == next) {
+                while resolving.pop().as_deref() != Some(name) {}
+                return Err(Error::Eval(format!("type alias '{next}' refers to itself")));
+            }
+            resolving.push(next.clone());
+            target = next_target.clone();
+        }
+        let result = self.eval_type_check_in(val, &target, scope, depth + 1, resolving);
+        while resolving.pop().as_deref() != Some(name) {}
+        result
+    }
+
+    fn eval_type_check_in(
+        &mut self,
+        val: &Value,
+        ty: &crate::parser::TypeExpr,
+        scope: &Scope,
+        depth: usize,
+        resolving: &mut Vec<String>,
     ) -> Result<bool> {
         use crate::parser::TypeExpr;
         match ty {
@@ -3588,7 +3680,7 @@ impl Evaluator {
                 // Check if name is a type alias; if so, resolve to the aliased type
                 if let Some(resolved) = scope.get_type_alias(name) {
                     let resolved = resolved.clone();
-                    return self.eval_type_check(val, &resolved, scope, depth + 1);
+                    return self.eval_alias_check(val, name, &resolved, scope, depth, resolving);
                 }
                 if let Some(matches) = value_is_class_type(val, name, scope) {
                     return Ok(matches);
@@ -3603,7 +3695,7 @@ impl Evaluator {
                     true
                 } else if let Some(resolved) = scope.get_type_alias(class_name) {
                     let resolved = resolved.clone();
-                    self.eval_type_check(val, &resolved, scope, depth + 1)?
+                    self.eval_alias_check(val, class_name, &resolved, scope, depth, resolving)?
                 } else {
                     value_is_class_type(val, class_name, scope)
                         .unwrap_or_else(|| value_is_named_type(val, base))
@@ -3638,18 +3730,29 @@ impl Evaluator {
                 if is_null_value(val) {
                     return Ok(true);
                 }
-                self.eval_type_check(val, inner, scope, depth)
+                self.eval_type_check_in(val, inner, scope, depth, resolving)
             }
             TypeExpr::Union(variants) => {
+                // A type pklr does not model cannot be disproved at runtime.
+                // Check every modeled variant first, but preserve that
+                // conservative acceptance only if none of them matches.
+                let mut has_uncheckable_variant = false;
                 for v in variants {
-                    if self.eval_type_check(val, v, scope, depth)? {
+                    if !type_is_runtime_checkable(v, scope) {
+                        has_uncheckable_variant = true;
+                    } else if self.eval_type_check_in(val, v, scope, depth, resolving)? {
                         return Ok(true);
                     }
                 }
-                Ok(false)
+                Ok(has_uncheckable_variant)
             }
-            // Non-constrained types: delegate to the simple check
-            _ => Ok(value_is_type(val, ty)),
+            TypeExpr::Generic(name, _) => {
+                if let Some(resolved) = scope.get_type_alias(name) {
+                    let resolved = resolved.clone();
+                    return self.eval_alias_check(val, name, &resolved, scope, depth, resolving);
+                }
+                Ok(value_is_type(val, ty))
+            }
         }
     }
 

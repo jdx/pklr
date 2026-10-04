@@ -3942,3 +3942,54 @@ fn nested_amendments_of_class_instances_reject_elements() {
         );
     }
 }
+
+#[test]
+fn declared_property_types_check_aliases_constraints_and_late_members() {
+    let alias = eval_fails(
+        r#"
+typealias IsB = String(this == "b")
+checked: IsB = "x"
+"#,
+    );
+    assert!(alias.contains("property 'checked'"), "{alias}");
+
+    let later = eval_fails(
+        r#"
+checked: Int(this < limit) = 1
+limit = 0
+"#,
+    );
+    assert!(later.contains("property 'checked'"), "{later}");
+}
+
+#[test]
+fn declared_property_type_checks_wait_for_instances_and_cover_body_forms() {
+    let json = eval(
+        r#"
+class C { value: Int = "bad" }
+instance = new C { value = 1 }
+function: Function1<Int, Int> = (x) -> x
+"#,
+    );
+    assert_eq!(json["instance"]["value"], 1);
+
+    let class_default = eval_fails("class C { value: Int = \"bad\" }\ninstance = new C {}\n");
+    assert!(
+        class_default.contains("property 'value'"),
+        "{class_default}"
+    );
+
+    let body = eval_fails("items: Listing(this.length == 1) { 1; 2 }\n");
+    assert!(body.contains("property 'items'"), "{body}");
+}
+
+#[test]
+fn amended_module_checks_the_final_declared_property_value() {
+    let temp = TestTempDir::new("pklr_amended_declared_property_type");
+    std::fs::write(temp.path().join("Base.pkl"), "foo: Int(this > 0) = -1\n").unwrap();
+    let child = temp.path().join("Child.pkl");
+    std::fs::write(&child, "amends \"Base.pkl\"\nfoo = 5\n").unwrap();
+
+    let json = pklr::EvaluatorBuilder::new().eval_to_json(&child).unwrap();
+    assert_eq!(json["foo"], 5);
+}
