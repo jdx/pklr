@@ -50,6 +50,11 @@ pub(super) struct Scope {
     /// captured: an instance's scopes, and modules imported meanwhile, start
     /// without it.
     pub(super) defining_class: bool,
+    /// Type names that resolve as no alias from this scope, whatever an
+    /// enclosing scope declares: a check scope restoring how a declared type
+    /// resolved before a later alias of the same name. Not inherited by
+    /// `child` (lookups from a child reach it anyway) and not captured.
+    pub(super) type_alias_barrier: Option<Rc<FxHashSet<String>>>,
     pub(super) module_identities: Rc<FxIndexMap<Name, String>>,
     pub(super) poisoned: Rc<FxIndexMap<Name, String>>,
     /// Names in `vars` or `poisoned` declared by an entry written in the body
@@ -87,6 +92,7 @@ impl Scope {
             type_aliases: Rc::default(),
             shadows_builtin_type: self.shadows_builtin_type,
             defining_class: self.defining_class,
+            type_alias_barrier: None,
             module_identities: Rc::default(),
             poisoned: Rc::default(),
             declared: Rc::default(),
@@ -304,9 +310,20 @@ impl Scope {
     }
 
     pub(super) fn get_type_alias(&self, name: &str) -> Option<&crate::parser::TypeExpr> {
-        self.type_aliases
-            .get(name)
-            .or_else(|| self.parent.as_ref().and_then(|p| p.get_type_alias(name)))
+        let mut scope = self;
+        loop {
+            if let Some(alias) = scope.type_aliases.get(name) {
+                return Some(alias);
+            }
+            if scope
+                .type_alias_barrier
+                .as_ref()
+                .is_some_and(|barrier| barrier.contains(name))
+            {
+                return None;
+            }
+            scope = scope.parent.as_deref()?;
+        }
     }
 
     pub(super) fn get(&self, name: &str) -> Option<&Value> {

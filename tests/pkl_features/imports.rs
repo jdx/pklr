@@ -3087,3 +3087,37 @@ async fn narrowed_import_reads_values_named_as_types() {
     assert_eq!(val["outLocal"], serde_json::json!({ "v": "b" }));
     assert_eq!(val["outShadowed"], serde_json::json!({ "a": 1 }));
 }
+
+#[tokio::test]
+async fn refreshed_typed_local_uses_module_type_aliases_declared_later() {
+    // As in Pkl, a module's type alias applies throughout the module, so the
+    // refreshed typed local's `Int` is the later alias (`String`) here.
+    let temp = TestTempDir::new("pklr_test_refresh_later_module_alias");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("bad.pkl"),
+        "class C { v = module.limit }\nlocal ok: Int = new C {}.v\nlimit = 2\ntypealias Int = String\nout = ok\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("good.pkl"),
+        "class C { v = module.limit }\nlocal ok: Int = new C {}.v\nlimit = \"s\"\ntypealias Int = String\nout = ok\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("main_bad.pkl"), "import \"bad.pkl\"\nall = bad\n").unwrap();
+    std::fs::write(
+        dir.join("main_good.pkl"),
+        "import \"good.pkl\"\nall = good\n",
+    )
+    .unwrap();
+
+    let err = pklr::eval_to_json_async(&dir.join("main_bad.pkl"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("property 'ok' expected Int"), "{err}");
+    let val = pklr::eval_to_json_async(&dir.join("main_good.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["all"]["out"], "s");
+}

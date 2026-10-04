@@ -2098,16 +2098,17 @@ obj { when (true) { typealias Small = Int(this < 2); checked: Int(this is Small)
 
 #[test]
 fn later_alias_does_not_capture_builtin_type_of_typed_local() {
-    // `Int` is the built-in where the local is bound; a later alias of the
-    // same name does not change that.
-    let message = eval_fails(
+    // In an object body, `Int` is the built-in where the local is bound; a
+    // later alias of the same name does not change that. A module's alias
+    // applies throughout the module, as in Pkl.
+    let json = eval(
         r#"
 local bad: Int = "x"
 typealias Int = String
 out = bad
 "#,
     );
-    assert!(message.contains("property 'bad' expected Int"), "{message}");
+    assert_eq!(json["out"], "x");
     let message = eval_fails(
         r#"
 obj { local bad: Int = "x"; typealias Int = String; out = bad }
@@ -5202,4 +5203,90 @@ c = new C { when (true) { v: Any = "x" } }
     // Repeated iterations of one declaration still check only the last.
     let json = eval("obj { for (x in List(1, 2)) { checked: Int(this == x) = x } }");
     assert_eq!(json["obj"]["checked"], 2);
+}
+
+#[test]
+fn module_property_constraint_uses_late_bound_local_function() {
+    let err =
+        eval_fails("local helper = (x) -> x < limit\nchecked: Int(helper(this)) = 3\nlimit = 2\n");
+    assert!(err.contains("property 'checked'"), "{err}");
+    let json = eval("local helper = (x) -> x < limit\nchecked: Int(helper(this)) = 1\nlimit = 2\n");
+    assert_eq!(json["checked"], 1);
+}
+
+#[test]
+fn module_type_alias_declared_later_applies_throughout_the_module() {
+    // As in Pkl (checked against pkl 0.32.1), a module's type alias applies
+    // to the whole module, before or after its declaration, for properties
+    // and typed locals alike.
+    let json = eval("x: Int = \"s\"\ntypealias Int = String\n");
+    assert_eq!(json["x"], "s");
+    let err = eval_fails("x: Int = 1\ntypealias Int = String\n");
+    assert!(err.contains("property 'x' expected Int"), "{err}");
+    let json = eval("local x: Int = \"s\"\ntypealias Int = String\nres = x\n");
+    assert_eq!(json["res"], "s");
+    let err = eval_fails("local x: Int = 1\ntypealias Int = String\nres = x\n");
+    assert!(err.contains("property 'x' expected Int"), "{err}");
+}
+
+#[test]
+fn object_body_property_keeps_the_types_it_was_declared_with() {
+    // An object body's declarations apply only after them (Pkl has no type
+    // aliases in object bodies). A name resolvable where the property is
+    // declared keeps that meaning, as for a typed local.
+    let err = eval_fails("obj { x: Int = \"s\"; typealias Int = String }");
+    assert!(err.contains("property 'x' expected Int"), "{err}");
+    let json = eval("obj { x: Int = 1; typealias Int = String }");
+    assert_eq!(json["obj"]["x"], 1);
+    let err = eval_fails("obj { local x: Int = \"s\"; typealias Int = String; res = x }");
+    assert!(err.contains("property 'x' expected Int"), "{err}");
+    let json = eval("obj { local x: Int = 1; typealias Int = String; res = x }");
+    assert_eq!(json["obj"]["res"], 1);
+    // An earlier alias keeps its meaning over a later one of the same name.
+    let json = eval("obj { typealias A = Int; x: A = 1; typealias A = String }");
+    assert_eq!(json["obj"]["x"], 1);
+    let err = eval_fails("obj { typealias A = Int; x: A = \"s\"; typealias A = String }");
+    assert!(err.contains("property 'x' expected A"), "{err}");
+    // A name unresolvable there means the later declaration.
+    let err = eval_fails("obj { x: Later = 5; typealias Later = Int(this < 3) }");
+    assert!(err.contains("property 'x' expected Later"), "{err}");
+    let json = eval("obj { x: Later = 1; typealias Later = Int(this < 3) }");
+    assert_eq!(json["obj"]["x"], 1);
+    // Also when the constraint reads a member, checked in the finished body.
+    let json = eval("obj { lim = 3; x: Int(this < lim) = 1; typealias Int = String }");
+    assert_eq!(json["obj"]["x"], 1);
+    let err = eval_fails("obj { lim = 3; x: Int(this < lim) = 5; typealias Int = String }");
+    assert!(err.contains("property 'x'"), "{err}");
+    let json =
+        eval("obj { lim = 3; local y: Int(this < lim) = 1; typealias Int = String; res = y }");
+    assert_eq!(json["obj"]["res"], 1);
+}
+
+#[test]
+fn only_the_last_write_of_a_body_generator_property_is_checked() {
+    // Within one body, a later iteration replaces the write of either
+    // branch; each write is checked in its own iteration only if it is last.
+    let json = eval(
+        "obj { for (x in List(1, 2)) { when (x == 1) { v: Int(this == x) = x } else { v: Int(this == x) = x } } }",
+    );
+    assert_eq!(json["obj"]["v"], 2);
+    let err = eval_fails(
+        "obj { for (x in List(1, 2)) { when (x == 1) { v: Int(this == x) = x } else { v: Int(this == x) = 3 } } }",
+    );
+    assert!(err.contains("property 'v'"), "{err}");
+}
+
+#[test]
+fn self_referential_type_alias_is_an_error() {
+    for src in [
+        "typealias Loop<T> = Loop<T>\nres = 1 is Loop<Int>",
+        "typealias Loop<T> = Loop<T>\nres = 1 as Loop<Int>",
+        "typealias Loop = Loop\nres = 1 is Loop",
+        "typealias Loop = Loop\nres = 1 as Loop",
+        "typealias A<T> = B<T>\ntypealias B<T> = A<T>\nres = 1 is A<Int>",
+        "typealias Loop<T> = Loop<T>\nx: Loop<Int> = 1",
+    ] {
+        let err = eval_fails(src);
+        assert!(err.contains("refers to itself"), "{src}: {err}");
+    }
 }

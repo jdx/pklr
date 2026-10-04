@@ -125,9 +125,9 @@ struct PendingTypeCheck {
     /// its local functions are bound again over the check scope, so a
     /// constraint calling one sees the enclosing object's finished members.
     body: Option<Body>,
-    /// The declaring property's AST address: every iteration of one
-    /// generator writes through the same declaration.
-    declaration: usize,
+    /// The index, in the enclosing object's body, of the generator entry
+    /// this check came from (the outermost one, for a nested generator).
+    generator_entry: usize,
 }
 
 /// What the deferred type checks of a finished object body read.
@@ -139,6 +139,9 @@ struct FinishedBody<'a> {
     own_body_scope: Option<(&'a Scope, &'a HashSet<String>)>,
     local_bindings: &'a FxHashMap<usize, std::result::Result<Value, String>>,
     all_props: &'a IndexMap<String, Value>,
+    /// How the declared types of properties resolved where they were
+    /// declared, for those a later declaration of the body may shadow.
+    declared_types: &'a FxHashMap<usize, DeclaredTypes>,
 }
 
 impl FinishedBody<'_> {
@@ -193,9 +196,8 @@ impl FinishedBody<'_> {
 }
 
 /// A typed local of an object body whose check waits for the finished body:
-/// the local, its entry index, and the type aliases its type resolved to
-/// where it was bound.
-type DeferredLocal<'a> = (&'a Property, usize, Vec<(String, crate::parser::TypeExpr)>);
+/// the local, its entry index, and how its type resolved where it was bound.
+type DeferredLocal<'a> = (&'a Property, usize, DeclaredTypes);
 
 /// The result of checking a typed local.
 enum LocalCheck {
@@ -479,15 +481,53 @@ fn type_check_dependencies(
     type_closure(ty, &|name| scope.get_type_alias(name).cloned())
 }
 
-/// The type aliases a typed local's declared type resolves to where it is
-/// bound. Its deferred check keeps these, so an alias of the same name
-/// declared later in the body does not change what the local was declared
-/// as.
-fn bound_aliases(prop: &Property, scope: &Scope) -> Vec<(String, crate::parser::TypeExpr)> {
-    prop.type_ann
-        .as_ref()
-        .map(|ty| type_check_dependencies(ty, scope).0)
-        .unwrap_or_default()
+/// How an object body entry's declared type resolved where it was declared.
+/// A check run against the finished body keeps this, so a type alias or
+/// class the body declares later does not change what the entry was
+/// declared as: a name that resolved there keeps that meaning.
+#[derive(Default)]
+struct DeclaredTypes {
+    /// The type aliases the type reached, as they resolved there.
+    aliases: Vec<(String, crate::parser::TypeExpr)>,
+    /// Names the type reached that were not aliases there but a built-in
+    /// type or a class, which a later declaration of the body shadows: in
+    /// the check they stay what they were.
+    unaliased: FxHashSet<String>,
+}
+
+impl DeclaredTypes {
+    /// The resolution of `ty` at the entry at `entry_index` of `entries`,
+    /// whose scope is `scope`.
+    fn at(
+        ty: &crate::parser::TypeExpr,
+        scope: &Scope,
+        entries: &[Entry],
+        entry_index: usize,
+    ) -> Self {
+        let (aliases, names) = type_check_dependencies(ty, scope);
+        let rest = &entries[entry_index + 1..];
+        let unaliased = names
+            .into_iter()
+            .filter(|name| {
+                rest.iter().any(|entry| {
+                    matches!(entry, Entry::TypeAlias(declared, _) | Entry::ClassDef(declared, ..)
+                        if declared == name)
+                }) && scope.get_type_alias(name).is_none()
+                    && (is_builtin_type_name(name) || resolve_dotted(scope, name).is_some())
+            })
+            .collect();
+        DeclaredTypes { aliases, unaliased }
+    }
+
+    /// Restore this resolution in `scope`, a check scope of its own.
+    fn apply(&self, scope: &mut Scope) {
+        for (name, alias) in &self.aliases {
+            scope.set_type_alias(name.clone(), alias.clone());
+        }
+        if !self.unaliased.is_empty() {
+            scope.type_alias_barrier = Some(Rc::new(self.unaliased.clone()));
+        }
+    }
 }
 
 /// The part of `scope` a deferred check against `ty` needs, saved for later:
@@ -714,11 +754,17 @@ fn type_has_constraint(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
 /// built-in type) keeps that meaning. A name that does not resolve yet means
 /// the later declaration, so the check waits for the finished body, where it
 /// is bound.
+///
+/// With `hoisted` (a module, whose declarations apply throughout it, as in
+/// Pkl), any name the module declares later counts, whatever it resolves to
+/// at the entry: `local x: Int = "s"` then `typealias Int = String` checks
+/// against the later alias.
 fn names_later_declaration(
     ty: &crate::parser::TypeExpr,
     scope: &Scope,
     entries: &[Entry],
     entry_index: usize,
+    hoisted: bool,
 ) -> bool {
     let rest = &entries[entry_index + 1..];
     // Cheap common case: the body declares no type alias or class after
@@ -753,14 +799,17 @@ fn names_later_declaration(
     // Follow alias chains, through aliases in scope and, for an unresolved
     // name, the later declaration: `typealias A = B` then a local of type
     // `A`, then `typealias B = Int`, reaches the later `B`.
-    let (_, names) = type_closure(ty, &|name| match scope.get_type_alias(name) {
-        Some(alias) => Some(alias.clone()),
-        None if unresolved(name) => later_alias(name).cloned(),
-        None => None,
+    let (_, names) = type_closure(ty, &|name| match later_alias(name) {
+        Some(alias) if hoisted => Some(alias.clone()),
+        _ => match scope.get_type_alias(name) {
+            Some(alias) => Some(alias.clone()),
+            None if unresolved(name) => later_alias(name).cloned(),
+            None => None,
+        },
     });
     names
         .iter()
-        .any(|name| unresolved(name) && declared_later(name))
+        .any(|name| declared_later(name) && (hoisted || unresolved(name)))
 }
 
 /// The bindings of the locals written in the same body as the entry at
@@ -2945,6 +2994,7 @@ impl Evaluator {
                                     &scope,
                                     &module.body,
                                     entry_index,
+                                    true,
                                 ) || constraint_reads_members(
                                     ty,
                                     &scope,
@@ -3349,19 +3399,30 @@ impl Evaluator {
         //
         // Check typed locals whose constraint reads module members against
         // the finished module. One that fails is poisoned in another pass.
-        let mut failed_locals = Vec::new();
-        if !deferred_locals.is_empty() {
-            // A constraint may call a local function, which must see the
-            // finished module (late binding): re-create the module's local
-            // functions over it for the checks.
+        //
+        // A constraint may call a local function, which must see the
+        // finished module (late binding): the checks run with the module's
+        // local functions re-created over it. Most modules declare none.
+        let local_function_scope = if module.body.iter().any(|entry| {
+            matches!(entry, Entry::Property(prop)
+                if matches!(prop.value, Some(Expr::Lambda(..)))
+                    && has_modifier(&prop.modifiers, Modifier::Local))
+        }) {
             let mut check_scope = scope.child();
             self.rebind_local_functions(&module.body, &mut check_scope, depth)?;
+            Some(check_scope)
+        } else {
+            None
+        };
+        let check_scope = local_function_scope.as_ref().unwrap_or(&scope);
+        let mut failed_locals = Vec::new();
+        if !deferred_locals.is_empty() {
             for prop in deferred_locals {
                 let Some(value) = scope.get(&prop.name).cloned() else {
                     continue;
                 };
                 if let LocalCheck::Failed(message) =
-                    self.typed_local_failure(prop, &value, &check_scope, depth)?
+                    self.typed_local_failure(prop, &value, check_scope, depth)?
                 {
                     failed_locals.push((local_key(prop, &Rc::from([])), message));
                 }
@@ -3393,10 +3454,10 @@ impl Evaluator {
             {
                 continue;
             }
-            let Some(value) = all_props.get(&prop.name).cloned() else {
+            let Some(value) = all_props.get(&prop.name) else {
                 continue;
             };
-            self.check_declared_property_type(prop, &value, &scope, depth)?;
+            self.check_declared_property_type(prop, value, check_scope, depth)?;
         }
 
         if depth == 0 {
@@ -3858,10 +3919,41 @@ impl Evaluator {
         // Non-lambda locals are evaluated eagerly; lambda locals are deferred
         // to a second pass so they capture the fully-populated scope.
         let mut deferred_lambdas: Vec<(String, &crate::parser::Expr, usize)> = Vec::new();
+        // The last type alias or class the body declares, which typed
+        // properties before it may need to be protected from.
+        let last_declaration = if tracks_types {
+            entries
+                .iter()
+                .rposition(|entry| matches!(entry, Entry::TypeAlias(..) | Entry::ClassDef(..)))
+        } else {
+            None
+        };
+        let mut declared_types: FxHashMap<usize, DeclaredTypes> = FxHashMap::default();
         // Unlike a module's, a type alias declared in an object body is
         // visible only to entries after it (as narrowed-import analysis
         // assumes), so it is registered in declaration order below.
         for (entry_index, entry) in entries.iter().enumerate() {
+            // A typed property a later type alias or class may shadow keeps
+            // how its type resolves here, for its check against the finished
+            // body.
+            if let Entry::Property(prop) = entry
+                && let Some(ty) = &prop.type_ann
+                && last_declaration.is_some_and(|last| entry_index < last)
+                && !has_modifier(&prop.modifiers, Modifier::Local)
+            {
+                let active_scope = scope_for_object_entry(
+                    entry_index,
+                    &child_scope,
+                    entry_scopes,
+                    &entry_owners,
+                    own_body_scope,
+                );
+                declared_types.insert(
+                    entry_index,
+                    DeclaredTypes::at(ty, &active_scope, entries, entry_index),
+                );
+                continue;
+            }
             // Only locals, classes and type aliases are handled in this pass,
             // so build the entry's scope only for those.
             if !matches!(
@@ -4333,6 +4425,7 @@ impl Evaluator {
                 own_body_scope,
                 local_bindings: &local_bindings,
                 all_props: &all_props,
+                declared_types: &declared_types,
             };
             let hand_up = match &checks {
                 TypeChecks::Generator(outer_names, _) => {
@@ -4367,6 +4460,7 @@ impl Evaluator {
                 own_body_scope,
                 local_bindings: &local_bindings,
                 all_props: &all_props,
+                declared_types: &declared_types,
             };
             let failed_locals = self.check_finished_body(
                 &body,
@@ -4993,9 +5087,13 @@ impl Evaluator {
         // enclosing object, which is not complete yet.
         if (in_generator && type_has_constraint(ty, scope))
             || constraint_reads_members(ty, scope, members)
-            || names_later_declaration(ty, scope, entries, entry_index)
+            || names_later_declaration(ty, scope, entries, entry_index, false)
         {
-            deferred_locals.push((prop, entry_index, bound_aliases(prop, scope)));
+            deferred_locals.push((
+                prop,
+                entry_index,
+                DeclaredTypes::at(ty, scope, entries, entry_index),
+            ));
             return Ok((Ok(val), false));
         }
         Ok(match self.typed_local_failure(prop, &val, scope, depth)? {
@@ -5004,7 +5102,11 @@ impl Evaluator {
             LocalCheck::Failed(message) => (Err(message), true),
             LocalCheck::Passed => (Ok(val), false),
             LocalCheck::Unresolved => {
-                deferred_locals.push((prop, entry_index, bound_aliases(prop, scope)));
+                deferred_locals.push((
+                    prop,
+                    entry_index,
+                    DeclaredTypes::at(ty, scope, entries, entry_index),
+                ));
                 (Ok(val), false)
             }
         })
@@ -5046,7 +5148,7 @@ impl Evaluator {
         depth: usize,
     ) -> Result<Vec<(LocalKey, String)>> {
         let mut failed_locals = Vec::new();
-        for (prop, entry_index, aliases) in deferred_locals {
+        for (prop, entry_index, declared) in deferred_locals {
             let Some(Ok(value)) = body.local_bindings.get(&entry_index).cloned() else {
                 continue;
             };
@@ -5054,11 +5156,9 @@ impl Evaluator {
                 continue;
             };
             let mut check_scope = body.check_scope(entry_index);
-            // The local keeps the aliases it was declared with; only member
+            // The local keeps the types it was declared with; only member
             // values come from the finished body.
-            for (name, alias) in aliases {
-                check_scope.set_type_alias(name, alias);
-            }
+            declared.apply(&mut check_scope);
             // In a `for`/`when` body, a constraint can read members of the
             // enclosing object bound after this body, so the check is handed
             // up to that object with the iteration's bindings it reads.
@@ -5075,7 +5175,7 @@ impl Evaluator {
                     entry_index: None,
                     local: Some(local_key(prop, &iteration)),
                     body: Some(Arc::clone(body.entries)),
-                    declaration: prop as *const Property as usize,
+                    generator_entry: iteration.first().copied().unwrap_or_default(),
                 });
                 continue;
             }
@@ -5127,7 +5227,15 @@ impl Evaluator {
             let Some(value) = body.all_props.get(&prop.name).cloned() else {
                 continue;
             };
-            let active_scope = body.entry_scope(entry_index);
+            let declared = body.declared_types.get(&entry_index);
+            let active_scope = match declared {
+                Some(declared) => {
+                    let mut scope = body.entry_scope(entry_index).child();
+                    declared.apply(&mut scope);
+                    scope
+                }
+                None => body.entry_scope(entry_index),
+            };
             if let TypeChecks::Generator(outer_names, _) = checks {
                 let names = iteration_names.get_or_insert_with(|| {
                     let mut names = (**outer_names).clone();
@@ -5156,14 +5264,17 @@ impl Evaluator {
                     entry_index: None,
                     local: None,
                     body: body_entries,
-                    declaration: prop as *const Property as usize,
+                    generator_entry: checks.iteration().first().copied().unwrap_or_default(),
                 });
                 continue;
             }
             let members = body_members.get_or_insert_with(|| body_member_names(body.entries));
             if constraint_reads_members(ty, &active_scope, members) {
                 drop(active_scope);
-                let check_scope = body.check_scope(entry_index);
+                let mut check_scope = body.check_scope(entry_index);
+                if let Some(declared) = declared {
+                    declared.apply(&mut check_scope);
+                }
                 self.check_object_property_type(prop, &value, &check_scope, depth)?;
             } else {
                 self.check_object_property_type(prop, &value, &active_scope, depth)?;
@@ -5179,16 +5290,22 @@ impl Evaluator {
         // is returned, to poison in another pass.
         let mut failed_locals = Vec::new();
         let checks = pending.split_off(generator_mark);
-        // A property a later iteration of the same generator declaration
-        // wrote again is superseded: its value is not the object's, so only
-        // the last write's check applies, in that write's scope. Distinct
-        // declarations (an inherited generator's and an amendment's) each
-        // check the final value against their own declared type.
-        let mut written_later: FxHashSet<usize> = FxHashSet::default();
+        // Within one body's generators, a property written again later (by
+        // another iteration, or another branch or generator of that body)
+        // is superseded: its value is not the object's, so only the last
+        // write's check applies, in that write's scope. Generators written in
+        // different bodies (an inherited one and the amendment's own, told
+        // apart by their lexical scope) each check the final value against
+        // their own declared type.
+        let mut written_later: FxHashSet<(Option<*const CapturedScope>, &str)> =
+            FxHashSet::default();
         let superseded = checks
             .iter()
             .rev()
-            .map(|check| check.local.is_none() && !written_later.insert(check.declaration))
+            .map(|check| {
+                check.local.is_none()
+                    && !written_later.insert((body.owner(check.generator_entry), &check.name))
+            })
             .collect::<Vec<_>>();
         for (check, superseded) in checks.into_iter().zip(superseded.into_iter().rev()) {
             if superseded {
@@ -5309,6 +5426,39 @@ impl Evaluator {
         scope: &Scope,
         depth: usize,
     ) -> Result<bool> {
+        self.eval_type_check_in(val, ty, scope, depth, &mut Vec::new())
+    }
+
+    /// Check `val` against the type alias `name` resolves to (`resolved`).
+    /// `resolving` holds the aliases being resolved around this check: an
+    /// alias that reaches itself (`typealias Loop<T> = Loop<T>`) is an error,
+    /// not endless recursion.
+    fn eval_alias_check(
+        &mut self,
+        val: &Value,
+        name: &str,
+        resolved: &crate::parser::TypeExpr,
+        scope: &Scope,
+        depth: usize,
+        resolving: &mut Vec<String>,
+    ) -> Result<bool> {
+        if resolving.iter().any(|seen| seen == name) {
+            return Err(Error::Eval(format!("type alias '{name}' refers to itself")));
+        }
+        resolving.push(name.to_string());
+        let matches = self.eval_type_check_in(val, resolved, scope, depth + 1, resolving);
+        resolving.pop();
+        matches
+    }
+
+    fn eval_type_check_in(
+        &mut self,
+        val: &Value,
+        ty: &crate::parser::TypeExpr,
+        scope: &Scope,
+        depth: usize,
+        resolving: &mut Vec<String>,
+    ) -> Result<bool> {
         use crate::parser::TypeExpr;
         match ty {
             TypeExpr::Named(name) => {
@@ -5318,7 +5468,7 @@ impl Evaluator {
                 // Check if name is a type alias; if so, resolve to the aliased type
                 if let Some(resolved) = scope.get_type_alias(name) {
                     let resolved = resolved.clone();
-                    return self.eval_type_check(val, &resolved, scope, depth + 1);
+                    return self.eval_alias_check(val, name, &resolved, scope, depth, resolving);
                 }
                 if let Some(matches) = value_is_class_type(val, name, scope) {
                     return Ok(matches);
@@ -5333,7 +5483,7 @@ impl Evaluator {
                     true
                 } else if let Some(resolved) = scope.get_type_alias(class_name) {
                     let resolved = resolved.clone();
-                    self.eval_type_check(val, &resolved, scope, depth + 1)?
+                    self.eval_alias_check(val, class_name, &resolved, scope, depth, resolving)?
                 } else {
                     value_is_class_type(val, class_name, scope)
                         .unwrap_or_else(|| value_is_named_type(val, base))
@@ -5368,11 +5518,11 @@ impl Evaluator {
                 if is_null_value(val) {
                     return Ok(true);
                 }
-                self.eval_type_check(val, inner, scope, depth)
+                self.eval_type_check_in(val, inner, scope, depth, resolving)
             }
             TypeExpr::Union(variants) => {
                 for v in variants {
-                    if self.eval_type_check(val, v, scope, depth)? {
+                    if self.eval_type_check_in(val, v, scope, depth, resolving)? {
                         return Ok(true);
                     }
                 }
@@ -5383,7 +5533,7 @@ impl Evaluator {
             TypeExpr::Generic(name, _) => {
                 if let Some(resolved) = scope.get_type_alias(name) {
                     let resolved = resolved.clone();
-                    return self.eval_type_check(val, &resolved, scope, depth + 1);
+                    return self.eval_alias_check(val, name, &resolved, scope, depth, resolving);
                 }
                 Ok(value_is_type(val, ty))
             }

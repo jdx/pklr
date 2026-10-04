@@ -651,8 +651,9 @@ pub(super) fn type_is_runtime_checkable(ty: &crate::parser::TypeExpr, scope: &Sc
     type_is_runtime_checkable_inner(ty, scope, &mut Vec::new())
 }
 
-/// Type aliases are resolved (following chains, guarding against cycles)
-/// before deciding, so an alias is checkable exactly when its target is.
+/// Type aliases are resolved (following chains) before deciding, so an alias
+/// is checkable exactly when its target is. An alias that reaches itself
+/// counts as checkable, so the check reports the cycle.
 fn type_is_runtime_checkable_inner(
     ty: &crate::parser::TypeExpr,
     scope: &Scope,
@@ -672,7 +673,8 @@ fn type_is_runtime_checkable_inner(
             // so it is resolved first, as `eval_type_check` does.
             if let Some(alias) = scope.get_type_alias(runtime_name) {
                 if resolving.iter().any(|seen| seen == runtime_name) {
-                    return false;
+                    // A cycle is checked, so the check reports it.
+                    return true;
                 }
                 resolving.push(runtime_name.to_string());
                 let checkable = type_is_runtime_checkable_inner(alias, scope, resolving);
@@ -702,7 +704,7 @@ fn type_is_runtime_checkable_inner(
             }
             if let Some(alias) = scope.get_type_alias(name) {
                 if resolving.iter().any(|seen| seen == name) {
-                    return false;
+                    return true;
                 }
                 resolving.push(name.clone());
                 let checkable = type_is_runtime_checkable_inner(alias, scope, resolving);
