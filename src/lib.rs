@@ -18,6 +18,10 @@ pub use eval::Evaluator;
 #[cfg(feature = "eval-core")]
 pub use value::Value;
 
+/// Re-export reqwest so consumers can build a client for
+/// [`EvaluatorBuilder::http_client`] without a separate dependency.
+#[cfg(feature = "async")]
+pub use reqwest;
 /// Re-export ureq so consumers can configure an HTTP agent without a separate
 /// dependency.
 #[cfg(feature = "http")]
@@ -45,6 +49,13 @@ pub fn eval_to_json(path: &Path) -> Result<serde_json::Value> {
     EvaluatorBuilder::new().eval_to_json(path)
 }
 
+/// Evaluate a Pkl file on tokio's blocking thread pool and return its
+/// contents as JSON. Must be called from within a tokio runtime.
+#[cfg(feature = "async")]
+pub async fn eval_to_json_async(path: &Path) -> Result<serde_json::Value> {
+    EvaluatorBuilder::new().eval_to_json_async(path).await
+}
+
 /// Options for [`eval_with_options`].
 #[cfg(feature = "native-io")]
 #[derive(Default)]
@@ -63,6 +74,8 @@ pub struct EvalOptions {
 pub struct EvaluatorBuilder {
     #[cfg(feature = "http")]
     agent: Option<ureq::Agent>,
+    #[cfg(feature = "async")]
+    client: Option<reqwest::Client>,
     http_rewrites: Vec<String>,
     package_cache_dir: Option<std::path::PathBuf>,
     offline: bool,
@@ -87,6 +100,14 @@ impl EvaluatorBuilder {
     #[cfg(feature = "http")]
     pub fn http_agent(mut self, agent: ureq::Agent) -> Self {
         self.agent = Some(agent);
+        self
+    }
+
+    /// Fetch over HTTP with a `reqwest` client on tokio instead of ureq.
+    /// Takes precedence over [`http_agent`](Self::http_agent).
+    #[cfg(feature = "async")]
+    pub fn http_client(mut self, client: reqwest::Client) -> Self {
+        self.client = Some(client);
         self
     }
 
@@ -128,11 +149,18 @@ impl EvaluatorBuilder {
     ///
     /// A package that fails to preload is skipped and fetched normally.
     pub fn build(self) -> Evaluator {
+        #[cfg(feature = "async")]
+        let (capabilities, agent) = match self.client {
+            Some(client) => (Some(NativeCapabilities::with_reqwest_client(client)), None),
+            None => (None, self.agent),
+        };
+        #[cfg(all(feature = "http", not(feature = "async")))]
+        let (capabilities, agent) = (None, self.agent);
         #[cfg(feature = "http")]
-        let capabilities = match self.agent {
+        let capabilities = capabilities.unwrap_or_else(|| match agent {
             Some(agent) => NativeCapabilities::with_http_agent(agent),
             None => NativeCapabilities::new(),
-        };
+        });
         #[cfg(not(feature = "http"))]
         let capabilities = NativeCapabilities::new();
         let mut evaluator = Evaluator::with_capabilities(capabilities);
@@ -154,13 +182,60 @@ impl EvaluatorBuilder {
 
     /// Evaluate a Pkl file and return its JSON and environment dependencies.
     pub fn eval(self, path: &Path) -> Result<EvalOutcome> {
+        self.eval_with_cancel(path, None)
+    }
+
+    fn eval_with_cancel(
+        self,
+        path: &Path,
+        cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<EvalOutcome> {
         let mut evaluator = self.build();
+        if let Some(cancel) = cancel {
+            evaluator.set_cancel_flag(cancel);
+        }
         evaluator.set_base_path(path.parent().unwrap_or(Path::new(".")));
         let value = evaluator.eval_file_converted(path)?;
         Ok(EvalOutcome {
             json: value.to_json(),
             env_reads: evaluator.take_env_reads(),
         })
+    }
+
+    /// [`eval_to_json`](Self::eval_to_json) on tokio's blocking thread pool.
+    /// Must be called from within a tokio runtime.
+    #[cfg(feature = "async")]
+    pub async fn eval_to_json_async(self, path: &Path) -> Result<serde_json::Value> {
+        Ok(self.eval_async(path).await?.json)
+    }
+
+    /// [`eval`](Self::eval) on tokio's blocking thread pool, so the
+    /// synchronous evaluation does not block the caller's runtime. Must be
+    /// called from within a tokio runtime.
+    ///
+    /// Dropping the returned future (for example on a timeout) cancels the
+    /// evaluation: it stops at its next expression, read or fetch, and starts
+    /// no further downloads.
+    #[cfg(feature = "async")]
+    pub async fn eval_async(self, path: &Path) -> Result<EvalOutcome> {
+        /// Cancels the evaluation when the future holding it is dropped.
+        struct CancelOnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+        impl Drop for CancelOnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+
+        let path = path.to_path_buf();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let _guard = CancelOnDrop(cancel.clone());
+        let task = tokio::task::spawn_blocking(move || self.eval_with_cancel(&path, Some(cancel)));
+        match task.await {
+            Ok(result) => result,
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(error) => Err(Error::Eval(format!("evaluation task failed: {error}"))),
+        }
     }
 }
 

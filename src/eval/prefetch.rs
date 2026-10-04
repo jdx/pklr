@@ -42,10 +42,19 @@ pub(super) struct PrefetchState {
 
 impl Default for PrefetchState {
     fn default() -> Self {
+        Self::new(None)
+    }
+}
+
+impl PrefetchState {
+    /// A fresh budget, spent at once when `cancel` is set, so a cancelled
+    /// evaluation starts no further prefetch requests and drops the bodies
+    /// still downloading.
+    pub(super) fn new(cancel: Option<Arc<std::sync::atomic::AtomicBool>>) -> Self {
         Self {
             attempted: HashSet::default(),
             requests: MAX_REQUESTS,
-            bytes: FetchBudget::new(MAX_BYTES),
+            bytes: FetchBudget::new(MAX_BYTES).cancelled_by(cancel),
         }
     }
 }

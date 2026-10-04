@@ -37,6 +37,11 @@ pub(crate) use scope::SourceScope;
 use scope::*;
 use types::*;
 
+/// The error a cancelled evaluation fails with.
+fn cancelled() -> Error {
+    Error::Eval("evaluation cancelled".to_string())
+}
+
 const DYNAMIC_SIBLING_REF: &str = "\0pklr:dynamic-sibling";
 
 /// Evaluates pkl source files to [`Value`].
@@ -78,6 +83,9 @@ pub struct Evaluator {
     scoped_imports_in_flight: HashSet<PathBuf>,
     /// Host-provided IO for files, environment, HTTP, packages, and globs.
     capabilities: Box<dyn EvalCapabilities>,
+    /// Set from another thread to stop the evaluation (see
+    /// [`Evaluator::set_cancel_flag`]).
+    cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Extracted package zip directories (zip URL → temp dir path)
     #[cfg(feature = "package-zip")]
     package_dirs: HashMap<String, PathBuf>,
@@ -286,6 +294,7 @@ impl Default for Evaluator {
 /// Access to the host capabilities.
 impl Evaluator {
     fn read_to_string_io(&mut self, path: &Path) -> Result<String> {
+        self.check_cancelled()?;
         self.capabilities.read_to_string(path)
     }
 
@@ -323,10 +332,12 @@ impl Evaluator {
     }
 
     fn fetch_text_io(&mut self, url: &str) -> Result<String> {
+        self.check_cancelled()?;
         self.capabilities.fetch_text(url)
     }
 
     fn fetch_bytes_io(&mut self, url: &str) -> Result<Vec<u8>> {
+        self.check_cancelled()?;
         self.capabilities.fetch_bytes(url)
     }
 
@@ -364,6 +375,7 @@ impl Evaluator {
             env_reads: BTreeMap::new(),
             scoped_imports_in_flight: HashSet::default(),
             capabilities: Box::new(capabilities),
+            cancel: None,
             #[cfg(feature = "package-zip")]
             package_dirs: HashMap::default(),
             package_cache_dir: None,
@@ -415,6 +427,24 @@ impl Evaluator {
         self.offline = offline;
     }
 
+    /// Stop evaluating, with an "evaluation cancelled" error, once `flag` is
+    /// set, for example from another thread after a timeout. The evaluator
+    /// checks it before each expression, module read and fetch, and starts
+    /// no further prefetch requests once it is set.
+    pub fn set_cancel_flag(&mut self, flag: Arc<std::sync::atomic::AtomicBool>) {
+        self.cancel = Some(flag);
+    }
+
+    /// Fail if the cancel flag is set. A single `Option` test when there is
+    /// none.
+    #[inline]
+    fn check_cancelled(&self) -> Result<()> {
+        match &self.cancel {
+            Some(flag) if flag.load(std::sync::atomic::Ordering::Relaxed) => Err(cancelled()),
+            _ => Ok(()),
+        }
+    }
+
     /// Return the environment variables observed by the latest evaluation.
     ///
     /// Missing variables are included with a `None` value. Entries are ordered
@@ -442,6 +472,7 @@ impl Evaluator {
         self.module_scopes.clear();
         self.scoped_imports_in_flight.clear();
         self.converters.clear();
+        self.prefetch = prefetch::PrefetchState::new(self.cancel.clone());
     }
 
     /// Add HTTP URL rewrite rules. Each rule is a `"source_prefix=target_prefix"` string
@@ -1455,6 +1486,8 @@ impl Evaluator {
                 self.max_depth
             )));
         }
+        self.check_cancelled()?;
+        self.prefetch_remote_imports(module, path);
         if module
             .body
             .iter()
@@ -4267,6 +4300,7 @@ impl Evaluator {
         if depth > self.max_depth {
             return Err(Error::Eval("maximum recursion depth exceeded".into()));
         }
+        self.check_cancelled()?;
         match expr {
             Expr::Null => Ok(Value::Null),
             Expr::Bool(b) => Ok(Value::Bool(*b)),

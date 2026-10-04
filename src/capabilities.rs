@@ -122,6 +122,8 @@ pub trait EvalCapabilities: Send + Sync {
 #[derive(Debug)]
 pub struct FetchBudget {
     remaining: AtomicU64,
+    /// When set, the budget counts as spent.
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl FetchBudget {
@@ -129,7 +131,23 @@ impl FetchBudget {
     pub fn new(bytes: u64) -> Self {
         Self {
             remaining: AtomicU64::new(bytes),
+            cancel: None,
         }
+    }
+
+    /// Treat the budget as spent once `cancel` is set.
+    pub(crate) fn cancelled_by(
+        mut self,
+        cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Self {
+        self.cancel = cancel;
+        self
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
     }
 
     /// A budget that is never spent.
@@ -139,6 +157,9 @@ impl FetchBudget {
 
     /// The bytes left.
     pub fn remaining(&self) -> u64 {
+        if self.is_cancelled() {
+            return 0;
+        }
         self.remaining.load(Ordering::Acquire)
     }
 
@@ -150,7 +171,7 @@ impl FetchBudget {
     /// Take `bytes` if that many are left, returning whether it did. Nothing
     /// is taken when they do not fit.
     pub fn try_take(&self, bytes: u64) -> bool {
-        self.update(|left| left.checked_sub(bytes)).is_some()
+        !self.is_cancelled() && self.update(|left| left.checked_sub(bytes)).is_some()
     }
 
     /// Charge `bytes` already downloaded, leaving the budget spent if they

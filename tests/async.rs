@@ -237,3 +237,62 @@ async fn eval_async_with_reqwest_on_a_current_thread_runtime() {
     assert_eq!(json["result"], 3);
     assert_eq!(server.requests(), 2);
 }
+
+/// Dropping `eval_async`'s future (here on a timeout) cancels the
+/// evaluation: once the request in flight finishes, no further one starts.
+#[tokio::test(flavor = "multi_thread")]
+async fn timing_out_eval_async_stops_fetching() {
+    const LINKS: u64 = 20;
+    let server = common::DelayedServer::start_with(
+        |path| {
+            let index: u64 = path.strip_prefix("/")?.strip_suffix(".pkl")?.parse().ok()?;
+            Some(if index + 1 < LINKS {
+                format!("import \"{}.pkl\" as Next\nvalue = Next.value\n", index + 1)
+            } else {
+                "value = 1\n".to_string()
+            })
+        },
+        std::time::Duration::from_millis(200),
+    );
+    let path = common::write_entry(
+        "async_timeout_cancels",
+        "main.pkl",
+        &format!(
+            "import \"{}/0.pkl\" as Zero\nresult = Zero.value\n",
+            server.base
+        ),
+    );
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        pklr::EvaluatorBuilder::new().eval_to_json_async(&path),
+    )
+    .await;
+    assert!(result.is_err(), "evaluation finished before the timeout");
+
+    // Let the request in flight at the timeout finish.
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let after_cancel = server.requests();
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+
+    assert_eq!(
+        server.requests(),
+        after_cancel,
+        "requests kept starting after the evaluation was cancelled"
+    );
+    assert!(after_cancel < LINKS as usize, "{after_cancel} requests");
+}
+
+#[test]
+fn a_cancelled_evaluation_fails_with_a_cancelled_error() {
+    let mut evaluator = pklr::Evaluator::new();
+    let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    evaluator.set_cancel_flag(flag);
+
+    let error = evaluator
+        .eval_source("value = 1 + 1\n", std::path::Path::new("entry.pkl"))
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("evaluation cancelled"), "{error}");
+}
