@@ -1757,6 +1757,87 @@ other {
 }
 
 #[test]
+fn generator_check_keeps_type_alias_declared_in_generator() {
+    let message = eval_fails(
+        r#"
+obj { when (true) { typealias Small = Int(this < 2); checked: Small = 3 } }
+"#,
+    );
+    assert!(
+        message.contains("property 'checked' expected Small"),
+        "{message}"
+    );
+    let json = eval(
+        r#"
+obj { when (true) { typealias Small = Int(this < 5); checked: Small = 3 } }
+"#,
+    );
+    assert_eq!(json["obj"]["checked"], 3);
+}
+
+#[test]
+fn nested_generator_check_keeps_enclosing_generator_locals() {
+    let message = eval_fails(
+        r#"
+obj { for (x in List(1)) { local lim = 2; when (true) { checked: Int(this < lim) = 3 } } }
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+    let json = eval(
+        r#"
+obj { for (x in List(1)) { local lim = 5; when (true) { checked: Int(this < lim) = 3 } } }
+"#,
+    );
+    assert_eq!(json["obj"]["checked"], 3);
+}
+
+#[test]
+fn generator_check_keeps_failed_generator_local_failed() {
+    // The failed local must not fall through to the outer `lim`.
+    let message = eval_fails(
+        r#"
+lim = 10
+obj { for (x in List(1)) { local lim: Int = "x"; checked: Int(this < lim) = 3 } }
+"#,
+    );
+    assert!(message.contains("property 'lim' expected Int"), "{message}");
+}
+
+#[test]
+fn local_constraint_reads_generator_produced_member() {
+    let message = eval_fails(
+        r#"
+obj { local checked: Int(this < limit) = 3; when (true) { limit = 2 }; out = checked }
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+    let json = eval(
+        r#"
+obj { local checked: Int(this < limit) = 1; when (true) { limit = 2 }; out = checked }
+"#,
+    );
+    assert_eq!(json["obj"]["out"], 1);
+}
+
+#[test]
+fn amendment_keeps_inherited_typed_local_lazy() {
+    let json = eval(
+        r#"
+base { local bad: Int = "x" }
+obj = (base) {}
+"#,
+    );
+    assert_eq!(json["obj"], serde_json::json!({}));
+    let message = eval_fails(
+        r#"
+base { local bad: Int = "x"; out = bad }
+obj = (base) {}
+"#,
+    );
+    assert!(message.contains("property 'bad' expected Int"), "{message}");
+}
+
+#[test]
 fn amendment_generator_declared_property_is_checked() {
     let message = eval_fails(
         r#"

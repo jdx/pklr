@@ -88,15 +88,29 @@ pub struct Evaluator {
 }
 
 /// A declared-type check of a generator-produced property. It runs in the
-/// finished enclosing object's scope, with the iteration's own bindings
-/// (loop variables and generator-body locals) on top.
+/// iteration scope it was evaluated in, with the finished enclosing object's
+/// members layered over it, except names the iteration declares itself.
 struct PendingTypeCheck {
     prop: Property,
     value: Value,
-    iteration_bindings: Vec<(String, Value)>,
-    /// The enclosing object's entry (the generator) that produced it, set
-    /// once that object's generator entry finishes.
-    entry_index: Option<usize>,
+    /// The iteration scope, and the names in it whose binding is poisoned.
+    scope: CapturedScope,
+    poisoned: IndexMap<String, String>,
+    /// Loop variables and the locals, classes and type aliases of the
+    /// generator bodies around the property: these win over object members.
+    iteration_names: HashSet<String>,
+}
+
+/// The result of checking a typed local.
+enum LocalCheck {
+    Passed,
+    /// Reading the local must fail with this error.
+    Failed(String),
+    /// The constraint reads a name that is not bound yet. When the local is
+    /// bound, its check waits for the finished body. If the name is unbound
+    /// even then (a member of an enclosing body bound later), the check
+    /// cannot be decided and the local is left unchecked.
+    Unresolved,
 }
 
 /// The result of evaluating a body whose typed locals may need another pass.
@@ -119,9 +133,10 @@ enum TypeChecks {
     /// The entries at these indices: the ones an amendment wrote itself.
     Entries(Rc<HashSet<usize>>),
     /// Every entry of a `for`/`when` body, handed to the enclosing object to
-    /// check once that object is complete, with the loop variables bound by
-    /// the generators around it.
-    Generator(Rc<Vec<(String, Value)>>),
+    /// check once that object is complete. Carries the names the iterations
+    /// around it declare (loop variables, enclosing generator bodies'
+    /// declarations).
+    Generator(Rc<HashSet<String>>),
 }
 
 impl TypeChecks {
@@ -133,18 +148,19 @@ impl TypeChecks {
         }
     }
 
-    /// Checks for the body of the generator at `entry_index`, which binds
-    /// `loop_bindings` for this iteration.
-    fn for_generator(&self, entry_index: usize, loop_bindings: Vec<(String, Value)>) -> TypeChecks {
+    /// Checks for the body of the generator at `entry_index`. `names` are
+    /// what this iteration declares around that body: its loop variables,
+    /// plus, inside a generator body, that body's own declarations.
+    fn for_generator(&self, entry_index: usize, names: Vec<String>) -> TypeChecks {
         if !self.includes(entry_index) {
             return TypeChecks::Nothing;
         }
-        let mut bindings = match self {
+        let mut all = match self {
             TypeChecks::Generator(outer) => (**outer).clone(),
-            _ => Vec::new(),
+            _ => HashSet::new(),
         };
-        bindings.extend(loop_bindings);
-        TypeChecks::Generator(Rc::new(bindings))
+        all.extend(names);
+        TypeChecks::Generator(Rc::new(all))
     }
 
     fn is_generator(&self) -> bool {
@@ -163,6 +179,42 @@ struct ModuleScopeSnapshot {
     values: ScopeMap,
     type_aliases: IndexMap<String, crate::parser::TypeExpr>,
     late_properties: Vec<Property>,
+}
+
+/// The names of a body's members, including properties its `for`/`when`
+/// generators produce.
+fn body_member_names(entries: &[Entry]) -> HashSet<String> {
+    fn generated(entries: &[Entry], names: &mut HashSet<String>) {
+        for entry in entries {
+            match entry {
+                Entry::ForGenerator(fgen) => collect(&fgen.body, names),
+                Entry::WhenGenerator(wgen) => {
+                    collect(&wgen.body, names);
+                    if let Some(else_body) = &wgen.else_body {
+                        collect(else_body, names);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    fn collect(entries: &[Entry], names: &mut HashSet<String>) {
+        for entry in entries {
+            if let Entry::Property(prop) = entry
+                && !has_modifier(&prop.modifiers, Modifier::Local)
+            {
+                names.insert(prop.name.clone());
+            }
+        }
+        generated(entries, names);
+    }
+    let mut names = entries
+        .iter()
+        .filter_map(entry_member_name)
+        .cloned()
+        .collect::<HashSet<_>>();
+    generated(entries, &mut names);
+    names
 }
 
 /// Whether a constraint of `ty`, or of a type alias it names (following alias
@@ -2095,17 +2147,12 @@ impl Evaluator {
         }
         // Typed locals whose constraint reads a module member are checked
         // once the module is complete.
-        let module_members = module
-            .body
-            .iter()
-            .filter_map(entry_member_name)
-            .cloned()
-            .chain(
-                late_inherited_properties
-                    .iter()
-                    .map(|prop| prop.name.clone()),
-            )
-            .collect::<HashSet<_>>();
+        let mut module_members = body_member_names(&module.body);
+        module_members.extend(
+            late_inherited_properties
+                .iter()
+                .map(|prop| prop.name.clone()),
+        );
         let mut deferred_locals = Vec::new();
 
         // First pass: collect locals, class definitions, and type aliases in
@@ -2129,13 +2176,18 @@ impl Evaluator {
                                 deferred_locals.push(prop);
                                 scope.declare(prop.name.clone(), val);
                             }
-                            Some(_) => match self
-                                .typed_local_failure(prop, &val, &scope, depth)
-                                .await?
-                            {
-                                Some(message) => scope.declare_poisoned(prop.name.clone(), message),
-                                None => scope.declare(prop.name.clone(), val),
-                            },
+                            Some(_) => {
+                                match self.typed_local_failure(prop, &val, &scope, depth).await? {
+                                    LocalCheck::Failed(message) => {
+                                        scope.declare_poisoned(prop.name.clone(), message)
+                                    }
+                                    LocalCheck::Passed => scope.declare(prop.name.clone(), val),
+                                    LocalCheck::Unresolved => {
+                                        deferred_locals.push(prop);
+                                        scope.declare(prop.name.clone(), val);
+                                    }
+                                }
+                            }
                             None => scope.declare(prop.name.clone(), val),
                         },
                         Err(Error::Eval(message)) => {
@@ -2426,7 +2478,7 @@ impl Evaluator {
             let Some(value) = scope.get(&prop.name).cloned() else {
                 continue;
             };
-            if let Some(message) = self
+            if let LocalCheck::Failed(message) = self
                 .typed_local_failure(prop, &value, &scope, depth)
                 .await?
             {
@@ -2751,11 +2803,26 @@ impl Evaluator {
         // Typed locals whose constraint reads a member of this body, with
         // their entry index: checked once the body is complete.
         let mut deferred_locals: Vec<(&Property, usize)> = Vec::new();
-        let body_members = entries
+        let body_members = body_member_names(entries);
+        // What this body declares for itself rather than as object members:
+        // inside a generator body these belong to the iteration.
+        let declared_names = entries
             .iter()
-            .filter_map(entry_member_name)
-            .cloned()
-            .collect::<HashSet<_>>();
+            .filter_map(|entry| match entry {
+                Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {
+                    Some(prop.name.clone())
+                }
+                Entry::ClassDef(name, ..) | Entry::TypeAlias(name, _) => Some(name.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        // A nested generator's iteration also owns this generator body's
+        // declarations; an object's own declarations are its members.
+        let generator_names = if checks.is_generator() {
+            declared_names.clone()
+        } else {
+            Vec::new()
+        };
         let mut child_scope = scope.child();
         let entry_owners = entry_scope_owners(entries, entry_scopes, inherited_source);
         let own_body = own_body_names(entries, entry_scopes, inherited_source);
@@ -2881,7 +2948,10 @@ impl Evaluator {
                     // entries can reference it (e.g. a non-lambda local that
                     // calls a lambda local defined just above it).
                     let mut type_failed = false;
-                    let checked = prop.type_ann.is_some() && checks.includes(entry_index);
+                    // Typed locals are checked lazily (a failure poisons the
+                    // binding) in every body, whichever property entries it
+                    // checks, so an unread local never fails.
+                    let checked = prop.type_ann.is_some();
                     let evaluated = if let Some(message) =
                         poisoned_locals.get(&prop.name).filter(|_| checked)
                     {
@@ -2903,13 +2973,17 @@ impl Evaluator {
                                 .typed_local_failure(prop, &val, &active_scope, depth)
                                 .await?
                             {
-                                Some(message) => {
+                                LocalCheck::Failed(message) => {
                                     // Re-binding it after the properties
                                     // (below) would drop the poison.
                                     type_failed = true;
                                     Err(message)
                                 }
-                                None => Ok(val),
+                                LocalCheck::Passed => Ok(val),
+                                LocalCheck::Unresolved => {
+                                    deferred_locals.push((prop, entry_index));
+                                    Ok(val)
+                                }
                             },
                             Err(Error::Eval(message)) => Err(message),
                             Err(error) => return Err(error),
@@ -3176,10 +3250,11 @@ impl Evaluator {
                     let items = collection_to_items(collection);
                     for (k, v) in items {
                         let mut iter_scope = active_scope.child();
-                        let mut loop_bindings = vec![(fgen.val_var.clone(), v.clone())];
+                        let mut iteration_names = generator_names.clone();
+                        iteration_names.push(fgen.val_var.clone());
                         iter_scope.set(fgen.val_var.clone(), v);
                         if let Some(key_var) = &fgen.key_var {
-                            loop_bindings.push((key_var.clone(), k.clone()));
+                            iteration_names.push(key_var.clone());
                             iter_scope.set(key_var.clone(), k);
                         }
                         let body_val = self
@@ -3189,7 +3264,7 @@ impl Evaluator {
                                 depth,
                                 None,
                                 None,
-                                checks.for_generator(entry_index, loop_bindings),
+                                checks.for_generator(entry_index, iteration_names),
                             )
                             .await?;
                         if let Value::Object(m, _) = body_val {
@@ -3224,7 +3299,7 @@ impl Evaluator {
                                 depth,
                                 None,
                                 None,
-                                checks.for_generator(entry_index, Vec::new()),
+                                checks.for_generator(entry_index, generator_names.clone()),
                             )
                             .await?;
                         if let Value::Object(m, _) = body_val {
@@ -3246,7 +3321,7 @@ impl Evaluator {
                                 depth,
                                 None,
                                 None,
-                                checks.for_generator(entry_index, Vec::new()),
+                                checks.for_generator(entry_index, generator_names.clone()),
                             )
                             .await?;
                         if let Value::Object(m, _) = else_val {
@@ -3265,13 +3340,6 @@ impl Evaluator {
                 Entry::Elem(_) => {} // bare elements only valid in Listing bodies
                 Entry::ClassDef(..) | Entry::TypeAlias(..) => {} // handled in scope setup
             }
-            // Checks a generator entry handed up are run in that entry's scope
-            // of this object once it is complete.
-            if !checks.is_generator() {
-                for pending in &mut self.generator_type_checks[generator_mark..] {
-                    pending.entry_index.get_or_insert(entry_index);
-                }
-            }
         }
         // Check typed locals whose constraint reads members of this body
         // against the finished body. One that fails is poisoned in another
@@ -3281,15 +3349,22 @@ impl Evaluator {
             let Some(value) = child_scope.get(&prop.name).cloned() else {
                 continue;
             };
-            let active_scope = scope_for_object_entry(
+            // Members a `for`/`when` produced are in `all_props` but not bound
+            // by name in the body's scope; layer every finished member over
+            // the local's scope so they replace outer bindings too.
+            let mut check_scope = scope_for_object_entry(
                 entry_index,
                 &child_scope,
                 entry_scopes,
                 &entry_owners,
                 own_body_scope,
-            );
-            if let Some(message) = self
-                .typed_local_failure(prop, &value, &active_scope, depth)
+            )
+            .child();
+            for (name, member) in all_props.iter() {
+                check_scope.set(name.clone(), member.clone());
+            }
+            if let LocalCheck::Failed(message) = self
+                .typed_local_failure(prop, &value, &check_scope, depth)
                 .await?
             {
                 failed_locals.push((prop.name.clone(), message));
@@ -3320,20 +3395,14 @@ impl Evaluator {
         //
         // A `for`/`when` body hands its checks to the enclosing object, which
         // runs them once complete, so constraints can read its later members.
-        // They keep the iteration's own bindings: loop variables and this
-        // body's locals.
-        let iteration_bindings = match &checks {
-            TypeChecks::Generator(loop_bindings) => {
-                let mut bindings = (**loop_bindings).clone();
-                for entry in entries.iter() {
-                    if let Entry::Property(prop) = entry
-                        && has_modifier(&prop.modifiers, Modifier::Local)
-                        && let Some(value) = child_scope.get(&prop.name)
-                    {
-                        bindings.push((prop.name.clone(), value.clone()));
-                    }
-                }
-                Some(bindings)
+        // They keep the iteration scope, and the names the iteration declares
+        // itself (loop variables, generator-body locals, classes and type
+        // aliases) keep winning over the object's members.
+        let iteration_names = match &checks {
+            TypeChecks::Generator(outer_names) => {
+                let mut names = (**outer_names).clone();
+                names.extend(declared_names.iter().cloned());
+                Some(names)
             }
             _ => None,
         };
@@ -3351,15 +3420,6 @@ impl Evaluator {
             let Some(value) = all_props.get(&prop.name).cloned() else {
                 continue;
             };
-            if let Some(bindings) = &iteration_bindings {
-                self.generator_type_checks.push(PendingTypeCheck {
-                    prop: prop.clone(),
-                    value,
-                    iteration_bindings: bindings.clone(),
-                    entry_index: None,
-                });
-                continue;
-            }
             let active_scope = scope_for_object_entry(
                 entry_index,
                 &child_scope,
@@ -3367,30 +3427,51 @@ impl Evaluator {
                 &entry_owners,
                 own_body_scope,
             );
+            if let Some(names) = &iteration_names {
+                self.generator_type_checks.push(PendingTypeCheck {
+                    prop: prop.clone(),
+                    value,
+                    scope: capture_scope(&active_scope),
+                    poisoned: active_scope.flatten_poisoned(),
+                    iteration_names: names.clone(),
+                });
+                continue;
+            }
             self.check_declared_property_type(prop, &value, &active_scope, depth)
                 .await?;
         }
         // Check what this object's `for`/`when` bodies produced, unless this
         // is itself such a body, whose enclosing object does that. Each check
-        // runs in the finished scope of the generator entry, so this object's
-        // members replace outer bindings of the same name, with the
-        // iteration's own bindings on top.
+        // runs in its iteration scope with this object's finished members
+        // layered over it, so they replace outer bindings of the same name,
+        // except names the iteration declares itself. Failed bindings of the
+        // iteration stay failed.
         if !checks.is_generator() {
             let pending = self.generator_type_checks.split_off(generator_mark);
+            let member_names = body_members
+                .iter()
+                .chain(all_props.keys())
+                .cloned()
+                .collect::<HashSet<_>>();
             for check in pending {
-                let entry_scope = match check.entry_index {
-                    Some(entry_index) => scope_for_object_entry(
-                        entry_index,
-                        &child_scope,
-                        entry_scopes,
-                        &entry_owners,
-                        own_body_scope,
-                    ),
-                    None => child_scope.clone(),
-                };
-                let mut check_scope = entry_scope.child();
-                for (name, value) in check.iteration_bindings {
-                    check_scope.set(name, value);
+                let mut check_scope = restore_scope(&check.scope).child();
+                let mut overlaid = HashSet::new();
+                for name in &member_names {
+                    if check.iteration_names.contains(name) {
+                        continue;
+                    }
+                    if let Some(value) = child_scope.get(name) {
+                        check_scope.set(name.clone(), value.clone());
+                        overlaid.insert(name.clone());
+                    } else if let Some(message) = child_scope.poison_of(name) {
+                        check_scope.poison(name.clone(), message.clone());
+                        overlaid.insert(name.clone());
+                    }
+                }
+                for (name, message) in check.poisoned {
+                    if !overlaid.contains(&name) {
+                        check_scope.poison(name, message);
+                    }
                 }
                 self.check_declared_property_type(&check.prop, &check.value, &check_scope, depth)
                     .await?;
@@ -3721,21 +3802,22 @@ impl Evaluator {
     /// fails, through functions and constraints alike, and an unread local
     /// never does.
     ///
-    /// Returns the error to poison the local with, or `None` if it passes. A
-    /// constraint that reads a poisoned binding fails with that binding's
-    /// error. One that reads a name not bound yet (a member of an enclosing
-    /// body declared later) cannot be decided and passes.
+    /// A constraint that reads a poisoned binding fails with that binding's
+    /// error. One that reads a name not bound yet is `Unresolved`.
     async fn typed_local_failure(
         &mut self,
         prop: &Property,
         value: &Value,
         scope: &Scope,
         depth: usize,
-    ) -> Result<Option<String>> {
+    ) -> Result<LocalCheck> {
         match self.declared_type_mismatch(prop, value, scope, depth).await {
-            Ok(failure) => Ok(failure),
-            Err(Error::Eval(message)) if message.starts_with("undefined variable: ") => Ok(None),
-            Err(Error::Eval(message)) => Ok(Some(message)),
+            Ok(None) => Ok(LocalCheck::Passed),
+            Ok(Some(message)) => Ok(LocalCheck::Failed(message)),
+            Err(Error::Eval(message)) if message.starts_with("undefined variable: ") => {
+                Ok(LocalCheck::Unresolved)
+            }
+            Err(Error::Eval(message)) => Ok(LocalCheck::Failed(message)),
             Err(error) => Err(error),
         }
     }
@@ -4079,6 +4161,11 @@ impl Evaluator {
                 let Entry::Property(prop) = entry else {
                     continue;
                 };
+                // Typed locals are checked lazily, when bound: a failure
+                // poisons the local, so only a read fails.
+                if has_modifier(&prop.modifiers, Modifier::Local) {
+                    continue;
+                }
                 let Some(type_ann) = &prop.type_ann else {
                     continue;
                 };
