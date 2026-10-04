@@ -2017,6 +2017,99 @@ limit = 2
 }
 
 #[test]
+fn typed_local_through_alias_of_later_alias_is_checked() {
+    // `A` is bound when the local is, but reaches `B`, declared later.
+    let message = eval_fails(
+        r#"
+typealias A = B
+local bad: A = "x"
+typealias B = Int
+out = bad
+"#,
+    );
+    assert!(message.contains("property 'bad' expected A"), "{message}");
+    let message = eval_fails(
+        r#"
+obj { typealias A = B; local bad: A = "x"; typealias B = Int; out = bad }
+"#,
+    );
+    assert!(message.contains("property 'bad' expected A"), "{message}");
+    let json = eval(
+        r#"
+typealias A = B
+local ok: A = 1
+local unread: A = "x"
+typealias B = Int
+out = ok
+"#,
+    );
+    assert_eq!(json["out"], 1);
+}
+
+#[test]
+fn generator_check_follows_outer_alias_to_generator_declaration() {
+    let message = eval_fails(
+        r#"
+typealias A = B
+obj { when (true) { typealias B = Int; checked: A = "x" } }
+"#,
+    );
+    assert!(
+        message.contains("property 'checked' expected A"),
+        "{message}"
+    );
+    let message = eval_fails(
+        r#"
+typealias A = C
+obj { when (true) { class C { v = 1 }; checked: A = "x" } }
+"#,
+    );
+    assert!(
+        message.contains("property 'checked' expected A"),
+        "{message}"
+    );
+    let json = eval(
+        r#"
+typealias A = B
+typealias D = C
+obj { when (true) { typealias B = Int; checked: A = 1 } }
+other { when (true) { class C { v = 1 }; checked: D = new C {} } }
+"#,
+    );
+    assert_eq!(json["obj"]["checked"], 1);
+    assert_eq!(json["other"]["checked"]["v"], 1);
+}
+
+#[test]
+fn generator_check_keeps_alias_named_in_constraint() {
+    let json = eval(
+        r#"
+obj { when (true) { typealias Small = Int(this < 2); checked: Int(this is Small) = 1 } }
+"#,
+    );
+    assert_eq!(json["obj"]["checked"], 1);
+    let message = eval_fails(
+        r#"
+obj { when (true) { typealias Small = Int(this < 2); checked: Int(this is Small) = 3 } }
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+}
+
+#[test]
+fn alias_shadowing_builtin_name_is_resolved_first() {
+    // `String` here is an alias of `Function1`, which is not checked.
+    let json = eval(
+        r#"
+typealias String = Function1<String, String>
+f: String = (x) -> x
+out = f.apply("y")
+"#,
+    );
+    assert_eq!(json["out"], "y");
+}
+
+#[test]
 fn amendment_keeps_inherited_typed_local_lazy() {
     let json = eval(
         r#"

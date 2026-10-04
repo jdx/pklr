@@ -410,8 +410,17 @@ fn type_is_runtime_checkable_inner(
     match ty {
         TypeExpr::Named(name) => {
             let runtime_name = name.strip_prefix('*').unwrap_or(name);
-            // Built-in types (by far the most common) are decided without
-            // walking the scope chain for an alias.
+            // An alias may shadow a built-in name (`typealias String = ...`),
+            // so it is resolved first, as `eval_type_check` does.
+            if let Some(alias) = scope.get_type_alias(runtime_name) {
+                if resolving.iter().any(|seen| seen == runtime_name) {
+                    return false;
+                }
+                resolving.push(runtime_name.to_string());
+                let checkable = type_is_runtime_checkable_inner(alias, scope, resolving);
+                resolving.pop();
+                return checkable;
+            }
             if string_literal_type_value(name).is_some()
                 || matches!(
                     runtime_name,
@@ -434,15 +443,6 @@ fn type_is_runtime_checkable_inner(
                 )
             {
                 return true;
-            }
-            if let Some(alias) = scope.get_type_alias(runtime_name) {
-                if resolving.iter().any(|seen| seen == runtime_name) {
-                    return false;
-                }
-                resolving.push(runtime_name.to_string());
-                let checkable = type_is_runtime_checkable_inner(alias, scope, resolving);
-                resolving.pop();
-                return checkable;
             }
             resolve_dotted(scope, runtime_name).is_some()
         }

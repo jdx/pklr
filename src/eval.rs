@@ -316,71 +316,87 @@ fn layer_finished_members(
     layered
 }
 
-/// What checking a value against `ty` in `scope` depends on: the type aliases
-/// it reaches (following alias chains), with their definitions there, and the
-/// names it can read, from its constraints and those of the aliases, plus the
-/// type names themselves (a class is a value in scope).
+/// The closure of what checking a value against `ty` depends on, following
+/// alias chains with `resolve`: the type aliases reached, with the definitions
+/// `resolve` gave them, and every name reached. Names include the type names
+/// themselves (a class is a value in scope, a dotted name also counts by its
+/// root), the names read by constraints (of `ty` and of the aliases), and the
+/// types named inside those constraints (`this is Small`, `as`), whose
+/// aliases are followed too.
+fn type_closure(
+    ty: &crate::parser::TypeExpr,
+    resolve: &dyn Fn(&str) -> Option<crate::parser::TypeExpr>,
+) -> (Vec<(String, crate::parser::TypeExpr)>, FxHashSet<String>) {
+    struct Closure<'a> {
+        resolve: &'a dyn Fn(&str) -> Option<crate::parser::TypeExpr>,
+        aliases: Vec<(String, crate::parser::TypeExpr)>,
+        names: FxHashSet<String>,
+    }
+    impl Closure<'_> {
+        fn name(&mut self, name: &str) {
+            let name = name
+                .trim_start_matches('*')
+                .trim_end_matches('?')
+                .split('<')
+                .next()
+                .unwrap_or(name);
+            if !self.names.insert(name.to_string()) {
+                // Already visited, which also ends alias cycles.
+                return;
+            }
+            if let Some(root) = name.split('.').next() {
+                self.names.insert(root.to_string());
+            }
+            if let Some(alias) = (self.resolve)(name) {
+                self.ty(&alias);
+                self.aliases.push((name.to_string(), alias));
+            }
+        }
+        fn ty(&mut self, ty: &crate::parser::TypeExpr) {
+            use crate::parser::TypeExpr;
+            match ty {
+                TypeExpr::Named(name) => self.name(name),
+                TypeExpr::Constrained(base, constraint) => {
+                    // Everything the constraint reads, including the types it
+                    // names; a name that is an alias is followed like any
+                    // other.
+                    let mut refs = HashSet::new();
+                    collect_expr_refs(constraint, &mut refs, &HashSet::new());
+                    for name in refs {
+                        self.name(&name);
+                    }
+                    self.name(base);
+                }
+                TypeExpr::Nullable(inner) => self.ty(inner),
+                TypeExpr::Union(variants) => {
+                    for variant in variants {
+                        self.ty(variant);
+                    }
+                }
+                TypeExpr::Generic(name, args) => {
+                    self.name(name);
+                    for arg in args {
+                        self.ty(arg);
+                    }
+                }
+            }
+        }
+    }
+    let mut closure = Closure {
+        resolve,
+        aliases: Vec::new(),
+        names: FxHashSet::default(),
+    };
+    closure.ty(ty);
+    (closure.aliases, closure.names)
+}
+
+/// `type_closure` with the aliases `scope` resolves.
 fn type_check_dependencies(
     ty: &crate::parser::TypeExpr,
     scope: &Scope,
 ) -> (Vec<(String, crate::parser::TypeExpr)>, FxHashSet<String>) {
-    fn visit_name(
-        name: &str,
-        scope: &Scope,
-        aliases: &mut Vec<(String, crate::parser::TypeExpr)>,
-        names: &mut FxHashSet<String>,
-    ) {
-        let name = name
-            .trim_start_matches('*')
-            .trim_end_matches('?')
-            .split('<')
-            .next()
-            .unwrap_or(name);
-        names.insert(name.to_string());
-        if let Some(root) = name.split('.').next() {
-            names.insert(root.to_string());
-        }
-        if aliases.iter().any(|(seen, _)| seen == name) {
-            return;
-        }
-        if let Some(alias) = scope.get_type_alias(name) {
-            aliases.push((name.to_string(), alias.clone()));
-            visit(alias, scope, aliases, names);
-        }
-    }
-    fn visit(
-        ty: &crate::parser::TypeExpr,
-        scope: &Scope,
-        aliases: &mut Vec<(String, crate::parser::TypeExpr)>,
-        names: &mut FxHashSet<String>,
-    ) {
-        use crate::parser::TypeExpr;
-        match ty {
-            TypeExpr::Named(name) => visit_name(name, scope, aliases, names),
-            TypeExpr::Constrained(base, constraint) => {
-                let mut refs = HashSet::new();
-                collect_expr_refs(constraint, &mut refs, &HashSet::new());
-                names.extend(refs);
-                visit_name(base, scope, aliases, names);
-            }
-            TypeExpr::Nullable(inner) => visit(inner, scope, aliases, names),
-            TypeExpr::Union(variants) => {
-                for variant in variants {
-                    visit(variant, scope, aliases, names);
-                }
-            }
-            TypeExpr::Generic(name, args) => {
-                visit_name(name, scope, aliases, names);
-                for arg in args {
-                    visit(arg, scope, aliases, names);
-                }
-            }
-        }
-    }
-    let mut aliases = Vec::new();
-    let mut names = FxHashSet::default();
-    visit(ty, scope, &mut aliases, &mut names);
-    (aliases, names)
+    type_closure(ty, &|name| scope.get_type_alias(name).cloned())
 }
 
 /// The type aliases a typed local's declared type resolves to where it is
@@ -441,27 +457,83 @@ fn generator_body_has_typed_entries(entries: &[Entry]) -> bool {
 }
 
 /// Whether a deferred check of a generator-produced property of type `ty`
-/// needs the iteration scope it was produced in: the type, its aliases or
-/// their constraints (when `constrained`) read a name the iteration declares
+/// needs the iteration scope it was produced in: anything the type reaches
+/// (following alias chains as `scope`, the generator body's, resolves them,
+/// and through its constraints) is a name the iteration declares
 /// (`iteration_names`). Any other type resolves the same from the enclosing
 /// object's generator entry.
 fn type_needs_iteration_scope(
     ty: &crate::parser::TypeExpr,
     scope: &Scope,
     iteration_names: &FxHashSet<String>,
-    constrained: bool,
 ) -> bool {
     if iteration_names.is_empty() {
         return false;
     }
-    if !constrained {
-        // Without a constraint, only the type names themselves are read.
-        let mut names = FxHashSet::default();
-        type_expr_names(ty, &mut names);
-        return names.iter().any(|name| iteration_names.contains(name));
+    type_reaches(ty, &|name| scope.get_type_alias(name), &|name| {
+        iteration_names.contains(name)
+    })
+}
+
+/// Whether any name in the closure `type_closure` computes for `ty` (with
+/// aliases from `resolve`) satisfies `found`. Stops at the first match and
+/// allocates only to follow aliases and constraints, so the common case of a
+/// plain type name is cheap.
+fn type_reaches<'a>(
+    ty: &'a crate::parser::TypeExpr,
+    resolve: &dyn Fn(&str) -> Option<&'a crate::parser::TypeExpr>,
+    found: &dyn Fn(&str) -> bool,
+) -> bool {
+    fn name<'a>(
+        name: &str,
+        resolve: &dyn Fn(&str) -> Option<&'a crate::parser::TypeExpr>,
+        found: &dyn Fn(&str) -> bool,
+        followed: &mut Vec<String>,
+    ) -> bool {
+        let name = name
+            .trim_start_matches('*')
+            .trim_end_matches('?')
+            .split('<')
+            .next()
+            .unwrap_or(name);
+        if found(name) || name.split('.').next().is_some_and(found) {
+            return true;
+        }
+        let Some(alias) = resolve(name) else {
+            return false;
+        };
+        if followed.iter().any(|seen| seen == name) {
+            return false;
+        }
+        followed.push(name.to_string());
+        visit(alias, resolve, found, followed)
     }
-    let (_, names) = type_check_dependencies(ty, scope);
-    names.iter().any(|name| iteration_names.contains(name))
+    fn visit<'a>(
+        ty: &'a crate::parser::TypeExpr,
+        resolve: &dyn Fn(&str) -> Option<&'a crate::parser::TypeExpr>,
+        found: &dyn Fn(&str) -> bool,
+        followed: &mut Vec<String>,
+    ) -> bool {
+        use crate::parser::TypeExpr;
+        match ty {
+            TypeExpr::Named(type_name) => name(type_name, resolve, found, followed),
+            TypeExpr::Constrained(base, constraint) => {
+                let mut refs = HashSet::new();
+                collect_expr_refs(constraint, &mut refs, &HashSet::new());
+                refs.iter().any(|read| name(read, resolve, found, followed))
+                    || name(base, resolve, found, followed)
+            }
+            TypeExpr::Nullable(inner) => visit(inner, resolve, found, followed),
+            TypeExpr::Union(variants) => variants
+                .iter()
+                .any(|variant| visit(variant, resolve, found, followed)),
+            TypeExpr::Generic(type_name, args) => {
+                name(type_name, resolve, found, followed)
+                    || args.iter().any(|arg| visit(arg, resolve, found, followed))
+            }
+        }
+    }
+    visit(ty, resolve, found, &mut Vec::new())
 }
 
 /// Whether `ty`, or a type alias it names (following alias chains), has a
@@ -493,36 +565,6 @@ fn type_has_constraint(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
     visit(ty, scope, &mut Vec::new())
 }
 
-/// The type names `ty` mentions (without `*`, `?` or type arguments).
-fn type_expr_names(ty: &crate::parser::TypeExpr, names: &mut FxHashSet<String>) {
-    use crate::parser::TypeExpr;
-    let base = |name: &str| {
-        name.trim_start_matches('*')
-            .trim_end_matches('?')
-            .split('<')
-            .next()
-            .unwrap_or(name)
-            .to_string()
-    };
-    match ty {
-        TypeExpr::Named(name) | TypeExpr::Constrained(name, _) => {
-            names.insert(base(name));
-        }
-        TypeExpr::Nullable(inner) => type_expr_names(inner, names),
-        TypeExpr::Union(variants) => {
-            for variant in variants {
-                type_expr_names(variant, names);
-            }
-        }
-        TypeExpr::Generic(name, args) => {
-            names.insert(base(name));
-            for arg in args {
-                type_expr_names(arg, names);
-            }
-        }
-    }
-}
-
 /// Whether `ty` names a type that is not resolvable at the entry at
 /// `entry_index` but is a type alias declared later in the same body. A
 /// body's alias applies only after its declaration, so a name that already
@@ -535,15 +577,33 @@ fn names_later_alias(
     entries: &[Entry],
     entry_index: usize,
 ) -> bool {
-    let mut names = FxHashSet::default();
-    type_expr_names(ty, &mut names);
+    let later = |name: &str| {
+        entries[entry_index + 1..]
+            .iter()
+            .find_map(|entry| match entry {
+                Entry::TypeAlias(alias, ty) if alias == name => Some(ty),
+                _ => None,
+            })
+    };
+    // Cheap common case: the body declares no type alias after this entry.
+    if !entries[entry_index + 1..]
+        .iter()
+        .any(|entry| matches!(entry, Entry::TypeAlias(..)))
+    {
+        return false;
+    }
+    // Follow alias chains, through aliases in scope and, for a name not in
+    // scope yet, the later declaration: `typealias A = B` then a local of
+    // type `A`, then `typealias B = Int`, reaches the later `B`.
+    let (_, names) = type_closure(ty, &|name| {
+        scope.get_type_alias(name).or_else(|| later(name)).cloned()
+    });
     names.iter().any(|name| {
-        // Built-in types, aliases in scope and classes already resolve.
-        !type_is_runtime_checkable(&crate::parser::TypeExpr::Named(name.clone()), scope)
-            && entries
-                .iter()
-                .skip(entry_index + 1)
-                .any(|entry| matches!(entry, Entry::TypeAlias(alias, _) if alias == name))
+        // Aliases in scope and classes already resolve; a name declared
+        // later that does not means the later alias.
+        scope.get_type_alias(name).is_none()
+            && resolve_dotted(scope, name).is_none()
+            && later(name).is_some()
     })
 }
 
@@ -4517,7 +4577,7 @@ impl Evaluator {
                 // alias) needs the iteration scope; any other type resolves
                 // the same from the enclosing object's entry.
                 let constrained = type_has_constraint(ty, &active_scope);
-                let saved_scope = type_needs_iteration_scope(ty, &active_scope, names, constrained)
+                let saved_scope = type_needs_iteration_scope(ty, &active_scope, names)
                     .then(|| capture_for_type_check(ty, &active_scope));
                 let iteration_names = if saved_scope.is_some() {
                     names.clone()
