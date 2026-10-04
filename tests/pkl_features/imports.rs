@@ -2540,9 +2540,17 @@ async fn narrowed_import_respects_builtins_redeclared_in_nested_bodies() {
         "length = 1\nresult {\n  inner {\n    typealias Listing = Int\n    ok = 1 is Listing<Int>(this == length)\n  }\n}\n",
     )
     .unwrap();
+    // A redeclaration in a sibling body doesn't apply to `ok`, whose check
+    // through `T` binds the string's own `length`, so the module's unused
+    // `length` must not be evaluated.
+    std::fs::write(
+        dir.join("dep_sibling.pkl"),
+        "length = throw(\"unused\")\ntypealias T = String(length == 1)\nresult {\n  inner {\n    typealias String = Int\n    value = 1\n  }\n  ok = \"b\" is T\n}\n",
+    )
+    .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"dep.pkl\" as Dep\nimport \"dep_direct.pkl\" as DepDirect\nimport \"dep_listing.pkl\" as DepListing\nout = Dep.result.ok\noutDirect = DepDirect.result.ok\noutListing = DepListing.result.inner.ok\n",
+        "import \"dep.pkl\" as Dep\nimport \"dep_direct.pkl\" as DepDirect\nimport \"dep_listing.pkl\" as DepListing\nimport \"dep_sibling.pkl\" as DepSibling\nout = Dep.result.ok\noutDirect = DepDirect.result.ok\noutListing = DepListing.result.inner.ok\noutSibling = DepSibling.result.ok\n",
     )
     .unwrap();
 
@@ -2552,6 +2560,7 @@ async fn narrowed_import_respects_builtins_redeclared_in_nested_bodies() {
     assert_eq!(val["out"], true);
     assert_eq!(val["outDirect"], true);
     assert_eq!(val["outListing"], true);
+    assert_eq!(val["outSibling"], true);
 }
 
 #[tokio::test]

@@ -404,33 +404,28 @@ pub(super) fn expand_requested_fields(
             collect_property_type_decls(prop, &module_aliases, &mut declared);
             let narrowed = narrow_aliases(&module_aliases, &declared);
             let definition_aliases = narrowed.as_ref().or(aliases);
-            let mut pending: Vec<String> = refs.iter().cloned().collect();
-            let mut visited = HashSet::new();
-            while let Some(name) = pending.pop() {
-                let Some(definition) = definitions.get(name.as_str()) else {
-                    continue;
+            follow_definitions(&definitions, &mut refs, definition_aliases);
+            // A body that redeclares a built-in such as `String` changes what
+            // a followed definition's constraint on it binds, but only for
+            // checks within that body. Follow the definitions its own
+            // references reach again with the built-in left unresolved.
+            let mut scoped_refs = HashSet::new();
+            for_each_property_body(prop, &mut |body| {
+                let builtins: HashSet<&str> = declared_entry_types(body)
+                    .filter(|name| BINDING_BUILTIN_TYPES.contains(name))
+                    .collect();
+                let Some(unresolved) = with_builtins_unresolved(
+                    definition_aliases.unwrap_or(&module_aliases),
+                    &builtins,
+                ) else {
+                    return;
                 };
-                if !visited.insert(name) {
-                    continue;
-                }
-                let mut definition_refs = HashSet::new();
-                collect_entry_refs_unnarrowed(
-                    std::slice::from_ref(*definition),
-                    &mut definition_refs,
-                    &shadows,
-                    definition_aliases,
-                );
-                collect_sibling_field_refs_entries(
-                    std::slice::from_ref(*definition),
-                    &mut definition_refs,
-                );
-                definition_refs.remove("this");
-                for dep in definition_refs {
-                    if refs.insert(dep.clone()) {
-                        pending.push(dep);
-                    }
-                }
-            }
+                let mut body_refs = HashSet::new();
+                collect_entry_refs_in(body, &mut body_refs, &shadows, definition_aliases);
+                follow_definitions(&definitions, &mut body_refs, Some(&unresolved));
+                scoped_refs.extend(body_refs);
+            });
+            refs.extend(scoped_refs);
             for dep in refs {
                 if dep == DYNAMIC_SIBLING_REF {
                     for name in &property_names {
@@ -447,6 +442,41 @@ pub(super) fn expand_requested_fields(
         }
     }
     expanded
+}
+
+/// Adds to `refs` what the type aliases and classes in `definitions` that
+/// `refs` names read (transitively), resolving constraint bases through
+/// `aliases`.
+fn follow_definitions(
+    definitions: &HashMap<&str, &Entry>,
+    refs: &mut HashSet<String>,
+    aliases: Option<&TypeAliases>,
+) {
+    let shadows = HashSet::new();
+    let mut pending: Vec<String> = refs.iter().cloned().collect();
+    let mut visited = HashSet::new();
+    while let Some(name) = pending.pop() {
+        let Some(definition) = definitions.get(name.as_str()) else {
+            continue;
+        };
+        if !visited.insert(name) {
+            continue;
+        }
+        let mut definition_refs = HashSet::new();
+        collect_entry_refs_unnarrowed(
+            std::slice::from_ref(*definition),
+            &mut definition_refs,
+            &shadows,
+            aliases,
+        );
+        collect_sibling_field_refs_entries(std::slice::from_ref(*definition), &mut definition_refs);
+        definition_refs.remove("this");
+        for dep in definition_refs {
+            if refs.insert(dep.clone()) {
+                pending.push(dep);
+            }
+        }
+    }
 }
 
 pub(super) fn collect_sibling_field_refs_entries(entries: &[Entry], refs: &mut HashSet<String>) {
@@ -533,21 +563,17 @@ fn collect_property_type_decls<'e>(
     aliases: &TypeAliases,
     out: &mut HashSet<&'e str>,
 ) {
-    if let Some(expr) = &prop.value {
-        collect_expr_type_decls(expr, aliases, out);
-    }
-    if let Some(body) = &prop.body {
-        collect_entries_type_decls(body, aliases, true, out);
-    }
+    for_each_property_body(prop, &mut |body| {
+        collect_entries_type_decls(body, aliases, out)
+    });
 }
 
-/// Adds to `out` the name of every type alias or class declared in `entries`
-/// (and, when `nested`, in bodies within them), except a type alias that
-/// redeclares one of `aliases` identically, which reads the same either way.
+/// Adds to `out` the name of every type alias or class declared directly in
+/// `entries`, except a type alias that redeclares one of `aliases`
+/// identically, which reads the same either way.
 fn collect_entries_type_decls<'e>(
     entries: &'e [Entry],
     aliases: &TypeAliases,
-    nested: bool,
     out: &mut HashSet<&'e str>,
 ) {
     for entry in entries {
@@ -560,72 +586,105 @@ fn collect_entries_type_decls<'e>(
                     out.insert(name);
                 }
             }
-            Entry::ClassDef(name, _, _, body) => {
+            Entry::ClassDef(name, ..) => {
                 out.insert(name);
-                if nested {
-                    collect_entries_type_decls(body, aliases, true, out);
-                }
             }
-            _ if !nested => {}
-            Entry::Property(prop) => collect_property_type_decls(prop, aliases, out),
-            Entry::DynProperty(key, value) => {
-                collect_expr_type_decls(key, aliases, out);
-                collect_expr_type_decls(value, aliases, out);
-            }
-            Entry::ForGenerator(fgen) => {
-                collect_expr_type_decls(&fgen.collection, aliases, out);
-                collect_entries_type_decls(&fgen.body, aliases, true, out);
-            }
-            Entry::WhenGenerator(wgen) => {
-                collect_expr_type_decls(&wgen.condition, aliases, out);
-                collect_entries_type_decls(&wgen.body, aliases, true, out);
-                if let Some(body) = &wgen.else_body {
-                    collect_entries_type_decls(body, aliases, true, out);
-                }
-            }
-            Entry::Spread(expr) | Entry::Elem(expr) => collect_expr_type_decls(expr, aliases, out),
+            _ => {}
         }
     }
 }
 
-fn collect_expr_type_decls<'e>(expr: &'e Expr, aliases: &TypeAliases, out: &mut HashSet<&'e str>) {
+/// The names of the type aliases and classes declared directly in `entries`.
+fn declared_entry_types(entries: &[Entry]) -> impl Iterator<Item = &str> {
+    entries.iter().filter_map(|entry| match entry {
+        Entry::TypeAlias(name, _) | Entry::ClassDef(name, ..) => Some(name.as_str()),
+        _ => None,
+    })
+}
+
+/// Calls `f` with every body inside `prop`: its own body and the object
+/// bodies within its value, and the bodies nested within those.
+fn for_each_property_body<'e>(prop: &'e Property, f: &mut dyn FnMut(&'e [Entry])) {
+    if let Some(expr) = &prop.value {
+        for_each_expr_body(expr, f);
+    }
+    if let Some(body) = &prop.body {
+        f(body);
+        for_each_nested_body(body, f);
+    }
+}
+
+/// Calls `f` with every body nested within `entries` (not `entries` itself).
+fn for_each_nested_body<'e>(entries: &'e [Entry], f: &mut dyn FnMut(&'e [Entry])) {
+    let body = |body: &'e [Entry], f: &mut dyn FnMut(&'e [Entry])| {
+        f(body);
+        for_each_nested_body(body, f);
+    };
+    for entry in entries {
+        match entry {
+            Entry::Property(prop) => for_each_property_body(prop, f),
+            Entry::DynProperty(key, value) => {
+                for_each_expr_body(key, f);
+                for_each_expr_body(value, f);
+            }
+            Entry::ForGenerator(fgen) => {
+                for_each_expr_body(&fgen.collection, f);
+                body(&fgen.body, f);
+            }
+            Entry::WhenGenerator(wgen) => {
+                for_each_expr_body(&wgen.condition, f);
+                body(&wgen.body, f);
+                if let Some(else_body) = &wgen.else_body {
+                    body(else_body, f);
+                }
+            }
+            Entry::Spread(expr) | Entry::Elem(expr) => for_each_expr_body(expr, f),
+            Entry::ClassDef(_, _, _, class_body) => body(class_body, f),
+            Entry::TypeAlias(..) => {}
+        }
+    }
+}
+
+/// Calls `f` with every object body within `expr`, and the bodies nested
+/// within those.
+fn for_each_expr_body<'e>(expr: &'e Expr, f: &mut dyn FnMut(&'e [Entry])) {
     match expr {
         Expr::New(_, entries, _) | Expr::InferredNew(_, entries) | Expr::ObjectBody(entries) => {
-            collect_entries_type_decls(entries, aliases, true, out)
+            f(entries);
+            for_each_nested_body(entries, f);
         }
-        Expr::Field(base, _) | Expr::NullSafeField(base, _) => {
-            collect_expr_type_decls(base, aliases, out)
-        }
+        Expr::Field(base, _) | Expr::NullSafeField(base, _) => for_each_expr_body(base, f),
         Expr::Index(base, index) | Expr::Binop(_, base, index) => {
-            collect_expr_type_decls(base, aliases, out);
-            collect_expr_type_decls(index, aliases, out);
+            for_each_expr_body(base, f);
+            for_each_expr_body(index, f);
         }
         Expr::Call(callee, args) => {
-            collect_expr_type_decls(callee, aliases, out);
+            for_each_expr_body(callee, f);
             for arg in args {
-                collect_expr_type_decls(arg, aliases, out);
+                for_each_expr_body(arg, f);
             }
         }
         Expr::If(cond, then_expr, else_expr) => {
-            collect_expr_type_decls(cond, aliases, out);
-            collect_expr_type_decls(then_expr, aliases, out);
-            collect_expr_type_decls(else_expr, aliases, out);
+            for_each_expr_body(cond, f);
+            for_each_expr_body(then_expr, f);
+            for_each_expr_body(else_expr, f);
         }
         Expr::Let(_, value, body) => {
-            collect_expr_type_decls(value, aliases, out);
-            collect_expr_type_decls(body, aliases, out);
+            for_each_expr_body(value, f);
+            for_each_expr_body(body, f);
         }
-        Expr::Is(value, _) | Expr::As(value, _) => collect_expr_type_decls(value, aliases, out),
-        Expr::Lambda(_, value)
+        Expr::Is(value, _)
+        | Expr::As(value, _)
+        | Expr::Lambda(_, value)
         | Expr::Unop(_, value)
         | Expr::Throw(value)
         | Expr::Trace(value)
         | Expr::Read(value)
-        | Expr::ReadOrNull(value) => collect_expr_type_decls(value, aliases, out),
+        | Expr::ReadOrNull(value) => for_each_expr_body(value, f),
         Expr::StringInterpolation(parts) => {
             for part in parts {
                 if let StringInterpPart::Expr(expr) = part {
-                    collect_expr_type_decls(expr, aliases, out);
+                    for_each_expr_body(expr, f);
                 }
             }
         }
@@ -670,10 +729,8 @@ fn mentioned_type_names<'t>(ty: &'t crate::parser::TypeExpr, out: &mut Vec<&'t s
 
 /// `aliases` without each alias whose meaning may differ where the `declared`
 /// type names are in scope: one that is itself declared, or whose definition,
-/// followed through the other `aliases`, mentions a declared name. A declared
-/// name that `constraint_bound_names` would read as a built-in is marked
-/// unresolvable, since the built-in's bindings no longer apply. `None` when
-/// `aliases` is unchanged.
+/// followed through the other `aliases`, mentions a declared name. `None`
+/// when every alias is kept.
 fn narrow_aliases<'a>(
     aliases: &TypeAliases<'a>,
     declared: &HashSet<&str>,
@@ -697,18 +754,31 @@ fn narrow_aliases<'a>(
         }
         false
     };
-    let mut kept: TypeAliases<'a> = aliases
+    let kept: TypeAliases<'a> = aliases
         .iter()
         .filter(|(name, _)| !affected(name))
         .map(|(name, ty)| (*name, *ty))
         .collect();
-    let mut changed = kept.len() != aliases.len();
+    (kept.len() != aliases.len()).then_some(kept)
+}
+
+/// `aliases` with each of the `declared` names that `constraint_bound_names`
+/// would read as a built-in marked unresolvable, since where the declaration
+/// is in scope the built-in's bindings no longer apply. `None` when
+/// `aliases` is unchanged.
+fn with_builtins_unresolved<'a>(
+    aliases: &TypeAliases<'a>,
+    declared: &HashSet<&str>,
+) -> Option<TypeAliases<'a>> {
+    let mut marked = None;
     for builtin in BINDING_BUILTIN_TYPES {
-        if declared.contains(builtin) && kept.insert(builtin, None).is_none() {
-            changed = true;
+        if declared.contains(builtin) && aliases.get(builtin) != Some(&None) {
+            marked
+                .get_or_insert_with(|| aliases.clone())
+                .insert(*builtin, None);
         }
     }
-    changed.then_some(kept)
+    marked
 }
 
 /// `constraint_bound_names`, after following `base` through `aliases` (with
@@ -894,15 +964,15 @@ fn collect_entry_refs_in(
     // (`typealias String = Int` under an identical `typealias S = String`). So
     // stop resolving the module aliases whose definitions reach a name this
     // body declares (other than by an identical redeclaration), keeping the
-    // conservative reading of their constraints.
-    //
-    // Without module aliases, a redeclared built-in still needs marking.
+    // conservative reading of their constraints, and leave a redeclared
+    // built-in unresolved (even without module aliases).
     let no_aliases = TypeAliases::new();
     let narrowed = {
         let aliases = aliases.unwrap_or(&no_aliases);
         let mut declared = HashSet::new();
-        collect_entries_type_decls(entries, aliases, false, &mut declared);
-        narrow_aliases(aliases, &declared)
+        collect_entries_type_decls(entries, aliases, &mut declared);
+        let narrowed = narrow_aliases(aliases, &declared);
+        with_builtins_unresolved(narrowed.as_ref().unwrap_or(aliases), &declared).or(narrowed)
     };
     collect_entry_refs_unnarrowed(entries, refs, shadows, narrowed.as_ref().or(aliases));
 }
