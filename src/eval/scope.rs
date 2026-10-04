@@ -223,6 +223,34 @@ impl Scope {
         identities
     }
 
+    /// Replace a binding declared in the body that owns this scope with a
+    /// poisoned one, dropping any value it held.
+    pub(super) fn redeclare_poisoned(&mut self, name: String, message: String) {
+        if self.vars.contains_key(name.as_str()) {
+            Arc::make_mut(&mut self.vars).shift_remove(name.as_str());
+        }
+        self.declare_poisoned(name, message);
+    }
+
+    /// Key recording the error of a module member (a class, type alias or
+    /// module function, never a local) that failed to evaluate. It contains a
+    /// dot, so it never collides with a binding.
+    pub(super) fn member_poison_key(name: &str) -> String {
+        format!("module.{name}")
+    }
+
+    /// Record (`Some`) or clear (`None`) the error of module member `name`.
+    pub(super) fn set_member_poison(&mut self, name: &str, message: Option<String>) {
+        let key = Self::member_poison_key(name);
+        match message {
+            Some(message) => self.poison(key, message),
+            None if self.poisoned.contains_key(key.as_str()) => {
+                Rc::make_mut(&mut self.poisoned).shift_remove(key.as_str());
+            }
+            None => {}
+        }
+    }
+
     pub(super) fn poison(&mut self, name: String, message: String) {
         Rc::make_mut(&mut self.poisoned).insert(name.into(), message);
     }
@@ -318,6 +346,74 @@ impl Scope {
         );
         result
     }
+}
+
+/// The saved error for member `name` that object `obj_expr` (with `source`)
+/// does not have: a failed class of an imported module object, or, inside
+/// the defining module, one read through `module`/`this`. Used by every
+/// by-name member read (`a.C`, `a?.C`, `a["C"]`) before reporting a missing
+/// member.
+pub(super) fn missing_member_error(
+    source: &Option<Arc<ObjectSource>>,
+    obj_expr: &Expr,
+    name: &str,
+    scope: &Scope,
+) -> Option<String> {
+    if let Some(message) = source
+        .as_ref()
+        .and_then(|source| source.poisoned_members.as_ref()?.get(name))
+    {
+        return Some(message.clone());
+    }
+    match obj_expr {
+        Expr::Ident(root) if root == "module" || root == "this" => {
+            poisoned_member(scope, &format!("{root}.{name}"))
+        }
+        _ => None,
+    }
+}
+
+/// The error of a poisoned member a dotted name refers to: either the root
+/// binding itself, or a member of a module object that failed to evaluate
+/// (`dep.C` where `dep`'s class `C` could not be built). `None` when the name
+/// resolves or is simply absent.
+pub(super) fn poisoned_member(scope: &Scope, name: &str) -> Option<String> {
+    let mut parts = name.trim_end_matches('?').split('.');
+    let root = parts.next()?;
+    let Some(mut value) = scope.get(root) else {
+        return scope.poison_of(root).cloned();
+    };
+    // Inside the defining module, `module` (and `this` while it is the module
+    // object) is a snapshot of the module's members. A member that failed to
+    // evaluate is absent from it; its error is kept in the module scope under
+    // `Scope::member_poison_key`. Locals are not members, so a failed local
+    // is never reported here.
+    let names_current_module = root == "module"
+        || (root == "this"
+            && matches!(
+                (value, scope.get("module")),
+                (Value::Object(this, _), Some(Value::Object(module, _))) if Arc::ptr_eq(this, module)
+            ));
+    for (index, part) in parts.enumerate() {
+        let Value::Object(map, source) = value else {
+            return None;
+        };
+        match map.get(part) {
+            Some(member) => value = member,
+            None => {
+                if let Some(message) = source
+                    .as_ref()
+                    .and_then(|source| source.poisoned_members.as_ref()?.get(part))
+                {
+                    return Some(message.clone());
+                }
+                return (index == 0 && names_current_module)
+                    .then(|| scope.poison_of(&Scope::member_poison_key(part)).cloned())
+                    .flatten();
+            }
+        }
+    }
+    None
 }
 
 pub(super) fn capture_scope(scope: &Scope) -> CapturedScope {
