@@ -501,7 +501,12 @@ pub(super) fn value_to_display(v: &Value) -> String {
         Value::Int(n) => n.to_string(),
         Value::Float(f) => f.to_string(),
         Value::String(s) => s.to_string(),
-        _ => format!("{v:?}"),
+        Value::Lambda(..) => "<function>".into(),
+        // Rendered from the members alone. The debug form also printed each
+        // object's source, whose captured scope holds every binding visible
+        // where it was defined, so a map keyed by objects built strings that
+        // grew with each enclosing binding.
+        Value::Object(..) | Value::List(_) => v.to_json().to_string(),
     }
 }
 

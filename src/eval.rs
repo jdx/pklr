@@ -7860,10 +7860,17 @@ impl Evaluator {
             .or(inherited_default.value);
         let explicit_default_entries =
             find_default_body_entries(entries).or(inherited_default.entries);
+        // An entry can read the entries before it through `this`
+        // (`["two"] = this["one"] + 1`). Most mapping bodies never name
+        // `this`, and skip copying the map for each entry.
+        let binds_this = referenced_roots(entries).contains("this");
 
         for entry in entries {
             match entry {
                 Entry::DynProperty(key_expr, val_expr) => {
+                    if binds_this {
+                        entry_scope.set("this", Value::Object(Arc::new(map.clone()), None));
+                    }
                     let key = self.eval_expr(key_expr, &entry_scope, depth + 1)?;
                     let key_str = value_to_key(&key)?;
                     if let Some(Value::Object(existing_map, Some(existing_src))) = map.get(&key_str)

@@ -5494,3 +5494,24 @@ fn default_amended_only_in_a_branch_that_does_not_run_is_checked() {
     );
     assert_eq!(json["c"]["o"]["v"], 1);
 }
+
+fn mapping_entry_reads_earlier_entries_through_this() {
+    let json = eval("res = new Mapping {\n  [\"one\"] = 1\n  [\"two\"] = this[\"one\"] + 1\n}");
+    assert_eq!(json["res"], serde_json::json!({"one": 1, "two": 2}));
+}
+
+#[test]
+fn map_keyed_by_objects_does_not_blow_up() {
+    // An object key was rendered with its source's captured scope, which
+    // holds every binding before it, so each local's key embedded the
+    // previous one's, escaped again, and the keys grew exponentially.
+    let mut src = String::new();
+    for i in 0..30 {
+        src.push_str(&format!(
+            "local m{i} = Map(new Mapping {{ [\"k\"] = {i} }}, {i})\n"
+        ));
+    }
+    src.push_str("res = m29.length\n");
+    let json = eval(&src);
+    assert_eq!(json["res"], 1);
+}
