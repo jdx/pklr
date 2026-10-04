@@ -357,6 +357,18 @@ pub(super) fn expand_requested_fields(
             _ => None,
         })
         .collect();
+    let mut module_aliases: TypeAliases = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::TypeAlias(name, ty) => Some((name.as_str(), Some(ty))),
+            _ => None,
+        })
+        .collect();
+    // Leave the built-ins an inherited alias may redefine (and this module
+    // doesn't) unresolved.
+    for builtin in inherited_builtins {
+        module_aliases.entry(builtin).or_insert(None);
+    }
     // Type aliases and classes evaluate their constraints and defaults when a
     // value is checked or built, so a property using one also depends on what
     // the definition reads.
@@ -377,19 +389,17 @@ pub(super) fn expand_requested_fields(
                 _ => None,
             })
             .collect(),
+        locals: entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {
+                    Some((prop.name.as_str(), entry))
+                }
+                _ => None,
+            })
+            .collect(),
+        module_aliases: &module_aliases,
     };
-    let mut module_aliases: TypeAliases = entries
-        .iter()
-        .filter_map(|entry| match entry {
-            Entry::TypeAlias(name, ty) => Some((name.as_str(), Some(ty))),
-            _ => None,
-        })
-        .collect();
-    // Leave the built-ins an inherited alias may redefine (and this module
-    // doesn't) unresolved.
-    for builtin in inherited_builtins {
-        module_aliases.entry(builtin).or_insert(None);
-    }
     let aliases = Some(&module_aliases);
     // An importer reading `dep.ClassName` needs the module properties the
     // class reads through `module` (it is evaluated against them). Other
@@ -466,37 +476,74 @@ pub(super) fn expand_requested_fields(
     expanded
 }
 
-/// Adds to `refs` what the type aliases and classes in `definitions` that
-/// `refs` names read (transitively), resolving constraint bases through
-/// `aliases`.
+/// Adds to `refs` what the type aliases, classes and locals in `definitions`
+/// that `refs` names read (transitively), resolving constraint bases through
+/// `aliases`, or through the module's aliases for what a local reaches (it is
+/// evaluated at module level).
 fn follow_definitions(
     definitions: &Definitions,
     refs: &mut HashSet<String>,
     aliases: Option<&TypeAliases>,
 ) {
     let shadows = HashSet::default();
-    let mut pending: Vec<String> = refs.iter().cloned().collect();
+    // Each name with whether it was reached through a local. A name reached
+    // both ways is followed both ways, as the aliases may differ.
+    let mut pending: Vec<(String, bool)> = refs.iter().map(|name| (name.clone(), false)).collect();
     let mut visited = HashSet::default();
-    while let Some(name) = pending.pop() {
-        let Some(definition) = definitions.types.get(name.as_str()) else {
-            continue;
-        };
-        if !visited.insert(name) {
+    while let Some((name, module_scope)) = pending.pop() {
+        let definition = definitions.types.get(name.as_str());
+        let local = definitions.locals.get(name.as_str());
+        if (definition.is_none() && local.is_none()) || !visited.insert((name, module_scope)) {
             continue;
         }
         let mut definition_refs = HashSet::default();
-        collect_entry_refs_unnarrowed(
-            std::slice::from_ref(*definition),
-            &mut definition_refs,
-            &shadows,
-            aliases,
-            None,
-        );
-        collect_sibling_field_refs_entries(std::slice::from_ref(*definition), &mut definition_refs);
-        definition_refs.remove("this");
-        for dep in definition_refs {
-            if refs.insert(dep.clone()) {
-                pending.push(dep);
+        if let Some(definition) = definition {
+            collect_entry_refs_unnarrowed(
+                std::slice::from_ref(*definition),
+                &mut definition_refs,
+                &shadows,
+                if module_scope {
+                    Some(definitions.module_aliases)
+                } else {
+                    aliases
+                },
+                None,
+            );
+        }
+        let mut local_refs = HashSet::default();
+        if let Some(local) = local {
+            collect_entry_refs_unnarrowed(
+                std::slice::from_ref(*local),
+                &mut local_refs,
+                &shadows,
+                Some(definitions.module_aliases),
+                None,
+            );
+        }
+        if let Some(definition) = definition {
+            collect_sibling_field_refs_entries(
+                std::slice::from_ref(*definition),
+                &mut definition_refs,
+            );
+        }
+        // At module level `this` is the module object too.
+        if let Some(Entry::Property(prop)) = local {
+            if let Some(ty) = &prop.type_ann {
+                collect_sibling_field_refs_type(ty, &mut local_refs);
+            }
+            if let Some(expr) = &prop.value {
+                collect_sibling_field_refs_expr(expr, &mut local_refs, true);
+            }
+            if let Some(body) = &prop.body {
+                collect_sibling_field_refs_entries(body, &mut local_refs);
+            }
+        }
+        for (deps, module_scope) in [(definition_refs, module_scope), (local_refs, true)] {
+            for dep in deps {
+                if dep != "this" {
+                    refs.insert(dep.clone());
+                    pending.push((dep, module_scope));
+                }
             }
         }
     }
@@ -583,6 +630,14 @@ type TypeAliases<'a> = HashMap<&'a str, Option<&'a crate::parser::TypeExpr>>;
 struct Definitions<'a> {
     types: HashMap<&'a str, &'a Entry>,
     values: HashSet<&'a str>,
+    /// The module's locals, which are always evaluated and are evaluated
+    /// again once the module's properties exist when they reach a class
+    /// reading `module` (see `module_dependent_members`). A property reading
+    /// one depends on what the local reads, including through its classes.
+    locals: HashMap<&'a str, &'a Entry>,
+    /// The module's aliases, which a local's checks resolve against wherever
+    /// it is read from.
+    module_aliases: &'a TypeAliases<'a>,
 }
 
 /// Adds to `out` the name of every type alias or class declared directly in
