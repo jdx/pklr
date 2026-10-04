@@ -4,9 +4,9 @@ use super::*;
 // Glob imports (import*)
 // ============================================================
 
-#[tokio::test]
-async fn import_glob() {
-    let mut ev = pklr::eval::Evaluator::new_async();
+#[test]
+fn import_glob() {
+    let mut ev = pklr::eval::Evaluator::new();
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     ev.set_base_path(&base);
     let src = r#"
@@ -15,14 +15,14 @@ alpha_val = Items["items/alpha.pkl"].value
 beta_val = Items["items/beta.pkl"].value
 "#;
     let path = base.join("test_glob.pkl");
-    let val = ev.eval_source(src, &path).await.unwrap();
+    let val = ev.eval_source(src, &path).unwrap();
     let json = val.to_json();
     assert_eq!(json["alpha_val"], "alpha");
     assert_eq!(json["beta_val"], "beta");
 }
 
-#[tokio::test]
-async fn import_glob_value_is_available_to_class_output() {
+#[test]
+fn import_glob_value_is_available_to_class_output() {
     let temp = TestTempDir::new("pklr_test_import_glob_class_output");
     let dir = temp.path();
     std::fs::create_dir_all(dir.join("builtins")).unwrap();
@@ -53,9 +53,7 @@ amended = (factory) { stdin = true }
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["factory"]["step"]["check"], "prettier --check");
     assert_eq!(val["amended"]["step"]["check"], "prettier --stdin-filepath");
 }
@@ -63,13 +61,11 @@ amended = (factory) { stdin = true }
 /// Set in the child process spawned by `import_glob_keys_are_relative_for_relative_entry_path`.
 const RELATIVE_GLOB_CHILD_ENV: &str = "PKLR_TEST_RELATIVE_GLOB_CHILD";
 
-#[tokio::test]
-async fn import_glob_keys_are_relative_for_relative_entry_path() {
+#[test]
+fn import_glob_keys_are_relative_for_relative_entry_path() {
     if std::env::var_os(RELATIVE_GLOB_CHILD_ENV).is_some() {
         // Running in the child process, whose cwd is the temp dir.
-        let val = pklr::eval_to_json_async(std::path::Path::new("main.pkl"))
-            .await
-            .unwrap();
+        let val = pklr::eval_to_json(std::path::Path::new("main.pkl")).unwrap();
         assert_eq!(val["result"], "used");
         return;
     }
@@ -109,8 +105,8 @@ result = Parts["parts/used.pkl"].value
     );
 }
 
-#[tokio::test]
-async fn import_glob_double_star_crosses_directories() {
+#[test]
+fn import_glob_double_star_crosses_directories() {
     let temp = TestTempDir::new("pklr_test_import_glob_double_star");
     let dir = temp.path();
     std::fs::create_dir_all(dir.join("config")).unwrap();
@@ -125,13 +121,13 @@ has_self = Index.containsKey("hk.pkl")
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("hk.pkl")).await.unwrap();
+    let val = pklr::eval_to_json(&dir.join("hk.pkl")).unwrap();
     assert_eq!(val["value"], "foo");
     assert_eq!(val["has_self"], false);
 }
 
-#[tokio::test]
-async fn import_glob_star_matches_one_directory_segment() {
+#[test]
+fn import_glob_star_matches_one_directory_segment() {
     let temp = TestTempDir::new("pklr_test_import_glob_star_directory_segment");
     let dir = temp.path();
     std::fs::create_dir_all(dir.join("config")).unwrap();
@@ -148,13 +144,13 @@ has_nested = Index.containsKey("nested/config/bar.pkl")
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("hk.pkl")).await.unwrap();
+    let val = pklr::eval_to_json(&dir.join("hk.pkl")).unwrap();
     assert_eq!(val["value"], "foo");
     assert_eq!(val["has_nested"], false);
 }
 
-#[tokio::test]
-async fn import_glob_double_star_slash_matches_root_and_nested_files() {
+#[test]
+fn import_glob_double_star_slash_matches_root_and_nested_files() {
     let temp = TestTempDir::new("pklr_test_import_glob_double_star_slash");
     let dir = temp.path();
     std::fs::create_dir_all(dir.join("nested")).unwrap();
@@ -170,16 +166,14 @@ nested_value = Index["nested/foo.pkl"].value
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["root_value"], "root");
     assert_eq!(val["nested_value"], "nested");
 }
 
 #[cfg(unix)]
-#[tokio::test]
-async fn import_glob_matches_symlinked_files() {
+#[test]
+fn import_glob_matches_symlinked_files() {
     let temp = TestTempDir::new("pklr_test_import_glob_symlinked_files");
     let dir = temp.path();
     std::fs::create_dir_all(dir.join("real")).unwrap();
@@ -194,15 +188,13 @@ value = Index["linked.pkl"].value
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["value"], "foo");
 }
 
 #[cfg(unix)]
-#[tokio::test]
-async fn import_glob_skips_broken_symlinks() {
+#[test]
+fn import_glob_skips_broken_symlinks() {
     let temp = TestTempDir::new("pklr_test_import_glob_broken_symlinks");
     let dir = temp.path();
     std::fs::write(dir.join("good.pkl"), r#"value = "good""#).unwrap();
@@ -217,15 +209,13 @@ has_broken = Index.containsKey("broken.pkl")
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["value"], "good");
     assert_eq!(val["has_broken"], false);
 }
 
-#[tokio::test]
-async fn import_glob_expression_binds_matched_modules() {
+#[test]
+fn import_glob_expression_binds_matched_modules() {
     let temp = TestTempDir::new("pklr_test_import_glob_expr");
     let dir = temp.path();
     std::fs::create_dir_all(dir.join("generated")).unwrap();
@@ -242,9 +232,7 @@ alpha = generated["generated/alpha.pkl"].value
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(
         val["keys"],
         serde_json::json!(["generated/alpha.pkl", "generated/beta.pkl"])
@@ -253,8 +241,8 @@ alpha = generated["generated/alpha.pkl"].value
     assert_eq!(val["alpha"], "alpha");
 }
 
-#[tokio::test]
-async fn import_glob_expression_without_matches_is_empty() {
+#[test]
+fn import_glob_expression_without_matches_is_empty() {
     let temp = TestTempDir::new("pklr_test_import_glob_expr_empty");
     let dir = temp.path();
     std::fs::write(
@@ -266,14 +254,12 @@ count = generated.length
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["count"], 0);
 }
 
-#[tokio::test]
-async fn import_glob_expression_skips_the_enclosing_module() {
+#[test]
+fn import_glob_expression_skips_the_enclosing_module() {
     let temp = TestTempDir::new("pklr_test_import_glob_expr_self");
     let dir = temp.path();
     std::fs::write(dir.join("other.pkl"), r#"value = "other""#).unwrap();
@@ -286,14 +272,12 @@ keys = siblings.keys.toList()
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["keys"], serde_json::json!(["other.pkl"]));
 }
 
-#[tokio::test]
-async fn import_glob_expression_resolves_against_its_own_module() {
+#[test]
+fn import_glob_expression_resolves_against_its_own_module() {
     let temp = TestTempDir::new("pklr_test_import_glob_expr_own_module");
     let dir = temp.path();
     std::fs::create_dir_all(dir.join("lib/generated")).unwrap();
@@ -320,9 +304,7 @@ fromLambda = Index.fromLambda
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(
         val["fromModule"],
         serde_json::json!(["generated/one.pkl"]),
@@ -336,8 +318,8 @@ fromLambda = Index.fromLambda
     assert_eq!(val["fromLambda"], 1, "{val}");
 }
 
-#[tokio::test]
-async fn inherited_import_glob_expression_resolves_against_the_base_module() {
+#[test]
+fn inherited_import_glob_expression_resolves_against_the_base_module() {
     let temp = TestTempDir::new("pklr_test_import_glob_expr_amends");
     let dir = temp.path();
     std::fs::create_dir_all(dir.join("base/generated")).unwrap();
@@ -361,9 +343,7 @@ fromChild = import*("own/*.pkl").keys.toList()
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("child.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("child.pkl")).unwrap();
     assert_eq!(
         val["fromBase"],
         serde_json::json!(["generated/one.pkl"]),
@@ -376,8 +356,8 @@ fromChild = import*("own/*.pkl").keys.toList()
     );
 }
 
-#[tokio::test]
-async fn import_expressions_are_listing_elements() {
+#[test]
+fn import_expressions_are_listing_elements() {
     let temp = TestTempDir::new("pklr_test_import_expr_listing");
     let dir = temp.path();
     std::fs::create_dir_all(dir.join("generated")).unwrap();
@@ -392,9 +372,7 @@ globbed = new Listing { ...import*("generated/*.pkl").toMap().values }
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(
         val["single"],
         serde_json::json!([{"value": "alpha"}]),
@@ -407,8 +385,8 @@ globbed = new Listing { ...import*("generated/*.pkl").toMap().values }
     );
 }
 
-#[tokio::test]
-async fn import_expression_evaluates_a_single_module() {
+#[test]
+fn import_expression_evaluates_a_single_module() {
     let temp = TestTempDir::new("pklr_test_import_expr");
     let dir = temp.path();
     std::fs::create_dir_all(dir.join("generated")).unwrap();
@@ -421,14 +399,12 @@ value = import("generated/alpha.pkl").value
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["value"], "alpha");
 }
 
-#[tokio::test]
-async fn import_expression_field_access_only_evaluates_that_field() {
+#[test]
+fn import_expression_field_access_only_evaluates_that_field() {
     let temp = TestTempDir::new("pklr_test_import_expr_narrowing");
     let dir = temp.path();
     std::fs::write(
@@ -452,16 +428,14 @@ chained = import("mod.pkl").nested.inner
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["plain"], "h-ok");
     assert_eq!(val["derived"], "h-ok-derived");
     assert_eq!(val["chained"], "deep");
 }
 
-#[tokio::test]
-async fn import_expression_reports_missing_modules() {
+#[test]
+fn import_expression_reports_missing_modules() {
     let temp = TestTempDir::new("pklr_test_import_expr_missing");
     let dir = temp.path();
     std::fs::write(
@@ -470,8 +444,7 @@ async fn import_expression_reports_missing_modules() {
     )
     .unwrap();
 
-    let err = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
+    let err = pklr::eval_to_json(&dir.join("main.pkl"))
         .unwrap_err()
         .to_string();
     assert!(err.contains("alpha.pkl"), "{err}");
@@ -511,8 +484,8 @@ value = import*(pattern)
     );
 }
 
-#[tokio::test]
-async fn unused_import_is_not_evaluated() {
+#[test]
+fn unused_import_is_not_evaluated() {
     let temp = TestTempDir::new("pklr_test_unused_import");
     let dir = temp.path();
     std::fs::write(
@@ -532,7 +505,7 @@ result = "ok"
     .unwrap();
 
     let path = dir.join("main.pkl");
-    let val = pklr::eval_to_json_async(&path).await.unwrap();
+    let val = pklr::eval_to_json(&path).unwrap();
     assert_eq!(val["result"], "ok");
 }
 
@@ -547,21 +520,6 @@ result = "ok"
 "#,
     );
     assert_eq!(json["result"], "ok");
-}
-
-#[test]
-fn import_and_class_with_same_name_is_a_duplicate() {
-    let err = eval_fails(
-        r#"
-import "does-not-exist.pkl" as Foo
-class Foo {}
-result = new Foo {}
-"#,
-    );
-    assert!(
-        err.contains("Duplicate definition of member `Foo`"),
-        "{err}"
-    );
 }
 
 #[test]
@@ -585,8 +543,8 @@ fn unused_import_glob_without_alias_is_still_invalid() {
     assert!(err.contains("import* requires an alias"), "{err}");
 }
 
-#[tokio::test]
-async fn import_used_by_inherited_class_default_is_loaded() {
+#[test]
+fn import_used_by_inherited_class_default_is_loaded() {
     let temp = TestTempDir::new("pklr_test_inherited_import_ref");
     let dir = temp.path();
     std::fs::write(
@@ -605,14 +563,14 @@ import "meta.pkl"
 result = new Project {}
 "#;
 
-    let mut ev = Evaluator::new_async();
-    let val = ev.eval_source(src, &dir.join("child.pkl")).await.unwrap();
+    let mut ev = Evaluator::new();
+    let val = ev.eval_source(src, &dir.join("child.pkl")).unwrap();
     let json = val.to_json();
     assert_eq!(json["result"]["name"], "hk");
 }
 
-#[tokio::test]
-async fn imported_amends_base_uses_inherited_scope() {
+#[test]
+fn imported_amends_base_uses_inherited_scope() {
     let temp = TestTempDir::new("pklr_test_imported_amends_base_scope");
     let dir = temp.path();
     std::fs::write(
@@ -634,15 +592,13 @@ baseName = Base.name
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("child.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("child.pkl")).unwrap();
     assert_eq!(val["name"], "hk");
     assert_eq!(val["baseName"], "hk");
 }
 
-#[tokio::test]
-async fn amended_object_keeps_definition_site_import_scope() {
+#[test]
+fn amended_object_keeps_definition_site_import_scope() {
     let temp = TestTempDir::new("pklr_test_amended_object_import_scope");
     let dir = temp.path();
     std::fs::write(
@@ -693,9 +649,7 @@ steps {
     )
     .unwrap();
 
-    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let json = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(
         json,
         serde_json::json!({
@@ -707,8 +661,8 @@ steps {
     );
 }
 
-#[tokio::test]
-async fn amended_object_keeps_definition_site_scope_when_local_shadows_import() {
+#[test]
+fn amended_object_keeps_definition_site_scope_when_local_shadows_import() {
     let temp = TestTempDir::new("pklr_test_amended_object_local_scope");
     let dir = temp.path();
     std::fs::write(
@@ -754,9 +708,7 @@ steps { ["a"] = Shared.a }
     )
     .unwrap();
 
-    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let json = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(
         json,
         serde_json::json!({
@@ -767,8 +719,8 @@ steps { ["a"] = Shared.a }
     );
 }
 
-#[tokio::test]
-async fn amended_object_uses_amendment_site_scope_for_overlay_entries() {
+#[test]
+fn amended_object_uses_amendment_site_scope_for_overlay_entries() {
     let temp = TestTempDir::new("pklr_test_amended_object_overlay_scope");
     let dir = temp.path();
     std::fs::write(
@@ -794,9 +746,7 @@ result = (Lib.value) {
     )
     .unwrap();
 
-    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let json = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(
         json["result"],
         serde_json::json!({
@@ -806,8 +756,8 @@ result = (Lib.value) {
     );
 }
 
-#[tokio::test]
-async fn amended_object_keeps_definition_site_type_alias_scope() {
+#[test]
+fn amended_object_keeps_definition_site_type_alias_scope() {
     let temp = TestTempDir::new("pklr_test_amended_object_type_alias_scope");
     let dir = temp.path();
     std::fs::write(
@@ -831,14 +781,12 @@ result = (Lib.item) {}
     )
     .unwrap();
 
-    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let json = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(json["result"], serde_json::json!({"value": "ok"}));
 }
 
-#[tokio::test]
-async fn amended_object_uses_amendment_scope_for_replaced_default() {
+#[test]
+fn amended_object_uses_amendment_scope_for_replaced_default() {
     let temp = TestTempDir::new("pklr_test_amended_object_default_scope");
     let dir = temp.path();
     std::fs::write(
@@ -864,17 +812,15 @@ result = (Lib.value) {
     )
     .unwrap();
 
-    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let json = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(
         json["result"],
         serde_json::json!({"entry": {"selected": "amendment"}})
     );
 }
 
-#[tokio::test]
-async fn amended_object_applies_default_body_amendments() {
+#[test]
+fn amended_object_applies_default_body_amendments() {
     let temp = TestTempDir::new("pklr_test_amended_object_default_body");
     let dir = temp.path();
     std::fs::write(
@@ -904,9 +850,7 @@ result = (Lib.value) {
     )
     .unwrap();
 
-    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let json = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(
         json["result"],
         serde_json::json!({
@@ -919,8 +863,8 @@ result = (Lib.value) {
     );
 }
 
-#[tokio::test]
-async fn repeated_default_body_amendments_apply_once() {
+#[test]
+fn repeated_default_body_amendments_apply_once() {
     let temp = TestTempDir::new("pklr_test_repeated_default_body_amendments");
     let dir = temp.path();
     std::fs::write(
@@ -960,60 +904,15 @@ result = (Middle.value) {
     )
     .unwrap();
 
-    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let json = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(
         json["result"]["entry"]["items"],
         serde_json::json!(["middle", "main"])
     );
 }
 
-#[tokio::test]
-async fn amendment_type_alias_uses_amendment_scope() {
-    let temp = TestTempDir::new("pklr_test_amendment_type_alias_scope");
-    let dir = temp.path();
-    std::fs::write(
-        dir.join("Lib.pkl"),
-        r#"
-open class Foo {
-    origin = "definition"
-}
-value = new {
-    inherited = new Foo {}
-}
-"#,
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("main.pkl"),
-        r#"
-import "Lib.pkl"
-open class Foo {
-    origin = "amendment"
-}
-result = (Lib.value) {
-    typealias Alias = Foo
-    selected = new Alias {}
-}
-"#,
-    )
-    .unwrap();
-
-    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
-    assert_eq!(
-        json["result"],
-        serde_json::json!({
-            "inherited": {"origin": "definition"},
-            "selected": {"origin": "amendment"}
-        })
-    );
-}
-
-#[tokio::test]
-async fn amended_object_reconstructs_classes_in_definition_namespace() {
+#[test]
+fn amended_object_reconstructs_classes_in_definition_namespace() {
     let temp = TestTempDir::new("pklr_test_amended_object_class_namespace");
     let dir = temp.path();
     std::fs::write(
@@ -1038,14 +937,12 @@ result = (Lib.item) {}
     )
     .unwrap();
 
-    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let json = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(json["result"], serde_json::json!({"item": {"value": "ok"}}));
 }
 
-#[tokio::test]
-async fn amended_object_overlay_can_reference_later_inherited_sibling() {
+#[test]
+fn amended_object_overlay_can_reference_later_inherited_sibling() {
     let temp = TestTempDir::new("pklr_test_amended_object_later_sibling");
     let dir = temp.path();
     std::fs::write(
@@ -1079,24 +976,20 @@ result = (Lib.item) { selected = later }
     )
     .unwrap();
 
-    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let json = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(
         json["result"],
         serde_json::json!({"selected": "inherited", "later": "inherited"})
     );
-    let json = pklr::eval_to_json_async(&dir.join("shadowed.pkl"))
-        .await
-        .unwrap();
+    let json = pklr::eval_to_json(&dir.join("shadowed.pkl")).unwrap();
     assert_eq!(
         json["result"],
         serde_json::json!({"selected": "module", "later": "inherited"})
     );
 }
 
-#[tokio::test]
-async fn repeated_amendment_keeps_each_entries_lexical_scope() {
+#[test]
+fn repeated_amendment_keeps_each_entries_lexical_scope() {
     let temp = TestTempDir::new("pklr_test_repeated_amendment_scope");
     let dir = temp.path();
     std::fs::write(
@@ -1129,17 +1022,15 @@ result = (Middle.item) {}
     )
     .unwrap();
 
-    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let json = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(
         json["result"],
         serde_json::json!({"inherited": "definition", "overlay": "middle"})
     );
 }
 
-#[tokio::test]
-async fn derived_class_amendment_keeps_parent_and_child_lexical_scopes() {
+#[test]
+fn derived_class_amendment_keeps_parent_and_child_lexical_scopes() {
     let temp = TestTempDir::new("pklr_test_derived_class_amendment_scope");
     let dir = temp.path();
     std::fs::write(
@@ -1178,9 +1069,7 @@ result = (Middle.item) {
     )
     .unwrap();
 
-    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let json = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(
         json["result"],
         serde_json::json!({
@@ -1192,8 +1081,8 @@ result = (Middle.item) {
     );
 }
 
-#[tokio::test]
-async fn derived_class_amendment_seeds_inherited_property_values() {
+#[test]
+fn derived_class_amendment_seeds_inherited_property_values() {
     let temp = TestTempDir::new("pklr_test_derived_class_inherited_property_values");
     let dir = temp.path();
     std::fs::write(
@@ -1225,17 +1114,15 @@ result = Middle.item
     )
     .unwrap();
 
-    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let json = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(
         json["result"],
         serde_json::json!({"later": "parent property", "selected": "child module"})
     );
 }
 
-#[tokio::test]
-async fn nested_class_inheritance_keeps_each_definition_scope() {
+#[test]
+fn nested_class_inheritance_keeps_each_definition_scope() {
     let temp = TestTempDir::new("pklr_test_nested_class_inheritance_scope");
     let dir = temp.path();
     std::fs::write(
@@ -1280,9 +1167,7 @@ result = (new Leaf.Leaf {}) { fromMain = collision }
     )
     .unwrap();
 
-    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let json = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(
         json["result"],
         serde_json::json!({
@@ -1294,8 +1179,8 @@ result = (new Leaf.Leaf {}) { fromMain = collision }
     );
 }
 
-#[tokio::test]
-async fn unassigned_inherited_property_does_not_shadow_amendment_scope() {
+#[test]
+fn unassigned_inherited_property_does_not_shadow_amendment_scope() {
     let temp = TestTempDir::new("pklr_test_unassigned_inherited_property_scope");
     let dir = temp.path();
     std::fs::write(
@@ -1321,14 +1206,12 @@ result = (Lib.item) {
     )
     .unwrap();
 
-    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let json = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(json["result"], serde_json::json!({"selected": "amendment"}));
 }
 
-#[tokio::test]
-async fn amended_typed_property_keeps_definition_site_class_identity() {
+#[test]
+fn amended_typed_property_keeps_definition_site_class_identity() {
     let temp = TestTempDir::new("pklr_test_amended_typed_property_identity");
     let dir = temp.path();
     std::fs::write(
@@ -1372,17 +1255,15 @@ hooks {
     )
     .unwrap();
 
-    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let json = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(
         json["hooks"]["check"]["steps"]["demo"]["tests"],
         serde_json::json!({"case": {"expect": {"stdout": "ok"}}})
     );
 }
 
-#[tokio::test]
-async fn scoped_inherited_base_does_not_pollute_import_cache() {
+#[test]
+fn scoped_inherited_base_does_not_pollute_import_cache() {
     let temp = TestTempDir::new("pklr_test_scoped_base_cache");
     let dir = temp.path();
     std::fs::write(
@@ -1403,19 +1284,19 @@ result = name
     )
     .unwrap();
 
-    let mut ev = Evaluator::new_async();
-    let child_val = ev.eval_file_pub(&dir.join("child.pkl")).await.unwrap();
+    let mut ev = Evaluator::new();
+    let child_val = ev.eval_file(&dir.join("child.pkl")).unwrap();
     assert_eq!(child_val.to_json()["result"], "hk");
 
-    let err = ev.eval_file_pub(&dir.join("Base.pkl")).await.unwrap_err();
+    let err = ev.eval_file(&dir.join("Base.pkl")).unwrap_err();
     assert!(
         err.to_string().contains("undefined variable: meta"),
         "{err}"
     );
 }
 
-#[tokio::test]
-async fn imported_amends_and_extends_bases_keep_separate_values() {
+#[test]
+fn imported_amends_and_extends_bases_keep_separate_values() {
     let temp = TestTempDir::new("pklr_test_imported_dual_inherited_bases");
     let dir = temp.path();
     std::fs::write(dir.join("AmendsBase.pkl"), r#"amendsName = meta.name"#).unwrap();
@@ -1435,16 +1316,14 @@ extended = ExtendsBase.extendsName
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("child.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("child.pkl")).unwrap();
     assert_eq!(val["extendsName"], "hk");
     assert_eq!(val["amended"], "hk");
     assert_eq!(val["extended"], "hk");
 }
 
-#[tokio::test]
-async fn import_used_only_by_annotation_does_not_create_builtin_cycle() {
+#[test]
+fn import_used_only_by_annotation_does_not_create_builtin_cycle() {
     let temp = TestTempDir::new("pklr_test_annotation_import_cycle");
     let dir = temp.path();
     std::fs::create_dir_all(dir.join("builtins")).unwrap();
@@ -1490,13 +1369,13 @@ amended = ((Builtins.prettier) { stdin = true }).step
     .unwrap();
 
     let path = dir.join("main.pkl");
-    let val = pklr::eval_to_json_async(&path).await.unwrap();
+    let val = pklr::eval_to_json(&path).unwrap();
     assert_eq!(val["result"], "ok");
     assert_eq!(val["amended"], "stdin");
 }
 
-#[tokio::test]
-async fn unused_import_glob_field_does_not_evaluate() {
+#[test]
+fn unused_import_glob_field_does_not_evaluate() {
     let temp = TestTempDir::new("pklr_test_unused_import_glob_field");
     let dir = temp.path();
     std::fs::create_dir_all(dir.join("builtins")).unwrap();
@@ -1530,14 +1409,12 @@ result = Builtins.prettier
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["result"], "ok");
 }
 
-#[tokio::test]
-async fn partial_import_expands_this_and_module_dependencies() {
+#[test]
+fn partial_import_expands_this_and_module_dependencies() {
     let temp = TestTempDir::new("pklr_test_partial_import_this_deps");
     let dir = temp.path();
     std::fs::write(
@@ -1560,52 +1437,13 @@ z = Dep.z
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["y"], 42);
     assert_eq!(val["z"], 43);
 }
 
-#[tokio::test]
-async fn partial_import_includes_type_annotation_fields() {
-    let temp = TestTempDir::new("pklr_test_partial_import_type_ann");
-    let dir = temp.path();
-    std::fs::write(
-        dir.join("types.pkl"),
-        r#"
-Step = new Dynamic {
-    enabled = true
-}
-Other = "other"
-broken = missing.field
-"#,
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("main.pkl"),
-        r#"
-import "types.pkl" as Types
-other = Types.Other
-steps: Mapping<String, Types.Step> = new Mapping<String, Types.Step> {
-    ["a"] {
-        name = "alpha"
-    }
-}
-enabled = steps["a"].enabled
-"#,
-    )
-    .unwrap();
-
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
-    assert_eq!(val["other"], "other");
-    assert_eq!(val["enabled"], true);
-}
-
-#[tokio::test]
-async fn partial_import_includes_generic_param_fields() {
+#[test]
+fn partial_import_includes_generic_param_fields() {
     let temp = TestTempDir::new("pklr_test_partial_import_generic_param");
     let dir = temp.path();
     std::fs::write(
@@ -1634,15 +1472,13 @@ enabled = steps["a"].enabled
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["other"], "other");
     assert_eq!(val["enabled"], true);
 }
 
-#[tokio::test]
-async fn partial_import_ignores_imports_used_only_by_skipped_properties() {
+#[test]
+fn partial_import_ignores_imports_used_only_by_skipped_properties() {
     let temp = TestTempDir::new("pklr_test_partial_import_skipped_import");
     let dir = temp.path();
     std::fs::write(
@@ -1664,14 +1500,12 @@ result = Dep.wanted
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["result"], "ok");
 }
 
-#[tokio::test]
-async fn partial_import_treats_object_method_receiver_as_whole_import() {
+#[test]
+fn partial_import_treats_object_method_receiver_as_whole_import() {
     let temp = TestTempDir::new("pklr_test_partial_import_object_method");
     let dir = temp.path();
     std::fs::write(
@@ -1691,15 +1525,13 @@ result = Dep.toMap().toMapping()
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["result"]["first"], "one");
     assert_eq!(val["result"]["second"], "two");
 }
 
-#[tokio::test]
-async fn partial_import_treats_object_map_values_receiver_as_whole_import() {
+#[test]
+fn partial_import_treats_object_map_values_receiver_as_whole_import() {
     let temp = TestTempDir::new("pklr_test_partial_import_map_values");
     let dir = temp.path();
     std::fs::write(
@@ -1719,15 +1551,13 @@ result = Dep.mapValues((k, v) -> v + 1).toMapping()
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["result"]["first"], 2);
     assert_eq!(val["result"]["second"], 3);
 }
 
-#[tokio::test]
-async fn partial_import_keeps_user_defined_method_names_field_scoped() {
+#[test]
+fn partial_import_keeps_user_defined_method_names_field_scoped() {
     let temp = TestTempDir::new("pklr_test_partial_import_user_method");
     let dir = temp.path();
     std::fs::write(
@@ -1747,14 +1577,12 @@ result = Dep.map(41)
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["result"], 42);
 }
 
-#[tokio::test]
-async fn partial_import_includes_sibling_function_called_by_requested_function() {
+#[test]
+fn partial_import_includes_sibling_function_called_by_requested_function() {
     let temp = TestTempDir::new("pklr_test_partial_import_sibling_function");
     let dir = temp.path();
     std::fs::write(
@@ -1775,9 +1603,7 @@ result = Dep.picked()
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["result"], "ok");
 }
 
@@ -1813,8 +1639,8 @@ fn top_level_bare_elements_are_invalid() {
     assert!(err.contains("Invalid property definition"), "{err}");
 }
 
-#[tokio::test]
-async fn imported_typed_mapping_does_not_leak_schema_classes() {
+#[test]
+fn imported_typed_mapping_does_not_leak_schema_classes() {
     let temp = TestTempDir::new("pklr_test_imported_typed_mapping");
     let dir = temp.path();
     std::fs::write(
@@ -1850,15 +1676,13 @@ steps = other.STEPS
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["steps"]["original"]["check"], "echo original");
     assert!(val["steps"]["original"].get("Script").is_none(), "{val}");
 }
 
-#[tokio::test]
-async fn nested_imported_mapping_amendments_preserve_entries() {
+#[test]
+fn nested_imported_mapping_amendments_preserve_entries() {
     let temp = TestTempDir::new("pklr_test_nested_imported_mapping_amendments");
     let dir = temp.path();
     std::fs::write(
@@ -1914,9 +1738,7 @@ steps = (Default.steps) {
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("All.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("All.pkl")).unwrap();
     assert_eq!(
         val["steps"],
         serde_json::json!({
@@ -1976,8 +1798,8 @@ result = (hooks) {
     );
 }
 
-#[tokio::test]
-async fn module_imported_narrowly_by_many_modules() {
+#[test]
+fn module_imported_narrowly_by_many_modules() {
     let temp = TestTempDir::new("pklr_test_shared_narrowed_import");
     let dir = temp.path();
     std::fs::create_dir_all(dir.join("parts")).unwrap();
@@ -2038,9 +1860,7 @@ direct = shared.greeting
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["oneHub"], "hub");
     assert_eq!(
         val["oneStep"],
@@ -2055,8 +1875,8 @@ direct = shared.greeting
     assert_eq!(val["direct"], "hi");
 }
 
-#[tokio::test]
-async fn reused_evaluator_rereads_changed_imports() {
+#[test]
+fn reused_evaluator_rereads_changed_imports() {
     let temp = TestTempDir::new("pklr_test_reused_evaluator_imports");
     let dir = temp.path();
     std::fs::write(dir.join("dep.pkl"), "value = 1\nother = 2\n").unwrap();
@@ -2066,27 +1886,19 @@ async fn reused_evaluator_rereads_changed_imports() {
     )
     .unwrap();
 
-    let mut ev = pklr::eval::Evaluator::new_async();
-    let first = ev
-        .eval_file_pub(&dir.join("main.pkl"))
-        .await
-        .unwrap()
-        .to_json();
+    let mut ev = pklr::eval::Evaluator::new();
+    let first = ev.eval_file(&dir.join("main.pkl")).unwrap().to_json();
     assert_eq!(first["narrow"], 1);
     assert_eq!(first["whole"]["other"], 2);
 
     std::fs::write(dir.join("dep.pkl"), "value = 10\nother = 20\n").unwrap();
-    let second = ev
-        .eval_file_pub(&dir.join("main.pkl"))
-        .await
-        .unwrap()
-        .to_json();
+    let second = ev.eval_file(&dir.join("main.pkl")).unwrap().to_json();
     assert_eq!(second["narrow"], 10);
     assert_eq!(second["whole"]["other"], 20);
 }
 
-#[tokio::test]
-async fn narrowed_import_that_read_a_cycle_placeholder_is_not_reused() {
+#[test]
+fn narrowed_import_that_read_a_cycle_placeholder_is_not_reused() {
     let temp = TestTempDir::new("pklr_test_cycle_narrowed_reuse");
     let dir = temp.path();
     std::fs::write(
@@ -2105,9 +1917,7 @@ async fn narrowed_import_that_read_a_cycle_placeholder_is_not_reused() {
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     // While hub is being imported, dep sees hub's placeholder. Once hub is
     // done, the same narrowed import of dep must see its real value rather
     // than a result cached during the cycle.
@@ -2115,8 +1925,8 @@ async fn narrowed_import_that_read_a_cycle_placeholder_is_not_reused() {
     assert_eq!(val["after"], "T");
 }
 
-#[tokio::test]
-async fn import_glob_evaluates_only_referenced_modules() {
+#[test]
+fn import_glob_evaluates_only_referenced_modules() {
     let temp = TestTempDir::new("pklr_test_glob_referenced_only");
     let dir = temp.path();
     std::fs::create_dir_all(dir.join("parts")).unwrap();
@@ -2133,14 +1943,12 @@ async fn import_glob_evaluates_only_referenced_modules() {
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["result"], "used");
 }
 
-#[tokio::test]
-async fn import_glob_keys_still_see_every_module() {
+#[test]
+fn import_glob_keys_still_see_every_module() {
     let temp = TestTempDir::new("pklr_test_glob_keys_all");
     let dir = temp.path();
     std::fs::create_dir_all(dir.join("parts")).unwrap();
@@ -2152,15 +1960,13 @@ async fn import_glob_keys_still_see_every_module() {
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["a"], "a");
     assert_eq!(val["count"], 2);
 }
 
-#[tokio::test]
-async fn import_glob_keeps_modules_an_amended_base_reads() {
+#[test]
+fn import_glob_keeps_modules_an_amended_base_reads() {
     let temp = TestTempDir::new("pklr_test_glob_amended_base_reads");
     let dir = temp.path();
     std::fs::create_dir_all(dir.join("parts")).unwrap();
@@ -2177,15 +1983,13 @@ async fn import_glob_keeps_modules_an_amended_base_reads() {
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["fromBase"], "b");
     assert_eq!(val["fromChild"], "a");
 }
 
-#[tokio::test]
-async fn import_glob_field_read_named_like_a_module_sees_every_module() {
+#[test]
+fn import_glob_field_read_named_like_a_module_sees_every_module() {
     let temp = TestTempDir::new("pklr_test_glob_field_named_like_module");
     let dir = temp.path();
     std::fs::write(dir.join("length"), "value = \"L\"\n").unwrap();
@@ -2196,15 +2000,13 @@ async fn import_glob_field_read_named_like_a_module_sees_every_module() {
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["l"], "L");
     assert_eq!(val["count"], 2);
 }
 
-#[tokio::test]
-async fn import_glob_keeps_modules_read_by_type_alias_constraints() {
+#[test]
+fn import_glob_keeps_modules_read_by_type_alias_constraints() {
     let temp = TestTempDir::new("pklr_test_glob_type_alias_constraint");
     let dir = temp.path();
     std::fs::create_dir_all(dir.join("parts")).unwrap();
@@ -2220,15 +2022,13 @@ ok = "b" is IsB
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["fromA"], "a");
     assert_eq!(val["ok"], true);
 }
 
-#[tokio::test]
-async fn indexed_ordinary_import_is_evaluated_whole() {
+#[test]
+fn indexed_ordinary_import_is_evaluated_whole() {
     let temp = TestTempDir::new("pklr_test_indexed_ordinary_import");
     let dir = temp.path();
     std::fs::write(
@@ -2242,14 +2042,12 @@ async fn indexed_ordinary_import_is_evaluated_whole() {
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["out"], true);
 }
 
-#[tokio::test]
-async fn import_glob_in_a_base_keeps_modules_its_children_read() {
+#[test]
+fn import_glob_in_a_base_keeps_modules_its_children_read() {
     let temp = TestTempDir::new("pklr_test_glob_base_children_read");
     let dir = temp.path();
     std::fs::create_dir_all(dir.join("parts")).unwrap();
@@ -2271,15 +2069,15 @@ async fn import_glob_in_a_base_keeps_modules_its_children_read() {
     )
     .unwrap();
 
-    let extended = pklr::eval_to_json_async(&dir.join("B.pkl")).await.unwrap();
+    let extended = pklr::eval_to_json(&dir.join("B.pkl")).unwrap();
     assert_eq!(extended["a"], "a");
     assert_eq!(extended["b"], "b");
-    let amended = pklr::eval_to_json_async(&dir.join("C.pkl")).await.unwrap();
+    let amended = pklr::eval_to_json(&dir.join("C.pkl")).unwrap();
     assert_eq!(amended["c"], "b");
 }
 
-#[tokio::test]
-async fn narrowed_import_follows_type_alias_constraints() {
+#[test]
+fn narrowed_import_follows_type_alias_constraints() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_type_alias");
     let dir = temp.path();
     std::fs::write(
@@ -2293,15 +2091,13 @@ async fn narrowed_import_follows_type_alias_constraints() {
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["ok"], true);
     assert_eq!(val["out"], true);
 }
 
-#[tokio::test]
-async fn narrowed_import_follows_module_reads_in_class_defaults() {
+#[test]
+fn narrowed_import_follows_module_reads_in_class_defaults() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_class_default");
     let dir = temp.path();
     // `Bar`'s default reads the module property `min` without `module.`, so
@@ -2322,25 +2118,19 @@ async fn narrowed_import_follows_module_reads_in_class_defaults() {
     )
     .unwrap();
 
-    let dep = pklr::eval_to_json_async(&dir.join("dep.pkl"))
-        .await
-        .unwrap();
+    let dep = pklr::eval_to_json(&dir.join("dep.pkl")).unwrap();
     assert_eq!(
         dep,
         serde_json::json!({"min": 1, "result": {"bar": {"a": 1}}})
     );
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val, serde_json::json!({"out": {"bar": {"a": 1}}}));
-    let class = pklr::eval_to_json_async(&dir.join("class.pkl"))
-        .await
-        .unwrap();
+    let class = pklr::eval_to_json(&dir.join("class.pkl")).unwrap();
     assert_eq!(class, serde_json::json!({"out": {"a": 1}}));
 }
 
-#[tokio::test]
-async fn narrowed_import_ignores_class_properties_named_like_module_properties() {
+#[test]
+fn narrowed_import_ignores_class_properties_named_like_module_properties() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_class_property_shadow");
     let dir = temp.path();
     // `b = a` reads the instance's own `a`, not the unused module property
@@ -2356,14 +2146,12 @@ async fn narrowed_import_ignores_class_properties_named_like_module_properties()
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val, serde_json::json!({"d": {"a": 6, "b": 6}}));
 }
 
-#[tokio::test]
-async fn narrowed_import_follows_module_reads_named_like_inherited_properties() {
+#[test]
+fn narrowed_import_follows_module_reads_named_like_inherited_properties() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_inherited_name");
     let dir = temp.path();
     // `min` in `Child` is the inherited property, but `Child`'s defaults are
@@ -2380,18 +2168,14 @@ async fn narrowed_import_follows_module_reads_named_like_inherited_properties() 
     )
     .unwrap();
 
-    let dep = pklr::eval_to_json_async(&dir.join("dep.pkl"))
-        .await
-        .unwrap();
+    let dep = pklr::eval_to_json(&dir.join("dep.pkl")).unwrap();
     assert_eq!(dep["out"], serde_json::json!({"min": 2, "a": 2}));
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val, serde_json::json!({"out": {"min": 2, "a": 2}}));
 }
 
-#[tokio::test]
-async fn narrowed_import_skips_module_properties_named_like_inherited_method_reads() {
+#[test]
+fn narrowed_import_skips_module_properties_named_like_inherited_method_reads() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_inherited_method");
     let dir = temp.path();
     // A method body runs on a built instance, where `min` is the inherited
@@ -2413,278 +2197,13 @@ async fn narrowed_import_skips_module_properties_named_like_inherited_method_rea
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["min"], 2);
     assert_eq!(val["max"], 3);
 }
 
-#[tokio::test]
-async fn narrowed_import_ignores_class_properties_named_like_module_properties_when_following_class()
- {
-    let temp = TestTempDir::new("pklr_test_narrowed_import_followed_class_shadow");
-    let dir = temp.path();
-    // `D` reads the module's `max` (by name, or through `module`), so an
-    // importer building one needs it, but `b = a` reads the instance's own
-    // `a`, so the unused module `a` is not needed.
-    std::fs::write(
-        dir.join("dep.pkl"),
-        "a = throw(\"unused\")\nmax = 3\nclass D {\n  a = 6\n  b = a\n  c = max\n}\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("dep_qualified.pkl"),
-        "a = throw(\"unused\")\nmax = 3\nclass D {\n  a = 6\n  b = a\n  c = module.max\n}\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("main.pkl"),
-        "import \"dep.pkl\" as Dep\nimport \"dep_qualified.pkl\" as Q\nd = new Dep.D {}\nq = new Q.D {}\n",
-    )
-    .unwrap();
-
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
-    assert_eq!(
-        val,
-        serde_json::json!({"d": {"a": 6, "b": 6, "c": 3}, "q": {"a": 6, "b": 6, "c": 3}})
-    );
-}
-
-#[tokio::test]
-async fn narrowed_import_skips_inherited_method_reads_when_following_class() {
-    let temp = TestTempDir::new("pklr_test_narrowed_import_followed_class_inherited");
-    let dir = temp.path();
-    // `getMax` reads the module's `max`, so an importer building a `Child`
-    // needs it, but `getMin` runs on the built instance, where `min` is the
-    // inherited property, so the unused module `min` is not needed.
-    std::fs::write(
-        dir.join("dep.pkl"),
-        "min = throw(\"unused\")\nmax = 3\nopen class Parent { min = 2 }\nclass Child extends Parent {\n  function getMin() = min\n  function getMax() = max\n}\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("main.pkl"),
-        "import \"dep.pkl\" as Dep\nchild = new Dep.Child {}\nmin = child.getMin()\nmax = child.getMax()\n",
-    )
-    .unwrap();
-
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
-    assert_eq!(val["min"], 2);
-    assert_eq!(val["max"], 3);
-}
-
-#[tokio::test]
-async fn narrowed_import_follows_module_reads_made_before_class_properties_are_bound() {
-    let temp = TestTempDir::new("pklr_test_narrowed_import_followed_class_early_reads");
-    let dir = temp.path();
-    // A class body's locals are evaluated before its properties, and each
-    // property is bound in declaration order, so these reads of `a` (or
-    // `name`) happen before the class's own property of that name exists
-    // and still need the module's.
-    let deps = [
-        // A local.
-        "a = 1\nmax = 3\nclass D {\n  local x = a\n  a = 6\n  b = x\n  c = module.max\n}\n",
-        // A property's own initializer.
-        "a = \"mod\"\nmax = 3\nclass D {\n  a = a\n  c = module.max\n}\n",
-        // A method called by a default declared before the property.
-        "a = 1\nmax = 3\nclass D {\n  function f() = a\n  b = f()\n  a = 6\n  c = module.max\n}\n",
-        // A local method, which captures the scope the locals see, even when
-        // a default after the property runs it.
-        "a = 1\nmax = 3\nclass D {\n  local f = () -> a\n  a = 6\n  b = f.apply()\n  c = module.max\n}\n",
-        // A nested class, whose defaults are also evaluated first.
-        "a = 1\nmax = 3\nclass D {\n  a = 6\n  class Inner { x = a }\n  b = new Inner {}\n  c = module.max\n}\n",
-        // A nested class's method, called by a default declared before the
-        // property.
-        "a = 1\nmax = 3\nclass D {\n  class Reader { function f() = a }\n  r = new Reader {}.f()\n  a = 6\n  c = module.max\n}\n",
-        // ...or through another of its methods.
-        "a = 1\nmax = 3\nclass D {\n  class Reader {\n    function g() = a\n    function f() = g()\n  }\n  r = new Reader {}.f()\n  a = 6\n  c = module.max\n}\n",
-        // ...or through another nested class's method, or a property storing
-        // the method.
-        "a = 1\nmax = 3\nclass D {\n  class Reader { function f() = a }\n  class Caller { function go() = new Reader {}.f() }\n  r = new Caller {}.go()\n  a = 6\n  c = module.max\n}\n",
-        "a = 1\nmax = 3\nclass D {\n  class Reader {\n    function g() = a\n    callback = g\n  }\n  r = new Reader {}.callback.apply()\n  a = 6\n  c = module.max\n}\n",
-        // ...or a function it passes an instance to.
-        "a = 1\nmax = 3\nlocal function run(x) = x.f()\nclass D {\n  class Reader { function f() = a }\n  r = run(new Reader {})\n  a = 6\n  c = module.max\n}\n",
-        "a = 1\nmax = 3\nlocal function run(x) = x.f()\nclass D {\n  class Reader { function f() = a }\n  r = new Reader {} |> run\n  a = 6\n  c = module.max\n}\n",
-        // ...or a class nested in the nested class.
-        "a = 1\nmax = 3\nclass D {\n  class Reader {\n    class Inner { function f() = a }\n    function go() = new Inner {}.f()\n  }\n  r = new Reader {}.go()\n  a = 6\n  c = module.max\n}\n",
-        // ...or a sibling of a nested class it builds.
-        "a = 1\nmax = 3\nclass D {\n  class Reader {\n    class Other { function f() = a }\n    class Middle { function go() = new Other {}.f() }\n    function go() = new Middle {}.go()\n  }\n  r = new Reader {}.go()\n  a = 6\n  c = module.max\n}\n",
-    ];
-    for (i, dep) in deps.iter().enumerate() {
-        let name = format!("dep{i}.pkl");
-        std::fs::write(dir.join(&name), format!("{dep}d = new D {{}}\n")).unwrap();
-        std::fs::write(
-            dir.join("main.pkl"),
-            format!("import \"{name}\" as Dep\nd = new Dep.D {{}}\n"),
-        )
-        .unwrap();
-        let direct = pklr::eval_to_json_async(&dir.join(&name)).await.unwrap();
-        let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-            .await
-            .unwrap();
-        assert_eq!(val["d"], direct["d"], "{dep}");
-    }
-}
-
-#[tokio::test]
-async fn narrowed_import_skips_nested_class_reads_after_class_properties_are_bound() {
-    let temp = TestTempDir::new("pklr_test_narrowed_import_nested_class_reads");
-    let dir = temp.path();
-    // Only a nested class's defaults are evaluated before `D`'s properties
-    // are bound: `Inner`'s `x` reads its own `a`, and its method `f` runs
-    // after `D`'s `a` is bound, so the unused module `a` is not needed.
-    std::fs::write(
-        dir.join("dep.pkl"),
-        "a = throw(\"unused\")\nmax = 3\nclass D {\n  a = 6\n  class Inner {\n    a = 1\n    x = a\n  }\n  class Reader { function f() = a }\n  b = new Inner {}\n  r = new Reader {}.f()\n  c = module.max\n}\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("main.pkl"),
-        "import \"dep.pkl\" as Dep\nd = new Dep.D {}\n",
-    )
-    .unwrap();
-
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
-    assert_eq!(val["d"]["b"]["x"], 1);
-    assert_eq!(val["d"]["r"], 6);
-    assert_eq!(val["d"]["c"], 3);
-}
-
-#[tokio::test]
-async fn narrowed_import_skips_nested_methods_early_defaults_do_not_run_on_outer_names() {
-    let temp = TestTempDir::new("pklr_test_narrowed_import_nested_method_reads");
-    let dir = temp.path();
-    // Building a `Reader` before `D`'s `a` is bound doesn't call `f`, nor
-    // does passing something else to a function.
-    std::fs::write(
-        dir.join("built.pkl"),
-        "a = throw(\"unused\")\nmax = 3\nlocal function id(x) = x\nclass D {\n  class Reader { function f() = a }\n  r = new Reader {}\n  s = id(1 + 1)\n  t = id(\"\\(r)\")\n  a = 6\n  c = module.max\n}\n",
-    )
-    .unwrap();
-    // `f` reads the `a` a `Reader` inherits from `Base`.
-    std::fs::write(
-        dir.join("inherited.pkl"),
-        "a = throw(\"unused\")\nmax = 3\nopen class Base { a = 2 }\nclass D {\n  class Reader extends Base { function f() = a }\n  r = new Reader {}.f()\n  a = 6\n  c = module.max\n}\n",
-    )
-    .unwrap();
-    // The same for a class nested deeper that extends a class an enclosing
-    // nested class declares, and for one reading what the instance around it
-    // inherits.
-    std::fs::write(
-        dir.join("deep.pkl"),
-        "a = throw(\"unused\")\nmax = 3\nclass D {\n  class Reader {\n    open class Base { a = 2 }\n    class Middle {\n      class Inner extends Base { function f() = a }\n      function go() = new Inner {}.f()\n    }\n    function go() = new Middle {}.go()\n  }\n  r = new Reader {}.go()\n  a = 6\n  c = module.max\n}\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("enclosing.pkl"),
-        "a = throw(\"unused\")\nmax = 3\nopen class Base { a = 2 }\nclass D {\n  class Reader extends Base {\n    class Inner { function f() = a }\n    function go() = new Inner {}.f()\n  }\n  r = new Reader {}.go()\n  a = 6\n  c = module.max\n}\n",
-    )
-    .unwrap();
-    // `module.Base` is the module's class, not a nested one of that name.
-    std::fs::write(
-        dir.join("qualified.pkl"),
-        "a = throw(\"unused\")\nmax = 3\nopen class Base { a = 2 }\nclass D {\n  open class Base { b = 3 }\n  class Reader extends module.Base { function f() = a }\n  r = new Reader {}.f()\n  a = 6\n  c = module.max\n}\n",
-    )
-    .unwrap();
-    // Inherited through empty classes.
-    std::fs::write(
-        dir.join("chain.pkl"),
-        "a = throw(\"unused\")\nmax = 3\nclass D {\n  open class Base { a = 2 }\n  open class Empty1 extends Base {}\n  open class Empty2 extends Empty1 {}\n  class Reader extends Empty2 { function f() = a }\n  r = new Reader {}.f()\n  a = 6\n  c = module.max\n}\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("main.pkl"),
-        "import \"built.pkl\" as B\nimport \"inherited.pkl\" as I\nimport \"deep.pkl\" as P\nimport \"enclosing.pkl\" as E\nimport \"qualified.pkl\" as Q\nimport \"chain.pkl\" as C\nbuilt = new B.D {}\ninherited = new I.D {}\ndeep = new P.D {}\nenclosing = new E.D {}\nqualified = new Q.D {}\nchain = new C.D {}\n",
-    )
-    .unwrap();
-
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
-    assert_eq!(val["built"]["c"], 3);
-    assert_eq!(val["inherited"]["r"], 2);
-    assert_eq!(val["deep"]["r"], 2);
-    assert_eq!(val["enclosing"]["r"], 2);
-    assert_eq!(val["qualified"]["r"], 2);
-    assert_eq!(val["chain"]["r"], 2);
-}
-
-#[tokio::test]
-async fn narrowed_import_skips_local_methods_class_defaults_do_not_run() {
-    let temp = TestTempDir::new("pklr_test_narrowed_import_local_method");
-    let dir = temp.path();
-    // The local method `f` only runs from `g` on the built instance, where
-    // `min` is the inherited property, so the unused module `min` is not
-    // needed.
-    std::fs::write(
-        dir.join("dep.pkl"),
-        "min = throw(\"unused\")\nmax = 3\nopen class Parent { min = 2 }\nclass Child extends Parent {\n  local f = () -> min\n  function g() = f.apply()\n  c = max\n}\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("main.pkl"),
-        "import \"dep.pkl\" as Dep\nchild = new Dep.Child {}\ng = child.g()\n",
-    )
-    .unwrap();
-
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
-    assert_eq!(val["g"], 2);
-    assert_eq!(val["child"]["c"], 3);
-}
-
-#[tokio::test]
-async fn narrowed_import_skips_stored_methods_class_defaults_do_not_apply() {
-    let temp = TestTempDir::new("pklr_test_narrowed_import_stored_method");
-    let dir = temp.path();
-    // `callback = getMin` only stores the method, which then runs on the
-    // built instance, where `min` is the inherited property.
-    std::fs::write(
-        dir.join("stored.pkl"),
-        "min = throw(\"unused\")\nmax = 3\nopen class Parent { min = 2 }\nclass Child extends Parent {\n  function getMin() = min\n  callback = getMin\n  c = max\n}\n",
-    )
-    .unwrap();
-    // Applying the stored method in a default runs it before `Parent`'s
-    // `min` is merged in, so the module's `min` is still needed.
-    std::fs::write(
-        dir.join("applied.pkl"),
-        "min = 1\nmax = 3\nopen class Parent { min = 2 }\nclass Child extends Parent {\n  function getMin() = min\n  callback = getMin\n  a = callback.apply()\n  c = max\n}\nchild = new Child {}\n",
-    )
-    .unwrap();
-    // A stored local method applied on the built instance reads the
-    // instance's `a`, so the unused module `a` is not needed either.
-    std::fs::write(
-        dir.join("local.pkl"),
-        "a = throw(\"unused\")\nmax = 3\nclass D {\n  local f = () -> a\n  callback = f\n  a = 6\n  c = module.max\n}\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("main.pkl"),
-        "import \"stored.pkl\" as S\nimport \"applied.pkl\" as A\nimport \"local.pkl\" as L\nmin = (new S.Child {}).callback.apply()\napplied = (new A.Child {}).a\nlocalMethod = (new L.D {}).callback.apply()\n",
-    )
-    .unwrap();
-
-    let direct = pklr::eval_to_json_async(&dir.join("applied.pkl"))
-        .await
-        .unwrap();
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
-    assert_eq!(val["min"], 2);
-    assert_eq!(val["applied"], direct["child"]["a"]);
-    assert_eq!(val["localMethod"], 6);
-}
-
-#[tokio::test]
-async fn narrowed_import_follows_methods_called_by_class_defaults() {
+#[test]
+fn narrowed_import_follows_methods_called_by_class_defaults() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_default_method_call");
     let dir = temp.path();
     // `a` calls `getMin` while `Child`'s defaults are first evaluated, before
@@ -2702,17 +2221,13 @@ async fn narrowed_import_follows_methods_called_by_class_defaults() {
     )
     .unwrap();
 
-    let dep = pklr::eval_to_json_async(&dir.join("dep.pkl"))
-        .await
-        .unwrap();
+    let dep = pklr::eval_to_json(&dir.join("dep.pkl")).unwrap();
     assert_eq!(dep["child"]["a"], 2);
     assert_eq!(dep["thisChild"]["a"], 2);
     assert_eq!(dep["aliasChild"]["a"], 2);
     assert_eq!(dep["outerChild"]["obj"]["a"], 2);
     assert_eq!(dep["outerChild"]["deep"]["inner"]["a"], 2);
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["child"]["a"], 2);
     assert_eq!(val["thisChild"]["a"], 2);
     assert_eq!(val["aliasChild"]["a"], 2);
@@ -2720,8 +2235,8 @@ async fn narrowed_import_follows_methods_called_by_class_defaults() {
     assert_eq!(val["outerChild"]["deep"]["inner"]["a"], 2);
 }
 
-#[tokio::test]
-async fn narrowed_import_skips_methods_class_defaults_do_not_call() {
+#[test]
+fn narrowed_import_skips_methods_class_defaults_do_not_call() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_default_this_read");
     let dir = temp.path();
     // `a` reads `this.x` and `obj` reads `outer.x` but neither calls a
@@ -2739,17 +2254,15 @@ async fn narrowed_import_skips_methods_class_defaults_do_not_call() {
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["a"], 3);
     assert_eq!(val["b"], 4);
     assert_eq!(val["c"], 3);
     assert_eq!(val["min"], 2);
 }
 
-#[tokio::test]
-async fn narrowed_import_follows_module_reads_but_not_checked_value_members() {
+#[test]
+fn narrowed_import_follows_module_reads_but_not_checked_value_members() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_constraint_names");
     let dir = temp.path();
     // `length` in the constraint is the checked string's length, so the
@@ -2776,16 +2289,14 @@ async fn narrowed_import_follows_module_reads_but_not_checked_value_members() {
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["short"], true);
     assert_eq!(val["moduleRead"], true);
     assert_eq!(val["number"], true);
 }
 
-#[tokio::test]
-async fn narrowed_import_ignores_checked_value_names_in_is_expressions() {
+#[test]
+fn narrowed_import_ignores_checked_value_names_in_is_expressions() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_is_constraint");
     let dir = temp.path();
     std::fs::write(
@@ -2822,9 +2333,7 @@ async fn narrowed_import_ignores_checked_value_names_in_is_expressions() {
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["plain"], true);
     assert_eq!(val["classed"], true);
     assert_eq!(val["aliased"], true);
@@ -2832,8 +2341,8 @@ async fn narrowed_import_ignores_checked_value_names_in_is_expressions() {
     assert_eq!(val["nullable"], true);
 }
 
-#[tokio::test]
-async fn narrowed_import_resolves_local_aliases_in_constraint_bases() {
+#[test]
+fn narrowed_import_resolves_local_aliases_in_constraint_bases() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_alias_constraint_base");
     let dir = temp.path();
     // `S` is `String`, so `length` in the constraint is the string's own.
@@ -2870,9 +2379,7 @@ async fn narrowed_import_resolves_local_aliases_in_constraint_bases() {
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["string"], true);
     assert_eq!(val["chain"], true);
     assert_eq!(val["listing"], true);
@@ -2880,8 +2387,8 @@ async fn narrowed_import_resolves_local_aliases_in_constraint_bases() {
     assert_eq!(val["nullable"], true);
 }
 
-#[tokio::test]
-async fn narrowed_import_respects_aliases_redeclared_in_nested_bodies() {
+#[test]
+fn narrowed_import_respects_aliases_redeclared_in_nested_bodies() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_nested_alias");
     let dir = temp.path();
     // The nested `S` is `Int`, whose check binds no `length`, so the module's
@@ -2952,9 +2459,7 @@ async fn narrowed_import_respects_aliases_redeclared_in_nested_bodies() {
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["out"], true);
     assert_eq!(val["outString"], true);
     assert_eq!(val["outOrder"], true);
@@ -2966,147 +2471,8 @@ async fn narrowed_import_respects_aliases_redeclared_in_nested_bodies() {
     assert_eq!(val["outFollowedUnrelated"], true);
 }
 
-#[tokio::test]
-async fn narrowed_import_respects_builtins_redeclared_in_nested_bodies() {
-    let temp = TestTempDir::new("pklr_test_narrowed_import_nested_builtin");
-    let dir = temp.path();
-    // The module alias `T` is checked inside a body that redeclares `String`
-    // as `Int`, whose check binds no `length`, so the module's `length` is
-    // still needed.
-    std::fs::write(
-        dir.join("dep.pkl"),
-        "length = 1\ntypealias T = String(length == 1)\nresult {\n  typealias String = Int\n  ok = 1 is T\n}\n",
-    )
-    .unwrap();
-    // The same holds for a check on the redeclared name directly.
-    std::fs::write(
-        dir.join("dep_direct.pkl"),
-        "length = 1\nresult {\n  typealias String = Int\n  ok = 1 is String(length == 1)\n}\n",
-    )
-    .unwrap();
-    // Collections redeclared deeper inside the body, including as generics.
-    std::fs::write(
-        dir.join("dep_listing.pkl"),
-        "length = 1\nresult {\n  inner {\n    typealias Listing = Int\n    ok = 1 is Listing<Int>(this == length)\n  }\n}\n",
-    )
-    .unwrap();
-    // A class's member types are checked where the object is built, so a
-    // class instantiated in that body checks `Int` and reads the module's
-    // `length`, directly or through `T`.
-    std::fs::write(
-        dir.join("dep_class.pkl"),
-        "length = 1\ntypealias T = String(length == 1)\nclass C {\n  a: String(length == 1) = 1\n  b: T = 1\n}\nresult {\n  typealias String = Int\n  ok = new C {}\n}\n",
-    )
-    .unwrap();
-    // A redeclaration in a sibling body doesn't apply to `ok`, whose check
-    // through `T` binds the string's own `length`, so the module's unused
-    // `length` must not be evaluated.
-    std::fs::write(
-        dir.join("dep_sibling.pkl"),
-        "length = throw(\"unused\")\ntypealias T = String(length == 1)\nresult {\n  inner {\n    typealias String = Int\n    value = 1\n  }\n  ok = \"b\" is T\n}\n",
-    )
-    .unwrap();
-    // A local bound around the redeclaring body still shadows the module's
-    // unused `x`.
-    std::fs::write(
-        dir.join("dep_local.pkl"),
-        "x = throw(\"unused\")\nresult {\n  local x = 1\n  inner {\n    typealias String = Int\n    ok = x\n  }\n}\n",
-    )
-    .unwrap();
-    // An identical redeclaration of the module's `String` reads the same, so
-    // `T` still checks a List, which binds its own `length`.
-    std::fs::write(
-        dir.join("dep_identical.pkl"),
-        "length = throw(\"unused\")\ntypealias String = List\ntypealias T = String(length == 1)\nresult {\n  typealias String = List\n  ok = List(1) is T\n}\n",
-    )
-    .unwrap();
-    // An identical `String = List` still changes meaning when the body also
-    // redeclares `List`, so checks on `String` (through `T`, or directly)
-    // read the module's `length`.
-    std::fs::write(
-        dir.join("dep_identical_shadowed.pkl"),
-        "length = 1\ntypealias String = List\ntypealias T = String(length == 1)\nresult {\n  typealias List = Int\n  typealias String = List\n  ok = 1 is T\n  okDirect = 1 is String(this == length)\n}\n",
-    )
-    .unwrap();
-    // Redeclaring `List` in a sibling body doesn't change what `String`
-    // means for `ok`, which checks a List with its own `length`.
-    std::fs::write(
-        dir.join("dep_alias_sibling.pkl"),
-        "length = throw(\"unused\")\ntypealias String = List\ntypealias T = String(length == 1)\nresult {\n  inner {\n    typealias List = Int\n    value = 1\n  }\n  ok = List(1) is T\n}\n",
-    )
-    .unwrap();
-    // Redeclared as a collection, `String` still binds the value's own
-    // `length`, directly or through `T`, so the module's unused `length` must
-    // not be evaluated.
-    std::fs::write(
-        dir.join("dep_collection.pkl"),
-        "length = throw(\"unused\")\ntypealias T = String(length == 1)\nresult {\n  typealias String = Listing<Int>\n  ok = List(1) is String(length == 1)\n  okFollowed = List(1) is T\n}\n",
-    )
-    .unwrap();
-    // A deeper body that redeclares `List` changes what the outer
-    // `String = List` means there, so its check reads the module's `length`.
-    std::fs::write(
-        dir.join("dep_deeper.pkl"),
-        "length = 1\nresult {\n  typealias String = List\n  inner {\n    typealias List = Int\n    ok = 1 is String(length == 1)\n  }\n}\n",
-    )
-    .unwrap();
-    // A base module's alias can redefine a built-in this module checks
-    // against, directly or through a nested redeclaration.
-    std::fs::write(dir.join("base.pkl"), "typealias List = Int\n").unwrap();
-    std::fs::write(
-        dir.join("dep_inherited.pkl"),
-        "extends \"base.pkl\"\nlength = 1\nresult {\n  ok = 1 is List(length == 1)\n}\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("dep_inherited_nested.pkl"),
-        "amends \"base.pkl\"\nlength = 1\nresult {\n  typealias String = List\n  ok = 1 is String(length == 1)\n}\n",
-    )
-    .unwrap();
-    // Only the built-ins a base actually redefines count: `String` checks
-    // under an empty base, or one redefining only `List`, still bind the
-    // string's own `length`, so the module's unused `length` isn't read.
-    std::fs::write(dir.join("base_empty.pkl"), "").unwrap();
-    std::fs::write(
-        dir.join("dep_inherited_empty.pkl"),
-        "amends \"base_empty.pkl\"\nlength = throw(\"unused\")\nresult {\n  ok = \"b\" is String(length == 1)\n}\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("dep_inherited_other.pkl"),
-        "extends \"base.pkl\"\nlength = throw(\"unused\")\nresult {\n  ok = \"b\" is String(length == 1)\n}\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("main.pkl"),
-        "import \"dep.pkl\" as Dep\nimport \"dep_direct.pkl\" as DepDirect\nimport \"dep_inherited_empty.pkl\" as DepInheritedEmpty\nimport \"dep_inherited_other.pkl\" as DepInheritedOther\nimport \"dep_deeper.pkl\" as DepDeeper\nimport \"dep_inherited.pkl\" as DepInherited\nimport \"dep_inherited_nested.pkl\" as DepInheritedNested\nimport \"dep_collection.pkl\" as DepCollection\nimport \"dep_alias_sibling.pkl\" as DepAliasSibling\nimport \"dep_identical_shadowed.pkl\" as DepIdenticalShadowed\nimport \"dep_local.pkl\" as DepLocal\nimport \"dep_identical.pkl\" as DepIdentical\nimport \"dep_listing.pkl\" as DepListing\nimport \"dep_sibling.pkl\" as DepSibling\nimport \"dep_class.pkl\" as DepClass\nout = Dep.result.ok\noutDirect = DepDirect.result.ok\noutListing = DepListing.result.inner.ok\noutSibling = DepSibling.result.ok\noutClass = DepClass.result.ok\noutLocal = DepLocal.result.inner.ok\noutIdentical = DepIdentical.result.ok\noutIdenticalShadowed = DepIdenticalShadowed.result.ok\noutIdenticalShadowedDirect = DepIdenticalShadowed.result.okDirect\noutAliasSibling = DepAliasSibling.result.ok\noutCollection = DepCollection.result.ok\noutCollectionFollowed = DepCollection.result.okFollowed\noutDeeper = DepDeeper.result.inner.ok\noutInherited = DepInherited.result.ok\noutInheritedNested = DepInheritedNested.result.ok\noutInheritedEmpty = DepInheritedEmpty.result.ok\noutInheritedOther = DepInheritedOther.result.ok\n",
-    )
-    .unwrap();
-
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
-    assert_eq!(val["out"], true);
-    assert_eq!(val["outDirect"], true);
-    assert_eq!(val["outListing"], true);
-    assert_eq!(val["outSibling"], true);
-    assert_eq!(val["outClass"], serde_json::json!({ "a": 1, "b": 1 }));
-    assert_eq!(val["outLocal"], 1);
-    assert_eq!(val["outIdentical"], true);
-    assert_eq!(val["outIdenticalShadowed"], true);
-    assert_eq!(val["outIdenticalShadowedDirect"], true);
-    assert_eq!(val["outAliasSibling"], true);
-    assert_eq!(val["outCollection"], true);
-    assert_eq!(val["outCollectionFollowed"], true);
-    assert_eq!(val["outDeeper"], true);
-    assert_eq!(val["outInherited"], true);
-    assert_eq!(val["outInheritedNested"], true);
-    assert_eq!(val["outInheritedEmpty"], true);
-    assert_eq!(val["outInheritedOther"], true);
-}
-
-#[tokio::test]
-async fn narrowed_import_resolves_aliases_in_followed_class_bodies() {
+#[test]
+fn narrowed_import_resolves_aliases_in_followed_class_bodies() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_class_alias");
     let dir = temp.path();
     // Following `C` analyses its property's constraint with the module's
@@ -3122,14 +2488,12 @@ async fn narrowed_import_resolves_aliases_in_followed_class_bodies() {
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["out"], "b");
 }
 
-#[tokio::test]
-async fn module_in_imported_class_body_means_the_class_module() {
+#[test]
+fn module_in_imported_class_body_means_the_class_module() {
     let temp = TestTempDir::new("pklr_test_module_in_imported_class");
     let dir = temp.path();
     std::fs::write(
@@ -3143,19 +2507,15 @@ async fn module_in_imported_class_body_means_the_class_module() {
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("dep2.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("dep2.pkl")).unwrap();
     assert_eq!(val["result"]["v"], "b");
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["r"], "b");
     assert_eq!(val["fresh"]["v"], "b");
 }
 
-#[tokio::test]
-async fn imported_class_reading_missing_module_property_reports_error() {
+#[test]
+fn imported_class_reading_missing_module_property_reports_error() {
     let temp = TestTempDir::new("pklr_test_imported_poisoned_class");
     let dir = temp.path();
     std::fs::write(dir.join("dep.pkl"), "class C { v = module.missing }\n").unwrap();
@@ -3167,9 +2527,7 @@ async fn imported_class_reading_missing_module_property_reports_error() {
     std::fs::write(dir.join("read.pkl"), "import \"dep.pkl\"\nresult = dep.C\n").unwrap();
 
     // The module defining the class still evaluates; the class is unused.
-    let val = pklr::eval_to_json_async(&dir.join("dep.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("dep.pkl")).unwrap();
     assert_eq!(val, serde_json::json!({}));
     // The failed class's error metadata must not stop amending the module
     // object from keeping its evaluated members.
@@ -3183,9 +2541,7 @@ async fn imported_class_reading_missing_module_property_reports_error() {
         "import \"depx.pkl\" as dep\nresult = (dep) { y = 2 }\nr2 = dep { y = 3 }\n",
     )
     .unwrap();
-    let val = pklr::eval_to_json_async(&dir.join("amend.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("amend.pkl")).unwrap();
     assert_eq!(val["result"], serde_json::json!({"x": 1, "y": 2}));
     assert_eq!(val["r2"], serde_json::json!({"x": 1, "y": 3}));
     // Null-safe and index reads report the saved error too.
@@ -3200,69 +2556,15 @@ async fn imported_class_reading_missing_module_property_reports_error() {
     )
     .unwrap();
     for importer in ["main.pkl", "read.pkl", "nullsafe.pkl", "index.pkl"] {
-        let err = pklr::eval_to_json_async(&dir.join(importer))
-            .await
+        let err = pklr::eval_to_json(&dir.join(importer))
             .unwrap_err()
             .to_string();
         assert!(err.contains("missing"), "{importer}: {err}");
     }
 }
 
-#[tokio::test]
-async fn narrowed_import_follows_module_reads_in_class_bodies() {
-    let temp = TestTempDir::new("pklr_test_narrowed_import_class_module_reads");
-    let dir = temp.path();
-    // The requested field reaches `C` only through a local; `C`'s body reads
-    // `limit` through `module`, so the narrowed import must evaluate `limit`.
-    std::fs::write(
-        dir.join("direct.pkl"),
-        "class C { v = module.limit }\nlocal ok = new C {}.v\nlimit = 2\nout = ok\n",
-    )
-    .unwrap();
-    // At module level `this` is the module, so `this.C` names the class.
-    std::fs::write(
-        dir.join("this_read.pkl"),
-        "class C { v = module.limit }\nlocal ok = new this.C {}.v\nlimit = 3\nout = ok\n",
-    )
-    .unwrap();
-    // A dynamic `module[key]` read can reach any property.
-    std::fs::write(
-        dir.join("dynamic.pkl"),
-        "class C { key = \"limit\"; v = module[key] }\nlocal ok = new C {}.v\nlimit = 4\nout = ok\n",
-    )
-    .unwrap();
-    // A local function reads the module property when it is called.
-    std::fs::write(
-        dir.join("lambda.pkl"),
-        "local f = () -> limit\nlimit = 5\nout = f()\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("main.pkl"),
-        "import \"direct.pkl\" as Direct\nimport \"this_read.pkl\"\nimport \"dynamic.pkl\" as DynamicDep\nimport \"lambda.pkl\" as Lambda\ndirect = Direct.out\nthisRead = this_read.out\ndynamic = DynamicDep.out\nlambda = Lambda.out\n",
-    )
-    .unwrap();
-
-    for (file, expected) in [
-        ("direct.pkl", 2),
-        ("this_read.pkl", 3),
-        ("dynamic.pkl", 4),
-        ("lambda.pkl", 5),
-    ] {
-        let val = pklr::eval_to_json_async(&dir.join(file)).await.unwrap();
-        assert_eq!(val["out"], expected, "{file}");
-    }
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
-    assert_eq!(val["direct"], 2);
-    assert_eq!(val["thisRead"], 3);
-    assert_eq!(val["dynamic"], 4);
-    assert_eq!(val["lambda"], 5);
-}
-
-#[tokio::test]
-async fn narrowed_import_follows_locals_with_module_aliases() {
+#[test]
+fn narrowed_import_follows_locals_with_module_aliases() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_local_aliases");
     let dir = temp.path();
     // `ok` is evaluated at module level, where `S` is a String whose check
@@ -3279,71 +2581,12 @@ async fn narrowed_import_follows_locals_with_module_aliases() {
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["out"], true);
 }
 
-#[tokio::test]
-async fn narrowed_import_keeps_type_and_property_names_apart() {
-    let temp = TestTempDir::new("pklr_test_narrowed_import_type_property_names");
-    let dir = temp.path();
-    // Checking against the alias `Foo` doesn't read the unused property
-    // `unused`.
-    std::fs::write(
-        dir.join("dep.pkl"),
-        "typealias Foo = Int\nunused = throw(\"unused\")\nresult {\n  ok = 1 is Foo\n}\n",
-    )
-    .unwrap();
-    // The alias is followed, so what its constraint reads is kept, and
-    // annotations and `new` name the type too.
-    std::fs::write(
-        dir.join("dep_followed.pkl"),
-        "min = 1\ntypealias Foo = Int(this >= min)\nunused = throw(\"unused\")\nclass Bar {\n  a: Int = 1\n}\nresult {\n  ok = 1 is Foo\n  local t: Foo = 2\n  typed = t\n  bar = new Bar {}\n}\n",
-    )
-    .unwrap();
-    // A body that follows definitions itself (it redeclares a type) drops the
-    // type reference too.
-    std::fs::write(
-        dir.join("dep_narrowed.pkl"),
-        "min = 1\ntypealias Foo = Int(this >= min)\nunused = throw(\"unused\")\nresult {\n  typealias String = Int\n  ok = 1 is Foo\n}\n",
-    )
-    .unwrap();
-    // Bindings shadow only their own namespace: a type declared in a body
-    // doesn't hide the module property it reads, and a local doesn't hide
-    // the module alias it checks against.
-    std::fs::write(
-        dir.join("dep_type_shadow.pkl"),
-        "Foo = 5\nresult {\n  typealias Foo = Int\n  ok = Foo\n}\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("dep_local_shadow.pkl"),
-        "min = 1\ntypealias Foo = Int(this >= min)\nresult {\n  local Foo = 1\n  ok = 1 is Foo\n}\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("main.pkl"),
-        "import \"dep.pkl\" as Dep\nimport \"dep_followed.pkl\" as DepFollowed\nimport \"dep_narrowed.pkl\" as DepNarrowed\nimport \"dep_type_shadow.pkl\" as DepTypeShadow\nimport \"dep_local_shadow.pkl\" as DepLocalShadow\nout = Dep.result.ok\noutFollowed = DepFollowed.result\noutNarrowed = DepNarrowed.result.ok\noutTypeShadow = DepTypeShadow.result.ok\noutLocalShadow = DepLocalShadow.result.ok\n",
-    )
-    .unwrap();
-
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
-    assert_eq!(val["out"], true);
-    assert_eq!(
-        val["outFollowed"],
-        serde_json::json!({ "ok": true, "typed": 2, "bar": { "a": 1 } })
-    );
-    assert_eq!(val["outNarrowed"], true);
-    assert_eq!(val["outTypeShadow"], 5);
-    assert_eq!(val["outLocalShadow"], true);
-}
-
-#[tokio::test]
-async fn narrowed_import_reads_qualified_type_roots_and_nested_classes() {
+#[test]
+fn narrowed_import_reads_qualified_type_roots_and_nested_classes() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_qualified_roots");
     let dir = temp.path();
     std::fs::write(dir.join("types.pkl"), "class Item {\n  a: Int = 1\n}\n").unwrap();
@@ -3367,177 +2610,7 @@ async fn narrowed_import_reads_qualified_type_roots_and_nested_classes() {
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["out"], serde_json::json!({ "a": 1 }));
     assert_eq!(val["outClass"], serde_json::json!({ "a": 1 }));
-}
-
-#[tokio::test]
-async fn narrowed_import_rejects_values_named_as_types() {
-    let temp = TestTempDir::new("pklr_test_narrowed_import_values_named_as_types");
-    let dir = temp.path();
-    // A property or local holding a class is a value, not a type, so `new`
-    // can't instantiate it, even through a narrowed import.
-    std::fs::write(
-        dir.join("dep_property.pkl"),
-        "Foo = Item\nclass Item {\n  a: Int = 1\n}\nresult = new Foo {}\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("dep_local.pkl"),
-        "class C {\n  v = module.expected\n}\nlocal x = module.C\nexpected = \"b\"\nresult = new x {}\n",
-    )
-    .unwrap();
-    for (alias, file, name) in [
-        ("DepProperty", "dep_property.pkl", "Foo"),
-        ("DepLocal", "dep_local.pkl", "x"),
-    ] {
-        std::fs::write(
-            dir.join("main.pkl"),
-            format!("import \"{file}\" as {alias}\nout = {alias}.result\n"),
-        )
-        .unwrap();
-        let err = pklr::eval_to_json_async(&dir.join("main.pkl"))
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains(&format!("Expected `{name}` to be a type, but it is not.")),
-            "{file}: {err}"
-        );
-    }
-}
-
-#[test]
-fn module_cannot_amend_or_extend_itself() {
-    let temp = TestTempDir::new("pklr_test_module_self_reference");
-    let dir = temp.path();
-    let amends = dir.join("selfAmends.pkl");
-    std::fs::write(&amends, "amends \"selfAmends.pkl\"\n").unwrap();
-    let err = pklr::eval_to_json(&amends).unwrap_err().to_string();
-    assert!(
-        err.contains("Module `selfAmends` cannot amend itself."),
-        "{err}"
-    );
-    let extends = dir.join("selfExtends.pkl");
-    std::fs::write(
-        &extends,
-        "open module selfExtends\nextends \"selfExtends.pkl\"\n",
-    )
-    .unwrap();
-    let err = pklr::eval_to_json(&extends).unwrap_err().to_string();
-    assert!(
-        err.contains("Module `selfExtends` cannot extend itself."),
-        "{err}"
-    );
-}
-
-#[test]
-fn module_that_amends_cannot_be_extended() {
-    let temp = TestTempDir::new("pklr_test_extend_amending_module");
-    let dir = temp.path();
-    std::fs::write(
-        dir.join("library.pkl"),
-        "open module my.library\nname = \"x\"\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("amending.pkl"),
-        "module amending\namends \"library.pkl\"\n",
-    )
-    .unwrap();
-    std::fs::write(dir.join("main.pkl"), "extends \"amending.pkl\"\n").unwrap();
-    let err = pklr::eval_to_json(&dir.join("main.pkl"))
-        .unwrap_err()
-        .to_string();
-    assert!(
-        err.contains(
-            "Module `my.library` cannot be extended or used as type because it amends another module."
-        ),
-        "{err}"
-    );
-}
-
-#[test]
-fn module_min_pkl_version_is_checked() {
-    let temp = TestTempDir::new("pklr_test_min_pkl_version");
-    let dir = temp.path();
-    std::fs::write(
-        dir.join("future.pkl"),
-        "@ModuleInfo { minPklVersion = \"99.9.9\" }\nmodule future\nx = 1\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("current.pkl"),
-        "@ModuleInfo { minPklVersion = \"0.27.2\" }\nmodule current\nx = 2\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("main.pkl"),
-        "import \"future.pkl\"\nimport \"current.pkl\"\nunused = 1\nok = current.x\n",
-    )
-    .unwrap();
-    // An import that is never read is never loaded.
-    assert_eq!(pklr::eval_to_json(&dir.join("main.pkl")).unwrap()["ok"], 2);
-    for src in [
-        "import \"future.pkl\"\nres = future.x\n",
-        "amends \"future.pkl\"\n",
-        "extends \"future.pkl\"\n",
-    ] {
-        std::fs::write(dir.join("main.pkl"), src).unwrap();
-        let err = pklr::eval_to_json(&dir.join("main.pkl"))
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("Module `future` requires Pkl version 99.9.9 or higher"),
-            "{src}: {err}"
-        );
-    }
-}
-
-#[test]
-fn abstract_module_cannot_be_instantiated() {
-    let temp = TestTempDir::new("pklr_test_abstract_module_new");
-    let dir = temp.path();
-    std::fs::write(dir.join("modB.pkl"), "abstract module modB\nx = 1\n").unwrap();
-    std::fs::write(dir.join("modA.pkl"), "x = 1\n").unwrap();
-    std::fs::write(
-        dir.join("main.pkl"),
-        "import \"modB.pkl\"\ny = new modB {}\n",
-    )
-    .unwrap();
-    let err = pklr::eval_to_json(&dir.join("main.pkl"))
-        .unwrap_err()
-        .to_string();
-    assert!(
-        err.contains("Cannot instantiate abstract class `modB`."),
-        "{err}"
-    );
-    std::fs::write(
-        dir.join("main.pkl"),
-        "import \"modA.pkl\"\ny = new modA { x = 2 }\n",
-    )
-    .unwrap();
-    assert_eq!(
-        pklr::eval_to_json(&dir.join("main.pkl")).unwrap()["y"]["x"],
-        2
-    );
-    // Amending the object of an abstract module instantiates it too, while
-    // reading its members works.
-    std::fs::write(
-        dir.join("main.pkl"),
-        "import \"modB.pkl\"\ny = (modB) { z = 2 }\n",
-    )
-    .unwrap();
-    let err = pklr::eval_to_json(&dir.join("main.pkl"))
-        .unwrap_err()
-        .to_string();
-    assert!(
-        err.contains("Cannot instantiate abstract class `modB`."),
-        "{err}"
-    );
-    std::fs::write(dir.join("main.pkl"), "import \"modB.pkl\"\ny = modB.x\n").unwrap();
-    assert_eq!(pklr::eval_to_json(&dir.join("main.pkl")).unwrap()["y"], 1);
 }

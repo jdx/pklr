@@ -13,27 +13,40 @@ use checks::{BodyKind, BodyScope};
 
 /// Collect all import URIs from a token stream (fast path, no full parse needed).
 pub fn collect_imports(tokens: &[Token]) -> Vec<String> {
+    collect_imports_with_kind(tokens)
+        .into_iter()
+        .map(|(uri, _)| uri)
+        .collect()
+}
+
+/// Like [`collect_imports`], also telling whether each URI comes from a glob
+/// import (`import*`), which evaluation expands rather than loads.
+pub(crate) fn collect_imports_with_kind(tokens: &[Token]) -> Vec<(String, bool)> {
     let mut imports = Vec::new();
     collect_imports_into(tokens, &mut imports);
     imports
 }
 
-fn collect_imports_into(tokens: &[Token], imports: &mut Vec<String>) {
+fn collect_imports_into(tokens: &[Token], imports: &mut Vec<(String, bool)>) {
     let mut i = 0;
     while i < tokens.len() {
         match &tokens[i].kind {
-            TokenKind::KwAmends | TokenKind::KwImport | TokenKind::KwImportStar => {
+            TokenKind::KwAmends
+            | TokenKind::KwExtends
+            | TokenKind::KwImport
+            | TokenKind::KwImportStar => {
+                let is_glob = matches!(tokens[i].kind, TokenKind::KwImportStar);
                 match tokens.get(i + 1).map(|t| &t.kind) {
                     // Declaration form: `import "uri"` / `import* "glob"` / `amends "uri"`
                     Some(TokenKind::StringLit(uri)) => {
-                        imports.push(uri.clone());
+                        imports.push((uri.clone(), is_glob));
                         i += 2;
                     }
                     // Expression form: `import("uri")` / `import*("glob")`
                     Some(TokenKind::LParen) => {
                         if let Some(TokenKind::StringLit(uri)) = tokens.get(i + 2).map(|t| &t.kind)
                         {
-                            imports.push(uri.clone());
+                            imports.push((uri.clone(), is_glob));
                         }
                         i += 2;
                     }
@@ -75,6 +88,9 @@ pub(crate) fn parse_type_name(name: &str) -> Result<TypeExpr> {
     Parser::new(&tokens, name, "<type>").parse_type()
 }
 
+/// The shared parser and lexer nesting limit.
+pub const MAX_NESTING_DEPTH: usize = 128;
+
 struct Parser<'a> {
     tokens: &'a [Token],
     source: &'a str,
@@ -82,6 +98,10 @@ struct Parser<'a> {
     pos: usize,
     /// Line of the last consumed token (used for newline-sensitive parsing).
     last_line: usize,
+    /// URIs of `import(...)` expressions parsed in this module.
+    import_exprs: Vec<String>,
+    /// Expressions and type constraints currently nested around the cursor.
+    depth: usize,
     /// Members of the body being parsed, for static checks.
     body: BodyScope,
     /// Annotations at the start of a module without a module declaration,
@@ -99,6 +119,8 @@ impl<'a> Parser<'a> {
             name,
             pos: 0,
             last_line: 1,
+            import_exprs: Vec::new(),
+            depth: 0,
             body: BodyScope::new(BodyKind::Object, None),
             leading_annotations: Vec::new(),
             type_refs: None,
@@ -285,6 +307,7 @@ impl<'a> Parser<'a> {
             amends,
             extends,
             imports,
+            import_exprs: std::mem::take(&mut self.import_exprs),
             annotations,
             body: body.into(),
         })
@@ -939,6 +962,14 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type(&mut self) -> Result<TypeExpr> {
+        let depth = self.depth;
+        self.deepen()?;
+        let result = self.parse_type_inner();
+        self.depth = depth;
+        result
+    }
+
+    fn parse_type_inner(&mut self) -> Result<TypeExpr> {
         let offset = self.peek_tok().offset;
         let (first, first_is_default) = self.parse_type_member()?;
         let mut variants = vec![(first, first_is_default)];
@@ -1042,8 +1073,10 @@ impl<'a> Parser<'a> {
         self.advance();
         // Types named inside a constraint expression aren't part of the type.
         let saved_refs = self.type_refs.take();
+        let depth = self.depth;
         let constraint = self.parse_constraint_exprs();
         self.type_refs = saved_refs;
+        self.depth = depth;
         let constraint = constraint?;
         Ok(TypeExpr::Constrained(
             type_expr_runtime_name(&base),
@@ -1057,6 +1090,7 @@ impl<'a> Parser<'a> {
         let mut constraint = self.parse_expr()?;
         while matches!(self.peek(), TokenKind::Comma) {
             self.advance();
+            self.deepen()?;
             let next = self.parse_expr()?;
             constraint = Expr::Binop(BinOp::And, Box::new(constraint), Box::new(next));
         }
@@ -1065,13 +1099,28 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_expr(&mut self) -> Result<Expr> {
-        self.parse_pipe()
+        let depth = self.depth;
+        self.deepen()?;
+        let result = self.parse_pipe();
+        self.depth = depth;
+        result
+    }
+
+    fn deepen(&mut self) -> Result<()> {
+        if self.depth >= MAX_NESTING_DEPTH {
+            return Err(self.parse_error(format!(
+                "expressions cannot be nested more than {MAX_NESTING_DEPTH} levels deep"
+            )));
+        }
+        self.depth += 1;
+        Ok(())
     }
 
     fn parse_pipe(&mut self) -> Result<Expr> {
         let mut left = self.parse_null_coalesce()?;
         while matches!(self.peek(), TokenKind::PipeGt) {
             self.advance();
+            self.deepen()?;
             let right = self.parse_null_coalesce()?;
             left = Expr::Binop(BinOp::Pipe, Box::new(left), Box::new(right));
         }
@@ -1082,6 +1131,7 @@ impl<'a> Parser<'a> {
         let mut left = self.parse_or()?;
         while matches!(self.peek(), TokenKind::QuestionQuestion) {
             self.advance();
+            self.deepen()?;
             let right = self.parse_or()?;
             left = Expr::Binop(BinOp::NullCoalesce, Box::new(left), Box::new(right));
         }
@@ -1092,6 +1142,7 @@ impl<'a> Parser<'a> {
         let mut left = self.parse_and()?;
         while matches!(self.peek(), TokenKind::PipePipe) {
             self.advance();
+            self.deepen()?;
             let right = self.parse_and()?;
             left = Expr::Binop(BinOp::Or, Box::new(left), Box::new(right));
         }
@@ -1102,6 +1153,7 @@ impl<'a> Parser<'a> {
         let mut left = self.parse_compare()?;
         while matches!(self.peek(), TokenKind::AmpAmp) {
             self.advance();
+            self.deepen()?;
             let right = self.parse_compare()?;
             left = Expr::Binop(BinOp::And, Box::new(left), Box::new(right));
         }
@@ -1121,6 +1173,7 @@ impl<'a> Parser<'a> {
                 _ => break,
             };
             self.advance();
+            self.deepen()?;
             let right = self.parse_add()?;
             left = Expr::Binop(op, Box::new(left), Box::new(right));
         }
@@ -1136,6 +1189,7 @@ impl<'a> Parser<'a> {
                 _ => break,
             };
             self.advance();
+            self.deepen()?;
             let right = self.parse_mul()?;
             left = Expr::Binop(op, Box::new(left), Box::new(right));
         }
@@ -1153,6 +1207,7 @@ impl<'a> Parser<'a> {
                 _ => break,
             };
             self.advance();
+            self.deepen()?;
             let right = self.parse_exp()?;
             left = Expr::Binop(op, Box::new(left), Box::new(right));
         }
@@ -1160,15 +1215,21 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_exp(&mut self) -> Result<Expr> {
-        let base = self.parse_unary()?;
-        if matches!(self.peek(), TokenKind::StarStar) {
+        // Gather the chain iteratively, then rebuild it from the right.  Parsing
+        // a long right-associative exponent chain recursively can overflow the
+        // process stack before the nesting limit has a chance to report an error.
+        let mut operands = vec![self.parse_unary()?];
+        while matches!(self.peek(), TokenKind::StarStar) {
             self.advance();
-            // Right-associative: recurse into parse_exp
-            let exp = self.parse_exp()?;
-            Ok(Expr::Binop(BinOp::Pow, Box::new(base), Box::new(exp)))
-        } else {
-            Ok(base)
+            self.deepen()?;
+            operands.push(self.parse_unary()?);
         }
+
+        let mut exp = operands.pop().expect("one exponent operand");
+        while let Some(base) = operands.pop() {
+            exp = Expr::Binop(BinOp::Pow, Box::new(base), Box::new(exp));
+        }
+        Ok(exp)
     }
 
     fn parse_unary(&mut self) -> Result<Expr> {
@@ -1188,6 +1249,20 @@ impl<'a> Parser<'a> {
     fn parse_postfix(&mut self) -> Result<Expr> {
         let mut expr = self.parse_primary()?;
         loop {
+            if !matches!(
+                self.peek(),
+                TokenKind::Dot
+                    | TokenKind::QuestionDot
+                    | TokenKind::LBracket
+                    | TokenKind::LParen
+                    | TokenKind::LBrace
+                    | TokenKind::KwIs
+                    | TokenKind::KwAs
+                    | TokenKind::BangBang
+            ) {
+                break;
+            }
+            self.deepen()?;
             match self.peek() {
                 TokenKind::Dot => {
                     self.advance();
@@ -1252,7 +1327,7 @@ impl<'a> Parser<'a> {
                     self.advance();
                     expr = Expr::Unop(UnOp::NonNull, Box::new(expr));
                 }
-                _ => break,
+                _ => unreachable!("postfix token was checked above"),
             }
         }
         Ok(expr)
@@ -1289,7 +1364,9 @@ impl<'a> Parser<'a> {
                             interp_parts.push(StringInterpPart::Literal(s));
                         }
                         crate::lexer::StringPart::Tokens(tokens) => {
-                            let expr = parse_expr_tokens(&tokens, self.source, self.name)?;
+                            let mut nested = Parser::new(&tokens, self.source, self.name);
+                            let expr = nested.parse_expr()?;
+                            self.import_exprs.append(&mut nested.import_exprs);
                             interp_parts.push(StringInterpPart::Expr(expr));
                         }
                     }
@@ -1429,6 +1506,7 @@ impl<'a> Parser<'a> {
             TokenKind::KwImport => {
                 self.advance();
                 let uri = self.parse_import_expr_uri("import")?;
+                self.import_exprs.push(uri.clone());
                 Ok(Expr::Import(uri, self.name.to_string()))
             }
             TokenKind::KwImportStar => {

@@ -10,6 +10,7 @@ No external binary or CLI required.
 - Import and amends resolution for local files
 - Glob imports, as `import* "dir/*.pkl" as Mods` declarations and `import*("dir/*.pkl")` expressions
 - Persistent caching, cache preloading, and offline evaluation for `package://` imports
+- Concurrent prefetching of remote `http(s)://` and `package://` imports
 - String interpolation, lambdas, higher-order methods
 - Rich error diagnostics via [miette](https://crates.io/crates/miette)
 
@@ -22,32 +23,68 @@ let json = eval_to_json(std::path::Path::new("config.pkl"))?;
 println!("{}", json);
 ```
 
-The default synchronous API uses blocking HTTP and creates no thread or Tokio
-runtime. A default build has no Tokio dependency.
+The API is synchronous. A default build uses the standard library for files
+and [ureq](https://crates.io/crates/ureq) for HTTP, and creates no Tokio
+runtime. Use `EvaluatorBuilder::http_agent` with a custom `pklr::ureq::Agent`
+for proxy, certificate, or timeout configuration.
 
-Asynchronous applications can disable default features and enable `async` plus
-any optional features they need:
+Before evaluating a module, pklr prefetches its remote `http(s)://` and
+`package://` imports, and theirs in turn, fetching each level in one batch.
+The native capabilities run up to eight requests at once. Prefetching only
+fills caches: a failed prefetch is retried when evaluation needs the module, so
+results and errors are the same as fetching one module at a time.
+
+## Cargo features
+
+| Feature | Default | What it adds |
+| --- | --- | --- |
+| `eval-core` | via the others | The evaluator, without any host IO. Supply your own `EvalCapabilities`. |
+| `native-io` | yes | `NativeCapabilities`, `EvaluatorBuilder`, `eval_to_json`, `analyze_imports` (std fs). |
+| `http` | yes | HTTP imports and package downloads through ureq and rustls. |
+| `package-zip` | yes | `package://` zip archives. |
+| `miette-diagnostics` | yes | Rich error diagnostics. |
+| `async` | no | A reqwest HTTP backend on Tokio and async entry points. |
+
+An embedder with its own IO can depend on the evaluator alone:
 
 ```toml
-pklr = { version = "2", default-features = false, features = ["async", "package-zip", "miette-diagnostics"] }
+pklr = { version = "5", default-features = false, features = ["eval-core"] }
 ```
 
 ```rust
-let json = pklr::eval_to_json_async(std::path::Path::new("config.pkl")).await?;
+let mut evaluator = pklr::Evaluator::with_capabilities(MyCapabilities::new());
+let value = evaluator.eval_file(std::path::Path::new("config.pkl"))?;
 ```
 
-The evaluator itself is synchronous. On a multi-threaded Tokio runtime, async
-evaluation runs in place under `tokio::task::block_in_place`, reading files
-directly and blocking on HTTP fetches while the runtime's other workers drive
-them. Anywhere else (a `current_thread` runtime or another executor) it runs on
-a worker thread and sends HTTP fetches back to the calling task.
-`analyze_imports_async` uses Tokio filesystem operations. For direct
-construction, use `Evaluator::new_async()`; the unsuffixed `Evaluator::new()`
-always selects blocking capabilities.
+`EvalCapabilities` methods are synchronous. A host with asynchronous IO can run
+the evaluator on a blocking thread and block on its own futures inside them.
+Override `fetch_text_many` and `fetch_bytes_many` to fetch prefetch batches
+concurrently; the defaults fetch one URL after another. Both get a
+`FetchBudget` (prefetching allows 64 MiB per evaluation) to charge response
+bytes to: start no request once it is spent, and drop a body that no longer
+fits.
 
-Use `EvaluatorBuilder::http_agent` with a custom `pklr::ureq::Agent` for
-synchronous HTTP configuration. The async `AsyncEvaluatorBuilder::http_client`
-accepts a custom `pklr::reqwest::Client`.
+### Optional async support
+
+The `async` feature is additive. It is for applications that already use
+reqwest, and it fetches prefetch batches concurrently on Tokio:
+
+```toml
+pklr = { version = "5", features = ["async"] }
+```
+
+```rust
+let json = pklr::EvaluatorBuilder::new()
+    .http_client(pklr::reqwest::Client::new())
+    .eval_to_json_async(std::path::Path::new("config.pkl"))
+    .await?;
+```
+
+`eval_async`, `eval_to_json_async` and the free `pklr::eval_to_json_async` run
+the synchronous evaluation on Tokio's blocking thread pool. With a reqwest
+client, requests run on the caller's runtime under `block_in_place` when called
+from a multi-threaded runtime, and on a private runtime otherwise, so the
+synchronous methods also work with a reqwest client.
 
 Package downloads can be shared across evaluator instances and reused without
 network access:

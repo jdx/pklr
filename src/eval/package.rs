@@ -31,7 +31,7 @@ pub(super) fn validate_package_bytes(url: &str, extension: &str, bytes: &[u8]) -
         std::str::from_utf8(bytes)
             .map_err(|error| Error::Eval(format!("package source is not UTF-8: {url}: {error}")))?;
     }
-    #[cfg(feature = "package-zip-core")]
+    #[cfg(feature = "package-zip")]
     if extension == "zip" {
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
             .map_err(|error| Error::Eval(format!("package archive is invalid: {url}: {error}")))?;

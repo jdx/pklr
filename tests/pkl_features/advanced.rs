@@ -6,7 +6,7 @@ use super::*;
 
 #[test]
 fn rewrite_url_longest_prefix_wins() {
-    let mut ev = Evaluator::new_async();
+    let mut ev = Evaluator::new();
     ev.set_http_rewrites(&[
         "https://example.com/=https://mirror.local/".to_string(),
         "https://example.com/special/=https://special.local/".to_string(),
@@ -30,7 +30,7 @@ fn rewrite_url_longest_prefix_wins() {
 
 #[test]
 fn rewrite_url_no_rules_is_identity() {
-    let ev = Evaluator::new_async();
+    let ev = Evaluator::new();
     assert_eq!(
         ev.rewrite_url("https://example.com/foo.pkl"),
         "https://example.com/foo.pkl"
@@ -1306,8 +1306,8 @@ s2 = (s) { a = 5 }
     assert_eq!(json["s2"]["b"], 6);
 }
 
-#[tokio::test]
-async fn parent_class_entries_resolve_their_module_names_before_inherited_members() {
+#[test]
+fn parent_class_entries_resolve_their_module_names_before_inherited_members() {
     let temp = TestTempDir::new("pklr_test_parent_class_entry_lexical_names");
     let dir = temp.path();
     std::fs::write(
@@ -1330,15 +1330,13 @@ amended = new Child { extra = 1 }
     )
     .unwrap();
 
-    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let json = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(json["plain"]["inner"]["seen"], "parent module");
     assert_eq!(json["amended"]["inner"]["seen"], "parent module");
 }
 
-#[tokio::test]
-async fn import_resolves_before_same_named_inherited_member() {
+#[test]
+fn import_resolves_before_same_named_inherited_member() {
     let temp = TestTempDir::new("pklr_test_import_before_inherited_member");
     let dir = temp.path();
     std::fs::write(dir.join("lib.pkl"), "x = \"import\"\n").unwrap();
@@ -1352,9 +1350,7 @@ t = new T { seen = lib.x }
     )
     .unwrap();
 
-    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let json = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(json["t"]["seen"], "import");
 }
 
@@ -1435,8 +1431,8 @@ e2 = (e) { x = "overlay" }
     assert_eq!(json["e2"]["inner"]["seen"], "module");
 }
 
-#[tokio::test]
-async fn shared_import_stays_declared_when_amending_an_imported_object() {
+#[test]
+fn shared_import_stays_declared_when_amending_an_imported_object() {
     // The amending module imports `lib.pkl` too, so the two views of the
     // import are merged. The merged binding is still `defs.pkl`'s import and
     // must keep resolving before `Inner.lib`.
@@ -1466,9 +1462,7 @@ result = (defs.c) { extra = 1 }
     )
     .unwrap();
 
-    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let json = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(json["result"]["inner"]["seen"], "import");
 }
 
@@ -1687,16 +1681,14 @@ myStep = new Step {{
     )
     .unwrap();
 
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let json = rt.block_on(async {
-        let mut ev = Evaluator::new_async();
+    let json = {
+        let mut ev = Evaluator::new();
         let val = ev
             .eval_source(&std::fs::read_to_string(&child_path).unwrap(), &child_path)
-            .await
             .unwrap();
-        let val = ev.apply_converters(val).await.unwrap();
+        let val = ev.apply_converters(val).unwrap();
         val.to_json()
-    });
+    };
     assert_eq!(json["myStep"]["_type"], "step");
     assert_eq!(json["myStep"]["check"], "cargo test");
 }
@@ -1747,16 +1739,14 @@ myStep = new Step {{
     )
     .unwrap();
 
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let json = rt.block_on(async {
-        let mut ev = Evaluator::new_async();
+    let json = {
+        let mut ev = Evaluator::new();
         let val = ev
             .eval_source(&std::fs::read_to_string(&child_path).unwrap(), &child_path)
-            .await
             .unwrap();
-        let val = ev.apply_converters(val).await.unwrap();
+        let val = ev.apply_converters(val).unwrap();
         val.to_json()
-    });
+    };
     assert_eq!(json["myStep"]["_type"], "step");
     assert_eq!(json["myStep"]["check"], "make test");
 }
@@ -1854,16 +1844,14 @@ hooks {{
     )
     .unwrap();
 
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let json = rt.block_on(async {
-        let mut ev = Evaluator::new_async();
+    let json = {
+        let mut ev = Evaluator::new();
         let val = ev
             .eval_source(&std::fs::read_to_string(&child_path).unwrap(), &child_path)
-            .await
             .unwrap();
-        let val = ev.apply_converters(val).await.unwrap();
+        let val = ev.apply_converters(val).unwrap();
         val.to_json()
-    });
+    };
     eprintln!("JSON: {}", serde_json::to_string_pretty(&json).unwrap());
     assert_eq!(json["hooks"]["check"]["steps"]["echo"]["_type"], "step");
     assert_eq!(json["hooks"]["check"]["steps"]["echo"]["check"], "echo ok");
@@ -1952,19 +1940,15 @@ hooks {
     )
     .unwrap();
 
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let json = rt
-        .block_on(async {
-            pklr::eval_to_json_with_options_async(
-                &child_path,
-                pklr::AsyncEvalOptions {
-                    http_rewrites: vec![format!("https://example.com/=http://{addr}/")],
-                    ..Default::default()
-                },
-            )
-            .await
-        })
-        .unwrap();
+    let json = pklr::eval_with_options(
+        &child_path,
+        pklr::EvalOptions {
+            http_rewrites: vec![format!("https://example.com/=http://{addr}/")],
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .json;
     server.join().unwrap();
 
     assert_eq!(json["hooks"]["check"]["steps"]["echo"]["check"], "echo ok!");
@@ -2010,33 +1994,26 @@ fn package_cache_survives_across_offline_evaluators() {
     )
     .unwrap();
     let rewrite = format!("https://example.com/=http://{addr}/");
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let first = rt
-        .block_on(
-            pklr::AsyncEvaluatorBuilder::new()
-                .http_rewrites([rewrite.clone()])
-                .package_cache_dir(cache_dir.clone())
-                .eval_to_json(&config_path),
-        )
+    let first = pklr::EvaluatorBuilder::new()
+        .http_rewrites([rewrite.clone()])
+        .package_cache_dir(cache_dir.clone())
+        .eval_to_json(&config_path)
         .unwrap();
     server.join().unwrap();
     assert_eq!(first["answer"], 42);
 
     // A new evaluator succeeds after the one-shot server has shut down.
-    let second = rt
-        .block_on(
-            pklr::AsyncEvaluatorBuilder::new()
-                .http_rewrites([rewrite])
-                .package_cache_dir(cache_dir)
-                .offline(true)
-                .eval_to_json(&config_path),
-        )
+    let second = pklr::EvaluatorBuilder::new()
+        .http_rewrites([rewrite])
+        .package_cache_dir(cache_dir)
+        .offline(true)
+        .eval_to_json(&config_path)
         .unwrap();
     assert_eq!(second["answer"], 42);
 }
 
 /// Build a single-entry package zip holding `contents` at `name`.
-#[cfg(feature = "package-zip-core")]
+#[cfg(feature = "package-zip")]
 fn package_zip(name: &str, contents: &str) -> Vec<u8> {
     use std::io::Write;
 
@@ -2063,19 +2040,15 @@ fn preloaded_package_evaluates_offline_without_a_cold_start() {
     .unwrap();
 
     // No server is ever started: the preloaded zip is the only source.
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let json = rt
-        .block_on(
-            pklr::AsyncEvaluatorBuilder::new()
-                .package_cache_dir(temp.path().join("cache"))
-                .offline(true)
-                .preload_package(
-                    "https://example.com/pkg@1.0.0.zip",
-                    "zip",
-                    package_zip("Config.pkl", "answer = 42\n"),
-                )
-                .eval_to_json(&config_path),
+    let json = pklr::EvaluatorBuilder::new()
+        .package_cache_dir(temp.path().join("cache"))
+        .offline(true)
+        .preload_package(
+            "https://example.com/pkg@1.0.0.zip",
+            "zip",
+            package_zip("Config.pkl", "answer = 42\n"),
         )
+        .eval_to_json(&config_path)
         .unwrap();
     assert_eq!(json["answer"], 42);
 }
@@ -2112,29 +2085,23 @@ fn preloaded_package_does_not_override_a_cached_download() {
     )
     .unwrap();
     let rewrite = format!("https://example.com/=http://{addr}/");
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(
-        pklr::AsyncEvaluatorBuilder::new()
-            .http_rewrites([rewrite])
-            .package_cache_dir(cache_dir.clone())
-            .eval_to_json(&config_path),
-    )
-    .unwrap();
+    pklr::EvaluatorBuilder::new()
+        .http_rewrites([rewrite])
+        .package_cache_dir(cache_dir.clone())
+        .eval_to_json(&config_path)
+        .unwrap();
     server.join().unwrap();
 
     // The downloaded package is already cached, so the preloaded copy is ignored.
-    let json = rt
-        .block_on(
-            pklr::AsyncEvaluatorBuilder::new()
-                .package_cache_dir(cache_dir)
-                .offline(true)
-                .preload_package(
-                    "https://example.com/pkg@1.0.0.zip",
-                    "zip",
-                    package_zip("Config.pkl", "answer = 7\n"),
-                )
-                .eval_to_json(&config_path),
+    let json = pklr::EvaluatorBuilder::new()
+        .package_cache_dir(cache_dir)
+        .offline(true)
+        .preload_package(
+            "https://example.com/pkg@1.0.0.zip",
+            "zip",
+            package_zip("Config.pkl", "answer = 7\n"),
         )
+        .eval_to_json(&config_path)
         .unwrap();
     assert_eq!(json["answer"], 42);
 }
@@ -2150,19 +2117,15 @@ fn preloading_a_package_for_another_version_is_a_cache_miss() {
     )
     .unwrap();
 
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let error = rt
-        .block_on(
-            pklr::AsyncEvaluatorBuilder::new()
-                .package_cache_dir(temp.path().join("cache"))
-                .offline(true)
-                .preload_package(
-                    "https://example.com/pkg@1.0.0.zip",
-                    "zip",
-                    package_zip("Config.pkl", "answer = 42\n"),
-                )
-                .eval_to_json(&config_path),
+    let error = pklr::EvaluatorBuilder::new()
+        .package_cache_dir(temp.path().join("cache"))
+        .offline(true)
+        .preload_package(
+            "https://example.com/pkg@1.0.0.zip",
+            "zip",
+            package_zip("Config.pkl", "answer = 42\n"),
         )
+        .eval_to_json(&config_path)
         .unwrap_err()
         .to_string();
     assert!(
@@ -2171,14 +2134,13 @@ fn preloading_a_package_for_another_version_is_a_cache_miss() {
     );
 }
 
-#[tokio::test]
-async fn preloading_invalid_package_bytes_is_rejected() {
+#[test]
+fn preloading_invalid_package_bytes_is_rejected() {
     let temp = TestTempDir::new("pklr_test_preload_invalid");
-    let mut evaluator = pklr::Evaluator::new_async();
+    let mut evaluator = pklr::Evaluator::new();
     evaluator.set_package_cache_dir(temp.path().join("cache"));
     let error = evaluator
-        .preload_package_async("https://example.com/pkg@1.0.0.zip", "zip", b"not a zip")
-        .await
+        .preload_package("https://example.com/pkg@1.0.0.zip", "zip", b"not a zip")
         .unwrap_err()
         .to_string();
     assert!(
@@ -2187,23 +2149,22 @@ async fn preloading_invalid_package_bytes_is_rejected() {
     );
 }
 
-#[tokio::test]
-async fn preloading_reports_a_cache_write_failure() {
+#[test]
+fn preloading_reports_a_cache_write_failure() {
     let temp = TestTempDir::new("pklr_test_preload_write_failure");
     // A file where the cache directory belongs: the seed cannot be stored, and
     // reporting success would leave the host expecting a usable cache entry.
     let cache_path = temp.path().join("cache");
     std::fs::write(&cache_path, b"not a directory").unwrap();
 
-    let mut evaluator = pklr::Evaluator::new_async();
+    let mut evaluator = pklr::Evaluator::new();
     evaluator.set_package_cache_dir(&cache_path);
     let error = evaluator
-        .preload_package_async(
+        .preload_package(
             "https://example.com/pkg@1.0.0.zip",
             "zip",
             &package_zip("Config.pkl", "answer = 42\n"),
         )
-        .await
         .unwrap_err()
         .to_string();
     assert!(
@@ -2251,27 +2212,20 @@ fn direct_package_relatives_survive_across_offline_evaluators() {
     )
     .unwrap();
     let rewrite = format!("https://github.com/acme/pkg/releases/download/v1/=http://{addr}/");
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let first = rt
-        .block_on(
-            pklr::AsyncEvaluatorBuilder::new()
-                .http_rewrites([rewrite.clone()])
-                .package_cache_dir(cache_dir.clone())
-                .eval_to_json(&config_path),
-        )
+    let first = pklr::EvaluatorBuilder::new()
+        .http_rewrites([rewrite.clone()])
+        .package_cache_dir(cache_dir.clone())
+        .eval_to_json(&config_path)
         .unwrap();
     server.join().unwrap();
     assert_eq!(first["base"], 41);
     assert_eq!(first["answer"], 42);
 
-    let second = rt
-        .block_on(
-            pklr::AsyncEvaluatorBuilder::new()
-                .http_rewrites([rewrite])
-                .package_cache_dir(cache_dir)
-                .offline(true)
-                .eval_to_json(&config_path),
-        )
+    let second = pklr::EvaluatorBuilder::new()
+        .http_rewrites([rewrite])
+        .package_cache_dir(cache_dir)
+        .offline(true)
+        .eval_to_json(&config_path)
         .unwrap();
     assert_eq!(second["base"], 41);
     assert_eq!(second["answer"], 42);
@@ -2316,14 +2270,10 @@ fn unreadable_package_cache_is_a_miss_while_online() {
         "amends \"package://example.com/pkg@1.0.0#/Config.pkl\"\n",
     )
     .unwrap();
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let json = rt
-        .block_on(
-            pklr::AsyncEvaluatorBuilder::new()
-                .http_rewrites([format!("https://example.com/=http://{addr}/")])
-                .package_cache_dir(cache_path)
-                .eval_to_json(&config_path),
-        )
+    let json = pklr::EvaluatorBuilder::new()
+        .http_rewrites([format!("https://example.com/=http://{addr}/")])
+        .package_cache_dir(cache_path)
+        .eval_to_json(&config_path)
         .unwrap();
     server.join().unwrap();
     assert_eq!(json["answer"], 42);
@@ -2339,14 +2289,10 @@ fn offline_package_cache_miss_is_actionable() {
     )
     .unwrap();
 
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let error = rt
-        .block_on(
-            pklr::AsyncEvaluatorBuilder::new()
-                .package_cache_dir(temp.path().join("cache"))
-                .offline(true)
-                .eval_to_json(&config_path),
-        )
+    let error = pklr::EvaluatorBuilder::new()
+        .package_cache_dir(temp.path().join("cache"))
+        .offline(true)
+        .eval_to_json(&config_path)
         .unwrap_err()
         .to_string();
     assert!(error.contains("package is not cached and offline mode is enabled"));
@@ -2784,8 +2730,8 @@ result = run()
     );
 }
 
-#[tokio::test]
-async fn inferred_function_result_imported_class() {
+#[test]
+fn inferred_function_result_imported_class() {
     let dir = TestTempDir::new("inferred_function_result");
     std::fs::write(
         dir.path().join("types.pkl"),
@@ -2811,12 +2757,8 @@ local holder = new Holder { step = factory.run("echo a") }
 result = (holder.step) { glob = "*" }
 typed = holder.step is types.Step
 "#;
-    let mut evaluator = Evaluator::new_async();
-    let v = evaluator
-        .eval_source(source, &path)
-        .await
-        .unwrap()
-        .to_json();
+    let mut evaluator = Evaluator::new();
+    let v = evaluator.eval_source(source, &path).unwrap().to_json();
     assert_eq!(
         v["result"],
         serde_json::json!({"check":"echo a", "glob":"*"})

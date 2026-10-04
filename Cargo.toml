@@ -13,17 +13,24 @@ include     = ["/src/**/*", "/tests/**/*", "/Cargo.toml", "/README.md", "/LICENS
 
 [features]
 default = [
-  "blocking",
+  "native-io",
+  "http",
+  "package-zip",
   "miette-diagnostics",
 ]
-eval-core = ["dep:indexmap", "dep:pollster", "dep:rustc-hash", "dep:serde_json", "dep:url"]
+# The evaluator without any host IO. Embedders supply their own
+# `EvalCapabilities`.
+eval-core = ["dep:indexmap", "dep:rustc-hash", "dep:serde_json", "dep:url"]
+# `NativeCapabilities`: std file system and environment access.
 native-io = ["eval-core"]
-http = ["eval-core", "dep:reqwest"]
-package-zip-core = ["native-io", "dep:zip"]
-package-zip = ["package-zip-core"]
+# HTTP imports and packages for `NativeCapabilities`, via ureq and rustls.
+http = ["native-io", "dep:rustls", "dep:ureq"]
+# `package://` zip archives.
+package-zip = ["eval-core", "dep:zip"]
 miette-diagnostics = ["dep:miette"]
-blocking = ["package-zip-core", "dep:rustls", "dep:ureq"]
-async = ["native-io", "http", "dep:async-recursion", "dep:tokio"]
+# Optional and additive: a reqwest HTTP backend that fetches on tokio, and
+# async entry points that run evaluation on tokio's blocking pool.
+async = ["http", "dep:reqwest", "dep:tokio"]
 
 [dependencies]
 indexmap    = { version = "2", optional = true }
@@ -31,33 +38,31 @@ miette     = { version = "7", features = ["derive"], optional = true }
 rustc-hash = { version = "2", optional = true }
 serde_json = { version = "1", optional = true }
 thiserror  = "2"
-async-recursion = { version = "1", optional = true }
-pollster         = { version = "1", optional = true }
 reqwest         = { version = "0.13", default-features = false, features = ["rustls"], optional = true }
 rustls          = { version = "0.23", default-features = false, features = ["aws-lc-rs", "tls12"], optional = true }
-tokio           = { version = "1", features = ["fs", "rt", "rt-multi-thread"], optional = true }
 ureq            = { version = "3", default-features = false, features = ["platform-verifier", "rustls-no-provider"], optional = true }
 zip             = { version = "8", default-features = false, features = ["deflate"], optional = true }
+tokio           = { version = "1", features = ["rt", "rt-multi-thread", "sync"], optional = true }
 url             = { version = "2", optional = true }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 
 [[test]]
 name = "integration"
-required-features = ["async", "package-zip"]
+required-features = ["http", "package-zip"]
 
 [[test]]
 name = "pkl_features"
-required-features = ["async", "package-zip"]
+required-features = ["http", "package-zip"]
 
 [[test]]
-name = "blocking"
-required-features = ["blocking"]
+name = "native"
+required-features = ["http", "package-zip"]
+
+[[test]]
+name = "async"
+required-features = ["async", "package-zip"]
 
 [profile.dev]
 debug = 1
-
-[[example]]
-name = "eval_json"
-required-features = ["native-io"]
