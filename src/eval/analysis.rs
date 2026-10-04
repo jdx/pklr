@@ -1731,7 +1731,8 @@ fn expr_mentions(expr: &Expr, name: &str) -> bool {
 }
 
 /// How a class body's expressions reach the class instance: `this` in the
-/// body itself (and in its methods), `outer` one object body down. Names
+/// body itself (and in its methods), `outer` one object body down, and
+/// `outer.outer` (and so on) further down. Names
 /// read as `ref.name` or `ref["name"]` go to `members`; any other use of the
 /// reference (bound by a `let`, passed to a call, indexed by a computed key)
 /// sets `escapes`, after which any member may be read.
@@ -1741,20 +1742,21 @@ struct InstanceReads {
 }
 
 impl InstanceReads {
-    /// The keyword naming the instance `depth` object bodies below the class
-    /// body, if any.
-    fn reference(depth: usize) -> Option<&'static str> {
-        match depth {
-            0 => Some("this"),
-            1 => Some("outer"),
+    /// How many object bodies below the class body `expr` names the
+    /// instance, if it is `this` or a chain of `outer`s.
+    fn reference_depth(expr: &Expr) -> Option<usize> {
+        match expr {
+            Expr::Ident(name) if name == "this" => Some(0),
+            Expr::Ident(name) if name == "outer" => Some(1),
+            Expr::Field(base, field) if field == "outer" => match Self::reference_depth(base)? {
+                0 => None,
+                depth => Some(depth + 1),
+            },
             _ => None,
         }
     }
 
     fn entries(&mut self, entries: &[Entry], depth: usize) {
-        if Self::reference(depth).is_none() {
-            return;
-        }
         for entry in entries {
             match entry {
                 Entry::Property(prop) => {
@@ -1788,11 +1790,10 @@ impl InstanceReads {
     }
 
     fn expr(&mut self, expr: &Expr, depth: usize) {
-        let Some(reference) = Self::reference(depth) else {
-            return;
-        };
-        let is_reference = |expr: &Expr| matches!(expr, Expr::Ident(name) if name == reference);
+        let is_reference = |expr: &Expr| Self::reference_depth(expr) == Some(depth);
         match expr {
+            // The instance used as a value.
+            _ if is_reference(expr) => self.escapes = true,
             Expr::Field(base, field) | Expr::NullSafeField(base, field) if is_reference(base) => {
                 self.members.insert(field.clone());
             }
@@ -1805,7 +1806,10 @@ impl InstanceReads {
                     self.expr(index, depth);
                 }
             },
-            Expr::Ident(name) => self.escapes |= name == reference,
+            // `this` or an `outer` chain naming some other object.
+            Expr::Field(base, _) | Expr::NullSafeField(base, _)
+                if Self::reference_depth(base).is_some() => {}
+            Expr::Ident(_) => {}
             Expr::New(_, entries, _)
             | Expr::ObjectBody(entries)
             | Expr::InferredNew(_, entries) => self.entries(entries, depth + 1),
