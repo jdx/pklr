@@ -2333,3 +2333,30 @@ async fn narrowed_import_follows_module_reads_but_not_checked_value_members() {
     assert_eq!(val["moduleRead"], true);
     assert_eq!(val["number"], true);
 }
+
+#[tokio::test]
+async fn narrowed_import_ignores_checked_value_names_in_is_expressions() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_is_constraint");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("plain.pkl"),
+        "length = throw(\"unused\")\nresult = \"b\" is String(length == 1)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("class.pkl"),
+        "length = throw(\"unused\")\nclass C { ok = \"b\" is String(length == 1) }\nresult = new C {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"plain.pkl\" as Plain\nimport \"class.pkl\" as Class\nplain = Plain.result\nclassed = Class.result.ok\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["plain"], true);
+    assert_eq!(val["classed"], true);
+}
