@@ -1967,6 +1967,7 @@ impl Evaluator {
                         // A class that reads `module` may need properties the
                         // property pass has not evaluated yet.
                         Err(Error::Eval(message)) if module_members.contains(name) => {
+                            scope.set_member_poison(name, Some(message.clone()));
                             scope.declare_poisoned(name.clone(), message)
                         }
                         Err(error) => return Err(error),
@@ -3102,8 +3103,14 @@ impl Evaluator {
                 ),
                 Entry::TypeAlias(name, ty) if members.contains(name) => {
                     match type_alias_target(ty).and_then(|target| poisoned_member(scope, target)) {
-                        Some(message) => scope.redeclare_poisoned(name.clone(), message),
-                        None => self.eval_type_alias(name, ty, scope),
+                        Some(message) => {
+                            scope.set_member_poison(name, Some(message.clone()));
+                            scope.redeclare_poisoned(name.clone(), message);
+                        }
+                        None => {
+                            scope.set_member_poison(name, None);
+                            self.eval_type_alias(name, ty, scope);
+                        }
                     }
                     continue;
                 }
@@ -3128,10 +3135,18 @@ impl Evaluator {
             };
             let module_value = match result {
                 Ok(value) => {
+                    if module_member {
+                        scope.set_member_poison(name, None);
+                    }
                     scope.declare(name.clone(), value.clone());
                     Some(value)
                 }
                 Err(Error::Eval(message)) => {
+                    // Only members of the module object, not locals, are
+                    // reported through `module.C`/`module["C"]`.
+                    if module_member {
+                        scope.set_member_poison(name, Some(message.clone()));
+                    }
                     scope.redeclare_poisoned(name.clone(), message);
                     None
                 }

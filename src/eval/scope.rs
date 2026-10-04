@@ -232,6 +232,25 @@ impl Scope {
         self.declare_poisoned(name, message);
     }
 
+    /// Key recording the error of a module member (a class, type alias or
+    /// module function, never a local) that failed to evaluate. It contains a
+    /// dot, so it never collides with a binding.
+    pub(super) fn member_poison_key(name: &str) -> String {
+        format!("module.{name}")
+    }
+
+    /// Record (`Some`) or clear (`None`) the error of module member `name`.
+    pub(super) fn set_member_poison(&mut self, name: &str, message: Option<String>) {
+        let key = Self::member_poison_key(name);
+        match message {
+            Some(message) => self.poison(key, message),
+            None if self.poisoned.contains_key(key.as_str()) => {
+                Rc::make_mut(&mut self.poisoned).shift_remove(key.as_str());
+            }
+            None => {}
+        }
+    }
+
     pub(super) fn poison(&mut self, name: String, message: String) {
         Rc::make_mut(&mut self.poisoned).insert(name.into(), message);
     }
@@ -329,10 +348,6 @@ impl Scope {
     }
 }
 
-/// The error of a poisoned member a dotted name refers to: either the root
-/// binding itself, or a member of a module object that failed to evaluate
-/// (`dep.C` where `dep`'s class `C` could not be built). `None` when the name
-/// resolves or is simply absent.
 /// The saved error for member `name` that object `obj_expr` (with `source`)
 /// does not have: a failed class of an imported module object, or, inside
 /// the defining module, one read through `module`/`this`. Used by every
@@ -358,6 +373,10 @@ pub(super) fn missing_member_error(
     }
 }
 
+/// The error of a poisoned member a dotted name refers to: either the root
+/// binding itself, or a member of a module object that failed to evaluate
+/// (`dep.C` where `dep`'s class `C` could not be built). `None` when the name
+/// resolves or is simply absent.
 pub(super) fn poisoned_member(scope: &Scope, name: &str) -> Option<String> {
     let mut parts = name.trim_end_matches('?').split('.');
     let root = parts.next()?;
@@ -366,7 +385,9 @@ pub(super) fn poisoned_member(scope: &Scope, name: &str) -> Option<String> {
     };
     // Inside the defining module, `module` (and `this` while it is the module
     // object) is a snapshot of the module's members. A member that failed to
-    // evaluate is absent from it but poisoned in the module scope.
+    // evaluate is absent from it; its error is kept in the module scope under
+    // `Scope::member_poison_key`. Locals are not members, so a failed local
+    // is never reported here.
     let names_current_module = root == "module"
         || (root == "this"
             && matches!(
@@ -387,7 +408,7 @@ pub(super) fn poisoned_member(scope: &Scope, name: &str) -> Option<String> {
                     return Some(message.clone());
                 }
                 return (index == 0 && names_current_module)
-                    .then(|| scope.poison_of(part).cloned())
+                    .then(|| scope.poison_of(&Scope::member_poison_key(part)).cloned())
                     .flatten();
             }
         }

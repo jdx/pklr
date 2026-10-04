@@ -3486,6 +3486,20 @@ fn failed_class_reports_error_through_every_member_read() {
 }
 
 #[test]
+fn failed_module_local_is_not_a_member_of_module() {
+    // Locals are not members of `module`/`this`, whether or not they failed,
+    // even in a module whose classes are refreshed.
+    let src = "class C { v = module.expected }\nlocal x = throw(\"boom\")\nexpected = \"b\"\n";
+    let val = eval(&format!("{src}result = module?.x\nself = this?.x\n"));
+    assert_eq!(val["result"], serde_json::Value::Null);
+    assert_eq!(val["self"], serde_json::Value::Null);
+    for read in ["module[\"x\"]", "this[\"x\"]"] {
+        let err = eval_fails(&format!("{src}result = {read}\n"));
+        assert!(err.contains("key not found: x"), "{read}: {err}");
+    }
+}
+
+#[test]
 fn failed_class_reports_error_through_module_and_this() {
     for src in [
         "class C { v = module.missing }\nresult = new module.C {}\n",
