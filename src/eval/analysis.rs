@@ -365,7 +365,7 @@ pub(super) fn expand_requested_fields(
     let module_aliases: TypeAliases = entries
         .iter()
         .filter_map(|entry| match entry {
-            Entry::TypeAlias(name, ty) => Some((name.as_str(), ty)),
+            Entry::TypeAlias(name, ty) => Some((name.as_str(), Some(ty))),
             _ => None,
         })
         .collect();
@@ -501,16 +501,29 @@ fn constraint_bound_names(base: &str) -> &'static [&'static str] {
     let base = base.trim_start_matches('*');
     // A generic base such as `Listing<String>` checks as its class.
     let base = base.split('<').next().unwrap_or(base).trim();
-    match base {
-        "String" | "List" | "Listing" | "Map" | "Mapping" | "Set" | "Collection" => {
-            &["this", "length", "isEmpty"]
-        }
-        _ => &["this"],
+    if BINDING_BUILTIN_TYPES.contains(&base) {
+        &["this", "length", "isEmpty"]
+    } else {
+        &["this"]
     }
 }
 
+/// The built-in types whose constraints bind `length` and `isEmpty`; see
+/// `constraint_bound_names`.
+const BINDING_BUILTIN_TYPES: &[&str] = &[
+    "String",
+    "List",
+    "Listing",
+    "Map",
+    "Mapping",
+    "Set",
+    "Collection",
+];
+
 /// A module's own type aliases by name, for resolving a constraint's base.
-type TypeAliases<'a> = HashMap<&'a str, &'a crate::parser::TypeExpr>;
+/// `None` marks a name that can't be resolved here: a built-in type that a
+/// nested body redeclares, which may no longer bind what the built-in does.
+type TypeAliases<'a> = HashMap<&'a str, Option<&'a crate::parser::TypeExpr>>;
 
 /// Type names declared anywhere inside `prop` (in its body or in object
 /// bodies within its value), other than identical redeclarations of
@@ -540,7 +553,10 @@ fn collect_entries_type_decls<'e>(
     for entry in entries {
         match entry {
             Entry::TypeAlias(name, ty) => {
-                if aliases.get(name.as_str()).is_none_or(|outer| *outer != ty) {
+                if aliases
+                    .get(name.as_str())
+                    .is_none_or(|outer| *outer != Some(ty))
+                {
                     out.insert(name);
                 }
             }
@@ -654,8 +670,10 @@ fn mentioned_type_names<'t>(ty: &'t crate::parser::TypeExpr, out: &mut Vec<&'t s
 
 /// `aliases` without each alias whose meaning may differ where the `declared`
 /// type names are in scope: one that is itself declared, or whose definition,
-/// followed through the other `aliases`, mentions a declared name. `None`
-/// when every alias is kept.
+/// followed through the other `aliases`, mentions a declared name. A declared
+/// name that `constraint_bound_names` would read as a built-in is marked
+/// unresolvable, since the built-in's bindings no longer apply. `None` when
+/// `aliases` is unchanged.
 fn narrow_aliases<'a>(
     aliases: &TypeAliases<'a>,
     declared: &HashSet<&str>,
@@ -673,23 +691,30 @@ fn narrow_aliases<'a>(
             if !seen.insert(name) {
                 continue;
             }
-            if let Some(ty) = aliases.get(name) {
+            if let Some(Some(ty)) = aliases.get(name) {
                 mentioned_type_names(ty, &mut pending);
             }
         }
         false
     };
-    let kept: TypeAliases<'a> = aliases
+    let mut kept: TypeAliases<'a> = aliases
         .iter()
         .filter(|(name, _)| !affected(name))
         .map(|(name, ty)| (*name, *ty))
         .collect();
-    (kept.len() != aliases.len()).then_some(kept)
+    let mut changed = kept.len() != aliases.len();
+    for builtin in BINDING_BUILTIN_TYPES {
+        if declared.contains(builtin) && kept.insert(builtin, None).is_none() {
+            changed = true;
+        }
+    }
+    changed.then_some(kept)
 }
 
 /// `constraint_bound_names`, after following `base` through `aliases` (with
 /// cycle protection) to the type it names. A base that resolves to a nullable
-/// or union type, or that loops, binds only `this`; a name that isn't one of
+/// or union type, to an unresolvable name, or that loops, binds only `this`;
+/// a name that isn't one of
 /// `aliases` (a class, an imported alias, an unknown name) is left to
 /// `constraint_bound_names` as is.
 fn constraint_bound_names_resolving(
@@ -709,6 +734,9 @@ fn constraint_bound_names_resolving(
         let name = name.split('<').next().unwrap_or(name).trim();
         let Some(ty) = aliases.get(name) else {
             return constraint_bound_names(base);
+        };
+        let Some(ty) = ty else {
+            return &["this"];
         };
         if !seen.insert(name) {
             return &["this"];
@@ -867,11 +895,15 @@ fn collect_entry_refs_in(
     // stop resolving the module aliases whose definitions reach a name this
     // body declares (other than by an identical redeclaration), keeping the
     // conservative reading of their constraints.
-    let narrowed = aliases.and_then(|aliases| {
+    //
+    // Without module aliases, a redeclared built-in still needs marking.
+    let no_aliases = TypeAliases::new();
+    let narrowed = {
+        let aliases = aliases.unwrap_or(&no_aliases);
         let mut declared = HashSet::new();
         collect_entries_type_decls(entries, aliases, false, &mut declared);
         narrow_aliases(aliases, &declared)
-    });
+    };
     collect_entry_refs_unnarrowed(entries, refs, shadows, narrowed.as_ref().or(aliases));
 }
 

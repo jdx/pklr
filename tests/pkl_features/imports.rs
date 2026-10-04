@@ -2517,6 +2517,44 @@ async fn narrowed_import_respects_aliases_redeclared_in_nested_bodies() {
 }
 
 #[tokio::test]
+async fn narrowed_import_respects_builtins_redeclared_in_nested_bodies() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_nested_builtin");
+    let dir = temp.path();
+    // The module alias `T` is checked inside a body that redeclares `String`
+    // as `Int`, whose check binds no `length`, so the module's `length` is
+    // still needed.
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "length = 1\ntypealias T = String(length == 1)\nresult {\n  typealias String = Int\n  ok = 1 is T\n}\n",
+    )
+    .unwrap();
+    // The same holds for a check on the redeclared name directly.
+    std::fs::write(
+        dir.join("dep_direct.pkl"),
+        "length = 1\nresult {\n  typealias String = Int\n  ok = 1 is String(length == 1)\n}\n",
+    )
+    .unwrap();
+    // Collections redeclared deeper inside the body, including as generics.
+    std::fs::write(
+        dir.join("dep_listing.pkl"),
+        "length = 1\nresult {\n  inner {\n    typealias Listing = Int\n    ok = 1 is Listing<Int>(this == length)\n  }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as Dep\nimport \"dep_direct.pkl\" as DepDirect\nimport \"dep_listing.pkl\" as DepListing\nout = Dep.result.ok\noutDirect = DepDirect.result.ok\noutListing = DepListing.result.inner.ok\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["out"], true);
+    assert_eq!(val["outDirect"], true);
+    assert_eq!(val["outListing"], true);
+}
+
+#[tokio::test]
 async fn narrowed_import_resolves_aliases_in_followed_class_bodies() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_class_alias");
     let dir = temp.path();
