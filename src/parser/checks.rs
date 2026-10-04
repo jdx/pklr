@@ -276,7 +276,7 @@ impl Parser<'_> {
         for (i, tok) in self.tokens.iter().enumerate().skip(start) {
             match &tok.kind {
                 TokenKind::Lt => depth += 1,
-                TokenKind::Gt => {
+                TokenKind::Gt if depth > 0 => {
                     depth -= 1;
                     if depth == 0 {
                         break;
