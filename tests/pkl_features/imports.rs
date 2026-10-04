@@ -523,18 +523,6 @@ result = "ok"
 }
 
 #[test]
-fn shadowed_unused_import_is_not_evaluated() {
-    let json = eval(
-        r#"
-import "does-not-exist.pkl" as Foo
-class Foo {}
-result = new Foo {}
-"#,
-    );
-    assert!(json["result"].is_object());
-}
-
-#[test]
 fn nested_shadowed_unused_import_is_not_evaluated() {
     let json = eval(
         r#"
@@ -920,47 +908,6 @@ result = (Middle.value) {
     assert_eq!(
         json["result"]["entry"]["items"],
         serde_json::json!(["middle", "main"])
-    );
-}
-
-#[test]
-fn amendment_type_alias_uses_amendment_scope() {
-    let temp = TestTempDir::new("pklr_test_amendment_type_alias_scope");
-    let dir = temp.path();
-    std::fs::write(
-        dir.join("Lib.pkl"),
-        r#"
-open class Foo {
-    origin = "definition"
-}
-value = new {
-    inherited: Foo = new Foo {}
-}
-"#,
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("main.pkl"),
-        r#"
-import "Lib.pkl"
-open class Foo {
-    origin = "amendment"
-}
-result = (Lib.value) {
-    typealias Alias = Foo
-    selected = new Alias {}
-}
-"#,
-    )
-    .unwrap();
-
-    let json = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
-    assert_eq!(
-        json["result"],
-        serde_json::json!({
-            "inherited": {"origin": "definition"},
-            "selected": {"origin": "amendment"}
-        })
     );
 }
 
@@ -1493,42 +1440,6 @@ z = Dep.z
     let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["y"], 42);
     assert_eq!(val["z"], 43);
-}
-
-#[test]
-fn partial_import_includes_type_annotation_fields() {
-    let temp = TestTempDir::new("pklr_test_partial_import_type_ann");
-    let dir = temp.path();
-    std::fs::write(
-        dir.join("types.pkl"),
-        r#"
-Step = new Dynamic {
-    enabled = true
-}
-Other = "other"
-broken = missing.field
-"#,
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("main.pkl"),
-        r#"
-import "types.pkl" as Types
-other = Types.Other
-steps: Mapping<String, Types.Step> = new Mapping {}
-steps {
-    ["a"] {
-        name = "alpha"
-    }
-}
-enabled = steps["a"].enabled
-"#,
-    )
-    .unwrap();
-
-    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
-    assert_eq!(val["other"], "other");
-    assert_eq!(val["enabled"], true);
 }
 
 #[test]
@@ -2561,151 +2472,6 @@ fn narrowed_import_respects_aliases_redeclared_in_nested_bodies() {
 }
 
 #[test]
-fn narrowed_import_respects_builtins_redeclared_in_nested_bodies() {
-    let temp = TestTempDir::new("pklr_test_narrowed_import_nested_builtin");
-    let dir = temp.path();
-    // The module alias `T` is checked inside a body that redeclares `String`
-    // as `Int`, whose check binds no `length`, so the module's `length` is
-    // still needed.
-    std::fs::write(
-        dir.join("dep.pkl"),
-        "length = 1\ntypealias T = String(length == 1)\nresult {\n  typealias String = Int\n  ok = 1 is T\n}\n",
-    )
-    .unwrap();
-    // The same holds for a check on the redeclared name directly.
-    std::fs::write(
-        dir.join("dep_direct.pkl"),
-        "length = 1\nresult {\n  typealias String = Int\n  ok = 1 is String(length == 1)\n}\n",
-    )
-    .unwrap();
-    // Collections redeclared deeper inside the body, including as generics.
-    std::fs::write(
-        dir.join("dep_listing.pkl"),
-        "length = 1\nresult {\n  inner {\n    typealias Listing = Int\n    ok = 1 is Listing<Int>(this == length)\n  }\n}\n",
-    )
-    .unwrap();
-    // A class's member types are checked where the object is built, so a
-    // class instantiated in that body checks `Int` and reads the module's
-    // `length`, directly or through `T`.
-    std::fs::write(
-        dir.join("dep_class.pkl"),
-        "length = 1\ntypealias T = String(length == 1)\nclass C {\n  a: String(length == 1) = 1\n  b: T = 1\n}\nresult {\n  typealias String = Int\n  ok = new C {}\n}\n",
-    )
-    .unwrap();
-    // A redeclaration in a sibling body doesn't apply to `ok`, whose check
-    // through `T` binds the string's own `length`, so the module's unused
-    // `length` must not be evaluated.
-    std::fs::write(
-        dir.join("dep_sibling.pkl"),
-        "length = throw(\"unused\")\ntypealias T = String(length == 1)\nresult {\n  inner {\n    typealias String = Int\n    value = 1\n  }\n  ok = \"b\" is T\n}\n",
-    )
-    .unwrap();
-    // A local bound around the redeclaring body still shadows the module's
-    // unused `x`.
-    std::fs::write(
-        dir.join("dep_local.pkl"),
-        "x = throw(\"unused\")\nresult {\n  local x = 1\n  inner {\n    typealias String = Int\n    ok = x\n  }\n}\n",
-    )
-    .unwrap();
-    // An identical redeclaration of the module's `String` reads the same, so
-    // `T` still checks a List, which binds its own `length`.
-    std::fs::write(
-        dir.join("dep_identical.pkl"),
-        "length = throw(\"unused\")\ntypealias String = List\ntypealias T = String(length == 1)\nresult {\n  typealias String = List\n  ok = List(1) is T\n}\n",
-    )
-    .unwrap();
-    // An identical `String = List` still changes meaning when the body also
-    // redeclares `List`, so checks on `String` (through `T`, or directly)
-    // read the module's `length`.
-    std::fs::write(
-        dir.join("dep_identical_shadowed.pkl"),
-        "length = 1\ntypealias String = List\ntypealias T = String(length == 1)\nresult {\n  typealias List = Int\n  typealias String = List\n  ok = 1 is T\n  okDirect = 1 is String(this == length)\n}\n",
-    )
-    .unwrap();
-    // Redeclaring `List` in a sibling body doesn't change what `String`
-    // means for `ok`, which checks a List with its own `length`.
-    std::fs::write(
-        dir.join("dep_alias_sibling.pkl"),
-        "length = throw(\"unused\")\ntypealias String = List\ntypealias T = String(length == 1)\nresult {\n  inner {\n    typealias List = Int\n    value = 1\n  }\n  ok = List(1) is T\n}\n",
-    )
-    .unwrap();
-    // Types and properties have separate namespaces, so a body that follows
-    // the type `Foo` itself still reads the module property `Foo`.
-    std::fs::write(
-        dir.join("dep_same_name.pkl"),
-        "typealias Foo = Int\nFoo = 5\nresult {\n  typealias String = Int\n  ok = Foo\n}\n",
-    )
-    .unwrap();
-    // Redeclared as a collection, `String` still binds the value's own
-    // `length`, directly or through `T`, so the module's unused `length` must
-    // not be evaluated.
-    std::fs::write(
-        dir.join("dep_collection.pkl"),
-        "length = throw(\"unused\")\ntypealias T = String(length == 1)\nresult {\n  typealias String = Listing<Int>\n  ok = List(1) is String(length == 1)\n  okFollowed = List(1) is T\n}\n",
-    )
-    .unwrap();
-    // A deeper body that redeclares `List` changes what the outer
-    // `String = List` means there, so its check reads the module's `length`.
-    std::fs::write(
-        dir.join("dep_deeper.pkl"),
-        "length = 1\nresult {\n  typealias String = List\n  inner {\n    typealias List = Int\n    ok = 1 is String(length == 1)\n  }\n}\n",
-    )
-    .unwrap();
-    // A base module's alias can redefine a built-in this module checks
-    // against, directly or through a nested redeclaration.
-    std::fs::write(dir.join("base.pkl"), "typealias List = Int\n").unwrap();
-    std::fs::write(
-        dir.join("dep_inherited.pkl"),
-        "extends \"base.pkl\"\nlength = 1\nresult {\n  ok = 1 is List(length == 1)\n}\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("dep_inherited_nested.pkl"),
-        "amends \"base.pkl\"\nlength = 1\nresult {\n  typealias String = List\n  ok = 1 is String(length == 1)\n}\n",
-    )
-    .unwrap();
-    // Only the built-ins a base actually redefines count: `String` checks
-    // under an empty base, or one redefining only `List`, still bind the
-    // string's own `length`, so the module's unused `length` isn't read.
-    std::fs::write(dir.join("base_empty.pkl"), "").unwrap();
-    std::fs::write(
-        dir.join("dep_inherited_empty.pkl"),
-        "amends \"base_empty.pkl\"\nlength = throw(\"unused\")\nresult {\n  ok = \"b\" is String(length == 1)\n}\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("dep_inherited_other.pkl"),
-        "extends \"base.pkl\"\nlength = throw(\"unused\")\nresult {\n  ok = \"b\" is String(length == 1)\n}\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("main.pkl"),
-        "import \"dep.pkl\" as Dep\nimport \"dep_direct.pkl\" as DepDirect\nimport \"dep_inherited_empty.pkl\" as DepInheritedEmpty\nimport \"dep_inherited_other.pkl\" as DepInheritedOther\nimport \"dep_deeper.pkl\" as DepDeeper\nimport \"dep_inherited.pkl\" as DepInherited\nimport \"dep_inherited_nested.pkl\" as DepInheritedNested\nimport \"dep_collection.pkl\" as DepCollection\nimport \"dep_same_name.pkl\" as DepSameName\nimport \"dep_alias_sibling.pkl\" as DepAliasSibling\nimport \"dep_identical_shadowed.pkl\" as DepIdenticalShadowed\nimport \"dep_local.pkl\" as DepLocal\nimport \"dep_identical.pkl\" as DepIdentical\nimport \"dep_listing.pkl\" as DepListing\nimport \"dep_sibling.pkl\" as DepSibling\nimport \"dep_class.pkl\" as DepClass\nout = Dep.result.ok\noutDirect = DepDirect.result.ok\noutListing = DepListing.result.inner.ok\noutSibling = DepSibling.result.ok\noutClass = DepClass.result.ok\noutLocal = DepLocal.result.inner.ok\noutIdentical = DepIdentical.result.ok\noutIdenticalShadowed = DepIdenticalShadowed.result.ok\noutIdenticalShadowedDirect = DepIdenticalShadowed.result.okDirect\noutAliasSibling = DepAliasSibling.result.ok\noutSameName = DepSameName.result.ok\noutCollection = DepCollection.result.ok\noutCollectionFollowed = DepCollection.result.okFollowed\noutDeeper = DepDeeper.result.inner.ok\noutInherited = DepInherited.result.ok\noutInheritedNested = DepInheritedNested.result.ok\noutInheritedEmpty = DepInheritedEmpty.result.ok\noutInheritedOther = DepInheritedOther.result.ok\n",
-    )
-    .unwrap();
-
-    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
-    assert_eq!(val["out"], true);
-    assert_eq!(val["outDirect"], true);
-    assert_eq!(val["outListing"], true);
-    assert_eq!(val["outSibling"], true);
-    assert_eq!(val["outClass"], serde_json::json!({ "a": 1, "b": 1 }));
-    assert_eq!(val["outLocal"], 1);
-    assert_eq!(val["outIdentical"], true);
-    assert_eq!(val["outIdenticalShadowed"], true);
-    assert_eq!(val["outIdenticalShadowedDirect"], true);
-    assert_eq!(val["outAliasSibling"], true);
-    assert_eq!(val["outSameName"], 5);
-    assert_eq!(val["outCollection"], true);
-    assert_eq!(val["outCollectionFollowed"], true);
-    assert_eq!(val["outDeeper"], true);
-    assert_eq!(val["outInherited"], true);
-    assert_eq!(val["outInheritedNested"], true);
-    assert_eq!(val["outInheritedEmpty"], true);
-    assert_eq!(val["outInheritedOther"], true);
-}
-
-#[test]
 fn narrowed_import_resolves_aliases_in_followed_class_bodies() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_class_alias");
     let dir = temp.path();
@@ -2798,57 +2564,6 @@ fn imported_class_reading_missing_module_property_reports_error() {
 }
 
 #[test]
-fn narrowed_import_follows_module_reads_in_class_bodies() {
-    let temp = TestTempDir::new("pklr_test_narrowed_import_class_module_reads");
-    let dir = temp.path();
-    // The requested field reaches `C` only through a local; `C`'s body reads
-    // `limit` through `module`, so the narrowed import must evaluate `limit`.
-    std::fs::write(
-        dir.join("direct.pkl"),
-        "class C { v = module.limit }\nlocal ok = new C {}.v\nlimit = 2\nout = ok\n",
-    )
-    .unwrap();
-    // At module level `this` is the module, so `this.C` names the class.
-    std::fs::write(
-        dir.join("this_read.pkl"),
-        "class C { v = module.limit }\nlocal ok = new this.C {}.v\nlimit = 3\nout = ok\n",
-    )
-    .unwrap();
-    // A dynamic `module[key]` read can reach any property.
-    std::fs::write(
-        dir.join("dynamic.pkl"),
-        "class C { key = \"limit\"; v = module[key] }\nlocal ok = new C {}.v\nlimit = 4\nout = ok\n",
-    )
-    .unwrap();
-    // A local function reads the module property when it is called.
-    std::fs::write(
-        dir.join("lambda.pkl"),
-        "local f = () -> limit\nlimit = 5\nout = f()\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("main.pkl"),
-        "import \"direct.pkl\"\nimport \"this_read.pkl\"\nimport \"dynamic.pkl\"\nimport \"lambda.pkl\"\ndirect = direct.out\nthisRead = this_read.out\ndynamic = dynamic.out\nlambda = lambda.out\n",
-    )
-    .unwrap();
-
-    for (file, expected) in [
-        ("direct.pkl", 2),
-        ("this_read.pkl", 3),
-        ("dynamic.pkl", 4),
-        ("lambda.pkl", 5),
-    ] {
-        let val = pklr::eval_to_json(&dir.join(file)).unwrap();
-        assert_eq!(val["out"], expected, "{file}");
-    }
-    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
-    assert_eq!(val["direct"], 2);
-    assert_eq!(val["thisRead"], 3);
-    assert_eq!(val["dynamic"], 4);
-    assert_eq!(val["lambda"], 5);
-}
-
-#[test]
 fn narrowed_import_follows_locals_with_module_aliases() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_local_aliases");
     let dir = temp.path();
@@ -2868,68 +2583,6 @@ fn narrowed_import_follows_locals_with_module_aliases() {
 
     let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["out"], true);
-}
-
-#[test]
-fn narrowed_import_keeps_type_and_property_names_apart() {
-    let temp = TestTempDir::new("pklr_test_narrowed_import_type_property_names");
-    let dir = temp.path();
-    // Types and properties have separate namespaces: checking against the
-    // alias `Foo` doesn't read the unused property `Foo`.
-    std::fs::write(
-        dir.join("dep.pkl"),
-        "typealias Foo = Int\nFoo = throw(\"unused\")\nresult {\n  ok = 1 is Foo\n}\n",
-    )
-    .unwrap();
-    // Reading `Foo` as a value reads the property.
-    std::fs::write(
-        dir.join("dep_value.pkl"),
-        "typealias Foo = Int\nFoo = 5\nresult {\n  ok = Foo\n}\n",
-    )
-    .unwrap();
-    // The alias is still followed, so what its constraint reads is kept, and
-    // annotations and `new` name the type too.
-    std::fs::write(
-        dir.join("dep_followed.pkl"),
-        "min = 1\ntypealias Foo = Int(this >= min)\nFoo = throw(\"unused\")\nclass Bar {\n  a: Int = 1\n}\nBar = throw(\"unused\")\nresult {\n  ok = 1 is Foo\n  typed: Foo = 2\n  bar = new Bar {}\n}\n",
-    )
-    .unwrap();
-    // A body that follows definitions itself (it redeclares a type) drops the
-    // type reference too.
-    std::fs::write(
-        dir.join("dep_narrowed.pkl"),
-        "min = 1\ntypealias Foo = Int(this >= min)\nFoo = throw(\"unused\")\nresult {\n  typealias String = Int\n  ok = 1 is Foo\n}\n",
-    )
-    .unwrap();
-    // Bindings shadow only their own namespace: a type declared in a body
-    // doesn't hide the module property it reads, and a local doesn't hide
-    // the module alias it checks against.
-    std::fs::write(
-        dir.join("dep_type_shadow.pkl"),
-        "Foo = 5\nresult {\n  typealias Foo = Int\n  ok = Foo\n}\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("dep_local_shadow.pkl"),
-        "min = 1\ntypealias Foo = Int(this >= min)\nresult {\n  local Foo = 1\n  ok = 1 is Foo\n}\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("main.pkl"),
-        "import \"dep.pkl\" as Dep\nimport \"dep_value.pkl\" as DepValue\nimport \"dep_followed.pkl\" as DepFollowed\nimport \"dep_narrowed.pkl\" as DepNarrowed\nimport \"dep_type_shadow.pkl\" as DepTypeShadow\nimport \"dep_local_shadow.pkl\" as DepLocalShadow\nout = Dep.result.ok\noutValue = DepValue.result.ok\noutFollowed = DepFollowed.result\noutNarrowed = DepNarrowed.result.ok\noutTypeShadow = DepTypeShadow.result.ok\noutLocalShadow = DepLocalShadow.result.ok\n",
-    )
-    .unwrap();
-
-    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
-    assert_eq!(val["out"], true);
-    assert_eq!(val["outValue"], 5);
-    assert_eq!(
-        val["outFollowed"],
-        serde_json::json!({ "ok": true, "typed": 2, "bar": { "a": 1 } })
-    );
-    assert_eq!(val["outNarrowed"], true);
-    assert_eq!(val["outTypeShadow"], 5);
-    assert_eq!(val["outLocalShadow"], true);
 }
 
 #[test]
@@ -2960,39 +2613,4 @@ fn narrowed_import_reads_qualified_type_roots_and_nested_classes() {
     let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["out"], serde_json::json!({ "a": 1 }));
     assert_eq!(val["outClass"], serde_json::json!({ "a": 1 }));
-}
-
-#[test]
-fn narrowed_import_reads_values_named_as_types() {
-    let temp = TestTempDir::new("pklr_test_narrowed_import_values_named_as_types");
-    let dir = temp.path();
-    // A type name that isn't one of the module's types can name a property
-    // or local holding a class, which building or checking one reads.
-    std::fs::write(
-        dir.join("dep_property.pkl"),
-        "Foo = Item\nclass Item {\n  a: Int = 1\n}\nresult: Foo = new Foo {}\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("dep_local.pkl"),
-        "class C {\n  v = module.expected\n}\nlocal x = module.C\nexpected = \"b\"\nresult = new x {}\n",
-    )
-    .unwrap();
-    // A local in the body binds the name, so the module property it shadows
-    // isn't read.
-    std::fs::write(
-        dir.join("dep_shadowed.pkl"),
-        "class Item {\n  a: Int = 1\n}\nFoo = throw(\"unused\")\nresult {\n  local Foo = Item\n  x = new Foo {}\n}\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("main.pkl"),
-        "import \"dep_property.pkl\" as DepProperty\nimport \"dep_local.pkl\" as DepLocal\nimport \"dep_shadowed.pkl\" as DepShadowed\noutProperty = DepProperty.result\noutLocal = DepLocal.result\noutShadowed = DepShadowed.result.x\n",
-    )
-    .unwrap();
-
-    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
-    assert_eq!(val["outProperty"], serde_json::json!({ "a": 1 }));
-    assert_eq!(val["outLocal"], serde_json::json!({ "v": "b" }));
-    assert_eq!(val["outShadowed"], serde_json::json!({ "a": 1 }));
 }

@@ -22,6 +22,7 @@ mod analysis;
 mod glob;
 mod mapping;
 mod package;
+mod prefetch;
 mod remote;
 mod scope;
 mod types;
@@ -93,6 +94,8 @@ pub struct Evaluator {
     package_cache_dir: Option<PathBuf>,
     /// HTTP URL roots whose sources belong to direct-download packages.
     package_http_roots: HashSet<String>,
+    /// Prefetch progress and budget for the current evaluation.
+    prefetch: prefetch::PrefetchState,
     /// Whether network access is disabled for this evaluator.
     offline: bool,
     /// HTTP URL rewrite rules (source_prefix → target_prefix).
@@ -380,6 +383,7 @@ impl Evaluator {
             package_dirs: HashMap::default(),
             package_cache_dir: None,
             package_http_roots: HashSet::default(),
+            prefetch: prefetch::PrefetchState::default(),
             offline: false,
             http_rewrites: Vec::new(),
             converters: Vec::new(),
