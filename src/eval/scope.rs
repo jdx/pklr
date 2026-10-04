@@ -423,9 +423,16 @@ impl EntryOwners {
     /// Drop the cached entry scopes' references to the object's current
     /// `this` snapshot, like `release_this_aliases` does for the object scope,
     /// so the property map can grow in place. The next entry rebinds them.
+    ///
+    /// A cached scope still shared with a live entry scope (as in a `for`
+    /// generator, whose scope outlives each iteration) is left alone: the live
+    /// scope holds the snapshot regardless, and releasing would only copy the
+    /// cached bindings.
     pub(super) fn release_this(&self, aliases: &[String]) {
         for cached in self.bindings.borrow_mut().values_mut() {
-            release_this_aliases(&mut cached.scope, aliases);
+            if Rc::strong_count(&cached.scope.vars) == 1 {
+                release_this_aliases(&mut cached.scope, aliases);
+            }
         }
     }
 
