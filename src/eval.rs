@@ -3045,8 +3045,10 @@ impl Evaluator {
                     );
                     let key = self.eval_expr(key_expr, &active_scope, depth)?;
                     let key_str = value_to_key(&key)?;
-                    // A body may define each key once (`["k"] { ... }` amends).
-                    if track_dynamic_members && !matches!(val_expr, Expr::ObjectBody(_)) {
+                    // A body may define each key once. An object body still
+                    // amends an inherited value, but it is a definition in
+                    // this body and must participate in duplicate detection.
+                    if track_dynamic_members {
                         let defined_by_layer = defined_by_layer.get_or_insert_default();
                         let layer = entry_layer(entry_scopes, entry_index);
                         if !defined_by_layer.insert((layer, key_str.clone())) {

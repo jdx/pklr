@@ -52,6 +52,13 @@ fn throw_produces_error() {
     assert!(msg.contains("boom"));
 }
 
+#[test]
+fn invalid_module_body_reports_a_parse_error() {
+    let msg = eval_fails("this is not valid pkl");
+    assert!(msg.contains("expected identifier"), "{msg}");
+    assert!(!msg.contains("Invalid property definition"), "{msg}");
+}
+
 // ============================================================
 // pkl:test
 // ============================================================
@@ -190,6 +197,20 @@ intAndFloat = test.catchOrNull(() -> new Mapping<Any, Int> { [1] = 10; [1.0] = 2
     );
     assert_eq!(json["direct"], "Duplicate definition of member `\"k\"`.");
     assert!(json["intAndFloat"].is_null());
+}
+
+#[test]
+fn amended_mapping_cannot_amend_a_key_twice_in_one_body() {
+    let msg = eval_fails(
+        r#"
+local m = new Mapping { ["nested"] = new Dynamic {} }
+x = (m) { ["nested"] { a = 1 }; ["nested"] { b = 2 } }
+"#,
+    );
+    assert!(
+        msg.contains("Duplicate definition of member `\"nested\"`."),
+        "{msg}"
+    );
 }
 
 #[test]

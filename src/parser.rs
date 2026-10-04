@@ -426,6 +426,12 @@ impl<'a> Parser<'a> {
             match &entry {
                 Entry::Property(prop) => self.check_property(member_offset, prop)?,
                 Entry::DynProperty(key, _) => self.check_entry_key(member_offset, key),
+                // A module is a class-like body, not a listing. Reject a bare
+                // expression while parsing so callers retain the source-level
+                // diagnostic instead of getting an evaluator-only error.
+                Entry::Elem(_) if self.body.kind == BodyKind::Module => {
+                    return Err(self.parse_error("expected identifier"));
+                }
                 Entry::ForGenerator(_) | Entry::WhenGenerator(_) | Entry::Spread(_) => {
                     self.body.set_has_generator();
                 }
