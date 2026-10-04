@@ -1076,28 +1076,77 @@ pub(super) fn is_module_sibling_ref(expr: &Expr, include_this: bool) -> bool {
     matches!(expr, Expr::Ident(name) if name == "module" || (include_this && name == "this"))
 }
 
-/// Classes by name, with each one's parent and body.
-type ClassMap<'e> = HashMap<&'e str, (Option<&'e str>, &'e [Entry])>;
+/// A class's parent and body.
+type ClassInfo<'e> = (Option<&'e str>, &'e [Entry]);
+
+/// The classes visible somewhere, by name: the module's, and the nested ones
+/// in scope there, which hide the module's of the same name except from
+/// `module.Name`.
+#[derive(Clone, Default)]
+struct ClassMap<'e> {
+    module: std::rc::Rc<HashMap<&'e str, ClassInfo<'e>>>,
+    nested: HashMap<&'e str, ClassInfo<'e>>,
+}
+
+impl<'e> ClassMap<'e> {
+    fn module(classes: HashMap<&'e str, ClassInfo<'e>>) -> Self {
+        ClassMap {
+            module: std::rc::Rc::new(classes),
+            nested: HashMap::default(),
+        }
+    }
+
+    fn get(&self, name: &str) -> Option<&ClassInfo<'e>> {
+        self.nested.get(name).or_else(|| self.module.get(name))
+    }
+
+    /// Adds the classes declared directly in `body`, hiding outer ones.
+    fn extend_with_body(&mut self, body: &'e [Entry]) {
+        self.nested
+            .extend(body.iter().filter_map(|entry| match entry {
+                Entry::ClassDef(name, _, parent, inner) => {
+                    Some((name.as_str(), (parent.as_deref(), inner.as_slice())))
+                }
+                _ => None,
+            }));
+    }
+}
 
 /// The non-local properties a class whose parent is `parent` inherits from
-/// the ancestors in `classes`.
+/// the ancestors in `classes`. `module.Parent` names the module's class, as
+/// does any parent of a module class.
 fn ancestor_properties<'e>(classes: &ClassMap<'e>, parent: Option<&'e str>) -> HashSet<&'e str> {
     let mut names = HashSet::default();
     let mut seen = HashSet::default();
-    // `extends module.Parent` names the same class as `extends Parent`.
-    let unqualified = |name: &'e str| name.strip_prefix("module.").unwrap_or(name);
-    let mut next = parent.map(unqualified);
-    while let Some(class) = next
-        && seen.insert(class)
-        && let Some((parent, body)) = classes.get(class)
-    {
+    let mut next = parent.map(|parent| (parent, false));
+    while let Some((name, in_module)) = next {
+        let (in_module, name) = match name.strip_prefix("module.") {
+            Some(name) => (true, name),
+            None => (in_module, name),
+        };
+        let info = if in_module {
+            classes.module.get(name)
+        } else {
+            classes.get(name)
+        };
+        let Some((parent, body)) = info else {
+            break;
+        };
+        if !seen.insert(std::ptr::from_ref(*body)) {
+            break;
+        }
+        let in_module = in_module
+            || classes
+                .module
+                .get(name)
+                .is_some_and(|(_, module_body)| std::ptr::eq(*module_body, *body));
         names.extend(body.iter().filter_map(|entry| match entry {
             Entry::Property(prop) if !has_modifier(&prop.modifiers, Modifier::Local) => {
                 Some(prop.name.as_str())
             }
             _ => None,
         }));
-        next = parent.map(unqualified);
+        next = parent.map(|parent| (parent, in_module));
     }
     names
 }
@@ -1121,15 +1170,17 @@ impl<'a> ModuleClasses<'a> {
                     _ => None,
                 })
                 .collect(),
-            classes: entries
-                .iter()
-                .filter_map(|entry| match entry {
-                    Entry::ClassDef(name, _, parent, body) => {
-                        Some((name.as_str(), (parent.as_deref(), body.as_slice())))
-                    }
-                    _ => None,
-                })
-                .collect(),
+            classes: ClassMap::module(
+                entries
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        Entry::ClassDef(name, _, parent, body) => {
+                            Some((name.as_str(), (parent.as_deref(), body.as_slice())))
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+            ),
         }
     }
 
@@ -1225,12 +1276,7 @@ impl<'e> EagerReads<'e> {
     /// `scope` holds the classes the body's nested classes may extend.
     fn new(body: &'e [Entry], scope: &ClassMap<'e>) -> Self {
         let mut classes = scope.clone();
-        classes.extend(body.iter().filter_map(|entry| match entry {
-            Entry::ClassDef(name, _, parent, class_body) => {
-                Some((name.as_str(), (parent.as_deref(), class_body.as_slice())))
-            }
-            _ => None,
-        }));
+        classes.extend_with_body(body);
         let mut reads = EagerReads {
             body,
             classes,
@@ -1441,12 +1487,7 @@ impl<'e> NestedClass<'e> {
     fn scope(&self, classes: &ClassMap<'e>) -> ClassMap<'e> {
         let mut scope = classes.clone();
         for (body, _) in &self.chain {
-            scope.extend(body.iter().filter_map(|entry| match entry {
-                Entry::ClassDef(name, _, parent, inner) => {
-                    Some((name.as_str(), (parent.as_deref(), inner.as_slice())))
-                }
-                _ => None,
-            }));
+            scope.extend_with_body(body);
         }
         scope
     }
@@ -1609,17 +1650,15 @@ fn collect_field_names_entries(entries: &[Entry], out: &mut HashSet<String>) {
     }
 }
 
-/// Whether `expr` may evaluate to an object: anything but literals and
-/// operators on them.
+/// Whether `expr` may evaluate to an object: anything but literals, string
+/// interpolations, and operators on them.
 fn may_be_object(expr: &Expr) -> bool {
     match expr {
         Expr::Null | Expr::Bool(_) | Expr::Int(_) | Expr::Float(_) | Expr::String(_) => false,
         Expr::Binop(_, left, right) => may_be_object(left) || may_be_object(right),
         Expr::Unop(_, value) => may_be_object(value),
-        Expr::StringInterpolation(parts) => parts.iter().any(|part| match part {
-            StringInterpPart::Expr(expr) => may_be_object(expr),
-            StringInterpPart::Literal(_) => false,
-        }),
+        // An interpolation is always a string.
+        Expr::StringInterpolation(_) => false,
         _ => true,
     }
 }
@@ -1645,7 +1684,11 @@ fn collect_field_names_expr(expr: &Expr, out: &mut HashSet<String>) {
         Expr::New(_, entries, _) | Expr::ObjectBody(entries) | Expr::InferredNew(_, entries) => {
             collect_field_names_entries(entries, out)
         }
-        Expr::Binop(_, left, right) => {
+        Expr::Binop(op, left, right) => {
+            // `x |> f` passes `x` to `f` like `f(x)`.
+            if matches!(op, BinOp::Pipe) && may_be_object(left) {
+                out.insert(DYNAMIC_SIBLING_REF.to_string());
+            }
             collect_field_names_expr(left, out);
             collect_field_names_expr(right, out);
         }
