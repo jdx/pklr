@@ -1,0 +1,60 @@
+import "../Builtins.pkl"
+import "../Config.pkl"
+import "./test/helpers.pkl"
+
+@Builtins.meta {
+  category = "Shell"
+  description = "Shell formatter"
+  project_indicators {
+    new { glob = "*.sh" }
+  }
+}
+shfmt = new Config.Step {
+  batch = true
+  glob = List("**/*.sh", "**/*.bash", "**/*.mksh", "**/*.bats", "**/*.zsh")
+  check_diff = "shfmt -d --apply-ignore {{ files }}"
+  check_list_files =
+    """
+    files=$(shfmt -l --apply-ignore {{ files }})
+    if [ -n "$files" ]; then
+      echo "$files"
+      exit 1
+    fi
+    """
+  fix = "shfmt -w --apply-ignore {{ files }}"
+  tests {
+    local const testMaker = new helpers.TestMaker { filename = "test.sh" }
+    local const before =
+      """
+      foo() {
+        (( $bar ))
+      }
+      """
+    local const after =
+      """
+      foo() {
+      	(($bar))
+      }
+
+      """
+    ["check bad file"] = testMaker.checkFail(before, 1)
+    ["check good file"] = testMaker.checkPass(after)
+    ["fix bad file"] = testMaker.fixPass(before, after)
+    ["fix good file"] = testMaker.fixPass(after, after)
+
+    local const ignoredTestMaker = new helpers.TestMaker {
+      filename = "test.sh"
+      extra_files {
+        [".editorconfig"] =
+          """
+          [test.sh]
+          ignore = true
+          """
+      }
+    }
+    ["check ignored bad file"] = ignoredTestMaker.checkPass(before)
+    ["check ignored good file"] = ignoredTestMaker.checkPass(after)
+    ["fix ignored bad file"] = ignoredTestMaker.fixPass(before, before)
+    ["fix ignored good file"] = ignoredTestMaker.fixPass(after, after)
+  }
+}
