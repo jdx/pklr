@@ -110,7 +110,7 @@ def normalize(v):
 # pkl errors that say nothing about whether pklr should accept the file.
 SKIP_ERRORS = re.compile(
     r"Cannot render|as JSON|no project found|Exception when making request|"
-    r"Cannot find module|has invalid syntax|Cannot find resource|I/O error"
+    r"Cannot find module|Cannot find resource|I/O error"
 )
 
 
