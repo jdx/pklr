@@ -6581,15 +6581,20 @@ fn check_instantiable(scope: &Scope, type_name: Option<&str>, class: Option<&Val
             if !type_name.contains('.')
                 && source.type_name.as_deref() != Some(type_name)
                 && scope.get_type_alias(type_name).is_none()
-                && scope.get(&type_alias_marker(type_name)).is_none() =>
+                && scope.get(&type_alias_marker(type_name)).is_none()
+                && source.poisoned_members.is_none()
+                && source.deprecated.is_empty() =>
         {
             Err(Error::Eval(format!(
                 "Expected `{type_name}` to be a type, but it is not."
             )))
         }
         // Built-ins are bound to a marker string of their own name.
-        None | Some(Value::String(_)) if EXTERNAL_CLASSES.contains(&resolved) => Err(Error::Eval(
-            format!("Cannot instantiate, or amend an instance of, external class `{resolved}`."),
+        None if EXTERNAL_CLASSES.contains(&resolved) => Err(Error::Eval(format!(
+            "Cannot instantiate, or amend an instance of, external class `{resolved}`."
+        ))),
+        Some(Value::String(name)) if EXTERNAL_CLASSES.contains(&name.as_ref()) => Err(Error::Eval(
+            format!("Cannot instantiate, or amend an instance of, external class `{name}`."),
         )),
         _ => Ok(()),
     }
