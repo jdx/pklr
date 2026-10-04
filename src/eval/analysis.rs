@@ -470,13 +470,17 @@ pub(super) fn collect_sibling_field_refs_entries(entries: &[Entry], refs: &mut H
 
 /// The names a type check binds for the checked value inside a constraint on
 /// `base` (see `eval_type_check`): `this` always, and `length` and `isEmpty`
-/// unless the base is a number or boolean.
+/// only when the base is a string or collection type, which bind them. For
+/// any other base, including aliases and classes that can't be resolved
+/// here, those two are kept as references: keeping an unneeded reference only
+/// evaluates more, while dropping a needed one breaks the check.
 fn constraint_bound_names(base: &str) -> &'static [&'static str] {
     let base = base.trim_start_matches('*').trim_end_matches('?');
     match base {
-        "Int" | "Int8" | "Int16" | "Int32" | "UInt" | "UInt8" | "UInt16" | "UInt32" | "Float"
-        | "Number" | "Boolean" => &["this"],
-        _ => &["this", "length", "isEmpty"],
+        "String" | "List" | "Listing" | "Map" | "Mapping" | "Set" | "Collection" => {
+            &["this", "length", "isEmpty"]
+        }
+        _ => &["this"],
     }
 }
 

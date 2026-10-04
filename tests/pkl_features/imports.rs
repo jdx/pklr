@@ -2348,9 +2348,16 @@ async fn narrowed_import_ignores_checked_value_names_in_is_expressions() {
         "length = throw(\"unused\")\nclass C { ok = \"b\" is String(length == 1) }\nresult = new C {}\n",
     )
     .unwrap();
+    // `N` can't be resolved during analysis, so `length` stays a module read;
+    // a number's check doesn't bind it.
+    std::fs::write(
+        dir.join("alias.pkl"),
+        "length = 1\ntypealias N = Int\nresult = 1 is N(this == length)\n",
+    )
+    .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"plain.pkl\" as Plain\nimport \"class.pkl\" as Class\nplain = Plain.result\nclassed = Class.result.ok\n",
+        "import \"plain.pkl\" as Plain\nimport \"class.pkl\" as Class\nimport \"alias.pkl\" as Alias\nplain = Plain.result\nclassed = Class.result.ok\naliased = Alias.result\n",
     )
     .unwrap();
 
@@ -2359,4 +2366,5 @@ async fn narrowed_import_ignores_checked_value_names_in_is_expressions() {
         .unwrap();
     assert_eq!(val["plain"], true);
     assert_eq!(val["classed"], true);
+    assert_eq!(val["aliased"], true);
 }
