@@ -2599,7 +2599,18 @@ async fn imported_class_reading_missing_module_property_reports_error() {
         .unwrap();
     assert_eq!(val["result"], serde_json::json!({"x": 1, "y": 2}));
     assert_eq!(val["r2"], serde_json::json!({"x": 1, "y": 3}));
-    for importer in ["main.pkl", "read.pkl"] {
+    // Null-safe and index reads report the saved error too.
+    std::fs::write(
+        dir.join("nullsafe.pkl"),
+        "import \"dep.pkl\"\nresult = dep?.C\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("index.pkl"),
+        "import \"dep.pkl\"\nresult = dep[\"C\"]\n",
+    )
+    .unwrap();
+    for importer in ["main.pkl", "read.pkl", "nullsafe.pkl", "index.pkl"] {
         let err = pklr::eval_to_json_async(&dir.join(importer))
             .await
             .unwrap_err()

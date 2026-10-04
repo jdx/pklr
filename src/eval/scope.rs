@@ -333,6 +333,31 @@ impl Scope {
 /// binding itself, or a member of a module object that failed to evaluate
 /// (`dep.C` where `dep`'s class `C` could not be built). `None` when the name
 /// resolves or is simply absent.
+/// The saved error for member `name` that object `obj_expr` (with `source`)
+/// does not have: a failed class of an imported module object, or, inside
+/// the defining module, one read through `module`/`this`. Used by every
+/// by-name member read (`a.C`, `a?.C`, `a["C"]`) before reporting a missing
+/// member.
+pub(super) fn missing_member_error(
+    source: &Option<Arc<ObjectSource>>,
+    obj_expr: &Expr,
+    name: &str,
+    scope: &Scope,
+) -> Option<String> {
+    if let Some(message) = source
+        .as_ref()
+        .and_then(|source| source.poisoned_members.as_ref()?.get(name))
+    {
+        return Some(message.clone());
+    }
+    match obj_expr {
+        Expr::Ident(root) if root == "module" || root == "this" => {
+            poisoned_member(scope, &format!("{root}.{name}"))
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn poisoned_member(scope: &Scope, name: &str) -> Option<String> {
     let mut parts = name.trim_end_matches('?').split('.');
     let root = parts.next()?;

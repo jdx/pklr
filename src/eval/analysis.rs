@@ -938,10 +938,12 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
     loop {
         let before = dependent.len();
         for (name, is_class, refs) in &members {
+            // A dynamic `module[key]` read can reach any tracked member.
             if !dependent.contains(name.as_str())
-                && refs.iter().any(|root| {
-                    (*is_class && root == "module") || dependent.contains(root.as_str())
-                })
+                && ((refs.contains(DYNAMIC_SIBLING_REF) && !dependent.is_empty())
+                    || refs.iter().any(|root| {
+                        (*is_class && root == "module") || dependent.contains(root.as_str())
+                    }))
             {
                 dependent.insert(name.to_string());
             }

@@ -4448,12 +4448,7 @@ impl Evaluator {
                     Value::Object(map, source) => {
                         let val = map.get(field).cloned().ok_or_else(|| {
                             Error::Eval(
-                                source
-                                    .as_ref()
-                                    .and_then(|source| {
-                                        source.poisoned_members.as_ref()?.get(field.as_str())
-                                    })
-                                    .cloned()
+                                missing_member_error(source, obj_expr, field, scope)
                                     .unwrap_or_else(|| format!("field not found: {field}")),
                             )
                         })?;
@@ -4471,6 +4466,12 @@ impl Evaluator {
                 match &obj {
                     Value::Null => Ok(Value::Null),
                     Value::Object(map, source) => {
+                        if !map.contains_key(field.as_str())
+                            && let Some(message) =
+                                missing_member_error(source, obj_expr, field, scope)
+                        {
+                            return Err(Error::Eval(message));
+                        }
                         let val = map.get(field).cloned().unwrap_or(Value::Null);
                         if !is_null_value(&val) {
                             self.warn_if_deprecated_access(source, field);
@@ -4506,10 +4507,12 @@ impl Evaluator {
                 let key = self.eval_expr(key_expr, scope, depth + 1).await?;
                 let key_str = value_to_key(&key)?;
                 match obj {
-                    Value::Object(map, _) => map
-                        .get(&key_str)
-                        .cloned()
-                        .ok_or_else(|| Error::Eval(format!("key not found: {key_str}"))),
+                    Value::Object(map, source) => map.get(&key_str).cloned().ok_or_else(|| {
+                        Error::Eval(
+                            missing_member_error(&source, obj_expr, &key_str, scope)
+                                .unwrap_or_else(|| format!("key not found: {key_str}")),
+                        )
+                    }),
                     _ => Err(Error::Eval("cannot index non-object".into())),
                 }
             }

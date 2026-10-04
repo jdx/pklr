@@ -3467,6 +3467,25 @@ result = new D {}
 }
 
 #[test]
+fn functions_reading_module_dynamically_are_refreshed() {
+    for src in [
+        "local key = \"C\"\nclass C { v = module.expected }\nlocal function make() = module[key].v\nexpected = \"b\"\nresult = make()\n",
+        "local key = \"C\"\nclass C { v = module.expected }\nfunction make() = module[key].v\nexpected = \"b\"\nresult = make()\n",
+    ] {
+        assert_eq!(eval(src)["result"], "b", "{src}");
+    }
+}
+
+#[test]
+fn failed_class_reports_error_through_every_member_read() {
+    for read in ["module[\"C\"]", "this[\"C\"]", "module?.C", "this?.C"] {
+        let src = format!("class C {{ v = module.missing }}\nresult = {read}\n");
+        let err = eval_fails(&src);
+        assert!(err.contains("missing"), "{read}: {err}");
+    }
+}
+
+#[test]
 fn failed_class_reports_error_through_module_and_this() {
     for src in [
         "class C { v = module.missing }\nresult = new module.C {}\n",
