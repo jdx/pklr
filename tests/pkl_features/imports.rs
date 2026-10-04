@@ -2277,6 +2277,61 @@ async fn import_glob_in_a_base_keeps_modules_its_children_read() {
 }
 
 #[tokio::test]
+async fn module_imported_by_class_body_checks_declared_types() {
+    // Skipping class default checks must not skip the declared types of a
+    // module imported while the class body is evaluated.
+    let temp = TestTempDir::new("pklr_test_class_body_import_checks_types");
+    let dir = temp.path();
+    std::fs::write(dir.join("dep.pkl"), "checked: Int = \"x\"\n").unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "class C {\n  dep = import(\"dep.pkl\")\n}\nc = new C {}\n",
+    )
+    .unwrap();
+
+    let err = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("property 'checked' expected Int"), "{err}");
+}
+
+#[tokio::test]
+async fn imported_module_checks_types_after_refreshing_module_members() {
+    // In an imported module, members that read `module` are refreshed once
+    // the module is complete; declared types are checked on those values.
+    let temp = TestTempDir::new("pklr_test_import_refresh_type_checks");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("bad.pkl"),
+        "class C { v = module.limit }\nlocal bad: String = new C {}.v\nlimit = 2\nout = bad\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("good.pkl"),
+        "class C { v = module.limit }\nlocal ok: Int = new C {}.v\nlimit = 2\nout = ok\n",
+    )
+    .unwrap();
+    // The whole module is used, so the import is not narrowed to `out`.
+    std::fs::write(dir.join("main_bad.pkl"), "import \"bad.pkl\"\nall = bad\n").unwrap();
+    std::fs::write(
+        dir.join("main_good.pkl"),
+        "import \"good.pkl\"\nall = good\n",
+    )
+    .unwrap();
+
+    let err = pklr::eval_to_json_async(&dir.join("main_bad.pkl"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("property 'bad' expected String"), "{err}");
+    let val = pklr::eval_to_json_async(&dir.join("main_good.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["all"]["out"], 2);
+}
+
+#[tokio::test]
 async fn narrowed_import_follows_type_alias_constraints() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_type_alias");
     let dir = temp.path();
@@ -2952,6 +3007,63 @@ async fn imported_class_reading_missing_module_property_reports_error() {
 }
 
 #[tokio::test]
+async fn narrowed_import_checks_only_the_members_it_evaluates() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_checks_evaluated");
+    let dir = temp.path();
+    std::fs::write(dir.join("base.pkl"), "x = 1\ny = 2\n").unwrap();
+    std::fs::write(
+        dir.join("child.pkl"),
+        "amends \"base.pkl\"\nx: Int(this > 5) = 10\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("bad.pkl"),
+        "amends \"base.pkl\"\nx: Int(this > 5) = 3\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("only_y.pkl"),
+        "import \"child.pkl\" as C\nout = C.y\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("both.pkl"),
+        "import \"child.pkl\" as C\ny = C.y\nx = C.x\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("bad_only_y.pkl"),
+        "import \"bad.pkl\" as B\nout = B.y\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("bad_x.pkl"),
+        "import \"bad.pkl\" as B\nout = B.x\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("only_y.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["out"], 2);
+    let val = pklr::eval_to_json_async(&dir.join("both.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["y"], 2);
+    assert_eq!(val["x"], 10);
+    // `x` is never read, so its failing constraint is never checked.
+    let val = pklr::eval_to_json_async(&dir.join("bad_only_y.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["out"], 2);
+    let err = pklr::eval_to_json_async(&dir.join("bad_x.pkl"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("property 'x'"), "{err}");
+}
+
+#[tokio::test]
 async fn narrowed_import_follows_module_reads_in_class_bodies() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_class_module_reads");
     let dir = temp.path();
@@ -3159,4 +3271,38 @@ async fn narrowed_import_reads_values_named_as_types() {
     assert_eq!(val["outProperty"], serde_json::json!({ "a": 1 }));
     assert_eq!(val["outLocal"], serde_json::json!({ "v": "b" }));
     assert_eq!(val["outShadowed"], serde_json::json!({ "a": 1 }));
+}
+
+#[tokio::test]
+async fn refreshed_typed_local_uses_module_type_aliases_declared_later() {
+    // As in Pkl, a module's type alias applies throughout the module, so the
+    // refreshed typed local's `Int` is the later alias (`String`) here.
+    let temp = TestTempDir::new("pklr_test_refresh_later_module_alias");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("bad.pkl"),
+        "class C { v = module.limit }\nlocal ok: Int = new C {}.v\nlimit = 2\ntypealias Int = String\nout = ok\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("good.pkl"),
+        "class C { v = module.limit }\nlocal ok: Int = new C {}.v\nlimit = \"s\"\ntypealias Int = String\nout = ok\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("main_bad.pkl"), "import \"bad.pkl\"\nall = bad\n").unwrap();
+    std::fs::write(
+        dir.join("main_good.pkl"),
+        "import \"good.pkl\"\nall = good\n",
+    )
+    .unwrap();
+
+    let err = pklr::eval_to_json_async(&dir.join("main_bad.pkl"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("property 'ok' expected Int"), "{err}");
+    let val = pklr::eval_to_json_async(&dir.join("main_good.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["all"]["out"], "s");
 }

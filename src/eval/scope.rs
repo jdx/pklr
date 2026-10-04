@@ -39,6 +39,26 @@ pub(super) struct Scope {
     // same map type) can be used as a scope without copying them.
     pub(super) vars: Arc<FxIndexMap<Name, Value>>,
     pub(super) type_aliases: Arc<TypeAliasMap>,
+    /// Whether a type alias in this scope, or in a scope it was built over,
+    /// may have a built-in type's name (`typealias String = ...`). Without
+    /// one, a built-in type name needs no alias lookup. May over-approximate.
+    pub(super) shadows_builtin_type: bool,
+    /// Whether a type alias in this scope, or in a scope it was built over,
+    /// may mention `outer`, so a body must bind `outer` for its checks. May
+    /// over-approximate.
+    pub(super) aliases_mention_outer: bool,
+    /// Whether this scope belongs to a class definition's body, or to a
+    /// value an amendment amends with a body of its own (or an object body
+    /// nested in either). Declared types there are checked when an instance
+    /// is built, or by that amendment, against the final values. Not
+    /// captured: an instance's scopes, and modules imported meanwhile, start
+    /// without it.
+    pub(super) defining_class: bool,
+    /// Type names that resolve as no alias from this scope, whatever an
+    /// enclosing scope declares: a check scope restoring how a declared type
+    /// resolved before a later alias of the same name. Not inherited by
+    /// `child` (lookups from a child reach it anyway) and not captured.
+    pub(super) type_alias_barrier: Option<Arc<FxHashSet<String>>>,
     pub(super) module_identities: Arc<FxIndexMap<Name, String>>,
     pub(super) poisoned: Arc<FxIndexMap<Name, String>>,
     /// Names in `vars` or `poisoned` declared by an entry written in the body
@@ -104,6 +124,10 @@ impl Default for Scope {
         Self {
             vars: Arc::clone(&empty.vars),
             type_aliases: Arc::clone(&empty.type_aliases),
+            shadows_builtin_type: false,
+            aliases_mention_outer: false,
+            defining_class: false,
+            type_alias_barrier: None,
             module_identities: Arc::clone(&empty.strings),
             poisoned: Arc::clone(&empty.strings),
             declared: Arc::clone(&empty.declared),
@@ -130,6 +154,9 @@ impl Scope {
 
     pub(super) fn child(&self) -> Self {
         Self {
+            shadows_builtin_type: self.shadows_builtin_type,
+            aliases_mention_outer: self.aliases_mention_outer,
+            defining_class: self.defining_class,
             type_namespace: self.type_namespace.clone(),
             receiver_entries: self.receiver_entries.clone(),
             receiver_list_base: self.receiver_list_base,
@@ -321,18 +348,22 @@ impl Scope {
         name: impl Into<Name>,
         ty: impl Into<Arc<crate::parser::TypeExpr>>,
     ) {
-        Arc::make_mut(&mut self.type_aliases).insert(name.into(), ty.into());
+        let name = name.into();
+        let ty = ty.into();
+        if super::types::is_builtin_type_name(&name) {
+            self.shadows_builtin_type = true;
+        }
+        if type_mentions(&ty, "outer") {
+            self.aliases_mention_outer = true;
+        }
+        Arc::make_mut(&mut self.type_aliases).insert(name, ty);
     }
 
-    /// Whether a type alias visible from this scope mentions `name`. A type
+    /// Whether a type alias visible from this scope mentions `outer`. A type
     /// alias's constraint runs in the scope of the value being checked, so it
     /// can read bindings such as `outer` from wherever the check happens.
-    pub(super) fn type_aliases_mention(&self, name: &str) -> bool {
-        self.type_aliases.values().any(|ty| type_mentions(ty, name))
-            || self
-                .parent
-                .as_ref()
-                .is_some_and(|parent| parent.type_aliases_mention(name))
+    pub(super) fn type_aliases_mention_outer(&self) -> bool {
+        self.aliases_mention_outer
     }
 
     /// Whether any type alias is visible from this scope.
@@ -345,19 +376,33 @@ impl Scope {
     }
 
     pub(super) fn get_type_alias(&self, name: &str) -> Option<&crate::parser::TypeExpr> {
-        self.type_aliases
-            .get(name)
-            .map(|ty| &**ty)
-            .or_else(|| self.parent.as_ref().and_then(|p| p.get_type_alias(name)))
+        let mut scope = self;
+        loop {
+            if let Some(alias) = scope.type_aliases.get(name) {
+                return Some(&**alias);
+            }
+            if scope
+                .type_alias_barrier
+                .as_ref()
+                .is_some_and(|barrier| barrier.contains(name))
+            {
+                return None;
+            }
+            scope = scope.parent.as_deref()?;
+        }
     }
 
     pub(super) fn get(&self, name: &str) -> Option<&Value> {
-        if self.poisoned.contains_key(name) {
-            return None;
+        let mut scope = self;
+        loop {
+            if scope.poisoned.contains_key(name) {
+                return None;
+            }
+            if let Some(value) = scope.vars.get(name) {
+                return Some(value);
+            }
+            scope = scope.parent.as_deref()?;
         }
-        self.vars
-            .get(name)
-            .or_else(|| self.parent.as_ref().and_then(|p| p.get(name)))
     }
 
     pub(super) fn flatten(&self) -> ScopeMap {
@@ -406,6 +451,11 @@ impl Scope {
             .as_ref()
             .map(|p| p.flatten_type_aliases())
             .unwrap_or_default();
+        // Names this scope resolves as no alias (see `type_alias_barrier`)
+        // stay hidden from a captured copy too.
+        if let Some(barrier) = &self.type_alias_barrier {
+            result.retain(|name, _| !barrier.contains(&**name));
+        }
         result.extend(
             self.type_aliases
                 .iter()
@@ -812,6 +862,33 @@ impl EntryOwners {
         }
     }
 
+    /// Whether the scope `scope_for_object_entry` builds for this entry
+    /// resolves `name` lexically rather than to the object's member: the
+    /// entry's lexical scope declares it and the entry's own body does not.
+    /// This is the rule `update_object_bindings` applies.
+    pub(super) fn hides_member(
+        &self,
+        entry_index: usize,
+        entry_scopes: Option<&[Option<Arc<CapturedScope>>]>,
+        own_body: Option<(&Scope, &HashSet<String>)>,
+        name: &str,
+    ) -> bool {
+        if let Some(captured) = entry_scopes
+            .and_then(|scopes| scopes.get(entry_index))
+            .and_then(Option::as_ref)
+        {
+            let owned = self
+                .owners
+                .get(entry_index)
+                .is_some_and(|owned| owned.contains(name));
+            return !owned && self.restored(captured).is_declared(name);
+        }
+        match own_body {
+            Some((definition, owned)) => !owned.contains(name) && definition.is_declared(name),
+            None => false,
+        }
+    }
+
     fn restored(&self, captured: &Arc<CapturedScope>) -> Scope {
         self.restored
             .borrow_mut()
@@ -888,16 +965,19 @@ pub(super) fn own_body_names(
     entry_scopes: Option<&[Option<Arc<CapturedScope>>]>,
     inherited: Option<&ObjectSource>,
 ) -> Option<HashSet<String>> {
-    let entry_scopes = entry_scopes?;
-    let own = |entries: &[Entry], scopes: &[Option<Arc<CapturedScope>>]| {
+    #[inline]
+    fn own<'e>(
+        entries: &'e [Entry],
+        scopes: &'e [Option<Arc<CapturedScope>>],
+    ) -> impl Iterator<Item = String> + 'e {
         entries
             .iter()
             .enumerate()
             .filter(|(index, _)| scopes.get(*index).is_none_or(Option::is_none))
             .filter_map(|(_, entry)| entry_member_name(entry).cloned())
-            .collect::<Vec<_>>()
-    };
-    let mut names: HashSet<String> = own(entries, entry_scopes).into_iter().collect();
+    }
+    let entry_scopes = entry_scopes?;
+    let mut names: HashSet<String> = own(entries, entry_scopes).collect();
     if let Some(source) = inherited {
         names.extend(own(&source.entries, &source.entry_scopes));
         // Members an earlier amendment replaced are no longer in `entries`.
@@ -974,6 +1054,9 @@ fn update_object_bindings(
     scope.this_aliases = object.this_aliases.clone();
     // The scope's own maps for these start empty, so it can share the object's.
     scope.type_aliases = object.type_aliases.clone();
+    scope.shadows_builtin_type |= object.shadows_builtin_type;
+    scope.aliases_mention_outer |= object.aliases_mention_outer;
+    scope.defining_class |= object.defining_class;
     scope.module_identities = object.module_identities.clone();
 }
 

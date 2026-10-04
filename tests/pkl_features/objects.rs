@@ -1166,7 +1166,7 @@ x = "hello"
 
 #[test]
 fn typealias_with_constraint() {
-    // typealias with type constraint -- constraint is skipped but should parse
+    // typealias with type constraint parses; an untyped property is unaffected
     let json = eval(
         r#"
 typealias Port = Int(isBetween(1, 65535))
@@ -1174,6 +1174,1267 @@ x = 8080
 "#,
     );
     assert_eq!(json["x"], 8080);
+}
+
+#[test]
+fn typealias_constraint_accepts_satisfying_property() {
+    let json = eval(
+        r#"
+typealias IsB = String(this == "b")
+typealias AlsoB = IsB
+checked: IsB = "b"
+chained: AlsoB = "b"
+nullable: IsB? = null
+nullableSet: IsB? = "b"
+unionAlias: IsB|Int = "b"
+unionOther: IsB|Int = 3
+obj {
+  inner: IsB = "b"
+}
+"#,
+    );
+    assert_eq!(json["checked"], "b");
+    assert_eq!(json["chained"], "b");
+    assert_eq!(json["nullable"], serde_json::Value::Null);
+    assert_eq!(json["nullableSet"], "b");
+    assert_eq!(json["unionAlias"], "b");
+    assert_eq!(json["unionOther"], 3);
+    assert_eq!(json["obj"]["inner"], "b");
+}
+
+#[test]
+fn typealias_constraint_rejects_violating_property() {
+    let message = eval_fails(
+        r#"
+typealias IsB = String(this == "b")
+checked: IsB = "x"
+"#,
+    );
+    assert!(
+        message.contains("property 'checked' expected IsB"),
+        "{message}"
+    );
+}
+
+#[test]
+fn inline_constraint_rejects_violating_property() {
+    let message = eval_fails(r#"checked: String(this == "b") = "x""#);
+    assert!(message.contains("property 'checked' expected"), "{message}");
+}
+
+#[test]
+fn typealias_constraint_rejects_violating_nullable_and_union() {
+    let alias = "typealias IsB = String(this == \"b\")\n";
+    let message = eval_fails(&format!("{alias}checked: IsB? = \"x\""));
+    assert!(
+        message.contains("property 'checked' expected IsB?"),
+        "{message}"
+    );
+    let message = eval_fails(&format!("{alias}checked: IsB|Int = \"x\""));
+    assert!(
+        message.contains("property 'checked' expected IsB|Int"),
+        "{message}"
+    );
+}
+
+#[test]
+fn typealias_of_typealias_constraint_rejects_violating_property() {
+    let message = eval_fails(
+        r#"
+typealias IsB = String(this == "b")
+typealias AlsoB = IsB
+checked: AlsoB = "x"
+"#,
+    );
+    assert!(
+        message.contains("property 'checked' expected AlsoB"),
+        "{message}"
+    );
+}
+
+#[test]
+fn typealias_constraint_rejects_violating_object_property() {
+    let message = eval_fails(
+        r#"
+typealias IsB = String(this == "b")
+obj {
+  checked: IsB = "x"
+}
+"#,
+    );
+    assert!(
+        message.contains("property 'checked' expected IsB"),
+        "{message}"
+    );
+}
+
+#[test]
+fn typealias_constraint_on_unread_local_is_lazy() {
+    // A typed local is checked when read, so an unused violating local is fine
+    let json = eval(
+        r#"
+typealias IsB = String(this == "b")
+local unused: IsB = "x"
+local used: IsB = "b"
+out = used
+"#,
+    );
+    assert_eq!(json["out"], "b");
+    let message = eval_fails(
+        r#"
+typealias IsB = String(this == "b")
+local bad: IsB = "x"
+out = bad
+"#,
+    );
+    assert!(message.contains("property 'bad' expected IsB"), "{message}");
+}
+
+#[test]
+fn class_default_violating_constraint_is_checked_on_instance_only() {
+    // Overridden class defaults are never read, so they are not checked
+    let json = eval(
+        r#"
+typealias IsB = String(this == "b")
+class C {
+  v: IsB = "x"
+}
+c = new C { v = "b" }
+"#,
+    );
+    assert_eq!(json["c"]["v"], "b");
+    let message = eval_fails(
+        r#"
+typealias IsB = String(this == "b")
+class C {
+  v: IsB = "x"
+}
+c = new C {}
+"#,
+    );
+    assert!(message.contains("property 'v' expected IsB"), "{message}");
+}
+
+#[test]
+fn module_constraint_reads_later_property() {
+    let json = eval(
+        r#"
+checked: Int(this < limit) = 1
+limit = 2
+"#,
+    );
+    assert_eq!(json["checked"], 1);
+    let message = eval_fails(
+        r#"
+checked: Int(this < limit) = 3
+limit = 2
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+}
+
+#[test]
+fn object_constraint_reads_later_property() {
+    let json = eval(
+        r#"
+obj {
+  checked: Int(this < limit) = 1
+  limit = 2
+}
+"#,
+    );
+    assert_eq!(json["obj"]["checked"], 1);
+    let message = eval_fails(
+        r#"
+obj {
+  checked: Int(this < limit) = 3
+  limit = 2
+}
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+}
+
+#[test]
+fn local_constraint_reads_later_property() {
+    let json = eval(
+        r#"
+local checked: Int(this < limit) = 1
+limit = 2
+out = checked
+obj {
+  local inner: Int(this < limit) = 1
+  limit = 2
+  out = inner
+}
+"#,
+    );
+    assert_eq!(json["out"], 1);
+    assert_eq!(json["obj"]["out"], 1);
+}
+
+#[test]
+fn alias_of_unmodeled_generic_is_not_checked() {
+    let json = eval(
+        r#"
+typealias F = Function1<String, String>
+f: F = (x) -> x
+out = f.apply("ok")
+"#,
+    );
+    assert_eq!(json["out"], "ok");
+}
+
+#[test]
+fn amendment_declared_property_is_checked() {
+    let message = eval_fails(
+        r#"
+base {}
+obj = (base) { checked: Int = "x" }
+"#,
+    );
+    assert!(
+        message.contains("property 'checked' expected Int"),
+        "{message}"
+    );
+    let json = eval(
+        r#"
+base { limit = 2 }
+obj = (base) { checked: Int(this < limit) = 1 }
+"#,
+    );
+    assert_eq!(json["obj"]["checked"], 1);
+}
+
+#[test]
+fn amendment_constraint_reads_sibling_added_by_amendment() {
+    let json = eval(
+        r#"
+base {}
+obj = (base) {
+  checked: Int(this < limit) = 1
+  limit: Int = 2
+  hidden secret: Int(this < limit) = 0
+}
+"#,
+    );
+    assert_eq!(json["obj"]["checked"], 1);
+    assert_eq!(json["obj"]["limit"], 2);
+    let message = eval_fails(
+        r#"
+base {}
+obj = (base) {
+  checked: Int(this < limit) = 3
+  limit: Int = 2
+}
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+}
+
+#[test]
+fn local_checked_against_alias_declared_later() {
+    let message = eval_fails(
+        r#"
+local bad: IsB = "x"
+typealias IsB = String(this == "b")
+out = bad
+"#,
+    );
+    assert!(message.contains("property 'bad' expected IsB"), "{message}");
+}
+
+#[test]
+fn typed_local_in_untaken_branch_is_not_checked() {
+    let json = eval(
+        r#"
+local bad: Int = "x"
+out = if (false) bad else 1
+"#,
+    );
+    assert_eq!(json["out"], 1);
+    let json = eval(
+        r#"
+obj {
+  local bad: Int = "x"
+  out = if (false) bad else 1
+}
+"#,
+    );
+    assert_eq!(json["obj"]["out"], 1);
+    // Through another local, too.
+    let json = eval(
+        r#"
+local bad: Int = "x"
+local viaLocal = if (false) bad else 2
+out = viaLocal
+"#,
+    );
+    assert_eq!(json["out"], 2);
+}
+
+#[test]
+fn typed_local_in_taken_branch_is_checked() {
+    let message = eval_fails(
+        r#"
+local bad: Int = "x"
+out = if (true) bad else 1
+"#,
+    );
+    assert!(message.contains("property 'bad' expected Int"), "{message}");
+    let message = eval_fails(
+        r#"
+obj {
+  local bad: Int = "x"
+  out = if (true) bad else 1
+}
+"#,
+    );
+    assert!(message.contains("property 'bad' expected Int"), "{message}");
+    let message = eval_fails(
+        r#"
+local bad: Int = "x"
+local viaLocal = bad
+out = viaLocal
+"#,
+    );
+    assert!(message.contains("property 'bad' expected Int"), "{message}");
+}
+
+#[test]
+fn amendment_constraint_reads_amendment_locals_and_aliases() {
+    let json = eval(
+        r#"
+base {}
+obj = (base) { local limit = 2; checked: Int(this < limit) = 1 }
+"#,
+    );
+    assert_eq!(json["obj"]["checked"], 1);
+    let message = eval_fails(
+        r#"
+base {}
+obj = (base) { local limit = 2; checked: Int(this < limit) = 3 }
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+    let message = eval_fails(
+        r#"
+base {}
+obj = (base) {
+  typealias Small = Int(this < 2)
+  checked: Small = 3
+}
+"#,
+    );
+    assert!(
+        message.contains("property 'checked' expected Small"),
+        "{message}"
+    );
+}
+
+#[test]
+fn amendment_typed_local_is_checked_when_read() {
+    let message = eval_fails(
+        r#"
+typealias IsB = String(this == "b")
+base {}
+obj = (base) { local bad: IsB = "x"; out = bad }
+"#,
+    );
+    assert!(message.contains("property 'bad' expected IsB"), "{message}");
+    let json = eval(
+        r#"
+typealias IsB = String(this == "b")
+base {}
+obj = (base) { local bad: IsB = "x"; out = if (false) bad else 1 }
+"#,
+    );
+    assert_eq!(json["obj"]["out"], 1);
+}
+
+#[test]
+fn typed_local_read_by_earlier_declared_reader_is_checked() {
+    // The reader appears before the local it reads through.
+    let message = eval_fails(
+        r#"
+local bad: Int = "x"
+out = viaLocal
+local viaLocal = bad
+"#,
+    );
+    assert!(message.contains("property 'bad' expected Int"), "{message}");
+}
+
+#[test]
+fn typed_local_read_through_called_function_is_checked() {
+    let message = eval_fails(
+        r#"
+local bad: Int = "x"
+function f() = bad
+out = f()
+"#,
+    );
+    assert!(message.contains("property 'bad' expected Int"), "{message}");
+    let message = eval_fails(
+        r#"
+local bad: Int = "x"
+f = (x) -> bad
+out = f.apply(0)
+"#,
+    );
+    assert!(message.contains("property 'bad' expected Int"), "{message}");
+    // A function that is never called does not read the local.
+    let json = eval(
+        r#"
+local bad: Int = "x"
+local function f() = bad
+out = 1
+"#,
+    );
+    assert_eq!(json["out"], 1);
+}
+
+#[test]
+fn typed_local_read_by_constraint_is_checked() {
+    let message = eval_fails(
+        r#"
+local bad: Int = "x"
+checked: Int(this == bad) = 1
+"#,
+    );
+    assert!(message.contains("property 'bad' expected Int"), "{message}");
+}
+
+#[test]
+fn generator_constraint_reads_later_object_member() {
+    let json = eval(
+        r#"
+obj { when (true) { checked: Int(this < limit) = 1 }; limit = 2 }
+"#,
+    );
+    assert_eq!(json["obj"]["checked"], 1);
+    let json = eval(
+        r#"
+obj { for (x in List(1)) { checked: Int(this < limit) = x }; limit = 2 }
+"#,
+    );
+    assert_eq!(json["obj"]["checked"], 1);
+    let message = eval_fails(
+        r#"
+obj { for (x in List(5)) { checked: Int(this < limit) = x }; limit = 2 }
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+}
+
+#[test]
+fn deferred_local_check_fails_only_when_read() {
+    // The constraint reads a property bound after the local, so its check
+    // waits for the module to be complete.
+    let message = eval_fails(
+        r#"
+local x: Int(this < limit) = 3
+limit = 2
+out = x
+"#,
+    );
+    assert!(message.contains("property 'x' expected"), "{message}");
+    let json = eval(
+        r#"
+local x: Int(this < limit) = 3
+limit = 2
+out = 1
+"#,
+    );
+    assert_eq!(json["out"], 1);
+}
+
+#[test]
+fn local_constraint_uses_finished_member_over_outer_binding() {
+    // The object's own `limit` replaces the outer one, in both directions.
+    let json = eval(
+        r#"
+limit = 0
+obj { local checked: Int(this < limit) = 1; limit = 2; out = checked }
+"#,
+    );
+    assert_eq!(json["obj"]["out"], 1);
+    let message = eval_fails(
+        r#"
+limit = 10
+obj { local checked: Int(this < limit) = 3; limit = 2; out = checked }
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+}
+
+#[test]
+fn parameter_named_like_failed_local_is_not_a_read() {
+    let json = eval(
+        r#"
+local bad: Int(this < limit) = 3
+f = (bad) -> bad
+limit = 2
+out = f.apply(0)
+"#,
+    );
+    assert_eq!(json["out"], 0);
+}
+
+#[test]
+fn checking_an_unused_local_does_not_read_another() {
+    let json = eval(
+        r#"
+local bad: Int(this < limit) = 3
+local unused: Int(this == bad) = 3
+limit = 2
+out = 1
+"#,
+    );
+    assert_eq!(json["out"], 1);
+    // Reading `unused` runs its constraint, which reads the failed `bad`.
+    let message = eval_fails(
+        r#"
+local bad: Int(this < limit) = 3
+local unused: Int(this == bad) = 3
+limit = 2
+out = unused
+"#,
+    );
+    assert!(message.contains("property 'bad' expected"), "{message}");
+}
+
+#[test]
+fn deferred_local_read_before_member_is_bound_is_checked() {
+    let message = eval_fails(
+        r#"
+local x: Int(this < limit) = 3
+out = x
+limit = 2
+"#,
+    );
+    assert!(message.contains("property 'x' expected"), "{message}");
+    let json = eval(
+        r#"
+local x: Int(this < limit) = 1
+out = x
+limit = 2
+"#,
+    );
+    assert_eq!(json["out"], 1);
+}
+
+#[test]
+fn generator_constraint_uses_finished_member_over_outer_binding() {
+    let message = eval_fails(
+        r#"
+limit = 10
+obj { when (true) { checked: Int(this < limit) = 3 }; limit = 2 }
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+    let message = eval_fails(
+        r#"
+limit = 10
+obj { for (x in List(3)) { checked: Int(this < limit) = x }; limit = 2 }
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+    // Loop variables and generator-body locals still win over members.
+    let json = eval(
+        r#"
+obj {
+  x = 100
+  for (x in List(3)) { checked: Int(this == x) = 3 }
+}
+other {
+  for (x in List(3)) { local y = x; checked: Int(this == y) = 3 }
+}
+"#,
+    );
+    assert_eq!(json["obj"]["checked"], 3);
+    assert_eq!(json["other"]["checked"], 3);
+}
+
+#[test]
+fn generator_check_keeps_type_alias_declared_in_generator() {
+    let message = eval_fails(
+        r#"
+obj { when (true) { typealias Small = Int(this < 2); checked: Small = 3 } }
+"#,
+    );
+    assert!(
+        message.contains("property 'checked' expected Small"),
+        "{message}"
+    );
+    let json = eval(
+        r#"
+obj { when (true) { typealias Small = Int(this < 5); checked: Small = 3 } }
+"#,
+    );
+    assert_eq!(json["obj"]["checked"], 3);
+}
+
+#[test]
+fn nested_generator_check_keeps_enclosing_generator_locals() {
+    let message = eval_fails(
+        r#"
+obj { for (x in List(1)) { local lim = 2; when (true) { checked: Int(this < lim) = 3 } } }
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+    let json = eval(
+        r#"
+obj { for (x in List(1)) { local lim = 5; when (true) { checked: Int(this < lim) = 3 } } }
+"#,
+    );
+    assert_eq!(json["obj"]["checked"], 3);
+}
+
+#[test]
+fn generator_check_keeps_failed_generator_local_failed() {
+    // The failed local must not fall through to the outer `lim`.
+    let message = eval_fails(
+        r#"
+lim = 10
+obj { for (x in List(1)) { local lim: Int = "x"; checked: Int(this < lim) = 3 } }
+"#,
+    );
+    assert!(message.contains("property 'lim' expected Int"), "{message}");
+}
+
+#[test]
+fn local_constraint_reads_generator_produced_member() {
+    let message = eval_fails(
+        r#"
+obj { local checked: Int(this < limit) = 3; when (true) { limit = 2 }; out = checked }
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+    let json = eval(
+        r#"
+obj { local checked: Int(this < limit) = 1; when (true) { limit = 2 }; out = checked }
+"#,
+    );
+    assert_eq!(json["obj"]["out"], 1);
+}
+
+#[test]
+fn deferred_local_check_prefers_enclosing_binding_over_inherited_member() {
+    // The enclosing `local limit = 2` wins over the inherited `limit = 10`.
+    let message = eval_fails(
+        r#"
+local limit = 2
+base { limit = 10 }
+obj = (base) { local checked: Int(this < limit) = 3; out = checked }
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+    let json = eval(
+        r#"
+local limit = 5
+base { limit = 1 }
+obj = (base) { local checked: Int(this < limit) = 3; out = checked }
+"#,
+    );
+    assert_eq!(json["obj"]["out"], 3);
+}
+
+#[test]
+fn class_typed_local_is_checked_only_when_an_instance_reads_it() {
+    // The instance overrides `v`, so `bad` is never read.
+    let json = eval(
+        r#"
+class C { local bad: Int = "x"; v = bad }
+c = new C { v = 1 }
+"#,
+    );
+    assert_eq!(json["c"]["v"], 1);
+    let message = eval_fails(
+        r#"
+class C { local bad: Int = "x"; v = bad }
+c = new C {}
+"#,
+    );
+    assert!(message.contains("property 'bad' expected Int"), "{message}");
+}
+
+#[test]
+fn deferred_local_check_keeps_same_body_local_over_inherited_member() {
+    let message = eval_fails(
+        r#"
+base { limit = 10 }
+obj = (base) { local limit = 2; local checked: Int(this < limit) = 3; out = checked }
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+    let json = eval(
+        r#"
+base { limit = 1 }
+obj = (base) { local limit = 5; local checked: Int(this < limit) = 3; out = checked }
+"#,
+    );
+    assert_eq!(json["obj"]["out"], 3);
+}
+
+#[test]
+fn generator_check_keeps_enclosing_binding_over_base_generated_member() {
+    let message = eval_fails(
+        r#"
+local limit = 2
+base { when (true) { limit = 10 } }
+obj = (base) { when (true) { checked: Int(this < limit) = 3 } }
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+    let json = eval(
+        r#"
+local limit = 5
+base { when (true) { limit = 1 } }
+obj = (base) { when (true) { checked: Int(this < limit) = 3 } }
+"#,
+    );
+    assert_eq!(json["obj"]["checked"], 3);
+}
+
+#[test]
+fn deferred_local_check_uses_member_replaced_by_later_generator() {
+    let message = eval_fails(
+        r#"
+base { limit = 5 }
+first = (base) { local checked: Int(this < limit) = 3; out = checked }
+second = (first) { when (true) { limit = 2 } }
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+    let json = eval(
+        r#"
+base { limit = 5 }
+first = (base) { local checked: Int(this < limit) = 3; out = checked }
+second = (first) { when (true) { limit = 4 } }
+"#,
+    );
+    assert_eq!(json["second"]["out"], 3);
+}
+
+#[test]
+fn object_local_naming_later_body_alias_is_checked_when_read() {
+    let message = eval_fails(
+        r#"
+obj { local bad: Small = 3; typealias Small = Int(this < 2); out = bad }
+"#,
+    );
+    assert!(
+        message.contains("property 'bad' expected Small"),
+        "{message}"
+    );
+    let json = eval(
+        r#"
+obj { local ok: Small = 1; typealias Small = Int(this < 2); out = ok }
+other { local bad: Small = 3; typealias Small = Int(this < 2); out = 1 }
+"#,
+    );
+    assert_eq!(json["obj"]["out"], 1);
+    assert_eq!(json["other"]["out"], 1);
+    // A name that already resolves keeps that meaning: the module's alias.
+    let json = eval(
+        r#"
+typealias Small = Int(this < 5)
+obj { local x: Small = 3; typealias Small = Int(this < 2); out = x }
+"#,
+    );
+    assert_eq!(json["obj"]["out"], 3);
+}
+
+#[test]
+fn direct_property_constraint_reads_generated_sibling() {
+    let message = eval_fails(
+        r#"
+limit = 10
+obj { checked: Int(this < limit) = 3; when (true) { limit = 2 } }
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+    let json = eval(
+        r#"
+obj { checked: Int(this < limit) = 1; when (true) { limit = 2 } }
+"#,
+    );
+    assert_eq!(json["obj"]["checked"], 1);
+}
+
+#[test]
+fn deferred_local_keeps_alias_resolved_where_bound() {
+    // `x` was declared as the module's `Small`; the object's later `Small`
+    // does not change that, while `limit` is still read from the object.
+    let json = eval(
+        r#"
+typealias Small = Int(this < limit)
+limit = 5
+obj {
+  local x: Small = 3
+  typealias Small = Int(this < 2)
+  limit = 5
+  out = x
+}
+"#,
+    );
+    assert_eq!(json["obj"]["out"], 3);
+    let message = eval_fails(
+        r#"
+typealias Small = Int(this < limit)
+limit = 5
+obj {
+  local x: Small = 3
+  typealias Small = Int(this < 2)
+  limit = 2
+  out = x
+}
+"#,
+    );
+    assert!(message.contains("property 'x' expected Small"), "{message}");
+}
+
+#[test]
+fn object_property_constraint_reading_later_enclosing_member_is_unchecked() {
+    // `limit` is a member of the module bound after `obj`, so the check
+    // cannot be decided when `obj` is complete and is left unchecked.
+    let json = eval(
+        r#"
+obj { checked: Int(this < limit) = 1 }
+limit = 2
+"#,
+    );
+    assert_eq!(json["obj"]["checked"], 1);
+    // A violation that can be decided still fails.
+    let message = eval_fails(
+        r#"
+obj { checked: Int(this < 2) = 3 }
+limit = 2
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+}
+
+#[test]
+fn typed_local_through_alias_of_later_alias_is_checked() {
+    // `A` is bound when the local is, but reaches `B`, declared later.
+    let message = eval_fails(
+        r#"
+typealias A = B
+local bad: A = "x"
+typealias B = Int
+out = bad
+"#,
+    );
+    assert!(message.contains("property 'bad' expected A"), "{message}");
+    let message = eval_fails(
+        r#"
+obj { typealias A = B; local bad: A = "x"; typealias B = Int; out = bad }
+"#,
+    );
+    assert!(message.contains("property 'bad' expected A"), "{message}");
+    let json = eval(
+        r#"
+typealias A = B
+local ok: A = 1
+local unread: A = "x"
+typealias B = Int
+out = ok
+"#,
+    );
+    assert_eq!(json["out"], 1);
+}
+
+#[test]
+fn generator_check_follows_outer_alias_to_generator_declaration() {
+    let message = eval_fails(
+        r#"
+typealias A = B
+obj { when (true) { typealias B = Int; checked: A = "x" } }
+"#,
+    );
+    assert!(
+        message.contains("property 'checked' expected A"),
+        "{message}"
+    );
+    let message = eval_fails(
+        r#"
+typealias A = C
+obj { when (true) { class C { v = 1 }; checked: A = "x" } }
+"#,
+    );
+    assert!(
+        message.contains("property 'checked' expected A"),
+        "{message}"
+    );
+    let json = eval(
+        r#"
+typealias A = B
+typealias D = C
+obj { when (true) { typealias B = Int; checked: A = 1 } }
+other { when (true) { class C { v = 1 }; checked: D = new C {} } }
+"#,
+    );
+    assert_eq!(json["obj"]["checked"], 1);
+    assert_eq!(json["other"]["checked"]["v"], 1);
+}
+
+#[test]
+fn generator_check_keeps_alias_named_in_constraint() {
+    let json = eval(
+        r#"
+obj { when (true) { typealias Small = Int(this < 2); checked: Int(this is Small) = 1 } }
+"#,
+    );
+    assert_eq!(json["obj"]["checked"], 1);
+    let message = eval_fails(
+        r#"
+obj { when (true) { typealias Small = Int(this < 2); checked: Int(this is Small) = 3 } }
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+}
+
+#[test]
+fn later_alias_does_not_capture_builtin_type_of_typed_local() {
+    // In an object body, `Int` is the built-in where the local is bound; a
+    // later alias of the same name does not change that. A module's alias
+    // applies throughout the module, as in Pkl.
+    let json = eval(
+        r#"
+local bad: Int = "x"
+typealias Int = String
+out = bad
+"#,
+    );
+    assert_eq!(json["out"], "x");
+    let message = eval_fails(
+        r#"
+obj { local bad: Int = "x"; typealias Int = String; out = bad }
+"#,
+    );
+    assert!(message.contains("property 'bad' expected Int"), "{message}");
+    // A later alias of a name that resolves to nothing yet still applies.
+    let message = eval_fails(
+        r#"
+local bad: Later = "x"
+typealias Later = Int
+out = bad
+"#,
+    );
+    assert!(
+        message.contains("property 'bad' expected Later"),
+        "{message}"
+    );
+    let json = eval(
+        r#"
+obj { local ok: Later = 1; typealias Later = Int; out = ok }
+"#,
+    );
+    assert_eq!(json["obj"]["out"], 1);
+}
+
+#[test]
+fn typed_local_refreshed_after_module_member_is_still_checked() {
+    // `bad` reads a class that reads `module`, so it is evaluated again once
+    // `limit` is bound; that re-evaluation is checked like the first.
+    let message = eval_fails(
+        r#"
+class C { v = module.limit }
+local bad: String = new C {}.v
+limit = 2
+out = bad
+"#,
+    );
+    assert!(
+        message.contains("property 'bad' expected String"),
+        "{message}"
+    );
+    let json = eval(
+        r#"
+class C { v = module.limit }
+local ok: Int = new C {}.v
+local unread: String = new C {}.v
+limit = 2
+out = ok
+"#,
+    );
+    assert_eq!(json["out"], 2);
+    // A deferred check (its constraint reads `limit`) sees the refreshed
+    // value as well.
+    let message = eval_fails(
+        r#"
+class C { v = module.limit }
+local bad: Int(this < limit) = new C {}.v + 5
+limit = 2
+out = bad
+"#,
+    );
+    assert!(message.contains("property 'bad' expected"), "{message}");
+}
+
+#[test]
+fn typed_local_of_later_class_is_checked_when_read() {
+    let message = eval_fails(
+        r#"
+local bad: C = 1
+class C {}
+out = bad
+"#,
+    );
+    assert!(message.contains("property 'bad' expected C"), "{message}");
+    let message = eval_fails(
+        r#"
+obj { local bad: C = 1; class C {}; out = bad }
+"#,
+    );
+    assert!(message.contains("property 'bad' expected C"), "{message}");
+    let json = eval(
+        r#"
+local unread: C = 1
+local ok: C? = null
+class C {}
+out = ok
+"#,
+    );
+    assert!(json["out"].is_null());
+}
+
+#[test]
+fn generator_typed_local_constraint_reads_enclosing_later_member() {
+    let message = eval_fails(
+        r#"
+limit = 10
+obj { when (true) { local bad: Int(this < limit) = 3; out = bad }; limit = 2 }
+"#,
+    );
+    assert!(message.contains("property 'bad' expected"), "{message}");
+    let message = eval_fails(
+        r#"
+obj { for (x in List(3)) { local bad: Int(this < limit) = x; out = bad }; limit = 2 }
+"#,
+    );
+    assert!(message.contains("property 'bad' expected"), "{message}");
+    // The reversed values pass, and an unread failing local does not fail.
+    let json = eval(
+        r#"
+limit = 0
+obj { when (true) { local ok: Int(this < limit) = 1; out = ok }; limit = 2 }
+other { when (true) { local bad: Int(this < limit) = 3; out = 1 }; limit = 2 }
+"#,
+    );
+    assert_eq!(json["obj"]["out"], 1);
+    assert_eq!(json["other"]["out"], 1);
+    // The object's own local of the same name is a different local.
+    let json = eval(
+        r#"
+obj {
+  local bad: Int = 1
+  when (true) { local bad: Int(this < limit) = 3; other = 1 }
+  limit = 2
+  out = bad
+}
+"#,
+    );
+    assert_eq!(json["obj"]["out"], 1);
+}
+
+#[test]
+fn generator_local_failing_in_unread_iteration_does_not_poison_read_one() {
+    // Only the iteration whose value passes (bad = 1) is read.
+    let json = eval(
+        r#"
+obj {
+  for (x in List(1, 3)) { local bad: Int(this < limit) = x; when (x == 1) { out = bad } }
+  limit = 2
+}
+"#,
+    );
+    assert_eq!(json["obj"]["out"], 1);
+    // The read iteration fails.
+    let message = eval_fails(
+        r#"
+obj {
+  for (x in List(1, 3)) { local bad: Int(this < limit) = x; when (x == 3) { out = bad } }
+  limit = 2
+}
+"#,
+    );
+    assert!(message.contains("property 'bad' expected"), "{message}");
+    // Iterations of nested generators are told apart too.
+    let json = eval(
+        r#"
+obj {
+  for (x in List(1)) {
+    for (y in List(1, 5)) { local v: Int(this < limit) = y; when (y == 1) { out = v } }
+  }
+  limit = 2
+}
+"#,
+    );
+    assert_eq!(json["obj"]["out"], 1);
+}
+
+#[test]
+fn alias_shadowing_builtin_name_is_resolved_first() {
+    // `String` here is an alias of `Function1`, which is not checked.
+    let json = eval(
+        r#"
+typealias String = Function1<String, String>
+f: String = (x) -> x
+out = f.apply("y")
+"#,
+    );
+    assert_eq!(json["out"], "y");
+}
+
+#[test]
+fn amendment_keeps_inherited_typed_local_lazy() {
+    let json = eval(
+        r#"
+base { local bad: Int = "x" }
+obj = (base) {}
+"#,
+    );
+    assert_eq!(json["obj"], serde_json::json!({}));
+    let message = eval_fails(
+        r#"
+base { local bad: Int = "x"; out = bad }
+obj = (base) {}
+"#,
+    );
+    assert!(message.contains("property 'bad' expected Int"), "{message}");
+}
+
+#[test]
+fn generator_check_reads_sibling_from_another_generator() {
+    let message = eval_fails(
+        r#"
+obj {
+  when (true) { limit = 2 }
+  when (true) { checked: Int(this < limit) = 3 }
+}
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+    let json = eval(
+        r#"
+obj {
+  when (true) { limit = 5 }
+  when (true) { checked: Int(this < limit) = 3 }
+}
+"#,
+    );
+    assert_eq!(json["obj"]["checked"], 3);
+}
+
+#[test]
+fn generator_check_prefers_generated_member_over_outer_binding() {
+    let message = eval_fails(
+        r#"
+limit = 10
+obj {
+  when (true) { limit = 2 }
+  when (true) { checked: Int(this < limit) = 3 }
+}
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+    let json = eval(
+        r#"
+limit = 0
+obj {
+  when (true) { limit = 5 }
+  when (true) { checked: Int(this < limit) = 3 }
+}
+"#,
+    );
+    assert_eq!(json["obj"]["checked"], 3);
+}
+
+#[test]
+fn class_generator_property_is_checked_on_instance() {
+    let message = eval_fails(
+        r#"
+typealias IsB = String(this == "b")
+class C { for (x in List(1)) { v: IsB = "x" } }
+c = new C {}
+"#,
+    );
+    assert!(message.contains("property 'v' expected IsB"), "{message}");
+    let json = eval(
+        r#"
+typealias IsB = String(this == "b")
+class C { for (x in List(1)) { v: IsB = "b" } }
+c = new C {}
+"#,
+    );
+    assert_eq!(json["c"]["v"], "b");
+}
+
+#[test]
+fn class_generator_default_overridden_by_instance_passes() {
+    let json = eval(
+        r#"
+class C { for (x in List(1)) { v: Int = "x" } }
+c = new C { v = 1 }
+"#,
+    );
+    assert_eq!(json["c"]["v"], 1);
+    let message = eval_fails(
+        r#"
+class C { for (x in List(1)) { v: Int = "x" } }
+c = new C {}
+"#,
+    );
+    assert!(message.contains("property 'v' expected Int"), "{message}");
+}
+
+#[test]
+fn amendment_generator_declared_property_is_checked() {
+    let message = eval_fails(
+        r#"
+base {}
+obj = (base) {
+  for (x in List(1)) {
+    checked: Int = "x"
+  }
+}
+"#,
+    );
+    assert!(
+        message.contains("property 'checked' expected Int"),
+        "{message}"
+    );
+    let message = eval_fails(
+        r#"
+base {}
+obj = (base) {
+  when (true) {
+    checked: Int = "x"
+  }
+}
+"#,
+    );
+    assert!(
+        message.contains("property 'checked' expected Int"),
+        "{message}"
+    );
+    // The same declaration in a plain object body is rejected as well.
+    let message = eval_fails(
+        r#"
+obj {
+  for (x in List(1)) {
+    checked: Int = "x"
+  }
+}
+"#,
+    );
+    assert!(
+        message.contains("property 'checked' expected Int"),
+        "{message}"
+    );
 }
 
 #[test]
@@ -3621,4 +4882,556 @@ obj {
 "#,
     );
     assert_eq!(json["obj"]["ok"], true);
+}
+
+#[test]
+fn typed_local_constraint_uses_late_bound_local_function() {
+    // The local function reads `limit`, which the body overrides after it:
+    // the deferred check must use the function bound to the final `limit`.
+    let err = eval_fails(
+        r#"
+limit = 10
+obj {
+  local helper = (x) -> x < limit
+  local checked: Int(helper(this)) = 3
+  limit = 2
+  out = checked
+}
+"#,
+    );
+    assert!(err.contains("checked"), "{err}");
+    let json = eval(
+        r#"
+limit = 0
+obj {
+  local helper = (x) -> x < limit
+  local checked: Int(helper(this)) = 1
+  limit = 2
+  out = checked
+}
+"#,
+    );
+    assert_eq!(json["obj"]["out"], 1);
+}
+
+#[test]
+fn module_typed_local_constraint_uses_late_bound_local_function() {
+    let err = eval_fails(
+        r#"
+local helper = (x) -> x < limit
+local checked: Int(helper(this)) = 3
+limit = 2
+out = checked
+"#,
+    );
+    assert!(err.contains("checked"), "{err}");
+    let json = eval(
+        r#"
+local helper = (x) -> x < limit
+local checked: Int(helper(this)) = 1
+limit = 2
+out = checked
+"#,
+    );
+    assert_eq!(json["out"], 1);
+}
+
+#[test]
+fn generator_typed_local_constraint_uses_late_bound_local_function() {
+    let err = eval_fails(
+        r#"
+limit = 10
+obj {
+  when (true) {
+    local helper = (x) -> x < limit
+    local checked: Int(helper(this)) = 3
+    out = checked
+  }
+  limit = 2
+}
+"#,
+    );
+    assert!(err.contains("checked"), "{err}");
+    let json = eval(
+        r#"
+limit = 0
+obj {
+  when (true) {
+    local helper = (x) -> x < limit
+    local checked: Int(helper(this)) = 1
+    out = checked
+  }
+  limit = 2
+}
+"#,
+    );
+    assert_eq!(json["obj"]["out"], 1);
+}
+
+#[test]
+fn class_default_nested_object_is_checked_against_instance_values() {
+    // A nested object's default is checked once the instance is built,
+    // against what the instance amends it to.
+    let json = eval(
+        r#"
+class C { o { v: Int = "x" } }
+c = new C { o { v = 1 } }
+"#,
+    );
+    assert_eq!(json["c"]["o"]["v"], 1);
+    let err = eval_fails(
+        r#"
+class C { o { v: Int = "x" } }
+c = new C {}
+out = c.o.v
+"#,
+    );
+    assert!(err.contains("property 'v' expected Int"), "{err}");
+    let err = eval_fails(
+        r#"
+class C { o { v: Int = "x" } }
+c = new C { o { w = 1 } }
+"#,
+    );
+    assert!(err.contains("property 'v' expected Int"), "{err}");
+    let err = eval_fails(
+        r#"
+class C { o { v: Int = 1 } }
+c = new C { o { v = "y" } }
+"#,
+    );
+    assert!(err.contains("property 'v' expected Int"), "{err}");
+}
+
+#[test]
+fn class_default_deeply_nested_object_is_checked_against_instance_values() {
+    let json = eval(
+        r#"
+class C { o { p { v: Int = "x" } } }
+c = new C { o { p { v = 1 } } }
+d = (c) { o { w = 2 } }
+"#,
+    );
+    assert_eq!(json["c"]["o"]["p"]["v"], 1);
+    assert_eq!(json["d"]["o"]["p"]["v"], 1);
+    let err = eval_fails(
+        r#"
+class C { o { p { v: Int = "x" } } }
+c = new C { o { p { w = 1 } } }
+"#,
+    );
+    assert!(err.contains("property 'v' expected Int"), "{err}");
+    let json = eval(
+        r#"
+class C { o: Dynamic = new Dynamic { v: Int = "x" } }
+c = new C { o { v = 1 } }
+"#,
+    );
+    assert_eq!(json["c"]["o"]["v"], 1);
+}
+
+#[test]
+fn amended_nested_object_keeps_checking_its_declared_types() {
+    let err = eval_fails(
+        r#"
+a { o { p { v: Int = 1 } } }
+b = (a) { o { p { v = "y" } } }
+"#,
+    );
+    assert!(err.contains("property 'v' expected Int"), "{err}");
+    let err = eval_fails(
+        r#"
+a { o { v: Int = 1 } }
+b = (a) { o { w = 3 } }
+c = (b) { o { v = "y" } }
+"#,
+    );
+    assert!(err.contains("property 'v' expected Int"), "{err}");
+    let json = eval(
+        r#"
+a { o { v: Int = 1 } }
+b = (a) { o { w = 3 } }
+c = (b) { o { v = 2 } }
+"#,
+    );
+    assert_eq!(json["c"]["o"], serde_json::json!({"v": 2, "w": 3}));
+}
+
+#[test]
+fn generic_type_alias_is_checked_as_its_target() {
+    let err = eval_fails("typealias Ls<T> = List<T>\nx: Ls<Int> = 5");
+    assert!(err.contains("property 'x' expected Ls<Int>"), "{err}");
+    let json = eval("typealias Ls<T> = List<T>\nx: Ls<Int> = List(1)");
+    assert_eq!(json["x"], serde_json::json!([1]));
+    let err = eval_fails("typealias Ls<T> = List<T>(length > 1)\nx: Ls<Int> = List(1)");
+    assert!(err.contains("property 'x' expected Ls<Int>"), "{err}");
+    let json = eval("typealias Ls<T> = List<T>(length > 1)\nx: Ls<Int> = List(1, 2)");
+    assert_eq!(json["x"], serde_json::json!([1, 2]));
+}
+
+#[test]
+fn type_alias_shadowing_a_generic_collection_is_resolved() {
+    // `Listing<Int>` names the alias, not the built-in collection.
+    let err = eval_fails("typealias Listing = String\nx: Listing<Int> = 5");
+    assert!(err.contains("property 'x' expected Listing<Int>"), "{err}");
+    let json = eval("typealias Listing = String\nx: Listing<Int> = \"a\"");
+    assert_eq!(json["x"], "a");
+}
+
+#[test]
+fn typed_local_constrained_generic_alias_reads_later_member() {
+    // The alias's constraint reads `limit`, which the body sets after the
+    // local: the local is checked against the finished body.
+    for alias in [
+        "typealias Small<T> = List<T>(length < limit)",
+        "typealias Small<T> = List<T>(this.every((x) -> x < limit))",
+    ] {
+        let err = eval_fails(&format!(
+            "{alias}\nlimit = 10\nobj {{\n  local checked: Small<Int> = List(1, 2, 3)\n  limit = 2\n  out = checked\n}}\n"
+        ));
+        assert!(err.contains("checked"), "{alias}: {err}");
+        let json = eval(&format!(
+            "{alias}\nlimit = 0\nobj {{\n  local checked: Small<Int> = List(1)\n  limit = 2\n  out = checked\n}}\n"
+        ));
+        assert_eq!(json["obj"]["out"], serde_json::json!([1]), "{alias}");
+    }
+}
+
+#[test]
+fn generator_property_constrained_generic_alias_reads_later_member() {
+    for alias in [
+        "typealias Small<T> = List<T>(length < limit)",
+        "typealias Small<T> = List<T>(this.every((x) -> x < limit))",
+    ] {
+        let err = eval_fails(&format!(
+            "{alias}\nlimit = 10\nobj {{\n  when (true) {{\n    p: Small<Int> = List(1, 2, 3)\n  }}\n  limit = 2\n}}\n"
+        ));
+        assert!(err.contains("property 'p'"), "{alias}: {err}");
+        let json = eval(&format!(
+            "{alias}\nlimit = 0\nobj {{\n  when (true) {{\n    p: Small<Int> = List(1)\n  }}\n  limit = 2\n}}\n"
+        ));
+        assert_eq!(json["obj"]["p"], serde_json::json!([1]), "{alias}");
+    }
+}
+
+#[test]
+fn generator_check_saves_what_a_local_function_reads() {
+    // The saved iteration scope must hold `y`, which `helper` reads, or the
+    // re-bound helper cannot evaluate and the value would pass unchecked.
+    let err = eval_fails(
+        "obj { when (true) { local y = 2; local helper = (x) -> x < y; checked: Int(helper(this)) = 3 } }",
+    );
+    assert!(err.contains("property 'checked'"), "{err}");
+    let json = eval(
+        "obj { when (true) { local y = 5; local helper = (x) -> x < y; checked: Int(helper(this)) = 3 } }",
+    );
+    assert_eq!(json["obj"]["checked"], 3);
+}
+
+#[test]
+fn generator_typed_local_check_saves_what_a_local_function_reads() {
+    let err = eval_fails(
+        "obj { when (true) { local y = 2; local helper = (x) -> x < y; local checked: Int(helper(this)) = 3; out = checked } }",
+    );
+    assert!(err.contains("checked"), "{err}");
+    let json = eval(
+        "obj { when (true) { local y = 5; local helper = (x) -> x < y; local checked: Int(helper(this)) = 3; out = checked } }",
+    );
+    assert_eq!(json["obj"]["out"], 3);
+}
+
+#[test]
+fn generator_check_saves_what_local_functions_read_transitively() {
+    let err = eval_fails(
+        "obj { when (true) { local z = 2; local h2 = (x) -> x < z; local helper = (x) -> h2(x); checked: Int(helper(this)) = 3 } }",
+    );
+    assert!(err.contains("property 'checked'"), "{err}");
+    let json = eval(
+        "obj { when (true) { local z = 5; local h2 = (x) -> x < z; local helper = (x) -> h2(x); checked: Int(helper(this)) = 3 } }",
+    );
+    assert_eq!(json["obj"]["checked"], 3);
+    // A loop variable the function reads.
+    let err = eval_fails(
+        "obj { for (i in List(1)) { local helper = (x) -> x < i; checked: Int(helper(this)) = 3 } }",
+    );
+    assert!(err.contains("property 'checked'"), "{err}");
+    let json = eval(
+        "obj { for (i in List(5)) { local helper = (x) -> x < i; checked: Int(helper(this)) = 3 } }",
+    );
+    assert_eq!(json["obj"]["checked"], 3);
+}
+
+#[test]
+fn generator_property_rewritten_by_later_iteration_is_checked_once() {
+    // The last iteration's write is the object's value, checked in that
+    // iteration's scope; the superseded write is not checked against it.
+    let json = eval("obj { for (x in List(1, 2)) { checked: Int(this == x) = x } }");
+    assert_eq!(json["obj"]["checked"], 2);
+    let err = eval_fails("obj { for (x in List(1, 2)) { checked: Int(this == x) = 3 } }");
+    assert!(err.contains("property 'checked'"), "{err}");
+    let err = eval_fails("obj { for (x in List(1, 2)) { checked: Int(this < 2) = x } }");
+    assert!(err.contains("property 'checked'"), "{err}");
+    let json = eval("obj { for (x in List(2, 1)) { checked: Int(this < 2) = x } }");
+    assert_eq!(json["obj"]["checked"], 1);
+}
+
+#[test]
+fn inherited_and_amending_generators_each_check_their_declared_type() {
+    // The amendment's generator writes `v` again, but the class's generator
+    // declared it `Int`: the final value is checked against both types.
+    let err = eval_fails(
+        r#"
+class C { when (true) { v: Int = 1 } }
+c = new C { when (true) { v: Any = "x" } }
+"#,
+    );
+    assert!(err.contains("property 'v' expected Int"), "{err}");
+    let json = eval(
+        r#"
+class C { when (true) { v: Int = 1 } }
+c = new C { when (true) { v: Any = 2 } }
+"#,
+    );
+    assert_eq!(json["c"]["v"], 2);
+    let json = eval(
+        r#"
+class C { when (true) { v: Any = 1 } }
+c = new C { when (true) { v: Any = "x" } }
+"#,
+    );
+    assert_eq!(json["c"]["v"], "x");
+    // Repeated iterations of one declaration still check only the last.
+    let json = eval("obj { for (x in List(1, 2)) { checked: Int(this == x) = x } }");
+    assert_eq!(json["obj"]["checked"], 2);
+}
+
+#[test]
+fn module_property_constraint_uses_late_bound_local_function() {
+    let err =
+        eval_fails("local helper = (x) -> x < limit\nchecked: Int(helper(this)) = 3\nlimit = 2\n");
+    assert!(err.contains("property 'checked'"), "{err}");
+    let json = eval("local helper = (x) -> x < limit\nchecked: Int(helper(this)) = 1\nlimit = 2\n");
+    assert_eq!(json["checked"], 1);
+}
+
+#[test]
+fn module_type_alias_declared_later_applies_throughout_the_module() {
+    // As in Pkl (checked against pkl 0.32.1), a module's type alias applies
+    // to the whole module, before or after its declaration, for properties
+    // and typed locals alike.
+    let json = eval("x: Int = \"s\"\ntypealias Int = String\n");
+    assert_eq!(json["x"], "s");
+    let err = eval_fails("x: Int = 1\ntypealias Int = String\n");
+    assert!(err.contains("property 'x' expected Int"), "{err}");
+    let json = eval("local x: Int = \"s\"\ntypealias Int = String\nres = x\n");
+    assert_eq!(json["res"], "s");
+    let err = eval_fails("local x: Int = 1\ntypealias Int = String\nres = x\n");
+    assert!(err.contains("property 'x' expected Int"), "{err}");
+}
+
+#[test]
+fn object_body_property_keeps_the_types_it_was_declared_with() {
+    // An object body's declarations apply only after them (Pkl has no type
+    // aliases in object bodies). A name resolvable where the property is
+    // declared keeps that meaning, as for a typed local.
+    let err = eval_fails("obj { x: Int = \"s\"; typealias Int = String }");
+    assert!(err.contains("property 'x' expected Int"), "{err}");
+    let json = eval("obj { x: Int = 1; typealias Int = String }");
+    assert_eq!(json["obj"]["x"], 1);
+    let err = eval_fails("obj { local x: Int = \"s\"; typealias Int = String; res = x }");
+    assert!(err.contains("property 'x' expected Int"), "{err}");
+    let json = eval("obj { local x: Int = 1; typealias Int = String; res = x }");
+    assert_eq!(json["obj"]["res"], 1);
+    // An earlier alias keeps its meaning over a later one of the same name.
+    let json = eval("obj { typealias A = Int; x: A = 1; typealias A = String }");
+    assert_eq!(json["obj"]["x"], 1);
+    let err = eval_fails("obj { typealias A = Int; x: A = \"s\"; typealias A = String }");
+    assert!(err.contains("property 'x' expected A"), "{err}");
+    // A name unresolvable there means the later declaration.
+    let err = eval_fails("obj { x: Later = 5; typealias Later = Int(this < 3) }");
+    assert!(err.contains("property 'x' expected Later"), "{err}");
+    let json = eval("obj { x: Later = 1; typealias Later = Int(this < 3) }");
+    assert_eq!(json["obj"]["x"], 1);
+    // Also when the constraint reads a member, checked in the finished body.
+    let json = eval("obj { lim = 3; x: Int(this < lim) = 1; typealias Int = String }");
+    assert_eq!(json["obj"]["x"], 1);
+    let err = eval_fails("obj { lim = 3; x: Int(this < lim) = 5; typealias Int = String }");
+    assert!(err.contains("property 'x'"), "{err}");
+    let json =
+        eval("obj { lim = 3; local y: Int(this < lim) = 1; typealias Int = String; res = y }");
+    assert_eq!(json["obj"]["res"], 1);
+}
+
+#[test]
+fn only_the_last_write_of_a_body_generator_property_is_checked() {
+    // Within one body, a later iteration replaces the write of either
+    // branch; each write is checked in its own iteration only if it is last.
+    let json = eval(
+        "obj { for (x in List(1, 2)) { when (x == 1) { v: Int(this == x) = x } else { v: Int(this == x) = x } } }",
+    );
+    assert_eq!(json["obj"]["v"], 2);
+    let err = eval_fails(
+        "obj { for (x in List(1, 2)) { when (x == 1) { v: Int(this == x) = x } else { v: Int(this == x) = 3 } } }",
+    );
+    assert!(err.contains("property 'v'"), "{err}");
+}
+
+#[test]
+fn self_referential_type_alias_is_an_error() {
+    for src in [
+        "typealias Loop<T> = Loop<T>\nres = 1 is Loop<Int>",
+        "typealias Loop<T> = Loop<T>\nres = 1 as Loop<Int>",
+        "typealias Loop = Loop\nres = 1 is Loop",
+        "typealias Loop = Loop\nres = 1 as Loop",
+        "typealias A<T> = B<T>\ntypealias B<T> = A<T>\nres = 1 is A<Int>",
+        "typealias Loop<T> = Loop<T>\nx: Loop<Int> = 1",
+    ] {
+        let err = eval_fails(src);
+        assert!(err.contains("refers to itself"), "{src}: {err}");
+    }
+}
+
+#[test]
+fn class_named_like_a_builtin_type_is_resolved_in_declared_types() {
+    // A class shadows the built-in type of the same name, so the declared
+    // type names the class, in properties and object bodies alike.
+    let json = eval("class Int { v = 1 }\nx: Int = new Int {}\n");
+    assert_eq!(json["x"]["v"], 1);
+    let err = eval_fails("class Int { v = 1 }\nx: Int = 1\n");
+    assert!(err.contains("property 'x' expected Int"), "{err}");
+    let json = eval("class String { v = 1 }\nobj { x: String = new String {} }\n");
+    assert_eq!(json["obj"]["x"]["v"], 1);
+    let err = eval_fails("class String { v = 1 }\nobj { x: String = \"s\" }\n");
+    assert!(err.contains("property 'x' expected String"), "{err}");
+    let json = eval("class Int { v = 1 }\nx: Int? = null\n");
+    assert_eq!(json["x"], serde_json::Value::Null);
+}
+
+#[test]
+fn later_class_of_a_body_does_not_rebind_an_earlier_entry() {
+    // `C` resolves to the enclosing class where `x` is declared; the body's
+    // later `class C` applies only after it, for the value and the check.
+    let json = eval("class C { v = 1 }\nobj { x: C = new C {}; class C { y = 1 } }");
+    assert_eq!(json["obj"]["x"], serde_json::json!({"v": 1}));
+    let err = eval_fails(
+        "class C { v = 1 }\nclass D { w = 1 }\nobj { x: C = new D {}; class C { y = 1 } }",
+    );
+    assert!(err.contains("property 'x' expected C"), "{err}");
+    // Also for a constraint, checked in the finished body.
+    let json = eval(
+        "class C { v = 1 }\nobj { lim = 2; x: C(this.v < lim) = new C {}; class C { y = 1 } }",
+    );
+    assert_eq!(json["obj"]["x"]["v"], 1);
+    let err = eval_fails(
+        "class C { v = 1 }\nobj { lim = 1; x: C(this.v < lim) = new C {}; class C { y = 1 } }",
+    );
+    assert!(err.contains("property 'x'"), "{err}");
+    // Entries after the declaration see the body's class.
+    let json = eval("class C { v = 1 }\nobj { class C { y = 1 }; x: C = new C {} }");
+    assert_eq!(json["obj"]["x"], serde_json::json!({"y": 1}));
+    // A typed local agrees.
+    let json = eval("class C { v = 1 }\nobj { local x: C = new C {}; class C { y = 1 }; res = x }");
+    assert_eq!(json["obj"]["res"], serde_json::json!({"v": 1}));
+}
+
+#[test]
+fn body_class_without_an_earlier_binding_is_visible_before_it() {
+    // A name that resolves to nothing before the declaration means the
+    // body's later class.
+    let json = eval("obj { x: C = new C {}; class C { y = 1 } }");
+    assert_eq!(json["obj"]["x"], serde_json::json!({"y": 1}));
+}
+
+#[test]
+fn captured_scope_keeps_types_from_before_a_later_body_alias() {
+    // `x`'s captured scope is from before the body's `typealias Int`, so an
+    // amendment re-checks `v` against the built-in `Int`.
+    let json = eval("obj { x { v: Int = 1 }; typealias Int = String }\ny = (obj.x) {}");
+    assert_eq!(json["y"]["v"], 1);
+    let json = eval("obj { x { v: Int = 1 }; typealias Int = String }\ny = (obj.x) { v = 2 }");
+    assert_eq!(json["y"]["v"], 2);
+    let err =
+        eval_fails("obj { x { v: Int = 1 }; typealias Int = String }\ny = (obj.x) { v = \"s\" }");
+    assert!(err.contains("property 'v' expected Int"), "{err}");
+    // Declared before `x`, the alias applies to it.
+    let json = eval("obj { typealias Int = String; x { v: Int = \"s\" } }\ny = (obj.x) {}");
+    assert_eq!(json["y"]["v"], "s");
+    let err = eval_fails("obj { typealias Int = String; x { v: Int = 1 } }\ny = (obj.x) {}");
+    assert!(err.contains("property 'v' expected Int"), "{err}");
+}
+
+#[test]
+fn captured_scope_keeps_classes_from_before_a_later_body_class() {
+    let json =
+        eval("class C { v = 1 }\nobj { x { c = new C {} }; class C { y = 1 } }\ny = (obj.x) {}");
+    assert_eq!(json["y"]["c"], serde_json::json!({"v": 1}));
+    let json = eval(
+        "class C { v = 1 }\nobj { x { c: C = new C {} }; class C { y = 1 } }\ny = (obj.x) { c = new C {} }",
+    );
+    assert_eq!(json["y"]["c"], serde_json::json!({"v": 1}));
+    let err = eval_fails(
+        "class C { v = 1 }\nclass D { w = 1 }\nobj { x { c: C = new C {} }; class C { y = 1 } }\ny = (obj.x) { c = new D {} }",
+    );
+    assert!(err.contains("property 'c' expected C"), "{err}");
+}
+
+#[test]
+fn later_body_class_named_like_a_builtin_does_not_rebind_earlier_entries() {
+    // Before the body's `class Int`, `Int` is the built-in type.
+    let json = eval("obj { x: Int = 1; class Int { v = 1 } }");
+    assert_eq!(json["obj"]["x"], 1);
+    let err = eval_fails("obj { x: Int = \"s\"; class Int { v = 1 } }");
+    assert!(err.contains("property 'x' expected Int"), "{err}");
+    // After it, `Int` is the class.
+    let json = eval("obj { class Int { v = 1 }; x: Int = new Int {} }");
+    assert_eq!(json["obj"]["x"]["v"], 1);
+    let err = eval_fails("obj { class Int { v = 1 }; x: Int = 1 }");
+    assert!(err.contains("property 'x' expected Int"), "{err}");
+}
+
+#[test]
+fn module_function_in_a_constraint_is_late_bound() {
+    // `helper` reads `limit`, bound after the checked entries; the check
+    // calls the function as bound in the finished module.
+    let err =
+        eval_fails("function helper(x) = x < limit\nchecked: Int(helper(this)) = 3\nlimit = 2\n");
+    assert!(err.contains("property 'checked'"), "{err}");
+    let json = eval("function helper(x) = x < limit\nchecked: Int(helper(this)) = 1\nlimit = 2\n");
+    assert_eq!(json["checked"], 1);
+    let err = eval_fails(
+        "function helper(x) = x < limit\nlocal checked: Int(helper(this)) = 3\nlimit = 2\nres = checked\n",
+    );
+    assert!(err.contains("property 'checked'"), "{err}");
+    let json = eval(
+        "function helper(x) = x < limit\nlocal checked: Int(helper(this)) = 1\nlimit = 2\nres = checked\n",
+    );
+    assert_eq!(json["res"], 1);
+}
+
+#[test]
+fn class_generator_default_amended_by_an_instance_is_built_unchecked() {
+    let json = eval("class C { when (true) { o { v: Int = \"x\" } } }\nc = new C { o { v = 1 } }");
+    assert_eq!(json["c"]["o"]["v"], 1);
+    let json =
+        eval("class C { for (k in List(1)) { o { v: Int = \"x\" } } }\nc = new C { o { v = 1 } }");
+    assert_eq!(json["c"]["o"]["v"], 1);
+    let json = eval(
+        "class C { when (false) { o { v: Int = 1 } } else { o { v: Int = \"x\" } } }\nc = new C { o { v = 2 } }",
+    );
+    assert_eq!(json["c"]["o"]["v"], 2);
+    // Without an amendment of `o`, the default is checked.
+    let err = eval_fails("class C { when (true) { o { v: Int = \"x\" } } }\nc = new C {}");
+    assert!(err.contains("property 'v' expected Int"), "{err}");
+    let err = eval_fails("class C { when (true) { v: Int = \"x\" } }\nc = new C {}");
+    assert!(err.contains("property 'v' expected Int"), "{err}");
+    // The amendment's own declared types are checked.
+    let err = eval_fails(
+        "class C { when (true) { o { v: Int = \"x\" } } }\nc = new C { o { v: Int = \"y\" } }",
+    );
+    assert!(err.contains("property 'v' expected Int"), "{err}");
+    // pklr currently replaces a generator-produced member amended this way
+    // rather than merging it (Pkl merges), so the generator's `v` is not in
+    // the result and is not checked; this pins that until it is fixed.
+    let json = eval("class C { when (true) { o { v: Int = \"x\" } } }\nc = new C { o { w = 1 } }");
+    assert_eq!(json["c"]["o"], serde_json::json!({"w": 1}));
 }

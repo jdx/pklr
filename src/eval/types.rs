@@ -620,39 +620,139 @@ pub(super) fn value_is_class_type(val: &Value, name: &str, scope: &Scope) -> Opt
     )
 }
 
+/// Whether `name` (optionally `*`-prefixed) is a built-in type checked at
+/// runtime, or a string-literal type. An alias of the same name in scope
+/// takes precedence over it.
+#[inline]
+pub(super) fn is_builtin_type_name(name: &str) -> bool {
+    string_literal_type_value(name).is_some()
+        || matches!(
+            name.strip_prefix('*').unwrap_or(name),
+            "Null"
+                | "Boolean"
+                | "Bool"
+                | "Int"
+                | "Float"
+                | "Number"
+                | "String"
+                | "List"
+                | "Listing"
+                | "Set"
+                | "Map"
+                | "Mapping"
+                | "Object"
+                | "Dynamic"
+                | "Function"
+                | "Any"
+        )
+}
+
+/// Whether `val` matches `ty` when `ty` is made only of built-in type names
+/// and string-literal types (`String`, `Int?`, `"a"|"b"`), which no alias in
+/// scope shadows: decided without resolving anything. `None` for any other
+/// type, which needs the full check.
+pub(super) fn builtin_type_matches(
+    val: &Value,
+    ty: &crate::parser::TypeExpr,
+    scope: &Scope,
+) -> Option<bool> {
+    use crate::parser::TypeExpr;
+    if scope.shadows_builtin_type {
+        return None;
+    }
+    match ty {
+        TypeExpr::Named(name) if is_builtin_type_name(name) => {
+            // `List` and `Map` style names may also be classes' parents, so
+            // only value types and string literals are decided here.
+            let plain = name.strip_prefix('*').unwrap_or(name);
+            (string_literal_type_value(name).is_some()
+                || matches!(
+                    plain,
+                    "Null" | "Boolean" | "Bool" | "Int" | "Float" | "Number" | "String" | "Any"
+                ))
+            .then(|| value_is_type(val, ty))
+        }
+        TypeExpr::Nullable(inner) => {
+            let inner = builtin_type_matches(val, inner, scope)?;
+            Some(is_null_value(val) || inner)
+        }
+        TypeExpr::Union(variants) => {
+            let mut matches = false;
+            for variant in variants {
+                matches |= builtin_type_matches(val, variant, scope)?;
+            }
+            Some(matches)
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn type_is_runtime_checkable(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
+    type_is_runtime_checkable_inner(ty, scope, &mut Vec::new())
+}
+
+/// Type aliases are resolved (following chains) before deciding, so an alias
+/// is checkable exactly when its target is. An alias that reaches itself
+/// counts as checkable, so the check reports the cycle.
+fn type_is_runtime_checkable_inner(
+    ty: &crate::parser::TypeExpr,
+    scope: &Scope,
+    resolving: &mut Vec<String>,
+) -> bool {
     use crate::parser::TypeExpr;
     match ty {
         TypeExpr::Named(name) => {
             let runtime_name = name.strip_prefix('*').unwrap_or(name);
-            string_literal_type_value(name).is_some()
-                || matches!(
-                    runtime_name,
-                    "Null"
-                        | "Boolean"
-                        | "Bool"
-                        | "Int"
-                        | "Float"
-                        | "Number"
-                        | "String"
-                        | "List"
-                        | "Listing"
-                        | "Set"
-                        | "Map"
-                        | "Mapping"
-                        | "Object"
-                        | "Dynamic"
-                        | "Function"
-                        | "Any"
-                )
-                || scope.get_type_alias(runtime_name).is_some()
-                || resolve_dotted(scope, runtime_name).is_some()
+            let builtin = is_builtin_type_name(name);
+            // A built-in type name is decided without walking the scope chain
+            // for an alias, unless an alias in scope may shadow one.
+            if builtin && !scope.shadows_builtin_type {
+                return true;
+            }
+            // An alias may shadow a built-in name (`typealias String = ...`),
+            // so it is resolved first, as `eval_type_check` does.
+            if let Some(alias) = scope.get_type_alias(runtime_name) {
+                if resolving.iter().any(|seen| seen == runtime_name) {
+                    // A cycle is checked, so the check reports it.
+                    return true;
+                }
+                resolving.push(runtime_name.to_string());
+                let checkable = type_is_runtime_checkable_inner(alias, scope, resolving);
+                resolving.pop();
+                return checkable;
+            }
+            if builtin {
+                return true;
+            }
+            resolve_dotted(scope, runtime_name).is_some()
         }
-        TypeExpr::Nullable(inner) => type_is_runtime_checkable(inner, scope),
+        TypeExpr::Nullable(inner) => type_is_runtime_checkable_inner(inner, scope, resolving),
         TypeExpr::Union(variants) => variants
             .iter()
-            .all(|variant| type_is_runtime_checkable(variant, scope)),
-        TypeExpr::Generic(_, _) => true,
+            .all(|variant| type_is_runtime_checkable_inner(variant, scope, resolving)),
+        // Only collection generics have a runtime representation to check;
+        // other generics (`Function1<...>`, `Pair<...>`) are not modeled. An
+        // alias (`typealias Pairs<T> = List<T>`) is resolved first, as for a
+        // named type, since it may also shadow a collection name.
+        TypeExpr::Generic(name, _) => {
+            let collection = matches!(
+                name.as_str(),
+                "List" | "Listing" | "Set" | "Map" | "Mapping"
+            );
+            if collection && !scope.shadows_builtin_type {
+                return true;
+            }
+            if let Some(alias) = scope.get_type_alias(name) {
+                if resolving.iter().any(|seen| seen == name) {
+                    return true;
+                }
+                resolving.push(name.clone());
+                let checkable = type_is_runtime_checkable_inner(alias, scope, resolving);
+                resolving.pop();
+                return checkable;
+            }
+            collection
+        }
         TypeExpr::Constrained(base, _) => {
             let runtime_name = base
                 .trim_start_matches('*')
@@ -660,7 +760,7 @@ pub(super) fn type_is_runtime_checkable(ty: &crate::parser::TypeExpr, scope: &Sc
                 .split('<')
                 .next()
                 .unwrap_or(base);
-            type_is_runtime_checkable(&TypeExpr::Named(runtime_name.into()), scope)
+            type_is_runtime_checkable_inner(&TypeExpr::Named(runtime_name.into()), scope, resolving)
         }
     }
 }
