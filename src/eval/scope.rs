@@ -35,7 +35,9 @@ pub(super) struct Scope {
     // does for every nested body, does not copy its bindings.
     // They also use a fast non-cryptographic hasher: lookups and inserts on
     // these maps dominate evaluation, and the keys come from trusted source.
-    pub(super) vars: Rc<FxIndexMap<Name, Value>>,
+    // `vars` is an `Arc` so a lambda's captured bindings (a `ScopeMap`, the
+    // same map type) can be used as a scope without copying them.
+    pub(super) vars: Arc<FxIndexMap<Name, Value>>,
     pub(super) type_aliases: Rc<FxIndexMap<Name, crate::parser::TypeExpr>>,
     pub(super) module_identities: Rc<FxIndexMap<Name, String>>,
     pub(super) poisoned: Rc<FxIndexMap<Name, String>>,
@@ -57,9 +59,20 @@ pub(super) struct Scope {
 }
 
 impl Scope {
+    /// A scope for calling a lambda: its captured bindings, shared rather
+    /// than copied, under a child layer for the call's own bindings
+    /// (parameters, and anything the caller layers over the capture).
+    pub(super) fn for_call(captured: &Arc<ScopeMap>) -> Self {
+        Scope {
+            vars: Arc::clone(captured),
+            ..Scope::default()
+        }
+        .child()
+    }
+
     pub(super) fn child(&self) -> Self {
         Self {
-            vars: Rc::default(),
+            vars: Arc::default(),
             type_aliases: Rc::default(),
             module_identities: Rc::default(),
             poisoned: Rc::default(),
@@ -93,7 +106,7 @@ impl Scope {
         if self.this_aliases.contains(&*name) {
             Rc::make_mut(&mut self.this_aliases).remove(&*name);
         }
-        Rc::make_mut(&mut self.vars).insert(name, val);
+        Arc::make_mut(&mut self.vars).insert(name, val);
     }
 
     /// Mark the binding of `name` in this scope as a local alias of `this`.
@@ -224,6 +237,17 @@ impl Scope {
 
     pub(super) fn set_type_alias(&mut self, name: String, ty: crate::parser::TypeExpr) {
         Rc::make_mut(&mut self.type_aliases).insert(name.into(), ty);
+    }
+
+    /// Whether a type alias visible from this scope mentions `name`. A type
+    /// alias's constraint runs in the scope of the value being checked, so it
+    /// can read bindings such as `outer` from wherever the check happens.
+    pub(super) fn type_aliases_mention(&self, name: &str) -> bool {
+        self.type_aliases.values().any(|ty| type_mentions(ty, name))
+            || self
+                .parent
+                .as_ref()
+                .is_some_and(|parent| parent.type_aliases_mention(name))
     }
 
     pub(super) fn get_type_alias(&self, name: &str) -> Option<&crate::parser::TypeExpr> {
@@ -430,7 +454,7 @@ impl EntryOwners {
     /// cached bindings.
     pub(super) fn release_this(&self, aliases: &[String]) {
         for cached in self.bindings.borrow_mut().values_mut() {
-            if Rc::strong_count(&cached.scope.vars) == 1 {
+            if Arc::strong_count(&cached.scope.vars) == 1 {
                 release_this_aliases(&mut cached.scope, aliases);
             }
         }
@@ -577,7 +601,7 @@ fn update_object_bindings(
             hidden.insert(name.clone());
             continue;
         }
-        Rc::make_mut(&mut scope.vars).insert(name.clone(), value.clone());
+        Arc::make_mut(&mut scope.vars).insert(name.clone(), value.clone());
     }
     // Rebuilt whenever either side has poisoned names, so names no longer
     // poisoned on the object are dropped from the scope.

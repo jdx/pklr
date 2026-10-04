@@ -97,6 +97,163 @@ struct ModuleScopeSnapshot {
     late_properties: Vec<Property>,
 }
 
+/// The value of a literal or a plain name, or `None` for any expression that
+/// needs the full evaluator. Must agree with `Evaluator::eval_expr_boxed`.
+fn eval_simple_expr(
+    expr: &Expr,
+    scope: &Scope,
+    depth: usize,
+    max_depth: usize,
+) -> Option<Result<Value>> {
+    if depth > max_depth {
+        return None;
+    }
+    Some(match expr {
+        Expr::Null => Ok(Value::Null),
+        Expr::Bool(b) => Ok(Value::Bool(*b)),
+        Expr::Int(n) => Ok(Value::Int(*n)),
+        Expr::Float(f) => Ok(Value::Float(*f)),
+        Expr::String(s) => Ok(Value::String(s.clone())),
+        Expr::Ident(name) => scope.get(name).cloned().ok_or_else(|| {
+            Error::Eval(
+                scope
+                    .poison_of(name)
+                    .cloned()
+                    .unwrap_or_else(|| format!("undefined variable: {name}")),
+            )
+        }),
+        // An operator over simple operands, other than `|>` (a call) and an
+        // object-body amendment, which need the evaluator. `&&`, `||` keep
+        // short-circuiting; the depth mirrors `eval_binop`'s `depth + 1`.
+        Expr::Binop(op, left, right)
+            if !matches!(op, BinOp::Pipe)
+                && !(matches!(op, BinOp::Add) && matches!(right.as_ref(), Expr::ObjectBody(_))) =>
+        {
+            if !is_simple_expr(left) || !is_simple_expr(right) {
+                return None;
+            }
+            let l = match eval_simple_expr(left, scope, depth + 1, max_depth)? {
+                Ok(l) => l,
+                Err(error) => return Some(Err(error)),
+            };
+            if matches!(op, BinOp::And | BinOp::Or) {
+                let left_truthy = is_truthy(&l);
+                let short_circuit = match op {
+                    BinOp::And => !left_truthy,
+                    _ => left_truthy,
+                };
+                if short_circuit {
+                    return Some(Ok(Value::Bool(left_truthy)));
+                }
+                return Some(
+                    eval_simple_expr(right, scope, depth + 1, max_depth)?
+                        .map(|r| Value::Bool(is_truthy(&r))),
+                );
+            }
+            let r = match eval_simple_expr(right, scope, depth + 1, max_depth)? {
+                Ok(r) => r,
+                Err(error) => return Some(Err(error)),
+            };
+            apply_binop(*op, l, r)
+        }
+        _ => return None,
+    })
+}
+
+/// Whether `eval_simple_expr` can evaluate `expr` without the evaluator.
+fn is_simple_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Null
+        | Expr::Bool(_)
+        | Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::String(_)
+        | Expr::Ident(_) => true,
+        Expr::Binop(op, left, right) => {
+            !matches!(op, BinOp::Pipe)
+                && !(matches!(op, BinOp::Add) && matches!(right.as_ref(), Expr::ObjectBody(_)))
+                && is_simple_expr(left)
+                && is_simple_expr(right)
+        }
+        _ => false,
+    }
+}
+
+/// Apply a binary operator other than `|>` to evaluated operands.
+fn apply_binop(op: BinOp, l: Value, r: Value) -> Result<Value> {
+    match op {
+        BinOp::Add => add_values(l, r),
+        BinOp::Sub => arithmetic(l, r, |a, b| Ok(a - b), |a, b| Ok(a - b)),
+        BinOp::Mul => arithmetic(l, r, |a, b| Ok(a * b), |a, b| Ok(a * b)),
+        BinOp::Div => arithmetic(
+            l,
+            r,
+            |a, b| {
+                if b == 0 {
+                    Err(Error::Eval("division by zero".into()))
+                } else {
+                    Ok(a / b)
+                }
+            },
+            |a, b| Ok(a / b),
+        ),
+        BinOp::Mod => arithmetic(
+            l,
+            r,
+            |a, b| {
+                if b == 0 {
+                    Err(Error::Eval("modulo by zero".into()))
+                } else {
+                    Ok(a % b)
+                }
+            },
+            |a, b| Ok(a % b),
+        ),
+        BinOp::Eq => Ok(Value::Bool(values_eq(&l, &r))),
+        BinOp::Ne => Ok(Value::Bool(!values_eq(&l, &r))),
+        BinOp::Lt => compare(l, r, std::cmp::Ordering::Less),
+        BinOp::Le => compare_or_eq(l, r, std::cmp::Ordering::Less),
+        BinOp::Gt => compare(l, r, std::cmp::Ordering::Greater),
+        BinOp::Ge => compare_or_eq(l, r, std::cmp::Ordering::Greater),
+        BinOp::And => Ok(Value::Bool(is_truthy(&l) && is_truthy(&r))),
+        BinOp::Or => Ok(Value::Bool(is_truthy(&l) || is_truthy(&r))),
+        BinOp::IntDiv => arithmetic(
+            l,
+            r,
+            |a, b| {
+                if b == 0 {
+                    Err(Error::Eval("division by zero".into()))
+                } else {
+                    Ok(a / b)
+                }
+            },
+            |a, b| Ok((a / b).floor()),
+        ),
+        BinOp::Pow => arithmetic(
+            l,
+            r,
+            |a, b| {
+                if b < 0 {
+                    Err(Error::Eval(
+                        "integer exponentiation with negative exponent is not supported".into(),
+                    ))
+                } else {
+                    Ok(a.pow(b as u32))
+                }
+            },
+            |a, b| Ok(a.powf(b)),
+        ),
+        BinOp::NullCoalesce => {
+            if is_null_value(&l) {
+                Ok(r)
+            } else {
+                Ok(l)
+            }
+        }
+        BinOp::Pipe => unreachable!("`|>` calls a function; see eval_binop"),
+    }
+}
+
 fn regex_value(pattern: Value) -> Value {
     let mut map = IndexMap::new();
     map.insert("_type".to_string(), Value::String("regex".to_string()));
@@ -1821,8 +1978,10 @@ impl Evaluator {
 
         // Second pass: evaluate non-local entries into output object
         let mut out = base_obj;
-        // all_props includes hidden properties — used for `this`/`module` snapshots
-        let mut all_props = out.clone();
+        // all_props includes hidden properties — used for `this`/`module`
+        // snapshots. It is shared with those snapshots and grown in place, as
+        // in `eval_entries_with_lexical_scopes`, rather than copied per property.
+        let mut all_props = Arc::new(out.clone());
         // Seed scope with base properties so body amendments can find them
         // (e.g., `hooks { ... }` needs to find the base hooks Mapping in scope
         // to properly amend it with type-aware merging).
@@ -1830,15 +1989,9 @@ impl Evaluator {
             scope.set(k.clone(), v.clone());
         }
         // Bind `this` at module level so properties can reference the module object
-        scope.set(
-            "this".into(),
-            Value::Object(Arc::new(all_props.clone()), None),
-        );
+        scope.set("this".into(), Value::Object(Arc::clone(&all_props), None));
         // Also bind `module` to the same value
-        scope.set(
-            "module".into(),
-            Value::Object(Arc::new(all_props.clone()), None),
-        );
+        scope.set("module".into(), Value::Object(Arc::clone(&all_props), None));
         for entry in module.body.iter() {
             if let Entry::Property(prop) = entry {
                 let mods = &prop.modifiers;
@@ -1920,7 +2073,7 @@ impl Evaluator {
                     // Always add to scope so other properties can reference it
                     scope.declare(prop.name.clone(), v.clone());
                     // Track in all_props (including hidden) for `this`/`module`
-                    all_props.insert(prop.name.clone(), v.clone());
+                    module_props_insert(&mut scope, &mut all_props, prop.name.clone(), v.clone());
                     if !has_modifier(mods, Modifier::Hidden)
                         && (depth > 0 || should_render_property_value(prop, &v))
                         && requested_output_fields
@@ -1930,7 +2083,7 @@ impl Evaluator {
                         out.insert(prop.name.clone(), v);
                     }
                     // Update `this` and `module` with all properties (including hidden)
-                    let snapshot = Value::Object(Arc::new(all_props.clone()), None);
+                    let snapshot = Value::Object(Arc::clone(&all_props), None);
                     scope.set("this".into(), snapshot.clone());
                     scope.set("module".into(), snapshot);
                 }
@@ -2011,7 +2164,12 @@ impl Evaluator {
                 match self.eval_property(prop, &scope, depth).await {
                     Ok(Some(value)) => {
                         scope.set(prop.name.clone(), value.clone());
-                        all_props.insert(prop.name.clone(), value.clone());
+                        module_props_insert(
+                            &mut scope,
+                            &mut all_props,
+                            prop.name.clone(),
+                            value.clone(),
+                        );
                         if !has_modifier(&prop.modifiers, Modifier::Hidden)
                             && (depth > 0 || should_render_property_value(prop, &value))
                             && requested_output_fields
@@ -2020,7 +2178,7 @@ impl Evaluator {
                         {
                             out.insert(prop.name.clone(), value);
                         }
-                        let snapshot = Value::Object(Arc::new(all_props.clone()), None);
+                        let snapshot = Value::Object(Arc::clone(&all_props), None);
                         scope.set("this".into(), snapshot.clone());
                         scope.set("module".into(), snapshot);
                     }
@@ -2039,7 +2197,12 @@ impl Evaluator {
                         if has_modifier(&prop.modifiers, Modifier::Local) {
                             continue;
                         }
-                        all_props.insert(prop.name.clone(), value.clone());
+                        module_props_insert(
+                            &mut scope,
+                            &mut all_props,
+                            prop.name.clone(),
+                            value.clone(),
+                        );
                         if !has_modifier(&prop.modifiers, Modifier::Hidden)
                             && (depth > 0 || should_render_property_value(prop, &value))
                             && requested_output_fields
@@ -2048,7 +2211,7 @@ impl Evaluator {
                         {
                             out.insert(prop.name.clone(), value);
                         }
-                        let snapshot = Value::Object(Arc::new(all_props.clone()), None);
+                        let snapshot = Value::Object(Arc::clone(&all_props), None);
                         scope.set("this".into(), snapshot.clone());
                         scope.set("module".into(), snapshot);
                     }
@@ -2363,16 +2526,6 @@ impl Evaluator {
                 }
             }
         }
-        // Set `outer` to a snapshot of the parent scope's variables as an object.
-        // Also insert Null for any nullable-no-default properties declared in these
-        // entries but absent from the parent scope, so that `outer.optionalProp`
-        // resolves to Null rather than failing with "field not found".
-        let mut outer_map = scope.flatten();
-        // `this` inside the body is rebound to the new object, so the parent's
-        // `this` snapshot is unreachable through `outer`. Leaving it out keeps
-        // nested objects from holding a reference to the parent's property map,
-        // which would otherwise force a full copy on every parent insert.
-        outer_map.shift_remove("this");
         // Locals of an enclosing object that alias its `this` (`local self =
         // this`) hold the same snapshot. Drop the ones this body never names so
         // they are not captured by the object built here; `outer` keeps them
@@ -2393,30 +2546,44 @@ impl Evaluator {
                 }
             }
         };
-        for name in &unused_this_aliases {
-            outer_map.shift_remove(name.as_str());
-        }
-        for entry in entries.iter() {
-            if let Entry::Property(prop) = entry
-                && prop.value.is_none()
-                && prop.body.is_none()
-                && !has_modifier(&prop.modifiers, Modifier::Local)
-                && !outer_map.contains_key(prop.name.as_str())
-                && matches!(prop.type_ann, Some(crate::parser::TypeExpr::Nullable(_)))
-            {
-                outer_map.insert(prop.name.as_str().into(), Value::Null);
+        // `outer` is only reachable by name, so a body that never mentions it
+        // (the common case) skips flattening the enclosing scope for it.
+        if entries_mention(entries, "outer") || scope.type_aliases_mention("outer") {
+            // Set `outer` to a snapshot of the parent scope's variables as an object.
+            // Also insert Null for any nullable-no-default properties declared in these
+            // entries but absent from the parent scope, so that `outer.optionalProp`
+            // resolves to Null rather than failing with "field not found".
+            let mut outer_map = scope.flatten();
+            // `this` inside the body is rebound to the new object, so the parent's
+            // `this` snapshot is unreachable through `outer`. Leaving it out keeps
+            // nested objects from holding a reference to the parent's property map,
+            // which would otherwise force a full copy on every parent insert.
+            outer_map.shift_remove("this");
+            for name in &unused_this_aliases {
+                outer_map.shift_remove(name.as_str());
             }
+            for entry in entries.iter() {
+                if let Entry::Property(prop) = entry
+                    && prop.value.is_none()
+                    && prop.body.is_none()
+                    && !has_modifier(&prop.modifiers, Modifier::Local)
+                    && !outer_map.contains_key(prop.name.as_str())
+                    && matches!(prop.type_ann, Some(crate::parser::TypeExpr::Nullable(_)))
+                {
+                    outer_map.insert(prop.name.as_str().into(), Value::Null);
+                }
+            }
+            let outer_obj = Value::Object(
+                Arc::new(
+                    outer_map
+                        .into_iter()
+                        .map(|(k, v)| (k.to_string(), v))
+                        .collect(),
+                ),
+                None,
+            );
+            child_scope.set("outer".into(), outer_obj);
         }
-        let outer_obj = Value::Object(
-            Arc::new(
-                outer_map
-                    .into_iter()
-                    .map(|(k, v)| (k.to_string(), v))
-                    .collect(),
-            ),
-            None,
-        );
-        child_scope.set("outer".into(), outer_obj);
         // Class-as-a-function definitions commonly use `local self = this` so
         // output properties can close over the amended instance. Bind `this`
         // before locals are evaluated, then keep direct aliases synchronized as
@@ -3852,8 +4019,20 @@ impl Evaluator {
         Ok(())
     }
 
-    #[async_recursion(?Send)]
+    /// Evaluate `expr`. Literals and plain name lookups, which are most of the
+    /// expressions evaluated, are answered here without allocating the boxed
+    /// future that a recursive evaluation needs.
     async fn eval_expr(&mut self, expr: &Expr, scope: &Scope, depth: usize) -> Result<Value> {
+        if depth <= self.max_depth
+            && let Some(result) = eval_simple_expr(expr, scope, depth, self.max_depth)
+        {
+            return result;
+        }
+        self.eval_expr_boxed(expr, scope, depth).await
+    }
+
+    #[async_recursion(?Send)]
+    async fn eval_expr_boxed(&mut self, expr: &Expr, scope: &Scope, depth: usize) -> Result<Value> {
         if depth > self.max_depth {
             return Err(Error::Eval("maximum recursion depth exceeded".into()));
         }
@@ -4373,6 +4552,34 @@ impl Evaluator {
         }
     }
 
+    /// Evaluate the `(start, end)` arguments of an `IntSeq(start, end)` call.
+    async fn eval_int_seq_bounds(
+        &mut self,
+        args: &[Expr],
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<(i64, i64)> {
+        let [start_expr, end_expr] = args else {
+            return Err(Error::Eval(format!(
+                "IntSeq() expects 2 arguments (start, end), got {}",
+                args.len()
+            )));
+        };
+        let mut bounds = [0i64; 2];
+        for (slot, expr) in bounds.iter_mut().zip([start_expr, end_expr]) {
+            match self.eval_expr(expr, scope, depth + 1).await? {
+                Value::Int(n) => *slot = n,
+                other => {
+                    return Err(Error::Eval(format!(
+                        "IntSeq() expects Int arguments, got {}",
+                        value_type_name(&other)
+                    )));
+                }
+            }
+        }
+        Ok((bounds[0], bounds[1]))
+    }
+
     #[async_recursion(?Send)]
     async fn eval_call(
         &mut self,
@@ -4381,6 +4588,31 @@ impl Evaluator {
         scope: &Scope,
         depth: usize,
     ) -> Result<Value> {
+        // `IntSeq(start, end).step(n)`: IntSeq evaluates to a plain list, so
+        // the step is applied while the range bounds are still known.
+        if let Expr::Field(obj_expr, method) = func_expr
+            && method == "step"
+            && let Expr::Call(seq_func, seq_args) = obj_expr.as_ref()
+            && matches!(seq_func.as_ref(), Expr::Ident(name) if name == "IntSeq")
+            && int_seq_is_builtin(scope)
+        {
+            let (start, end) = self.eval_int_seq_bounds(seq_args, scope, depth).await?;
+            let [step_expr] = args else {
+                return Err(Error::Eval(
+                    "IntSeq.step() expects exactly one argument".into(),
+                ));
+            };
+            let step = match self.eval_expr(step_expr, scope, depth + 1).await? {
+                Value::Int(n) => n,
+                other => {
+                    return Err(Error::Eval(format!(
+                        "IntSeq.step() expects an Int, got {}",
+                        value_type_name(&other)
+                    )));
+                }
+            };
+            return int_seq(start, end, step);
+        }
         // Handle method calls: obj.method(args)
         if let Expr::Field(obj_expr, method) = func_expr {
             let obj = self.eval_expr(obj_expr, scope, depth + 1).await?;
@@ -4459,6 +4691,10 @@ impl Evaluator {
                     }
                     return Ok(Value::List(items)); // deduplicated
                 }
+                "IntSeq" if int_seq_is_builtin(scope) => {
+                    let (start, end) = self.eval_int_seq_bounds(args, scope, depth).await?;
+                    return int_seq(start, end, 1);
+                }
                 "Regex" => {
                     if let Some(arg) = args.first() {
                         let val = self.eval_expr(arg, scope, depth + 1).await?;
@@ -4489,11 +4725,7 @@ impl Evaluator {
 
         // Lambda call
         if let Value::Lambda(params, body, captured) = func_val {
-            let mut call_scope = Scope::default();
-            // Restore captured scope
-            for (k, v) in captured.iter() {
-                call_scope.set_name(k.clone(), v.clone());
-            }
+            let mut call_scope = Scope::for_call(&captured);
             // If we're inside a method call context (scope has `this` as an Object),
             // layer the instance's properties so local functions see overridden values
             if let Some(Value::Object(this_map, _)) = scope.get("this") {
@@ -4563,10 +4795,7 @@ impl Evaluator {
         if let Value::Object(map, _) = obj
             && let Some(Value::Lambda(params, body, captured)) = map.get(method)
         {
-            let mut call_scope = Scope::default();
-            for (k, v) in captured.iter() {
-                call_scope.set_name(k.clone(), v.clone());
-            }
+            let mut call_scope = Scope::for_call(captured);
             // Layer in all instance properties, including lambdas, so local
             // functions called by this method see overrides.
             for (k, v) in map.iter() {
@@ -4810,10 +5039,7 @@ impl Evaluator {
 
             // Lambda.apply()
             (Value::Lambda(params, body, captured), "apply") => {
-                let mut call_scope = Scope::default();
-                for (k, v) in captured.iter() {
-                    call_scope.set_name(k.clone(), v.clone());
-                }
+                let mut call_scope = Scope::for_call(captured);
                 for (param, arg) in params.iter().zip(args.iter()) {
                     call_scope.declare(param.clone(), arg.clone());
                 }
@@ -4832,10 +5058,7 @@ impl Evaluator {
         depth: usize,
     ) -> Result<Value> {
         if let Value::Lambda(params, body, captured) = lambda {
-            let mut scope = Scope::default();
-            for (k, v) in captured.iter() {
-                scope.set_name(k.clone(), v.clone());
-            }
+            let mut scope = Scope::for_call(captured);
             for (param, arg) in params.iter().zip(args.iter()) {
                 scope.declare(param.clone(), arg.clone());
             }
@@ -4968,74 +5191,6 @@ impl Evaluator {
         let l = self.eval_expr(left, scope, depth + 1).await?;
         let r = self.eval_expr(right, scope, depth + 1).await?;
         match op {
-            BinOp::Add => add_values(l, r),
-            BinOp::Sub => arithmetic(l, r, |a, b| Ok(a - b), |a, b| Ok(a - b)),
-            BinOp::Mul => arithmetic(l, r, |a, b| Ok(a * b), |a, b| Ok(a * b)),
-            BinOp::Div => arithmetic(
-                l,
-                r,
-                |a, b| {
-                    if b == 0 {
-                        Err(Error::Eval("division by zero".into()))
-                    } else {
-                        Ok(a / b)
-                    }
-                },
-                |a, b| Ok(a / b),
-            ),
-            BinOp::Mod => arithmetic(
-                l,
-                r,
-                |a, b| {
-                    if b == 0 {
-                        Err(Error::Eval("modulo by zero".into()))
-                    } else {
-                        Ok(a % b)
-                    }
-                },
-                |a, b| Ok(a % b),
-            ),
-            BinOp::Eq => Ok(Value::Bool(values_eq(&l, &r))),
-            BinOp::Ne => Ok(Value::Bool(!values_eq(&l, &r))),
-            BinOp::Lt => compare(l, r, std::cmp::Ordering::Less),
-            BinOp::Le => compare_or_eq(l, r, std::cmp::Ordering::Less),
-            BinOp::Gt => compare(l, r, std::cmp::Ordering::Greater),
-            BinOp::Ge => compare_or_eq(l, r, std::cmp::Ordering::Greater),
-            BinOp::And => Ok(Value::Bool(is_truthy(&l) && is_truthy(&r))),
-            BinOp::Or => Ok(Value::Bool(is_truthy(&l) || is_truthy(&r))),
-            BinOp::IntDiv => arithmetic(
-                l,
-                r,
-                |a, b| {
-                    if b == 0 {
-                        Err(Error::Eval("division by zero".into()))
-                    } else {
-                        Ok(a / b)
-                    }
-                },
-                |a, b| Ok((a / b).floor()),
-            ),
-            BinOp::Pow => arithmetic(
-                l,
-                r,
-                |a, b| {
-                    if b < 0 {
-                        Err(Error::Eval(
-                            "integer exponentiation with negative exponent is not supported".into(),
-                        ))
-                    } else {
-                        Ok(a.pow(b as u32))
-                    }
-                },
-                |a, b| Ok(a.powf(b)),
-            ),
-            BinOp::NullCoalesce => {
-                if is_null_value(&l) {
-                    Ok(r)
-                } else {
-                    Ok(l)
-                }
-            }
             BinOp::Pipe => {
                 // x |> f  is equivalent to  f(x)
                 match r {
@@ -5046,10 +5201,7 @@ impl Evaluator {
                                 params.len()
                             )));
                         }
-                        let mut call_scope = Scope::default();
-                        for (k, v) in captured.iter() {
-                            call_scope.set_name(k.clone(), v.clone());
-                        }
+                        let mut call_scope = Scope::for_call(&captured);
                         call_scope.declare(params[0].clone(), l);
                         self.eval_expr(&body, &call_scope, depth + 1).await
                     }
@@ -5058,6 +5210,7 @@ impl Evaluator {
                     )),
                 }
             }
+            _ => apply_binop(op, l, r),
         }
     }
 
@@ -5507,10 +5660,7 @@ impl Evaluator {
                                 && !blocked_root_converters.contains(conv_name)
                                 && let Value::Lambda(params, body, captured) = lambda
                             {
-                                let mut call_scope = Scope::default();
-                                for (k, v) in captured.iter() {
-                                    call_scope.set_name(k.clone(), v.clone());
-                                }
+                                let mut call_scope = Scope::for_call(captured);
                                 // Bind the object as the first parameter
                                 if let Some(param) = params.first() {
                                     call_scope.declare(
@@ -5796,6 +5946,41 @@ fn seed_builtins(scope: &mut Scope) {
     ] {
         scope.set(name.to_string(), Value::String(name.to_string()));
     }
+}
+
+/// Whether `IntSeq` in `scope` is still the built-in, which `seed_builtins`
+/// binds to a marker string, rather than a user binding of that name.
+fn int_seq_is_builtin(scope: &Scope) -> bool {
+    matches!(scope.get("IntSeq"), Some(Value::String(name)) if name == "IntSeq")
+}
+
+/// Largest number of elements an `IntSeq` may produce. IntSeq is
+/// materialized as a list, so an unbounded range would exhaust memory.
+const MAX_INT_SEQ_LEN: i128 = 1_000_000;
+
+/// Materialize `IntSeq(start, end).step(step)` as a list of ints. The range is
+/// inclusive of `end` when a step lands on it, and empty when `step` points
+/// away from `end` (e.g. `IntSeq(5, 1)` with the default step of 1).
+fn int_seq(start: i64, end: i64, step: i64) -> Result<Value> {
+    if step == 0 {
+        return Err(Error::Eval("IntSeq step must not be 0".into()));
+    }
+    let (start_w, end_w, step_w) = (start as i128, end as i128, step as i128);
+    let len = if (step > 0 && start <= end) || (step < 0 && start >= end) {
+        (end_w - start_w) / step_w + 1
+    } else {
+        0
+    };
+    if len > MAX_INT_SEQ_LEN {
+        return Err(Error::Eval(format!(
+            "IntSeq({start}, {end}) with step {step} has {len} elements, more than the supported maximum of {MAX_INT_SEQ_LEN}"
+        )));
+    }
+    Ok(Value::List(
+        (0..len)
+            .map(|i| Value::Int((start_w + i * step_w) as i64))
+            .collect(),
+    ))
 }
 
 fn collection_to_items(v: Value) -> Vec<(Value, Value)> {
