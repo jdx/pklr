@@ -413,6 +413,15 @@ impl Scope {
             {
                 return Some(value);
             }
+            // A scope restoring how a name resolved before a later class of
+            // the same body (see `restore_shadowed`) hides it as a type too.
+            if scope
+                .type_aliases
+                .get(name)
+                .is_some_and(|ty| is_hidden_alias(ty))
+            {
+                return None;
+            }
             level = scope.parent.as_deref();
         }
         None
