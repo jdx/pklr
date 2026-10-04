@@ -286,6 +286,16 @@ fn analyze_imports_inner(
                 if let Ok(expanded) = eval::expand_glob(base, &uri) {
                     local_imports.extend(expanded);
                 }
+            } else if let Some(triple_dot) = eval::parse_triple_dot_path(&uri)? {
+                let exists = |candidate: &Path| Ok(candidate.exists());
+                // `analyze_imports` uses the native file system, so resolve a
+                // relative entry path before walking its ancestor directories.
+                let path = if path.is_relative() {
+                    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+                } else {
+                    path.to_path_buf()
+                };
+                local_imports.extend(eval::resolve_triple_dot(&path, triple_dot, None, exists)?);
             } else {
                 local_imports.push(base.join(&uri));
             }

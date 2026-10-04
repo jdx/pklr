@@ -2614,3 +2614,103 @@ fn narrowed_import_reads_qualified_type_roots_and_nested_classes() {
     assert_eq!(val["out"], serde_json::json!({ "a": 1 }));
     assert_eq!(val["outClass"], serde_json::json!({ "a": 1 }));
 }
+// ============================================================
+// Triple-dot imports
+// ============================================================
+
+#[test]
+fn triple_dot_import_searches_ancestor_directories() {
+    let temp = TestTempDir::new("pklr_test_triple_dot_ancestors");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("helper")).unwrap();
+    std::fs::create_dir_all(dir.join("a/b/c")).unwrap();
+    std::fs::write(dir.join("helper/Lib.pkl"), "name = \"root helper\"\n").unwrap();
+    // Not found: the module's own directory is not searched.
+    std::fs::create_dir_all(dir.join("a/b/c/helper")).unwrap();
+    std::fs::write(dir.join("a/b/c/helper/Lib.pkl"), "name = \"own dir\"\n").unwrap();
+    std::fs::write(
+        dir.join("a/b/c/main.pkl"),
+        "import \".../helper/Lib.pkl\"\nname = Lib.name\nviaExpr = import(\".../helper/Lib.pkl\").name\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("a/b/c/main.pkl")).unwrap();
+    assert_eq!(val["name"], "root helper");
+    assert_eq!(val["viaExpr"], "root helper");
+
+    // The nearest ancestor wins.
+    std::fs::create_dir_all(dir.join("a/b/helper")).unwrap();
+    std::fs::write(dir.join("a/b/helper/Lib.pkl"), "name = \"nearest\"\n").unwrap();
+    let val = pklr::eval_to_json(&dir.join("a/b/c/main.pkl")).unwrap();
+    assert_eq!(val["name"], "nearest");
+}
+
+#[test]
+fn bare_triple_dot_amends_same_named_module_in_ancestor() {
+    let temp = TestTempDir::new("pklr_test_triple_dot_bare");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("sub/inner")).unwrap();
+    std::fs::write(dir.join("Config.pkl"), "a = 1\nb = 2\n").unwrap();
+    std::fs::write(dir.join("sub/inner/Config.pkl"), "amends \"...\"\nb = 3\n").unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("sub/inner/Config.pkl")).unwrap();
+    assert_eq!(val, serde_json::json!({ "a": 1, "b": 3 }));
+}
+
+#[test]
+fn triple_dot_import_from_relative_entry_path() {
+    let temp = TestTempDir::new("pklr_test_triple_dot_relative");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("input/api")).unwrap();
+    std::fs::create_dir_all(dir.join("input-helper/api")).unwrap();
+    std::fs::write(dir.join("input-helper/api/Lib.pkl"), "x = 42\n").unwrap();
+    std::fs::write(
+        dir.join("input/api/main.pkl"),
+        "import \".../input-helper/api/Lib.pkl\"\nx = Lib.x\n",
+    )
+    .unwrap();
+
+    // Evaluate through a relative path, as `pkl eval api/main.pkl` would
+    // from the `input` directory.
+    let mut ev = pklr::eval::Evaluator::new();
+    let source = std::fs::read_to_string(dir.join("input/api/main.pkl")).unwrap();
+    let relative = pathdiff(&dir.join("input/api/main.pkl"));
+    let val = ev.eval_source(&source, &relative).unwrap().to_json();
+    assert_eq!(val["x"], 42);
+}
+
+/// `path` relative to the current directory, through `..` components.
+fn pathdiff(path: &std::path::Path) -> std::path::PathBuf {
+    let cwd = std::env::current_dir().unwrap();
+    let Some(common) = cwd.ancestors().find(|ancestor| path.starts_with(ancestor)) else {
+        return path.to_path_buf();
+    };
+    let ups = cwd.strip_prefix(common).unwrap().components().count();
+    let mut relative: std::path::PathBuf = std::iter::repeat_n("..", ups).collect();
+    relative.push(path.strip_prefix(common).unwrap());
+    relative
+}
+
+#[test]
+fn invalid_triple_dot_uri_is_rejected() {
+    let temp = TestTempDir::new("pklr_test_triple_dot_invalid");
+    let dir = temp.path();
+    std::fs::write(dir.join("main.pkl"), "import \".../\"\nx = 1\n").unwrap();
+    let err = pklr::eval_to_json(&dir.join("main.pkl")).unwrap_err();
+    assert!(err.to_string().contains("has invalid syntax"), "{err}");
+}
+
+#[test]
+fn analyze_imports_resolves_triple_dot_imports() {
+    let temp = TestTempDir::new("pklr_test_triple_dot_analyze");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("a/b")).unwrap();
+    std::fs::write(dir.join("Lib.pkl"), "x = 1\n").unwrap();
+    std::fs::write(
+        dir.join("a/b/main.pkl"),
+        "import \".../Lib.pkl\"\ny = Lib.x\n",
+    )
+    .unwrap();
+    let imports = pklr::analyze_imports(&dir.join("a/b/main.pkl")).unwrap();
+    assert_eq!(imports, vec![dir.join("Lib.pkl")]);
+}
