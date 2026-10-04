@@ -63,13 +63,20 @@ def checkout(version, repo):
 
 def build():
     # Ask cargo where it put the binary, so CARGO_TARGET_DIR and the like work.
-    out = subprocess.run(
+    # With --message-format=json, compiler diagnostics arrive on stdout as JSON;
+    # stderr (cargo's own errors) is passed through.
+    p = subprocess.run(
         ["cargo", "build", "-q", "--release", "--example", "eval_json",
-         "--message-format=json"],
-        cwd=ROOT, check=True, capture_output=True, text=True,
-    ).stdout
-    for line in out.splitlines():
-        msg = json.loads(line)
+         "--message-format=json-diagnostic-rendered-ansi"],
+        cwd=ROOT, stdout=subprocess.PIPE, text=True,
+    )
+    messages = [json.loads(line) for line in p.stdout.splitlines() if line.startswith("{")]
+    if p.returncode != 0:
+        for msg in messages:
+            if msg.get("reason") == "compiler-message":
+                print(msg["message"]["rendered"], end="", file=sys.stderr)
+        sys.exit(f"cargo build failed (exit {p.returncode})")
+    for msg in messages:
         if (msg.get("reason") == "compiler-artifact"
                 and msg["target"]["name"] == "eval_json" and msg.get("executable")):
             return Path(msg["executable"])
