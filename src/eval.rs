@@ -211,14 +211,18 @@ enum BodyOutcome<T> {
     PoisonAndRetry(Vec<(LocalKey, String)>),
 }
 
-/// Identifies a typed local's declaration: the address of its AST node,
-/// which stays the same across passes over a body. Unlike its name, it
-/// tells apart same-named locals of an object and of its `for`/`when`
-/// bodies.
-type LocalKey = usize;
+/// Identifies one binding of a typed local: the address of its declaration's
+/// AST node, which stays the same across passes over a body, and, for a local
+/// of a `for`/`when` body, the iteration it was bound in (see
+/// `TypeChecks::Generator`). Unlike its name, the declaration tells apart
+/// same-named locals of an object and of its `for`/`when` bodies; the
+/// iteration tells apart the bindings of one declaration in different
+/// iterations, so a failing iteration that is not read does not poison one
+/// that is.
+type LocalKey = (usize, Rc<[usize]>);
 
-fn local_key(prop: &Property) -> LocalKey {
-    prop as *const Property as usize
+fn local_key(prop: &Property, iteration: &Rc<[usize]>) -> LocalKey {
+    (prop as *const Property as usize, Rc::clone(iteration))
 }
 
 /// Typed locals that failed their check against a finished body, with the
@@ -238,22 +242,24 @@ enum TypeChecks {
     /// Every entry of a `for`/`when` body, handed to the enclosing object to
     /// check once that object is complete. Carries the names the iterations
     /// around it declare (loop variables, enclosing generator bodies'
-    /// declarations).
-    Generator(Rc<FxHashSet<String>>),
+    /// declarations), and its iteration path: for each generator from the
+    /// enclosing object down, its entry index and the iteration number.
+    Generator(Rc<FxHashSet<String>>, Rc<[usize]>),
 }
 
 impl TypeChecks {
     fn includes(&self, entry_index: usize) -> bool {
         match self {
-            TypeChecks::All | TypeChecks::Generator(_) => true,
+            TypeChecks::All | TypeChecks::Generator(..) => true,
             TypeChecks::Nothing => false,
             TypeChecks::Entries(indices) => indices.contains(&entry_index),
         }
     }
 
-    /// Checks for the body of the generator at `entry_index`. `names` are
-    /// what this iteration declares around that body: its loop variables,
-    /// plus, inside a generator body, that body's own declarations.
+    /// Checks for the body of the generator at `entry_index`, in its
+    /// `iteration`th iteration (0 for a `when`). `names` are what this
+    /// iteration declares around that body: its loop variables, plus, inside
+    /// a generator body, that body's own declarations.
     ///
     /// `body_typed` says whether the generator's body (or a generator nested
     /// in it) has a typed entry; without one there is nothing to check, and
@@ -261,6 +267,7 @@ impl TypeChecks {
     fn for_generator(
         &self,
         entry_index: usize,
+        iteration: usize,
         body_typed: bool,
         names: impl FnOnce() -> Vec<String>,
     ) -> TypeChecks {
@@ -268,21 +275,38 @@ impl TypeChecks {
             return TypeChecks::Nothing;
         }
         let names = names();
-        match self {
-            TypeChecks::Generator(outer) if names.is_empty() => {
-                TypeChecks::Generator(Rc::clone(outer))
-            }
-            TypeChecks::Generator(outer) => {
+        let mut path = self.iteration().to_vec();
+        path.extend([entry_index, iteration]);
+        let names = match self {
+            TypeChecks::Generator(outer, _) if names.is_empty() => Rc::clone(outer),
+            TypeChecks::Generator(outer, _) => {
                 let mut all = (**outer).clone();
                 all.extend(names);
-                TypeChecks::Generator(Rc::new(all))
+                Rc::new(all)
             }
-            _ => TypeChecks::Generator(Rc::new(names.into_iter().collect())),
-        }
+            _ => Rc::new(names.into_iter().collect()),
+        };
+        TypeChecks::Generator(names, path.into())
     }
 
     fn is_generator(&self) -> bool {
-        matches!(self, TypeChecks::Generator(_))
+        matches!(self, TypeChecks::Generator(..))
+    }
+
+    /// The iteration path of a `for`/`when` body; empty for an object body.
+    fn iteration(&self) -> &[usize] {
+        match self {
+            TypeChecks::Generator(_, path) => path,
+            _ => &[],
+        }
+    }
+
+    /// `iteration` as a shareable path, for a `LocalKey`.
+    fn iteration_key(&self) -> Rc<[usize]> {
+        match self {
+            TypeChecks::Generator(_, path) => Rc::clone(path),
+            _ => Rc::from([]),
+        }
     }
 }
 
@@ -2836,7 +2860,7 @@ impl Evaluator {
                 Entry::Property(prop)
                     if has_modifier(&prop.modifiers, Modifier::Local) && prop.value.is_some() =>
                 {
-                    if let Some(message) = poisoned_locals.get(&local_key(prop)) {
+                    if let Some(message) = poisoned_locals.get(&local_key(prop, &Rc::from([]))) {
                         // Failed its check in an earlier pass.
                         scope.declare_poisoned(prop.name.clone(), message.clone());
                         continue;
@@ -3261,7 +3285,7 @@ impl Evaluator {
             if let LocalCheck::Failed(message) =
                 self.typed_local_failure(prop, &value, &scope, depth)?
             {
-                failed_locals.push((local_key(prop), message));
+                failed_locals.push((local_key(prop, &Rc::from([])), message));
             }
         }
         if !failed_locals.is_empty() {
@@ -3787,7 +3811,7 @@ impl Evaluator {
                             poisoned_locals,
                             &mut body_members,
                             &mut deferred_locals,
-                            checks.is_generator(),
+                            &checks,
                         )?;
                         type_failed = failed;
                         evaluated
@@ -4066,18 +4090,19 @@ impl Evaluator {
                     let collection = self.eval_expr(&fgen.collection, &active_scope, depth)?;
                     let items = collection_to_items(collection);
                     let body_typed = generator_body_has_typed_entries(&fgen.body);
-                    for (k, v) in items {
+                    for (iteration, (k, v)) in items.into_iter().enumerate() {
                         let mut iter_scope = active_scope.child();
                         iter_scope.set(fgen.val_var.clone(), v);
                         if let Some(key_var) = &fgen.key_var {
                             iter_scope.set(key_var.clone(), k);
                         }
-                        let body_checks = checks.for_generator(entry_index, body_typed, || {
-                            let mut names = generator_names.clone();
-                            names.push(fgen.val_var.clone());
-                            names.extend(fgen.key_var.iter().cloned());
-                            names
-                        });
+                        let body_checks =
+                            checks.for_generator(entry_index, iteration, body_typed, || {
+                                let mut names = generator_names.clone();
+                                names.push(fgen.val_var.clone());
+                                names.extend(fgen.key_var.iter().cloned());
+                                names
+                            });
                         let body_val = self.eval_entries_pending(
                             &fgen.body,
                             &iter_scope,
@@ -4119,6 +4144,7 @@ impl Evaluator {
                             None,
                             checks.for_generator(
                                 entry_index,
+                                0,
                                 generator_body_has_typed_entries(&wgen.body),
                                 || generator_names.clone(),
                             ),
@@ -4145,6 +4171,7 @@ impl Evaluator {
                             None,
                             checks.for_generator(
                                 entry_index,
+                                1,
                                 generator_body_has_typed_entries(else_body),
                                 || generator_names.clone(),
                             ),
@@ -4189,15 +4216,20 @@ impl Evaluator {
                 all_props: &all_props,
             };
             let hand_up = match &checks {
-                TypeChecks::Generator(outer_names) => {
+                TypeChecks::Generator(outer_names, _) => {
                     let mut names = (**outer_names).clone();
                     names.extend(generator_names.iter().cloned());
                     Some((&mut *pending, names))
                 }
                 _ => None,
             };
-            let failed_locals =
-                self.settle_deferred_locals(&body, deferred_locals, hand_up, depth)?;
+            let failed_locals = self.settle_deferred_locals(
+                &body,
+                deferred_locals,
+                hand_up,
+                checks.iteration_key(),
+                depth,
+            )?;
             if !failed_locals.is_empty() {
                 return Ok(BodyOutcome::PoisonAndRetry(failed_locals));
             }
@@ -4387,7 +4419,8 @@ impl Evaluator {
                             // one that failed its check against the finished
                             // module (a poison-and-retry pass) stays failed:
                             // a refresh must not rebind it unchecked.
-                            let result = match poisoned_locals.get(&local_key(prop)) {
+                            let result = match poisoned_locals.get(&local_key(prop, &Rc::from([])))
+                            {
                                 Some(message) if is_local => Err(Error::Eval(message.clone())),
                                 _ => match self.eval_expr(expr, scope, depth) {
                                     Ok(value) if is_local && prop.type_ann.is_some() => {
@@ -4829,12 +4862,15 @@ impl Evaluator {
         poisoned_locals: &PoisonedLocals,
         body_members: &mut Option<FxHashSet<String>>,
         deferred_locals: &mut Vec<DeferredLocal<'a>>,
-        in_generator: bool,
+        checks: &TypeChecks,
     ) -> Result<(std::result::Result<Value, String>, bool)> {
-        if let Some(message) = poisoned_locals.get(&local_key(prop)) {
+        if !poisoned_locals.is_empty()
+            && let Some(message) = poisoned_locals.get(&local_key(prop, &checks.iteration_key()))
+        {
             // Failed its check in an earlier pass.
             return Ok((Err(message.clone()), true));
         }
+        let in_generator = checks.is_generator();
         let Some(expr) = &prop.value else {
             return Ok((Ok(Value::Null), false));
         };
@@ -4876,6 +4912,7 @@ impl Evaluator {
         body: &FinishedBody,
         deferred_locals: Vec<DeferredLocal>,
         mut hand_up: Option<(&mut Vec<PendingTypeCheck>, FxHashSet<String>)>,
+        iteration: Rc<[usize]>,
         depth: usize,
     ) -> Result<Vec<(LocalKey, String)>> {
         let mut failed_locals = Vec::new();
@@ -4906,14 +4943,14 @@ impl Evaluator {
                     constrained: true,
                     iteration_names: iteration_names.clone(),
                     entry_index: None,
-                    local: Some(local_key(prop)),
+                    local: Some(local_key(prop, &iteration)),
                 });
                 continue;
             }
             if let LocalCheck::Failed(message) =
                 self.typed_local_failure(prop, &value, &check_scope, depth)?
             {
-                failed_locals.push((local_key(prop), message));
+                failed_locals.push((local_key(prop, &iteration), message));
             }
         }
         Ok(failed_locals)
@@ -4959,7 +4996,7 @@ impl Evaluator {
                 continue;
             };
             let active_scope = body.entry_scope(entry_index);
-            if let TypeChecks::Generator(outer_names) = checks {
+            if let TypeChecks::Generator(outer_names, _) = checks {
                 let names = iteration_names.get_or_insert_with(|| {
                     let mut names = (**outer_names).clone();
                     names.extend(generator_names.iter().cloned());

@@ -2240,6 +2240,42 @@ obj {
 }
 
 #[test]
+fn generator_local_failing_in_unread_iteration_does_not_poison_read_one() {
+    // Only the iteration whose value passes (bad = 1) is read.
+    let json = eval(
+        r#"
+obj {
+  for (x in List(1, 3)) { local bad: Int(this < limit) = x; when (x == 1) { out = bad } }
+  limit = 2
+}
+"#,
+    );
+    assert_eq!(json["obj"]["out"], 1);
+    // The read iteration fails.
+    let message = eval_fails(
+        r#"
+obj {
+  for (x in List(1, 3)) { local bad: Int(this < limit) = x; when (x == 3) { out = bad } }
+  limit = 2
+}
+"#,
+    );
+    assert!(message.contains("property 'bad' expected"), "{message}");
+    // Iterations of nested generators are told apart too.
+    let json = eval(
+        r#"
+obj {
+  for (x in List(1)) {
+    for (y in List(1, 5)) { local v: Int(this < limit) = y; when (y == 1) { out = v } }
+  }
+  limit = 2
+}
+"#,
+    );
+    assert_eq!(json["obj"]["out"], 1);
+}
+
+#[test]
 fn alias_shadowing_builtin_name_is_resolved_first() {
     // `String` here is an alias of `Function1`, which is not checked.
     let json = eval(
