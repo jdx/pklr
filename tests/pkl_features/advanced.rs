@@ -509,8 +509,7 @@ class PrettierFactory extends BuiltinFactory { step = new Step { name = "prettie
 typealias StepDefinition = Step | BuiltinFactory
 prettier = new PrettierFactory {}
 class Hook { steps: Mapping<String, StepDefinition | Group> = new Mapping<String, Step> {} }
-hooks: Mapping<String, Hook> = new Mapping<String, Hook> {}
-hooks {
+hooks: Mapping<String, Hook> = new Mapping<String, Hook> {
     ["check"] {
         steps {
             ["plain"] = prettier
@@ -1499,7 +1498,7 @@ fn mapping_local_body_is_visible_to_dynamic_entries() {
     let json = eval(
         r#"
 values = new Mapping<String, Int> {
-    local options {
+    local options = new Dynamic {
         port = 3000
     }
     ["port"] = options.port
@@ -1732,7 +1731,11 @@ open class Step {
     check: String = ""
 }
 
-steps: Mapping<String, Step> = new Mapping<String, Step> {}
+steps: Mapping<String, Step> = new Mapping<String, Step> {
+    ["echo"] {
+        check = "echo ok"
+    }
+}
 
 output {
     renderer {
@@ -1742,12 +1745,6 @@ output {
                 ...s.toDynamic()
             }
         }
-    }
-}
-
-steps {
-    ["echo"] {
-        check = "echo ok"
     }
 }
 "#,
@@ -2636,9 +2633,10 @@ fn lambda_parameters_override_class_properties_across_call_forms() {
         r#"
 class Step { stage: String?; check: String? }
 local make = (stage) -> new Step { check = stage }
-local holder = new {
+class Holder {
   function makeStep(stage: String): Step = new Step { check = stage }
 }
+local holder = new Holder {}
 applied = make.apply("apply")
 method = holder.makeStep("method")
 callback = (new Listing { "callback" }).map(make)
@@ -3051,9 +3049,8 @@ fn lambda_object_keeps_default_type_binding() {
     let json = eval(
         r#"
 class Step { value = 42 }
-local make = () -> new Dynamic {
-  selected: *Step | String
-}
+class Holder { selected: *Step | String }
+local make = () -> new Holder {}
 result = make.apply()
 "#,
     );
@@ -3076,10 +3073,9 @@ result = make.apply()
 fn lambda_object_keeps_generic_default_type_binding() {
     let json = eval(
         r#"
-class Container<T> { value = 42 }
-local make = () -> new Dynamic {
-  selected: *Container<String> | String
-}
+class Container { value = 42 }
+class Holder { selected: *Container | String }
+local make = () -> new Holder {}
 result = make.apply()
 "#,
     );
@@ -3092,10 +3088,11 @@ fn lambda_object_keeps_quoted_default_type_binding() {
         r#"
 class `Foo-Bar` { value = 42 }
 class `My Step` { value = 43 }
-local make = () -> new Dynamic {
+class Holder {
   selected: *`Foo-Bar` | String
   spaced: *`My Step` | String
 }
+local make = () -> new Holder {}
 result = make.apply()
 "#,
     );
@@ -3142,10 +3139,10 @@ no = check.apply(new Other {})
 fn lambda_constrained_check_keeps_quoted_generic_class() {
     let json = eval(
         r#"
-class `Box,Pair`<T> { value = 1 }
+class `Box,Pair` { value = 1 }
 class Other { value = 2 }
-local check = (v) -> v is `Box,Pair`<String>(true)
-yes = check.apply(new `Box,Pair`<String> {})
+local check = (v) -> v is `Box,Pair`(true)
+yes = check.apply(new `Box,Pair` {})
 no = check.apply(new Other {})
 "#,
     );

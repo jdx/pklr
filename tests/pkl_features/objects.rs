@@ -451,10 +451,11 @@ data {
 fn this_keyword_with_hidden_property() {
     let json = eval(
         r#"
-data {
+class Data {
     hidden base = "https://example.com"
     url = this.base + "/api"
 }
+data = new Data {}
 "#,
     );
     // base must not appear in output (hidden)
@@ -566,18 +567,18 @@ result = factory.lastValue()
 }
 
 #[test]
-fn class_with_type_params() {
-    let json = eval(
+fn class_with_type_params_is_rejected() {
+    let err = eval_fails(
         r#"
 class Container<T> {
     value: T = "default"
 }
-x = new Container {
-    value = "custom"
-}
 "#,
     );
-    assert_eq!(json["x"]["value"], "custom");
+    assert!(
+        err.contains("Only standard library members can have type parameters"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -944,8 +945,8 @@ x = version
 }
 
 #[test]
-fn hidden_in_nested_object() {
-    let json = eval(
+fn hidden_in_nested_object_is_rejected() {
+    let err = eval_fails(
         r#"
 config {
     hidden internal = "private"
@@ -953,8 +954,10 @@ config {
 }
 "#,
     );
-    assert!(json["config"].get("internal").is_none());
-    assert_eq!(json["config"]["public"], "visible");
+    assert!(
+        err.contains("Modifier `hidden` is not applicable to object members"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -977,8 +980,10 @@ external name: String
 x = name
 "#,
     );
-    assert!(msg.contains("external"));
-    assert!(msg.contains("must be assigned"));
+    assert!(
+        msg.contains("External members can only be defined by standard library modules"),
+        "{msg}"
+    );
 }
 
 #[tokio::test]
@@ -1262,7 +1267,8 @@ fn nullable_class_default_can_be_amended() {
     let json = eval(
         r#"
 class Options { enabled: Boolean = false }
-base { options: Options? }
+class Base { options: Options? }
+base = new Base {}
 result = (base) { options { enabled = true } }
 "#,
     );
@@ -1274,7 +1280,8 @@ fn nullable_amendment_prefers_existing_non_null_value() {
     let json = eval(
         r#"
 class Options { enabled: Boolean = false; label: String = "default" }
-base { options: Options? = new Options { enabled = true } }
+class Base { options: Options? = new Options { enabled = true } }
+base = new Base {}
 result = (base) { options { label = "changed" } }
 "#,
     );
@@ -1286,7 +1293,8 @@ result = (base) { options { label = "changed" } }
 fn listing_body_amendment_appends_elements() {
     let json = eval(
         r#"
-base { items: Listing<String> }
+class Base { items: Listing<String> }
+base = new Base {}
 result = (base) {
   items {
     local prefix = ""
@@ -1602,7 +1610,8 @@ fn constrained_nullable_mapping_preserves_value_defaults() {
     let json = eval(
         r#"
 class Item { enabled: Boolean = false }
-base { items: Mapping<String, Item>?(length >= 0) }
+class Base { items: Mapping<String, Item>(length >= 0)? }
+base = new Base {}
 result = (base) { items { ["example"] { enabled = true } } }
 "#,
     );
@@ -3600,7 +3609,7 @@ fn outer_in_type_position_is_bound() {
 class Step { v = 1 }
 obj {
   inner { s = new outer.Step {} }
-  x: outer.Step = new Step {}
+  local x: outer.Step = new Step {}
   ok = x is outer.Step
 }
 "#,

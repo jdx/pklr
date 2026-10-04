@@ -791,8 +791,15 @@ x = (base) { ["k"] { prop = 3 } }
     );
     assert!(err.contains("cannot have a property"), "{err}");
 
+    let err = eval_fails(
+        "local base = new Mapping { [\"k\"] = new Listing { 1 2 } }\nx = (base) { [\"k\"] { for (n in List(1)) { prop = n } } }\n",
+    );
+    assert!(
+        err.contains("A for-generator cannot generate object properties"),
+        "{err}"
+    );
+
     for body in [
-        "for (n in List(1)) { prop = n }",
         "when (true) { prop = 3 }",
         "when (false) { 3 } else { prop = 3 }",
     ] {
@@ -1167,4 +1174,219 @@ result = a.a_value
         .await
         .unwrap();
     assert_eq!(val["result"], "from_a");
+}
+
+// ============================================================
+// Static member checks
+// ============================================================
+
+#[test]
+fn duplicate_member_definitions_are_rejected() {
+    for (src, name) in [
+        ("foo = 1\nfoo = 2\n", "foo"),
+        ("foo = 1\nlocal foo = 2\n", "foo"),
+        ("function f() = 1\nfunction f(x) = x\n", "f"),
+        ("class C\nC = 1\n", "C"),
+        ("typealias T = Int\nT = 1\n", "T"),
+        ("import \"pkl:test\"\ntest = 1\n", "test"),
+        ("class C {\n  a: Int\n  a: String\n}\n", "a"),
+        ("obj {\n  a = 1\n  a = 2\n}\n", "a"),
+        ("obj {\n  a { b = 1 }\n  a { c = 1 }\n}\n", "a"),
+        (
+            "m = new Mapping {\n  [\"k\"] = 1\n  [\"k\"] = 2\n}\n",
+            "\"k\"",
+        ),
+        ("m = new Mapping {\n  [1] = 1\n  [1] = 2\n}\n", "1"),
+        ("xs = List(1)\nobj {\n  for (i, i in xs) { i }\n}\n", "i"),
+    ] {
+        let err = eval_fails(src);
+        assert!(
+            err.contains(&format!("Duplicate definition of member `{name}`")),
+            "{src}: {err}"
+        );
+    }
+}
+
+#[test]
+fn members_in_separate_namespaces_are_not_duplicates() {
+    // Properties and methods have separate namespaces, and object bodies
+    // keep local properties, non-local properties and entries apart.
+    let src = r#"
+function foo() = 1
+foo = 5
+class C {
+  bar: Int = 3
+  function bar() = 2
+}
+obj {
+  a = 1
+  local a = 2
+  local function a() = 4
+  ["a"] = 3
+}
+"#;
+    pklr::parser::parse(&pklr::lexer::lex(src).unwrap()).unwrap();
+
+    // Duplicates a generator adds are only found when it runs.
+    let json = eval("gen {\n  a = 1\n  when (false) { a = 2 }\n}\n");
+    assert_eq!(json["gen"]["a"], 1);
+}
+
+#[test]
+fn invalid_modifiers_are_rejected() {
+    for (src, message) in [
+        (
+            "fixed module foo\n",
+            "Modifier `fixed` is not applicable to modules.",
+        ),
+        (
+            "hidden class Foo\n",
+            "Modifier `hidden` is not applicable to classes.",
+        ),
+        (
+            "abstract typealias Foo = Int\n",
+            "Modifier `abstract` is not applicable to type aliases.",
+        ),
+        (
+            "open function foo() = 1\n",
+            "Modifier `open` is not applicable to methods.",
+        ),
+        (
+            "open foo: Int = 1\n",
+            "Modifier `open` is not applicable to properties.",
+        ),
+        (
+            "class Foo {\n  open function f() = 1\n}\n",
+            "Modifier `open` is not applicable to methods.",
+        ),
+        (
+            "foo {\n  abstract bar = 1\n}\n",
+            "Modifier `abstract` is not applicable to object members.",
+        ),
+        (
+            "foo {\n  fixed bar = 1\n}\n",
+            "Modifier `fixed` is not applicable to object members.",
+        ),
+        (
+            "foo = new Dynamic {\n  const bar = 1\n}\n",
+            "Modifier `const` can only be applied to object members that are also `local`.",
+        ),
+        (
+            "external function foo()\n",
+            "External members can only be defined by standard library modules.",
+        ),
+        (
+            "class Foo {\n  external bar: String\n}\n",
+            "External members can only be defined by standard library modules.",
+        ),
+        (
+            "local hidden name: String = \"\"\n",
+            "Modifier `hidden` is redundant here; just use `local`.",
+        ),
+        (
+            "local fixed name: String = \"\"\n",
+            "Modifier `fixed` is redundant here; just use `local`.",
+        ),
+        (
+            "abstract open class Person\n",
+            "Modifier `open` is redundant here; just use `abstract`.",
+        ),
+    ] {
+        let err = eval_fails(src);
+        assert!(err.contains(message), "{src}: {err}");
+    }
+}
+
+#[test]
+fn invalid_member_definitions_are_rejected() {
+    for (src, message) in [
+        ("local x: Int\n", "Missing property value."),
+        (
+            "class Box<A> {\n  element: A\n}\n",
+            "Only standard library members can have type parameters.",
+        ),
+        (
+            "local function f<T>(x: T) = x\n",
+            "Only standard library members can have type parameters.",
+        ),
+        (
+            "typealias Pair<A, A> = List<A>\n",
+            "Duplicate type parameter `A`.",
+        ),
+        (
+            "obj {\n  for (n in List(1)) { foo = n }\n}\n",
+            "A for-generator cannot generate object properties (only entries and elements).",
+        ),
+        (
+            "obj {\n  for (n in List(1)) { when (true) { local foo = n } }\n}\n",
+            "A for-generator cannot generate object properties (only entries and elements).",
+        ),
+        (
+            "obj {\n  for (n in List(1)) { local function f() = n }\n}\n",
+            "A for-generator cannot generate object methods (only entries and elements).",
+        ),
+        (
+            "obj {\n  function f() = 1\n}\n",
+            "Method needs a `local` modifier because it is defined in an object, not a class.",
+        ),
+        (
+            "obj {\n  x: Int = 1\n}\n",
+            "A non-local object property cannot have a type annotation.",
+        ),
+        (
+            "obj {\n  local x { a = 1 }\n}\n",
+            "A local property definition cannot be amended.",
+        ),
+    ] {
+        let err = eval_fails(src);
+        assert!(err.contains(message), "{src}: {err}");
+    }
+}
+
+#[test]
+fn amending_module_member_rules() {
+    let temp = TestTempDir::new("pklr_test_amending_module_member_rules");
+    let dir = temp.path();
+    std::fs::write(dir.join("base.pkl"), "name: String = \"\"\n").unwrap();
+    let path = dir.join("main.pkl");
+    for (src, message) in [
+        (
+            "amends \"base.pkl\"\nname: String = \"x\"\n",
+            "A non-local object property cannot have a type annotation.",
+        ),
+        (
+            "amends \"base.pkl\"\nfunction foo() = 1\n",
+            "Method needs a `local` modifier.",
+        ),
+        (
+            "amends \"base.pkl\"\nclass Other\n",
+            "Class needs a `local` modifier.",
+        ),
+        (
+            "amends \"base.pkl\"\ntypealias Other = Int\n",
+            "Type alias needs a `local` modifier.",
+        ),
+        (
+            "amends \"base.pkl\"\nlocal object {\n  a = 1\n}\n",
+            "A local property definition cannot be amended.",
+        ),
+        (
+            "amends \"base.pkl\"\nhidden name = \"x\"\n",
+            "Modifier `hidden` is not applicable to object members.",
+        ),
+        (
+            "open module foo\namends \"base.pkl\"\n",
+            "Modifier `open` is not applicable to modules that amend another module.",
+        ),
+    ] {
+        std::fs::write(&path, src).unwrap();
+        let err = pklr::eval_to_json(&path).unwrap_err().to_string();
+        assert!(err.contains(message), "{src}: {err}");
+    }
+    std::fs::write(
+        &path,
+        "amends \"base.pkl\"\nlocal suffix: String = \"!\"\nlocal function f(s) = s + suffix\nlocal class C\nname = f(\"x\")\n",
+    )
+    .unwrap();
+    assert_eq!(pklr::eval_to_json(&path).unwrap()["name"], "x!");
 }

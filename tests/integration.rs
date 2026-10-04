@@ -525,7 +525,7 @@ value: Mapping<String, String>?(length > 0, !isEmpty)
 fn type_constraints_do_not_consume_next_line_elements() {
     let source = r#"
 items {
-  value: String
+  local value: String = "v"
   ("next")
 }
 "#;
@@ -1339,9 +1339,7 @@ local linters = new Mapping<String, Step> {
     }
 }
 
-hooks: Mapping<String, Hook> = new Mapping<String, Hook> {}
-
-hooks {
+hooks: Mapping<String, Hook> = new Mapping<String, Hook> {
     ["pre-commit"] {
         fix = true
         steps = linters

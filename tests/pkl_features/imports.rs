@@ -550,15 +550,18 @@ result = "ok"
 }
 
 #[test]
-fn shadowed_unused_import_is_not_evaluated() {
-    let json = eval(
+fn import_and_class_with_same_name_is_a_duplicate() {
+    let err = eval_fails(
         r#"
 import "does-not-exist.pkl" as Foo
 class Foo {}
 result = new Foo {}
 "#,
     );
-    assert!(json["result"].is_object());
+    assert!(
+        err.contains("Duplicate definition of member `Foo`"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -977,7 +980,7 @@ open class Foo {
     origin = "definition"
 }
 value = new {
-    inherited: Foo = new Foo {}
+    inherited = new Foo {}
 }
 "#,
     )
@@ -1584,8 +1587,7 @@ broken = missing.field
         r#"
 import "types.pkl" as Types
 other = Types.Other
-steps: Mapping<String, Types.Step> = new Mapping {}
-steps {
+steps: Mapping<String, Types.Step> = new Mapping<String, Types.Step> {
     ["a"] {
         name = "alpha"
     }
@@ -2770,13 +2772,6 @@ async fn narrowed_import_respects_builtins_redeclared_in_nested_bodies() {
         "length = throw(\"unused\")\ntypealias String = List\ntypealias T = String(length == 1)\nresult {\n  inner {\n    typealias List = Int\n    value = 1\n  }\n  ok = List(1) is T\n}\n",
     )
     .unwrap();
-    // Types and properties have separate namespaces, so a body that follows
-    // the type `Foo` itself still reads the module property `Foo`.
-    std::fs::write(
-        dir.join("dep_same_name.pkl"),
-        "typealias Foo = Int\nFoo = 5\nresult {\n  typealias String = Int\n  ok = Foo\n}\n",
-    )
-    .unwrap();
     // Redeclared as a collection, `String` still binds the value's own
     // `length`, directly or through `T`, so the module's unused `length` must
     // not be evaluated.
@@ -2821,7 +2816,7 @@ async fn narrowed_import_respects_builtins_redeclared_in_nested_bodies() {
     .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"dep.pkl\" as Dep\nimport \"dep_direct.pkl\" as DepDirect\nimport \"dep_inherited_empty.pkl\" as DepInheritedEmpty\nimport \"dep_inherited_other.pkl\" as DepInheritedOther\nimport \"dep_deeper.pkl\" as DepDeeper\nimport \"dep_inherited.pkl\" as DepInherited\nimport \"dep_inherited_nested.pkl\" as DepInheritedNested\nimport \"dep_collection.pkl\" as DepCollection\nimport \"dep_same_name.pkl\" as DepSameName\nimport \"dep_alias_sibling.pkl\" as DepAliasSibling\nimport \"dep_identical_shadowed.pkl\" as DepIdenticalShadowed\nimport \"dep_local.pkl\" as DepLocal\nimport \"dep_identical.pkl\" as DepIdentical\nimport \"dep_listing.pkl\" as DepListing\nimport \"dep_sibling.pkl\" as DepSibling\nimport \"dep_class.pkl\" as DepClass\nout = Dep.result.ok\noutDirect = DepDirect.result.ok\noutListing = DepListing.result.inner.ok\noutSibling = DepSibling.result.ok\noutClass = DepClass.result.ok\noutLocal = DepLocal.result.inner.ok\noutIdentical = DepIdentical.result.ok\noutIdenticalShadowed = DepIdenticalShadowed.result.ok\noutIdenticalShadowedDirect = DepIdenticalShadowed.result.okDirect\noutAliasSibling = DepAliasSibling.result.ok\noutSameName = DepSameName.result.ok\noutCollection = DepCollection.result.ok\noutCollectionFollowed = DepCollection.result.okFollowed\noutDeeper = DepDeeper.result.inner.ok\noutInherited = DepInherited.result.ok\noutInheritedNested = DepInheritedNested.result.ok\noutInheritedEmpty = DepInheritedEmpty.result.ok\noutInheritedOther = DepInheritedOther.result.ok\n",
+        "import \"dep.pkl\" as Dep\nimport \"dep_direct.pkl\" as DepDirect\nimport \"dep_inherited_empty.pkl\" as DepInheritedEmpty\nimport \"dep_inherited_other.pkl\" as DepInheritedOther\nimport \"dep_deeper.pkl\" as DepDeeper\nimport \"dep_inherited.pkl\" as DepInherited\nimport \"dep_inherited_nested.pkl\" as DepInheritedNested\nimport \"dep_collection.pkl\" as DepCollection\nimport \"dep_alias_sibling.pkl\" as DepAliasSibling\nimport \"dep_identical_shadowed.pkl\" as DepIdenticalShadowed\nimport \"dep_local.pkl\" as DepLocal\nimport \"dep_identical.pkl\" as DepIdentical\nimport \"dep_listing.pkl\" as DepListing\nimport \"dep_sibling.pkl\" as DepSibling\nimport \"dep_class.pkl\" as DepClass\nout = Dep.result.ok\noutDirect = DepDirect.result.ok\noutListing = DepListing.result.inner.ok\noutSibling = DepSibling.result.ok\noutClass = DepClass.result.ok\noutLocal = DepLocal.result.inner.ok\noutIdentical = DepIdentical.result.ok\noutIdenticalShadowed = DepIdenticalShadowed.result.ok\noutIdenticalShadowedDirect = DepIdenticalShadowed.result.okDirect\noutAliasSibling = DepAliasSibling.result.ok\noutCollection = DepCollection.result.ok\noutCollectionFollowed = DepCollection.result.okFollowed\noutDeeper = DepDeeper.result.inner.ok\noutInherited = DepInherited.result.ok\noutInheritedNested = DepInheritedNested.result.ok\noutInheritedEmpty = DepInheritedEmpty.result.ok\noutInheritedOther = DepInheritedOther.result.ok\n",
     )
     .unwrap();
 
@@ -2838,7 +2833,6 @@ async fn narrowed_import_respects_builtins_redeclared_in_nested_bodies() {
     assert_eq!(val["outIdenticalShadowed"], true);
     assert_eq!(val["outIdenticalShadowedDirect"], true);
     assert_eq!(val["outAliasSibling"], true);
-    assert_eq!(val["outSameName"], 5);
     assert_eq!(val["outCollection"], true);
     assert_eq!(val["outCollectionFollowed"], true);
     assert_eq!(val["outDeeper"], true);
@@ -2982,7 +2976,7 @@ async fn narrowed_import_follows_module_reads_in_class_bodies() {
     .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"direct.pkl\"\nimport \"this_read.pkl\"\nimport \"dynamic.pkl\"\nimport \"lambda.pkl\"\ndirect = direct.out\nthisRead = this_read.out\ndynamic = dynamic.out\nlambda = lambda.out\n",
+        "import \"direct.pkl\" as Direct\nimport \"this_read.pkl\"\nimport \"dynamic.pkl\" as DynamicDep\nimport \"lambda.pkl\" as Lambda\ndirect = Direct.out\nthisRead = this_read.out\ndynamic = DynamicDep.out\nlambda = Lambda.out\n",
     )
     .unwrap();
 
@@ -3032,31 +3026,25 @@ async fn narrowed_import_follows_locals_with_module_aliases() {
 async fn narrowed_import_keeps_type_and_property_names_apart() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_type_property_names");
     let dir = temp.path();
-    // Types and properties have separate namespaces: checking against the
-    // alias `Foo` doesn't read the unused property `Foo`.
+    // Checking against the alias `Foo` doesn't read the unused property
+    // `unused`.
     std::fs::write(
         dir.join("dep.pkl"),
-        "typealias Foo = Int\nFoo = throw(\"unused\")\nresult {\n  ok = 1 is Foo\n}\n",
+        "typealias Foo = Int\nunused = throw(\"unused\")\nresult {\n  ok = 1 is Foo\n}\n",
     )
     .unwrap();
-    // Reading `Foo` as a value reads the property.
-    std::fs::write(
-        dir.join("dep_value.pkl"),
-        "typealias Foo = Int\nFoo = 5\nresult {\n  ok = Foo\n}\n",
-    )
-    .unwrap();
-    // The alias is still followed, so what its constraint reads is kept, and
+    // The alias is followed, so what its constraint reads is kept, and
     // annotations and `new` name the type too.
     std::fs::write(
         dir.join("dep_followed.pkl"),
-        "min = 1\ntypealias Foo = Int(this >= min)\nFoo = throw(\"unused\")\nclass Bar {\n  a: Int = 1\n}\nBar = throw(\"unused\")\nresult {\n  ok = 1 is Foo\n  typed: Foo = 2\n  bar = new Bar {}\n}\n",
+        "min = 1\ntypealias Foo = Int(this >= min)\nunused = throw(\"unused\")\nclass Bar {\n  a: Int = 1\n}\nresult {\n  ok = 1 is Foo\n  local t: Foo = 2\n  typed = t\n  bar = new Bar {}\n}\n",
     )
     .unwrap();
     // A body that follows definitions itself (it redeclares a type) drops the
     // type reference too.
     std::fs::write(
         dir.join("dep_narrowed.pkl"),
-        "min = 1\ntypealias Foo = Int(this >= min)\nFoo = throw(\"unused\")\nresult {\n  typealias String = Int\n  ok = 1 is Foo\n}\n",
+        "min = 1\ntypealias Foo = Int(this >= min)\nunused = throw(\"unused\")\nresult {\n  typealias String = Int\n  ok = 1 is Foo\n}\n",
     )
     .unwrap();
     // Bindings shadow only their own namespace: a type declared in a body
@@ -3074,7 +3062,7 @@ async fn narrowed_import_keeps_type_and_property_names_apart() {
     .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"dep.pkl\" as Dep\nimport \"dep_value.pkl\" as DepValue\nimport \"dep_followed.pkl\" as DepFollowed\nimport \"dep_narrowed.pkl\" as DepNarrowed\nimport \"dep_type_shadow.pkl\" as DepTypeShadow\nimport \"dep_local_shadow.pkl\" as DepLocalShadow\nout = Dep.result.ok\noutValue = DepValue.result.ok\noutFollowed = DepFollowed.result\noutNarrowed = DepNarrowed.result.ok\noutTypeShadow = DepTypeShadow.result.ok\noutLocalShadow = DepLocalShadow.result.ok\n",
+        "import \"dep.pkl\" as Dep\nimport \"dep_followed.pkl\" as DepFollowed\nimport \"dep_narrowed.pkl\" as DepNarrowed\nimport \"dep_type_shadow.pkl\" as DepTypeShadow\nimport \"dep_local_shadow.pkl\" as DepLocalShadow\nout = Dep.result.ok\noutFollowed = DepFollowed.result\noutNarrowed = DepNarrowed.result.ok\noutTypeShadow = DepTypeShadow.result.ok\noutLocalShadow = DepLocalShadow.result.ok\n",
     )
     .unwrap();
 
@@ -3082,7 +3070,6 @@ async fn narrowed_import_keeps_type_and_property_names_apart() {
         .await
         .unwrap();
     assert_eq!(val["out"], true);
-    assert_eq!(val["outValue"], 5);
     assert_eq!(
         val["outFollowed"],
         serde_json::json!({ "ok": true, "typed": 2, "bar": { "a": 1 } })
