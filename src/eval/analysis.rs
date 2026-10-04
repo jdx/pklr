@@ -969,19 +969,45 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
         .iter()
         .map(|(_, _, refs)| refs.contains(DYNAMIC_SIBLING_REF))
         .collect();
-    let deps: Vec<Vec<usize>> = tracked
+    let static_deps: Vec<Vec<usize>> = tracked
         .iter()
         .enumerate()
         .map(|(i, (_, _, refs))| {
-            let mut deps: Vec<usize> = if dynamic[i] {
-                (0..tracked.len()).filter(|&j| !dynamic[j]).collect()
-            } else {
-                refs.iter()
-                    .filter_map(|name| index.get(name.as_str()).copied())
-                    .collect()
-            };
-            deps.retain(|&j| j != i);
+            let mut deps: Vec<usize> = refs
+                .iter()
+                .filter_map(|name| index.get(name.as_str()).copied())
+                .filter(|&j| j != i)
+                .collect();
             deps.sort_unstable();
+            deps
+        })
+        .collect();
+    // Whether `from` reads `to`, directly or through other members.
+    let reaches = |from: usize, to: usize| {
+        let mut seen = vec![false; tracked.len()];
+        let mut stack = vec![from];
+        while let Some(i) = stack.pop() {
+            if i == to {
+                return true;
+            }
+            if !std::mem::replace(&mut seen[i], true) {
+                stack.extend(&static_deps[i]);
+            }
+        }
+        false
+    };
+    // A dynamic reader goes after the other members, except those that read
+    // it: ordering it after them would put it after its own dependents.
+    let deps: Vec<Vec<usize>> = (0..tracked.len())
+        .map(|i| {
+            let mut deps = static_deps[i].clone();
+            if dynamic[i] {
+                deps.extend(
+                    (0..tracked.len()).filter(|&j| j != i && !dynamic[j] && !reaches(j, i)),
+                );
+                deps.sort_unstable();
+                deps.dedup();
+            }
             deps
         })
         .collect();

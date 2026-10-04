@@ -3520,6 +3520,25 @@ fn members_declared_before_the_class_they_use_are_refreshed() {
 }
 
 #[test]
+fn dynamic_module_readers_are_refreshed_before_their_dependents() {
+    // `C` reads `module[key]` and `D` reads `C`: `C` must be refreshed first.
+    let val = eval(
+        "local key = \"expected\"\nclass C { v = module[key] }\nclass D { v = module.C.v }\nexpected = \"b\"\nresult = new D {}\n",
+    );
+    assert_eq!(val["result"], serde_json::json!({"v": "b"}));
+    // A function using a class that reads `module` dynamically.
+    let val = eval(
+        "local key = \"expected\"\nfunction make() = new C {}\nclass C { v = module[key] }\nexpected = \"b\"\nresult = make()\n",
+    );
+    assert_eq!(val["result"], serde_json::json!({"v": "b"}));
+    // A dynamic reader of the module consumed by a function.
+    let val = eval(
+        "local key = \"C\"\nlocal function make() = new D {}\nclass D { c = module[key] }\nclass C { v = module.expected }\nexpected = \"b\"\nresult = make().c.v\n",
+    );
+    assert_eq!(val["result"], "b");
+}
+
+#[test]
 fn failed_class_reports_error_through_module_and_this() {
     for src in [
         "class C { v = module.missing }\nresult = new module.C {}\n",

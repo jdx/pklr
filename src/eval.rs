@@ -3268,78 +3268,139 @@ impl Evaluator {
             .filter_map(|entry| Some((entry_member_name(entry)?.as_str(), entry)))
             .filter(|(name, _)| members.contains(*name))
             .collect();
-        for entry in members
+        let ordered: Vec<&Entry> = members
             .iter()
             .filter_map(|name| member_entries.get(name.as_str()).copied())
-        {
-            if !pending.is_empty() && member_reads_pending(entry, &pending) {
-                flush_module_members(scope, module_props, &mut pending);
-            }
-            // Classes and module functions are also members of the module
-            // object behind `this`/`module`; locals and type aliases are not.
-            let (name, result, module_member) = match entry {
-                Entry::ClassDef(name, class_mods, parent, body) if members.contains(name) => (
-                    name,
-                    self.eval_class_def(name, class_mods, parent.as_deref(), body, scope, depth),
-                    true,
-                ),
-                Entry::TypeAlias(name, ty) if members.contains(name) => {
-                    match type_alias_target(ty).and_then(|target| poisoned_member(scope, target)) {
-                        Some(message) => {
-                            scope.set_member_poison(name, Some(message.clone()));
-                            scope.redeclare_poisoned(name.clone(), message);
-                        }
-                        None => {
-                            scope.set_member_poison(name, None);
-                            self.eval_type_alias(name, ty, scope);
-                        }
-                    }
+            .collect();
+        let mut todo = ordered.clone();
+        // One pass normally suffices. If a cycle left a member that reads
+        // another one ahead of it, and that one recovered in this pass, the
+        // reader is refreshed again, for at most one pass per member.
+        for _ in 0..ordered.len() {
+            let mut position: HashMap<&str, usize> = HashMap::new();
+            let mut recovered: Vec<(String, usize)> = Vec::new();
+            for entry in todo.iter().copied() {
+                if !pending.is_empty() && member_reads_pending(entry, &pending) {
+                    flush_module_members(scope, module_props, &mut pending);
+                }
+                let Some(entry_name) = entry_member_name(entry) else {
                     continue;
-                }
-                Entry::Property(prop) if members.contains(&prop.name) => {
-                    let Some(expr) = &prop.value else {
-                        continue;
+                };
+                let was_bound = scope.get(entry_name).is_some();
+                'entry: {
+                    // Classes and module functions are also members of the module
+                    // object behind `this`/`module`; locals and type aliases are not.
+                    let (name, result, module_member) = match entry {
+                        Entry::ClassDef(name, class_mods, parent, body)
+                            if members.contains(name) =>
+                        {
+                            (
+                                name,
+                                self.eval_class_def(
+                                    name,
+                                    class_mods,
+                                    parent.as_deref(),
+                                    body,
+                                    scope,
+                                    depth,
+                                ),
+                                true,
+                            )
+                        }
+                        Entry::TypeAlias(name, ty) if members.contains(name) => {
+                            match type_alias_target(ty)
+                                .and_then(|target| poisoned_member(scope, target))
+                            {
+                                Some(message) => {
+                                    scope.set_member_poison(name, Some(message.clone()));
+                                    scope.redeclare_poisoned(name.clone(), message);
+                                }
+                                None => {
+                                    scope.set_member_poison(name, None);
+                                    self.eval_type_alias(name, ty, scope);
+                                }
+                            }
+                            break 'entry;
+                        }
+                        Entry::Property(prop) if members.contains(&prop.name) => {
+                            let Some(expr) = &prop.value else {
+                                break 'entry;
+                            };
+                            // A module function is bound when the property pass
+                            // reaches it; only re-bind it once it has been.
+                            if !has_modifier(&prop.modifiers, Modifier::Local)
+                                && scope.get(&prop.name).is_none()
+                            {
+                                break 'entry;
+                            }
+                            (
+                                &prop.name,
+                                self.eval_expr(expr, scope, depth),
+                                !has_modifier(&prop.modifiers, Modifier::Local),
+                            )
+                        }
+                        _ => break 'entry,
                     };
-                    // A module function is bound when the property pass
-                    // reaches it; only re-bind it once it has been.
-                    if !has_modifier(&prop.modifiers, Modifier::Local)
-                        && scope.get(&prop.name).is_none()
+                    let module_value = match result {
+                        Ok(value) => {
+                            if module_member {
+                                scope.set_member_poison(name, None);
+                            }
+                            scope.declare(name.clone(), value.clone());
+                            Some(value)
+                        }
+                        Err(Error::Eval(message)) => {
+                            // Only members of the module object, not locals, are
+                            // reported through `module.C`/`module["C"]`.
+                            if module_member {
+                                scope.set_member_poison(name, Some(message.clone()));
+                            }
+                            scope.redeclare_poisoned(name.clone(), message);
+                            None
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    // Keep `this.C` and `module.C` in step with the bare name.
+                    if module_member && (module_value.is_some() || module_props.contains_key(name))
                     {
-                        continue;
+                        pending.push((name.clone(), module_value));
                     }
-                    (
-                        &prop.name,
-                        self.eval_expr(expr, scope, depth),
-                        !has_modifier(&prop.modifiers, Modifier::Local),
-                    )
                 }
-                _ => continue,
-            };
-            let module_value = match result {
-                Ok(value) => {
-                    if module_member {
-                        scope.set_member_poison(name, None);
-                    }
-                    scope.declare(name.clone(), value.clone());
-                    Some(value)
+                let index = position.len();
+                position.insert(entry_name.as_str(), index);
+                if !was_bound && scope.get(entry_name).is_some() {
+                    recovered.push((entry_name.clone(), index));
                 }
-                Err(Error::Eval(message)) => {
-                    // Only members of the module object, not locals, are
-                    // reported through `module.C`/`module["C"]`.
-                    if module_member {
-                        scope.set_member_poison(name, Some(message.clone()));
-                    }
-                    scope.redeclare_poisoned(name.clone(), message);
-                    None
-                }
-                Err(error) => return Err(error),
-            };
-            // Keep `this.C` and `module.C` in step with the bare name.
-            if module_member && (module_value.is_some() || module_props.contains_key(name)) {
-                pending.push((name.clone(), module_value));
             }
+            flush_module_members(scope, module_props, &mut pending);
+            if recovered.is_empty() {
+                break;
+            }
+            // Members that read a member which recovered after they were
+            // refreshed (or that weren't refreshed in this pass) are stale.
+            let stale: Vec<&Entry> = ordered
+                .iter()
+                .copied()
+                .filter(|entry| {
+                    let Some(name) = entry_member_name(entry) else {
+                        return false;
+                    };
+                    let at = position.get(name.as_str()).copied();
+                    let missed: Vec<(String, Option<Value>)> = recovered
+                        .iter()
+                        .filter(|(recovered, index)| {
+                            recovered != name && at.is_none_or(|at| at < *index)
+                        })
+                        .map(|(recovered, _)| (recovered.clone(), None))
+                        .collect();
+                    !missed.is_empty() && member_reads_pending(entry, &missed)
+                })
+                .collect();
+            if stale.is_empty() {
+                break;
+            }
+            todo = stale;
         }
-        flush_module_members(scope, module_props, &mut pending);
         Ok(())
     }
 
