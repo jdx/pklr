@@ -2477,6 +2477,72 @@ async fn narrowed_import_skips_inherited_method_reads_when_following_class() {
 }
 
 #[tokio::test]
+async fn narrowed_import_follows_module_reads_made_before_class_properties_are_bound() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_followed_class_early_reads");
+    let dir = temp.path();
+    // A class body's locals are evaluated before its properties, and each
+    // property is bound in declaration order, so these reads of `a` (or
+    // `name`) happen before the class's own property of that name exists
+    // and still need the module's.
+    let deps = [
+        // A local.
+        "a = 1\nmax = 3\nclass D {\n  local x = a\n  a = 6\n  b = x\n  c = module.max\n}\n",
+        // A property's own initializer.
+        "a = \"mod\"\nmax = 3\nclass D {\n  a = a\n  c = module.max\n}\n",
+        // A method called by a default declared before the property.
+        "a = 1\nmax = 3\nclass D {\n  function f() = a\n  b = f()\n  a = 6\n  c = module.max\n}\n",
+    ];
+    for (i, dep) in deps.iter().enumerate() {
+        let name = format!("dep{i}.pkl");
+        std::fs::write(dir.join(&name), format!("{dep}d = new D {{}}\n")).unwrap();
+        std::fs::write(
+            dir.join("main.pkl"),
+            format!("import \"{name}\" as Dep\nd = new Dep.D {{}}\n"),
+        )
+        .unwrap();
+        let direct = pklr::eval_to_json_async(&dir.join(&name)).await.unwrap();
+        let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+            .await
+            .unwrap();
+        assert_eq!(val["d"], direct["d"], "{dep}");
+    }
+}
+
+#[tokio::test]
+async fn narrowed_import_skips_stored_methods_class_defaults_do_not_apply() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_stored_method");
+    let dir = temp.path();
+    // `callback = getMin` only stores the method, which then runs on the
+    // built instance, where `min` is the inherited property.
+    std::fs::write(
+        dir.join("stored.pkl"),
+        "min = throw(\"unused\")\nmax = 3\nopen class Parent { min = 2 }\nclass Child extends Parent {\n  function getMin() = min\n  callback = getMin\n  c = max\n}\n",
+    )
+    .unwrap();
+    // Applying the stored method in a default runs it before `Parent`'s
+    // `min` is merged in, so the module's `min` is still needed.
+    std::fs::write(
+        dir.join("applied.pkl"),
+        "min = 1\nmax = 3\nopen class Parent { min = 2 }\nclass Child extends Parent {\n  function getMin() = min\n  callback = getMin\n  a = callback.apply()\n  c = max\n}\nchild = new Child {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"stored.pkl\" as S\nimport \"applied.pkl\" as A\nmin = (new S.Child {}).callback.apply()\napplied = (new A.Child {}).a\n",
+    )
+    .unwrap();
+
+    let direct = pklr::eval_to_json_async(&dir.join("applied.pkl"))
+        .await
+        .unwrap();
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["min"], 2);
+    assert_eq!(val["applied"], direct["child"]["a"]);
+}
+
+#[tokio::test]
 async fn narrowed_import_follows_methods_called_by_class_defaults() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_default_method_call");
     let dir = temp.path();

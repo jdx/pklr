@@ -1113,38 +1113,46 @@ impl<'a> ModuleClasses<'a> {
     }
 
     /// The `roots` (bare roots read in the body of the module-level `class`)
-    /// that read module properties. A bare root naming a module property that
-    /// the body doesn't declare itself reads it like `module.name`. The
+    /// that read module properties. A bare root naming a module property
+    /// reads it like `module.name` unless the instance has a property of that
+    /// name when the read happens. The body's locals are evaluated before its
+    /// properties, and each property is bound in declaration order, so a
+    /// property the body declares only hides the module's from the entries
+    /// after it, and from methods none of the defaults up to it run. The
     /// body's defaults are first evaluated before the parent's members are
-    /// merged in, so an inherited property of that name read by a default
-    /// still reads the module's. A method runs on the built instance, where
-    /// it reads the inherited property.
+    /// merged in, so an inherited property is likewise only seen by methods
+    /// the defaults don't run.
     fn module_reads<'r>(
         &self,
         class: &str,
         body: &[Entry],
         roots: &'r HashSet<String>,
     ) -> Vec<&'r String> {
-        let mut reads: Vec<&String> = roots
+        let mut inherited = None;
+        let mut default_refs = None;
+        roots
             .iter()
             .filter(|root| {
-                self.is_property(root)
-                    && !body
-                        .iter()
-                        .any(|entry| matches!(entry, Entry::Property(prop) if prop.name == **root))
+                if !self.is_property(root) {
+                    return false;
+                }
+                let declared = body.iter().rposition(
+                    |entry| matches!(entry, Entry::Property(prop) if prop.name == **root),
+                );
+                if let Some(declared) = declared {
+                    return eager_class_refs(body, Some(declared)).contains(root.as_str());
+                }
+                if !inherited
+                    .get_or_insert_with(|| self.inherited_properties(class))
+                    .contains(root.as_str())
+                {
+                    return true;
+                }
+                default_refs
+                    .get_or_insert_with(|| eager_class_refs(body, None))
+                    .contains(root.as_str())
             })
-            .collect();
-        if reads.is_empty() {
-            return reads;
-        }
-        let inherited = self.inherited_properties(class);
-        if reads.iter().any(|root| inherited.contains(root.as_str())) {
-            let default_refs = eager_class_refs(body);
-            reads.retain(|root| {
-                !inherited.contains(root.as_str()) || default_refs.contains(root.as_str())
-            });
-        }
-        reads
+            .collect()
     }
 
     /// The non-local properties `class` inherits from ancestors declared in
@@ -1178,13 +1186,22 @@ impl<'a> ModuleClasses<'a> {
     }
 }
 
-/// The names a class body reads while its defaults are evaluated: those
-/// of its non-method entries, and of the methods they call (by name, as
-/// `this.name`, or any of them through a dynamic `this[...]`). Other
-/// method bodies only run on a built instance.
-fn eager_class_refs(body: &[Entry]) -> HashSet<String> {
+/// The names a class body reads while its defaults are evaluated: those of
+/// its locals and other non-method entries (only those at or before index
+/// `upto`, plus the locals, when given), and of the methods they run. A
+/// method runs when they read it (calling it by name, as `this.name`, or any
+/// of them through a dynamic `this[...]`), except that a property whose value
+/// is just the method (`callback = getMin`) only stores it: the method then
+/// runs when they read that property. Other method bodies only run on a
+/// built instance.
+fn eager_class_refs(body: &[Entry], upto: Option<usize>) -> HashSet<String> {
     fn is_method(entry: &Entry) -> bool {
-        matches!(entry, Entry::Property(prop) if matches!(prop.value, Some(Expr::Lambda(..))))
+        matches!(
+            entry,
+            Entry::Property(prop)
+                if !has_modifier(&prop.modifiers, Modifier::Local)
+                    && matches!(prop.value, Some(Expr::Lambda(..)))
+        )
     }
     // The members `entries` read as `this.name`, where `this` is the
     // instance (not a nested object body's own `this`).
@@ -1218,19 +1235,67 @@ fn eager_class_refs(body: &[Entry]) -> HashSet<String> {
             }
         }
     }
-    let defaults: Vec<Entry> = body.iter().filter(|e| !is_method(e)).cloned().collect();
+    let methods: HashSet<&str> = body
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::Property(prop) if is_method(entry) => Some(prop.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    // Properties storing a method (`callback = getMin` or `= this.getMin`),
+    // with the method each stores.
+    let stored: HashMap<&str, &str> = body
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::Property(prop) if !has_modifier(&prop.modifiers, Modifier::Local) => {
+                let method = match prop.value.as_ref()? {
+                    Expr::Ident(name) => name,
+                    Expr::Field(base, name) if matches!(&**base, Expr::Ident(this) if this == "this") => {
+                        name
+                    }
+                    _ => return None,
+                };
+                methods
+                    .contains(method.as_str())
+                    .then_some((prop.name.as_str(), method.as_str()))
+            }
+            _ => None,
+        })
+        .collect();
+    let defaults: Vec<Entry> = body
+        .iter()
+        .enumerate()
+        .filter(|(index, entry)| {
+            !is_method(entry)
+                && !matches!(entry, Entry::Property(prop) if stored.contains_key(prop.name.as_str()))
+                && (upto.is_none_or(|upto| *index <= upto)
+                    || matches!(entry, Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local)))
+        })
+        .map(|(_, entry)| entry.clone())
+        .collect();
     let mut refs = referenced_roots(&defaults);
     let mut members = HashSet::new();
     instance_member_refs(&defaults, &mut members);
     let mut followed = HashSet::new();
     loop {
         let calls_all = members.contains(DYNAMIC_SIBLING_REF);
+        let read = |name: &str| refs.contains(name) || members.contains(name);
+        let mut runs: HashSet<&str> = methods
+            .iter()
+            .copied()
+            .filter(|method| calls_all || read(method))
+            .collect();
+        runs.extend(
+            stored
+                .iter()
+                .filter(|(property, _)| read(property))
+                .map(|(_, method)| *method),
+        );
         let next: Vec<&Entry> = body
             .iter()
             .filter(|entry| match entry {
                 Entry::Property(prop) if is_method(entry) => {
-                    (calls_all || refs.contains(&prop.name) || members.contains(&prop.name))
-                        && followed.insert(prop.name.as_str())
+                    runs.contains(prop.name.as_str()) && followed.insert(prop.name.as_str())
                 }
                 _ => false,
             })
