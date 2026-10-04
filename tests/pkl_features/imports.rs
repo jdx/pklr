@@ -2505,6 +2505,8 @@ async fn narrowed_import_follows_module_reads_made_before_class_properties_are_b
         // the method.
         "a = 1\nmax = 3\nclass D {\n  class Reader { function f() = a }\n  class Caller { function go() = new Reader {}.f() }\n  r = new Caller {}.go()\n  a = 6\n  c = module.max\n}\n",
         "a = 1\nmax = 3\nclass D {\n  class Reader {\n    function g() = a\n    callback = g\n  }\n  r = new Reader {}.callback.apply()\n  a = 6\n  c = module.max\n}\n",
+        // ...or a function it passes an instance to.
+        "a = 1\nmax = 3\nlocal function run(x) = x.f()\nclass D {\n  class Reader { function f() = a }\n  r = run(new Reader {})\n  a = 6\n  c = module.max\n}\n",
     ];
     for (i, dep) in deps.iter().enumerate() {
         let name = format!("dep{i}.pkl");

@@ -1465,7 +1465,8 @@ fn class_default_reads<'e>(body: &'e [Entry], scope: &ClassMap<'e>) -> HashSet<S
 }
 
 /// Adds to `out` every member name `entries` read from any object (`x.name`,
-/// `x?.name`, `x["name"]`), or `DYNAMIC_SIBLING_REF` for a computed key.
+/// `x?.name`, `x["name"]`), or `DYNAMIC_SIBLING_REF` for a computed key or a
+/// value passed to a call (which may read any of its members).
 fn collect_field_names_entries(entries: &[Entry], out: &mut HashSet<String>) {
     for entry in entries {
         match entry {
@@ -1524,6 +1525,16 @@ fn collect_field_names_expr(expr: &Expr, out: &mut HashSet<String>) {
             collect_field_names_expr(right, out);
         }
         Expr::Call(callee, args) => {
+            // A value passed to a call may have any of its members read
+            // there.
+            if args.iter().any(|arg| {
+                !matches!(
+                    arg,
+                    Expr::Null | Expr::Bool(_) | Expr::Int(_) | Expr::Float(_) | Expr::String(_)
+                )
+            }) {
+                out.insert(DYNAMIC_SIBLING_REF.to_string());
+            }
             collect_field_names_expr(callee, out);
             for arg in args {
                 collect_field_names_expr(arg, out);
