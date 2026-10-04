@@ -150,13 +150,15 @@ impl Scope {
     }
 
     pub(super) fn set_name(&mut self, name: Name, val: Value) {
-        if self.poisoned.contains_key(&*name) {
+        // These maps are almost always empty; checking that first skips
+        // hashing the name for each of them.
+        if !self.poisoned.is_empty() && self.poisoned.contains_key(&*name) {
             Arc::make_mut(&mut self.poisoned).shift_remove(&*name);
         }
-        if self.module_identities.contains_key(&*name) {
+        if !self.module_identities.is_empty() && self.module_identities.contains_key(&*name) {
             Arc::make_mut(&mut self.module_identities).shift_remove(&*name);
         }
-        if self.this_aliases.contains(&*name) {
+        if !self.this_aliases.is_empty() && self.this_aliases.contains(&*name) {
             Arc::make_mut(&mut self.this_aliases).remove(&*name);
         }
         Arc::make_mut(&mut self.vars).insert(name, val);
