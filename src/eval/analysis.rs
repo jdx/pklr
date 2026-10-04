@@ -1104,8 +1104,8 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
         classes: &HashMap<&'a str, (Option<&'a str>, &'a [Entry])>,
         class: &'a str,
     ) -> HashSet<&'a str> {
-        let mut names = HashSet::new();
-        let mut seen = HashSet::from([class]);
+        let mut names = HashSet::default();
+        let mut seen = HashSet::from_iter([class]);
         // `extends module.Parent` names the same class as `extends Parent`.
         let unqualified = |name: &'a str| name.strip_prefix("module.").unwrap_or(name);
         let mut next = classes
@@ -1137,11 +1137,11 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
         let defaults: Vec<Entry> = body.iter().filter(|e| !is_method(e)).cloned().collect();
         let mut refs = referenced_roots(&defaults);
         let mut instance = InstanceReads {
-            members: HashSet::new(),
+            members: HashSet::default(),
             escapes: false,
         };
         instance.entries(&defaults, 0);
-        let mut followed = HashSet::new();
+        let mut followed = HashSet::default();
         loop {
             let calls_all = instance.escapes;
             let next: Vec<&Entry> = body
