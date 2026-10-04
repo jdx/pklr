@@ -108,7 +108,7 @@ struct MappingInheritedDefault {
 struct ModuleScopeSnapshot {
     values: ScopeMap,
     type_aliases: TypeAliasMap,
-    late_properties: Vec<Property>,
+    late_properties: Vec<Arc<Property>>,
 }
 
 /// The value of a literal or a plain name, or `None` for any expression that
@@ -1245,7 +1245,7 @@ impl Evaluator {
         }
     }
 
-    fn inherited_late_properties(&self, path: &Path) -> Vec<Property> {
+    fn inherited_late_properties(&self, path: &Path) -> Vec<Arc<Property>> {
         self.module_scopes
             .get(path)
             .map(|snapshot| snapshot.late_properties.clone())
@@ -3870,6 +3870,7 @@ impl Evaluator {
                 }
                 let mut replacement = (*replacement).clone();
                 if let Entry::Property(overlay_prop) = &mut replacement {
+                    let overlay_prop = Arc::make_mut(overlay_prop);
                     if overlay_prop.type_ann.is_none() {
                         overlay_prop.type_ann = prop.type_ann.clone();
                     }
@@ -4098,6 +4099,7 @@ impl Evaluator {
                     && *prop.name == **key
                     && !has_modifier(&prop.modifiers, Modifier::Local)
                 {
+                    let prop = Arc::make_mut(prop);
                     prop.value = Some(Expr::Ident(binding.clone()));
                     prop.body = None;
                     if let Some(entry_scope) = source.entry_scopes.get_mut(index) {
@@ -4107,14 +4109,14 @@ impl Evaluator {
                 }
             }
             if !replaced {
-                Arc::make_mut(&mut source.entries).push(Entry::Property(Property {
+                Arc::make_mut(&mut source.entries).push(Entry::Property(Arc::new(Property {
                     annotations: Vec::new(),
                     modifiers: Vec::new(),
                     name: key.to_string(),
                     type_ann: None,
                     value: Some(Expr::Ident(binding)),
                     body: None,
-                }));
+                })));
                 source.entry_scopes.resize(source.entries.len(), None);
             }
             source.body_members.insert(key.to_string());
@@ -4391,14 +4393,18 @@ impl Evaluator {
                 )
             }),
             Expr::Lambda(params, body) => {
-                let mut body = (**body).clone();
-                capture_method_result_types(&mut body, scope);
+                // The body is shared with the AST unless one of the rewrites
+                // below applies to it.
+                let mut body = Arc::clone(body);
+                if needs_method_result_types(&body) {
+                    capture_method_result_types(Arc::make_mut(&mut body), scope);
+                }
                 let mut names = HashSet::default();
                 collect_unshadowed_names(&body, &mut names);
                 // A body that names a type captures the whole scope (below),
                 // so resolving its aliases leaves `names` as it is.
                 if names.contains(NAMES_A_TYPE) && scope.has_type_aliases() {
-                    capture_type_aliases(&mut body, scope);
+                    capture_type_aliases(Arc::make_mut(&mut body), scope);
                 }
                 let mut refs = HashSet::default();
                 let shadows = params.iter().cloned().collect::<HashSet<_>>();
@@ -4425,13 +4431,9 @@ impl Evaluator {
                     .iter()
                     .filter(|name| scope.get(name).is_none())
                     .find_map(|name| scope.poison_of(name))
-                    .map(|message| Expr::Throw(Box::new(Expr::String(message.clone()))))
+                    .map(|message| Arc::new(Expr::Throw(Box::new(Expr::String(message.clone())))))
                     .unwrap_or(body);
-                Ok(Value::Lambda(
-                    params.as_slice().into(),
-                    Arc::new(captured_body),
-                    captured,
-                ))
+                Ok(Value::Lambda(Arc::clone(params), captured_body, captured))
             }
             Expr::InferredNew(ty, entries) => {
                 let (name, params) = inferred_new_type(ty, scope, 0)?;
@@ -4487,14 +4489,14 @@ impl Evaluator {
                         {
                             // Inject a synthetic default property referencing the value type
                             let vt_name = generic_params[1].clone();
-                            src_entries.push(Entry::Property(Property {
+                            src_entries.push(Entry::Property(Arc::new(Property {
                                 annotations: vec![],
                                 modifiers: vec![],
                                 name: "default".into(),
                                 type_ann: None,
                                 value: Some(Expr::New(Some(vt_name), vec![].into(), vec![])),
                                 body: None,
-                            }));
+                            })));
                         }
                         let source_body_members = src_entries
                             .iter()

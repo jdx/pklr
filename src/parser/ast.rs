@@ -39,7 +39,7 @@ pub struct Import {
 #[non_exhaustive]
 pub enum Entry {
     /// `key = expr` or `key: Type = expr`
-    Property(Property),
+    Property(std::sync::Arc<Property>),
     /// `["key"] = expr` (dynamic key)
     DynProperty(Expr, Expr),
     /// `for (k, v in collection) { ... }`
@@ -165,7 +165,7 @@ pub enum Expr {
     /// Null-safe field access: `expr?.field`
     NullSafeField(Box<Expr>, String),
     /// Lambda: `(params) -> body`
-    Lambda(Vec<String>, Box<Expr>),
+    Lambda(std::sync::Arc<[String]>, std::sync::Arc<Expr>),
     /// `throw("msg")`
     Throw(Box<Expr>),
     /// `trace(expr)`

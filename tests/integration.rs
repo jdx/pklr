@@ -509,7 +509,7 @@ value: Mapping<String, String>?(length > 0, !isEmpty)
     assert!(matches!(
         select.value,
         Some(Expr::Lambda(ref params, _))
-            if params == &["jobs".to_string()]
+            if params[..] == ["jobs".to_string()]
     ));
     let Entry::Property(value) = &module.body[2] else {
         panic!("expected constrained property");
