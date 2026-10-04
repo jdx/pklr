@@ -233,6 +233,28 @@ fn local_key(prop: &Property, iteration: &Rc<[usize]>) -> LocalKey {
 /// error a read fails with, for the next pass over that body.
 type PoisonedLocals = FxHashMap<LocalKey, String>;
 
+/// Poison the locals a pass found failing, before the next pass. Each pass
+/// must poison a local not poisoned yet, which bounds the passes by the
+/// number of typed locals; a pass that does not reports the failure rather
+/// than retrying forever.
+fn poison_failed_locals(
+    poisoned: &mut PoisonedLocals,
+    failures: Vec<(LocalKey, String)>,
+) -> Result<()> {
+    let mut first = None;
+    let mut progressed = false;
+    for (key, message) in failures {
+        if first.is_none() {
+            first = Some(message.clone());
+        }
+        progressed |= poisoned.insert(key, message).is_none();
+    }
+    match first {
+        Some(message) if !progressed => Err(Error::Eval(message)),
+        _ => Ok(()),
+    }
+}
+
 /// Which entries of an object body have their declared types checked once
 /// the body is evaluated.
 #[derive(Clone)]
@@ -2312,7 +2334,9 @@ impl Evaluator {
             }
             match outcome? {
                 BodyOutcome::Done(value) => return Ok(value),
-                BodyOutcome::PoisonAndRetry(failures) => poisoned_locals.extend(failures),
+                BodyOutcome::PoisonAndRetry(failures) => {
+                    poison_failed_locals(&mut poisoned_locals, failures)?
+                }
             }
         }
     }
@@ -3648,7 +3672,7 @@ impl Evaluator {
                 Ok(BodyOutcome::Done(value)) => return Ok(value),
                 Ok(BodyOutcome::PoisonAndRetry(failures)) => {
                     pending.truncate(generator_mark);
-                    poisoned_locals.extend(failures);
+                    poison_failed_locals(&mut poisoned_locals, failures)?;
                 }
                 Err(error) => {
                     // A caller may recover from the error (a failed local is
