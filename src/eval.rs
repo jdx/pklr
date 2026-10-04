@@ -3653,10 +3653,7 @@ impl Evaluator {
         // Rust call stack once per alias.  Flatten the simple-name part here;
         // compound targets still go through the regular checker below.
         let mut target = resolved.clone();
-        loop {
-            let crate::parser::TypeExpr::Named(next) = &target else {
-                break;
-            };
+        while let crate::parser::TypeExpr::Named(next) = &target {
             let Some(next_target) = scope.get_type_alias(next) else {
                 break;
             };
