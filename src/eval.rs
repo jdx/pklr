@@ -14,7 +14,7 @@ use crate::parser::{
     self, BinOp, Body, Entry, Expr, Modifier, Module, Property, StringInterpPart, UnOp,
 };
 use crate::value::{
-    CapturedScope, NameSet, ObjectMap, ObjectSource, ScopeMap, TypeAliasMap, Value,
+    CapturedScope, NameSet, ObjectMap, ObjectSource, PoisonedMember, ScopeMap, TypeAliasMap, Value,
 };
 
 mod analysis;
@@ -65,6 +65,10 @@ pub struct Evaluator {
     body_roots_cache: HashMap<usize, (crate::parser::Body, Arc<HashSet<String>>)>,
     /// Final scopes for modules evaluated in this run, used to preserve inherited locals.
     module_scopes: HashMap<PathBuf, ModuleScopeSnapshot>,
+    /// Whether a module evaluated in this run has a failed property that
+    /// rendering it would output (see `PoisonedMember::rendered`), so the
+    /// output must be checked for one.
+    rendered_member_failed: bool,
     /// Environment variables read during evaluation (name → observed value).
     env_reads: BTreeMap<String, Option<String>>,
     /// Local files currently being evaluated with inherited scope.
@@ -109,6 +113,21 @@ struct ModuleScopeSnapshot {
     values: ScopeMap,
     type_aliases: TypeAliasMap,
     late_properties: Vec<Property>,
+}
+
+/// The error of the first failed member rendering `value` would output: a
+/// failed property of a module object it contains.
+fn rendered_member_failure(value: &Value) -> Option<&str> {
+    match value {
+        Value::Object(map, source) => source
+            .as_ref()
+            .and_then(|source| source.poisoned_members.as_ref())
+            .and_then(|members| members.values().find(|member| member.rendered))
+            .map(|member| member.message.as_str())
+            .or_else(|| map.values().find_map(rendered_member_failure)),
+        Value::List(items) => items.iter().find_map(rendered_member_failure),
+        _ => None,
+    }
 }
 
 /// The value of a literal or a plain name, or `None` for any expression that
@@ -289,6 +308,7 @@ impl Default for Evaluator {
             parse_cache: HashMap::default(),
             body_roots_cache: HashMap::default(),
             module_scopes: HashMap::default(),
+            rendered_member_failed: false,
             env_reads: BTreeMap::new(),
             scoped_imports_in_flight: HashSet::default(),
             #[cfg(feature = "blocking")]
@@ -547,6 +567,7 @@ impl Evaluator {
             parse_cache: HashMap::default(),
             body_roots_cache: HashMap::default(),
             module_scopes: HashMap::default(),
+            rendered_member_failed: false,
             env_reads: BTreeMap::new(),
             scoped_imports_in_flight: HashSet::default(),
             capabilities: Box::new(capabilities),
@@ -626,6 +647,7 @@ impl Evaluator {
         self.body_roots_cache.clear();
         clear_names();
         self.module_scopes.clear();
+        self.rendered_member_failed = false;
         self.scoped_imports_in_flight.clear();
         self.converters.clear();
     }
@@ -2156,199 +2178,245 @@ impl Evaluator {
             expand_requested_fields(&dependency_entries, fields, &inherited_builtins)
         });
 
-        // Locals are evaluated before the main property pass, but `this` and
-        // `module` must already expose inherited members at that point.
-        let inherited_snapshot = Value::Object(Arc::new(base_obj.clone()), None);
-        scope.set("this", inherited_snapshot.clone());
-        scope.set("module", inherited_snapshot);
-
-        // Classes whose bodies read `module` resolve it to this module's
-        // properties, which are only available once the property pass has
-        // evaluated them. Such classes, and the classes and locals built on
-        // them, are evaluated again before a property that can read them,
-        // when the `module` snapshot has changed since they last were.
-        let module_members = module_dependent_members(&module.body);
-        let mut module_members_stale = !module_members.is_empty();
-
-        // First pass: collect locals, class definitions, and type aliases in
-        // declaration order so they can reference each other
-        for entry in module.body.iter() {
-            match entry {
-                Entry::Property(prop)
-                    if has_modifier(&prop.modifiers, Modifier::Local) && prop.value.is_some() =>
-                {
-                    match self.eval_expr(prop.value.as_ref().unwrap(), &scope, depth) {
-                        Ok(val) => scope.declare(&prop.name, val),
-                        Err(Error::Eval(message)) => {
-                            scope.declare_poisoned(prop.name.clone(), message)
-                        }
-                        Err(error) => return Err(error),
-                    }
-                }
-                Entry::ClassDef(name, class_mods, parent, body) => {
-                    match self.eval_class_def(
-                        name,
-                        class_mods,
-                        parent.as_deref(),
-                        body,
-                        &scope,
-                        depth,
-                    ) {
-                        Ok(defaults) => scope.declare(name, defaults),
-                        // A class that reads `module` may need properties the
-                        // property pass has not evaluated yet.
-                        Err(Error::Eval(message)) if module_members.contains(name) => {
-                            scope.set_member_poison(name, Some(message.clone()));
-                            scope.declare_poisoned(name.clone(), message)
-                        }
-                        Err(error) => return Err(error),
-                    }
-                }
-                Entry::TypeAlias(name, ty) => {
-                    self.eval_type_alias(name, ty, &mut scope);
-                }
-                _ => {}
-            }
-        }
-
-        // Export class definitions so they're accessible via dotted paths
-        // (e.g., `import "helpers.pkl"` → `helpers.ClassName`).
-        // Track class names to exclude from serialized output.
-        let mut class_names: std::collections::HashSet<String> =
-            std::collections::HashSet::default();
-        for entry in module.body.iter() {
-            if let Entry::ClassDef(name, ..) = entry {
-                if let Some(cls_val) = scope.get(name) {
-                    base_obj.insert(name.as_str().into(), cls_val.clone());
-                    class_names.insert(name.clone());
-                } else if module_members.contains(name) {
-                    class_names.insert(name.clone());
-                }
-            }
-        }
-
-        // Second pass: evaluate non-local entries into output object
-        let mut out = base_obj;
-        // all_props includes hidden properties — used for `this`/`module`
-        // snapshots. It is shared with those snapshots and grown in place, as
-        // in `eval_entries_with_lexical_scopes`, rather than copied per property.
-        let mut all_props = Arc::new(out.clone());
-        // Seed scope with base properties so body amendments can find them
-        // (e.g., `hooks { ... }` needs to find the base hooks Mapping in scope
-        // to properly amend it with type-aware merging).
-        for (k, v) in &out {
+        // Inherited members are visible by name and through `this`/`module`
+        // from the start; this module's members join them as they evaluate.
+        let mut all_props = Arc::new(base_obj.clone());
+        for (k, v) in &base_obj {
             scope.set(k, v.clone());
         }
-        // Bind `this` at module level so properties can reference the module object
         scope.set("this", Value::Object(Arc::clone(&all_props), None));
-        // Also bind `module` to the same value
         scope.set("module", Value::Object(Arc::clone(&all_props), None));
-        for entry in module.body.iter() {
-            if let Entry::Property(prop) = entry {
-                let mods = &prop.modifiers;
-                if has_modifier(mods, Modifier::Local) {
-                    continue; // already collected
+
+        // Evaluate locals, classes, type aliases and properties in dependency
+        // order, so a member can read one declared after it. A member that
+        // fails is poisoned rather than failing the module: as in Pkl, the
+        // error surfaces only where the member is used (or rendered, below).
+        let mut class_names: std::collections::HashSet<String> =
+            std::collections::HashSet::default();
+        let mut evaluated: HashMap<&str, Value> = HashMap::default();
+        let mut failed: HashMap<&str, String> = HashMap::default();
+        let mut failed_indices: HashSet<usize> = HashSet::default();
+        let plan = module_evaluation_plan(&module.body);
+        let mut todo = plan.order.clone();
+        // A member can fail because it read another before that one could be
+        // evaluated: through a dynamic `module[key]`, which the order can't
+        // account for. Members that failed are evaluated again, along with
+        // the members that read them, until a pass changes nothing.
+        let mut previous_failures: Option<HashMap<&str, String>> = None;
+        for _ in 0..=plan.order.len() {
+            for index in todo {
+                let entry = &module.body[index];
+                if let Some(name) = module_member_name(entry) {
+                    failed.remove(name);
+                    failed_indices.remove(&index);
                 }
-                // Extract renderer converters from the `output` block AST,
-                // then skip it (it's not included in the output).
-                // Clear any base-inherited converters so child overrides take precedence.
-                if prop.name == "output" {
-                    if depth == 0 {
-                        self.converters.clear();
-                        self.extract_converters_from_ast(prop, &scope, depth);
-                    }
-                    continue;
-                }
-                if let Some(fields) = &requested_eval_fields
-                    && !fields.contains(&prop.name)
-                {
-                    continue;
-                }
-                // abstract/external properties must have a value (or be overridden)
-                if (has_modifier(mods, Modifier::Abstract)
-                    || has_modifier(mods, Modifier::External))
-                    && prop.value.is_none()
-                    && prop.body.is_none()
-                {
-                    if let Some(v) = out.get(prop.name.as_str()) {
-                        // Satisfied by base — add to scope so other properties can reference it
-                        scope.set(&prop.name, v.clone());
-                    } else if has_modifier(mods, Modifier::External) {
-                        return Err(Error::Eval(format!(
-                            "external property '{}' must be assigned a value in {}",
-                            prop.name,
-                            path.display()
-                        )));
-                    } else if depth == 0 && !module_is_abstract(module) {
-                        return Err(Error::Eval(format!(
-                            "abstract property '{}' must be assigned a value in {}",
-                            prop.name,
-                            path.display()
-                        )));
-                    }
-                    continue;
-                }
-                if module_members_stale && reads_module_members(prop, &module_members) {
-                    self.refresh_module_members(
-                        module,
-                        &module_members,
-                        &mut scope,
-                        &mut all_props,
-                        depth,
-                    )?;
-                    module_members_stale = false;
-                }
-                let val = match self.eval_property(prop, &scope, depth) {
-                    Ok(value) => value,
-                    // Module properties are late-bound. Keep an unresolved
-                    // template expression deferred until a consumer actually
-                    // requires it; poisoned locals still surface that error.
-                    Err(Error::Eval(message))
-                        if is_unresolved_template_error(&message)
-                            && (module_is_abstract(module)
-                                || property_reference_names(prop).iter().any(|name| {
-                                    late_inherited_properties
-                                        .iter()
-                                        .any(|inherited| inherited.name == *name)
-                                })) =>
+                match entry {
+                    Entry::Property(prop)
+                        if has_modifier(&prop.modifiers, Modifier::Local)
+                            && prop.value.is_some() =>
                     {
-                        None
+                        match self.eval_expr(prop.value.as_ref().unwrap(), &scope, depth) {
+                            Ok(val) => scope.declare(&prop.name, val),
+                            Err(Error::Eval(message)) => {
+                                scope.declare_poisoned(prop.name.clone(), message);
+                                failed_indices.insert(index);
+                            }
+                            Err(error) => return Err(error),
+                        }
                     }
-                    Err(error) => return Err(error),
-                };
-                if let Some(v) = val {
-                    // const/fixed: error if overriding an immutable property from base
-                    if (has_modifier(mods, Modifier::Const) || has_modifier(mods, Modifier::Fixed))
-                        && out.contains_key(prop.name.as_str())
-                    {
-                        let kind = if has_modifier(mods, Modifier::Const) {
-                            "const"
-                        } else {
-                            "fixed"
+                    Entry::ClassDef(name, class_mods, parent, body) => {
+                        class_names.insert(name.clone());
+                        match self.eval_class_def(
+                            name,
+                            class_mods,
+                            parent.as_deref(),
+                            body,
+                            &scope,
+                            depth,
+                        ) {
+                            Ok(defaults) => {
+                                scope.set_member_poison(name, None);
+                                scope.declare(name, defaults.clone());
+                                module_props_insert(
+                                    &mut scope,
+                                    &mut all_props,
+                                    name.clone(),
+                                    defaults,
+                                );
+                                let snapshot = Value::Object(Arc::clone(&all_props), None);
+                                scope.set("this", snapshot.clone());
+                                scope.set("module", snapshot);
+                            }
+                            Err(Error::Eval(message)) => {
+                                scope.set_member_poison(name, Some(message.clone()));
+                                scope.declare_poisoned(name.clone(), message.clone());
+                                failed.insert(name, message);
+                                failed_indices.insert(index);
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    Entry::TypeAlias(name, ty) => {
+                        self.eval_type_alias(name, ty, &mut scope);
+                    }
+                    Entry::Property(prop) => {
+                        let mods = &prop.modifiers;
+                        if has_modifier(mods, Modifier::Local) {
+                            continue;
+                        }
+                        // Extract renderer converters from the `output` block AST,
+                        // then skip it (it's not included in the output).
+                        // Clear any base-inherited converters so child overrides take precedence.
+                        if prop.name == "output" {
+                            if depth == 0 {
+                                self.converters.clear();
+                                self.extract_converters_from_ast(prop, &scope, depth);
+                            }
+                            continue;
+                        }
+                        if let Some(fields) = &requested_eval_fields
+                            && !fields.contains(&prop.name)
+                        {
+                            continue;
+                        }
+                        // abstract/external properties must have a value (or be overridden)
+                        if (has_modifier(mods, Modifier::Abstract)
+                            || has_modifier(mods, Modifier::External))
+                            && prop.value.is_none()
+                            && prop.body.is_none()
+                        {
+                            if let Some(v) = base_obj.get(prop.name.as_str()) {
+                                // Satisfied by base — add to scope so other properties can reference it
+                                scope.set(&prop.name, v.clone());
+                            } else if has_modifier(mods, Modifier::External) {
+                                return Err(Error::Eval(format!(
+                                    "external property '{}' must be assigned a value in {}",
+                                    prop.name,
+                                    path.display()
+                                )));
+                            } else if depth == 0 && !module_is_abstract(module) {
+                                return Err(Error::Eval(format!(
+                                    "abstract property '{}' must be assigned a value in {}",
+                                    prop.name,
+                                    path.display()
+                                )));
+                            }
+                            continue;
+                        }
+                        let val = match self.eval_property(prop, &scope, depth) {
+                            Ok(value) => value,
+                            // Module properties are late-bound. Keep an unresolved
+                            // template expression deferred until a consumer actually
+                            // requires it; poisoned locals still surface that error.
+                            Err(Error::Eval(message))
+                                if is_unresolved_template_error(&message)
+                                    && (module_is_abstract(module)
+                                        || property_reference_names(prop).iter().any(|name| {
+                                            late_inherited_properties
+                                                .iter()
+                                                .any(|inherited| inherited.name == *name)
+                                        })) =>
+                            {
+                                None
+                            }
+                            Err(Error::Eval(message)) => {
+                                scope.declare_poisoned(prop.name.clone(), message.clone());
+                                failed.insert(&prop.name, message);
+                                failed_indices.insert(index);
+                                continue;
+                            }
+                            Err(error) => return Err(error),
                         };
-                        return Err(Error::Eval(format!(
-                            "cannot override {kind} property '{}'",
-                            prop.name
-                        )));
+                        if let Some(v) = val {
+                            // const/fixed: error if overriding an immutable property from base
+                            if (has_modifier(mods, Modifier::Const)
+                                || has_modifier(mods, Modifier::Fixed))
+                                && base_obj.contains_key(prop.name.as_str())
+                            {
+                                let kind = if has_modifier(mods, Modifier::Const) {
+                                    "const"
+                                } else {
+                                    "fixed"
+                                };
+                                return Err(Error::Eval(format!(
+                                    "cannot override {kind} property '{}'",
+                                    prop.name
+                                )));
+                            }
+                            // Always add to scope so other properties can reference it
+                            scope.declare(&prop.name, v.clone());
+                            // Track in all_props (including hidden) for `this`/`module`
+                            module_props_insert(
+                                &mut scope,
+                                &mut all_props,
+                                prop.name.clone(),
+                                v.clone(),
+                            );
+                            // Update `this` and `module` with all properties (including hidden)
+                            let snapshot = Value::Object(Arc::clone(&all_props), None);
+                            scope.set("this", snapshot.clone());
+                            scope.set("module", snapshot);
+                            evaluated.insert(&prop.name, v);
+                        }
                     }
-                    // Always add to scope so other properties can reference it
-                    scope.declare(&prop.name, v.clone());
-                    // Track in all_props (including hidden) for `this`/`module`
-                    module_props_insert(&mut scope, &mut all_props, prop.name.clone(), v.clone());
-                    if !has_modifier(mods, Modifier::Hidden)
-                        && (depth > 0 || should_render_property_value(prop, &v))
-                        && requested_output_fields
-                            .as_ref()
-                            .is_none_or(|fields| fields.contains(&prop.name))
-                    {
-                        out.insert(prop.name.as_str().into(), v);
-                    }
-                    // Update `this` and `module` with all properties (including hidden)
-                    let snapshot = Value::Object(Arc::clone(&all_props), None);
-                    scope.set("this", snapshot.clone());
-                    scope.set("module", snapshot);
-                    module_members_stale = !module_members.is_empty();
+                    _ => {}
                 }
+            }
+            if failed_indices.is_empty() || previous_failures.as_ref() == Some(&failed) {
+                break;
+            }
+            previous_failures = Some(failed.clone());
+            todo = plan.affected_by(&failed_indices);
+        }
+
+        // Assemble the module object in declaration order: inherited members,
+        // then classes (exported so they're accessible via dotted paths, e.g.
+        // `import "helpers.pkl"` → `helpers.ClassName`), then properties. A
+        // failed property that would be rendered fails the module.
+        let mut out = base_obj;
+        let mut poisoned_members = IndexMap::new();
+        for entry in module.body.iter() {
+            if let Entry::ClassDef(name, ..) = entry {
+                if let Some(value) = scope.get(name) {
+                    out.insert(name.as_str().into(), value.clone());
+                } else if let Some(message) = failed.get(name.as_str()) {
+                    poisoned_members.insert(
+                        name.clone(),
+                        PoisonedMember {
+                            message: message.clone(),
+                            rendered: false,
+                        },
+                    );
+                }
+            }
+        }
+        for entry in module.body.iter() {
+            let Entry::Property(prop) = entry else {
+                continue;
+            };
+            let rendered = !has_modifier(&prop.modifiers, Modifier::Hidden)
+                && requested_output_fields
+                    .as_ref()
+                    .is_none_or(|fields| fields.contains(&prop.name));
+            if let Some(message) = failed.get(prop.name.as_str()) {
+                if rendered && depth == 0 {
+                    return Err(Error::Eval(message.clone()));
+                }
+                self.rendered_member_failed |= rendered;
+                poisoned_members.insert(
+                    prop.name.clone(),
+                    PoisonedMember {
+                        message: message.clone(),
+                        rendered,
+                    },
+                );
+                continue;
+            }
+            if let Some(value) = evaluated.remove(prop.name.as_str())
+                && rendered
+                && (depth > 0 || should_render_property_value(prop, &value))
+            {
+                out.insert(prop.name.as_str().into(), value);
             }
         }
 
@@ -2423,16 +2491,6 @@ impl Evaluator {
                 if child_property_names.contains(prop.name.as_str()) {
                     continue;
                 }
-                if module_members_stale && reads_module_members(prop, &module_members) {
-                    self.refresh_module_members(
-                        module,
-                        &module_members,
-                        &mut scope,
-                        &mut all_props,
-                        depth,
-                    )?;
-                    module_members_stale = false;
-                }
                 match self.eval_property(prop, &scope, depth) {
                     Ok(Some(value)) => {
                         scope.set(&prop.name, value.clone());
@@ -2453,7 +2511,6 @@ impl Evaluator {
                         let snapshot = Value::Object(Arc::clone(&all_props), None);
                         scope.set("this", snapshot.clone());
                         scope.set("module", snapshot);
-                        module_members_stale = !module_members.is_empty();
                     }
                     Ok(None) => {}
                     Err(Error::Eval(message))
@@ -2464,16 +2521,6 @@ impl Evaluator {
                 }
             }
             for prop in &late_child_properties {
-                if module_members_stale && reads_module_members(prop, &module_members) {
-                    self.refresh_module_members(
-                        module,
-                        &module_members,
-                        &mut scope,
-                        &mut all_props,
-                        depth,
-                    )?;
-                    module_members_stale = false;
-                }
                 match self.eval_property(prop, &scope, depth) {
                     Ok(Some(value)) => {
                         scope.set(&prop.name, value.clone());
@@ -2497,7 +2544,6 @@ impl Evaluator {
                         let snapshot = Value::Object(Arc::clone(&all_props), None);
                         scope.set("this", snapshot.clone());
                         scope.set("module", snapshot);
-                        module_members_stale = !module_members.is_empty();
                     }
                     Ok(None) => {}
                     Err(Error::Eval(message))
@@ -2505,43 +2551,6 @@ impl Evaluator {
                             || (module_is_abstract(module)
                                 && is_unresolved_template_error(&message)) => {}
                     Err(error) => return Err(error),
-                }
-            }
-        }
-
-        // Export the classes that read `module` as evaluated against the
-        // complete module, which is what `module` means to importers, along
-        // with the module functions re-bound to them. A class whose defaults
-        // still fail is not exported. As in Pkl, the module itself still
-        // evaluates, and the class's error is kept so an importer that reads
-        // or instantiates it gets that error instead of a missing member.
-        // The top-level module (depth 0) has no importers and its output
-        // leaves classes and functions out, so it skips this.
-        let mut poisoned_members = IndexMap::new();
-        if depth > 0 && !module_members.is_empty() {
-            if module_members_stale {
-                self.refresh_module_members(
-                    module,
-                    &module_members,
-                    &mut scope,
-                    &mut all_props,
-                    depth,
-                )?;
-            }
-            for name in &module_members {
-                if class_names.contains(name) {
-                    if let Some(value) = scope.get(name) {
-                        out.insert(name.as_str().into(), value.clone());
-                    } else {
-                        out.shift_remove(name.as_str());
-                        if let Some(message) = scope.poison_of(name) {
-                            poisoned_members.insert(name.clone(), message.clone());
-                        }
-                    }
-                } else if out.contains_key(name.as_str())
-                    && let Some(value) = scope.get(name)
-                {
-                    out.insert(name.as_str().into(), value.clone());
                 }
             }
         }
@@ -2617,6 +2626,14 @@ impl Evaluator {
                 late_properties: effective_late_properties.into_values().collect(),
             },
         );
+        // An imported module whose failed property this output renders fails
+        // the output, as rendering that property directly would.
+        if depth == 0
+            && self.rendered_member_failed
+            && let Some(message) = out.values().find_map(rendered_member_failure)
+        {
+            return Err(Error::Eval(message.to_string()));
+        }
         Ok(Value::Object(Arc::new(out), source))
     }
 
@@ -3272,177 +3289,6 @@ impl Evaluator {
             poisoned_members: None,
         };
         Ok(Value::Object(Arc::new(map), Some(Arc::new(source))))
-    }
-
-    /// Re-evaluate the module members named in `members` (see
-    /// `module_dependent_members`) in declaration order against the current
-    /// module scope, so class bodies see the latest `module` snapshot and the
-    /// locals using those classes see the new class values. A member that
-    /// still fails is poisoned, which surfaces its error when it is used.
-    fn refresh_module_members(
-        &mut self,
-        module: &Module,
-        members: &indexmap::IndexSet<String>,
-        scope: &mut Scope,
-        module_props: &mut Arc<ObjectMap>,
-        depth: usize,
-    ) -> Result<()> {
-        // New values of the module object's members, written to the map
-        // behind `this`/`module` in one batch: the map is shared with the
-        // scopes the classes captured, so each write copies it. A member that
-        // reads a pending member as `module.C` gets the batch written first.
-        let mut pending: Vec<(String, Option<Value>)> = Vec::new();
-        // `members` is in dependency order (see `module_dependent_members`).
-        let member_entries: HashMap<&str, &Entry> = module
-            .body
-            .iter()
-            .filter(|entry| {
-                matches!(
-                    entry,
-                    Entry::ClassDef(..) | Entry::TypeAlias(..) | Entry::Property(_)
-                )
-            })
-            .filter_map(|entry| Some((entry_member_name(entry)?.as_str(), entry)))
-            .filter(|(name, _)| members.contains(*name))
-            .collect();
-        let ordered: Vec<&Entry> = members
-            .iter()
-            .filter_map(|name| member_entries.get(name.as_str()).copied())
-            .collect();
-        let mut todo = ordered.clone();
-        // One pass normally suffices. If a cycle left a member that reads
-        // another one ahead of it, and that one recovered in this pass, the
-        // reader is refreshed again, for at most one pass per member. In those
-        // later passes every member that is re-bound counts as changed (a
-        // function re-bound to a lambda capturing a recovered class), so its
-        // readers are refreshed in turn.
-        for pass in 0..ordered.len() {
-            let mut position: HashMap<&str, usize> = HashMap::default();
-            let mut changed: Vec<(String, usize)> = Vec::new();
-            for entry in todo.iter().copied() {
-                if !pending.is_empty() && member_reads_pending(entry, &pending) {
-                    flush_module_members(scope, module_props, &mut pending);
-                }
-                let Some(entry_name) = entry_member_name(entry) else {
-                    continue;
-                };
-                let was_bound = scope.get(entry_name).is_some();
-                'entry: {
-                    // Classes and module functions are also members of the module
-                    // object behind `this`/`module`; locals and type aliases are not.
-                    let (name, result, module_member) = match entry {
-                        Entry::ClassDef(name, class_mods, parent, body)
-                            if members.contains(name) =>
-                        {
-                            (
-                                name,
-                                self.eval_class_def(
-                                    name,
-                                    class_mods,
-                                    parent.as_deref(),
-                                    body,
-                                    scope,
-                                    depth,
-                                ),
-                                true,
-                            )
-                        }
-                        Entry::TypeAlias(name, ty) if members.contains(name) => {
-                            match type_alias_target(ty)
-                                .and_then(|target| poisoned_member(scope, target))
-                            {
-                                Some(message) => {
-                                    scope.set_member_poison(name, Some(message.clone()));
-                                    scope.redeclare_poisoned(name.clone(), message);
-                                }
-                                None => {
-                                    scope.set_member_poison(name, None);
-                                    self.eval_type_alias(name, ty, scope);
-                                }
-                            }
-                            break 'entry;
-                        }
-                        Entry::Property(prop) if members.contains(&prop.name) => {
-                            let Some(expr) = &prop.value else {
-                                break 'entry;
-                            };
-                            // A module function is bound when the property pass
-                            // reaches it; only re-bind it once it has been.
-                            if !has_modifier(&prop.modifiers, Modifier::Local)
-                                && scope.get(&prop.name).is_none()
-                            {
-                                break 'entry;
-                            }
-                            (
-                                &prop.name,
-                                self.eval_expr(expr, scope, depth),
-                                !has_modifier(&prop.modifiers, Modifier::Local),
-                            )
-                        }
-                        _ => break 'entry,
-                    };
-                    let module_value = match result {
-                        Ok(value) => {
-                            if module_member {
-                                scope.set_member_poison(name, None);
-                            }
-                            scope.declare(name, value.clone());
-                            Some(value)
-                        }
-                        Err(Error::Eval(message)) => {
-                            // Only members of the module object, not locals, are
-                            // reported through `module.C`/`module["C"]`.
-                            if module_member {
-                                scope.set_member_poison(name, Some(message.clone()));
-                            }
-                            scope.redeclare_poisoned(name.clone(), message);
-                            None
-                        }
-                        Err(error) => return Err(error),
-                    };
-                    // Keep `this.C` and `module.C` in step with the bare name.
-                    if module_member
-                        && (module_value.is_some() || module_props.contains_key(name.as_str()))
-                    {
-                        pending.push((name.clone(), module_value));
-                    }
-                }
-                let index = position.len();
-                position.insert(entry_name.as_str(), index);
-                if (pass > 0 || !was_bound) && scope.get(entry_name).is_some() {
-                    changed.push((entry_name.clone(), index));
-                }
-            }
-            flush_module_members(scope, module_props, &mut pending);
-            if changed.is_empty() {
-                break;
-            }
-            // Members that read a member which changed after they were
-            // refreshed (or that weren't refreshed in this pass) are stale.
-            let stale: Vec<&Entry> = ordered
-                .iter()
-                .copied()
-                .filter(|entry| {
-                    let Some(name) = entry_member_name(entry) else {
-                        return false;
-                    };
-                    let at = position.get(name.as_str()).copied();
-                    let missed: Vec<(String, Option<Value>)> = changed
-                        .iter()
-                        .filter(|(changed, index)| {
-                            changed != name && at.is_none_or(|at| at < *index)
-                        })
-                        .map(|(changed, _)| (changed.clone(), None))
-                        .collect();
-                    !missed.is_empty() && member_reads_pending(entry, &missed)
-                })
-                .collect();
-            if stale.is_empty() {
-                break;
-            }
-            todo = stale;
-        }
-        Ok(())
     }
 
     /// Evaluate a class definition, optionally inheriting from a parent class.

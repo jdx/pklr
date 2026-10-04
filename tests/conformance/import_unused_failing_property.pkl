@@ -1,0 +1,2 @@
+import "lib/failing.pkl" as F
+res = F.ok

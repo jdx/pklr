@@ -3331,15 +3331,15 @@ lambda = mk("y")
 }
 
 #[test]
-fn module_in_class_body_before_property_is_evaluated_reports_error() {
-    let err = eval_fails(
+fn module_in_class_body_reads_property_declared_after_use() {
+    let val = eval(
         r#"
 class C { v = module.expected }
 result = new C {}
 expected = "b"
 "#,
     );
-    assert!(err.contains("expected"), "{err}");
+    assert_eq!(val["result"], serde_json::json!({"v": "b"}));
 }
 
 #[test]
