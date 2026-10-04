@@ -1092,3 +1092,138 @@ fn prefetching_large_unused_imports_stays_within_the_byte_budget() {
     let bound = BUDGET + 8 * (RESPONSE + 1024) + 64 * 1024;
     assert!(served <= bound, "served {served} bytes; bound {bound}");
 }
+
+/// Evaluate `source` as a local file on a large stack and return the error.
+fn deep_source_error(name: &str, source: String) -> String {
+    let path = common::write_entry(name, "main.pkl", &source);
+    on_large_stack(move || pklr::eval_to_json(&path))
+        .unwrap_err()
+        .to_string()
+}
+
+#[test]
+fn long_operator_chains_are_parse_errors() {
+    const TERMS: usize = 100_000;
+    let chains = [
+        (
+            "chain_pow",
+            format!("value = {}\n", vec!["1"; TERMS].join(" ** ")),
+        ),
+        (
+            "chain_add",
+            format!("value = {}\n", vec!["1"; TERMS].join(" + ")),
+        ),
+        (
+            "chain_coalesce",
+            format!("value = {}\n", vec!["1"; TERMS].join(" ?? ")),
+        ),
+        (
+            "chain_field",
+            format!(
+                "local o = new {{ a = 1 }}\nvalue = o{}\n",
+                ".a".repeat(TERMS)
+            ),
+        ),
+        (
+            "chain_null_safe",
+            format!(
+                "local o = new {{ a = 1 }}\nvalue = o{}\n",
+                "?.a".repeat(TERMS)
+            ),
+        ),
+        (
+            "chain_index",
+            format!("value = List(1){}\n", "[0]".repeat(TERMS)),
+        ),
+        (
+            "chain_non_null",
+            format!("value = 1{}\n", "!!".repeat(TERMS)),
+        ),
+        (
+            "chain_amend",
+            format!("value = new {{}}{}\n", " {}".repeat(TERMS)),
+        ),
+        (
+            "chain_constraint",
+            format!("value: Int({}) = 1\n", vec!["true"; TERMS].join(", ")),
+        ),
+    ];
+    for (name, source) in chains {
+        let error = deep_source_error(name, source);
+        assert!(error.contains("levels deep"), "{name}: {error}");
+    }
+}
+
+#[test]
+fn long_prefix_and_body_chains_do_not_crash() {
+    const TERMS: usize = 100_000;
+    // `- - x` and `! ! x` are not Pkl syntax; long runs of them are a plain
+    // syntax error, not a stack overflow.
+    for (name, source) in [
+        ("prefix_neg", format!("value = {}1\n", "- ".repeat(TERMS))),
+        (
+            "prefix_not",
+            format!("value = {}true\n", "! ".repeat(TERMS)),
+        ),
+    ] {
+        let error = deep_source_error(name, source);
+        assert!(error.contains("unexpected token"), "{name}: {error}");
+    }
+    for (name, source) in [
+        (
+            "nested_neg",
+            format!("value = {}1{}\n", "-(".repeat(TERMS), ")".repeat(TERMS)),
+        ),
+        (
+            "nested_not",
+            format!("value = {}true{}\n", "!(".repeat(TERMS), ")".repeat(TERMS)),
+        ),
+        (
+            "nested_if",
+            format!(
+                "value = {}1{}\n",
+                "if (true) ".repeat(TERMS),
+                " else 0".repeat(TERMS)
+            ),
+        ),
+        (
+            "nested_let",
+            format!(
+                "value = {}1\n",
+                (0..TERMS)
+                    .map(|i| format!("let (x{i} = 1) "))
+                    .collect::<String>()
+            ),
+        ),
+        (
+            "nested_lambda",
+            format!("value = {}1\n", "(x) -> ".repeat(TERMS)),
+        ),
+        (
+            "nested_type",
+            format!(
+                "value: {}Int{} = List()\n",
+                "List<".repeat(TERMS),
+                ">".repeat(TERMS)
+            ),
+        ),
+    ] {
+        let error = deep_source_error(name, source);
+        assert!(error.contains("levels deep"), "{name}: {error}");
+    }
+}
+
+#[test]
+fn short_operator_chains_still_parse() {
+    let json = pklr::Evaluator::new()
+        .eval_source(
+            "pow = 2 ** 3 ** 2\nsum = 1 + 2 + 3 + 4\nfield = new { a = new { b = 5 } }.a.b\n",
+            Path::new("entry.pkl"),
+        )
+        .unwrap()
+        .to_json();
+
+    assert_eq!(json["pow"], 512);
+    assert_eq!(json["sum"], 10);
+    assert_eq!(json["field"], 5);
+}
