@@ -151,19 +151,23 @@ struct FinishedBody<'a> {
     own_body_scope: Option<(&'a Scope, &'a HashSet<String>)>,
     local_bindings: &'a FxHashMap<usize, std::result::Result<Value, String>>,
     all_props: &'a IndexMap<String, Value>,
-    /// How the declared types of properties resolved where they were
-    /// declared, for those a later declaration of the body may shadow.
-    declared_types: &'a FxHashMap<usize, DeclaredTypes>,
+    /// Names a later type alias or class of the body rebinds; entries
+    /// before it are checked with the earlier binding, as they evaluated.
+    shadowed: &'a [ShadowedName],
 }
 
 impl FinishedBody<'_> {
     fn entry_scope(&self, entry_index: usize) -> Scope {
-        scope_for_object_entry(
+        restore_shadowed(
+            scope_for_object_entry(
+                entry_index,
+                self.child_scope,
+                self.entry_scopes,
+                self.entry_owners,
+                self.own_body_scope,
+            ),
+            self.shadowed,
             entry_index,
-            self.child_scope,
-            self.entry_scopes,
-            self.entry_owners,
-            self.own_body_scope,
         )
     }
 
@@ -500,6 +504,86 @@ fn type_check_dependencies(
     scope: &Scope,
 ) -> (Vec<(String, crate::parser::TypeExpr)>, FxHashSet<String>) {
     type_closure(ty, &|name| scope.get_type_alias(name).cloned())
+}
+
+/// A name an object body's type alias or class (declared at `index`)
+/// rebinds although it already resolved before that declaration: to a
+/// binding of an enclosing scope or an earlier entry, a type alias, or a
+/// built-in type. A body's declarations apply only after them, so entries
+/// before it keep the earlier meaning, for their values and their checks.
+pub(super) struct ShadowedName {
+    index: usize,
+    name: String,
+    /// The value bound to the name before, if any (an enclosing class).
+    value: Option<Value>,
+    /// The type alias the name resolved to before, if any.
+    alias: Option<crate::parser::TypeExpr>,
+}
+
+/// Record that the declaration at `index` rebinds `name` (as a type alias
+/// when `alias`), if the name already resolves in `scope`, the scope the
+/// declaration is evaluated in.
+fn record_shadowed(
+    shadowed: &mut Vec<ShadowedName>,
+    index: usize,
+    name: &str,
+    alias: bool,
+    scope: &Scope,
+) {
+    let value = scope.get(name).cloned();
+    let old_alias = scope.get_type_alias(name).cloned();
+    // A later class leaves a built-in type name alone unless it was bound;
+    // a later alias of a built-in name shadows the built-in.
+    let builtin = alias && is_builtin_type_name(name);
+    if value.is_some() || old_alias.is_some() || builtin {
+        shadowed.push(ShadowedName {
+            index,
+            name: name.to_string(),
+            value,
+            alias: old_alias,
+        });
+    }
+}
+
+/// `scope` for the entry at `entry_index`, with the names a later
+/// declaration of the body rebinds (`shadowed`, in declaration order)
+/// restored to what they were before it. Most bodies shadow nothing, and
+/// get `scope` back as is.
+fn restore_shadowed(scope: Scope, shadowed: &[ShadowedName], entry_index: usize) -> Scope {
+    if shadowed.last().is_none_or(|last| last.index <= entry_index) {
+        return scope;
+    }
+    let mut scope = scope.child();
+    let mut barrier = FxHashSet::default();
+    // The earliest declaration's record holds the binding before the body
+    // rebound the name at all, so it is applied last.
+    for shadow in shadowed
+        .iter()
+        .rev()
+        .filter(|shadow| shadow.index > entry_index)
+    {
+        match &shadow.value {
+            Some(value) => scope.set(shadow.name.clone(), value.clone()),
+            None => scope.poison(
+                shadow.name.clone(),
+                format!("undefined variable: {}", shadow.name),
+            ),
+        }
+        match &shadow.alias {
+            Some(alias) => {
+                barrier.remove(&shadow.name);
+                scope.set_type_alias(shadow.name.clone(), alias.clone());
+            }
+            None => {
+                Arc::make_mut(&mut scope.type_aliases).shift_remove(shadow.name.as_str());
+                barrier.insert(shadow.name.clone());
+            }
+        }
+    }
+    if !barrier.is_empty() {
+        scope.type_alias_barrier = Some(Arc::new(barrier));
+    }
+    scope
 }
 
 /// How an object body entry's declared type resolved where it was declared.
@@ -3997,41 +4081,14 @@ impl Evaluator {
         // Non-lambda locals are evaluated eagerly; lambda locals are deferred
         // to a second pass so they capture the fully-populated scope.
         let mut deferred_lambdas: Vec<(String, &crate::parser::Expr, usize)> = Vec::new();
-        // The last type alias or class the body declares, which typed
-        // properties before it may need to be protected from.
-        let last_declaration = if tracks_types {
-            entries
-                .iter()
-                .rposition(|entry| matches!(entry, Entry::TypeAlias(..) | Entry::ClassDef(..)))
-        } else {
-            None
-        };
-        let mut declared_types: FxHashMap<usize, DeclaredTypes> = FxHashMap::default();
+        // Names a type alias or class of this body rebinds that already
+        // resolved before it: entries before the declaration keep the
+        // earlier binding (see `restore_shadowed`).
+        let mut shadowed: Vec<ShadowedName> = Vec::new();
         // Unlike a module's, a type alias declared in an object body is
         // visible only to entries after it (as narrowed-import analysis
         // assumes), so it is registered in declaration order below.
         for (entry_index, entry) in entries.iter().enumerate() {
-            // A typed property a later type alias or class may shadow keeps
-            // how its type resolves here, for its check against the finished
-            // body.
-            if let Entry::Property(prop) = entry
-                && let Some(ty) = &prop.type_ann
-                && last_declaration.is_some_and(|last| entry_index < last)
-                && !has_modifier(&prop.modifiers, Modifier::Local)
-            {
-                let active_scope = scope_for_object_entry(
-                    entry_index,
-                    &child_scope,
-                    entry_scopes,
-                    &entry_owners,
-                    own_body_scope,
-                );
-                declared_types.insert(
-                    entry_index,
-                    DeclaredTypes::at(ty, &active_scope, entries, entry_index),
-                );
-                continue;
-            }
             // Only locals, classes and type aliases are handled in this pass,
             // so build the entry's scope only for those.
             if !matches!(
@@ -4119,6 +4176,7 @@ impl Evaluator {
                     }
                 }
                 Entry::ClassDef(name, class_mods, parent, body) => {
+                    record_shadowed(&mut shadowed, entry_index, name, false, &active_scope);
                     let defaults = self.eval_class_def(
                         name,
                         class_mods,
@@ -4134,6 +4192,7 @@ impl Evaluator {
                     }
                 }
                 Entry::TypeAlias(name, ty) => {
+                    record_shadowed(&mut shadowed, entry_index, name, true, &active_scope);
                     let mut resolved_scope = active_scope;
                     self.eval_type_alias(name, ty, &mut resolved_scope);
                     child_scope.set_type_alias(name.clone(), ty.clone());
@@ -4153,12 +4212,16 @@ impl Evaluator {
             if prop.name != "default" || has_modifier(&prop.modifiers, Modifier::Local) {
                 continue;
             }
-            let mut active_scope = scope_for_object_entry(
+            let mut active_scope = restore_shadowed(
+                scope_for_object_entry(
+                    entry_index,
+                    &child_scope,
+                    entry_scopes,
+                    &entry_owners,
+                    own_body_scope,
+                ),
+                &shadowed,
                 entry_index,
-                &child_scope,
-                entry_scopes,
-                &entry_owners,
-                own_body_scope,
             );
             if let Some(template) = &default_template {
                 active_scope.set("default", template.clone());
@@ -4185,12 +4248,16 @@ impl Evaluator {
                         continue; // abstract without value — skip (must be overridden)
                     }
                     refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
-                    let mut active_scope = scope_for_object_entry(
+                    let mut active_scope = restore_shadowed(
+                        scope_for_object_entry(
+                            entry_index,
+                            &child_scope,
+                            entry_scopes,
+                            &entry_owners,
+                            own_body_scope,
+                        ),
+                        &shadowed,
                         entry_index,
-                        &child_scope,
-                        entry_scopes,
-                        &entry_owners,
-                        own_body_scope,
                     );
                     if checks.defers_nested(entry_index) {
                         active_scope.defining_class = true;
@@ -4220,12 +4287,16 @@ impl Evaluator {
                     }
                 }
                 Entry::DynProperty(key_expr, val_expr) => {
-                    let active_scope = scope_for_object_entry(
+                    let active_scope = restore_shadowed(
+                        scope_for_object_entry(
+                            entry_index,
+                            &child_scope,
+                            entry_scopes,
+                            &entry_owners,
+                            own_body_scope,
+                        ),
+                        &shadowed,
                         entry_index,
-                        &child_scope,
-                        entry_scopes,
-                        &entry_owners,
-                        own_body_scope,
                     );
                     let key = self.eval_expr(key_expr, &active_scope, depth)?;
                     let key_str = value_to_key(&key)?;
@@ -4323,12 +4394,16 @@ impl Evaluator {
                     refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                 }
                 Entry::Spread(expr) => {
-                    let active_scope = scope_for_object_entry(
+                    let active_scope = restore_shadowed(
+                        scope_for_object_entry(
+                            entry_index,
+                            &child_scope,
+                            entry_scopes,
+                            &entry_owners,
+                            own_body_scope,
+                        ),
+                        &shadowed,
                         entry_index,
-                        &child_scope,
-                        entry_scopes,
-                        &entry_owners,
-                        own_body_scope,
                     );
                     let val = self.eval_expr(expr, &active_scope, depth)?;
                     if let Value::Object(m, _) = val {
@@ -4345,12 +4420,16 @@ impl Evaluator {
                     }
                 }
                 Entry::ForGenerator(fgen) => {
-                    let active_scope = scope_for_object_entry(
+                    let active_scope = restore_shadowed(
+                        scope_for_object_entry(
+                            entry_index,
+                            &child_scope,
+                            entry_scopes,
+                            &entry_owners,
+                            own_body_scope,
+                        ),
+                        &shadowed,
                         entry_index,
-                        &child_scope,
-                        entry_scopes,
-                        &entry_owners,
-                        own_body_scope,
                     );
                     let collection = self.eval_expr(&fgen.collection, &active_scope, depth)?;
                     let items = collection_to_items(collection);
@@ -4392,12 +4471,16 @@ impl Evaluator {
                     }
                 }
                 Entry::WhenGenerator(wgen) => {
-                    let active_scope = scope_for_object_entry(
+                    let active_scope = restore_shadowed(
+                        scope_for_object_entry(
+                            entry_index,
+                            &child_scope,
+                            entry_scopes,
+                            &entry_owners,
+                            own_body_scope,
+                        ),
+                        &shadowed,
                         entry_index,
-                        &child_scope,
-                        entry_scopes,
-                        &entry_owners,
-                        own_body_scope,
                     );
                     let cond = self.eval_expr(&wgen.condition, &active_scope, depth)?;
                     if is_truthy(&cond) {
@@ -4471,12 +4554,16 @@ impl Evaluator {
         // properties so they capture overridden values (late binding).
         refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
         for (name, expr, entry_index) in deferred_lambdas {
-            let active_scope = scope_for_object_entry(
+            let active_scope = restore_shadowed(
+                scope_for_object_entry(
+                    entry_index,
+                    &child_scope,
+                    entry_scopes,
+                    &entry_owners,
+                    own_body_scope,
+                ),
+                &shadowed,
                 entry_index,
-                &child_scope,
-                entry_scopes,
-                &entry_owners,
-                own_body_scope,
             );
             let val = self.eval_expr(expr, &active_scope, depth)?;
             drop(active_scope);
@@ -4500,7 +4587,7 @@ impl Evaluator {
                 own_body_scope,
                 local_bindings: &local_bindings,
                 all_props: &all_props,
-                declared_types: &declared_types,
+                shadowed: &shadowed,
             };
             let hand_up = match &checks {
                 TypeChecks::Generator(outer_names, _) => {
@@ -4535,7 +4622,7 @@ impl Evaluator {
                 own_body_scope,
                 local_bindings: &local_bindings,
                 all_props: &all_props,
-                declared_types: &declared_types,
+                shadowed: &shadowed,
             };
             let failed_locals = self.check_finished_body(
                 &body,
@@ -5312,15 +5399,7 @@ impl Evaluator {
             let Some(value) = body.all_props.get(&prop.name).cloned() else {
                 continue;
             };
-            let declared = body.declared_types.get(&entry_index);
-            let active_scope = match declared {
-                Some(declared) => {
-                    let mut scope = body.entry_scope(entry_index).child();
-                    declared.apply(&mut scope);
-                    scope
-                }
-                None => body.entry_scope(entry_index),
-            };
+            let active_scope = body.entry_scope(entry_index);
             if let TypeChecks::Generator(outer_names, _) = checks {
                 let names = iteration_names.get_or_insert_with(|| {
                     let mut names = (**outer_names).clone();
@@ -5356,10 +5435,7 @@ impl Evaluator {
             let members = body_members.get_or_insert_with(|| body_member_names(body.entries));
             if constraint_reads_members(ty, &active_scope, members) {
                 drop(active_scope);
-                let mut check_scope = body.check_scope(entry_index);
-                if let Some(declared) = declared {
-                    declared.apply(&mut check_scope);
-                }
+                let check_scope = body.check_scope(entry_index);
                 self.check_object_property_type(prop, &value, &check_scope, depth)?;
             } else {
                 self.check_object_property_type(prop, &value, &active_scope, depth)?;

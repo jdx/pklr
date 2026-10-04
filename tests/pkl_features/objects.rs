@@ -5306,3 +5306,38 @@ fn class_named_like_a_builtin_type_is_resolved_in_declared_types() {
     let json = eval("class Int { v = 1 }\nx: Int? = null\n");
     assert_eq!(json["x"], serde_json::Value::Null);
 }
+
+#[test]
+fn later_class_of_a_body_does_not_rebind_an_earlier_entry() {
+    // `C` resolves to the enclosing class where `x` is declared; the body's
+    // later `class C` applies only after it, for the value and the check.
+    let json = eval("class C { v = 1 }\nobj { x: C = new C {}; class C { y = 1 } }");
+    assert_eq!(json["obj"]["x"], serde_json::json!({"v": 1}));
+    let err = eval_fails(
+        "class C { v = 1 }\nclass D { w = 1 }\nobj { x: C = new D {}; class C { y = 1 } }",
+    );
+    assert!(err.contains("property 'x' expected C"), "{err}");
+    // Also for a constraint, checked in the finished body.
+    let json = eval(
+        "class C { v = 1 }\nobj { lim = 2; x: C(this.v < lim) = new C {}; class C { y = 1 } }",
+    );
+    assert_eq!(json["obj"]["x"]["v"], 1);
+    let err = eval_fails(
+        "class C { v = 1 }\nobj { lim = 1; x: C(this.v < lim) = new C {}; class C { y = 1 } }",
+    );
+    assert!(err.contains("property 'x'"), "{err}");
+    // Entries after the declaration see the body's class.
+    let json = eval("class C { v = 1 }\nobj { class C { y = 1 }; x: C = new C {} }");
+    assert_eq!(json["obj"]["x"], serde_json::json!({"y": 1}));
+    // A typed local agrees.
+    let json = eval("class C { v = 1 }\nobj { local x: C = new C {}; class C { y = 1 }; res = x }");
+    assert_eq!(json["obj"]["res"], serde_json::json!({"v": 1}));
+}
+
+#[test]
+fn body_class_without_an_earlier_binding_is_visible_before_it() {
+    // A name that resolves to nothing before the declaration means the
+    // body's later class.
+    let json = eval("obj { x: C = new C {}; class C { y = 1 } }");
+    assert_eq!(json["obj"]["x"], serde_json::json!({"y": 1}));
+}
