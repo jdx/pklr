@@ -97,6 +97,27 @@ struct ModuleScopeSnapshot {
     late_properties: Vec<Property>,
 }
 
+/// The value of a literal or a plain name, or `None` for any expression that
+/// needs the full evaluator. Must agree with `Evaluator::eval_expr_boxed`.
+fn eval_simple_expr(expr: &Expr, scope: &Scope) -> Option<Result<Value>> {
+    Some(match expr {
+        Expr::Null => Ok(Value::Null),
+        Expr::Bool(b) => Ok(Value::Bool(*b)),
+        Expr::Int(n) => Ok(Value::Int(*n)),
+        Expr::Float(f) => Ok(Value::Float(*f)),
+        Expr::String(s) => Ok(Value::String(s.clone())),
+        Expr::Ident(name) => scope.get(name).cloned().ok_or_else(|| {
+            Error::Eval(
+                scope
+                    .poison_of(name)
+                    .cloned()
+                    .unwrap_or_else(|| format!("undefined variable: {name}")),
+            )
+        }),
+        _ => return None,
+    })
+}
+
 fn regex_value(pattern: Value) -> Value {
     let mut map = IndexMap::new();
     map.insert("_type".to_string(), Value::String("regex".to_string()));
@@ -1821,8 +1842,10 @@ impl Evaluator {
 
         // Second pass: evaluate non-local entries into output object
         let mut out = base_obj;
-        // all_props includes hidden properties — used for `this`/`module` snapshots
-        let mut all_props = out.clone();
+        // all_props includes hidden properties — used for `this`/`module`
+        // snapshots. It is shared with those snapshots and grown in place, as
+        // in `eval_entries_with_lexical_scopes`, rather than copied per property.
+        let mut all_props = Arc::new(out.clone());
         // Seed scope with base properties so body amendments can find them
         // (e.g., `hooks { ... }` needs to find the base hooks Mapping in scope
         // to properly amend it with type-aware merging).
@@ -1830,15 +1853,9 @@ impl Evaluator {
             scope.set(k.clone(), v.clone());
         }
         // Bind `this` at module level so properties can reference the module object
-        scope.set(
-            "this".into(),
-            Value::Object(Arc::new(all_props.clone()), None),
-        );
+        scope.set("this".into(), Value::Object(Arc::clone(&all_props), None));
         // Also bind `module` to the same value
-        scope.set(
-            "module".into(),
-            Value::Object(Arc::new(all_props.clone()), None),
-        );
+        scope.set("module".into(), Value::Object(Arc::clone(&all_props), None));
         for entry in module.body.iter() {
             if let Entry::Property(prop) = entry {
                 let mods = &prop.modifiers;
@@ -1920,7 +1937,7 @@ impl Evaluator {
                     // Always add to scope so other properties can reference it
                     scope.declare(prop.name.clone(), v.clone());
                     // Track in all_props (including hidden) for `this`/`module`
-                    all_props.insert(prop.name.clone(), v.clone());
+                    module_props_insert(&mut scope, &mut all_props, prop.name.clone(), v.clone());
                     if !has_modifier(mods, Modifier::Hidden)
                         && (depth > 0 || should_render_property_value(prop, &v))
                         && requested_output_fields
@@ -1930,7 +1947,7 @@ impl Evaluator {
                         out.insert(prop.name.clone(), v);
                     }
                     // Update `this` and `module` with all properties (including hidden)
-                    let snapshot = Value::Object(Arc::new(all_props.clone()), None);
+                    let snapshot = Value::Object(Arc::clone(&all_props), None);
                     scope.set("this".into(), snapshot.clone());
                     scope.set("module".into(), snapshot);
                 }
@@ -2011,7 +2028,12 @@ impl Evaluator {
                 match self.eval_property(prop, &scope, depth).await {
                     Ok(Some(value)) => {
                         scope.set(prop.name.clone(), value.clone());
-                        all_props.insert(prop.name.clone(), value.clone());
+                        module_props_insert(
+                            &mut scope,
+                            &mut all_props,
+                            prop.name.clone(),
+                            value.clone(),
+                        );
                         if !has_modifier(&prop.modifiers, Modifier::Hidden)
                             && (depth > 0 || should_render_property_value(prop, &value))
                             && requested_output_fields
@@ -2020,7 +2042,7 @@ impl Evaluator {
                         {
                             out.insert(prop.name.clone(), value);
                         }
-                        let snapshot = Value::Object(Arc::new(all_props.clone()), None);
+                        let snapshot = Value::Object(Arc::clone(&all_props), None);
                         scope.set("this".into(), snapshot.clone());
                         scope.set("module".into(), snapshot);
                     }
@@ -2039,7 +2061,12 @@ impl Evaluator {
                         if has_modifier(&prop.modifiers, Modifier::Local) {
                             continue;
                         }
-                        all_props.insert(prop.name.clone(), value.clone());
+                        module_props_insert(
+                            &mut scope,
+                            &mut all_props,
+                            prop.name.clone(),
+                            value.clone(),
+                        );
                         if !has_modifier(&prop.modifiers, Modifier::Hidden)
                             && (depth > 0 || should_render_property_value(prop, &value))
                             && requested_output_fields
@@ -2048,7 +2075,7 @@ impl Evaluator {
                         {
                             out.insert(prop.name.clone(), value);
                         }
-                        let snapshot = Value::Object(Arc::new(all_props.clone()), None);
+                        let snapshot = Value::Object(Arc::clone(&all_props), None);
                         scope.set("this".into(), snapshot.clone());
                         scope.set("module".into(), snapshot);
                     }
@@ -3692,8 +3719,20 @@ impl Evaluator {
         Ok(())
     }
 
-    #[async_recursion(?Send)]
+    /// Evaluate `expr`. Literals and plain name lookups, which are most of the
+    /// expressions evaluated, are answered here without allocating the boxed
+    /// future that a recursive evaluation needs.
     async fn eval_expr(&mut self, expr: &Expr, scope: &Scope, depth: usize) -> Result<Value> {
+        if depth <= self.max_depth
+            && let Some(result) = eval_simple_expr(expr, scope)
+        {
+            return result;
+        }
+        self.eval_expr_boxed(expr, scope, depth).await
+    }
+
+    #[async_recursion(?Send)]
+    async fn eval_expr_boxed(&mut self, expr: &Expr, scope: &Scope, depth: usize) -> Result<Value> {
         if depth > self.max_depth {
             return Err(Error::Eval("maximum recursion depth exceeded".into()));
         }
