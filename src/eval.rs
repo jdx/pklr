@@ -268,11 +268,8 @@ enum TypeChecks {
     All,
     /// None: a class body, whose defaults an instance checks when built.
     Nothing,
-    /// The entries at these indices: the ones an amendment wrote itself.
-    /// The second set holds base entries the amendment then amends with a
-    /// body of its own (`o { v = 1 }`): objects nested in their values are
-    /// built unchecked, as the amendment checks the result.
-    Entries(Rc<FxHashSet<usize>>, Rc<FxHashSet<usize>>),
+    /// The entries an amendment wrote itself (see `AmendmentChecks`).
+    Entries(Rc<AmendmentChecks>),
     /// Every entry of a `for`/`when` body, handed to the enclosing object to
     /// check once that object is complete. Carries the names the iterations
     /// around it declare (loop variables, enclosing generator bodies'
@@ -281,19 +278,31 @@ enum TypeChecks {
     Generator(Rc<FxHashSet<String>>, Rc<[usize]>),
 }
 
+/// The checks of an amendment's merged entries, by entry index.
+struct AmendmentChecks {
+    /// The entries the amendment wrote with its own declared types, and the
+    /// generators, whose bodies may declare some.
+    checked: FxHashSet<usize>,
+    /// Entries a later entry amends with a body of its own (`o { v = 1 }`):
+    /// objects nested in their values are built unchecked, as that
+    /// amendment checks the result.
+    amended: FxHashSet<usize>,
+}
+
 impl TypeChecks {
     fn includes(&self, entry_index: usize) -> bool {
         match self {
             TypeChecks::All | TypeChecks::Generator(..) => true,
             TypeChecks::Nothing => false,
-            TypeChecks::Entries(indices, _) => indices.contains(&entry_index),
+            TypeChecks::Entries(entries) => entries.checked.contains(&entry_index),
         }
     }
 
     /// Whether objects nested in the entry at `entry_index` are built
     /// without checks, because an amendment of it checks the result.
     fn defers_nested(&self, entry_index: usize) -> bool {
-        matches!(self, TypeChecks::Entries(_, deferred) if deferred.contains(&entry_index))
+        matches!(self, TypeChecks::Entries(entries)
+            if !entries.amended.is_empty() && entries.amended.contains(&entry_index))
     }
 
     /// Checks for the body of the generator at `entry_index`, in its
@@ -3403,11 +3412,36 @@ impl Evaluator {
         // A constraint may call a local function, which must see the
         // finished module (late binding): the checks run with the module's
         // local functions re-created over it. Most modules declare none.
-        let local_function_scope = if module.body.iter().any(|entry| {
-            matches!(entry, Entry::Property(prop)
-                if matches!(prop.value, Some(Expr::Lambda(..)))
-                    && has_modifier(&prop.modifiers, Modifier::Local))
-        }) {
+        let local_functions = module
+            .body
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Property(prop)
+                    if matches!(prop.value, Some(Expr::Lambda(..)))
+                        && has_modifier(&prop.modifiers, Modifier::Local) =>
+                {
+                    Some(prop.name.as_str())
+                }
+                _ => None,
+            })
+            .collect::<FxHashSet<_>>();
+        let reaches_local_function = |prop: &Property| {
+            !local_functions.is_empty()
+                && prop.type_ann.as_ref().is_some_and(|ty| {
+                    type_reaches(ty, &|name| scope.get_type_alias(name), &|name| {
+                        local_functions.contains(name)
+                    })
+                })
+        };
+        let needs_local_functions = deferred_locals
+            .iter()
+            .any(|prop| reaches_local_function(prop))
+            || module.body.iter().any(|entry| {
+                matches!(entry, Entry::Property(prop)
+                    if !has_modifier(&prop.modifiers, Modifier::Local)
+                        && reaches_local_function(prop))
+            });
+        let local_function_scope = if needs_local_functions {
             let mut check_scope = scope.child();
             self.rebind_local_functions(&module.body, &mut check_scope, depth)?;
             Some(check_scope)
@@ -3871,7 +3905,7 @@ impl Evaluator {
         };
         // `outer` is only reachable by name, so a body that never mentions it
         // (the common case) skips flattening the enclosing scope for it.
-        if entries_mention(entries, "outer") || scope.type_aliases_mention("outer") {
+        if entries_mention(entries, "outer") || scope.type_aliases_mention_outer() {
             // Set `outer` to a snapshot of the parent scope's variables as an object.
             // Also insert Null for any nullable-no-default properties declared in these
             // entries but absent from the parent scope, so that `outer.optionalProp`
@@ -5025,9 +5059,14 @@ impl Evaluator {
         scope: &Scope,
         depth: usize,
     ) -> Result<Option<String>> {
-        if type_is_runtime_checkable(ty, scope)
-            && !self.eval_type_check(value, ty, scope, depth + 1)?
-        {
+        let matches = match builtin_type_matches(value, ty, scope) {
+            Some(matches) => matches,
+            None => {
+                !type_is_runtime_checkable(ty, scope)
+                    || self.eval_type_check(value, ty, scope, depth + 1)?
+            }
+        };
+        if !matches {
             return Ok(Some(format!(
                 "property '{}' expected {}, got {}",
                 name,
@@ -5288,6 +5327,9 @@ impl Evaluator {
         // it, except names the iteration declares itself. Failed bindings of
         // the iteration stay failed. A typed local of such a body that fails
         // is returned, to poison in another pass.
+        if pending.len() == generator_mark {
+            return Ok(Vec::new());
+        }
         let mut failed_locals = Vec::new();
         let checks = pending.split_off(generator_mark);
         // Within one body's generators, a property written again later (by
@@ -5780,12 +5822,12 @@ impl Evaluator {
         // unchecked, as that amendment checks them against the values it
         // leaves (here overriding a default `v: Int = "x"` of `o`).
         let mut amended_bases = FxHashSet::default();
-        let mut amended_later: HashSet<&str> = HashSet::new();
+        let mut amended_later: FxHashSet<&str> = FxHashSet::default();
         for (index, entry) in merged.iter().enumerate().rev() {
             let Entry::Property(prop) = entry else {
                 continue;
             };
-            if amended_later.contains(prop.name.as_str()) {
+            if !amended_later.is_empty() && amended_later.contains(prop.name.as_str()) {
                 amended_bases.insert(index);
             }
             if prop.body.is_some() && prop.value.is_none() {
@@ -5810,7 +5852,10 @@ impl Evaluator {
             if defining_class {
                 TypeChecks::Nothing
             } else {
-                TypeChecks::Entries(Rc::new(overlay_checked), Rc::new(amended_bases))
+                TypeChecks::Entries(Rc::new(AmendmentChecks {
+                    checked: overlay_checked,
+                    amended: amended_bases,
+                }))
             },
         )?;
         if let Value::Object(map, Some(source)) = result {

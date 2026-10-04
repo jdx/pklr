@@ -647,6 +647,46 @@ pub(super) fn is_builtin_type_name(name: &str) -> bool {
         )
 }
 
+/// Whether `val` matches `ty` when `ty` is made only of built-in type names
+/// and string-literal types (`String`, `Int?`, `"a"|"b"`), which no alias in
+/// scope shadows: decided without resolving anything. `None` for any other
+/// type, which needs the full check.
+pub(super) fn builtin_type_matches(
+    val: &Value,
+    ty: &crate::parser::TypeExpr,
+    scope: &Scope,
+) -> Option<bool> {
+    use crate::parser::TypeExpr;
+    if scope.shadows_builtin_type {
+        return None;
+    }
+    match ty {
+        TypeExpr::Named(name) if is_builtin_type_name(name) => {
+            // `List` and `Map` style names may also be classes' parents, so
+            // only value types and string literals are decided here.
+            let plain = name.strip_prefix('*').unwrap_or(name);
+            (string_literal_type_value(name).is_some()
+                || matches!(
+                    plain,
+                    "Null" | "Boolean" | "Bool" | "Int" | "Float" | "Number" | "String" | "Any"
+                ))
+            .then(|| value_is_type(val, ty))
+        }
+        TypeExpr::Nullable(inner) => {
+            let inner = builtin_type_matches(val, inner, scope)?;
+            Some(is_null_value(val) || inner)
+        }
+        TypeExpr::Union(variants) => {
+            let mut matches = false;
+            for variant in variants {
+                matches |= builtin_type_matches(val, variant, scope)?;
+            }
+            Some(matches)
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn type_is_runtime_checkable(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
     type_is_runtime_checkable_inner(ty, scope, &mut Vec::new())
 }

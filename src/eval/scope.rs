@@ -43,6 +43,10 @@ pub(super) struct Scope {
     /// may have a built-in type's name (`typealias String = ...`). Without
     /// one, a built-in type name needs no alias lookup. May over-approximate.
     pub(super) shadows_builtin_type: bool,
+    /// Whether a type alias in this scope, or in a scope it was built over,
+    /// may mention `outer`, so a body must bind `outer` for its checks. May
+    /// over-approximate.
+    pub(super) aliases_mention_outer: bool,
     /// Whether this scope belongs to a class definition's body, or to a
     /// value an amendment amends with a body of its own (or an object body
     /// nested in either). Declared types there are checked when an instance
@@ -91,6 +95,7 @@ impl Scope {
             vars: Arc::default(),
             type_aliases: Rc::default(),
             shadows_builtin_type: self.shadows_builtin_type,
+            aliases_mention_outer: self.aliases_mention_outer,
             defining_class: self.defining_class,
             type_alias_barrier: None,
             module_identities: Rc::default(),
@@ -286,18 +291,17 @@ impl Scope {
         if super::types::is_builtin_type_name(&name) {
             self.shadows_builtin_type = true;
         }
+        if type_mentions(&ty, "outer") {
+            self.aliases_mention_outer = true;
+        }
         Rc::make_mut(&mut self.type_aliases).insert(name.into(), ty);
     }
 
-    /// Whether a type alias visible from this scope mentions `name`. A type
+    /// Whether a type alias visible from this scope mentions `outer`. A type
     /// alias's constraint runs in the scope of the value being checked, so it
     /// can read bindings such as `outer` from wherever the check happens.
-    pub(super) fn type_aliases_mention(&self, name: &str) -> bool {
-        self.type_aliases.values().any(|ty| type_mentions(ty, name))
-            || self
-                .parent
-                .as_ref()
-                .is_some_and(|parent| parent.type_aliases_mention(name))
+    pub(super) fn type_aliases_mention_outer(&self) -> bool {
+        self.aliases_mention_outer
     }
 
     /// Whether any type alias is visible from this scope.
@@ -795,6 +799,7 @@ fn update_object_bindings(
     // The scope's own maps for these start empty, so it can share the object's.
     scope.type_aliases = object.type_aliases.clone();
     scope.shadows_builtin_type |= object.shadows_builtin_type;
+    scope.aliases_mention_outer |= object.aliases_mention_outer;
     scope.defining_class |= object.defining_class;
     scope.module_identities = object.module_identities.clone();
 }
