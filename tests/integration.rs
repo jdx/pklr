@@ -523,6 +523,21 @@ import "pkl/Builtins.pkl"
 }
 
 #[test]
+fn collect_imports_finds_module_extends_but_not_class_extends() {
+    let src = r#"
+extends "base.pkl"
+import "helper.pkl"
+class Child extends Parent {}
+"#;
+    let tokens = lex(src).unwrap();
+    let imports = collect_imports(&tokens);
+    assert_eq!(
+        imports,
+        vec!["base.pkl".to_string(), "helper.pkl".to_string()]
+    );
+}
+
+#[test]
 fn parser_allows_semicolons_between_header_directives() {
     let src = r#"
 amends "base.pkl"; import "helper.pkl"; x = helper.value

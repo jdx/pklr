@@ -22,9 +22,15 @@ fn collect_imports_into(tokens: &[Token], imports: &mut Vec<String>) {
     let mut i = 0;
     while i < tokens.len() {
         match &tokens[i].kind {
-            TokenKind::KwAmends | TokenKind::KwImport | TokenKind::KwImportStar => {
+            // `class C extends Parent` is followed by an identifier, not a
+            // string, so only the module header form `extends "uri"` matches.
+            TokenKind::KwAmends
+            | TokenKind::KwExtends
+            | TokenKind::KwImport
+            | TokenKind::KwImportStar => {
                 match tokens.get(i + 1).map(|t| &t.kind) {
-                    // Declaration form: `import "uri"` / `import* "glob"` / `amends "uri"`
+                    // Declaration form: `import "uri"` / `import* "glob"` /
+                    // `amends "uri"` / `extends "uri"`
                     Some(TokenKind::StringLit(uri)) => {
                         imports.push(uri.clone());
                         i += 2;
