@@ -4325,11 +4325,7 @@ impl Evaluator {
 
         // Lambda call
         if let Value::Lambda(params, body, captured) = func_val {
-            let mut call_scope = Scope::default();
-            // Restore captured scope
-            for (k, v) in captured.iter() {
-                call_scope.set_name(k.clone(), v.clone());
-            }
+            let mut call_scope = Scope::for_call(&captured);
             // If we're inside a method call context (scope has `this` as an Object),
             // layer the instance's properties so local functions see overridden values
             if let Some(Value::Object(this_map, _)) = scope.get("this") {
@@ -4399,10 +4395,7 @@ impl Evaluator {
         if let Value::Object(map, _) = obj
             && let Some(Value::Lambda(params, body, captured)) = map.get(method)
         {
-            let mut call_scope = Scope::default();
-            for (k, v) in captured.iter() {
-                call_scope.set_name(k.clone(), v.clone());
-            }
+            let mut call_scope = Scope::for_call(captured);
             // Layer in all instance properties, including lambdas, so local
             // functions called by this method see overrides.
             for (k, v) in map.iter() {
@@ -4646,10 +4639,7 @@ impl Evaluator {
 
             // Lambda.apply()
             (Value::Lambda(params, body, captured), "apply") => {
-                let mut call_scope = Scope::default();
-                for (k, v) in captured.iter() {
-                    call_scope.set_name(k.clone(), v.clone());
-                }
+                let mut call_scope = Scope::for_call(captured);
                 for (param, arg) in params.iter().zip(args.iter()) {
                     call_scope.declare(param.clone(), arg.clone());
                 }
@@ -4668,10 +4658,7 @@ impl Evaluator {
         depth: usize,
     ) -> Result<Value> {
         if let Value::Lambda(params, body, captured) = lambda {
-            let mut scope = Scope::default();
-            for (k, v) in captured.iter() {
-                scope.set_name(k.clone(), v.clone());
-            }
+            let mut scope = Scope::for_call(captured);
             for (param, arg) in params.iter().zip(args.iter()) {
                 scope.declare(param.clone(), arg.clone());
             }
@@ -4882,10 +4869,7 @@ impl Evaluator {
                                 params.len()
                             )));
                         }
-                        let mut call_scope = Scope::default();
-                        for (k, v) in captured.iter() {
-                            call_scope.set_name(k.clone(), v.clone());
-                        }
+                        let mut call_scope = Scope::for_call(&captured);
                         call_scope.declare(params[0].clone(), l);
                         self.eval_expr(&body, &call_scope, depth + 1).await
                     }
@@ -5343,10 +5327,7 @@ impl Evaluator {
                                 && !blocked_root_converters.contains(conv_name)
                                 && let Value::Lambda(params, body, captured) = lambda
                             {
-                                let mut call_scope = Scope::default();
-                                for (k, v) in captured.iter() {
-                                    call_scope.set_name(k.clone(), v.clone());
-                                }
+                                let mut call_scope = Scope::for_call(captured);
                                 // Bind the object as the first parameter
                                 if let Some(param) = params.first() {
                                     call_scope.declare(

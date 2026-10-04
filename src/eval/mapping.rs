@@ -19,7 +19,7 @@ pub(super) fn refresh_this_aliases(
 pub(super) fn release_this_aliases(scope: &mut Scope, aliases: &[String]) {
     for name in std::iter::once("this").chain(aliases.iter().map(String::as_str)) {
         if scope.vars.contains_key(name)
-            && let Some(slot) = Rc::make_mut(&mut scope.vars).get_mut(name)
+            && let Some(slot) = Arc::make_mut(&mut scope.vars).get_mut(name)
         {
             *slot = Value::Null;
         }
