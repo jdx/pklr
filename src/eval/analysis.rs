@@ -405,23 +405,25 @@ pub(super) fn expand_requested_fields(
             let narrowed = narrow_aliases(&module_aliases, &declared);
             let definition_aliases = narrowed.as_ref().or(aliases);
             follow_definitions(&definitions, &mut refs, definition_aliases);
-            // A body that redeclares a built-in such as `String` changes what
-            // a followed definition's constraint on it binds, but only for
-            // checks within that body. Follow the definitions its own
-            // references reach again with the built-in left unresolved.
+            // A body that redeclares a built-in such as `String` (other than
+            // identically) changes what a followed definition's constraint on
+            // it binds, but only for checks within that body. Follow the
+            // definitions its own references reach again with the built-in
+            // left unresolved. Those references are collected as above (with
+            // the names its enclosing bodies bind shadowed), so only what the
+            // definitions read is new.
             let mut scoped_refs = HashSet::new();
-            for_each_property_body(prop, &mut |body| {
-                let builtins: HashSet<&str> = declared_entry_types(body)
-                    .filter(|name| BINDING_BUILTIN_TYPES.contains(name))
-                    .collect();
+            for_each_property_body(prop, &shadows, &mut |body, body_shadows| {
+                let mut declared = HashSet::new();
+                collect_entries_type_decls(body, &module_aliases, &mut declared);
                 let Some(unresolved) = with_builtins_unresolved(
                     definition_aliases.unwrap_or(&module_aliases),
-                    &builtins,
+                    &declared,
                 ) else {
                     return;
                 };
                 let mut body_refs = HashSet::new();
-                collect_entry_refs_in(body, &mut body_refs, &shadows, definition_aliases);
+                collect_entry_refs_in(body, &mut body_refs, body_shadows, aliases);
                 follow_definitions(&definitions, &mut body_refs, Some(&unresolved));
                 scoped_refs.extend(body_refs);
             });
@@ -563,7 +565,7 @@ fn collect_property_type_decls<'e>(
     aliases: &TypeAliases,
     out: &mut HashSet<&'e str>,
 ) {
-    for_each_property_body(prop, &mut |body| {
+    for_each_property_body(prop, &HashSet::new(), &mut |body, _| {
         collect_entries_type_decls(body, aliases, out)
     });
 }
@@ -594,97 +596,111 @@ fn collect_entries_type_decls<'e>(
     }
 }
 
-/// The names of the type aliases and classes declared directly in `entries`.
-fn declared_entry_types(entries: &[Entry]) -> impl Iterator<Item = &str> {
-    entries.iter().filter_map(|entry| match entry {
-        Entry::TypeAlias(name, _) | Entry::ClassDef(name, ..) => Some(name.as_str()),
-        _ => None,
-    })
-}
-
-/// Calls `f` with every body inside `prop`: its own body and the object
-/// bodies within its value, and the bodies nested within those.
-fn for_each_property_body<'e>(prop: &'e Property, f: &mut dyn FnMut(&'e [Entry])) {
+/// Calls `f` with every body inside `prop` (its own body and the object
+/// bodies within its value, and the bodies nested within those) and the
+/// names bound around that body: `shadows` plus what enclosing bodies,
+/// generators, `let`s and lambdas bind, as `collect_entry_refs_in` tracks.
+fn for_each_property_body<'e>(
+    prop: &'e Property,
+    shadows: &HashSet<String>,
+    f: &mut dyn FnMut(&'e [Entry], &HashSet<String>),
+) {
     if let Some(expr) = &prop.value {
-        for_each_expr_body(expr, f);
+        for_each_expr_body(expr, shadows, f);
     }
     if let Some(body) = &prop.body {
-        f(body);
-        for_each_nested_body(body, f);
+        for_each_body(body, shadows, f);
     }
 }
 
-/// Calls `f` with every body nested within `entries` (not `entries` itself).
-fn for_each_nested_body<'e>(entries: &'e [Entry], f: &mut dyn FnMut(&'e [Entry])) {
-    let body = |body: &'e [Entry], f: &mut dyn FnMut(&'e [Entry])| {
-        f(body);
-        for_each_nested_body(body, f);
-    };
-    for entry in entries {
+/// Calls `f` with `body` and then with every body nested within it.
+fn for_each_body<'e>(
+    body: &'e [Entry],
+    shadows: &HashSet<String>,
+    f: &mut dyn FnMut(&'e [Entry], &HashSet<String>),
+) {
+    f(body, shadows);
+    let mut entry_shadows = shadows.clone();
+    entry_shadows.extend(declared_entry_roots(body));
+    for entry in body {
         match entry {
-            Entry::Property(prop) => for_each_property_body(prop, f),
+            Entry::Property(prop) => for_each_property_body(prop, &entry_shadows, f),
             Entry::DynProperty(key, value) => {
-                for_each_expr_body(key, f);
-                for_each_expr_body(value, f);
+                for_each_expr_body(key, &entry_shadows, f);
+                for_each_expr_body(value, &entry_shadows, f);
             }
             Entry::ForGenerator(fgen) => {
-                for_each_expr_body(&fgen.collection, f);
-                body(&fgen.body, f);
+                for_each_expr_body(&fgen.collection, &entry_shadows, f);
+                let mut body_shadows = entry_shadows.clone();
+                body_shadows.insert(fgen.val_var.clone());
+                if let Some(key_var) = &fgen.key_var {
+                    body_shadows.insert(key_var.clone());
+                }
+                for_each_body(&fgen.body, &body_shadows, f);
             }
             Entry::WhenGenerator(wgen) => {
-                for_each_expr_body(&wgen.condition, f);
-                body(&wgen.body, f);
+                for_each_expr_body(&wgen.condition, &entry_shadows, f);
+                for_each_body(&wgen.body, &entry_shadows, f);
                 if let Some(else_body) = &wgen.else_body {
-                    body(else_body, f);
+                    for_each_body(else_body, &entry_shadows, f);
                 }
             }
-            Entry::Spread(expr) | Entry::Elem(expr) => for_each_expr_body(expr, f),
-            Entry::ClassDef(_, _, _, class_body) => body(class_body, f),
+            Entry::Spread(expr) | Entry::Elem(expr) => for_each_expr_body(expr, &entry_shadows, f),
+            Entry::ClassDef(_, _, _, class_body) => for_each_body(class_body, &entry_shadows, f),
             Entry::TypeAlias(..) => {}
         }
     }
 }
 
 /// Calls `f` with every object body within `expr`, and the bodies nested
-/// within those.
-fn for_each_expr_body<'e>(expr: &'e Expr, f: &mut dyn FnMut(&'e [Entry])) {
+/// within those; see `for_each_property_body`.
+fn for_each_expr_body<'e>(
+    expr: &'e Expr,
+    shadows: &HashSet<String>,
+    f: &mut dyn FnMut(&'e [Entry], &HashSet<String>),
+) {
     match expr {
         Expr::New(_, entries, _) | Expr::InferredNew(_, entries) | Expr::ObjectBody(entries) => {
-            f(entries);
-            for_each_nested_body(entries, f);
+            for_each_body(entries, shadows, f)
         }
-        Expr::Field(base, _) | Expr::NullSafeField(base, _) => for_each_expr_body(base, f),
+        Expr::Field(base, _) | Expr::NullSafeField(base, _) => for_each_expr_body(base, shadows, f),
         Expr::Index(base, index) | Expr::Binop(_, base, index) => {
-            for_each_expr_body(base, f);
-            for_each_expr_body(index, f);
+            for_each_expr_body(base, shadows, f);
+            for_each_expr_body(index, shadows, f);
         }
         Expr::Call(callee, args) => {
-            for_each_expr_body(callee, f);
+            for_each_expr_body(callee, shadows, f);
             for arg in args {
-                for_each_expr_body(arg, f);
+                for_each_expr_body(arg, shadows, f);
             }
         }
         Expr::If(cond, then_expr, else_expr) => {
-            for_each_expr_body(cond, f);
-            for_each_expr_body(then_expr, f);
-            for_each_expr_body(else_expr, f);
+            for_each_expr_body(cond, shadows, f);
+            for_each_expr_body(then_expr, shadows, f);
+            for_each_expr_body(else_expr, shadows, f);
         }
-        Expr::Let(_, value, body) => {
-            for_each_expr_body(value, f);
-            for_each_expr_body(body, f);
+        Expr::Let(name, value, body) => {
+            for_each_expr_body(value, shadows, f);
+            let mut body_shadows = shadows.clone();
+            body_shadows.insert(name.clone());
+            for_each_expr_body(body, &body_shadows, f);
+        }
+        Expr::Lambda(params, value) => {
+            let mut body_shadows = shadows.clone();
+            body_shadows.extend(params.iter().cloned());
+            for_each_expr_body(value, &body_shadows, f);
         }
         Expr::Is(value, _)
         | Expr::As(value, _)
-        | Expr::Lambda(_, value)
         | Expr::Unop(_, value)
         | Expr::Throw(value)
         | Expr::Trace(value)
         | Expr::Read(value)
-        | Expr::ReadOrNull(value) => for_each_expr_body(value, f),
+        | Expr::ReadOrNull(value) => for_each_expr_body(value, shadows, f),
         Expr::StringInterpolation(parts) => {
             for part in parts {
                 if let StringInterpPart::Expr(expr) = part {
-                    for_each_expr_body(expr, f);
+                    for_each_expr_body(expr, shadows, f);
                 }
             }
         }

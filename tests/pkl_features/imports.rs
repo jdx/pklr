@@ -2556,9 +2556,23 @@ async fn narrowed_import_respects_builtins_redeclared_in_nested_bodies() {
         "length = throw(\"unused\")\ntypealias T = String(length == 1)\nresult {\n  inner {\n    typealias String = Int\n    value = 1\n  }\n  ok = \"b\" is T\n}\n",
     )
     .unwrap();
+    // A local bound around the redeclaring body still shadows the module's
+    // unused `x`.
+    std::fs::write(
+        dir.join("dep_local.pkl"),
+        "x = throw(\"unused\")\nresult {\n  local x = 1\n  inner {\n    typealias String = Int\n    ok = x\n  }\n}\n",
+    )
+    .unwrap();
+    // An identical redeclaration of the module's `String` reads the same, so
+    // `T` still checks a List, which binds its own `length`.
+    std::fs::write(
+        dir.join("dep_identical.pkl"),
+        "length = throw(\"unused\")\ntypealias String = List\ntypealias T = String(length == 1)\nresult {\n  typealias String = List\n  ok = List(1) is T\n}\n",
+    )
+    .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"dep.pkl\" as Dep\nimport \"dep_direct.pkl\" as DepDirect\nimport \"dep_listing.pkl\" as DepListing\nimport \"dep_sibling.pkl\" as DepSibling\nimport \"dep_class.pkl\" as DepClass\nout = Dep.result.ok\noutDirect = DepDirect.result.ok\noutListing = DepListing.result.inner.ok\noutSibling = DepSibling.result.ok\noutClass = DepClass.result.ok\n",
+        "import \"dep.pkl\" as Dep\nimport \"dep_direct.pkl\" as DepDirect\nimport \"dep_local.pkl\" as DepLocal\nimport \"dep_identical.pkl\" as DepIdentical\nimport \"dep_listing.pkl\" as DepListing\nimport \"dep_sibling.pkl\" as DepSibling\nimport \"dep_class.pkl\" as DepClass\nout = Dep.result.ok\noutDirect = DepDirect.result.ok\noutListing = DepListing.result.inner.ok\noutSibling = DepSibling.result.ok\noutClass = DepClass.result.ok\noutLocal = DepLocal.result.inner.ok\noutIdentical = DepIdentical.result.ok\n",
     )
     .unwrap();
 
@@ -2570,6 +2584,8 @@ async fn narrowed_import_respects_builtins_redeclared_in_nested_bodies() {
     assert_eq!(val["outListing"], true);
     assert_eq!(val["outSibling"], true);
     assert_eq!(val["outClass"], serde_json::json!({ "a": 1, "b": 1 }));
+    assert_eq!(val["outLocal"], 1);
+    assert_eq!(val["outIdentical"], true);
 }
 
 #[tokio::test]
