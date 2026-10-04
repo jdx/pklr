@@ -202,7 +202,7 @@ myStep = (base) { check = "b" }
 fn converter_applies_to_subclass_instance() {
     let json = eval_with_converters(
         r#"
-class Factory {
+open class Factory {
     fixed output = new { check = "base" }
 }
 class Prettier extends Factory {}

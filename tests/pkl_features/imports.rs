@@ -3375,14 +3375,14 @@ async fn narrowed_import_reads_qualified_type_roots_and_nested_classes() {
 }
 
 #[tokio::test]
-async fn narrowed_import_reads_values_named_as_types() {
+async fn narrowed_import_rejects_values_named_as_types() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_values_named_as_types");
     let dir = temp.path();
-    // A type name that isn't one of the module's types can name a property
-    // or local holding a class, which building or checking one reads.
+    // A property or local holding a class is a value, not a type, so `new`
+    // can't instantiate it, even through a narrowed import.
     std::fs::write(
         dir.join("dep_property.pkl"),
-        "Foo = Item\nclass Item {\n  a: Int = 1\n}\nresult: Foo = new Foo {}\n",
+        "Foo = Item\nclass Item {\n  a: Int = 1\n}\nresult = new Foo {}\n",
     )
     .unwrap();
     std::fs::write(
@@ -3390,23 +3390,154 @@ async fn narrowed_import_reads_values_named_as_types() {
         "class C {\n  v = module.expected\n}\nlocal x = module.C\nexpected = \"b\"\nresult = new x {}\n",
     )
     .unwrap();
-    // A local in the body binds the name, so the module property it shadows
-    // isn't read.
+    for (alias, file, name) in [
+        ("DepProperty", "dep_property.pkl", "Foo"),
+        ("DepLocal", "dep_local.pkl", "x"),
+    ] {
+        std::fs::write(
+            dir.join("main.pkl"),
+            format!("import \"{file}\" as {alias}\nout = {alias}.result\n"),
+        )
+        .unwrap();
+        let err = pklr::eval_to_json_async(&dir.join("main.pkl"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(&format!("Expected `{name}` to be a type, but it is not.")),
+            "{file}: {err}"
+        );
+    }
+}
+
+#[test]
+fn module_cannot_amend_or_extend_itself() {
+    let temp = TestTempDir::new("pklr_test_module_self_reference");
+    let dir = temp.path();
+    let amends = dir.join("selfAmends.pkl");
+    std::fs::write(&amends, "amends \"selfAmends.pkl\"\n").unwrap();
+    let err = pklr::eval_to_json(&amends).unwrap_err().to_string();
+    assert!(
+        err.contains("Module `selfAmends` cannot amend itself."),
+        "{err}"
+    );
+    let extends = dir.join("selfExtends.pkl");
     std::fs::write(
-        dir.join("dep_shadowed.pkl"),
-        "class Item {\n  a: Int = 1\n}\nFoo = throw(\"unused\")\nresult {\n  local Foo = Item\n  x = new Foo {}\n}\n",
+        &extends,
+        "open module selfExtends\nextends \"selfExtends.pkl\"\n",
+    )
+    .unwrap();
+    let err = pklr::eval_to_json(&extends).unwrap_err().to_string();
+    assert!(
+        err.contains("Module `selfExtends` cannot extend itself."),
+        "{err}"
+    );
+}
+
+#[test]
+fn module_that_amends_cannot_be_extended() {
+    let temp = TestTempDir::new("pklr_test_extend_amending_module");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("library.pkl"),
+        "open module my.library\nname = \"x\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("amending.pkl"),
+        "module amending\namends \"library.pkl\"\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("main.pkl"), "extends \"amending.pkl\"\n").unwrap();
+    let err = pklr::eval_to_json(&dir.join("main.pkl"))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains(
+            "Module `my.library` cannot be extended or used as type because it amends another module."
+        ),
+        "{err}"
+    );
+}
+
+#[test]
+fn module_min_pkl_version_is_checked() {
+    let temp = TestTempDir::new("pklr_test_min_pkl_version");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("future.pkl"),
+        "@ModuleInfo { minPklVersion = \"99.9.9\" }\nmodule future\nx = 1\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("current.pkl"),
+        "@ModuleInfo { minPklVersion = \"0.27.2\" }\nmodule current\nx = 2\n",
     )
     .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"dep_property.pkl\" as DepProperty\nimport \"dep_local.pkl\" as DepLocal\nimport \"dep_shadowed.pkl\" as DepShadowed\noutProperty = DepProperty.result\noutLocal = DepLocal.result\noutShadowed = DepShadowed.result.x\n",
+        "import \"future.pkl\"\nimport \"current.pkl\"\nunused = 1\nok = current.x\n",
     )
     .unwrap();
+    // An import that is never read is never loaded.
+    assert_eq!(pklr::eval_to_json(&dir.join("main.pkl")).unwrap()["ok"], 2);
+    for src in [
+        "import \"future.pkl\"\nres = future.x\n",
+        "amends \"future.pkl\"\n",
+        "extends \"future.pkl\"\n",
+    ] {
+        std::fs::write(dir.join("main.pkl"), src).unwrap();
+        let err = pklr::eval_to_json(&dir.join("main.pkl"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("Module `future` requires Pkl version 99.9.9 or higher"),
+            "{src}: {err}"
+        );
+    }
+}
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
-    assert_eq!(val["outProperty"], serde_json::json!({ "a": 1 }));
-    assert_eq!(val["outLocal"], serde_json::json!({ "v": "b" }));
-    assert_eq!(val["outShadowed"], serde_json::json!({ "a": 1 }));
+#[test]
+fn abstract_module_cannot_be_instantiated() {
+    let temp = TestTempDir::new("pklr_test_abstract_module_new");
+    let dir = temp.path();
+    std::fs::write(dir.join("modB.pkl"), "abstract module modB\nx = 1\n").unwrap();
+    std::fs::write(dir.join("modA.pkl"), "x = 1\n").unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"modB.pkl\"\ny = new modB {}\n",
+    )
+    .unwrap();
+    let err = pklr::eval_to_json(&dir.join("main.pkl"))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("Cannot instantiate abstract class `modB`."),
+        "{err}"
+    );
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"modA.pkl\"\ny = new modA { x = 2 }\n",
+    )
+    .unwrap();
+    assert_eq!(
+        pklr::eval_to_json(&dir.join("main.pkl")).unwrap()["y"]["x"],
+        2
+    );
+    // Amending the object of an abstract module instantiates it too, while
+    // reading its members works.
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"modB.pkl\"\ny = (modB) { z = 2 }\n",
+    )
+    .unwrap();
+    let err = pklr::eval_to_json(&dir.join("main.pkl"))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("Cannot instantiate abstract class `modB`."),
+        "{err}"
+    );
+    std::fs::write(dir.join("main.pkl"), "import \"modB.pkl\"\ny = modB.x\n").unwrap();
+    assert_eq!(pklr::eval_to_json(&dir.join("main.pkl")).unwrap()["y"], 1);
 }

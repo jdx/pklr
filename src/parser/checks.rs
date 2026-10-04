@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 
 use super::Parser;
-use super::ast::{Expr, Import, Modifier, Property};
+use super::ast::{Annotation, Entry, Expr, Import, Modifier, Property};
 use crate::error::Result;
 use crate::lexer::TokenKind;
 
@@ -127,6 +127,37 @@ const PROPERTY_MODIFIERS: &[Modifier] = &[
 ];
 const OBJECT_MEMBER_MODIFIERS: &[Modifier] = &[Modifier::Local, Modifier::Const];
 
+/// The Pkl release whose language pklr implements, checked against a
+/// module's `@ModuleInfo { minPklVersion = "..." }`.
+pub(crate) const PKL_VERSION: &str = "0.32.1";
+
+/// `major.minor.patch` of a version string, ignoring any pre-release or
+/// build suffix.
+fn version_triple(version: &str) -> Option<(u64, u64, u64)> {
+    let core = version.split(['-', '+']).next()?;
+    let mut parts = core.split('.').map(|part| part.parse::<u64>().ok());
+    Some((parts.next()??, parts.next()??, parts.next()??))
+}
+
+/// The value of a string expression made only of literals
+/// (`"0.2" + "7.0"`), as pkl folds them.
+fn constant_string(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::String(s) => Some(s.to_string()),
+        Expr::Binop(super::ast::BinOp::Add, left, right) => {
+            Some(constant_string(left)? + &constant_string(right)?)
+        }
+        Expr::StringInterpolation(parts) => parts
+            .iter()
+            .map(|part| match part {
+                super::ast::StringInterpPart::Literal(s) => Some(s.to_string()),
+                super::ast::StringInterpPart::Expr(expr) => constant_string(expr),
+            })
+            .collect(),
+        _ => None,
+    }
+}
+
 /// The name a module import is bound to when it has no `as` alias: the last
 /// path segment of the URI without its extension.
 fn inferred_import_name(uri: &str) -> &str {
@@ -184,6 +215,48 @@ impl Parser<'_> {
             ));
         }
         Ok(())
+    }
+
+    /// Reject a module whose `@ModuleInfo` requires a newer Pkl than
+    /// [`PKL_VERSION`].
+    pub(super) fn check_min_pkl_version(
+        &self,
+        annotations: &[Annotation],
+        module_name: Option<&str>,
+    ) -> Result<()> {
+        let Some(required) = annotations
+            .iter()
+            .filter(|annotation| annotation.name == "ModuleInfo")
+            .flat_map(|annotation| &annotation.body)
+            .find_map(|entry| match entry {
+                Entry::Property(prop) if prop.name == "minPklVersion" => {
+                    prop.value.as_ref().and_then(constant_string)
+                }
+                _ => None,
+            })
+        else {
+            return Ok(());
+        };
+        let (Some(required_triple), Some(current)) =
+            (version_triple(&required), version_triple(PKL_VERSION))
+        else {
+            return Ok(());
+        };
+        if required_triple <= current {
+            return Ok(());
+        }
+        let name = module_name.map(str::to_string).unwrap_or_else(|| {
+            std::path::Path::new(self.name)
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_else(|| self.name.to_string())
+        });
+        Err(self.semantic_error(
+            0,
+            format!(
+                "Module `{name}` requires Pkl version {required} or higher, but your Pkl version is {PKL_VERSION}."
+            ),
+        ))
     }
 
     /// Check the modifiers of the module declaration (`open module foo`).

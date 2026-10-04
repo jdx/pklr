@@ -609,7 +609,7 @@ x = new Config.Step {
 fn class_extends_basic() {
     let json = eval(
         r#"
-class Animal {
+open class Animal {
     name: String = "unknown"
     legs: Int = 4
 }
@@ -630,7 +630,7 @@ x = new Dog {
 fn class_extends_override_parent_default() {
     let json = eval(
         r#"
-class Base {
+open class Base {
     port: Int = 8080
     host: String = "localhost"
 }
@@ -651,7 +651,7 @@ fn class_extends_instance_override() {
     // Instance overrides both parent and child defaults
     let json = eval(
         r#"
-class Base {
+open class Base {
     x: Int = 1
     y: Int = 2
 }
@@ -673,7 +673,7 @@ result = new Child {
 fn super_keyword_basic() {
     let json = eval(
         r#"
-class Base {
+open class Base {
     greeting: String = "hello"
 }
 class Child extends Base {
@@ -689,7 +689,7 @@ x = new Child {}
 fn super_keyword_field_access() {
     let json = eval(
         r#"
-class Config {
+open class Config {
     port: Int = 8080
     url: String = "http://localhost"
 }
@@ -709,10 +709,10 @@ fn class_extends_chain() {
     // Three-level inheritance chain
     let json = eval(
         r#"
-class A {
+open class A {
     x: Int = 1
 }
-class B extends A {
+open class B extends A {
     y: Int = 2
 }
 class C extends B {
@@ -2485,7 +2485,7 @@ feature = true
 fn class_extends_inherits_defaults() {
     let json = eval(
         r#"
-class Animal {
+open class Animal {
     name: String = "unknown"
     legs: Int = 4
 }
@@ -2506,7 +2506,7 @@ x = new Dog {
 fn class_extends_override_parent() {
     let json = eval(
         r#"
-class Base {
+open class Base {
     value: Int = 1
 }
 class Child extends Base {
@@ -3320,7 +3320,7 @@ overridden = new C { v = "o" }
 fn module_in_class_body_reaches_subclasses_and_local_functions() {
     let val = eval(
         r#"
-class C { v = module.expected; w = "w" }
+open class C { v = module.expected; w = "w" }
 class D extends C { u = module.other }
 local function make(s) = new D { w = s }
 local mk = (s) -> new C { w = s }
@@ -3373,7 +3373,7 @@ result = new D {}
 fn subclass_recovers_once_module_property_is_evaluated() {
     let val = eval(
         r#"
-class C { v = module.expected }
+open class C { v = module.expected }
 class D extends C { w = 1 }
 expected = "b"
 result = new D {}
@@ -3581,11 +3581,20 @@ fn qualified_class_refs_are_refreshed_when_class_recovers() {
     for src in [
         "class C { v = module.expected }\nfunction make() = new module.C {}\nexpected = \"b\"\nresult = make()\n",
         "class C { v = module.expected }\nfunction make() = new this.C {}\nexpected = \"b\"\nresult = make()\n",
-        "class C { v = module.expected }\nlocal x = module.C\nexpected = \"b\"\nresult = new x {}\n",
-        "class C { v = module.expected }\nlocal x = this.C\nexpected = \"b\"\nresult = new x {}\n",
     ] {
         let val = eval(src);
         assert_eq!(val["result"], serde_json::json!({"v": "b"}), "{src}");
+    }
+    // A local holding a class is a value, not a type.
+    for src in [
+        "class C { v = module.expected }\nlocal x = module.C\nexpected = \"b\"\nresult = new x {}\n",
+        "class C { v = module.expected }\nlocal x = this.C\nexpected = \"b\"\nresult = new x {}\n",
+    ] {
+        let err = eval_fails(src);
+        assert!(
+            err.contains("Expected `x` to be a type, but it is not."),
+            "{src}: {err}"
+        );
     }
 }
 
@@ -3691,4 +3700,111 @@ f = new F { p { ["a"] { w = 1 } } }
     let expected = serde_json::json!({"a": {"v": "a", "w": 1}, "b": {"v": "b"}});
     assert_eq!(json["x"], expected);
     assert_eq!(json["f"]["p"], expected);
+}
+
+// ============================================================
+// Class extension and instantiation rules
+// ============================================================
+
+#[test]
+fn class_without_body_is_an_empty_class() {
+    let json = eval("open class Base\nclass Derived extends Base\nx = new Derived {}\n");
+    assert_eq!(json["x"], serde_json::json!({}));
+}
+
+#[test]
+fn invalid_supertypes_are_rejected() {
+    for (src, message) in [
+        (
+            "class Base\nclass Derived extends Base\n",
+            "Cannot extend non-open class `test#Base`.",
+        ),
+        (
+            "open class Recurring extends Recurring {}\n",
+            "Class `test#Recurring` cannot extend itself.",
+        ),
+        (
+            "class Person extends Any\n",
+            "Cannot extend external class `Any`.",
+        ),
+        (
+            "class Person extends Dynamic\n",
+            "Cannot extend non-open class `Dynamic`.",
+        ),
+        (
+            "open class Foo\ntypealias Bar = Foo\nclass Baz extends Bar\n",
+            "`Bar` is not a valid supertype.",
+        ),
+    ] {
+        let err = eval_fails(src);
+        assert!(err.contains(message), "{src}: {err}");
+    }
+    // Open and abstract classes can be extended.
+    let json = eval(
+        "open class A { a = 1 }\nabstract class B extends A { b = 2 }\nclass C extends B\nx = new C {}\n",
+    );
+    assert_eq!(json["x"], serde_json::json!({"a": 1, "b": 2}));
+}
+
+#[test]
+fn abstract_and_external_classes_cannot_be_instantiated() {
+    for (src, message) in [
+        (
+            "abstract class Base\nres = new Base {}\n",
+            "Cannot instantiate abstract class `test#Base`.",
+        ),
+        (
+            "res = new String {}\n",
+            "Cannot instantiate, or amend an instance of, external class `String`.",
+        ),
+        (
+            "res = new Map {}\n",
+            "Cannot instantiate, or amend an instance of, external class `Map`.",
+        ),
+        (
+            "class Foo\nlocal Foo2 = Foo\nres = new Foo2 {}\n",
+            "Expected `Foo2` to be a type, but it is not.",
+        ),
+        (
+            "local Foo = new Dynamic {\n  @Deprecated { message = \"old\" }\n  value = 1\n}\nres = new Foo {}\n",
+            "Expected `Foo` to be a type, but it is not.",
+        ),
+    ] {
+        let err = eval_fails(src);
+        assert!(err.contains(message), "{src}: {err}");
+    }
+}
+
+#[test]
+fn instantiation_checks_follow_type_aliases() {
+    let err = eval_fails("typealias R = Regex\nres = new R {}\n");
+    assert!(
+        err.contains("Cannot instantiate, or amend an instance of, external class `Regex`."),
+        "{err}"
+    );
+    let json =
+        eval("class Foo { x = 1 }\ntypealias A = Foo\nlocal f = () -> new A {}\nr = f.apply()\n");
+    assert_eq!(json["r"], serde_json::json!({"x": 1}));
+    // A parameter named like the class doesn't change what the alias names.
+    let json = eval(
+        "class Foo { x = 1 }\ntypealias A = Foo\nlocal f = (Foo) -> new A {}\nr = f.apply(5)\n",
+    );
+    assert_eq!(json["r"], serde_json::json!({"x": 1}));
+    let err = eval_fails(
+        "typealias A1 = A2\ntypealias A2 = A3\ntypealias A3 = A4\ntypealias A4 = A5\ntypealias A5 = A6\ntypealias A6 = A7\ntypealias A7 = A8\ntypealias A8 = A9\ntypealias A9 = Regex\nres = new A1 {}\n",
+    );
+    assert!(
+        err.contains("Cannot instantiate, or amend an instance of, external class `Regex`."),
+        "{err}"
+    );
+}
+
+#[test]
+fn min_pkl_version_folds_constant_strings() {
+    let err =
+        eval_fails("@ModuleInfo { minPklVersion = \"99.\" + \"9.9\" }\nmodule future\nx = 1\n");
+    assert!(
+        err.contains("Module `future` requires Pkl version 99.9.9 or higher"),
+        "{err}"
+    );
 }
