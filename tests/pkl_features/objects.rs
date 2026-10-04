@@ -173,6 +173,37 @@ differentTypes = test.catchOrNull(() -> new Mapping<Any, Int> { [1] = 10; ["1"] 
     assert!(json["differentTypes"].is_null());
 }
 
+#[test]
+fn amended_mapping_cannot_define_a_key_twice() {
+    let json = eval(
+        r#"
+import "pkl:test"
+local m = new Mapping { ["z"] = 0 }
+direct = test.catch(() -> (m) { ["k"] = 1; ["" + "k"] = 2 }.length)
+intAndFloat = test.catchOrNull(() -> new Mapping<Any, Int> { [1] = 10; [1.0] = 20 })
+"#,
+    );
+    assert_eq!(json["direct"], "Duplicate definition of member `\"k\"`.");
+    // pkl keeps `1` and `1.0` as distinct keys.
+    assert!(json["intAndFloat"].is_null());
+}
+
+#[test]
+fn declared_module_names_do_not_outlive_an_evaluation() {
+    let temp = TestTempDir::new("pklr_test_module_names_reset");
+    let dir = temp.path();
+    let settings = dir.join("settings.pkl");
+    let main = dir.join("main.pkl");
+    std::fs::write(&main, "import \"settings.pkl\"\nx = settings.nope\n").unwrap();
+    let mut ev = Evaluator::new();
+    std::fs::write(&settings, "module company.Settings\na = 1\n").unwrap();
+    let first = ev.eval_file_blocking(&main).unwrap_err().to_string();
+    assert!(first.contains("in module `company.Settings`"), "{first}");
+    std::fs::write(&settings, "a = 1\n").unwrap();
+    let second = ev.eval_file_blocking(&main).unwrap_err().to_string();
+    assert!(second.contains("in module `settings`"), "{second}");
+}
+
 #[tokio::test]
 async fn missing_property_messages_use_declared_module_names() {
     let temp = TestTempDir::new("pklr_test_declared_module_name");

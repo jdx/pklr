@@ -544,6 +544,15 @@ impl Evaluator {
         self.scoped_imports_in_flight.clear();
         self.converters.clear();
         self.prefetch = prefetch::PrefetchState::new(self.cancel.clone());
+        self.module_names.clear();
+    }
+
+    /// Set a custom HTTP client for fetching remote imports and packages.
+    /// Use this to configure proxy settings, CA certificates, timeouts, etc.
+    /// Returns an error when the installed capabilities use another HTTP backend.
+    #[cfg(feature = "http")]
+    pub fn set_http_client(&mut self, client: reqwest::Client) -> Result<()> {
+        self.capabilities.set_http_client(client)
     }
 
     /// Add HTTP URL rewrite rules. Each rule is a `"source_prefix=target_prefix"` string
@@ -2942,6 +2951,8 @@ impl Evaluator {
         let mut generated: HashSet<Arc<str>> = HashSet::default();
         // Members generators produced, by the body (layer) they belong to.
         let mut generated_by_layer: HashSet<(usize, Arc<str>)> = HashSet::default();
+        // Keys `[key] = value` entries defined, by body (layer) and key type.
+        let mut defined_by_layer: HashSet<(usize, &'static str, Arc<str>)> = HashSet::default();
         for (entry_index, entry) in entries.iter().enumerate() {
             match entry {
                 Entry::Property(prop) => {
@@ -3024,6 +3035,23 @@ impl Evaluator {
                     );
                     let key = self.eval_expr(key_expr, &active_scope, depth)?;
                     let key_str = value_to_key(&key)?;
+                    // A body may define each key once (`["k"] { ... }` amends).
+                    if !matches!(val_expr, Expr::ObjectBody(_)) {
+                        let layer = entry_layer(entry_scopes, entry_index);
+                        let key_type = value_type_name(&key);
+                        if !defined_by_layer.insert((layer, key_type, key_str.clone()))
+                            || (key_type == "String"
+                                && generated_by_layer.contains(&(layer, key_str.clone())))
+                        {
+                            let key = match &key {
+                                Value::String(s) => format!("{s:?}"),
+                                key => value_to_display(key),
+                            };
+                            return Err(Error::Eval(format!(
+                                "Duplicate definition of member `{key}`."
+                            )));
+                        }
+                    }
                     // `["key"] { ... }` amends an entry inherited from the parent
                     // (for example when amending an untyped `Mapping`) rather than
                     // replacing it.
