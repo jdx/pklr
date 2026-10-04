@@ -449,7 +449,14 @@ impl Evaluator {
             .cloned();
         #[cfg(not(feature = "package-zip"))]
         let root: Option<PathBuf> = None;
-        resolve_triple_dot(current_path, path, root.as_deref(), |candidate| {
+        // Canonicalize through the evaluator's capabilities, which resolves
+        // native relative entry paths and supports virtual path namespaces.
+        // Unlike `std::path::absolute`, this never substitutes the host CWD
+        // for a capability-backed evaluator.
+        let current_path = self
+            .canonicalize_io(current_path)
+            .unwrap_or_else(|_| current_path.to_path_buf());
+        resolve_triple_dot(&current_path, path, root.as_deref(), |candidate| {
             self.path_exists_io(candidate)
         })
     }
