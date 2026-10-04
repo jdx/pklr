@@ -919,7 +919,12 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
     ) -> HashSet<&'a str> {
         let mut names = HashSet::new();
         let mut seen = HashSet::from([class]);
-        let mut next = classes.get(class).and_then(|(parent, _)| *parent);
+        // `extends module.Parent` names the same class as `extends Parent`.
+        let unqualified = |name: &'a str| name.strip_prefix("module.").unwrap_or(name);
+        let mut next = classes
+            .get(class)
+            .and_then(|(parent, _)| *parent)
+            .map(unqualified);
         while let Some(class) = next
             && seen.insert(class)
             && let Some((parent, body)) = classes.get(class)
@@ -930,9 +935,38 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
                 }
                 _ => None,
             }));
-            next = *parent;
+            next = parent.map(unqualified);
         }
         names
+    }
+    // The names a class body reads while its defaults are evaluated: those
+    // of its non-method entries, and of the methods they call (by name, or
+    // any of them through `this`). Other method bodies only run on a built
+    // instance.
+    fn eager_class_refs(body: &[Entry]) -> HashSet<String> {
+        let is_method = |entry: &Entry| matches!(entry, Entry::Property(prop) if matches!(prop.value, Some(Expr::Lambda(..))));
+        let defaults: Vec<Entry> = body.iter().filter(|e| !is_method(e)).cloned().collect();
+        let mut refs = referenced_roots(&defaults);
+        let mut followed = HashSet::new();
+        loop {
+            let calls_all = refs.contains("this") || refs.contains(DYNAMIC_SIBLING_REF);
+            let next: Vec<&Entry> = body
+                .iter()
+                .filter(|entry| match entry {
+                    Entry::Property(prop) if is_method(entry) => {
+                        (calls_all || refs.contains(&prop.name))
+                            && followed.insert(prop.name.as_str())
+                    }
+                    _ => false,
+                })
+                .collect();
+            if next.is_empty() {
+                return refs;
+            }
+            for method in next {
+                refs.extend(referenced_roots(std::slice::from_ref(method)));
+            }
+        }
     }
     let members: Vec<(&String, bool, HashSet<String>)> = entries
         .iter()
@@ -960,18 +994,7 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
                         .iter()
                         .any(|root| !inherited.contains(root.as_str()))
                         || {
-                            let defaults: Vec<Entry> = body
-                                .iter()
-                                .filter(|entry| {
-                                    !matches!(
-                                        entry,
-                                        Entry::Property(prop)
-                                            if matches!(prop.value, Some(Expr::Lambda(..)))
-                                    )
-                                })
-                                .cloned()
-                                .collect();
-                            let default_refs = referenced_roots(&defaults);
+                            let default_refs = eager_class_refs(body);
                             module_reads
                                 .iter()
                                 .any(|root| default_refs.contains(root.as_str()))

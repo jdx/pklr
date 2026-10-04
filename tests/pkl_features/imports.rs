@@ -2419,6 +2419,35 @@ async fn narrowed_import_skips_module_properties_named_like_inherited_method_rea
 }
 
 #[tokio::test]
+async fn narrowed_import_follows_methods_called_by_class_defaults() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_default_method_call");
+    let dir = temp.path();
+    // `a` calls `getMin` while `Child`'s defaults are first evaluated, before
+    // `Parent`'s `min` is merged in, so the class must still be refreshed.
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "min = 1\nopen class Parent { min = 2 }\nclass Child extends Parent {\n  function getMin() = min\n  a = getMin()\n}\nclass ThisChild extends Parent {\n  function getMin() = min\n  a = this.getMin()\n}\nchild = new Child {}\nthisChild = new ThisChild {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as D\nchild = D.child\nthisChild = D.thisChild\n",
+    )
+    .unwrap();
+
+    let dep = pklr::eval_to_json_async(&dir.join("dep.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(dep["child"]["a"], 2);
+    assert_eq!(dep["thisChild"]["a"], 2);
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["child"]["a"], 2);
+    assert_eq!(val["thisChild"]["a"], 2);
+}
+
+#[tokio::test]
 async fn narrowed_import_follows_module_reads_but_not_checked_value_members() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_constraint_names");
     let dir = temp.path();
