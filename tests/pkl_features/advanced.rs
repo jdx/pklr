@@ -3152,3 +3152,124 @@ no = check.apply(new Other {})
     assert_eq!(json["yes"], true);
     assert_eq!(json["no"], false);
 }
+
+// ============================================================
+// IntSeq
+// ============================================================
+
+#[test]
+fn int_seq_for_generator() {
+    let json = eval(
+        r#"
+squares {
+  for (i in IntSeq(1, 5)) {
+    i * i
+  }
+}
+byKey {
+  for (idx, i in IntSeq(3, 4)) {
+    ["k\(i)"] = idx
+  }
+}
+"#,
+    );
+    assert_eq!(json["squares"], serde_json::json!([1, 4, 9, 16, 25]));
+    assert_eq!(json["byKey"], serde_json::json!({"k3": 0, "k4": 1}));
+}
+
+#[test]
+fn int_seq_to_list_and_properties() {
+    let json = eval(
+        r#"
+list = IntSeq(1, 5).toList()
+single = IntSeq(7, 7).toList()
+negative = IntSeq(-2, 2).toList()
+first = IntSeq(3, 9).first
+last = IntSeq(3, 9).last
+empty = IntSeq(1, 0).isEmpty
+notEmpty = IntSeq(1, 1).isEmpty
+len = IntSeq(1, 10).length
+local seq = IntSeq(0, 3)
+viaLocal = seq.toList()
+"#,
+    );
+    assert_eq!(json["list"], serde_json::json!([1, 2, 3, 4, 5]));
+    assert_eq!(json["single"], serde_json::json!([7]));
+    assert_eq!(json["negative"], serde_json::json!([-2, -1, 0, 1, 2]));
+    assert_eq!(json["first"], 3);
+    assert_eq!(json["last"], 9);
+    assert_eq!(json["empty"], true);
+    assert_eq!(json["notEmpty"], false);
+    assert_eq!(json["len"], 10);
+    assert_eq!(json["viaLocal"], serde_json::json!([0, 1, 2, 3]));
+}
+
+#[test]
+fn int_seq_step() {
+    let json = eval(
+        r#"
+evens = IntSeq(0, 10).step(2).toList()
+uneven = IntSeq(1, 10).step(3).toList()
+down = IntSeq(5, 1).step(-1).toList()
+downBy2 = IntSeq(10, 1).step(-2).toList()
+wrongWayUp = IntSeq(1, 5).step(-1).toList()
+looped {
+  for (i in IntSeq(10, 0).step(-5)) {
+    i
+  }
+}
+"#,
+    );
+    assert_eq!(json["evens"], serde_json::json!([0, 2, 4, 6, 8, 10]));
+    assert_eq!(json["uneven"], serde_json::json!([1, 4, 7, 10]));
+    assert_eq!(json["down"], serde_json::json!([5, 4, 3, 2, 1]));
+    assert_eq!(json["downBy2"], serde_json::json!([10, 8, 6, 4, 2]));
+    assert_eq!(json["wrongWayUp"], serde_json::json!([]));
+    assert_eq!(json["looped"], serde_json::json!([10, 5, 0]));
+}
+
+#[test]
+fn int_seq_empty_range() {
+    let json = eval(
+        r#"
+list = IntSeq(5, 1).toList()
+isEmpty = IntSeq(5, 1).isEmpty
+generated {
+  for (i in IntSeq(5, 1)) {
+    i
+  }
+}
+"#,
+    );
+    assert_eq!(json["list"], serde_json::json!([]));
+    assert_eq!(json["isEmpty"], true);
+    assert_eq!(json["generated"], serde_json::json!([]));
+}
+
+#[test]
+fn int_seq_map_and_fold() {
+    let json = eval(
+        r#"
+doubled = IntSeq(1, 4).map((i) -> i * 2)
+sum = IntSeq(1, 100).fold(0, (acc, i) -> acc + i)
+stepSum = IntSeq(0, 10).step(5).fold(0, (acc, i) -> acc + i)
+names = IntSeq(1, 3).map((i) -> "host\(i)").join(",")
+"#,
+    );
+    assert_eq!(json["doubled"], serde_json::json!([2, 4, 6, 8]));
+    assert_eq!(json["sum"], 5050);
+    assert_eq!(json["stepSum"], 15);
+    assert_eq!(json["names"], "host1,host2,host3");
+}
+
+#[test]
+fn int_seq_errors() {
+    let err = eval_fails("x = IntSeq(1, 5).step(0).toList()");
+    assert!(err.contains("step must not be 0"), "{err}");
+    let err = eval_fails("x = IntSeq(0, 9223372036854775807).toList()");
+    assert!(err.contains("supported maximum"), "{err}");
+    let err = eval_fails(r#"x = IntSeq(1, "5")"#);
+    assert!(err.contains("Int arguments"), "{err}");
+    let err = eval_fails("x = IntSeq(1)");
+    assert!(err.contains("expects 2 arguments"), "{err}");
+}
