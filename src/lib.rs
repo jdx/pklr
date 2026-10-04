@@ -49,6 +49,12 @@ pub fn eval_to_json(path: &Path) -> Result<serde_json::Value> {
     EvaluatorBuilder::new().eval_to_json(path)
 }
 
+/// Evaluate a Pkl file and render its `output.text`, or its default PCF output.
+#[cfg(feature = "native-io")]
+pub fn eval_to_text(path: &Path) -> Result<String> {
+    EvaluatorBuilder::new().eval_to_text(path)
+}
+
 /// Evaluate a Pkl file on tokio's blocking thread pool and return its
 /// contents as JSON. Must be called from within a tokio runtime.
 #[cfg(feature = "async")]
@@ -180,6 +186,13 @@ impl EvaluatorBuilder {
         Ok(self.eval(path)?.json)
     }
 
+    /// Evaluate a Pkl file and render its `output.text`, or its default PCF output.
+    pub fn eval_to_text(self, path: &Path) -> Result<String> {
+        let mut evaluator = self.build();
+        evaluator.set_base_path(path.parent().unwrap_or(Path::new(".")));
+        evaluator.eval_file_text_blocking(path)
+    }
+
     /// Evaluate a Pkl file and return its JSON and environment dependencies.
     pub fn eval(self, path: &Path) -> Result<EvalOutcome> {
         self.eval_with_cancel(path, None)
@@ -195,9 +208,9 @@ impl EvaluatorBuilder {
             evaluator.set_cancel_flag(cancel);
         }
         evaluator.set_base_path(path.parent().unwrap_or(Path::new(".")));
-        let value = evaluator.eval_file_converted(path)?;
+        let json = evaluator.eval_file_json_blocking(path)?;
         Ok(EvalOutcome {
-            json: value.to_json(),
+            json,
             env_reads: evaluator.take_env_reads(),
         })
     }
