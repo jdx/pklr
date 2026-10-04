@@ -3539,6 +3539,17 @@ fn dynamic_module_readers_are_refreshed_before_their_dependents() {
 }
 
 #[test]
+fn refresh_repeats_for_members_read_before_they_recovered() {
+    // Both classes read `module[...]`, so their order can't be derived and
+    // `C` (declared first) is refreshed before `D`, which it reads. `D`
+    // recovers in that pass, so `C` is refreshed again.
+    let val = eval(
+        "local k1 = \"D\"\nlocal k2 = \"expected\"\nclass C { v = module[k1].v }\nclass D { v = module[k2] }\nexpected = \"b\"\nresult = new C {}\n",
+    );
+    assert_eq!(val["result"], serde_json::json!({"v": "b"}));
+}
+
+#[test]
 fn failed_class_reports_error_through_module_and_this() {
     for src in [
         "class C { v = module.missing }\nresult = new module.C {}\n",
