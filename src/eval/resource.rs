@@ -177,7 +177,7 @@ impl Evaluator {
     /// capability's virtual relative namespace untouched. Native
     /// canonicalization produces an absolute path; sandbox capabilities can
     /// return their own virtual path unchanged.
-    fn host_absolute_path(&mut self, path: PathBuf) -> PathBuf {
+    pub(super) fn host_absolute_path(&mut self, path: PathBuf) -> PathBuf {
         if path.is_absolute() {
             path
         } else {
@@ -365,7 +365,7 @@ fn file_uri_path(uri: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(path))
 }
 
-fn file_uri(path: &Path) -> String {
+pub(super) fn file_uri(path: &Path) -> String {
     let path = percent_encode(&normalize_pkl_path(&path.to_string_lossy()));
     if path.len() >= 2 && path.as_bytes()[0].is_ascii_alphabetic() && path.as_bytes()[1] == b':' {
         format!("file:///{path}")

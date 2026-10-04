@@ -53,7 +53,7 @@ pub(super) fn needs_method_result_types(expr: &Expr) -> bool {
         Expr::If(_, then_expr, else_expr) => {
             needs_method_result_types(then_expr) || needs_method_result_types(else_expr)
         }
-        Expr::Let(_, _, body) | Expr::Trace(body) => needs_method_result_types(body),
+        Expr::Let(_, _, body) | Expr::Trace(body, _) => needs_method_result_types(body),
         _ => false,
     }
 }
@@ -70,7 +70,7 @@ pub(super) fn capture_method_result_types(expr: &mut Expr, scope: &Scope) {
             capture_method_result_types(then_expr, scope);
             capture_method_result_types(else_expr, scope);
         }
-        Expr::Let(_, _, body) | Expr::Trace(body) => capture_method_result_types(body, scope),
+        Expr::Let(_, _, body) | Expr::Trace(body, _) => capture_method_result_types(body, scope),
         _ => {}
     }
 }
@@ -112,7 +112,7 @@ impl AliasResolver<'_> {
             | Expr::NullSafeField(value, _)
             | Expr::Unop(_, value)
             | Expr::Throw(value)
-            | Expr::Trace(value)
+            | Expr::Trace(value, _)
             | Expr::Read(value, _)
             | Expr::ReadOrNull(value, _)
             | Expr::ReadGlob(value, _) => self.expr(value, shadowed),

@@ -6,7 +6,7 @@ mod checks;
 
 pub use ast::{
     Annotation, BinOp, Body, Entry, Expr, ForGenerator, Import, Modifier, Module, Property,
-    StringInterpPart, TypeExpr, UnOp, WhenGenerator,
+    StringInterpPart, TraceSite, TypeExpr, UnOp, WhenGenerator,
 };
 use ast::{infer_method_return_new, type_expr_runtime_name};
 use checks::{BodyKind, BodyScope};
@@ -1490,11 +1490,27 @@ impl<'a> Parser<'a> {
                 Ok(Expr::Throw(Box::new(msg)))
             }
             TokenKind::KwTrace => {
+                let line = self.tokens[self.pos].line;
                 self.advance();
                 self.expect(&TokenKind::LParen)?;
+                let start = self.tokens.get(self.pos).map_or(0, |token| token.offset);
                 let e = self.parse_expr()?;
+                let end = self
+                    .tokens
+                    .get(self.pos)
+                    .map_or(self.source.len(), |token| token.offset);
                 self.expect(&TokenKind::RParen)?;
-                Ok(Expr::Trace(Box::new(e)))
+                let site = TraceSite {
+                    source: self
+                        .source
+                        .get(start..end)
+                        .unwrap_or_default()
+                        .trim_end()
+                        .to_string(),
+                    module: self.name.to_string(),
+                    line,
+                };
+                Ok(Expr::Trace(Box::new(e), std::sync::Arc::new(site)))
             }
             TokenKind::KwRead => {
                 self.advance();
