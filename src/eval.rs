@@ -1250,6 +1250,9 @@ impl Evaluator {
             ..Scope::default()
         };
         seed_builtins(&mut scope);
+        // Evaluated as the base of an amending or extending module, whose
+        // reads of this module's bindings are not analyzed here.
+        let evaluated_as_base = inherited_scope.is_some();
         if let Some(inherited_scope) = inherited_scope {
             for (key, value) in inherited_scope.flatten() {
                 scope.set_name(key, value);
@@ -1297,13 +1300,15 @@ impl Evaluator {
                     continue;
                 }
 
-                // An amended or extended base can read the alias from this
-                // module's scope, and those reads are not analyzed here.
-                let requested = if module.amends.is_none() && module.extends.is_none() {
-                    glob_index_keys(&import_field_uses, &alias)
-                } else {
-                    None
-                };
+                // Code in other modules can read the alias without being analyzed
+                // here: an amended or extended base reads it from this module's
+                // scope, and a module amending or extending this one inherits it.
+                let requested =
+                    if module.amends.is_none() && module.extends.is_none() && !evaluated_as_base {
+                        glob_index_keys(&import_field_uses, &alias)
+                    } else {
+                        None
+                    };
                 let mapping = self
                     .eval_glob_import(uri, path, depth, requested.as_ref())
                     .await?;

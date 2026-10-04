@@ -2245,3 +2245,33 @@ async fn indexed_ordinary_import_is_evaluated_whole() {
         .unwrap();
     assert_eq!(val["out"], true);
 }
+
+#[tokio::test]
+async fn import_glob_in_a_base_keeps_modules_its_children_read() {
+    let temp = TestTempDir::new("pklr_test_glob_base_children_read");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("parts")).unwrap();
+    std::fs::write(dir.join("parts/a.pkl"), "value = \"a\"\n").unwrap();
+    std::fs::write(dir.join("parts/b.pkl"), "value = \"b\"\n").unwrap();
+    std::fs::write(
+        dir.join("A.pkl"),
+        "open module A\nimport* \"parts/*.pkl\" as X\na = X[\"parts/a.pkl\"].value\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("B.pkl"),
+        "extends \"A.pkl\"\nb = X[\"parts/b.pkl\"].value\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("C.pkl"),
+        "amends \"A.pkl\"\nc = X[\"parts/b.pkl\"].value\n",
+    )
+    .unwrap();
+
+    let extended = pklr::eval_to_json_async(&dir.join("B.pkl")).await.unwrap();
+    assert_eq!(extended["a"], "a");
+    assert_eq!(extended["b"], "b");
+    let amended = pklr::eval_to_json_async(&dir.join("C.pkl")).await.unwrap();
+    assert_eq!(amended["c"], "b");
+}
