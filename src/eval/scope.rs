@@ -29,7 +29,7 @@ pub(super) fn object_type_metadata(source: &ObjectSource) -> Option<ObjectTypeMe
     })
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub(super) struct Scope {
     // The maps are shared copy-on-write so cloning a scope, which `child`
     // does for every nested body, does not copy its bindings.
@@ -38,24 +38,82 @@ pub(super) struct Scope {
     // `vars` is an `Arc` so a lambda's captured bindings (a `ScopeMap`, the
     // same map type) can be used as a scope without copying them.
     pub(super) vars: Arc<FxIndexMap<Name, Value>>,
-    pub(super) type_aliases: Rc<FxIndexMap<Name, crate::parser::TypeExpr>>,
-    pub(super) module_identities: Rc<FxIndexMap<Name, String>>,
-    pub(super) poisoned: Rc<FxIndexMap<Name, String>>,
+    pub(super) type_aliases: Arc<TypeAliasMap>,
+    pub(super) module_identities: Arc<FxIndexMap<Name, String>>,
+    pub(super) poisoned: Arc<FxIndexMap<Name, String>>,
     /// Names in `vars` or `poisoned` declared by an entry written in the body
     /// that owns this scope, as opposed to members an object inherits from its
     /// class or parent. Pkl resolves a name in lexically enclosing bodies
     /// before falling back to the object's inherited members, so only these
     /// declared names may win over an inherited member of an inner object.
-    pub(super) declared: Rc<FxHashSet<Name>>,
+    pub(super) declared: Arc<FxHashSet<Name>>,
     /// Names in `vars` bound by a `local` that aliases the `this` of the
     /// object owning this scope (`local self = this`). Unlike a property such
     /// as `me = this`, such a local is not a member, so a nested object whose
     /// body never names it can leave it out of what it captures.
-    pub(super) this_aliases: Rc<FxHashSet<String>>,
+    pub(super) this_aliases: Arc<FxHashSet<String>>,
     pub(super) type_namespace: Option<String>,
     pub(super) receiver_entries: Option<Arc<Vec<Entry>>>,
     pub(super) receiver_list_base: Option<usize>,
-    pub(super) parent: Option<Rc<Scope>>,
+    pub(super) parent: Option<Arc<Scope>>,
+}
+
+/// Empty maps shared by new scopes. Most scopes never bind anything at some
+/// of their levels (a lambda call binds no type aliases, for one), so a new
+/// scope shares these and copies one only on its first write.
+#[derive(Default)]
+struct EmptyMaps {
+    vars: Arc<ScopeMap>,
+    type_aliases: Arc<TypeAliasMap>,
+    strings: Arc<FxIndexMap<Name, String>>,
+    declared: Arc<FxHashSet<Name>>,
+    this_aliases: Arc<FxHashSet<String>>,
+}
+
+static EMPTY_MAPS: std::sync::LazyLock<EmptyMaps> = std::sync::LazyLock::new(EmptyMaps::default);
+
+thread_local! {
+    /// Binding names already allocated on this thread. The same few names
+    /// (members of a class, lambda parameters, `this`) are bound for every
+    /// object and call, so sharing them saves an allocation per binding.
+    static NAMES: RefCell<FxHashSet<Name>> = RefCell::default();
+}
+
+/// A shared binding name for `name`.
+pub(super) fn name_of(name: &str) -> Name {
+    NAMES.with(|names| {
+        let mut names = names.borrow_mut();
+        if let Some(name) = names.get(name) {
+            return Name::clone(name);
+        }
+        let name = Name::from(name);
+        names.insert(Name::clone(&name));
+        name
+    })
+}
+
+/// Forget the names `name_of` has shared, so a long-lived thread does not
+/// keep every name it has ever seen. Names still bound stay valid.
+pub(super) fn clear_names() {
+    NAMES.with(|names| names.borrow_mut().clear());
+}
+
+impl Default for Scope {
+    fn default() -> Self {
+        let empty = &*EMPTY_MAPS;
+        Self {
+            vars: Arc::clone(&empty.vars),
+            type_aliases: Arc::clone(&empty.type_aliases),
+            module_identities: Arc::clone(&empty.strings),
+            poisoned: Arc::clone(&empty.strings),
+            declared: Arc::clone(&empty.declared),
+            this_aliases: Arc::clone(&empty.this_aliases),
+            type_namespace: None,
+            receiver_entries: None,
+            receiver_list_base: None,
+            parent: None,
+        }
+    }
 }
 
 impl Scope {
@@ -72,16 +130,11 @@ impl Scope {
 
     pub(super) fn child(&self) -> Self {
         Self {
-            vars: Arc::default(),
-            type_aliases: Rc::default(),
-            module_identities: Rc::default(),
-            poisoned: Rc::default(),
-            declared: Rc::default(),
-            this_aliases: Rc::default(),
             type_namespace: self.type_namespace.clone(),
             receiver_entries: self.receiver_entries.clone(),
             receiver_list_base: self.receiver_list_base,
-            parent: Some(Rc::new(self.clone())),
+            parent: Some(Arc::new(self.clone())),
+            ..Self::default()
         }
     }
 
@@ -92,19 +145,19 @@ impl Scope {
             .unwrap_or_else(|| name.to_string())
     }
 
-    pub(super) fn set(&mut self, name: String, val: Value) {
-        self.set_name(name.into(), val);
+    pub(super) fn set(&mut self, name: impl AsRef<str>, val: Value) {
+        self.set_name(name_of(name.as_ref()), val);
     }
 
     pub(super) fn set_name(&mut self, name: Name, val: Value) {
         if self.poisoned.contains_key(&*name) {
-            Rc::make_mut(&mut self.poisoned).shift_remove(&*name);
+            Arc::make_mut(&mut self.poisoned).shift_remove(&*name);
         }
         if self.module_identities.contains_key(&*name) {
-            Rc::make_mut(&mut self.module_identities).shift_remove(&*name);
+            Arc::make_mut(&mut self.module_identities).shift_remove(&*name);
         }
         if self.this_aliases.contains(&*name) {
-            Rc::make_mut(&mut self.this_aliases).remove(&*name);
+            Arc::make_mut(&mut self.this_aliases).remove(&*name);
         }
         Arc::make_mut(&mut self.vars).insert(name, val);
     }
@@ -112,7 +165,7 @@ impl Scope {
     /// Mark the binding of `name` in this scope as a local alias of `this`.
     pub(super) fn mark_this_alias(&mut self, name: &str) {
         if !self.this_aliases.contains(name) {
-            Rc::make_mut(&mut self.this_aliases).insert(name.to_string());
+            Arc::make_mut(&mut self.this_aliases).insert(name.to_string());
         }
     }
 
@@ -146,13 +199,13 @@ impl Scope {
     }
 
     /// Bind a name declared in the body that owns this scope.
-    pub(super) fn declare(&mut self, name: String, val: Value) {
-        self.declare_name(name.into(), val);
+    pub(super) fn declare(&mut self, name: impl AsRef<str>, val: Value) {
+        self.declare_name(name_of(name.as_ref()), val);
     }
 
     pub(super) fn declare_name(&mut self, name: Name, val: Value) {
         if !self.declared.contains(&*name) {
-            Rc::make_mut(&mut self.declared).insert(name.clone());
+            Arc::make_mut(&mut self.declared).insert(name.clone());
         }
         self.set_name(name, val);
     }
@@ -161,9 +214,9 @@ impl Scope {
     pub(super) fn declare_poisoned(&mut self, name: String, message: String) {
         let name = Name::from(name);
         if !self.declared.contains(&*name) {
-            Rc::make_mut(&mut self.declared).insert(name.clone());
+            Arc::make_mut(&mut self.declared).insert(name.clone());
         }
-        Rc::make_mut(&mut self.poisoned).insert(name, message);
+        Arc::make_mut(&mut self.poisoned).insert(name, message);
     }
 
     /// Whether the innermost binding of `name` was declared in a body rather
@@ -195,7 +248,7 @@ impl Scope {
     }
 
     pub(super) fn set_module_identity(&mut self, name: String, identity: String) {
-        Rc::make_mut(&mut self.module_identities).insert(name.into(), identity);
+        Arc::make_mut(&mut self.module_identities).insert(name.into(), identity);
     }
 
     pub(super) fn module_identity(&self, name: &str) -> Option<&String> {
@@ -245,14 +298,14 @@ impl Scope {
         match message {
             Some(message) => self.poison(key, message),
             None if self.poisoned.contains_key(key.as_str()) => {
-                Rc::make_mut(&mut self.poisoned).shift_remove(key.as_str());
+                Arc::make_mut(&mut self.poisoned).shift_remove(key.as_str());
             }
             None => {}
         }
     }
 
     pub(super) fn poison(&mut self, name: String, message: String) {
-        Rc::make_mut(&mut self.poisoned).insert(name.into(), message);
+        Arc::make_mut(&mut self.poisoned).insert(name.into(), message);
     }
 
     pub(super) fn poison_of(&self, name: &str) -> Option<&String> {
@@ -263,8 +316,12 @@ impl Scope {
         })
     }
 
-    pub(super) fn set_type_alias(&mut self, name: String, ty: crate::parser::TypeExpr) {
-        Rc::make_mut(&mut self.type_aliases).insert(name.into(), ty);
+    pub(super) fn set_type_alias(
+        &mut self,
+        name: impl Into<Name>,
+        ty: impl Into<Arc<crate::parser::TypeExpr>>,
+    ) {
+        Arc::make_mut(&mut self.type_aliases).insert(name.into(), ty.into());
     }
 
     /// Whether a type alias visible from this scope mentions `name`. A type
@@ -290,6 +347,7 @@ impl Scope {
     pub(super) fn get_type_alias(&self, name: &str) -> Option<&crate::parser::TypeExpr> {
         self.type_aliases
             .get(name)
+            .map(|ty| &**ty)
             .or_else(|| self.parent.as_ref().and_then(|p| p.get_type_alias(name)))
     }
 
@@ -342,7 +400,7 @@ impl Scope {
         self.parent.as_ref()?.flattened(name)
     }
 
-    pub(super) fn flatten_type_aliases(&self) -> IndexMap<String, crate::parser::TypeExpr> {
+    pub(super) fn flatten_type_aliases(&self) -> TypeAliasMap {
         let mut result = self
             .parent
             .as_ref()
@@ -351,9 +409,193 @@ impl Scope {
         result.extend(
             self.type_aliases
                 .iter()
-                .map(|(k, v)| (k.to_string(), v.clone())),
+                .map(|(k, v)| (k.clone(), Arc::clone(v))),
         );
         result
+    }
+}
+
+/// The bindings an object's definition saw, flattened.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct SourceScopeParts {
+    pub(crate) values: ScopeMap,
+    pub(crate) declared: NameSet,
+    pub(crate) module_identities: IndexMap<String, String>,
+    pub(crate) type_aliases: TypeAliasMap,
+}
+
+/// The scope an object was defined in, flattened only when something reads
+/// it. Most objects are never amended, and flattening every enclosing binding
+/// into each object's source dominated evaluation. Until then the scope chain
+/// itself is kept: its maps are copy-on-write, so later changes to the live
+/// scopes do not show through.
+pub(crate) struct SourceScope {
+    parts: std::sync::OnceLock<SourceScopeParts>,
+    pending: std::sync::Mutex<Option<PendingScope>>,
+}
+
+#[derive(Clone)]
+struct PendingScope {
+    scope: Scope,
+    /// Bindings left out of the flattened values.
+    hidden_values: Vec<Name>,
+    /// Module identities left out of the flattened identities.
+    hidden_identities: Vec<&'static str>,
+}
+
+impl PendingScope {
+    fn flatten(self) -> SourceScopeParts {
+        let mut values = self.scope.flatten();
+        for name in &self.hidden_values {
+            values.shift_remove(&**name);
+        }
+        let mut module_identities = self.scope.flatten_module_identities();
+        for name in self.hidden_identities {
+            module_identities.shift_remove(name);
+        }
+        SourceScopeParts {
+            values,
+            declared: self.scope.flatten_declared(),
+            module_identities,
+            type_aliases: self.scope.flatten_type_aliases(),
+        }
+    }
+}
+
+/// `scope` without bindings its flattened values never show: `hidden` names,
+/// and `this` below the innermost level that binds it. Only the levels that
+/// hold one are copied. A pending capture would otherwise keep an enclosing
+/// object's `this` snapshot alive, so the enclosing object could no longer
+/// grow its property map (or its scope) in place and would copy it for every
+/// member after this one.
+fn without_unreachable_bindings(scope: &Scope, hidden: &[Name]) -> Scope {
+    let mut levels = Vec::new();
+    let mut level = Some(scope);
+    while let Some(scope) = level {
+        levels.push(scope);
+        level = scope.parent.as_deref();
+    }
+    let this_level = levels
+        .iter()
+        .position(|scope| scope.vars.contains_key("this") || scope.poisoned.contains_key("this"));
+    // The root level (a module's scope, or a lambda's captured bindings) is
+    // left alone: copying it would cost as much as flattening, and keeping it
+    // costs little, since a module grows its members far less often than an
+    // object body evaluates nested objects.
+    let root = levels.len() - 1;
+    let unreachable = |index: usize, name: &str| {
+        index != root
+            && (hidden.iter().any(|hidden| &**hidden == name)
+                || (name == "this" && this_level.is_some_and(|this_level| index > this_level)))
+    };
+    let Some(outermost) = levels
+        .iter()
+        .enumerate()
+        .rposition(|(index, scope)| scope.vars.keys().any(|name| unreachable(index, name)))
+    else {
+        return scope.clone();
+    };
+    // Rebuild the levels from the outermost one changed inward, so each
+    // inner level points at its rebuilt parent.
+    let mut parent = levels[outermost].parent.clone();
+    for index in (0..=outermost).rev() {
+        let mut level = levels[index].clone();
+        level.parent = parent;
+        if level.vars.keys().any(|name| unreachable(index, name)) {
+            Arc::make_mut(&mut level.vars).retain(|name, _| !unreachable(index, name));
+        }
+        if index == 0 {
+            return level;
+        }
+        parent = Some(Arc::new(level));
+    }
+    unreachable!("the loop returns at index 0")
+}
+
+impl SourceScope {
+    /// Capture `scope`, leaving `hidden_values` out of its bindings and
+    /// `hidden_identities` out of its module identities.
+    pub(super) fn lazy(
+        scope: &Scope,
+        hidden_values: Vec<Name>,
+        hidden_identities: Vec<&'static str>,
+    ) -> Self {
+        Self {
+            parts: std::sync::OnceLock::new(),
+            pending: std::sync::Mutex::new(Some(PendingScope {
+                scope: without_unreachable_bindings(scope, &hidden_values),
+                hidden_values,
+                hidden_identities,
+            })),
+        }
+    }
+
+    pub(crate) fn from_parts(parts: SourceScopeParts) -> Self {
+        Self {
+            parts: std::sync::OnceLock::from(parts),
+            pending: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn take_pending(&self) -> Option<PendingScope> {
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
+    pub(crate) fn parts(&self) -> &SourceScopeParts {
+        // Flattening drops the pending scope, so the source stops holding the
+        // enclosing scopes' maps.
+        self.parts.get_or_init(|| {
+            self.take_pending()
+                .map(PendingScope::flatten)
+                .unwrap_or_default()
+        })
+    }
+
+    pub(crate) fn parts_mut(&mut self) -> &mut SourceScopeParts {
+        self.parts();
+        self.parts.get_mut().expect("flattened above")
+    }
+}
+
+impl Default for SourceScope {
+    fn default() -> Self {
+        Self::from_parts(SourceScopeParts::default())
+    }
+}
+
+impl Clone for SourceScope {
+    fn clone(&self) -> Self {
+        if let Some(parts) = self.parts.get() {
+            return Self::from_parts(parts.clone());
+        }
+        let pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        match pending {
+            Some(pending) => Self {
+                parts: std::sync::OnceLock::new(),
+                pending: std::sync::Mutex::new(Some(pending)),
+            },
+            // Another thread is flattening it.
+            None => Self::from_parts(self.parts().clone()),
+        }
+    }
+}
+
+impl PartialEq for SourceScope {
+    fn eq(&self, other: &Self) -> bool {
+        self.parts() == other.parts()
+    }
+}
+
+impl std::fmt::Debug for SourceScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.parts().fmt(f)
     }
 }
 
@@ -429,26 +671,31 @@ pub(super) fn capture_scope(scope: &Scope) -> CapturedScope {
     CapturedScope {
         values: scope.flatten(),
         declared: scope.flatten_declared(),
-        body_members: HashSet::new(),
+        body_members: HashSet::default(),
         module_identities: scope.flatten_module_identities(),
         type_aliases: scope.flatten_type_aliases(),
         type_namespace: scope.type_namespace.clone(),
     }
 }
 
-pub(super) fn capture_object_source_scope(source: &ObjectSource) -> CapturedScope {
-    let type_namespace = source
+/// The namespace of the module that declared the object's class.
+pub(super) fn object_source_type_namespace(source: &ObjectSource) -> Option<String> {
+    source
         .type_name
         .as_deref()
         .zip(source.type_identity.as_deref())
         .and_then(|(name, identity)| identity.strip_suffix(&format!(".{name}")))
-        .map(str::to_owned);
+        .map(str::to_owned)
+}
+
+pub(super) fn capture_object_source_scope(source: &ObjectSource) -> CapturedScope {
+    let type_namespace = object_source_type_namespace(source);
     CapturedScope {
-        values: source.scope.clone(),
-        declared: source.scope_declared.clone(),
+        values: source.scope().clone(),
+        declared: source.scope_declared().clone(),
         body_members: source.body_members.clone(),
-        module_identities: source.scope_module_identities.clone(),
-        type_aliases: source.scope_type_aliases.clone(),
+        module_identities: source.scope_module_identities().clone(),
+        type_aliases: source.scope_type_aliases().clone(),
         type_namespace,
     }
 }
@@ -461,7 +708,7 @@ pub(super) fn restore_scope(captured: &CapturedScope) -> Scope {
     for (name, value) in &captured.values {
         scope.set_name(name.clone(), value.clone());
     }
-    scope.declared = Rc::new(captured.declared.clone());
+    scope.declared = Arc::new(captured.declared.clone());
     for (name, identity) in &captured.module_identities {
         scope.set_module_identity(name.clone(), identity.clone());
     }
@@ -487,7 +734,7 @@ pub(super) fn scope_for_object_entry(
         .and_then(Option::as_ref)
     {
         let lexical = entry_owners.restored(captured);
-        let none = HashSet::new();
+        let none = HashSet::default();
         let owned = entry_owners
             .owners
             .get(entry_index)
@@ -590,7 +837,7 @@ pub(super) fn entry_scope_owners(
         .map(|source| source.entries.iter().zip(&source.entry_scopes))
         .into_iter()
         .flatten();
-    let mut groups: HashMap<*const CapturedScope, HashSet<String>> = HashMap::new();
+    let mut groups: HashMap<*const CapturedScope, HashSet<String>> = HashMap::default();
     for (entry, captured) in entries.iter().zip(entry_scopes).chain(inherited_entries) {
         let Some(captured) = captured else {
             continue;
@@ -698,7 +945,7 @@ fn update_object_bindings(
         }
         if owned.contains(&**name) {
             if !scope.declared.contains(&**name) {
-                Rc::make_mut(&mut scope.declared).insert(name.clone());
+                Arc::make_mut(&mut scope.declared).insert(name.clone());
             }
         } else if !scope.vars.contains_key(&**name) && lexical.is_declared(name) {
             // `lexical` is fixed for this cache entry and `owned` for its key,
@@ -715,14 +962,14 @@ fn update_object_bindings(
         for (name, message) in object.poisoned.iter() {
             if owned.contains(&**name) {
                 if !scope.declared.contains(&**name) {
-                    Rc::make_mut(&mut scope.declared).insert(name.clone());
+                    Arc::make_mut(&mut scope.declared).insert(name.clone());
                 }
                 poisoned.insert(name.clone(), message.clone());
             } else if !lexical.is_declared(name) {
                 poisoned.insert(name.clone(), message.clone());
             }
         }
-        scope.poisoned = Rc::new(poisoned);
+        scope.poisoned = Arc::new(poisoned);
     }
     scope.this_aliases = object.this_aliases.clone();
     // The scope's own maps for these start empty, so it can share the object's.
@@ -798,7 +1045,7 @@ pub(super) fn mapping_amendment_scopes(
         if current_declared.contains(&*key) {
             amendment.declare_name(key, value);
         } else {
-            Rc::make_mut(&mut amendment.declared).remove(&*key);
+            Arc::make_mut(&mut amendment.declared).remove(&*key);
             amendment.set_name(key, value);
         }
     }
@@ -806,4 +1053,125 @@ pub(super) fn mapping_amendment_scopes(
         amendment.set_type_alias(key, ty);
     }
     (inherited, amendment)
+}
+
+#[cfg(test)]
+mod source_scope_tests {
+    use super::*;
+
+    fn int(scope: &SourceScope, name: &str) -> Option<i64> {
+        match scope.parts().values.get(name) {
+            Some(Value::Int(n)) => Some(*n),
+            None => None,
+            Some(other) => panic!("expected an int for {name}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn keeps_bindings_from_capture_time() {
+        let mut outer = Scope::default();
+        outer.set("a", Value::Int(1));
+        let mut inner = outer.child();
+        inner.set("b", Value::Int(2));
+        let captured = SourceScope::lazy(&inner, Vec::new(), Vec::new());
+        // Writes after the capture, to the captured level and to the live
+        // scope it shares maps with, must not show through.
+        inner.set("b", Value::Int(20));
+        inner.set("c", Value::Int(3));
+        outer.set("a", Value::Int(10));
+        assert_eq!(int(&captured, "a"), Some(1));
+        assert_eq!(int(&captured, "b"), Some(2));
+        assert_eq!(int(&captured, "c"), None);
+    }
+
+    #[test]
+    fn flattens_like_the_scope() {
+        let mut outer = Scope::default();
+        outer.set("a", Value::Int(1));
+        outer.declare("d", Value::Int(4));
+        outer.set_module_identity("m".into(), "mod.pkl".into());
+        outer.set_type_alias("T", crate::parser::TypeExpr::Named("Int".into()));
+        let mut inner = outer.child();
+        inner.set("a", Value::Int(2));
+        inner.declare_poisoned("p".into(), "failed".into());
+        let captured = SourceScope::lazy(&inner, Vec::new(), Vec::new());
+        let parts = captured.parts();
+        assert_eq!(parts.values, inner.flatten());
+        assert_eq!(parts.declared, inner.flatten_declared());
+        assert_eq!(parts.module_identities, inner.flatten_module_identities());
+        assert_eq!(parts.type_aliases, inner.flatten_type_aliases());
+        assert_eq!(int(&captured, "a"), Some(2));
+    }
+
+    #[test]
+    fn leaves_out_hidden_bindings() {
+        let mut scope = Scope::default();
+        for name in ["this", "outer", "kept"] {
+            scope.set(name, Value::Int(1));
+            scope.set_module_identity(name.into(), format!("{name}.pkl"));
+        }
+        let captured = SourceScope::lazy(
+            &scope,
+            vec![name_of("this"), name_of("outer")],
+            vec!["outer"],
+        );
+        let parts = captured.parts();
+        assert_eq!(
+            parts.values.keys().map(|k| &**k).collect::<Vec<_>>(),
+            ["kept"]
+        );
+        assert_eq!(
+            parts.module_identities.keys().collect::<Vec<_>>(),
+            ["this", "kept"]
+        );
+    }
+
+    #[test]
+    fn does_not_keep_shadowed_this_snapshots() {
+        let root = Scope::default();
+        let mut object = root.child();
+        let props = Arc::new(IndexMap::new());
+        object.set("this", Value::Object(Arc::clone(&props), None));
+        object.set("member", Value::Int(1));
+        let mut nested = object.child();
+        nested.set("this", Value::Int(0));
+        let captured = SourceScope::lazy(&nested, Vec::new(), Vec::new());
+        let flattened = nested.flatten();
+        drop(nested);
+        // The object releases its `this` snapshot before growing its property
+        // map, as `release_this_aliases` does. The capture must not keep it.
+        object.set("this", Value::Null);
+        assert_eq!(Arc::strong_count(&props), 1);
+        assert_eq!(captured.parts().values, flattened);
+    }
+
+    #[test]
+    fn clones_match_before_and_after_flattening() {
+        let mut scope = Scope::default();
+        scope.set("a", Value::Int(1));
+        let captured = SourceScope::lazy(&scope, Vec::new(), Vec::new());
+        // Cloned while still pending: it keeps its own copy of the chain.
+        let pending_clone = captured.clone();
+        scope.set("a", Value::Int(2));
+        captured.parts();
+        // Cloned after flattening: it copies the flattened bindings.
+        let flattened_clone = captured.clone();
+        assert_eq!(int(&pending_clone, "a"), Some(1));
+        assert_eq!(int(&flattened_clone, "a"), Some(1));
+        assert_eq!(pending_clone, captured);
+        assert_eq!(flattened_clone, captured);
+    }
+
+    #[test]
+    fn writes_go_to_the_flattened_bindings() {
+        let mut scope = Scope::default();
+        scope.set("a", Value::Int(1));
+        let mut captured = SourceScope::lazy(&scope, Vec::new(), Vec::new());
+        captured
+            .parts_mut()
+            .values
+            .insert(name_of("b"), Value::Int(2));
+        assert_eq!(int(&captured, "a"), Some(1));
+        assert_eq!(int(&captured, "b"), Some(2));
+    }
 }

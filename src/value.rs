@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use rustc_hash::FxHashSet as HashSet;
 use std::sync::Arc;
 
 use indexmap::IndexMap;
@@ -9,6 +9,10 @@ use crate::parser::{Expr, TypeExpr};
 /// Captured lexical bindings, keyed by shared names so capturing a scope does
 /// not allocate a string per binding.
 pub type ScopeMap = IndexMap<Arc<str>, Value, rustc_hash::FxBuildHasher>;
+
+/// Type aliases captured with a scope. The types are shared so capturing a
+/// scope does not copy every alias's type expression.
+pub(crate) type TypeAliasMap = IndexMap<Arc<str>, Arc<TypeExpr>, rustc_hash::FxBuildHasher>;
 
 /// A set of binding names, shared with the scopes they came from.
 pub(crate) type NameSet = rustc_hash::FxHashSet<Arc<str>>;
@@ -22,7 +26,7 @@ pub(crate) struct CapturedScope {
     /// kept so an amendment that replaces one does not drop it from the body.
     pub body_members: HashSet<String>,
     pub module_identities: IndexMap<String, String>,
-    pub type_aliases: IndexMap<String, TypeExpr>,
+    pub type_aliases: TypeAliasMap,
     pub type_namespace: Option<String>,
 }
 
@@ -33,10 +37,9 @@ pub(crate) struct CapturedScope {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObjectSource {
     pub entries: crate::parser::Body,
-    pub scope: ScopeMap,
-    /// Names in `scope` declared in a lexically enclosing body, which an
-    /// inherited member of an inner object must not shadow.
-    pub(crate) scope_declared: NameSet,
+    /// The bindings visible where the object was defined (see
+    /// [`ObjectSource::scope`]).
+    pub(crate) captured: crate::eval::SourceScope,
     /// Members declared by the object's own definition body, including ones an
     /// amendment has since replaced.
     pub(crate) body_members: HashSet<String>,
@@ -52,10 +55,6 @@ pub struct ObjectSource {
     pub parent_type_names: Vec<String>,
     /// Stable definition-site identities for parent classes, nearest first.
     pub(crate) parent_type_identities: Vec<String>,
-    /// Canonical module identities for imports captured in `scope`.
-    pub(crate) scope_module_identities: IndexMap<String, String>,
-    /// Type aliases captured alongside `scope` at the object's definition site.
-    pub(crate) scope_type_aliases: IndexMap<String, TypeExpr>,
     /// Lexical scopes for entries introduced by earlier amendments. `None`
     /// entries use this object's definition-site `scope`.
     pub(crate) entry_scopes: Vec<Option<Arc<CapturedScope>>>,
@@ -81,6 +80,27 @@ pub struct ObjectSource {
 }
 
 impl ObjectSource {
+    /// The bindings visible where the object was defined.
+    pub fn scope(&self) -> &ScopeMap {
+        &self.captured.parts().values
+    }
+
+    /// Names in `scope` declared in a lexically enclosing body, which an
+    /// inherited member of an inner object must not shadow.
+    pub(crate) fn scope_declared(&self) -> &NameSet {
+        &self.captured.parts().declared
+    }
+
+    /// Canonical module identities for imports captured in `scope`.
+    pub(crate) fn scope_module_identities(&self) -> &IndexMap<String, String> {
+        &self.captured.parts().module_identities
+    }
+
+    /// Type aliases captured alongside `scope` at the object's definition site.
+    pub(crate) fn scope_type_aliases(&self) -> &TypeAliasMap {
+        &self.captured.parts().type_aliases
+    }
+
     /// Whether this source only carries a module object's failed members,
     /// with no entries to rebuild the object from on amendment.
     pub(crate) fn is_metadata_only(&self) -> bool {
