@@ -1237,9 +1237,18 @@ fn eager_class_refs(body: &[Entry], upto: Option<usize>) -> HashSet<String> {
         !is_method(entry)
             && !matches!(entry, Entry::Property(prop) if stored.contains_key(prop.name.as_str()))
     };
-    // What `seeds` read, with the methods they run (transitively).
+    // What `seeds` read, with the methods they run (transitively). A nested
+    // class reads only what its own defaults do (see `class_default_reads`).
     let reads = |seeds: Vec<Entry>| {
+        let (classes, seeds): (Vec<Entry>, Vec<Entry>) = seeds
+            .into_iter()
+            .partition(|entry| matches!(entry, Entry::ClassDef(..)));
         let mut refs = referenced_roots(&seeds);
+        for class in &classes {
+            if let Entry::ClassDef(_, _, _, body) = class {
+                refs.extend(class_default_reads(body));
+            }
+        }
         let mut instance = InstanceReads {
             members: HashSet::default(),
             escapes: false,
@@ -1298,6 +1307,20 @@ fn eager_class_refs(body: &[Entry], upto: Option<usize>) -> HashSet<String> {
         .map(|(_, entry)| entry.clone())
         .collect();
     reads(seeds).0
+}
+
+/// The names a class body's defaults read from its enclosing scope while
+/// they are evaluated (see `eager_class_refs`): those it doesn't bind itself
+/// by then. A name inherited from its parent is kept, as is one any default
+/// reads before the body's own property of that name is bound.
+fn class_default_reads(body: &[Entry]) -> HashSet<String> {
+    let mut refs = eager_class_refs(body, None);
+    refs.retain(|root| {
+        body.iter()
+            .rposition(|entry| matches!(entry, Entry::Property(prop) if prop.name == *root))
+            .is_none_or(|declared| eager_class_refs(body, Some(declared)).contains(root))
+    });
+    refs
 }
 
 /// Names, in declaration order, of the module members in `entries` that must

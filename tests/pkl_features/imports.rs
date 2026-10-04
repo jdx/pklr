@@ -2514,6 +2514,32 @@ async fn narrowed_import_follows_module_reads_made_before_class_properties_are_b
 }
 
 #[tokio::test]
+async fn narrowed_import_skips_nested_class_reads_after_class_properties_are_bound() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_nested_class_reads");
+    let dir = temp.path();
+    // Only a nested class's defaults are evaluated before `D`'s properties
+    // are bound: `Inner`'s `x` reads its own `a`, and its method `f` runs
+    // after `D`'s `a` is bound, so the unused module `a` is not needed.
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "a = throw(\"unused\")\nmax = 3\nclass D {\n  a = 6\n  class Inner {\n    a = 1\n    x = a\n  }\n  class Reader { function f() = a }\n  b = new Inner {}\n  r = new Reader {}.f()\n  c = module.max\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as Dep\nd = new Dep.D {}\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["d"]["b"]["x"], 1);
+    assert_eq!(val["d"]["r"], 6);
+    assert_eq!(val["d"]["c"], 3);
+}
+
+#[tokio::test]
 async fn narrowed_import_skips_local_methods_class_defaults_do_not_run() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_local_method");
     let dir = temp.path();
