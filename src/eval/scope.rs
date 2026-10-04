@@ -54,16 +54,6 @@ pub(super) struct Scope {
     /// captured: an instance's scopes, and modules imported meanwhile, start
     /// without it.
     pub(super) defining_class: bool,
-    /// For a `for`/`when` body: the members it writes that a later entry
-    /// of the enclosing amendment amends. Only those are built unchecked
-    /// (as with `defining_class`); siblings keep their checks. Read by the
-    /// body that receives this scope, not by bodies nested in it.
-    pub(super) deferred_members: Option<Arc<FxHashSet<String>>>,
-    /// Type names that resolve as no alias from this scope, whatever an
-    /// enclosing scope declares: a check scope restoring how a declared type
-    /// resolved before a later alias of the same name. Not inherited by
-    /// `child` (lookups from a child reach it anyway) and not captured.
-    pub(super) type_alias_barrier: Option<Arc<FxHashSet<String>>>,
     pub(super) module_identities: Arc<FxIndexMap<Name, String>>,
     pub(super) poisoned: Arc<FxIndexMap<Name, String>>,
     /// Names in `vars` or `poisoned` declared by an entry written in the body
@@ -132,8 +122,6 @@ impl Default for Scope {
             shadows_builtin_type: false,
             aliases_mention_outer: false,
             defining_class: false,
-            deferred_members: None,
-            type_alias_barrier: None,
             module_identities: Arc::clone(&empty.strings),
             poisoned: Arc::clone(&empty.strings),
             declared: Arc::clone(&empty.declared),
@@ -163,7 +151,6 @@ impl Scope {
             shadows_builtin_type: self.shadows_builtin_type,
             aliases_mention_outer: self.aliases_mention_outer,
             defining_class: self.defining_class,
-            deferred_members: self.deferred_members.clone(),
             type_namespace: self.type_namespace.clone(),
             receiver_entries: self.receiver_entries.clone(),
             receiver_list_base: self.receiver_list_base,
@@ -386,17 +373,22 @@ impl Scope {
         let mut scope = self;
         loop {
             if let Some(alias) = scope.type_aliases.get(name) {
-                return Some(&**alias);
-            }
-            if scope
-                .type_alias_barrier
-                .as_ref()
-                .is_some_and(|barrier| barrier.contains(name))
-            {
-                return None;
+                return (!is_hidden_alias(alias)).then_some(&**alias);
             }
             scope = scope.parent.as_deref()?;
         }
+    }
+
+    /// Make `name` resolve as no type alias from this scope, whatever an
+    /// enclosing scope declares: a check scope restoring how a declared type
+    /// resolved before a later alias of the same name. Kept in the alias map
+    /// (as a marker `flatten_type_aliases` drops), so scopes need no field
+    /// for it.
+    pub(super) fn hide_type_alias(&mut self, name: impl Into<Name>) {
+        Arc::make_mut(&mut self.type_aliases).insert(
+            name.into(),
+            Arc::new(crate::parser::TypeExpr::Named(String::new())),
+        );
     }
 
     pub(super) fn get(&self, name: &str) -> Option<&Value> {
@@ -458,18 +450,23 @@ impl Scope {
             .as_ref()
             .map(|p| p.flatten_type_aliases())
             .unwrap_or_default();
-        // Names this scope resolves as no alias (see `type_alias_barrier`)
-        // stay hidden from a captured copy too.
-        if let Some(barrier) = &self.type_alias_barrier {
-            result.retain(|name, _| !barrier.contains(&**name));
+        for (name, ty) in self.type_aliases.iter() {
+            // A name this scope hides (see `hide_type_alias`) stays hidden
+            // from a captured copy too.
+            if is_hidden_alias(ty) {
+                result.shift_remove(name);
+            } else {
+                result.insert(name.clone(), Arc::clone(ty));
+            }
         }
-        result.extend(
-            self.type_aliases
-                .iter()
-                .map(|(k, v)| (k.clone(), Arc::clone(v))),
-        );
         result
     }
+}
+
+/// Whether `ty` is the marker `Scope::hide_type_alias` stores: a type no
+/// source names (the parser never produces an empty type name).
+fn is_hidden_alias(ty: &crate::parser::TypeExpr) -> bool {
+    matches!(ty, crate::parser::TypeExpr::Named(name) if name.is_empty())
 }
 
 /// The bindings an object's definition saw, flattened.

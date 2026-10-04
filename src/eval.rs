@@ -111,6 +111,10 @@ pub struct Evaluator {
     /// produced by one. Any left when the body is done were never rebuilt,
     /// so the amendment is evaluated again with them checked.
     unrebuilt_members: Option<FxHashSet<String>>,
+    /// The members a `for`/`when` body about to be evaluated builds
+    /// unchecked (see `TypeChecks::deferred_generator_members`): set just
+    /// before `eval_entries_pending` for that body, and taken by it.
+    generator_deferred: Option<Arc<FxHashSet<String>>>,
 }
 
 /// A declared-type check of a generator-produced property. It runs in the
@@ -567,7 +571,6 @@ fn restore_shadowed(scope: Scope, shadowed: &[ShadowedName], entry_index: usize)
         return scope;
     }
     let mut scope = scope.child();
-    let mut barrier = FxHashSet::default();
     // The earliest declaration's record holds the binding before the body
     // rebound the name at all, so it is applied last.
     for shadow in shadowed
@@ -583,18 +586,9 @@ fn restore_shadowed(scope: Scope, shadowed: &[ShadowedName], entry_index: usize)
             ),
         }
         match &shadow.alias {
-            Some(alias) => {
-                barrier.remove(&shadow.name);
-                scope.set_type_alias(shadow.name.clone(), alias.clone());
-            }
-            None => {
-                Arc::make_mut(&mut scope.type_aliases).shift_remove(shadow.name.as_str());
-                barrier.insert(shadow.name.clone());
-            }
+            Some(alias) => scope.set_type_alias(shadow.name.clone(), alias.clone()),
+            None => scope.hide_type_alias(shadow.name.as_str()),
         }
-    }
-    if !barrier.is_empty() {
-        scope.type_alias_barrier = Some(Arc::new(barrier));
     }
     scope
 }
@@ -642,8 +636,8 @@ impl DeclaredTypes {
         for (name, alias) in &self.aliases {
             scope.set_type_alias(name.clone(), alias.clone());
         }
-        if !self.unaliased.is_empty() {
-            scope.type_alias_barrier = Some(Arc::new(self.unaliased.clone()));
+        for name in &self.unaliased {
+            scope.hide_type_alias(name.as_str());
         }
     }
 }
@@ -1310,6 +1304,7 @@ impl Default for Evaluator {
             retry_passes: 0,
             builtin_named_class: false,
             unrebuilt_members: None,
+            generator_deferred: None,
         }
     }
 }
@@ -1569,6 +1564,7 @@ impl Evaluator {
             retry_passes: 0,
             builtin_named_class: false,
             unrebuilt_members: None,
+            generator_deferred: None,
         }
     }
 
@@ -4015,12 +4011,15 @@ impl Evaluator {
         // body starts with what its enclosing object poisoned: locals whose
         // check was handed up to it.
         let mut poisoned_locals = inherited_poison.clone();
+        // Members a generator body builds unchecked, handed to each pass.
+        let deferred = self.generator_deferred.take();
         loop {
             let generator_mark = pending.len();
             let retrying = !poisoned_locals.is_empty();
             if retrying {
                 self.retry_passes += 1;
             }
+            self.generator_deferred = deferred.clone();
             let result = self.eval_body_entries(
                 entries,
                 scope,
@@ -4098,9 +4097,8 @@ impl Evaluator {
         } else {
             Vec::new()
         };
-        let inherited_deferred = scope.deferred_members.clone();
+        let inherited_deferred = self.generator_deferred.take();
         let mut child_scope = scope.child();
-        child_scope.deferred_members = None;
         let entry_owners = entry_scope_owners(entries, entry_scopes, inherited_source);
         let own_body = own_body_names(entries, entry_scopes, inherited_source);
         // Entries without a captured scope belong to the object's own
@@ -4526,7 +4524,7 @@ impl Evaluator {
                     }
                 }
                 Entry::ForGenerator(fgen) => {
-                    let mut active_scope = restore_shadowed(
+                    let active_scope = restore_shadowed(
                         scope_for_object_entry(
                             entry_index,
                             &child_scope,
@@ -4539,7 +4537,7 @@ impl Evaluator {
                     );
                     // Members it writes that a later entry amends are checked by
                     // that amendment (see `TypeChecks::defers_nested`).
-                    active_scope.deferred_members = checks
+                    let deferred = checks
                         .deferred_generator_members(entry_index)
                         .or_else(|| inherited_deferred.clone());
                     let collection = self.eval_expr(&fgen.collection, &active_scope, depth)?;
@@ -4558,6 +4556,7 @@ impl Evaluator {
                                 names.extend(fgen.key_var.iter().cloned());
                                 names
                             });
+                        self.generator_deferred = deferred.clone();
                         let body_val = self.eval_entries_pending(
                             &fgen.body,
                             &iter_scope,
@@ -4583,7 +4582,7 @@ impl Evaluator {
                     }
                 }
                 Entry::WhenGenerator(wgen) => {
-                    let mut active_scope = restore_shadowed(
+                    let active_scope = restore_shadowed(
                         scope_for_object_entry(
                             entry_index,
                             &child_scope,
@@ -4596,11 +4595,12 @@ impl Evaluator {
                     );
                     // Members it writes that a later entry amends are checked by
                     // that amendment (see `TypeChecks::defers_nested`).
-                    active_scope.deferred_members = checks
+                    let deferred = checks
                         .deferred_generator_members(entry_index)
                         .or_else(|| inherited_deferred.clone());
                     let cond = self.eval_expr(&wgen.condition, &active_scope, depth)?;
                     if is_truthy(&cond) {
+                        self.generator_deferred = deferred.clone();
                         let body_val = self.eval_entries_pending(
                             &wgen.body,
                             &active_scope,
@@ -4629,6 +4629,7 @@ impl Evaluator {
                             refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                         }
                     } else if let Some(else_body) = &wgen.else_body {
+                        self.generator_deferred = deferred.clone();
                         let else_val = self.eval_entries_pending(
                             else_body,
                             &active_scope,
@@ -5027,7 +5028,6 @@ impl Evaluator {
         };
 
         let mut child_scope = scope.child();
-        child_scope.deferred_members = None;
         if let Some(ref pv) = parent_val {
             child_scope.set("super", pv.clone());
         }
