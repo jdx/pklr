@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.0.0](https://github.com/jdx/pklr/compare/v4.0.0...v5.0.0) - 2026-10-04
+
+### Added
+
+- *(eval)* support IntSeq ([#234](https://github.com/jdx/pklr/pull/234))
+
+### Fixed
+
+- *(eval)* fix main build after #242 and #244 ([#246](https://github.com/jdx/pklr/pull/246))
+- *(eval)* re-evaluate classes that read module properties by bare name ([#242](https://github.com/jdx/pklr/pull/242))
+- *(eval)* keep types and values in separate namespaces in reference analysis ([#243](https://github.com/jdx/pklr/pull/243))
+- *(eval)* follow module-level locals when narrowing imports ([#241](https://github.com/jdx/pklr/pull/241))
+- *(eval)* don't assume built-in bindings for types redeclared in nested bodies ([#239](https://github.com/jdx/pklr/pull/239))
+- *(eval)* resolve type aliases in lambda bodies ([#240](https://github.com/jdx/pklr/pull/240))
+- *(eval)* resolve `module` in class bodies to the module's properties ([#236](https://github.com/jdx/pklr/pull/236))
+- *(eval)* resolve local type aliases in constraint bases for narrowed imports ([#233](https://github.com/jdx/pklr/pull/233))
+
+### Other
+
+- *(eval)* capture object scopes lazily and cut redundant work (hk config 17.2 ms -> 12.8 ms) ([#244](https://github.com/jdx/pklr/pull/244))
+- *(eval)* make the evaluator core synchronous ([#238](https://github.com/jdx/pklr/pull/238))
+- *(eval)* share lambda captures, skip unused outer, and more (hk config 26 ms -> 20 ms) ([#232](https://github.com/jdx/pklr/pull/232))
+
 ## [4.0.0](https://github.com/jdx/pklr/compare/v3.0.4...v4.0.0) - 2026-10-04
 
 ### Fixed
