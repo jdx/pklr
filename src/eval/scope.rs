@@ -420,6 +420,15 @@ impl EntryOwners {
         cached.scope.clone()
     }
 
+    /// Drop the cached entry scopes' references to the object's current
+    /// `this` snapshot, like `release_this_aliases` does for the object scope,
+    /// so the property map can grow in place. The next entry rebinds them.
+    pub(super) fn release_this(&self, aliases: &[String]) {
+        for cached in self.bindings.borrow_mut().values_mut() {
+            release_this_aliases(&mut cached.scope, aliases);
+        }
+    }
+
     fn restored(&self, captured: &Arc<CapturedScope>) -> Scope {
         self.restored
             .borrow_mut()
