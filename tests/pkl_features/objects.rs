@@ -121,8 +121,8 @@ examples { [x] = new Listing {}; [y] = new Listing {} }
     );
 }
 
-#[tokio::test]
-async fn modules_amending_a_pkl_test_module_inherit_catch() {
+#[test]
+fn modules_amending_a_pkl_test_module_inherit_catch() {
     let temp = TestTempDir::new("pklr_test_amend_pkl_test_base");
     let dir = temp.path();
     std::fs::write(
@@ -140,9 +140,7 @@ examples { [x] = new Listing {}; [y] = new Listing {} }
 "#,
     )
     .unwrap();
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(
         val,
         serde_json::json!({ "examples": { "boom": [], "bare": [] } })
@@ -204,8 +202,8 @@ fn declared_module_names_do_not_outlive_an_evaluation() {
     assert!(second.contains("in module `settings`"), "{second}");
 }
 
-#[tokio::test]
-async fn missing_property_messages_use_declared_module_names() {
+#[test]
+fn missing_property_messages_use_declared_module_names() {
     let temp = TestTempDir::new("pklr_test_declared_module_name");
     let dir = temp.path();
     std::fs::write(
@@ -222,9 +220,7 @@ typed = test.catch(() -> settings.bird.age)
 "#,
     )
     .unwrap();
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(
         val["typed"],
         "Cannot find property `age` in object of type `company.Settings#Bird`."
@@ -234,8 +230,7 @@ typed = test.catch(() -> settings.bird.age)
         "import \"settings.pkl\"\nx = settings.nope\n",
     )
     .unwrap();
-    let err = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
+    let err = pklr::eval_to_json(&dir.join("main.pkl"))
         .unwrap_err()
         .to_string();
     assert!(err.contains("Cannot find property `nope` in module `company.Settings`."));
