@@ -44,6 +44,23 @@ pub(super) fn module_props_insert(
     Arc::make_mut(properties).insert(key, value);
 }
 
+/// Remove a member from the module's property map, releasing the scope's
+/// `this`/`module` snapshots first like `module_props_insert`.
+pub(super) fn module_props_remove(
+    scope: &mut Scope,
+    properties: &mut Arc<IndexMap<String, Value>>,
+    key: &str,
+) {
+    for name in ["this", "module"] {
+        if scope.vars.contains_key(name)
+            && let Some(slot) = Arc::make_mut(&mut scope.vars).get_mut(name)
+        {
+            *slot = Value::Null;
+        }
+    }
+    Arc::make_mut(properties).shift_remove(key);
+}
+
 pub(super) fn props_insert(
     scope: &mut Scope,
     aliases: &[String],

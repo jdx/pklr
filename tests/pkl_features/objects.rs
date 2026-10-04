@@ -3387,6 +3387,29 @@ result = new A {}
 }
 
 #[test]
+fn recovered_class_is_visible_through_module_and_this() {
+    let val = eval(
+        r#"
+class C { v = module.expected }
+expected = "b"
+result = new module.C {}
+"#,
+    );
+    assert_eq!(val["result"], serde_json::json!({"v": "b"}));
+    let val = eval(
+        r#"
+class C { v = module.expected }
+function make() = new C {}
+expected = "b"
+viaModule = module.make()
+viaThis = this.make()
+"#,
+    );
+    assert_eq!(val["viaModule"], serde_json::json!({"v": "b"}));
+    assert_eq!(val["viaThis"], serde_json::json!({"v": "b"}));
+}
+
+#[test]
 fn module_function_building_class_reading_module_is_refreshed() {
     let val = eval(
         r#"

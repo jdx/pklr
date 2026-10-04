@@ -2055,8 +2055,14 @@ impl Evaluator {
                     continue;
                 }
                 if module_members_stale {
-                    self.refresh_module_members(module, &module_members, &mut scope, depth)
-                        .await?;
+                    self.refresh_module_members(
+                        module,
+                        &module_members,
+                        &mut scope,
+                        &mut all_props,
+                        depth,
+                    )
+                    .await?;
                     module_members_stale = false;
                 }
                 let val = match self.eval_property(prop, &scope, depth).await {
@@ -2185,8 +2191,14 @@ impl Evaluator {
                     continue;
                 }
                 if module_members_stale {
-                    self.refresh_module_members(module, &module_members, &mut scope, depth)
-                        .await?;
+                    self.refresh_module_members(
+                        module,
+                        &module_members,
+                        &mut scope,
+                        &mut all_props,
+                        depth,
+                    )
+                    .await?;
                     module_members_stale = false;
                 }
                 match self.eval_property(prop, &scope, depth).await {
@@ -2221,8 +2233,14 @@ impl Evaluator {
             }
             for prop in &late_child_properties {
                 if module_members_stale {
-                    self.refresh_module_members(module, &module_members, &mut scope, depth)
-                        .await?;
+                    self.refresh_module_members(
+                        module,
+                        &module_members,
+                        &mut scope,
+                        &mut all_props,
+                        depth,
+                    )
+                    .await?;
                     module_members_stale = false;
                 }
                 match self.eval_property(prop, &scope, depth).await {
@@ -2269,8 +2287,14 @@ impl Evaluator {
         let mut poisoned_members = IndexMap::new();
         if !module_members.is_empty() {
             if module_members_stale {
-                self.refresh_module_members(module, &module_members, &mut scope, depth)
-                    .await?;
+                self.refresh_module_members(
+                    module,
+                    &module_members,
+                    &mut scope,
+                    &mut all_props,
+                    depth,
+                )
+                .await?;
             }
             for name in &module_members {
                 if class_names.contains(name) {
@@ -3048,14 +3072,18 @@ impl Evaluator {
         module: &Module,
         members: &indexmap::IndexSet<String>,
         scope: &mut Scope,
+        module_props: &mut Arc<IndexMap<String, Value>>,
         depth: usize,
     ) -> Result<()> {
         for entry in module.body.iter() {
-            let (name, result) = match entry {
+            // Classes and module functions are also members of the module
+            // object behind `this`/`module`; locals and type aliases are not.
+            let (name, result, module_member) = match entry {
                 Entry::ClassDef(name, class_mods, parent, body) if members.contains(name) => (
                     name,
                     self.eval_class_def(name, class_mods, parent.as_deref(), body, scope, depth)
                         .await,
+                    true,
                 ),
                 Entry::TypeAlias(name, ty) if members.contains(name) => {
                     match type_alias_target(ty).and_then(|target| poisoned_member(scope, target)) {
@@ -3075,15 +3103,39 @@ impl Evaluator {
                     {
                         continue;
                     }
-                    (&prop.name, self.eval_expr(expr, scope, depth).await)
+                    (
+                        &prop.name,
+                        self.eval_expr(expr, scope, depth).await,
+                        !has_modifier(&prop.modifiers, Modifier::Local),
+                    )
                 }
                 _ => continue,
             };
-            match result {
-                Ok(value) => scope.declare(name.clone(), value),
-                Err(Error::Eval(message)) => scope.redeclare_poisoned(name.clone(), message),
+            let module_value = match result {
+                Ok(value) => {
+                    scope.declare(name.clone(), value.clone());
+                    Some(value)
+                }
+                Err(Error::Eval(message)) => {
+                    scope.redeclare_poisoned(name.clone(), message);
+                    None
+                }
                 Err(error) => return Err(error),
+            };
+            if !module_member {
+                continue;
             }
+            // Keep `this.C` and `module.C` in step with the bare name.
+            match module_value {
+                Some(value) => module_props_insert(scope, module_props, name.clone(), value),
+                None if module_props.contains_key(name) => {
+                    module_props_remove(scope, module_props, name);
+                }
+                None => continue,
+            }
+            let snapshot = Value::Object(Arc::clone(module_props), None);
+            scope.set("this".into(), snapshot.clone());
+            scope.set("module".into(), snapshot);
         }
         Ok(())
     }
@@ -3418,6 +3470,18 @@ impl Evaluator {
         current_scope: &Scope,
         depth: usize,
     ) -> Result<Value> {
+        // A module object's source can carry only error metadata. It has no
+        // entries to rebuild the object from, so amend the evaluated members.
+        if base_source.is_metadata_only() {
+            return self
+                .eval_value_amendment(
+                    Value::Object(Arc::clone(base_map), Some(Arc::clone(base_source))),
+                    &Arc::new(overlay_entries.to_vec()),
+                    current_scope,
+                    depth,
+                )
+                .await;
+        }
         let base_entries = &base_source.entries;
         let base_scope = &base_source.scope;
         // Build merged entry list preserving base order.
@@ -5065,7 +5129,9 @@ impl Evaluator {
                 .await?;
             return Ok(Value::List(amended));
         }
-        if let Value::Object(base_map, Some(base_src)) = &base {
+        if let Value::Object(base_map, Some(base_src)) = &base
+            && !base_src.is_metadata_only()
+        {
             if !base_src.mapping_value_types.is_empty() {
                 let (inherited_scope, mut amendment_scope) =
                     mapping_amendment_scopes(&base_src.scope, &base_src.scope_declared, scope);

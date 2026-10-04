@@ -2425,6 +2425,23 @@ async fn imported_class_reading_missing_module_property_reports_error() {
         .await
         .unwrap();
     assert_eq!(val, serde_json::json!({}));
+    // The failed class's error metadata must not stop amending the module
+    // object from keeping its evaluated members.
+    std::fs::write(
+        dir.join("depx.pkl"),
+        "x = 1\nclass C { v = module.missing }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("amend.pkl"),
+        "import \"depx.pkl\" as dep\nresult = (dep) { y = 2 }\nr2 = dep { y = 3 }\n",
+    )
+    .unwrap();
+    let val = pklr::eval_to_json_async(&dir.join("amend.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["result"], serde_json::json!({"x": 1, "y": 2}));
+    assert_eq!(val["r2"], serde_json::json!({"x": 1, "y": 3}));
     for importer in ["main.pkl", "read.pkl"] {
         let err = pklr::eval_to_json_async(&dir.join(importer))
             .await

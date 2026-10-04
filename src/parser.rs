@@ -1171,7 +1171,13 @@ impl<'a> Parser<'a> {
             }
             TokenKind::KwNew => {
                 self.advance();
-                let type_name = if let TokenKind::Ident(_) = self.peek() {
+                // `new module.C {}` names a class through the module object.
+                let module_qualified = matches!(self.peek(), TokenKind::KwModule)
+                    && matches!(
+                        self.tokens.get(self.pos + 1).map(|tok| &tok.kind),
+                        Some(TokenKind::Dot)
+                    );
+                let type_name = if module_qualified || matches!(self.peek(), TokenKind::Ident(_)) {
                     let mut name = self.expect_ident()?;
                     // Handle dotted type names: new Config.Step { ... }
                     while matches!(self.peek(), TokenKind::Dot) {

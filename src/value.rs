@@ -80,6 +80,17 @@ pub struct ObjectSource {
     pub(crate) poisoned_members: IndexMap<String, String>,
 }
 
+impl ObjectSource {
+    /// Whether this source only carries a module object's failed members,
+    /// with no entries to rebuild the object from on amendment.
+    pub(crate) fn is_metadata_only(&self) -> bool {
+        !self.poisoned_members.is_empty()
+            && self.entries.is_empty()
+            && self.evaluated_properties.is_empty()
+            && self.type_name.is_none()
+    }
+}
+
 /// A pkl runtime value.
 ///
 /// Pkl's `Mapping` type (arbitrary key→value) is represented as `Object` when
