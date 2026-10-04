@@ -3102,3 +3102,23 @@ result = make.apply()
     assert_eq!(json["result"]["selected"]["value"], 42);
     assert_eq!(json["result"]["spaced"]["value"], 43);
 }
+
+#[test]
+fn lambda_let_and_for_bindings_shadow_captured_names() {
+    // The capture collector ignores shadowing, so it also captures the outer
+    // `x`; the inner `let` and `for` bindings must still win.
+    let json = eval(
+        r#"
+local x = 1
+local f = (n) -> let (x = n + 10) x
+local g = (xs) -> new Listing { for (x in xs) { x * 2 } }
+local h = (n) -> let (y = n) y + x
+a = f.apply(1)
+b = g.apply(List(1, 2))
+c = h.apply(5)
+"#,
+    );
+    assert_eq!(json["a"], 11);
+    assert_eq!(json["b"], serde_json::json!([2, 4]));
+    assert_eq!(json["c"], 6);
+}
