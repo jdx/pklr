@@ -73,6 +73,22 @@ pub struct ObjectSource {
     /// containing module is loaded. Crate-private: only the evaluator
     /// reads/writes this; not part of the public API.
     pub(crate) deprecated: IndexMap<String, Option<String>>,
+    /// Members of a module object that failed to evaluate, mapped to their
+    /// error: a class whose defaults read a `module` property that never
+    /// resolved. Reading or instantiating such a member reports the error
+    /// instead of treating it as absent.
+    pub(crate) poisoned_members: Option<Arc<IndexMap<String, String>>>,
+}
+
+impl ObjectSource {
+    /// Whether this source only carries a module object's failed members,
+    /// with no entries to rebuild the object from on amendment.
+    pub(crate) fn is_metadata_only(&self) -> bool {
+        self.poisoned_members.is_some()
+            && self.entries.is_empty()
+            && self.evaluated_properties.is_empty()
+            && self.type_name.is_none()
+    }
 }
 
 /// A pkl runtime value.

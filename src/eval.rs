@@ -2111,6 +2111,14 @@ impl Evaluator {
         scope.set("this".into(), inherited_snapshot.clone());
         scope.set("module".into(), inherited_snapshot);
 
+        // Classes whose bodies read `module` resolve it to this module's
+        // properties, which are only available once the property pass has
+        // evaluated them. Such classes, and the classes and locals built on
+        // them, are evaluated again before a property that can read them,
+        // when the `module` snapshot has changed since they last were.
+        let module_members = module_dependent_members(&module.body);
+        let mut module_members_stale = !module_members.is_empty();
+
         // First pass: collect locals, class definitions, and type aliases in
         // declaration order so they can reference each other
         for entry in module.body.iter() {
@@ -2127,15 +2135,23 @@ impl Evaluator {
                     }
                 }
                 Entry::ClassDef(name, class_mods, parent, body) => {
-                    let defaults = self.eval_class_def(
+                    match self.eval_class_def(
                         name,
                         class_mods,
                         parent.as_deref(),
                         body,
                         &scope,
                         depth,
-                    )?;
-                    scope.declare(name.clone(), defaults);
+                    ) {
+                        Ok(defaults) => scope.declare(name.clone(), defaults),
+                        // A class that reads `module` may need properties the
+                        // property pass has not evaluated yet.
+                        Err(Error::Eval(message)) if module_members.contains(name) => {
+                            scope.set_member_poison(name, Some(message.clone()));
+                            scope.declare_poisoned(name.clone(), message)
+                        }
+                        Err(error) => return Err(error),
+                    }
                 }
                 Entry::TypeAlias(name, ty) => {
                     self.eval_type_alias(name, ty, &mut scope);
@@ -2149,11 +2165,13 @@ impl Evaluator {
         // Track class names to exclude from serialized output.
         let mut class_names: std::collections::HashSet<String> = std::collections::HashSet::new();
         for entry in module.body.iter() {
-            if let Entry::ClassDef(name, ..) = entry
-                && let Some(cls_val) = scope.get(name)
-            {
-                base_obj.insert(name.clone(), cls_val.clone());
-                class_names.insert(name.clone());
+            if let Entry::ClassDef(name, ..) = entry {
+                if let Some(cls_val) = scope.get(name) {
+                    base_obj.insert(name.clone(), cls_val.clone());
+                    class_names.insert(name.clone());
+                } else if module_members.contains(name) {
+                    class_names.insert(name.clone());
+                }
             }
         }
 
@@ -2218,6 +2236,16 @@ impl Evaluator {
                     }
                     continue;
                 }
+                if module_members_stale && reads_module_members(prop, &module_members) {
+                    self.refresh_module_members(
+                        module,
+                        &module_members,
+                        &mut scope,
+                        &mut all_props,
+                        depth,
+                    )?;
+                    module_members_stale = false;
+                }
                 let val = match self.eval_property(prop, &scope, depth) {
                     Ok(value) => value,
                     // Module properties are late-bound. Keep an unresolved
@@ -2267,6 +2295,7 @@ impl Evaluator {
                     let snapshot = Value::Object(Arc::clone(&all_props), None);
                     scope.set("this".into(), snapshot.clone());
                     scope.set("module".into(), snapshot);
+                    module_members_stale = !module_members.is_empty();
                 }
             }
         }
@@ -2342,6 +2371,16 @@ impl Evaluator {
                 if child_property_names.contains(prop.name.as_str()) {
                     continue;
                 }
+                if module_members_stale && reads_module_members(prop, &module_members) {
+                    self.refresh_module_members(
+                        module,
+                        &module_members,
+                        &mut scope,
+                        &mut all_props,
+                        depth,
+                    )?;
+                    module_members_stale = false;
+                }
                 match self.eval_property(prop, &scope, depth) {
                     Ok(Some(value)) => {
                         scope.set(prop.name.clone(), value.clone());
@@ -2362,6 +2401,7 @@ impl Evaluator {
                         let snapshot = Value::Object(Arc::clone(&all_props), None);
                         scope.set("this".into(), snapshot.clone());
                         scope.set("module".into(), snapshot);
+                        module_members_stale = !module_members.is_empty();
                     }
                     Ok(None) => {}
                     Err(Error::Eval(message))
@@ -2372,6 +2412,16 @@ impl Evaluator {
                 }
             }
             for prop in &late_child_properties {
+                if module_members_stale && reads_module_members(prop, &module_members) {
+                    self.refresh_module_members(
+                        module,
+                        &module_members,
+                        &mut scope,
+                        &mut all_props,
+                        depth,
+                    )?;
+                    module_members_stale = false;
+                }
                 match self.eval_property(prop, &scope, depth) {
                     Ok(Some(value)) => {
                         scope.set(prop.name.clone(), value.clone());
@@ -2395,6 +2445,7 @@ impl Evaluator {
                         let snapshot = Value::Object(Arc::clone(&all_props), None);
                         scope.set("this".into(), snapshot.clone());
                         scope.set("module".into(), snapshot);
+                        module_members_stale = !module_members.is_empty();
                     }
                     Ok(None) => {}
                     Err(Error::Eval(message))
@@ -2402,6 +2453,43 @@ impl Evaluator {
                             || (module_is_abstract(module)
                                 && is_unresolved_template_error(&message)) => {}
                     Err(error) => return Err(error),
+                }
+            }
+        }
+
+        // Export the classes that read `module` as evaluated against the
+        // complete module, which is what `module` means to importers, along
+        // with the module functions re-bound to them. A class whose defaults
+        // still fail is not exported. As in Pkl, the module itself still
+        // evaluates, and the class's error is kept so an importer that reads
+        // or instantiates it gets that error instead of a missing member.
+        // The top-level module (depth 0) has no importers and its output
+        // leaves classes and functions out, so it skips this.
+        let mut poisoned_members = IndexMap::new();
+        if depth > 0 && !module_members.is_empty() {
+            if module_members_stale {
+                self.refresh_module_members(
+                    module,
+                    &module_members,
+                    &mut scope,
+                    &mut all_props,
+                    depth,
+                )?;
+            }
+            for name in &module_members {
+                if class_names.contains(name) {
+                    if let Some(value) = scope.get(name) {
+                        out.insert(name.clone(), value.clone());
+                    } else {
+                        out.shift_remove(name);
+                        if let Some(message) = scope.poison_of(name) {
+                            poisoned_members.insert(name.clone(), message.clone());
+                        }
+                    }
+                } else if out.contains_key(name)
+                    && let Some(value) = scope.get(name)
+                {
+                    out.insert(name.clone(), value.clone());
                 }
             }
         }
@@ -2435,7 +2523,7 @@ impl Evaluator {
         // access can warn lazily. Modules without @Deprecated keep `None`
         // source to avoid changing amend behavior in the common case.
         let deprecated = collect_deprecated(&module.body);
-        let source = if deprecated.is_empty() {
+        let source = if deprecated.is_empty() && poisoned_members.is_empty() {
             None
         } else {
             Some(Arc::new(ObjectSource {
@@ -2454,6 +2542,8 @@ impl Evaluator {
                 evaluated_properties: Vec::new(),
                 mapping_value_types: Vec::new(),
                 deprecated,
+                poisoned_members: (!poisoned_members.is_empty())
+                    .then(|| Arc::new(poisoned_members)),
             }))
         };
         let mut effective_late_properties = IndexMap::new();
@@ -2960,6 +3050,7 @@ impl Evaluator {
                                     evaluated_properties: Vec::new(),
                                     mapping_value_types: Vec::new(),
                                     deprecated: merge_deprecated(&src.deprecated, body),
+                                    poisoned_members: None,
                                 },
                             };
                             *result_src = Some(std::sync::Arc::new(new_src));
@@ -3141,8 +3232,179 @@ impl Evaluator {
             evaluated_properties: all_props.keys().cloned().collect(),
             mapping_value_types: Vec::new(),
             deprecated: collect_deprecated(entries),
+            poisoned_members: None,
         };
         Ok(Value::Object(Arc::new(map), Some(Arc::new(source))))
+    }
+
+    /// Re-evaluate the module members named in `members` (see
+    /// `module_dependent_members`) in declaration order against the current
+    /// module scope, so class bodies see the latest `module` snapshot and the
+    /// locals using those classes see the new class values. A member that
+    /// still fails is poisoned, which surfaces its error when it is used.
+    fn refresh_module_members(
+        &mut self,
+        module: &Module,
+        members: &indexmap::IndexSet<String>,
+        scope: &mut Scope,
+        module_props: &mut Arc<IndexMap<String, Value>>,
+        depth: usize,
+    ) -> Result<()> {
+        // New values of the module object's members, written to the map
+        // behind `this`/`module` in one batch: the map is shared with the
+        // scopes the classes captured, so each write copies it. A member that
+        // reads a pending member as `module.C` gets the batch written first.
+        let mut pending: Vec<(String, Option<Value>)> = Vec::new();
+        // `members` is in dependency order (see `module_dependent_members`).
+        let member_entries: HashMap<&str, &Entry> = module
+            .body
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry,
+                    Entry::ClassDef(..) | Entry::TypeAlias(..) | Entry::Property(_)
+                )
+            })
+            .filter_map(|entry| Some((entry_member_name(entry)?.as_str(), entry)))
+            .filter(|(name, _)| members.contains(*name))
+            .collect();
+        let ordered: Vec<&Entry> = members
+            .iter()
+            .filter_map(|name| member_entries.get(name.as_str()).copied())
+            .collect();
+        let mut todo = ordered.clone();
+        // One pass normally suffices. If a cycle left a member that reads
+        // another one ahead of it, and that one recovered in this pass, the
+        // reader is refreshed again, for at most one pass per member. In those
+        // later passes every member that is re-bound counts as changed (a
+        // function re-bound to a lambda capturing a recovered class), so its
+        // readers are refreshed in turn.
+        for pass in 0..ordered.len() {
+            let mut position: HashMap<&str, usize> = HashMap::new();
+            let mut changed: Vec<(String, usize)> = Vec::new();
+            for entry in todo.iter().copied() {
+                if !pending.is_empty() && member_reads_pending(entry, &pending) {
+                    flush_module_members(scope, module_props, &mut pending);
+                }
+                let Some(entry_name) = entry_member_name(entry) else {
+                    continue;
+                };
+                let was_bound = scope.get(entry_name).is_some();
+                'entry: {
+                    // Classes and module functions are also members of the module
+                    // object behind `this`/`module`; locals and type aliases are not.
+                    let (name, result, module_member) = match entry {
+                        Entry::ClassDef(name, class_mods, parent, body)
+                            if members.contains(name) =>
+                        {
+                            (
+                                name,
+                                self.eval_class_def(
+                                    name,
+                                    class_mods,
+                                    parent.as_deref(),
+                                    body,
+                                    scope,
+                                    depth,
+                                ),
+                                true,
+                            )
+                        }
+                        Entry::TypeAlias(name, ty) if members.contains(name) => {
+                            match type_alias_target(ty)
+                                .and_then(|target| poisoned_member(scope, target))
+                            {
+                                Some(message) => {
+                                    scope.set_member_poison(name, Some(message.clone()));
+                                    scope.redeclare_poisoned(name.clone(), message);
+                                }
+                                None => {
+                                    scope.set_member_poison(name, None);
+                                    self.eval_type_alias(name, ty, scope);
+                                }
+                            }
+                            break 'entry;
+                        }
+                        Entry::Property(prop) if members.contains(&prop.name) => {
+                            let Some(expr) = &prop.value else {
+                                break 'entry;
+                            };
+                            // A module function is bound when the property pass
+                            // reaches it; only re-bind it once it has been.
+                            if !has_modifier(&prop.modifiers, Modifier::Local)
+                                && scope.get(&prop.name).is_none()
+                            {
+                                break 'entry;
+                            }
+                            (
+                                &prop.name,
+                                self.eval_expr(expr, scope, depth),
+                                !has_modifier(&prop.modifiers, Modifier::Local),
+                            )
+                        }
+                        _ => break 'entry,
+                    };
+                    let module_value = match result {
+                        Ok(value) => {
+                            if module_member {
+                                scope.set_member_poison(name, None);
+                            }
+                            scope.declare(name.clone(), value.clone());
+                            Some(value)
+                        }
+                        Err(Error::Eval(message)) => {
+                            // Only members of the module object, not locals, are
+                            // reported through `module.C`/`module["C"]`.
+                            if module_member {
+                                scope.set_member_poison(name, Some(message.clone()));
+                            }
+                            scope.redeclare_poisoned(name.clone(), message);
+                            None
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    // Keep `this.C` and `module.C` in step with the bare name.
+                    if module_member && (module_value.is_some() || module_props.contains_key(name))
+                    {
+                        pending.push((name.clone(), module_value));
+                    }
+                }
+                let index = position.len();
+                position.insert(entry_name.as_str(), index);
+                if (pass > 0 || !was_bound) && scope.get(entry_name).is_some() {
+                    changed.push((entry_name.clone(), index));
+                }
+            }
+            flush_module_members(scope, module_props, &mut pending);
+            if changed.is_empty() {
+                break;
+            }
+            // Members that read a member which changed after they were
+            // refreshed (or that weren't refreshed in this pass) are stale.
+            let stale: Vec<&Entry> = ordered
+                .iter()
+                .copied()
+                .filter(|entry| {
+                    let Some(name) = entry_member_name(entry) else {
+                        return false;
+                    };
+                    let at = position.get(name.as_str()).copied();
+                    let missed: Vec<(String, Option<Value>)> = changed
+                        .iter()
+                        .filter(|(changed, index)| {
+                            changed != name && at.is_none_or(|at| at < *index)
+                        })
+                        .map(|(changed, _)| (changed.clone(), None))
+                        .collect();
+                    !missed.is_empty() && member_reads_pending(entry, &missed)
+                })
+                .collect();
+            if stale.is_empty() {
+                break;
+            }
+            todo = stale;
+        }
+        Ok(())
     }
 
     /// Evaluate a class definition, optionally inheriting from a parent class.
@@ -3160,6 +3422,13 @@ impl Evaluator {
         depth: usize,
     ) -> Result<Value> {
         let parent_val = parent_name.and_then(|name| resolve_dotted(scope, name));
+        // A parent class that failed to evaluate fails its subclasses too,
+        // rather than leaving them without the inherited members.
+        if parent_val.is_none()
+            && let Some(message) = parent_name.and_then(|name| poisoned_member(scope, name))
+        {
+            return Err(Error::Eval(message));
+        }
         let (parent_type_names, parent_type_identities) = match &parent_val {
             Some(Value::Object(_, Some(source))) => {
                 let names = source
@@ -3462,6 +3731,16 @@ impl Evaluator {
         current_scope: &Scope,
         depth: usize,
     ) -> Result<Value> {
+        // A module object's source can carry only error metadata. It has no
+        // entries to rebuild the object from, so amend the evaluated members.
+        if base_source.is_metadata_only() {
+            return self.eval_value_amendment(
+                Value::Object(Arc::clone(base_map), Some(Arc::clone(base_source))),
+                &Arc::new(overlay_entries.to_vec()),
+                current_scope,
+                depth,
+            );
+        }
         let base_entries = &base_source.entries;
         let base_scope = &base_source.scope;
         // Build merged entry list preserving base order.
@@ -4177,6 +4456,7 @@ impl Evaluator {
                             evaluated_properties: map.keys().cloned().collect(),
                             mapping_value_types: generic_params.iter().skip(1).cloned().collect(),
                             deprecated,
+                            poisoned_members: None,
                         };
                         Ok(Value::Object(Arc::new(map), Some(Arc::new(source))))
                     }
@@ -4194,6 +4474,16 @@ impl Evaluator {
                             }
                             Some(val)
                         });
+                        // A class whose definition failed (for example one
+                        // reading a `module` property not evaluated yet) is
+                        // poisoned; report why instead of building a bare object.
+                        if base.is_none()
+                            && let Some(message) = type_name
+                                .as_deref()
+                                .and_then(|name| poisoned_member(scope, name))
+                        {
+                            return Err(Error::Eval(message));
+                        }
                         if let Some(Value::Object(ref base_map, Some(ref base_src))) = base {
                             // Enforce open modifier: non-open classes reject new properties
                             if !base_src.is_open {
@@ -4271,6 +4561,7 @@ impl Evaluator {
                                         evaluated_properties: Vec::new(),
                                         mapping_value_types: Vec::new(),
                                         deprecated: merge_deprecated(&base_src.deprecated, entries),
+                                        poisoned_members: None,
                                     }
                                 };
                                 *src_slot = Some(Arc::new(new_src));
@@ -4310,6 +4601,7 @@ impl Evaluator {
                                 evaluated_properties: Vec::new(),
                                 mapping_value_types: Vec::new(),
                                 deprecated,
+                                poisoned_members: None,
                             };
                             Ok(Value::Object(Arc::new(merged), Some(Arc::new(src))))
                         } else {
@@ -4377,10 +4669,12 @@ impl Evaluator {
                 }
                 match &obj {
                     Value::Object(map, source) => {
-                        let val = map
-                            .get(field)
-                            .cloned()
-                            .ok_or_else(|| Error::Eval(format!("field not found: {field}")))?;
+                        let val = map.get(field).cloned().ok_or_else(|| {
+                            Error::Eval(
+                                missing_member_error(source, obj_expr, field, scope)
+                                    .unwrap_or_else(|| format!("field not found: {field}")),
+                            )
+                        })?;
                         self.warn_if_deprecated_access(source, field);
                         Ok(val)
                     }
@@ -4395,6 +4689,12 @@ impl Evaluator {
                 match &obj {
                     Value::Null => Ok(Value::Null),
                     Value::Object(map, source) => {
+                        if !map.contains_key(field.as_str())
+                            && let Some(message) =
+                                missing_member_error(source, obj_expr, field, scope)
+                        {
+                            return Err(Error::Eval(message));
+                        }
                         let val = map.get(field).cloned().unwrap_or(Value::Null);
                         if !is_null_value(&val) {
                             self.warn_if_deprecated_access(source, field);
@@ -4428,10 +4728,12 @@ impl Evaluator {
                 let key = self.eval_expr(key_expr, scope, depth + 1)?;
                 let key_str = value_to_key(&key)?;
                 match obj {
-                    Value::Object(map, _) => map
-                        .get(&key_str)
-                        .cloned()
-                        .ok_or_else(|| Error::Eval(format!("key not found: {key_str}"))),
+                    Value::Object(map, source) => map.get(&key_str).cloned().ok_or_else(|| {
+                        Error::Eval(
+                            missing_member_error(&source, obj_expr, &key_str, scope)
+                                .unwrap_or_else(|| format!("key not found: {key_str}")),
+                        )
+                    }),
                     _ => Err(Error::Eval("cannot index non-object".into())),
                 }
             }
@@ -5015,7 +5317,9 @@ impl Evaluator {
             self.eval_listing_entries(overlay_entries, &amendment_scope, depth + 1, &mut amended)?;
             return Ok(Value::List(amended));
         }
-        if let Value::Object(base_map, Some(base_src)) = &base {
+        if let Value::Object(base_map, Some(base_src)) = &base
+            && !base_src.is_metadata_only()
+        {
             if !base_src.mapping_value_types.is_empty() {
                 let (inherited_scope, mut amendment_scope) =
                     mapping_amendment_scopes(&base_src.scope, &base_src.scope_declared, scope);
@@ -5372,6 +5676,7 @@ impl Evaluator {
                                         evaluated_properties: Vec::new(),
                                         mapping_value_types: Vec::new(),
                                         deprecated: merge_deprecated(&src.deprecated, body),
+                                        poisoned_members: None,
                                     },
                                 };
                                 *result_src = Some(std::sync::Arc::new(new_src));
