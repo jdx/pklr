@@ -382,6 +382,103 @@ async fn evaluator_resets_environment_reads_between_evaluations() {
     );
 }
 
+/// Capabilities whose environment variable changes on every read.
+struct ChangingEnvCapabilities {
+    reads: Arc<Mutex<usize>>,
+}
+
+impl EvalCapabilities for ChangingEnvCapabilities {
+    fn read_to_string<'a>(&'a mut self, path: &'a Path) -> BoxFuture<'a, pklr::Result<String>> {
+        let key = path.display().to_string();
+        Box::pin(async move { Err(pklr::Error::ImportNotFound(key)) })
+    }
+
+    fn path_exists<'a>(&'a mut self, _path: &'a Path) -> BoxFuture<'a, pklr::Result<bool>> {
+        Box::pin(async move { Ok(false) })
+    }
+
+    fn canonicalize<'a>(&'a mut self, path: &'a Path) -> BoxFuture<'a, pklr::Result<PathBuf>> {
+        let path = path.to_path_buf();
+        Box::pin(async move { Ok(path) })
+    }
+
+    fn read_env<'a>(&'a mut self, _name: &'a str) -> BoxFuture<'a, pklr::Result<Option<String>>> {
+        let mut reads = self.reads.lock().unwrap();
+        *reads += 1;
+        let value = format!("read {reads}");
+        Box::pin(async move { Ok(Some(value)) })
+    }
+
+    fn fetch_text<'a>(&'a mut self, url: &'a str) -> BoxFuture<'a, pklr::Result<String>> {
+        let url = url.to_string();
+        Box::pin(async move { Err(pklr::Error::ImportNotFound(url)) })
+    }
+
+    fn fetch_bytes<'a>(&'a mut self, url: &'a str) -> BoxFuture<'a, pklr::Result<Vec<u8>>> {
+        let url = url.to_string();
+        Box::pin(async move { Err(pklr::Error::ImportNotFound(url)) })
+    }
+
+    fn temp_dir<'a>(&'a mut self, prefix: &'a str) -> BoxFuture<'a, pklr::Result<PathBuf>> {
+        let prefix = prefix.to_string();
+        Box::pin(async move { Err(pklr::Error::Unsupported(prefix)) })
+    }
+
+    fn glob<'a>(
+        &'a mut self,
+        _base: &'a Path,
+        _pattern: &'a str,
+    ) -> BoxFuture<'a, pklr::Result<Vec<PathBuf>>> {
+        Box::pin(async move { Ok(Vec::new()) })
+    }
+}
+
+#[tokio::test]
+async fn reading_a_resource_again_returns_the_first_result() {
+    // As in Pkl, reads are cached per URI for an evaluation, so a resource
+    // that changes on the host still reads the same everywhere, including in
+    // output converters applied to a value referenced from several places.
+    let reads = Arc::new(Mutex::new(0));
+    let mut evaluator = pklr::Evaluator::with_capabilities(ChangingEnvCapabilities {
+        reads: reads.clone(),
+    });
+    let source = r#"
+class Step { name = "s" }
+output {
+  renderer {
+    converters {
+      [Step] = (s) -> read("env:STATE")
+    }
+  }
+}
+local step = new Step {}
+first = read("env:STATE")
+second = read("env:STATE")
+a = step
+b = step
+"#;
+    let value = evaluator
+        .eval_source(source, Path::new("virtual/main.pkl"))
+        .await
+        .unwrap();
+    let json = evaluator.apply_converters(value).await.unwrap().to_json();
+    assert_eq!(json["first"], "read 1");
+    assert_eq!(json["second"], "read 1");
+    assert_eq!(json["a"], "read 1");
+    assert_eq!(json["b"], "read 1");
+    assert_eq!(*reads.lock().unwrap(), 1);
+
+    // A new evaluation reads again.
+    let value = evaluator
+        .eval_source(
+            "value = read(\"env:STATE\")\n",
+            Path::new("virtual/next.pkl"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(value.to_json()["value"], "read 2");
+}
+
 #[tokio::test]
 async fn evaluator_reevaluates_imports_between_evaluations() {
     let mut modules = HashMap::new();
@@ -509,7 +606,7 @@ value: Mapping<String, String>?(length > 0, !isEmpty)
     assert!(matches!(
         select.value,
         Some(Expr::Lambda(ref params, _))
-            if params == &["jobs".to_string()]
+            if params[..] == ["jobs".to_string()]
     ));
     let Entry::Property(value) = &module.body[2] else {
         panic!("expected constrained property");
@@ -536,7 +633,7 @@ items {
     let body = items.body.as_ref().expect("expected items body");
     assert_eq!(body.len(), 2);
     assert!(matches!(body[0], Entry::Property(_)));
-    assert!(matches!(body[1], Entry::Elem(Expr::String(ref value)) if value == "next"));
+    assert!(matches!(body[1], Entry::Elem(Expr::String(ref value)) if &**value == "next"));
 }
 
 #[test]
