@@ -155,6 +155,7 @@ import "pkl:test"
 local m = new Mapping { ["a"] = 0 }
 forLoop = test.catch(() -> new Mapping { for (i in List(1, 2)) { ["a"] = i } })
 direct = test.catch(() -> new Mapping { ["a"] = 1; when (true) { ["a"] = 2 } })
+generatorAfterDirect = test.catch(() -> new Dynamic { ["a"] = 1; for (i in List(1)) { ["a"] = i } })
 twoLoops = test.catch(() -> new Mapping { for (i in List(1)) { ["a"] = i } for (i in List(1)) { ["a"] = i } })
 amendedTwice = test.catch(() -> (m) { for (i in List(1, 2)) { ["a"] = i } })
 amendsParent = (m) { for (i in List(1)) { ["a"] = i } }
@@ -163,7 +164,7 @@ differentTypes = test.catchOrNull(() -> new Mapping<Any, Int> { [1] = 10; ["1"] 
 "#,
     );
     let duplicate = "Duplicate definition of member `\"a\"`.";
-    for key in ["forLoop", "direct", "twoLoops", "amendedTwice"] {
+    for key in ["forLoop", "direct", "generatorAfterDirect", "twoLoops", "amendedTwice"] {
         assert_eq!(json[key], duplicate, "{key}");
     }
     assert_eq!(json["amendsParent"]["a"], 1);
@@ -182,7 +183,6 @@ intAndFloat = test.catchOrNull(() -> new Mapping<Any, Int> { [1] = 10; [1.0] = 2
 "#,
     );
     assert_eq!(json["direct"], "Duplicate definition of member `\"k\"`.");
-    // pkl keeps `1` and `1.0` as distinct keys.
     assert!(json["intAndFloat"].is_null());
 }
 

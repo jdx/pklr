@@ -2944,8 +2944,11 @@ impl Evaluator {
         // Allocate duplicate tracking only for bodies that actually use a
         // generator or dynamic key. Ordinary object bodies dominate module
         // evaluation and cannot exercise these checks.
-        let mut generated_by_layer: Option<HashSet<(usize, Arc<str>)>> = None;
-        let mut defined_by_layer: Option<HashSet<(usize, &'static str, Arc<str>)>> = None;
+        // The output map is keyed by its rendered member name, so duplicate
+        // bookkeeping must use that same identity. Sharing the set with
+        // generators makes direct-before-generator and generator-before-direct
+        // checks symmetric.
+        let mut defined_by_layer: Option<HashSet<(usize, Arc<str>)>> = None;
         for (entry_index, entry) in entries.iter().enumerate() {
             match entry {
                 Entry::Property(prop) => {
@@ -3032,15 +3035,7 @@ impl Evaluator {
                     if !matches!(val_expr, Expr::ObjectBody(_)) {
                         let defined_by_layer = defined_by_layer.get_or_insert_default();
                         let layer = entry_layer(entry_scopes, entry_index);
-                        let key_type = value_type_name(&key);
-                        if !defined_by_layer.insert((layer, key_type, key_str.clone()))
-                            || (key_type == "String"
-                                && generated_by_layer
-                                    .as_ref()
-                                    .is_some_and(|generated_by_layer| {
-                                        generated_by_layer.contains(&(layer, key_str.clone()))
-                                    }))
-                        {
+                        if !defined_by_layer.insert((layer, key_str.clone())) {
                             let key = match &key {
                                 Value::String(s) => format!("{s:?}"),
                                 key => value_to_display(key),
@@ -3199,7 +3194,7 @@ impl Evaluator {
                         )?;
                         if let Value::Object(m, _) = body_val {
                             record_generated_members(
-                                generated_by_layer.get_or_insert_default(),
+                                defined_by_layer.get_or_insert_default(),
                                 entry_layer(entry_scopes, entry_index),
                                 &m,
                                 &fgen.body,
@@ -3240,7 +3235,7 @@ impl Evaluator {
                         )?;
                         if let Value::Object(m, _) = body_val {
                             record_generated_members(
-                                generated_by_layer.get_or_insert_default(),
+                                defined_by_layer.get_or_insert_default(),
                                 entry_layer(entry_scopes, entry_index),
                                 &m,
                                 &wgen.body,
@@ -3270,7 +3265,7 @@ impl Evaluator {
                         )?;
                         if let Value::Object(m, _) = else_val {
                             record_generated_members(
-                                generated_by_layer.get_or_insert_default(),
+                                defined_by_layer.get_or_insert_default(),
                                 entry_layer(entry_scopes, entry_index),
                                 &m,
                                 else_body,
@@ -5759,8 +5754,12 @@ impl Evaluator {
                 Entry::DynProperty(key_expr, val_expr) => {
                     let key = self.eval_expr(key_expr, &entry_scope, depth + 1)?;
                     let key_str = value_to_key(&key)?;
-                    // Keys of different types (`1` and `"1"`) are different keys.
-                    if !defined_keys.insert((value_type_name(&key), key_str.clone())) {
+                    // Mapping keys retain their Pkl value type: `1` and `"1"`
+                    // are distinct. Object-body entries may amend an earlier
+                    // value from this body.
+                    if !matches!(val_expr, Expr::ObjectBody(_))
+                        && !defined_keys.insert((value_type_name(&key), key_str.clone()))
+                    {
                         let key = match &key {
                             Value::String(s) => format!("{s:?}"),
                             key => value_to_display(key),
