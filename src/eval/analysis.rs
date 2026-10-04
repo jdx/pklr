@@ -1810,6 +1810,16 @@ impl EvaluationPlan {
 /// (`module[key]`) may reach any member, so it comes after the other members
 /// unless they read it.
 pub(super) fn module_evaluation_plan(entries: &[Entry]) -> EvaluationPlan {
+    // A one-entry module has no sibling dependency to discover. This keeps
+    // the fixed evaluation cost of the planner out of simple configurations.
+    if entries.len() <= 1 {
+        return EvaluationPlan {
+            order: (0..entries.len()).collect(),
+            dependents: std::iter::repeat_with(Vec::new)
+                .take(entries.len())
+                .collect(),
+        };
+    }
     let mut by_name: HashMap<&str, Vec<usize>> = HashMap::default();
     for (index, entry) in entries.iter().enumerate() {
         if let Some(name) = module_member_name(entry) {
