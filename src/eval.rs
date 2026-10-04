@@ -3035,9 +3035,11 @@ impl Evaluator {
                         let key_type = value_type_name(&key);
                         if !defined_by_layer.insert((layer, key_type, key_str.clone()))
                             || (key_type == "String"
-                                && generated_by_layer.as_ref().is_some_and(|generated_by_layer| {
-                                    generated_by_layer.contains(&(layer, key_str.clone()))
-                                }))
+                                && generated_by_layer
+                                    .as_ref()
+                                    .is_some_and(|generated_by_layer| {
+                                        generated_by_layer.contains(&(layer, key_str.clone()))
+                                    }))
                         {
                             let key = match &key {
                                 Value::String(s) => format!("{s:?}"),
