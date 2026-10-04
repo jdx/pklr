@@ -2494,6 +2494,8 @@ async fn narrowed_import_follows_module_reads_made_before_class_properties_are_b
         // A local method, which captures the scope the locals see, even when
         // a default after the property runs it.
         "a = 1\nmax = 3\nclass D {\n  local f = () -> a\n  a = 6\n  b = f.apply()\n  c = module.max\n}\n",
+        // A nested class, whose defaults are also evaluated first.
+        "a = 1\nmax = 3\nclass D {\n  a = 6\n  class Inner { x = a }\n  b = new Inner {}\n  c = module.max\n}\n",
     ];
     for (i, dep) in deps.iter().enumerate() {
         let name = format!("dep{i}.pkl");

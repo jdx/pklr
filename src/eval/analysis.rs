@@ -1196,9 +1196,9 @@ impl<'a> ModuleClasses<'a> {
 /// that property. Other method bodies only run on a built instance.
 ///
 /// With `upto`, only the entries a class property at that index doesn't hide
-/// its name from: the defaults at or before it, the locals (evaluated before
-/// any property), and the local methods any default runs (which capture the
-/// scope the locals see).
+/// its name from: the defaults at or before it, the locals and nested
+/// classes (evaluated before any property), and the local methods any default
+/// runs (which capture the scope the locals see).
 fn eager_class_refs(body: &[Entry], upto: Option<usize>) -> HashSet<String> {
     fn is_method(entry: &Entry) -> bool {
         matches!(entry, Entry::Property(prop) if matches!(prop.value, Some(Expr::Lambda(..))))
@@ -1290,7 +1290,10 @@ fn eager_class_refs(body: &[Entry], upto: Option<usize>) -> HashSet<String> {
             Entry::Property(prop) if is_method(entry) => {
                 is_local(entry) && runs.contains(prop.name.as_str())
             }
-            _ => is_default(entry) && (*index <= upto || is_local(entry)),
+            _ => {
+                is_default(entry)
+                    && (*index <= upto || is_local(entry) || matches!(entry, Entry::ClassDef(..)))
+            }
         })
         .map(|(_, entry)| entry.clone())
         .collect();
