@@ -2729,7 +2729,7 @@ impl Evaluator {
         // For a generator body, the members its receiver holds so far. Its
         // members are the receiver's, so a body amendment (`o { ... }` or
         // `["k"] { ... }`) amends the receiver's existing member.
-        receiver_members: Option<&ObjectMap>,
+        receiver_members: Option<&ReceiverMembers<'_>>,
     ) -> Result<Value> {
         let mut child_scope = scope.child();
         let entry_owners = entry_scope_owners(entries, entry_scopes, inherited_source);
@@ -3136,7 +3136,10 @@ impl Evaluator {
                             depth,
                             None,
                             None,
-                            Some(&generator_receiver(receiver_members, &all_props)),
+                            Some(&ReceiverMembers {
+                                own: &all_props,
+                                outer: receiver_members,
+                            }),
                         )?;
                         if let Value::Object(m, _) = body_val {
                             entry_owners.release_this(&this_aliases);
@@ -3168,7 +3171,10 @@ impl Evaluator {
                             depth,
                             None,
                             None,
-                            Some(&generator_receiver(receiver_members, &all_props)),
+                            Some(&ReceiverMembers {
+                                own: &all_props,
+                                outer: receiver_members,
+                            }),
                         )?;
                         if let Value::Object(m, _) = body_val {
                             entry_owners.release_this(&this_aliases);
@@ -3189,7 +3195,10 @@ impl Evaluator {
                             depth,
                             None,
                             None,
-                            Some(&generator_receiver(receiver_members, &all_props)),
+                            Some(&ReceiverMembers {
+                                own: &all_props,
+                                outer: receiver_members,
+                            }),
                         )?;
                         if let Value::Object(m, _) = else_val {
                             entry_owners.release_this(&this_aliases);
@@ -6077,18 +6086,18 @@ impl Evaluator {
 type ConverterMemo = HashMap<(usize, usize), (Value, Option<Value>)>;
 
 /// The members a generator body's receiver holds so far: those of the object
-/// it is directly in, over those of any generator body enclosing that.
-fn generator_receiver<'a>(
-    outer: Option<&'a ObjectMap>,
+/// it is directly in, over those of any generator body enclosing that. The
+/// maps are borrowed rather than merged so nested generators copy nothing.
+struct ReceiverMembers<'a> {
     own: &'a ObjectMap,
-) -> std::borrow::Cow<'a, ObjectMap> {
-    match outer {
-        None => std::borrow::Cow::Borrowed(own),
-        Some(outer) => {
-            let mut members = outer.clone();
-            members.extend(own.iter().map(|(k, v)| (k.clone(), v.clone())));
-            std::borrow::Cow::Owned(members)
-        }
+    outer: Option<&'a ReceiverMembers<'a>>,
+}
+
+impl ReceiverMembers<'_> {
+    fn get(&self, name: &str) -> Option<&Value> {
+        self.own
+            .get(name)
+            .or_else(|| self.outer.and_then(|outer| outer.get(name)))
     }
 }
 
