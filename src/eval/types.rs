@@ -732,16 +732,10 @@ pub(super) fn values_eq(a: &Value, b: &Value) -> bool {
                 Some(true) => true,
                 Some(false) => false,
                 None => {
-                    a_map.len() == b_map.len()
-                        && a_map.iter().all(|(key, a)| {
-                            b_map.get(key).is_some_and(|b| {
-                                values_eq(a, b)
-                                    // Both are of the same class, so have the
-                                    // same methods.
-                                    || matches!(a, Value::Lambda(..))
-                                        && a_src.as_deref().is_some_and(|src| is_method(src, key))
-                            })
-                        })
+                    // Methods are not members, so they take no part.
+                    members(a_map, a_src).count() == members(b_map, b_src).count()
+                        && members(a_map, a_src)
+                            .all(|(key, a)| b_map.get(key).is_some_and(|b| values_eq(a, b)))
                 }
             }
         }
@@ -752,12 +746,22 @@ pub(super) fn values_eq(a: &Value, b: &Value) -> bool {
     }
 }
 
+/// The members of an object: its map without its methods.
+fn members<'a>(
+    map: &'a ObjectMap,
+    src: &'a Option<Arc<ObjectSource>>,
+) -> impl Iterator<Item = (&'a Arc<str>, &'a Value)> {
+    map.iter().filter(move |(key, value)| {
+        !(matches!(value, Value::Lambda(..))
+            && src.as_deref().is_some_and(|src| is_method(src, key)))
+    })
+}
+
 /// Whether `name` is a method of the object `src` describes.
 fn is_method(src: &ObjectSource, name: &str) -> bool {
-    src.type_name.is_some()
-        && src.entries.iter().any(
-            |entry| matches!(entry, Entry::Property(prop) if prop.is_method && prop.name == name),
-        )
+    src.entries
+        .iter()
+        .any(|entry| matches!(entry, Entry::Property(prop) if prop.is_method && prop.name == name))
 }
 
 /// The result of a `map`, `flatMap` or `filter` on a collection of `kind`:

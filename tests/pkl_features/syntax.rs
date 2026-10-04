@@ -584,6 +584,21 @@ differentClasses = Person == Person2
 }
 
 #[test]
+fn equality_ignores_methods() {
+    // Pkl rejects methods declared in object bodies; pklr accepts them, and
+    // like a class's methods they are not members.
+    let json = eval(
+        r#"
+dynamic = new Dynamic { x = 1; function f() = 1 } == new Dynamic { x = 1 }
+open class P { x = 1 }
+typed = new P { function g() = 2 } == new P {}
+"#,
+    );
+    assert_eq!(json["dynamic"], true);
+    assert_eq!(json["typed"], true);
+}
+
+#[test]
 fn equality_of_lambdas_is_identity() {
     let json = eval(
         r#"
