@@ -676,21 +676,62 @@ fn narrow_aliases<'a>(
 
 /// `aliases` with each of the `declared` names that `constraint_bound_names`
 /// would read as a built-in marked unresolvable, since where the declaration
-/// is in scope the built-in's bindings no longer apply. `None` when
-/// `aliases` is unchanged.
+/// is in scope the built-in's bindings may no longer apply. A built-in that
+/// `entries` only redeclares as type aliases which bind the same names (such
+/// as `typealias String = List`) stays resolved when nothing outside
+/// `aliases` already gave it another meaning: it binds them before and after
+/// the declaration alike. `None` when `aliases` is unchanged.
 fn with_builtins_unresolved<'a>(
     aliases: &TypeAliases<'a>,
+    entries: &[Entry],
     declared: &HashSet<&str>,
 ) -> Option<TypeAliases<'a>> {
-    let mut marked = None;
-    for builtin in BINDING_BUILTIN_TYPES {
-        if declared.contains(builtin) && aliases.get(builtin) != Some(&None) {
-            marked
-                .get_or_insert_with(|| aliases.clone())
-                .insert(*builtin, None);
-        }
+    let redeclared: Vec<&str> = BINDING_BUILTIN_TYPES
+        .iter()
+        .copied()
+        .filter(|builtin| declared.contains(builtin) && aliases.get(builtin) != Some(&None))
+        .collect();
+    if redeclared.is_empty() {
+        return None;
     }
-    marked
+    let mut marked = aliases.clone();
+    for builtin in &redeclared {
+        marked.insert(builtin, None);
+    }
+    // Resolve the new definitions with every redeclared built-in unresolved,
+    // so one that reaches another still counts as unknown.
+    let binds_same = |builtin: &str| {
+        aliases.get(builtin).is_none()
+            && entries.iter().all(|entry| match entry {
+                Entry::TypeAlias(name, ty) if name == builtin => {
+                    alias_binds_collection_names(ty, &marked)
+                }
+                Entry::ClassDef(name, ..) => name != builtin,
+                _ => true,
+            })
+    };
+    let kept: Vec<&str> = redeclared
+        .iter()
+        .copied()
+        .filter(|builtin| binds_same(builtin))
+        .collect();
+    for builtin in &kept {
+        marked.remove(builtin);
+    }
+    (kept.len() != redeclared.len()).then_some(marked)
+}
+
+/// Whether a check against the type alias definition `ty` binds `length` and
+/// `isEmpty`, resolving through `aliases`.
+fn alias_binds_collection_names(ty: &crate::parser::TypeExpr, aliases: &TypeAliases) -> bool {
+    match ty {
+        crate::parser::TypeExpr::Named(base)
+        | crate::parser::TypeExpr::Generic(base, _)
+        | crate::parser::TypeExpr::Constrained(base, _) => {
+            constraint_bound_names_resolving(base, Some(aliases)).contains(&"length")
+        }
+        crate::parser::TypeExpr::Nullable(_) | crate::parser::TypeExpr::Union(_) => false,
+    }
 }
 
 /// `constraint_bound_names`, after following `base` through `aliases` (with
@@ -1125,7 +1166,8 @@ fn collect_entry_refs_in(
         let mut declared = HashSet::new();
         collect_entries_type_decls(entries, aliases, &mut declared);
         let narrowed = narrow_aliases(aliases, &declared);
-        with_builtins_unresolved(narrowed.as_ref().unwrap_or(aliases), &declared).or(narrowed)
+        with_builtins_unresolved(narrowed.as_ref().unwrap_or(aliases), entries, &declared)
+            .or(narrowed)
     };
     // A definition's constraints resolve aliases where the check happens, so
     // when following `definitions` and this body changes the aliases, follow
