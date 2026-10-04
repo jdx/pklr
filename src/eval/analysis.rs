@@ -966,7 +966,7 @@ pub(super) fn collect_sibling_field_refs_expr(
         Expr::Index(base, index) => {
             if is_module_sibling_ref(base, include_this) {
                 if let Expr::String(key) = index.as_ref() {
-                    refs.insert(key.clone());
+                    refs.insert(key.to_string());
                 } else {
                     refs.insert(DYNAMIC_SIBLING_REF.to_string());
                 }
@@ -2089,7 +2089,7 @@ impl InstanceReads {
             }
             Expr::Index(base, index) if is_reference(base) => match index.as_ref() {
                 Expr::String(key) => {
-                    self.members.insert(key.clone());
+                    self.members.insert(key.to_string());
                 }
                 index => {
                     self.escapes = true;

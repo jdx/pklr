@@ -18,7 +18,7 @@ pub(super) fn collect_deprecated(entries: &[Entry]) -> IndexMap<String, Option<S
                         && p.name == "message"
                         && let Some(Expr::String(s)) = &p.value
                     {
-                        message = Some(s.clone());
+                        message = Some(s.to_string());
                     }
                 }
                 out.insert(prop.name.clone(), message);
@@ -63,7 +63,7 @@ pub(super) fn capture_method_result_types(expr: &mut Expr, scope: &Scope) {
         Expr::InferredNew(ty, entries) => {
             *expr = match inferred_new_type(ty, scope, 0) {
                 Ok((name, params)) => Expr::New(Some(name), std::mem::take(entries), params),
-                Err(error) => Expr::Throw(Box::new(Expr::String(error.to_string()))),
+                Err(error) => Expr::Throw(Box::new(Expr::String(error.to_string().into()))),
             };
         }
         Expr::If(_, then_expr, else_expr) => {

@@ -127,7 +127,7 @@ fn eval_simple_expr(
         Expr::Bool(b) => Ok(Value::Bool(*b)),
         Expr::Int(n) => Ok(Value::Int(*n)),
         Expr::Float(f) => Ok(Value::Float(*f)),
-        Expr::String(s) => Ok(Value::String(s.as_str().into())),
+        Expr::String(s) => Ok(Value::String(Arc::clone(s))),
         Expr::Ident(name) => scope.get(name).cloned().ok_or_else(|| {
             Error::Eval(
                 scope
@@ -2687,7 +2687,7 @@ impl Evaluator {
                     );
                     let mut receiver_entries = existing_map
                         .keys()
-                        .map(|key| Entry::DynProperty(Expr::String(key.to_string()), Expr::Null))
+                        .map(|key| Entry::DynProperty(Expr::String(Arc::clone(key)), Expr::Null))
                         .collect::<Vec<_>>();
                     receiver_entries.extend_from_slice(body);
                     amendment_scope.receiver_entries = Some(Arc::new(receiver_entries));
@@ -3508,7 +3508,7 @@ impl Evaluator {
                         .iter()
                         .filter_map(|e| match e {
                             Entry::Property(p) => Some(p.name.clone()),
-                            Entry::DynProperty(Expr::String(s), _) => Some(s.clone()),
+                            Entry::DynProperty(Expr::String(s), _) => Some(s.to_string()),
                             _ => None,
                         })
                         .collect();
@@ -4370,7 +4370,7 @@ impl Evaluator {
             Expr::Bool(b) => Ok(Value::Bool(*b)),
             Expr::Int(n) => Ok(Value::Int(*n)),
             Expr::Float(f) => Ok(Value::Float(*f)),
-            Expr::String(s) => Ok(Value::String(s.as_str().into())),
+            Expr::String(s) => Ok(Value::String(Arc::clone(s))),
             Expr::StringInterpolation(parts) => {
                 let mut result = String::new();
                 for part in parts {
@@ -4431,7 +4431,9 @@ impl Evaluator {
                     .iter()
                     .filter(|name| scope.get(name).is_none())
                     .find_map(|name| scope.poison_of(name))
-                    .map(|message| Arc::new(Expr::Throw(Box::new(Expr::String(message.clone())))))
+                    .map(|message| {
+                        Arc::new(Expr::Throw(Box::new(Expr::String(message.clone().into()))))
+                    })
                     .unwrap_or(body);
                 Ok(Value::Lambda(Arc::clone(params), captured_body, captured))
             }
@@ -4578,7 +4580,7 @@ impl Evaluator {
                                             )));
                                         }
                                         Entry::DynProperty(Expr::String(key), _)
-                                            if !base_names.contains(key) =>
+                                            if !base_names.contains(&**key) =>
                                         {
                                             return Err(Error::Eval(format!(
                                                 "cannot add property '{}' to non-open class",
@@ -5388,7 +5390,7 @@ impl Evaluator {
                 amendment_scope.set("super", base.clone());
                 let mut receiver_entries = base_map
                     .keys()
-                    .map(|key| Entry::DynProperty(Expr::String(key.to_string()), Expr::Null))
+                    .map(|key| Entry::DynProperty(Expr::String(Arc::clone(key)), Expr::Null))
                     .collect::<Vec<_>>();
                 receiver_entries.extend_from_slice(overlay_entries);
                 amendment_scope.receiver_entries = Some(Arc::new(receiver_entries));
@@ -5870,7 +5872,7 @@ impl Evaluator {
                 let class_name = match key_expr {
                     Expr::Ident(name) => name.clone(),
                     Expr::Field(_, name) => name.clone(),
-                    Expr::String(s) => s.clone(),
+                    Expr::String(s) => s.to_string(),
                     _ => continue,
                 };
                 // Evaluate the lambda value

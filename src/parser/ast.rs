@@ -133,7 +133,7 @@ pub enum Expr {
     Bool(bool),
     Int(i64),
     Float(f64),
-    String(String),
+    String(std::sync::Arc<str>),
     Ident(String),
     /// `new TypeName? { entries... }`
     /// The third field holds optional generic type parameter names (e.g., `<String, Step>`).

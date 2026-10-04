@@ -1126,7 +1126,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::StringLit(s) => {
                 self.advance();
-                Ok(Expr::String(s))
+                Ok(Expr::String(s.into()))
             }
             TokenKind::InterpolatedString(parts) => {
                 self.advance();

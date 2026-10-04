@@ -536,7 +536,7 @@ items {
     let body = items.body.as_ref().expect("expected items body");
     assert_eq!(body.len(), 2);
     assert!(matches!(body[0], Entry::Property(_)));
-    assert!(matches!(body[1], Entry::Elem(Expr::String(ref value)) if value == "next"));
+    assert!(matches!(body[1], Entry::Elem(Expr::String(ref value)) if &**value == "next"));
 }
 
 #[test]
