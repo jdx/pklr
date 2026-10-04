@@ -2361,6 +2361,34 @@ async fn narrowed_import_ignores_class_properties_named_like_module_properties()
 }
 
 #[tokio::test]
+async fn narrowed_import_follows_module_reads_named_like_inherited_properties() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_inherited_name");
+    let dir = temp.path();
+    // `min` in `Child` is the inherited property, but `Child`'s defaults are
+    // first evaluated before `Parent`'s members are merged in, so the class
+    // must still be refreshed once the module's `min` exists.
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "min = 1\nopen class Parent { min = 2 }\nclass Child extends Parent { a = min }\nout = new Child {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as D\nout = D.out\n",
+    )
+    .unwrap();
+
+    let dep = pklr::eval_to_json_async(&dir.join("dep.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(dep["out"], serde_json::json!({"min": 2, "a": 2}));
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val, serde_json::json!({"out": {"min": 2, "a": 2}}));
+}
+
+#[tokio::test]
 async fn narrowed_import_follows_module_reads_but_not_checked_value_members() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_constraint_names");
     let dir = temp.path();

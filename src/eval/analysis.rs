@@ -902,51 +902,21 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
             _ => None,
         })
         .collect();
-    let classes: HashMap<&str, (Option<&str>, &[Entry])> = entries
-        .iter()
-        .filter_map(|entry| match entry {
-            Entry::ClassDef(name, _, parent, body) => {
-                Some((name.as_str(), (parent.as_deref(), body.as_slice())))
-            }
-            _ => None,
-        })
-        .collect();
-    // The properties a class and its ancestors declared in this module
-    // define on the instance, which a bare name in the class body reads
-    // before the module's properties.
-    fn instance_properties<'a>(
-        classes: &HashMap<&'a str, (Option<&'a str>, &'a [Entry])>,
-        mut class: &'a str,
-    ) -> HashSet<&'a str> {
-        let mut names = HashSet::new();
-        let mut seen = HashSet::new();
-        while seen.insert(class)
-            && let Some((parent, body)) = classes.get(class)
-        {
-            names.extend(body.iter().filter_map(|entry| match entry {
-                Entry::Property(prop) => Some(prop.name.as_str()),
-                _ => None,
-            }));
-            let Some(parent) = parent else {
-                break;
-            };
-            class = parent;
-        }
-        names
-    }
     let members: Vec<(&String, bool, HashSet<String>)> = entries
         .iter()
         .filter_map(|entry| match entry {
             Entry::ClassDef(name, _, parent, body) => {
-                // A bare root naming a module property that the instance
-                // doesn't define reads it like `module.name`.
+                // A bare root naming a module property that the body doesn't
+                // declare itself reads it like `module.name`. An inherited
+                // property of that name still needs the refresh: the body's
+                // defaults are first evaluated before the parent's members
+                // are merged in, which fails until the module's is bound.
                 let mut refs = referenced_roots(body);
-                let mut instance = None;
                 if refs.iter().any(|root| {
                     module_properties.contains(root.as_str())
-                        && !instance
-                            .get_or_insert_with(|| instance_properties(&classes, name))
-                            .contains(root.as_str())
+                        && !body.iter().any(
+                            |entry| matches!(entry, Entry::Property(prop) if prop.name == *root),
+                        )
                 }) {
                     refs.insert("module".to_string());
                 }
