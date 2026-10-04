@@ -2381,3 +2381,29 @@ async fn narrowed_import_ignores_checked_value_names_in_is_expressions() {
     assert_eq!(val["generic"], true);
     assert_eq!(val["nullable"], true);
 }
+
+#[tokio::test]
+async fn module_in_imported_class_body_means_the_class_module() {
+    let temp = TestTempDir::new("pklr_test_module_in_imported_class");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("dep2.pkl"),
+        "expected = \"b\"\nclass C { v = module.expected }\nresult = new C {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep2.pkl\"\nexpected = \"main\"\nr = dep2.result.v\nfresh = new dep2.C {}\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("dep2.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["result"]["v"], "b");
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["r"], "b");
+    assert_eq!(val["fresh"]["v"], "b");
+}

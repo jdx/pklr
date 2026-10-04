@@ -3273,3 +3273,77 @@ x = new Test {
     assert_eq!(val["x"]["files"], serde_json::json!(["a"]));
     assert_eq!(val["x"]["expect"]["files"], serde_json::json!({"a": "b"}));
 }
+
+// ============================================================
+// `module` inside class bodies
+// ============================================================
+
+#[test]
+fn module_in_class_body_reads_module_property() {
+    let val = eval(
+        r#"
+expected = "b"
+class C { v = module.expected }
+result = new C {}
+"#,
+    );
+    assert_eq!(val["result"]["v"], "b");
+}
+
+#[test]
+fn module_in_class_body_reads_property_declared_after_class() {
+    let val = eval(
+        r#"
+class C { v = module.expected; w = "w" }
+expected = "b"
+result = new C {}
+amended = new C { w = "x" }
+overridden = new C { v = "o" }
+"#,
+    );
+    assert_eq!(val["result"]["v"], "b");
+    assert_eq!(val["amended"], serde_json::json!({"v": "b", "w": "x"}));
+    assert_eq!(val["overridden"]["v"], "o");
+    assert!(val.get("C").is_none());
+}
+
+#[test]
+fn module_in_class_body_reaches_subclasses_and_local_functions() {
+    let val = eval(
+        r#"
+class C { v = module.expected; w = "w" }
+class D extends C { u = module.other }
+local function make(s) = new D { w = s }
+local mk = (s) -> new C { w = s }
+expected = "b"
+other = "o"
+d = new D {}
+made = make("z")
+lambda = mk("y")
+"#,
+    );
+    assert_eq!(val["d"], serde_json::json!({"v": "b", "w": "w", "u": "o"}));
+    assert_eq!(
+        val["made"],
+        serde_json::json!({"v": "b", "w": "z", "u": "o"})
+    );
+    assert_eq!(val["lambda"], serde_json::json!({"v": "b", "w": "y"}));
+}
+
+#[test]
+fn module_in_class_body_before_property_is_evaluated_reports_error() {
+    let err = eval_fails(
+        r#"
+class C { v = module.expected }
+result = new C {}
+expected = "b"
+"#,
+    );
+    assert!(err.contains("expected"), "{err}");
+}
+
+#[test]
+fn unused_class_reading_missing_module_property_is_not_an_error() {
+    let val = eval("class C { v = module.missing }\nresult = 1\n");
+    assert_eq!(val, serde_json::json!({"result": 1}));
+}

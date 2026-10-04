@@ -1775,6 +1775,13 @@ impl Evaluator {
         scope.set("this".into(), inherited_snapshot.clone());
         scope.set("module".into(), inherited_snapshot);
 
+        // Classes whose bodies read `module` resolve it to this module's
+        // properties, which are only available once the property pass has
+        // evaluated them. Such classes, and the classes and locals built on
+        // them, are evaluated again whenever the `module` snapshot changes.
+        let module_members = module_dependent_members(&module.body);
+        let mut module_members_stale = !module_members.is_empty();
+
         // First pass: collect locals, class definitions, and type aliases in
         // declaration order so they can reference each other
         for entry in module.body.iter() {
@@ -1794,10 +1801,18 @@ impl Evaluator {
                     }
                 }
                 Entry::ClassDef(name, class_mods, parent, body) => {
-                    let defaults = self
+                    match self
                         .eval_class_def(name, class_mods, parent.as_deref(), body, &scope, depth)
-                        .await?;
-                    scope.declare(name.clone(), defaults);
+                        .await
+                    {
+                        Ok(defaults) => scope.declare(name.clone(), defaults),
+                        // A class that reads `module` may need properties the
+                        // property pass has not evaluated yet.
+                        Err(Error::Eval(message)) if module_members.contains(name) => {
+                            scope.declare_poisoned(name.clone(), message)
+                        }
+                        Err(error) => return Err(error),
+                    }
                 }
                 Entry::TypeAlias(name, ty) => {
                     self.eval_type_alias(name, ty, &mut scope);
@@ -1811,11 +1826,13 @@ impl Evaluator {
         // Track class names to exclude from serialized output.
         let mut class_names: std::collections::HashSet<String> = std::collections::HashSet::new();
         for entry in module.body.iter() {
-            if let Entry::ClassDef(name, ..) = entry
-                && let Some(cls_val) = scope.get(name)
-            {
-                base_obj.insert(name.clone(), cls_val.clone());
-                class_names.insert(name.clone());
+            if let Entry::ClassDef(name, ..) = entry {
+                if let Some(cls_val) = scope.get(name) {
+                    base_obj.insert(name.clone(), cls_val.clone());
+                    class_names.insert(name.clone());
+                } else if module_members.contains(name) {
+                    class_names.insert(name.clone());
+                }
             }
         }
 
@@ -1884,6 +1901,11 @@ impl Evaluator {
                     }
                     continue;
                 }
+                if module_members_stale {
+                    self.refresh_module_members(module, &module_members, &mut scope, depth)
+                        .await?;
+                    module_members_stale = false;
+                }
                 let val = match self.eval_property(prop, &scope, depth).await {
                     Ok(value) => value,
                     // Module properties are late-bound. Keep an unresolved
@@ -1933,6 +1955,7 @@ impl Evaluator {
                     let snapshot = Value::Object(Arc::new(all_props.clone()), None);
                     scope.set("this".into(), snapshot.clone());
                     scope.set("module".into(), snapshot);
+                    module_members_stale = !module_members.is_empty();
                 }
             }
         }
@@ -2008,6 +2031,11 @@ impl Evaluator {
                 if child_property_names.contains(prop.name.as_str()) {
                     continue;
                 }
+                if module_members_stale {
+                    self.refresh_module_members(module, &module_members, &mut scope, depth)
+                        .await?;
+                    module_members_stale = false;
+                }
                 match self.eval_property(prop, &scope, depth).await {
                     Ok(Some(value)) => {
                         scope.set(prop.name.clone(), value.clone());
@@ -2023,6 +2051,7 @@ impl Evaluator {
                         let snapshot = Value::Object(Arc::new(all_props.clone()), None);
                         scope.set("this".into(), snapshot.clone());
                         scope.set("module".into(), snapshot);
+                        module_members_stale = !module_members.is_empty();
                     }
                     Ok(None) => {}
                     Err(Error::Eval(message))
@@ -2033,6 +2062,11 @@ impl Evaluator {
                 }
             }
             for prop in &late_child_properties {
+                if module_members_stale {
+                    self.refresh_module_members(module, &module_members, &mut scope, depth)
+                        .await?;
+                    module_members_stale = false;
+                }
                 match self.eval_property(prop, &scope, depth).await {
                     Ok(Some(value)) => {
                         scope.set(prop.name.clone(), value.clone());
@@ -2051,6 +2085,7 @@ impl Evaluator {
                         let snapshot = Value::Object(Arc::new(all_props.clone()), None);
                         scope.set("this".into(), snapshot.clone());
                         scope.set("module".into(), snapshot);
+                        module_members_stale = !module_members.is_empty();
                     }
                     Ok(None) => {}
                     Err(Error::Eval(message))
@@ -2058,6 +2093,27 @@ impl Evaluator {
                             || (module_is_abstract(module)
                                 && is_unresolved_template_error(&message)) => {}
                     Err(error) => return Err(error),
+                }
+            }
+        }
+
+        // Export the classes that read `module` as evaluated against the
+        // complete module, which is what `module` means to importers. A class
+        // whose defaults still fail is left out, like any unused failing
+        // member: Pkl only reports the error when the class is instantiated.
+        if !module_members.is_empty() {
+            if module_members_stale {
+                self.refresh_module_members(module, &module_members, &mut scope, depth)
+                    .await?;
+            }
+            for name in module_members
+                .iter()
+                .filter(|name| class_names.contains(*name))
+            {
+                if let Some(value) = scope.get(name) {
+                    out.insert(name.clone(), value.clone());
+                } else {
+                    out.shift_remove(name);
                 }
             }
         }
@@ -2801,6 +2857,43 @@ impl Evaluator {
             deprecated: collect_deprecated(entries),
         };
         Ok(Value::Object(Arc::new(map), Some(Arc::new(source))))
+    }
+
+    /// Re-evaluate the module members named in `members` (see
+    /// `module_dependent_members`) in declaration order against the current
+    /// module scope, so class bodies see the latest `module` snapshot and the
+    /// locals using those classes see the new class values. A member that
+    /// still fails is poisoned, which surfaces its error when it is used.
+    async fn refresh_module_members(
+        &mut self,
+        module: &Module,
+        members: &indexmap::IndexSet<String>,
+        scope: &mut Scope,
+        depth: usize,
+    ) -> Result<()> {
+        for entry in module.body.iter() {
+            let (name, result) = match entry {
+                Entry::ClassDef(name, class_mods, parent, body) if members.contains(name) => (
+                    name,
+                    self.eval_class_def(name, class_mods, parent.as_deref(), body, scope, depth)
+                        .await,
+                ),
+                Entry::Property(prop)
+                    if has_modifier(&prop.modifiers, Modifier::Local)
+                        && members.contains(&prop.name)
+                        && let Some(expr) = &prop.value =>
+                {
+                    (&prop.name, self.eval_expr(expr, scope, depth).await)
+                }
+                _ => continue,
+            };
+            match result {
+                Ok(value) => scope.declare(name.clone(), value),
+                Err(Error::Eval(message)) => scope.redeclare_poisoned(name.clone(), message),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
     }
 
     /// Evaluate a class definition, optionally inheriting from a parent class.
@@ -3873,6 +3966,19 @@ impl Evaluator {
                             }
                             Some(val)
                         });
+                        // A class whose definition failed (for example one
+                        // reading a `module` property not evaluated yet) is
+                        // poisoned; report why instead of building a bare object.
+                        if base.is_none()
+                            && let Some(root) = type_name.as_deref().and_then(|name| {
+                                name.split('.')
+                                    .next()
+                                    .filter(|root| scope.get(root).is_none())
+                            })
+                            && let Some(message) = scope.poison_of(root)
+                        {
+                            return Err(Error::Eval(message.clone()));
+                        }
                         if let Some(Value::Object(ref base_map, Some(ref base_src))) = base {
                             // Enforce open modifier: non-open classes reject new properties
                             if !base_src.is_open {

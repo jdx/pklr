@@ -210,6 +210,15 @@ impl Scope {
         identities
     }
 
+    /// Replace a binding declared in the body that owns this scope with a
+    /// poisoned one, dropping any value it held.
+    pub(super) fn redeclare_poisoned(&mut self, name: String, message: String) {
+        if self.vars.contains_key(name.as_str()) {
+            Rc::make_mut(&mut self.vars).shift_remove(name.as_str());
+        }
+        self.declare_poisoned(name, message);
+    }
+
     pub(super) fn poison(&mut self, name: String, message: String) {
         Rc::make_mut(&mut self.poisoned).insert(name.into(), message);
     }

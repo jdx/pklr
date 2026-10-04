@@ -367,24 +367,30 @@ pub(super) fn expand_requested_fields(
     while changed {
         changed = false;
         for entry in entries {
-            let Entry::Property(prop) = entry else {
-                continue;
-            };
-            if !expanded.contains(&prop.name) {
-                continue;
-            }
             let mut refs = HashSet::new();
             let shadows = HashSet::new();
-            if let Some(ty) = &prop.type_ann {
-                collect_type_refs(ty, &mut refs, &shadows);
-            }
-            if let Some(expr) = &prop.value {
-                collect_expr_refs(expr, &mut refs, &shadows);
-                collect_sibling_field_refs_expr(expr, &mut refs, true);
-            }
-            if let Some(body) = &prop.body {
-                collect_entry_refs(body, &mut refs, &shadows);
-                collect_sibling_field_refs_entries(body, &mut refs);
+            match entry {
+                Entry::Property(prop) if expanded.contains(&prop.name) => {
+                    if let Some(ty) = &prop.type_ann {
+                        collect_type_refs(ty, &mut refs, &shadows);
+                    }
+                    if let Some(expr) = &prop.value {
+                        collect_expr_refs(expr, &mut refs, &shadows);
+                        collect_sibling_field_refs_expr(expr, &mut refs, true);
+                    }
+                    if let Some(body) = &prop.body {
+                        collect_entry_refs(body, &mut refs, &shadows);
+                        collect_sibling_field_refs_entries(body, &mut refs);
+                    }
+                }
+                // A requested class or type alias (an importer reading
+                // `dep.ClassName`) depends on what its definition reads.
+                Entry::ClassDef(name, ..) | Entry::TypeAlias(name, _)
+                    if expanded.contains(name) =>
+                {
+                    refs.insert(name.clone());
+                }
+                _ => continue,
             }
             let mut pending: Vec<String> = refs.iter().cloned().collect();
             let mut visited = HashSet::new();
@@ -600,6 +606,52 @@ pub(super) fn property_reference_names(prop: &Property) -> HashSet<String> {
 
 pub(super) fn is_module_sibling_ref(expr: &Expr, include_this: bool) -> bool {
     matches!(expr, Expr::Ident(name) if name == "module" || (include_this && name == "this"))
+}
+
+/// Names, in declaration order, of the module members in `entries` that must
+/// be evaluated again once the module's properties are available: classes
+/// whose bodies read `module`, and the classes and locals that reference such
+/// a member (a subclass, or a `local function` building an instance).
+pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<String> {
+    let members: Vec<(&String, bool, HashSet<String>)> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::ClassDef(name, _, parent, body) => {
+                let mut refs = referenced_roots(body);
+                if let Some(parent) = parent {
+                    collect_name_root(parent, &mut refs, &HashSet::new());
+                }
+                Some((name, true, refs))
+            }
+            Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {
+                let mut refs = HashSet::new();
+                collect_expr_refs(prop.value.as_ref()?, &mut refs, &HashSet::new());
+                Some((&prop.name, false, refs))
+            }
+            _ => None,
+        })
+        .collect();
+    let mut dependent = HashSet::new();
+    loop {
+        let before = dependent.len();
+        for (name, is_class, refs) in &members {
+            if !dependent.contains(name.as_str())
+                && refs.iter().any(|root| {
+                    (*is_class && root == "module") || dependent.contains(root.as_str())
+                })
+            {
+                dependent.insert(name.to_string());
+            }
+        }
+        if dependent.len() == before {
+            break;
+        }
+    }
+    members
+        .into_iter()
+        .filter(|(name, ..)| dependent.contains(name.as_str()))
+        .map(|(name, ..)| name.clone())
+        .collect()
 }
 
 pub(super) fn referenced_roots(entries: &[Entry]) -> HashSet<String> {
