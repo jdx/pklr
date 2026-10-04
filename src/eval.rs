@@ -3749,6 +3749,10 @@ impl Evaluator {
     fn eval_type_alias(&self, name: &str, ty: &crate::parser::TypeExpr, scope: &mut Scope) {
         // Store the TypeExpr so `is`/`as` can resolve alias names to their definitions
         scope.set_type_alias(name.to_string(), ty.clone());
+        // Also mark the name as a type among the bindings, which a function
+        // captures (its alias map is not), so `new Alias {}` inside one is
+        // still known to name a type.
+        scope.declare(type_alias_marker(name), Value::Bool(true));
         match ty {
             crate::parser::TypeExpr::Named(target) => {
                 // Alias to a class or another alias already in scope
@@ -6576,7 +6580,8 @@ fn check_instantiable(scope: &Scope, type_name: Option<&str>, class: Option<&Val
         Some(Value::Object(_, Some(source)))
             if !type_name.contains('.')
                 && source.type_name.as_deref() != Some(type_name)
-                && scope.get_type_alias(type_name).is_none() =>
+                && scope.get_type_alias(type_name).is_none()
+                && scope.get(&type_alias_marker(type_name)).is_none() =>
         {
             Err(Error::Eval(format!(
                 "Expected `{type_name}` to be a type, but it is not."
@@ -6588,6 +6593,12 @@ fn check_instantiable(scope: &Scope, type_name: Option<&str>, class: Option<&Val
         )),
         _ => Ok(()),
     }
+}
+
+/// The binding that marks `name` as a type alias (see `eval_type_alias`).
+/// The NUL prefix keeps it apart from any pkl identifier.
+fn type_alias_marker(name: &str) -> String {
+    format!("\0typealias:{name}")
 }
 
 /// A module's name as pkl reports it: the name from its `module`

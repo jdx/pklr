@@ -3779,6 +3779,11 @@ fn instantiation_checks_follow_type_aliases() {
     let json =
         eval("class Foo { x = 1 }\ntypealias A = Foo\nlocal f = () -> new A {}\nr = f.apply()\n");
     assert_eq!(json["r"], serde_json::json!({"x": 1}));
+    // A parameter named like the class doesn't change what the alias names.
+    let json = eval(
+        "class Foo { x = 1 }\ntypealias A = Foo\nlocal f = (Foo) -> new A {}\nr = f.apply(5)\n",
+    );
+    assert_eq!(json["r"], serde_json::json!({"x": 1}));
 }
 
 #[test]

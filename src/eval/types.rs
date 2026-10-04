@@ -107,19 +107,7 @@ impl AliasResolver<'_> {
                 self.ty(ty, shadowed);
                 self.body(entries, shadowed);
             }
-            Expr::New(type_name, entries, _) => {
-                // `new Alias {}` names the aliased class, which the call
-                // scope can still resolve once the alias itself is gone.
-                if let Some(name) = type_name
-                    && let Some(crate::parser::TypeExpr::Named(target)) =
-                        self.resolved_alias(name, shadowed)
-                    && !target.starts_with('*')
-                {
-                    *name = target;
-                }
-                self.body(entries, shadowed);
-            }
-            Expr::ObjectBody(entries) => self.body(entries, shadowed),
+            Expr::New(_, entries, _) | Expr::ObjectBody(entries) => self.body(entries, shadowed),
             Expr::Field(value, _)
             | Expr::NullSafeField(value, _)
             | Expr::Unop(_, value)
