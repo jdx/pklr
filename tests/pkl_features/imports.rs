@@ -2423,15 +2423,16 @@ async fn narrowed_import_follows_methods_called_by_class_defaults() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_default_method_call");
     let dir = temp.path();
     // `a` calls `getMin` while `Child`'s defaults are first evaluated, before
-    // `Parent`'s `min` is merged in, so the class must still be refreshed.
+    // `Parent`'s `min` is merged in, so the class must still be refreshed,
+    // also when the method is called through an alias of `this`.
     std::fs::write(
         dir.join("dep.pkl"),
-        "min = 1\nopen class Parent { min = 2 }\nclass Child extends Parent {\n  function getMin() = min\n  a = getMin()\n}\nclass ThisChild extends Parent {\n  function getMin() = min\n  a = this.getMin()\n}\nchild = new Child {}\nthisChild = new ThisChild {}\n",
+        "min = 1\nopen class Parent { min = 2 }\nclass Child extends Parent {\n  function getMin() = min\n  a = getMin()\n}\nclass ThisChild extends Parent {\n  function getMin() = min\n  a = this.getMin()\n}\nclass AliasChild extends Parent {\n  function getMin() = min\n  a = let (self = this) self.getMin()\n}\nchild = new Child {}\nthisChild = new ThisChild {}\naliasChild = new AliasChild {}\n",
     )
     .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"dep.pkl\" as D\nchild = D.child\nthisChild = D.thisChild\n",
+        "import \"dep.pkl\" as D\nchild = D.child\nthisChild = D.thisChild\naliasChild = D.aliasChild\n",
     )
     .unwrap();
 
@@ -2440,11 +2441,13 @@ async fn narrowed_import_follows_methods_called_by_class_defaults() {
         .unwrap();
     assert_eq!(dep["child"]["a"], 2);
     assert_eq!(dep["thisChild"]["a"], 2);
+    assert_eq!(dep["aliasChild"]["a"], 2);
     let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
         .await
         .unwrap();
     assert_eq!(val["child"]["a"], 2);
     assert_eq!(val["thisChild"]["a"], 2);
+    assert_eq!(val["aliasChild"]["a"], 2);
 }
 
 #[tokio::test]

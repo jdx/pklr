@@ -941,8 +941,8 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
     }
     // The names a class body reads while its defaults are evaluated: those
     // of its non-method entries, and of the methods they call (by name, as
-    // `this.name`, or any of them through a dynamic `this[...]`). Other
-    // method bodies only run on a built instance.
+    // `this.name`, or any of them through a dynamic `this[...]` or a `this`
+    // used as a value). Other method bodies only run on a built instance.
     fn eager_class_refs(body: &[Entry]) -> HashSet<String> {
         fn is_method(entry: &Entry) -> bool {
             matches!(entry, Entry::Property(prop) if matches!(prop.value, Some(Expr::Lambda(..))))
@@ -983,9 +983,10 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
         let mut refs = referenced_roots(&defaults);
         let mut members = HashSet::new();
         instance_member_refs(&defaults, &mut members);
+        let mut escapes = this_escapes_entries(&defaults);
         let mut followed = HashSet::new();
         loop {
-            let calls_all = members.contains(DYNAMIC_SIBLING_REF);
+            let calls_all = escapes || members.contains(DYNAMIC_SIBLING_REF);
             let next: Vec<&Entry> = body
                 .iter()
                 .filter(|entry| match entry {
@@ -1003,6 +1004,7 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
                 let method = std::slice::from_ref(method);
                 refs.extend(referenced_roots(method));
                 instance_member_refs(method, &mut members);
+                escapes |= this_escapes_entries(method);
             }
         }
     }
@@ -1755,6 +1757,81 @@ fn expr_mentions(expr: &Expr, name: &str) -> bool {
         | Expr::Import(..)
         | Expr::ImportGlob(..) => false,
     }
+}
+
+/// Whether `expr` uses `this` other than as the base of a member read
+/// (`this.x`, `this[k]`): bound by a `let`, passed to a call, and so on, after
+/// which any of the instance's members may be read. A nested object body
+/// binds its own `this`, but any mention there counts too, conservatively.
+fn this_escapes(expr: &Expr) -> bool {
+    match expr {
+        Expr::Field(base, _) | Expr::NullSafeField(base, _) if matches!(base.as_ref(), Expr::Ident(name) if name == "this") => {
+            false
+        }
+        Expr::Index(base, index) if matches!(base.as_ref(), Expr::Ident(name) if name == "this") => {
+            this_escapes(index)
+        }
+        Expr::Ident(ident) => ident == "this",
+        Expr::New(_, entries, _) | Expr::ObjectBody(entries) | Expr::InferredNew(_, entries) => {
+            entries_mention(entries, "this")
+        }
+        Expr::Field(base, _) | Expr::NullSafeField(base, _) => this_escapes(base),
+        Expr::Index(base, index) | Expr::Binop(_, base, index) => {
+            this_escapes(base) || this_escapes(index)
+        }
+        Expr::Call(callee, args) => this_escapes(callee) || args.iter().any(this_escapes),
+        Expr::If(cond, then_expr, else_expr) => {
+            this_escapes(cond) || this_escapes(then_expr) || this_escapes(else_expr)
+        }
+        Expr::Let(_, value, body) => this_escapes(value) || this_escapes(body),
+        // A type's constraints bind `this` to the checked value.
+        Expr::Is(value, _) | Expr::As(value, _) => this_escapes(value),
+        Expr::Lambda(_, value)
+        | Expr::Unop(_, value)
+        | Expr::Throw(value)
+        | Expr::Trace(value)
+        | Expr::Read(value)
+        | Expr::ReadOrNull(value) => this_escapes(value),
+        Expr::StringInterpolation(parts) => parts.iter().any(|part| match part {
+            StringInterpPart::Expr(expr) => this_escapes(expr),
+            StringInterpPart::Literal(_) => false,
+        }),
+        Expr::Null
+        | Expr::Bool(_)
+        | Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::String(_)
+        | Expr::Import(..)
+        | Expr::ImportGlob(..) => false,
+    }
+}
+
+/// `this_escapes` for the entries of a class body, where `this` is the
+/// instance.
+fn this_escapes_entries(entries: &[Entry]) -> bool {
+    entries.iter().any(|entry| match entry {
+        Entry::Property(prop) => {
+            prop.value.as_ref().is_some_and(this_escapes)
+                || prop
+                    .body
+                    .as_ref()
+                    .is_some_and(|body| entries_mention(body, "this"))
+        }
+        Entry::DynProperty(key, value) => this_escapes(key) || this_escapes(value),
+        Entry::Spread(expr) | Entry::Elem(expr) => this_escapes(expr),
+        Entry::ForGenerator(fgen) => {
+            this_escapes(&fgen.collection) || this_escapes_entries(&fgen.body)
+        }
+        Entry::WhenGenerator(wgen) => {
+            this_escapes(&wgen.condition)
+                || this_escapes_entries(&wgen.body)
+                || wgen
+                    .else_body
+                    .as_ref()
+                    .is_some_and(|body| this_escapes_entries(body))
+        }
+        Entry::ClassDef(..) | Entry::TypeAlias(..) => false,
+    })
 }
 
 pub(super) fn type_mentions(ty: &crate::parser::TypeExpr, name: &str) -> bool {
