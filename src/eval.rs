@@ -2950,8 +2950,12 @@ impl Evaluator {
                     let mut type_failed = false;
                     // Typed locals are checked lazily (a failure poisons the
                     // binding) in every body, whichever property entries it
-                    // checks, so an unread local never fails.
-                    let checked = prop.type_ann.is_some();
+                    // checks, so an unread local never fails. A class
+                    // definition (`Nothing`) binds them unchecked: its
+                    // defaults may read a local that an instance overrides
+                    // the reader of, and each instance re-evaluates and
+                    // checks the class's locals.
+                    let checked = prop.type_ann.is_some() && !matches!(checks, TypeChecks::Nothing);
                     let evaluated = if let Some(message) =
                         poisoned_locals.get(&prop.name).filter(|_| checked)
                     {

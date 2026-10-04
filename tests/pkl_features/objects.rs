@@ -1841,6 +1841,25 @@ obj = (base) { local checked: Int(this < limit) = 3; out = checked }
 }
 
 #[test]
+fn class_typed_local_is_checked_only_when_an_instance_reads_it() {
+    // The instance overrides `v`, so `bad` is never read.
+    let json = eval(
+        r#"
+class C { local bad: Int = "x"; v = bad }
+c = new C { v = 1 }
+"#,
+    );
+    assert_eq!(json["c"]["v"], 1);
+    let message = eval_fails(
+        r#"
+class C { local bad: Int = "x"; v = bad }
+c = new C {}
+"#,
+    );
+    assert!(message.contains("property 'bad' expected Int"), "{message}");
+}
+
+#[test]
 fn amendment_keeps_inherited_typed_local_lazy() {
     let json = eval(
         r#"
