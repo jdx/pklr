@@ -4621,6 +4621,7 @@ impl Evaluator {
                         Ok(Value::List(ListValue::new(ListKind::Listing, items)))
                     }
                     Some("Mapping") => {
+                        check_member_kinds("Mapping", entries, false)?;
                         // If the Mapping has a value type param (e.g., Mapping<String, Step>),
                         // resolve it as a default template so entries inherit the class type.
                         let value_type_defaults = generic_params
@@ -5557,6 +5558,12 @@ impl Evaluator {
             return Err(Error::Eval(format!(
                 "Cannot instantiate abstract class `{}`.",
                 source.type_identity.as_deref().unwrap_or_default()
+            )));
+        }
+        if let Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::String(_) = base {
+            return Err(Error::Eval(format!(
+                "Cannot instantiate, or amend an instance of, external class `{}`.",
+                value_type_name(&base)
             )));
         }
         if let Value::List(existing) = base {
@@ -6501,6 +6508,15 @@ const EXTERNAL_CLASSES: &[&str] = &[
     "Bytes",
 ];
 
+/// Abstract standard library classes that aren't external.
+const ABSTRACT_STDLIB_CLASSES: &[&str] = &[
+    "Annotation",
+    "Typed",
+    "BaseValueRenderer",
+    "ValueRenderer",
+    "BytesRenderer",
+];
+
 /// Standard library classes that are neither `open` nor `abstract`.
 const CLOSED_STDLIB_CLASSES: &[&str] = &["Dynamic", "Listing", "Mapping"];
 
@@ -6610,6 +6626,9 @@ fn check_instantiable(scope: &Scope, type_name: Option<&str>, class: Option<&Val
         Some(Value::String(name)) if EXTERNAL_CLASSES.contains(&name.as_ref()) => Err(Error::Eval(
             format!("Cannot instantiate, or amend an instance of, external class `{name}`."),
         )),
+        None | Some(Value::String(_)) if ABSTRACT_STDLIB_CLASSES.contains(&type_name) => Err(
+            Error::Eval(format!("Cannot instantiate abstract class `{type_name}`.")),
+        ),
         _ => Ok(()),
     }
 }
@@ -6884,27 +6903,45 @@ fn listing_spread_values(value: Value) -> Result<Arc<Vec<Value>>> {
 /// Reject elements in a body that amends or instantiates a class: only
 /// Listings and Dynamic objects can have elements.
 fn check_no_elements(source: &ObjectSource, entries: &[Entry]) -> Result<()> {
-    fn has_element(entries: &[Entry]) -> bool {
-        entries.iter().any(|entry| match entry {
-            Entry::Elem(_) => true,
-            Entry::ForGenerator(generator) => has_element(&generator.body),
-            Entry::WhenGenerator(generator) => {
-                has_element(&generator.body)
-                    || generator
-                        .else_body
-                        .as_deref()
-                        .is_some_and(|body| has_element(body))
-            }
-            _ => false,
-        })
-    }
     match &source.type_name {
-        Some(type_name) if has_element(entries) => Err(Error::Eval(format!(
-            "Object of type `{}` cannot have an element.",
-            qualified_class_name(source.type_identity.as_deref(), type_name)
-        ))),
-        _ => Ok(()),
+        Some(type_name) => check_member_kinds(
+            &qualified_class_name(source.type_identity.as_deref(), type_name),
+            entries,
+            true,
+        ),
+        None => Ok(()),
     }
+}
+
+/// Whether a body (or a generator in it) has a member matching `is_kind`.
+fn body_has(entries: &[Entry], is_kind: &dyn Fn(&Entry) -> bool) -> bool {
+    entries.iter().any(|entry| match entry {
+        Entry::ForGenerator(generator) => body_has(&generator.body, is_kind),
+        Entry::WhenGenerator(generator) => {
+            body_has(&generator.body, is_kind)
+                || generator
+                    .else_body
+                    .as_deref()
+                    .is_some_and(|body| body_has(body, is_kind))
+        }
+        entry => is_kind(entry),
+    })
+}
+
+/// Reject elements in the body of an object of type `type_display`, and
+/// entries too when `typed` (a class instance has only properties).
+fn check_member_kinds(type_display: &str, entries: &[Entry], typed: bool) -> Result<()> {
+    if body_has(entries, &|entry| matches!(entry, Entry::Elem(_))) {
+        return Err(Error::Eval(format!(
+            "Object of type `{type_display}` cannot have an element."
+        )));
+    }
+    if typed && body_has(entries, &|entry| matches!(entry, Entry::DynProperty(..))) {
+        return Err(Error::Eval(format!(
+            "Object of type `{type_display}` cannot have an entry."
+        )));
+    }
+    Ok(())
 }
 
 /// Reject a value a generator or spread can't iterate over: anything but a
