@@ -396,15 +396,19 @@ pub(super) fn expand_requested_fields(
                     continue;
                 }
                 let mut definition_refs = HashSet::new();
-                let definition = std::slice::from_ref(*definition);
-                collect_entry_refs(definition, &mut definition_refs, &shadows);
-                collect_sibling_field_refs_entries(definition, &mut definition_refs);
-                // A type check binds these for the value being checked, so in
-                // a constraint they are not module properties. Leaving one out
-                // is never worse than not following the definition at all.
-                for name in ["this", "length", "isEmpty"] {
-                    definition_refs.remove(name);
+                match definition {
+                    Entry::TypeAlias(_, ty) => constraint_aware_type_refs(ty, &mut definition_refs),
+                    _ => collect_entry_refs(
+                        std::slice::from_ref(*definition),
+                        &mut definition_refs,
+                        &shadows,
+                    ),
                 }
+                collect_sibling_field_refs_entries(
+                    std::slice::from_ref(*definition),
+                    &mut definition_refs,
+                );
+                definition_refs.remove("this");
                 for dep in definition_refs {
                     if refs.insert(dep.clone()) {
                         pending.push(dep);
@@ -463,6 +467,57 @@ pub(super) fn collect_sibling_field_refs_entries(entries: &[Entry], refs: &mut H
             }
             Entry::ClassDef(_, _, _, body) => collect_sibling_field_refs_entries(body, refs),
             Entry::TypeAlias(_, ty) => collect_sibling_field_refs_type(ty, refs),
+        }
+    }
+}
+
+/// The names a type refers to, leaving out names a type check binds for the
+/// checked value inside a constraint: `this` always, and `length` and
+/// `isEmpty` unless the constrained base is a number or boolean, whose checks
+/// don't bind them (see `eval_type_check`).
+fn constraint_aware_type_refs(ty: &crate::parser::TypeExpr, refs: &mut HashSet<String>) {
+    let shadows = HashSet::new();
+    match ty {
+        crate::parser::TypeExpr::Named(name) => collect_name_root(name, refs, &shadows),
+        crate::parser::TypeExpr::Generic(name, params) => {
+            collect_name_root(name, refs, &shadows);
+            for param in params {
+                constraint_aware_type_refs(param, refs);
+            }
+        }
+        crate::parser::TypeExpr::Nullable(inner) => constraint_aware_type_refs(inner, refs),
+        crate::parser::TypeExpr::Union(types) => {
+            for ty in types {
+                constraint_aware_type_refs(ty, refs);
+            }
+        }
+        crate::parser::TypeExpr::Constrained(base, constraint) => {
+            for component in constrained_type_components(base) {
+                collect_name_root(component, refs, &shadows);
+            }
+            let mut constraint_refs = HashSet::new();
+            collect_expr_refs(constraint, &mut constraint_refs, &shadows);
+            constraint_refs.remove("this");
+            let base = base.trim_start_matches('*').trim_end_matches('?');
+            let binds_members = !matches!(
+                base,
+                "Int"
+                    | "Int8"
+                    | "Int16"
+                    | "Int32"
+                    | "UInt"
+                    | "UInt8"
+                    | "UInt16"
+                    | "UInt32"
+                    | "Float"
+                    | "Number"
+                    | "Boolean"
+            );
+            if binds_members {
+                constraint_refs.remove("length");
+                constraint_refs.remove("isEmpty");
+            }
+            refs.extend(constraint_refs);
         }
     }
 }

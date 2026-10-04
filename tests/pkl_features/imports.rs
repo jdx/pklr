@@ -2314,9 +2314,15 @@ async fn narrowed_import_follows_module_reads_but_not_checked_value_members() {
         "expected = \"b\"\ntypealias IsB = String(this == module.expected)\nresult = \"b\" is IsB\n",
     )
     .unwrap();
+    // A number's check binds no `length`, so here it is the module property.
+    std::fs::write(
+        dir.join("number.pkl"),
+        "length = 1\ntypealias IsOne = Int(this == length)\nresult = 1 is IsOne\n",
+    )
+    .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"short.pkl\" as Short\nimport \"module_read.pkl\" as ModuleRead\nshort = Short.result\nmoduleRead = ModuleRead.result\n",
+        "import \"short.pkl\" as Short\nimport \"module_read.pkl\" as ModuleRead\nimport \"number.pkl\" as Number\nshort = Short.result\nmoduleRead = ModuleRead.result\nnumber = Number.result\n",
     )
     .unwrap();
 
@@ -2325,4 +2331,5 @@ async fn narrowed_import_follows_module_reads_but_not_checked_value_members() {
         .unwrap();
     assert_eq!(val["short"], true);
     assert_eq!(val["moduleRead"], true);
+    assert_eq!(val["number"], true);
 }
