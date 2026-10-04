@@ -3087,11 +3087,9 @@ impl Evaluator {
         for entry in module.body.iter() {
             if !pending.is_empty()
                 && entry_member_name(entry).is_some_and(|name| members.contains(name))
+                && member_reads_pending(entry, &pending)
             {
-                let refs = qualified_module_member_refs(entry);
-                if pending.iter().any(|(name, _)| refs.contains(name)) {
-                    flush_module_members(scope, module_props, &mut pending);
-                }
+                flush_module_members(scope, module_props, &mut pending);
             }
             // Classes and module functions are also members of the module
             // object behind `this`/`module`; locals and type aliases are not.

@@ -3432,6 +3432,41 @@ direct = new C { w = module.later }
 }
 
 #[test]
+fn class_read_in_type_constraint_is_refreshed() {
+    let val = eval(
+        r#"
+class C { v = module.expected }
+expected = "b"
+result = 1 is Int(module.C.v == "b")
+"#,
+    );
+    assert_eq!(val["result"], true);
+    let val = eval(
+        r#"
+class C { v = module.expected }
+typealias Ok = Int(module.C.v == "b")
+expected = "b"
+result = 1 is Ok
+"#,
+    );
+    assert_eq!(val["result"], true);
+}
+
+#[test]
+fn class_read_dynamically_through_module_is_refreshed() {
+    let val = eval(
+        r#"
+local key = "C"
+class C { v = module.expected }
+class D { v = module[key].v }
+expected = "b"
+result = new D {}
+"#,
+    );
+    assert_eq!(val["result"], serde_json::json!({"v": "b"}));
+}
+
+#[test]
 fn failed_class_reports_error_through_module_and_this() {
     for src in [
         "class C { v = module.missing }\nresult = new module.C {}\n",

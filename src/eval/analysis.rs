@@ -579,8 +579,10 @@ pub(super) fn collect_sibling_field_refs_expr(
             collect_sibling_field_refs_expr(value, refs, include_this);
             collect_sibling_field_refs_expr(body, refs, include_this);
         }
-        Expr::Is(value, _) | Expr::As(value, _) => {
+        Expr::Is(value, ty) | Expr::As(value, ty) => {
             collect_sibling_field_refs_expr(value, refs, include_this);
+            // `module.field` reads in the checked type's constraints.
+            collect_sibling_field_refs_type(ty, refs);
         }
         Expr::Lambda(_, body)
         | Expr::Unop(_, body)
@@ -667,6 +669,9 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
             Entry::TypeAlias(name, ty) => {
                 let mut refs = HashSet::new();
                 collect_type_refs(ty, &mut refs, &HashSet::new());
+                // `typealias Ok = Int(module.C.v == "b")` reads `C` when a
+                // value is checked against it.
+                collect_sibling_field_refs_type(ty, &mut refs);
                 if let Some(target) = type_alias_target(ty) {
                     refs.extend(qualified_member(target, true).map(str::to_string));
                 }
@@ -730,6 +735,9 @@ pub(super) fn qualified_module_member_refs(entry: &Entry) -> HashSet<String> {
             if let Some(value) = &prop.value {
                 collect_sibling_field_refs_expr(value, &mut refs, true);
             }
+            if let Some(ty) = &prop.type_ann {
+                collect_sibling_field_refs_type(ty, &mut refs);
+            }
         }
         _ => {}
     }
@@ -737,15 +745,30 @@ pub(super) fn qualified_module_member_refs(entry: &Entry) -> HashSet<String> {
 }
 
 /// Whether evaluating module property `prop` can read one of `members` (see
-/// `module_dependent_members`): by bare name, as `module.C`/`this.C`, through
-/// a dynamic `module[...]` read, or in its type annotation. Members are only
-/// refreshed before such a property, so other properties cost nothing extra.
+/// `module_dependent_members`). Members are only refreshed before such a
+/// property, so other properties cost nothing extra. Conservative: any
+/// dynamic `module[...]` read counts.
 pub(super) fn reads_module_members(prop: &Property, members: &indexmap::IndexSet<String>) -> bool {
     let mut refs = property_reference_names(prop);
     if let Some(ty) = &prop.type_ann {
         collect_type_refs(ty, &mut refs, &HashSet::new());
+        collect_sibling_field_refs_type(ty, &mut refs);
     }
-    refs.contains(DYNAMIC_SIBLING_REF) || refs.iter().any(|name| members.contains(name))
+    refs.contains(DYNAMIC_SIBLING_REF)
+        || refs.iter().any(|name| members.contains(name))
+        || members.iter().any(|name| property_mentions(prop, name))
+}
+
+/// Whether module member `entry`, evaluated during a refresh, can read one of
+/// `pending` (refreshed members not yet written to the module object): as
+/// `module.C`/`this.C`, through any dynamic `module[...]` read, or by name in
+/// a type (`x: module.C`, `is module.C`).
+pub(super) fn member_reads_pending(entry: &Entry, pending: &[(String, Option<Value>)]) -> bool {
+    let refs = qualified_module_member_refs(entry);
+    refs.contains(DYNAMIC_SIBLING_REF)
+        || pending
+            .iter()
+            .any(|(name, _)| refs.contains(name) || entry_mentions(entry, name))
 }
 
 /// The class or alias a type alias binds to at runtime (`typealias A = C`,
@@ -1133,21 +1156,23 @@ pub(super) fn entries_mention(entries: &[Entry], name: &str) -> bool {
     entries.iter().any(|entry| entry_mentions(entry, name))
 }
 
+fn property_mentions(prop: &Property, name: &str) -> bool {
+    prop.type_ann
+        .as_ref()
+        .is_some_and(|ty| type_mentions(ty, name))
+        || prop
+            .value
+            .as_ref()
+            .is_some_and(|expr| expr_mentions(expr, name))
+        || prop
+            .body
+            .as_ref()
+            .is_some_and(|body| entries_mention(body, name))
+}
+
 fn entry_mentions(entry: &Entry, name: &str) -> bool {
     match entry {
-        Entry::Property(prop) => {
-            prop.type_ann
-                .as_ref()
-                .is_some_and(|ty| type_mentions(ty, name))
-                || prop
-                    .value
-                    .as_ref()
-                    .is_some_and(|expr| expr_mentions(expr, name))
-                || prop
-                    .body
-                    .as_ref()
-                    .is_some_and(|body| entries_mention(body, name))
-        }
+        Entry::Property(prop) => property_mentions(prop, name),
         Entry::DynProperty(key, value) => expr_mentions(key, name) || expr_mentions(value, name),
         Entry::ForGenerator(fgen) => {
             expr_mentions(&fgen.collection, name) || entries_mention(&fgen.body, name)
