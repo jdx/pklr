@@ -441,21 +441,35 @@ impl Evaluator {
     /// Resolve the triple-dot `path` for the module at `current_path`.
     /// Inside an extracted package the search stops at the package root.
     fn resolve_triple_dot(&mut self, current_path: &Path, path: &str) -> Result<Option<PathBuf>> {
-        #[cfg(feature = "package-zip")]
-        let root = self
-            .package_dirs
-            .values()
-            .find(|root| current_path.starts_with(root))
-            .cloned();
-        #[cfg(not(feature = "package-zip"))]
-        let root: Option<PathBuf> = None;
         // Canonicalize through the evaluator's capabilities, which resolves
         // native relative entry paths and supports virtual path namespaces.
-        // Unlike `std::path::absolute`, this never substitutes the host CWD
-        // for a capability-backed evaluator.
-        let current_path = self
-            .canonicalize_io(current_path)
-            .unwrap_or_else(|_| current_path.to_path_buf());
+        // Unlike an unconditional `std::path::absolute`, this never
+        // substitutes the host CWD for a capability-backed evaluator.
+        let current_path = match self.canonicalize_io(current_path) {
+            Ok(path) => path,
+            // Native evaluators use the default base path. When a relative
+            // unsaved path cannot be canonicalized yet, make its ancestors
+            // concrete so the normal upward search still works.
+            Err(_) if current_path.is_relative() && self.base_path == Path::new(".") => {
+                std::path::absolute(current_path).unwrap_or_else(|_| current_path.to_path_buf())
+            }
+            // A capability host owns its namespace, including relative
+            // virtual paths, so retain the path it supplied on a failure.
+            Err(_) => current_path.to_path_buf(),
+        };
+        #[cfg(feature = "package-zip")]
+        let roots: Vec<PathBuf> = self
+            .package_dirs
+            .values()
+            .cloned()
+            .collect();
+        #[cfg(feature = "package-zip")]
+        let root = roots.into_iter().find_map(|root| {
+            let root = self.canonicalize_io(&root).unwrap_or(root);
+            current_path.starts_with(&root).then_some(root)
+        });
+        #[cfg(not(feature = "package-zip"))]
+        let root: Option<PathBuf> = None;
         resolve_triple_dot(&current_path, path, root.as_deref(), |candidate| {
             self.path_exists_io(candidate)
         })
