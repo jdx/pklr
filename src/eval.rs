@@ -974,13 +974,6 @@ impl Evaluator {
         self.eval_module(&module, path, 0)
     }
 
-    /// Evaluate a local pkl file and apply its output converters.
-    #[cfg(feature = "native-io")]
-    pub(crate) fn eval_file_converted(&mut self, path: &Path) -> Result<Value> {
-        let value = self.eval_file(path)?;
-        self.apply_converters(value)
-    }
-
     /// Evaluate a local pkl file by path.
     pub fn eval_file(&mut self, path: &Path) -> Result<Value> {
         self.begin_evaluation();
@@ -6164,10 +6157,8 @@ impl Evaluator {
     /// Apply `output.renderer.converters` to a value tree.
     /// Walks recursively, replacing typed objects with their converter output.
     pub fn apply_converters(&mut self, value: Value) -> Result<Value> {
-        if self.module_output.is_some() {
-            if self.output_has_scalar_converter()? {
-                return self.apply_output_converters(value);
-            }
+        if self.module_output.is_some() && self.output_has_scalar_converter()? {
+            return self.apply_output_converters(value);
         }
         if self.converters.is_empty() {
             if self.module_output.is_some() {
