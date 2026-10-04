@@ -2419,6 +2419,64 @@ async fn narrowed_import_skips_module_properties_named_like_inherited_method_rea
 }
 
 #[tokio::test]
+async fn narrowed_import_ignores_class_properties_named_like_module_properties_when_following_class()
+ {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_followed_class_shadow");
+    let dir = temp.path();
+    // `D` reads the module's `max` (by name, or through `module`), so an
+    // importer building one needs it, but `b = a` reads the instance's own
+    // `a`, so the unused module `a` is not needed.
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "a = throw(\"unused\")\nmax = 3\nclass D {\n  a = 6\n  b = a\n  c = max\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep_qualified.pkl"),
+        "a = throw(\"unused\")\nmax = 3\nclass D {\n  a = 6\n  b = a\n  c = module.max\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as Dep\nimport \"dep_qualified.pkl\" as Q\nd = new Dep.D {}\nq = new Q.D {}\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        val,
+        serde_json::json!({"d": {"a": 6, "b": 6, "c": 3}, "q": {"a": 6, "b": 6, "c": 3}})
+    );
+}
+
+#[tokio::test]
+async fn narrowed_import_skips_inherited_method_reads_when_following_class() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_followed_class_inherited");
+    let dir = temp.path();
+    // `getMax` reads the module's `max`, so an importer building a `Child`
+    // needs it, but `getMin` runs on the built instance, where `min` is the
+    // inherited property, so the unused module `min` is not needed.
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "min = throw(\"unused\")\nmax = 3\nopen class Parent { min = 2 }\nclass Child extends Parent {\n  function getMin() = min\n  function getMax() = max\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as Dep\nchild = new Dep.Child {}\nmin = child.getMin()\nmax = child.getMax()\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["min"], 2);
+    assert_eq!(val["max"], 3);
+}
+
+#[tokio::test]
 async fn narrowed_import_follows_methods_called_by_class_defaults() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_default_method_call");
     let dir = temp.path();

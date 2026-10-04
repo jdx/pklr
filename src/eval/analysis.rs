@@ -399,6 +399,7 @@ pub(super) fn expand_requested_fields(
             })
             .collect(),
         module_aliases: &module_aliases,
+        classes: ModuleClasses::new(entries),
     };
     let aliases = Some(&module_aliases);
     // An importer reading `dep.ClassName` needs the module properties the
@@ -509,6 +510,18 @@ fn follow_definitions(
                 },
                 None,
             );
+        }
+        // A class body's bare roots read module properties only where
+        // `ModuleClasses::module_reads` says so; the rest read the instance.
+        if let Some(Entry::ClassDef(class, _, _, body)) = definition {
+            let reads: HashSet<String> = definitions
+                .classes
+                .module_reads(class, body, &definition_refs)
+                .into_iter()
+                .cloned()
+                .collect();
+            definition_refs
+                .retain(|root| !definitions.classes.is_property(root) || reads.contains(root));
         }
         let mut local_refs = HashSet::new();
         if let Some(local) = local {
@@ -638,6 +651,9 @@ struct Definitions<'a> {
     /// The module's aliases, which a local's checks resolve against wherever
     /// it is read from.
     module_aliases: &'a TypeAliases<'a>,
+    /// Which bare roots in a followed class body read module properties
+    /// rather than the instance's own.
+    classes: ModuleClasses<'a>,
 }
 
 /// Adds to `out` the name of every type alias or class declared directly in
@@ -970,6 +986,176 @@ pub(super) fn is_module_sibling_ref(expr: &Expr, include_this: bool) -> bool {
     matches!(expr, Expr::Ident(name) if name == "module" || (include_this && name == "this"))
 }
 
+/// A module's non-local properties and its classes, for deciding which bare
+/// roots in a class body read the module's properties.
+struct ModuleClasses<'a> {
+    properties: HashSet<&'a str>,
+    classes: HashMap<&'a str, (Option<&'a str>, &'a [Entry])>,
+}
+
+impl<'a> ModuleClasses<'a> {
+    fn new(entries: &'a [Entry]) -> Self {
+        Self {
+            properties: entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    Entry::Property(prop) if !has_modifier(&prop.modifiers, Modifier::Local) => {
+                        Some(prop.name.as_str())
+                    }
+                    _ => None,
+                })
+                .collect(),
+            classes: entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    Entry::ClassDef(name, _, parent, body) => {
+                        Some((name.as_str(), (parent.as_deref(), body.as_slice())))
+                    }
+                    _ => None,
+                })
+                .collect(),
+        }
+    }
+
+    /// Whether `name` is one of the module's non-local properties.
+    fn is_property(&self, name: &str) -> bool {
+        self.properties.contains(name)
+    }
+
+    /// The `roots` (bare roots read in the body of the module-level `class`)
+    /// that read module properties. A bare root naming a module property that
+    /// the body doesn't declare itself reads it like `module.name`. The
+    /// body's defaults are first evaluated before the parent's members are
+    /// merged in, so an inherited property of that name read by a default
+    /// still reads the module's. A method runs on the built instance, where
+    /// it reads the inherited property.
+    fn module_reads<'r>(
+        &self,
+        class: &str,
+        body: &[Entry],
+        roots: &'r HashSet<String>,
+    ) -> Vec<&'r String> {
+        let mut reads: Vec<&String> = roots
+            .iter()
+            .filter(|root| {
+                self.is_property(root)
+                    && !body
+                        .iter()
+                        .any(|entry| matches!(entry, Entry::Property(prop) if prop.name == **root))
+            })
+            .collect();
+        if reads.is_empty() {
+            return reads;
+        }
+        let inherited = self.inherited_properties(class);
+        if reads.iter().any(|root| inherited.contains(root.as_str())) {
+            let default_refs = eager_class_refs(body);
+            reads.retain(|root| {
+                !inherited.contains(root.as_str()) || default_refs.contains(root.as_str())
+            });
+        }
+        reads
+    }
+
+    /// The non-local properties `class` inherits from ancestors declared in
+    /// this module.
+    fn inherited_properties(&self, class: &str) -> HashSet<&'a str> {
+        let mut names = HashSet::new();
+        let mut seen = HashSet::new();
+        // `extends module.Parent` names the same class as `extends Parent`.
+        let unqualified = |name: &'a str| name.strip_prefix("module.").unwrap_or(name);
+        let mut next = self
+            .classes
+            .get_key_value(class)
+            .and_then(|(class, (parent, _))| {
+                seen.insert(*class);
+                *parent
+            })
+            .map(unqualified);
+        while let Some(class) = next
+            && seen.insert(class)
+            && let Some((parent, body)) = self.classes.get(class)
+        {
+            names.extend(body.iter().filter_map(|entry| match entry {
+                Entry::Property(prop) if !has_modifier(&prop.modifiers, Modifier::Local) => {
+                    Some(prop.name.as_str())
+                }
+                _ => None,
+            }));
+            next = parent.map(unqualified);
+        }
+        names
+    }
+}
+
+/// The names a class body reads while its defaults are evaluated: those
+/// of its non-method entries, and of the methods they call (by name, as
+/// `this.name`, or any of them through a dynamic `this[...]`). Other
+/// method bodies only run on a built instance.
+fn eager_class_refs(body: &[Entry]) -> HashSet<String> {
+    fn is_method(entry: &Entry) -> bool {
+        matches!(entry, Entry::Property(prop) if matches!(prop.value, Some(Expr::Lambda(..))))
+    }
+    // The members `entries` read as `this.name`, where `this` is the
+    // instance (not a nested object body's own `this`).
+    fn instance_member_refs(entries: &[Entry], refs: &mut HashSet<String>) {
+        for entry in entries {
+            match entry {
+                Entry::Property(prop) => {
+                    if let Some(value) = &prop.value {
+                        collect_sibling_field_refs_expr(value, refs, true);
+                    }
+                }
+                Entry::DynProperty(key, value) => {
+                    collect_sibling_field_refs_expr(key, refs, true);
+                    collect_sibling_field_refs_expr(value, refs, true);
+                }
+                Entry::Spread(expr) | Entry::Elem(expr) => {
+                    collect_sibling_field_refs_expr(expr, refs, true);
+                }
+                Entry::ForGenerator(fgen) => {
+                    collect_sibling_field_refs_expr(&fgen.collection, refs, true);
+                    instance_member_refs(&fgen.body, refs);
+                }
+                Entry::WhenGenerator(wgen) => {
+                    collect_sibling_field_refs_expr(&wgen.condition, refs, true);
+                    instance_member_refs(&wgen.body, refs);
+                    if let Some(else_body) = &wgen.else_body {
+                        instance_member_refs(else_body, refs);
+                    }
+                }
+                Entry::ClassDef(..) | Entry::TypeAlias(..) => {}
+            }
+        }
+    }
+    let defaults: Vec<Entry> = body.iter().filter(|e| !is_method(e)).cloned().collect();
+    let mut refs = referenced_roots(&defaults);
+    let mut members = HashSet::new();
+    instance_member_refs(&defaults, &mut members);
+    let mut followed = HashSet::new();
+    loop {
+        let calls_all = members.contains(DYNAMIC_SIBLING_REF);
+        let next: Vec<&Entry> = body
+            .iter()
+            .filter(|entry| match entry {
+                Entry::Property(prop) if is_method(entry) => {
+                    (calls_all || refs.contains(&prop.name) || members.contains(&prop.name))
+                        && followed.insert(prop.name.as_str())
+                }
+                _ => false,
+            })
+            .collect();
+        if next.is_empty() {
+            return refs;
+        }
+        for method in next {
+            let method = std::slice::from_ref(method);
+            refs.extend(referenced_roots(method));
+            instance_member_refs(method, &mut members);
+        }
+    }
+}
+
 /// Names, in declaration order, of the module members in `entries` that must
 /// be evaluated again once the module's properties are available: classes
 /// whose bodies read `module` or a module property by name (`a = min`), and
@@ -992,151 +1178,13 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
     {
         return indexmap::IndexSet::new();
     }
-    let module_properties: HashSet<&str> = entries
-        .iter()
-        .filter_map(|entry| match entry {
-            Entry::Property(prop) if !has_modifier(&prop.modifiers, Modifier::Local) => {
-                Some(prop.name.as_str())
-            }
-            _ => None,
-        })
-        .collect();
-    let classes: HashMap<&str, (Option<&str>, &[Entry])> = entries
-        .iter()
-        .filter_map(|entry| match entry {
-            Entry::ClassDef(name, _, parent, body) => {
-                Some((name.as_str(), (parent.as_deref(), body.as_slice())))
-            }
-            _ => None,
-        })
-        .collect();
-    // The non-local properties `class` inherits from ancestors declared in
-    // this module.
-    fn inherited_properties<'a>(
-        classes: &HashMap<&'a str, (Option<&'a str>, &'a [Entry])>,
-        class: &'a str,
-    ) -> HashSet<&'a str> {
-        let mut names = HashSet::new();
-        let mut seen = HashSet::from([class]);
-        // `extends module.Parent` names the same class as `extends Parent`.
-        let unqualified = |name: &'a str| name.strip_prefix("module.").unwrap_or(name);
-        let mut next = classes
-            .get(class)
-            .and_then(|(parent, _)| *parent)
-            .map(unqualified);
-        while let Some(class) = next
-            && seen.insert(class)
-            && let Some((parent, body)) = classes.get(class)
-        {
-            names.extend(body.iter().filter_map(|entry| match entry {
-                Entry::Property(prop) if !has_modifier(&prop.modifiers, Modifier::Local) => {
-                    Some(prop.name.as_str())
-                }
-                _ => None,
-            }));
-            next = parent.map(unqualified);
-        }
-        names
-    }
-    // The names a class body reads while its defaults are evaluated: those
-    // of its non-method entries, and of the methods they call (by name, as
-    // `this.name`, or any of them through a dynamic `this[...]`). Other
-    // method bodies only run on a built instance.
-    fn eager_class_refs(body: &[Entry]) -> HashSet<String> {
-        fn is_method(entry: &Entry) -> bool {
-            matches!(entry, Entry::Property(prop) if matches!(prop.value, Some(Expr::Lambda(..))))
-        }
-        // The members `entries` read as `this.name`, where `this` is the
-        // instance (not a nested object body's own `this`).
-        fn instance_member_refs(entries: &[Entry], refs: &mut HashSet<String>) {
-            for entry in entries {
-                match entry {
-                    Entry::Property(prop) => {
-                        if let Some(value) = &prop.value {
-                            collect_sibling_field_refs_expr(value, refs, true);
-                        }
-                    }
-                    Entry::DynProperty(key, value) => {
-                        collect_sibling_field_refs_expr(key, refs, true);
-                        collect_sibling_field_refs_expr(value, refs, true);
-                    }
-                    Entry::Spread(expr) | Entry::Elem(expr) => {
-                        collect_sibling_field_refs_expr(expr, refs, true);
-                    }
-                    Entry::ForGenerator(fgen) => {
-                        collect_sibling_field_refs_expr(&fgen.collection, refs, true);
-                        instance_member_refs(&fgen.body, refs);
-                    }
-                    Entry::WhenGenerator(wgen) => {
-                        collect_sibling_field_refs_expr(&wgen.condition, refs, true);
-                        instance_member_refs(&wgen.body, refs);
-                        if let Some(else_body) = &wgen.else_body {
-                            instance_member_refs(else_body, refs);
-                        }
-                    }
-                    Entry::ClassDef(..) | Entry::TypeAlias(..) => {}
-                }
-            }
-        }
-        let defaults: Vec<Entry> = body.iter().filter(|e| !is_method(e)).cloned().collect();
-        let mut refs = referenced_roots(&defaults);
-        let mut members = HashSet::new();
-        instance_member_refs(&defaults, &mut members);
-        let mut followed = HashSet::new();
-        loop {
-            let calls_all = members.contains(DYNAMIC_SIBLING_REF);
-            let next: Vec<&Entry> = body
-                .iter()
-                .filter(|entry| match entry {
-                    Entry::Property(prop) if is_method(entry) => {
-                        (calls_all || refs.contains(&prop.name) || members.contains(&prop.name))
-                            && followed.insert(prop.name.as_str())
-                    }
-                    _ => false,
-                })
-                .collect();
-            if next.is_empty() {
-                return refs;
-            }
-            for method in next {
-                let method = std::slice::from_ref(method);
-                refs.extend(referenced_roots(method));
-                instance_member_refs(method, &mut members);
-            }
-        }
-    }
+    let classes = ModuleClasses::new(entries);
     let members: Vec<(&String, bool, HashSet<String>)> = entries
         .iter()
         .filter_map(|entry| match entry {
             Entry::ClassDef(name, _, parent, body) => {
                 let mut refs = referenced_roots(body);
-                // A bare root naming a module property that the body doesn't
-                // declare itself reads it like `module.name`. The body's
-                // defaults are first evaluated before the parent's members
-                // are merged in, so an inherited property of that name read
-                // by a default still needs the refresh. A method runs on the
-                // built instance, where it reads the inherited property.
-                let module_reads: Vec<&String> = refs
-                    .iter()
-                    .filter(|root| {
-                        module_properties.contains(root.as_str())
-                            && !body.iter().any(|entry| {
-                                matches!(entry, Entry::Property(prop) if prop.name == **root)
-                            })
-                    })
-                    .collect();
-                let reads_module = !module_reads.is_empty() && {
-                    let inherited = inherited_properties(&classes, name);
-                    module_reads
-                        .iter()
-                        .any(|root| !inherited.contains(root.as_str()))
-                        || {
-                            let default_refs = eager_class_refs(body);
-                            module_reads
-                                .iter()
-                                .any(|root| default_refs.contains(root.as_str()))
-                        }
-                };
+                let reads_module = !classes.module_reads(name, body, &refs).is_empty();
                 if reads_module {
                     refs.insert("module".to_string());
                 }
