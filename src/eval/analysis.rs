@@ -821,6 +821,9 @@ fn collect_unshadowed_type_names(ty: &crate::parser::TypeExpr, names: &mut HashS
             }
         }
         crate::parser::TypeExpr::Constrained(base, constraint) => {
+            // The base may be a quoted name containing a separator, so keep it
+            // whole as well as split into components.
+            insert_name_roots(names, base);
             for component in constrained_type_components(base) {
                 insert_name_roots(names, component);
             }

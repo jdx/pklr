@@ -3122,3 +3122,18 @@ c = h.apply(5)
     assert_eq!(json["b"], serde_json::json!([2, 4]));
     assert_eq!(json["c"], 6);
 }
+
+#[test]
+fn lambda_constrained_check_keeps_quoted_class_with_comma() {
+    let json = eval(
+        r#"
+class `Foo,Bar` { value = 1 }
+class Other { value = 2 }
+local check = (v) -> v is `Foo,Bar`(true)
+yes = check.apply(new `Foo,Bar` {})
+no = check.apply(new Other {})
+"#,
+    );
+    assert_eq!(json["yes"], true);
+    assert_eq!(json["no"], false);
+}
