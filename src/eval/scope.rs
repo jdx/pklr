@@ -43,6 +43,13 @@ pub(super) struct Scope {
     /// may have a built-in type's name (`typealias String = ...`). Without
     /// one, a built-in type name needs no alias lookup. May over-approximate.
     pub(super) shadows_builtin_type: bool,
+    /// Whether this scope belongs to a class definition's body, or to a
+    /// value an amendment amends with a body of its own (or an object body
+    /// nested in either). Declared types there are checked when an instance
+    /// is built, or by that amendment, against the final values. Not
+    /// captured: an instance's scopes, and modules imported meanwhile, start
+    /// without it.
+    pub(super) defining_class: bool,
     pub(super) module_identities: Rc<FxIndexMap<Name, String>>,
     pub(super) poisoned: Rc<FxIndexMap<Name, String>>,
     /// Names in `vars` or `poisoned` declared by an entry written in the body
@@ -79,6 +86,7 @@ impl Scope {
             vars: Arc::default(),
             type_aliases: Rc::default(),
             shadows_builtin_type: self.shadows_builtin_type,
+            defining_class: self.defining_class,
             module_identities: Rc::default(),
             poisoned: Rc::default(),
             declared: Rc::default(),
@@ -763,6 +771,7 @@ fn update_object_bindings(
     // The scope's own maps for these start empty, so it can share the object's.
     scope.type_aliases = object.type_aliases.clone();
     scope.shadows_builtin_type |= object.shadows_builtin_type;
+    scope.defining_class |= object.defining_class;
     scope.module_identities = object.module_identities.clone();
 }
 

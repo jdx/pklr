@@ -689,12 +689,27 @@ fn type_is_runtime_checkable_inner(
             .iter()
             .all(|variant| type_is_runtime_checkable_inner(variant, scope, resolving)),
         // Only collection generics have a runtime representation to check;
-        // other generics (`Function1<...>`, `Pair<...>`) are not modeled.
+        // other generics (`Function1<...>`, `Pair<...>`) are not modeled. An
+        // alias (`typealias Pairs<T> = List<T>`) is resolved first, as for a
+        // named type, since it may also shadow a collection name.
         TypeExpr::Generic(name, _) => {
-            matches!(
+            let collection = matches!(
                 name.as_str(),
                 "List" | "Listing" | "Set" | "Map" | "Mapping"
-            )
+            );
+            if collection && !scope.shadows_builtin_type {
+                return true;
+            }
+            if let Some(alias) = scope.get_type_alias(name) {
+                if resolving.iter().any(|seen| seen == name) {
+                    return false;
+                }
+                resolving.push(name.clone());
+                let checkable = type_is_runtime_checkable_inner(alias, scope, resolving);
+                resolving.pop();
+                return checkable;
+            }
+            collection
         }
         TypeExpr::Constrained(base, _) => {
             let runtime_name = base

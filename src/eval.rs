@@ -121,11 +121,15 @@ struct PendingTypeCheck {
     /// its declaration. A failure poisons it, in another pass over the
     /// enclosing object, instead of failing outright.
     local: Option<LocalKey>,
+    /// The `for`/`when` body's entries, when the iteration scope is saved:
+    /// its local functions are bound again over the check scope, so a
+    /// constraint calling one sees the enclosing object's finished members.
+    body: Option<Body>,
 }
 
 /// What the deferred type checks of a finished object body read.
 struct FinishedBody<'a> {
-    entries: &'a [Entry],
+    entries: &'a Body,
     child_scope: &'a Scope,
     entry_scopes: Option<&'a [Option<Arc<CapturedScope>>]>,
     entry_owners: &'a EntryOwners,
@@ -238,7 +242,10 @@ enum TypeChecks {
     /// None: a class body, whose defaults an instance checks when built.
     Nothing,
     /// The entries at these indices: the ones an amendment wrote itself.
-    Entries(Rc<FxHashSet<usize>>),
+    /// The second set holds base entries the amendment then amends with a
+    /// body of its own (`o { v = 1 }`): objects nested in their values are
+    /// built unchecked, as the amendment checks the result.
+    Entries(Rc<FxHashSet<usize>>, Rc<FxHashSet<usize>>),
     /// Every entry of a `for`/`when` body, handed to the enclosing object to
     /// check once that object is complete. Carries the names the iterations
     /// around it declare (loop variables, enclosing generator bodies'
@@ -252,8 +259,14 @@ impl TypeChecks {
         match self {
             TypeChecks::All | TypeChecks::Generator(..) => true,
             TypeChecks::Nothing => false,
-            TypeChecks::Entries(indices) => indices.contains(&entry_index),
+            TypeChecks::Entries(indices, _) => indices.contains(&entry_index),
         }
+    }
+
+    /// Whether objects nested in the entry at `entry_index` are built
+    /// without checks, because an amendment of it checks the result.
+    fn defers_nested(&self, entry_index: usize) -> bool {
+        matches!(self, TypeChecks::Entries(_, deferred) if deferred.contains(&entry_index))
     }
 
     /// Checks for the body of the generator at `entry_index`, in its
@@ -3278,14 +3291,21 @@ impl Evaluator {
         // Check typed locals whose constraint reads module members against
         // the finished module. One that fails is poisoned in another pass.
         let mut failed_locals = Vec::new();
-        for prop in deferred_locals {
-            let Some(value) = scope.get(&prop.name).cloned() else {
-                continue;
-            };
-            if let LocalCheck::Failed(message) =
-                self.typed_local_failure(prop, &value, &scope, depth)?
-            {
-                failed_locals.push((local_key(prop, &Rc::from([])), message));
+        if !deferred_locals.is_empty() {
+            // A constraint may call a local function, which must see the
+            // finished module (late binding): re-create the module's local
+            // functions over it for the checks.
+            let mut check_scope = scope.child();
+            self.rebind_local_functions(&module.body, &mut check_scope, depth)?;
+            for prop in deferred_locals {
+                let Some(value) = scope.get(&prop.name).cloned() else {
+                    continue;
+                };
+                if let LocalCheck::Failed(message) =
+                    self.typed_local_failure(prop, &value, &check_scope, depth)?
+                {
+                    failed_locals.push((local_key(prop, &Rc::from([])), message));
+                }
             }
         }
         if !failed_locals.is_empty() {
@@ -3302,6 +3322,15 @@ impl Evaluator {
                 || prop.value.is_none()
                 || prop.type_ann.is_none()
                 || has_modifier(&prop.modifiers, Modifier::Local)
+            {
+                continue;
+            }
+            // A narrowed import evaluates only the properties it needs; any
+            // other one still holds what this module inherited, not this
+            // assignment's value, so it is not checked here.
+            if requested_eval_fields
+                .as_ref()
+                .is_some_and(|fields| !fields.contains(&prop.name))
             {
                 continue;
             }
@@ -3527,7 +3556,14 @@ impl Evaluator {
     }
 
     fn eval_entries(&mut self, entries: &Body, scope: &Scope, depth: usize) -> Result<Value> {
-        self.eval_entries_checked(entries, scope, depth, TypeChecks::All)
+        // An object nested in a class definition's defaults is checked when
+        // an instance is built, like the class's own properties.
+        let checks = if scope.defining_class {
+            TypeChecks::Nothing
+        } else {
+            TypeChecks::All
+        };
+        self.eval_entries_checked(entries, scope, depth, checks)
     }
 
     /// Evaluate an object body. The entries `checks` selects have their
@@ -3920,13 +3956,16 @@ impl Evaluator {
                         continue; // abstract without value — skip (must be overridden)
                     }
                     refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
-                    let active_scope = scope_for_object_entry(
+                    let mut active_scope = scope_for_object_entry(
                         entry_index,
                         &child_scope,
                         entry_scopes,
                         &entry_owners,
                         own_body_scope,
                     );
+                    if checks.defers_nested(entry_index) {
+                        active_scope.defining_class = true;
+                    }
                     let value = self.eval_property(prop, &active_scope, depth)?;
                     // Release the entry scope first: it may share the object
                     // scope's bindings, which binding the value would then copy.
@@ -4202,9 +4241,30 @@ impl Evaluator {
                 }
             }
         }
+        // Evaluate deferred local lambdas (function definitions) AFTER all
+        // properties so they capture overridden values (late binding).
+        refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
+        for (name, expr, entry_index) in deferred_lambdas {
+            let active_scope = scope_for_object_entry(
+                entry_index,
+                &child_scope,
+                entry_scopes,
+                &entry_owners,
+                own_body_scope,
+            );
+            let val = self.eval_expr(expr, &active_scope, depth)?;
+            drop(active_scope);
+            if tracks_types {
+                // Deferred checks below read a local function's late-bound
+                // value, not the one it was first bound to.
+                local_bindings.insert(entry_index, Ok(val.clone()));
+            }
+            child_scope.set(name, val);
+        }
         // Check typed locals whose constraint reads members of this body
-        // against the finished body. One that fails is poisoned in another
-        // pass, so only an actual read fails.
+        // against the finished body, once local functions are re-bound to it.
+        // One that fails is poisoned in another pass, so only an actual read
+        // fails.
         if !deferred_locals.is_empty() {
             let body = FinishedBody {
                 entries,
@@ -4233,21 +4293,6 @@ impl Evaluator {
             if !failed_locals.is_empty() {
                 return Ok(BodyOutcome::PoisonAndRetry(failed_locals));
             }
-        }
-        // Evaluate deferred local lambdas (function definitions) AFTER all
-        // properties so they capture overridden values (late binding).
-        refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
-        for (name, expr, entry_index) in deferred_lambdas {
-            let active_scope = scope_for_object_entry(
-                entry_index,
-                &child_scope,
-                entry_scopes,
-                &entry_owners,
-                own_body_scope,
-            );
-            let val = self.eval_expr(expr, &active_scope, depth)?;
-            drop(active_scope);
-            child_scope.set(name, val);
         }
         // Check declared types once every member is bound, so a constraint
         // can read members declared after the property it checks. Each entry
@@ -4551,8 +4596,10 @@ impl Evaluator {
             child_scope.set("super".into(), pv.clone());
         }
 
-        // Class property defaults are checked against their declared types
-        // when an instance is built, not when the class is defined.
+        // Class property defaults, including those of objects nested in them,
+        // are checked against their declared types when an instance is
+        // built, not when the class is defined.
+        child_scope.defining_class = true;
         let child_defaults =
             self.eval_entries_checked(body, &child_scope, depth + 1, TypeChecks::Nothing)?;
         if let Some(Value::Object(parent_map, parent_src)) = parent_val {
@@ -4904,6 +4951,30 @@ impl Evaluator {
         })
     }
 
+    /// Bind again, in `scope`, the local functions (`local f = (x) -> ...`)
+    /// `entries` declare, so they capture the bindings `scope` holds rather
+    /// than those at their first binding: a deferred check reads a local
+    /// function's late-bound value, as a call from the finished body would.
+    /// A function whose binding failed is left as is.
+    fn rebind_local_functions(
+        &mut self,
+        entries: &[Entry],
+        scope: &mut Scope,
+        depth: usize,
+    ) -> Result<()> {
+        for entry in entries {
+            if let Entry::Property(prop) = entry
+                && has_modifier(&prop.modifiers, Modifier::Local)
+                && let Some(expr @ Expr::Lambda(..)) = &prop.value
+                && scope.get(&prop.name).is_some()
+            {
+                let value = self.eval_expr(expr, scope, depth)?;
+                scope.set(prop.name.clone(), value);
+            }
+        }
+        Ok(())
+    }
+
     /// Check the typed locals whose check waited for the finished body.
     /// Returns those that fail (name, error), to poison in another pass.
     #[inline(never)]
@@ -4944,6 +5015,7 @@ impl Evaluator {
                     iteration_names: iteration_names.clone(),
                     entry_index: None,
                     local: Some(local_key(prop, &iteration)),
+                    body: Some(Arc::clone(body.entries)),
                 });
                 continue;
             }
@@ -5009,10 +5081,10 @@ impl Evaluator {
                 let constrained = type_has_constraint(ty, &active_scope);
                 let saved_scope = type_needs_iteration_scope(ty, &active_scope, names)
                     .then(|| capture_for_type_check(ty, &active_scope));
-                let iteration_names = if saved_scope.is_some() {
-                    names.clone()
+                let (iteration_names, body_entries) = if saved_scope.is_some() {
+                    (names.clone(), Some(Arc::clone(body.entries)))
                 } else {
-                    FxHashSet::default()
+                    (FxHashSet::default(), None)
                 };
                 pending.push(PendingTypeCheck {
                     name: prop.name.clone(),
@@ -5023,6 +5095,7 @@ impl Evaluator {
                     iteration_names,
                     entry_index: None,
                     local: None,
+                    body: body_entries,
                 });
                 continue;
             }
@@ -5096,6 +5169,10 @@ impl Evaluator {
                 if !layered.contains(name) {
                     check_scope.poison(name.clone(), message.clone());
                 }
+            }
+            // The body's local functions see the finished members too.
+            if let Some(entries) = &check.body {
+                self.rebind_local_functions(entries, &mut check_scope, depth)?;
             }
             match check.local {
                 Some(key) => {
@@ -5232,8 +5309,15 @@ impl Evaluator {
                 }
                 Ok(false)
             }
-            // Non-constrained types: delegate to the simple check
-            _ => Ok(value_is_type(val, ty)),
+            // A generic alias (`typealias Pairs<T> = List<T>`) checks as its
+            // target; its type arguments are not modeled.
+            TypeExpr::Generic(name, _) => {
+                if let Some(resolved) = scope.get_type_alias(name) {
+                    let resolved = resolved.clone();
+                    return self.eval_type_check(val, &resolved, scope, depth + 1);
+                }
+                Ok(value_is_type(val, ty))
+            }
         }
     }
 
@@ -5472,8 +5556,29 @@ impl Evaluator {
 
         // Evaluate the merged entries (eval_entries handles locals, classes,
         // and evaluates properties in order with each added to scope)
+        // Entries a later entry amends with a body (`new C { o { v = 1 } }`,
+        // or an earlier amendment's chain): objects nested in them are built
+        // unchecked, as that amendment checks them against the values it
+        // leaves (here overriding a default `v: Int = "x"` of `o`).
+        let mut amended_bases = FxHashSet::default();
+        let mut amended_later: HashSet<&str> = HashSet::new();
+        for (index, entry) in merged.iter().enumerate().rev() {
+            let Entry::Property(prop) = entry else {
+                continue;
+            };
+            if amended_later.contains(prop.name.as_str()) {
+                amended_bases.insert(index);
+            }
+            if prop.body.is_some() && prop.value.is_none() {
+                amended_later.insert(prop.name.as_str());
+            }
+        }
         let merged: Body = Arc::new(merged);
         eval_scope.receiver_entries = Some(merged.clone());
+        // An object amended as part of a class definition's defaults is
+        // checked when an instance is built, like the class's properties.
+        let defining_class = current_scope.defining_class;
+        eval_scope.defining_class = defining_class;
         let mut result = self.eval_entries_with_lexical_scopes(
             &merged,
             &eval_scope,
@@ -5483,7 +5588,11 @@ impl Evaluator {
             // Entries the amendment wrote are checked in their own scope once
             // the body is done; the base's declared properties are checked
             // below.
-            TypeChecks::Entries(Rc::new(overlay_checked)),
+            if defining_class {
+                TypeChecks::Nothing
+            } else {
+                TypeChecks::Entries(Rc::new(overlay_checked), Rc::new(amended_bases))
+            },
         )?;
         if let Value::Object(map, Some(source)) = result {
             let mut source = Arc::unwrap_or_clone(source);
@@ -5499,7 +5608,9 @@ impl Evaluator {
                 _ => None,
             })
             .collect::<HashSet<_>>();
-        if let Value::Object(map, source) = &result {
+        if let Value::Object(map, source) = &result
+            && !defining_class
+        {
             for entry in base_entries.iter() {
                 let Entry::Property(prop) = entry else {
                     continue;

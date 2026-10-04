@@ -2820,3 +2820,60 @@ async fn imported_class_reading_missing_module_property_reports_error() {
         assert!(err.contains("missing"), "{importer}: {err}");
     }
 }
+
+#[tokio::test]
+async fn narrowed_import_checks_only_the_members_it_evaluates() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_checks_evaluated");
+    let dir = temp.path();
+    std::fs::write(dir.join("base.pkl"), "x = 1\ny = 2\n").unwrap();
+    std::fs::write(
+        dir.join("child.pkl"),
+        "amends \"base.pkl\"\nx: Int(this > 5) = 10\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("bad.pkl"),
+        "amends \"base.pkl\"\nx: Int(this > 5) = 3\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("only_y.pkl"),
+        "import \"child.pkl\" as C\nout = C.y\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("both.pkl"),
+        "import \"child.pkl\" as C\ny = C.y\nx = C.x\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("bad_only_y.pkl"),
+        "import \"bad.pkl\" as B\nout = B.y\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("bad_x.pkl"),
+        "import \"bad.pkl\" as B\nout = B.x\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("only_y.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["out"], 2);
+    let val = pklr::eval_to_json_async(&dir.join("both.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["y"], 2);
+    assert_eq!(val["x"], 10);
+    // `x` is never read, so its failing constraint is never checked.
+    let val = pklr::eval_to_json_async(&dir.join("bad_only_y.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["out"], 2);
+    let err = pklr::eval_to_json_async(&dir.join("bad_x.pkl"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("property 'x'"), "{err}");
+}

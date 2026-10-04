@@ -4882,3 +4882,197 @@ obj {
     );
     assert_eq!(json["obj"]["ok"], true);
 }
+
+#[test]
+fn typed_local_constraint_uses_late_bound_local_function() {
+    // The local function reads `limit`, which the body overrides after it:
+    // the deferred check must use the function bound to the final `limit`.
+    let err = eval_fails(
+        r#"
+limit = 10
+obj {
+  local helper = (x) -> x < limit
+  local checked: Int(helper(this)) = 3
+  limit = 2
+  out = checked
+}
+"#,
+    );
+    assert!(err.contains("checked"), "{err}");
+    let json = eval(
+        r#"
+limit = 0
+obj {
+  local helper = (x) -> x < limit
+  local checked: Int(helper(this)) = 1
+  limit = 2
+  out = checked
+}
+"#,
+    );
+    assert_eq!(json["obj"]["out"], 1);
+}
+
+#[test]
+fn module_typed_local_constraint_uses_late_bound_local_function() {
+    let err = eval_fails(
+        r#"
+local helper = (x) -> x < limit
+local checked: Int(helper(this)) = 3
+limit = 2
+out = checked
+"#,
+    );
+    assert!(err.contains("checked"), "{err}");
+    let json = eval(
+        r#"
+local helper = (x) -> x < limit
+local checked: Int(helper(this)) = 1
+limit = 2
+out = checked
+"#,
+    );
+    assert_eq!(json["out"], 1);
+}
+
+#[test]
+fn generator_typed_local_constraint_uses_late_bound_local_function() {
+    let err = eval_fails(
+        r#"
+limit = 10
+obj {
+  when (true) {
+    local helper = (x) -> x < limit
+    local checked: Int(helper(this)) = 3
+    out = checked
+  }
+  limit = 2
+}
+"#,
+    );
+    assert!(err.contains("checked"), "{err}");
+    let json = eval(
+        r#"
+limit = 0
+obj {
+  when (true) {
+    local helper = (x) -> x < limit
+    local checked: Int(helper(this)) = 1
+    out = checked
+  }
+  limit = 2
+}
+"#,
+    );
+    assert_eq!(json["obj"]["out"], 1);
+}
+
+#[test]
+fn class_default_nested_object_is_checked_against_instance_values() {
+    // A nested object's default is checked once the instance is built,
+    // against what the instance amends it to.
+    let json = eval(
+        r#"
+class C { o { v: Int = "x" } }
+c = new C { o { v = 1 } }
+"#,
+    );
+    assert_eq!(json["c"]["o"]["v"], 1);
+    let err = eval_fails(
+        r#"
+class C { o { v: Int = "x" } }
+c = new C {}
+out = c.o.v
+"#,
+    );
+    assert!(err.contains("property 'v' expected Int"), "{err}");
+    let err = eval_fails(
+        r#"
+class C { o { v: Int = "x" } }
+c = new C { o { w = 1 } }
+"#,
+    );
+    assert!(err.contains("property 'v' expected Int"), "{err}");
+    let err = eval_fails(
+        r#"
+class C { o { v: Int = 1 } }
+c = new C { o { v = "y" } }
+"#,
+    );
+    assert!(err.contains("property 'v' expected Int"), "{err}");
+}
+
+#[test]
+fn class_default_deeply_nested_object_is_checked_against_instance_values() {
+    let json = eval(
+        r#"
+class C { o { p { v: Int = "x" } } }
+c = new C { o { p { v = 1 } } }
+d = (c) { o { w = 2 } }
+"#,
+    );
+    assert_eq!(json["c"]["o"]["p"]["v"], 1);
+    assert_eq!(json["d"]["o"]["p"]["v"], 1);
+    let err = eval_fails(
+        r#"
+class C { o { p { v: Int = "x" } } }
+c = new C { o { p { w = 1 } } }
+"#,
+    );
+    assert!(err.contains("property 'v' expected Int"), "{err}");
+    let json = eval(
+        r#"
+class C { o: Dynamic = new Dynamic { v: Int = "x" } }
+c = new C { o { v = 1 } }
+"#,
+    );
+    assert_eq!(json["c"]["o"]["v"], 1);
+}
+
+#[test]
+fn amended_nested_object_keeps_checking_its_declared_types() {
+    let err = eval_fails(
+        r#"
+a { o { p { v: Int = 1 } } }
+b = (a) { o { p { v = "y" } } }
+"#,
+    );
+    assert!(err.contains("property 'v' expected Int"), "{err}");
+    let err = eval_fails(
+        r#"
+a { o { v: Int = 1 } }
+b = (a) { o { w = 3 } }
+c = (b) { o { v = "y" } }
+"#,
+    );
+    assert!(err.contains("property 'v' expected Int"), "{err}");
+    let json = eval(
+        r#"
+a { o { v: Int = 1 } }
+b = (a) { o { w = 3 } }
+c = (b) { o { v = 2 } }
+"#,
+    );
+    assert_eq!(json["c"]["o"], serde_json::json!({"v": 2, "w": 3}));
+}
+
+#[test]
+fn generic_type_alias_is_checked_as_its_target() {
+    let err = eval_fails("typealias Ls<T> = List<T>\nx: Ls<Int> = 5");
+    assert!(err.contains("property 'x' expected Ls<Int>"), "{err}");
+    let json = eval("typealias Ls<T> = List<T>\nx: Ls<Int> = List(1)");
+    assert_eq!(json["x"], serde_json::json!([1]));
+    let err = eval_fails("typealias Ls<T> = List<T>(length > 1)\nx: Ls<Int> = List(1)");
+    assert!(err.contains("property 'x' expected Ls<Int>"), "{err}");
+    let json = eval("typealias Ls<T> = List<T>(length > 1)\nx: Ls<Int> = List(1, 2)");
+    assert_eq!(json["x"], serde_json::json!([1, 2]));
+}
+
+#[test]
+fn type_alias_shadowing_a_generic_collection_is_resolved() {
+    // `Listing<Int>` names the alias, not the built-in collection.
+    let err = eval_fails("typealias Listing = String\nx: Listing<Int> = 5");
+    assert!(err.contains("property 'x' expected Listing<Int>"), "{err}");
+    let json = eval("typealias Listing = String\nx: Listing<Int> = \"a\"");
+    assert_eq!(json["x"], "a");
+}
