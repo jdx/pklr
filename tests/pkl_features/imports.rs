@@ -2419,6 +2419,269 @@ async fn narrowed_import_skips_module_properties_named_like_inherited_method_rea
 }
 
 #[tokio::test]
+async fn narrowed_import_ignores_class_properties_named_like_module_properties_when_following_class()
+ {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_followed_class_shadow");
+    let dir = temp.path();
+    // `D` reads the module's `max` (by name, or through `module`), so an
+    // importer building one needs it, but `b = a` reads the instance's own
+    // `a`, so the unused module `a` is not needed.
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "a = throw(\"unused\")\nmax = 3\nclass D {\n  a = 6\n  b = a\n  c = max\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep_qualified.pkl"),
+        "a = throw(\"unused\")\nmax = 3\nclass D {\n  a = 6\n  b = a\n  c = module.max\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as Dep\nimport \"dep_qualified.pkl\" as Q\nd = new Dep.D {}\nq = new Q.D {}\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        val,
+        serde_json::json!({"d": {"a": 6, "b": 6, "c": 3}, "q": {"a": 6, "b": 6, "c": 3}})
+    );
+}
+
+#[tokio::test]
+async fn narrowed_import_skips_inherited_method_reads_when_following_class() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_followed_class_inherited");
+    let dir = temp.path();
+    // `getMax` reads the module's `max`, so an importer building a `Child`
+    // needs it, but `getMin` runs on the built instance, where `min` is the
+    // inherited property, so the unused module `min` is not needed.
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "min = throw(\"unused\")\nmax = 3\nopen class Parent { min = 2 }\nclass Child extends Parent {\n  function getMin() = min\n  function getMax() = max\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as Dep\nchild = new Dep.Child {}\nmin = child.getMin()\nmax = child.getMax()\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["min"], 2);
+    assert_eq!(val["max"], 3);
+}
+
+#[tokio::test]
+async fn narrowed_import_follows_module_reads_made_before_class_properties_are_bound() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_followed_class_early_reads");
+    let dir = temp.path();
+    // A class body's locals are evaluated before its properties, and each
+    // property is bound in declaration order, so these reads of `a` (or
+    // `name`) happen before the class's own property of that name exists
+    // and still need the module's.
+    let deps = [
+        // A local.
+        "a = 1\nmax = 3\nclass D {\n  local x = a\n  a = 6\n  b = x\n  c = module.max\n}\n",
+        // A property's own initializer.
+        "a = \"mod\"\nmax = 3\nclass D {\n  a = a\n  c = module.max\n}\n",
+        // A method called by a default declared before the property.
+        "a = 1\nmax = 3\nclass D {\n  function f() = a\n  b = f()\n  a = 6\n  c = module.max\n}\n",
+        // A local method, which captures the scope the locals see, even when
+        // a default after the property runs it.
+        "a = 1\nmax = 3\nclass D {\n  local f = () -> a\n  a = 6\n  b = f.apply()\n  c = module.max\n}\n",
+        // A nested class, whose defaults are also evaluated first.
+        "a = 1\nmax = 3\nclass D {\n  a = 6\n  class Inner { x = a }\n  b = new Inner {}\n  c = module.max\n}\n",
+        // A nested class's method, called by a default declared before the
+        // property.
+        "a = 1\nmax = 3\nclass D {\n  class Reader { function f() = a }\n  r = new Reader {}.f()\n  a = 6\n  c = module.max\n}\n",
+        // ...or through another of its methods.
+        "a = 1\nmax = 3\nclass D {\n  class Reader {\n    function g() = a\n    function f() = g()\n  }\n  r = new Reader {}.f()\n  a = 6\n  c = module.max\n}\n",
+        // ...or through another nested class's method, or a property storing
+        // the method.
+        "a = 1\nmax = 3\nclass D {\n  class Reader { function f() = a }\n  class Caller { function go() = new Reader {}.f() }\n  r = new Caller {}.go()\n  a = 6\n  c = module.max\n}\n",
+        "a = 1\nmax = 3\nclass D {\n  class Reader {\n    function g() = a\n    callback = g\n  }\n  r = new Reader {}.callback.apply()\n  a = 6\n  c = module.max\n}\n",
+        // ...or a function it passes an instance to.
+        "a = 1\nmax = 3\nlocal function run(x) = x.f()\nclass D {\n  class Reader { function f() = a }\n  r = run(new Reader {})\n  a = 6\n  c = module.max\n}\n",
+        "a = 1\nmax = 3\nlocal function run(x) = x.f()\nclass D {\n  class Reader { function f() = a }\n  r = new Reader {} |> run\n  a = 6\n  c = module.max\n}\n",
+        // ...or a class nested in the nested class.
+        "a = 1\nmax = 3\nclass D {\n  class Reader {\n    class Inner { function f() = a }\n    function go() = new Inner {}.f()\n  }\n  r = new Reader {}.go()\n  a = 6\n  c = module.max\n}\n",
+        // ...or a sibling of a nested class it builds.
+        "a = 1\nmax = 3\nclass D {\n  class Reader {\n    class Other { function f() = a }\n    class Middle { function go() = new Other {}.f() }\n    function go() = new Middle {}.go()\n  }\n  r = new Reader {}.go()\n  a = 6\n  c = module.max\n}\n",
+    ];
+    for (i, dep) in deps.iter().enumerate() {
+        let name = format!("dep{i}.pkl");
+        std::fs::write(dir.join(&name), format!("{dep}d = new D {{}}\n")).unwrap();
+        std::fs::write(
+            dir.join("main.pkl"),
+            format!("import \"{name}\" as Dep\nd = new Dep.D {{}}\n"),
+        )
+        .unwrap();
+        let direct = pklr::eval_to_json_async(&dir.join(&name)).await.unwrap();
+        let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+            .await
+            .unwrap();
+        assert_eq!(val["d"], direct["d"], "{dep}");
+    }
+}
+
+#[tokio::test]
+async fn narrowed_import_skips_nested_class_reads_after_class_properties_are_bound() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_nested_class_reads");
+    let dir = temp.path();
+    // Only a nested class's defaults are evaluated before `D`'s properties
+    // are bound: `Inner`'s `x` reads its own `a`, and its method `f` runs
+    // after `D`'s `a` is bound, so the unused module `a` is not needed.
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "a = throw(\"unused\")\nmax = 3\nclass D {\n  a = 6\n  class Inner {\n    a = 1\n    x = a\n  }\n  class Reader { function f() = a }\n  b = new Inner {}\n  r = new Reader {}.f()\n  c = module.max\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as Dep\nd = new Dep.D {}\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["d"]["b"]["x"], 1);
+    assert_eq!(val["d"]["r"], 6);
+    assert_eq!(val["d"]["c"], 3);
+}
+
+#[tokio::test]
+async fn narrowed_import_skips_nested_methods_early_defaults_do_not_run_on_outer_names() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_nested_method_reads");
+    let dir = temp.path();
+    // Building a `Reader` before `D`'s `a` is bound doesn't call `f`, nor
+    // does passing something else to a function.
+    std::fs::write(
+        dir.join("built.pkl"),
+        "a = throw(\"unused\")\nmax = 3\nlocal function id(x) = x\nclass D {\n  class Reader { function f() = a }\n  r = new Reader {}\n  s = id(1 + 1)\n  t = id(\"\\(r)\")\n  a = 6\n  c = module.max\n}\n",
+    )
+    .unwrap();
+    // `f` reads the `a` a `Reader` inherits from `Base`.
+    std::fs::write(
+        dir.join("inherited.pkl"),
+        "a = throw(\"unused\")\nmax = 3\nopen class Base { a = 2 }\nclass D {\n  class Reader extends Base { function f() = a }\n  r = new Reader {}.f()\n  a = 6\n  c = module.max\n}\n",
+    )
+    .unwrap();
+    // The same for a class nested deeper that extends a class an enclosing
+    // nested class declares, and for one reading what the instance around it
+    // inherits.
+    std::fs::write(
+        dir.join("deep.pkl"),
+        "a = throw(\"unused\")\nmax = 3\nclass D {\n  class Reader {\n    open class Base { a = 2 }\n    class Middle {\n      class Inner extends Base { function f() = a }\n      function go() = new Inner {}.f()\n    }\n    function go() = new Middle {}.go()\n  }\n  r = new Reader {}.go()\n  a = 6\n  c = module.max\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("enclosing.pkl"),
+        "a = throw(\"unused\")\nmax = 3\nopen class Base { a = 2 }\nclass D {\n  class Reader extends Base {\n    class Inner { function f() = a }\n    function go() = new Inner {}.f()\n  }\n  r = new Reader {}.go()\n  a = 6\n  c = module.max\n}\n",
+    )
+    .unwrap();
+    // `module.Base` is the module's class, not a nested one of that name.
+    std::fs::write(
+        dir.join("qualified.pkl"),
+        "a = throw(\"unused\")\nmax = 3\nopen class Base { a = 2 }\nclass D {\n  open class Base { b = 3 }\n  class Reader extends module.Base { function f() = a }\n  r = new Reader {}.f()\n  a = 6\n  c = module.max\n}\n",
+    )
+    .unwrap();
+    // Inherited through empty classes.
+    std::fs::write(
+        dir.join("chain.pkl"),
+        "a = throw(\"unused\")\nmax = 3\nclass D {\n  open class Base { a = 2 }\n  open class Empty1 extends Base {}\n  open class Empty2 extends Empty1 {}\n  class Reader extends Empty2 { function f() = a }\n  r = new Reader {}.f()\n  a = 6\n  c = module.max\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"built.pkl\" as B\nimport \"inherited.pkl\" as I\nimport \"deep.pkl\" as P\nimport \"enclosing.pkl\" as E\nimport \"qualified.pkl\" as Q\nimport \"chain.pkl\" as C\nbuilt = new B.D {}\ninherited = new I.D {}\ndeep = new P.D {}\nenclosing = new E.D {}\nqualified = new Q.D {}\nchain = new C.D {}\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["built"]["c"], 3);
+    assert_eq!(val["inherited"]["r"], 2);
+    assert_eq!(val["deep"]["r"], 2);
+    assert_eq!(val["enclosing"]["r"], 2);
+    assert_eq!(val["qualified"]["r"], 2);
+    assert_eq!(val["chain"]["r"], 2);
+}
+
+#[tokio::test]
+async fn narrowed_import_skips_local_methods_class_defaults_do_not_run() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_local_method");
+    let dir = temp.path();
+    // The local method `f` only runs from `g` on the built instance, where
+    // `min` is the inherited property, so the unused module `min` is not
+    // needed.
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "min = throw(\"unused\")\nmax = 3\nopen class Parent { min = 2 }\nclass Child extends Parent {\n  local f = () -> min\n  function g() = f.apply()\n  c = max\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as Dep\nchild = new Dep.Child {}\ng = child.g()\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["g"], 2);
+    assert_eq!(val["child"]["c"], 3);
+}
+
+#[tokio::test]
+async fn narrowed_import_skips_stored_methods_class_defaults_do_not_apply() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_stored_method");
+    let dir = temp.path();
+    // `callback = getMin` only stores the method, which then runs on the
+    // built instance, where `min` is the inherited property.
+    std::fs::write(
+        dir.join("stored.pkl"),
+        "min = throw(\"unused\")\nmax = 3\nopen class Parent { min = 2 }\nclass Child extends Parent {\n  function getMin() = min\n  callback = getMin\n  c = max\n}\n",
+    )
+    .unwrap();
+    // Applying the stored method in a default runs it before `Parent`'s
+    // `min` is merged in, so the module's `min` is still needed.
+    std::fs::write(
+        dir.join("applied.pkl"),
+        "min = 1\nmax = 3\nopen class Parent { min = 2 }\nclass Child extends Parent {\n  function getMin() = min\n  callback = getMin\n  a = callback.apply()\n  c = max\n}\nchild = new Child {}\n",
+    )
+    .unwrap();
+    // A stored local method applied on the built instance reads the
+    // instance's `a`, so the unused module `a` is not needed either.
+    std::fs::write(
+        dir.join("local.pkl"),
+        "a = throw(\"unused\")\nmax = 3\nclass D {\n  local f = () -> a\n  callback = f\n  a = 6\n  c = module.max\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"stored.pkl\" as S\nimport \"applied.pkl\" as A\nimport \"local.pkl\" as L\nmin = (new S.Child {}).callback.apply()\napplied = (new A.Child {}).a\nlocalMethod = (new L.D {}).callback.apply()\n",
+    )
+    .unwrap();
+
+    let direct = pklr::eval_to_json_async(&dir.join("applied.pkl"))
+        .await
+        .unwrap();
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["min"], 2);
+    assert_eq!(val["applied"], direct["child"]["a"]);
+    assert_eq!(val["localMethod"], 6);
+}
+
+#[tokio::test]
 async fn narrowed_import_follows_methods_called_by_class_defaults() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_default_method_call");
     let dir = temp.path();
