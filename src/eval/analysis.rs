@@ -1158,8 +1158,8 @@ impl<'a> ModuleClasses<'a> {
     /// The non-local properties `class` inherits from ancestors declared in
     /// this module.
     fn inherited_properties(&self, class: &str) -> HashSet<&'a str> {
-        let mut names = HashSet::new();
-        let mut seen = HashSet::new();
+        let mut names = HashSet::default();
+        let mut seen = HashSet::default();
         // `extends module.Parent` names the same class as `extends Parent`.
         let unqualified = |name: &'a str| name.strip_prefix("module.").unwrap_or(name);
         let mut next = self
@@ -1241,11 +1241,11 @@ fn eager_class_refs(body: &[Entry], upto: Option<usize>) -> HashSet<String> {
     let reads = |seeds: Vec<Entry>| {
         let mut refs = referenced_roots(&seeds);
         let mut instance = InstanceReads {
-            members: HashSet::new(),
+            members: HashSet::default(),
             escapes: false,
         };
         instance.entries(&seeds, 0);
-        let mut followed = HashSet::new();
+        let mut followed = HashSet::default();
         loop {
             let calls_all = instance.escapes;
             let read = |name: &str| refs.contains(name) || instance.members.contains(name);
