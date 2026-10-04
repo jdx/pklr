@@ -2554,9 +2554,16 @@ async fn narrowed_import_skips_stored_methods_class_defaults_do_not_apply() {
         "min = 1\nmax = 3\nopen class Parent { min = 2 }\nclass Child extends Parent {\n  function getMin() = min\n  callback = getMin\n  a = callback.apply()\n  c = max\n}\nchild = new Child {}\n",
     )
     .unwrap();
+    // A stored local method applied on the built instance reads the
+    // instance's `a`, so the unused module `a` is not needed either.
+    std::fs::write(
+        dir.join("local.pkl"),
+        "a = throw(\"unused\")\nmax = 3\nclass D {\n  local f = () -> a\n  callback = f\n  a = 6\n  c = module.max\n}\n",
+    )
+    .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"stored.pkl\" as S\nimport \"applied.pkl\" as A\nmin = (new S.Child {}).callback.apply()\napplied = (new A.Child {}).a\n",
+        "import \"stored.pkl\" as S\nimport \"applied.pkl\" as A\nimport \"local.pkl\" as L\nmin = (new S.Child {}).callback.apply()\napplied = (new A.Child {}).a\nlocalMethod = (new L.D {}).callback.apply()\n",
     )
     .unwrap();
 
@@ -2568,6 +2575,7 @@ async fn narrowed_import_skips_stored_methods_class_defaults_do_not_apply() {
         .unwrap();
     assert_eq!(val["min"], 2);
     assert_eq!(val["applied"], direct["child"]["a"]);
+    assert_eq!(val["localMethod"], 6);
 }
 
 #[tokio::test]
