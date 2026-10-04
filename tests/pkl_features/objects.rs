@@ -3982,3 +3982,16 @@ fn amending_the_wrong_kind_of_parent_is_rejected() {
         assert!(err.contains(message), "{src}: {err}");
     }
 }
+#[test]
+fn nested_amendments_of_class_instances_reject_elements() {
+    for src in [
+        "class Foo { a = 1 }\nm = new Mapping<String, Foo> { [\"a\"] { \"ignored\" } }\n",
+        "class Foo { a = 1 }\nclass Bar { f: Foo }\nb = new Bar { f { \"x\" } }\n",
+    ] {
+        let err = eval_fails(src);
+        assert!(
+            err.contains("Object of type `test#Foo` cannot have an element."),
+            "{src}: {err}"
+        );
+    }
+}
