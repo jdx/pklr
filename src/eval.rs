@@ -1627,9 +1627,13 @@ impl Evaluator {
                 scope.set_module_identity(key, identity);
             }
         }
-        let requested_output_fields = requested_fields
-            .as_ref()
-            .map(|fields| expand_requested_fields(&module.body, fields));
+        let requested_output_fields = requested_fields.as_ref().map(|fields| {
+            expand_requested_fields(
+                &module.body,
+                fields,
+                module.amends.is_some() || module.extends.is_some(),
+            )
+        });
         let analysis_entries =
             analysis_entries_for_requested_fields(&module.body, requested_output_fields.as_ref());
         let mut referenced_imports = referenced_roots(&analysis_entries);
@@ -2102,7 +2106,11 @@ impl Evaluator {
                 .map(Entry::Property)
                 .collect::<Vec<_>>();
             dependency_entries.extend(module.body.iter().cloned());
-            expand_requested_fields(&dependency_entries, fields)
+            expand_requested_fields(
+                &dependency_entries,
+                fields,
+                module.amends.is_some() || module.extends.is_some(),
+            )
         });
 
         // Locals are evaluated before the main property pass, but `this` and

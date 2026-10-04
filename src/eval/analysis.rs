@@ -339,9 +339,12 @@ fn mark_other_use(uses: &mut HashMap<String, ImportUse>, name: &str) {
     }
 }
 
+/// `inherits` is whether the module amends or extends another, whose type
+/// aliases checks here also resolve but this analysis doesn't see.
 pub(super) fn expand_requested_fields(
     entries: &[Entry],
     requested: &HashSet<String>,
+    inherits: bool,
 ) -> HashSet<String> {
     let property_names: HashSet<String> = entries
         .iter()
@@ -373,13 +376,20 @@ pub(super) fn expand_requested_fields(
             })
             .collect(),
     };
-    let module_aliases: TypeAliases = entries
+    let mut module_aliases: TypeAliases = entries
         .iter()
         .filter_map(|entry| match entry {
             Entry::TypeAlias(name, ty) => Some((name.as_str(), Some(ty))),
             _ => None,
         })
         .collect();
+    // An inherited alias may redefine a built-in, so leave the built-ins this
+    // module doesn't define unresolved.
+    if inherits {
+        for builtin in BINDING_BUILTIN_TYPES {
+            module_aliases.entry(builtin).or_insert(None);
+        }
+    }
     let aliases = Some(&module_aliases);
     // An importer reading `dep.ClassName` needs the module properties the
     // class reads through `module` (it is evaluated against them). Other
@@ -677,13 +687,15 @@ fn narrow_aliases<'a>(
 /// `aliases` with each of the `declared` names that `constraint_bound_names`
 /// would read as a built-in marked unresolvable, since where the declaration
 /// is in scope the built-in's bindings may no longer apply. A built-in that
-/// `entries` only redeclares as type aliases which bind the same names (such
-/// as `typealias String = List`) stays resolved when nothing outside
-/// `aliases` already gave it another meaning: it binds them before and after
-/// the declaration alike. `None` when `aliases` is unchanged.
+/// `entries` only redeclares as one type alias which binds the same names
+/// (such as `typealias String = List`) stays resolved, to that definition, when
+/// nothing in `aliases` already gave it another meaning: it binds them before
+/// and after the declaration alike, and a deeper body that redeclares what
+/// the definition refers to still sees it. `None` when `aliases` is
+/// unchanged.
 fn with_builtins_unresolved<'a>(
     aliases: &TypeAliases<'a>,
-    entries: &[Entry],
+    entries: &'a [Entry],
     declared: &HashSet<&str>,
 ) -> Option<TypeAliases<'a>> {
     let redeclared: Vec<&str> = BINDING_BUILTIN_TYPES
@@ -700,25 +712,28 @@ fn with_builtins_unresolved<'a>(
     }
     // Resolve the new definitions with every redeclared built-in unresolved,
     // so one that reaches another still counts as unknown.
-    let binds_same = |builtin: &str| {
-        aliases.get(builtin).is_none()
-            && entries.iter().all(|entry| match entry {
-                Entry::TypeAlias(name, ty) if name == builtin => {
-                    alias_binds_collection_names(ty, &marked)
-                }
-                Entry::ClassDef(name, ..) => name != builtin,
-                _ => true,
-            })
+    let binding_definition = |builtin: &str| {
+        if aliases.contains_key(builtin) {
+            return None;
+        }
+        let mut definitions = entries.iter().filter_map(|entry| match entry {
+            Entry::TypeAlias(name, ty) if name == builtin => Some(Some(ty)),
+            Entry::ClassDef(name, ..) if name == builtin => Some(None),
+            _ => None,
+        });
+        match (definitions.next(), definitions.next()) {
+            (Some(Some(ty)), None) if alias_binds_collection_names(ty, &marked) => Some(ty),
+            _ => None,
+        }
     };
-    let kept: Vec<&str> = redeclared
+    let kept: Vec<_> = redeclared
         .iter()
-        .copied()
-        .filter(|builtin| binds_same(builtin))
+        .filter_map(|builtin| Some((*builtin, binding_definition(builtin)?)))
         .collect();
-    for builtin in &kept {
-        marked.remove(builtin);
+    for (builtin, ty) in kept {
+        marked.insert(builtin, Some(ty));
     }
-    (kept.len() != redeclared.len()).then_some(marked)
+    Some(marked)
 }
 
 /// Whether a check against the type alias definition `ty` binds `length` and
