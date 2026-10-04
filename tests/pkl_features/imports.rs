@@ -2829,3 +2829,35 @@ async fn narrowed_import_keeps_type_and_property_names_apart() {
     assert_eq!(val["outTypeShadow"], 5);
     assert_eq!(val["outLocalShadow"], true);
 }
+
+#[tokio::test]
+async fn narrowed_import_reads_qualified_type_roots_and_nested_classes() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_qualified_roots");
+    let dir = temp.path();
+    std::fs::write(dir.join("types.pkl"), "class Item {\n  a: Int = 1\n}\n").unwrap();
+    // The root of `Dep.Item` is a property holding a module, so building one
+    // reads the property.
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "Dep = import(\"types.pkl\")\nresult = new Dep.Item {}\n",
+    )
+    .unwrap();
+    // A class declared in a body is bound as a value too, so reading it there
+    // doesn't read the module property of its name.
+    std::fs::write(
+        dir.join("dep_class.pkl"),
+        "C = throw(\"unused\")\nresult {\n  class C {\n    a: Int = 1\n  }\n  ok = C\n  inst = new C {}\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as Dep\nimport \"dep_class.pkl\" as DepClass\nout = Dep.result\noutClass = DepClass.result.inst\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["out"], serde_json::json!({ "a": 1 }));
+    assert_eq!(val["outClass"], serde_json::json!({ "a": 1 }));
+}

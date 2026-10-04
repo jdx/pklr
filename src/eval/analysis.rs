@@ -594,6 +594,8 @@ type TypeAliases<'a> = HashMap<&'a str, Option<&'a crate::parser::TypeExpr>>;
 /// Names by namespace: those a body refers to, or those bound around it.
 /// Pkl keeps types and values apart, so a type named like a module property
 /// doesn't read the property, and a local doesn't hide a type of its name.
+/// The root of a qualified type name counts as both (see
+/// `collect_name_root`), as does a declared class.
 #[derive(Clone, Default)]
 struct Names {
     /// Value names: identifiers and `module.x`/`this.x` fields read, or
@@ -1509,11 +1511,18 @@ fn collect_type_refs(
 }
 
 fn collect_name_root(name: &str, refs: &mut Names, shadows: &Names) {
-    if let Some(root) = name.split('.').next()
-        && !root.is_empty()
-        && !shadows.types.contains(root)
-    {
+    let root = name.split('.').next().unwrap_or(name);
+    if root.is_empty() {
+        return;
+    }
+    let qualified = root.len() < name.len();
+    if !shadows.types.contains(root) {
         refs.types.insert(root.to_string());
+    }
+    // The root of a qualified name (`Dep.Item`) is a module, which may be a
+    // property holding one (`Dep = import(...)`), so it's read as a value too.
+    if qualified && !shadows.values.contains(root) {
+        refs.values.insert(root.to_string());
     }
 }
 
@@ -1530,7 +1539,13 @@ fn declared_entry_names(entries: &[Entry]) -> Names {
     let mut names = Names::default();
     for entry in entries {
         match entry {
-            Entry::ClassDef(name, ..) | Entry::TypeAlias(name, _) => {
+            // A class is bound as a value too (`ok = C`, `C.a`); a type alias
+            // is not.
+            Entry::ClassDef(name, ..) => {
+                names.types.insert(name.clone());
+                names.values.insert(name.clone());
+            }
+            Entry::TypeAlias(name, _) => {
                 names.types.insert(name.clone());
             }
             Entry::Property(prop)
