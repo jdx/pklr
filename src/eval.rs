@@ -2953,9 +2953,9 @@ impl Evaluator {
                     // its enclosing receiver.
                     if prop.value.is_none()
                         && prop.body.is_some()
-                        && let Some(existing) = all_props
-                            .get(prop.name.as_str())
-                            .or_else(|| receiver_members.and_then(|members| members.get(prop.name.as_str())))
+                        && let Some(existing) = all_props.get(prop.name.as_str()).or_else(|| {
+                            receiver_members.and_then(|members| members.get(prop.name.as_str()))
+                        })
                     {
                         active_scope.set(&prop.name, existing.clone());
                     }

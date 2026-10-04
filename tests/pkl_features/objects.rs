@@ -4016,9 +4016,6 @@ entryBase { ["k"] { v = 1 } }
 entry = (entryBase) { for (_ in List(1)) { ["k"] { w = 2 } } }
 "#,
     );
-    assert_eq!(
-        json["property"],
-        serde_json::json!({"o": {"v": 1, "w": 2}})
-    );
+    assert_eq!(json["property"], serde_json::json!({"o": {"v": 1, "w": 2}}));
     assert_eq!(json["entry"], serde_json::json!({"k": {"v": 1, "w": 2}}));
 }
