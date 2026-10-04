@@ -99,7 +99,15 @@ struct ModuleScopeSnapshot {
 
 /// The value of a literal or a plain name, or `None` for any expression that
 /// needs the full evaluator. Must agree with `Evaluator::eval_expr_boxed`.
-fn eval_simple_expr(expr: &Expr, scope: &Scope) -> Option<Result<Value>> {
+fn eval_simple_expr(
+    expr: &Expr,
+    scope: &Scope,
+    depth: usize,
+    max_depth: usize,
+) -> Option<Result<Value>> {
+    if depth > max_depth {
+        return None;
+    }
     Some(match expr {
         Expr::Null => Ok(Value::Null),
         Expr::Bool(b) => Ok(Value::Bool(*b)),
@@ -114,8 +122,136 @@ fn eval_simple_expr(expr: &Expr, scope: &Scope) -> Option<Result<Value>> {
                     .unwrap_or_else(|| format!("undefined variable: {name}")),
             )
         }),
+        // An operator over simple operands, other than `|>` (a call) and an
+        // object-body amendment, which need the evaluator. `&&`, `||` keep
+        // short-circuiting; the depth mirrors `eval_binop`'s `depth + 1`.
+        Expr::Binop(op, left, right)
+            if !matches!(op, BinOp::Pipe)
+                && !(matches!(op, BinOp::Add) && matches!(right.as_ref(), Expr::ObjectBody(_))) =>
+        {
+            if !is_simple_expr(left) || !is_simple_expr(right) {
+                return None;
+            }
+            let l = match eval_simple_expr(left, scope, depth + 1, max_depth)? {
+                Ok(l) => l,
+                Err(error) => return Some(Err(error)),
+            };
+            if matches!(op, BinOp::And | BinOp::Or) {
+                let left_truthy = is_truthy(&l);
+                let short_circuit = match op {
+                    BinOp::And => !left_truthy,
+                    _ => left_truthy,
+                };
+                if short_circuit {
+                    return Some(Ok(Value::Bool(left_truthy)));
+                }
+                return Some(
+                    eval_simple_expr(right, scope, depth + 1, max_depth)?
+                        .map(|r| Value::Bool(is_truthy(&r))),
+                );
+            }
+            let r = match eval_simple_expr(right, scope, depth + 1, max_depth)? {
+                Ok(r) => r,
+                Err(error) => return Some(Err(error)),
+            };
+            apply_binop(*op, l, r)
+        }
         _ => return None,
     })
+}
+
+/// Whether `eval_simple_expr` can evaluate `expr` without the evaluator.
+fn is_simple_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Null
+        | Expr::Bool(_)
+        | Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::String(_)
+        | Expr::Ident(_) => true,
+        Expr::Binop(op, left, right) => {
+            !matches!(op, BinOp::Pipe)
+                && !(matches!(op, BinOp::Add) && matches!(right.as_ref(), Expr::ObjectBody(_)))
+                && is_simple_expr(left)
+                && is_simple_expr(right)
+        }
+        _ => false,
+    }
+}
+
+/// Apply a binary operator other than `|>` to evaluated operands.
+fn apply_binop(op: BinOp, l: Value, r: Value) -> Result<Value> {
+    match op {
+        BinOp::Add => add_values(l, r),
+        BinOp::Sub => arithmetic(l, r, |a, b| Ok(a - b), |a, b| Ok(a - b)),
+        BinOp::Mul => arithmetic(l, r, |a, b| Ok(a * b), |a, b| Ok(a * b)),
+        BinOp::Div => arithmetic(
+            l,
+            r,
+            |a, b| {
+                if b == 0 {
+                    Err(Error::Eval("division by zero".into()))
+                } else {
+                    Ok(a / b)
+                }
+            },
+            |a, b| Ok(a / b),
+        ),
+        BinOp::Mod => arithmetic(
+            l,
+            r,
+            |a, b| {
+                if b == 0 {
+                    Err(Error::Eval("modulo by zero".into()))
+                } else {
+                    Ok(a % b)
+                }
+            },
+            |a, b| Ok(a % b),
+        ),
+        BinOp::Eq => Ok(Value::Bool(values_eq(&l, &r))),
+        BinOp::Ne => Ok(Value::Bool(!values_eq(&l, &r))),
+        BinOp::Lt => compare(l, r, std::cmp::Ordering::Less),
+        BinOp::Le => compare_or_eq(l, r, std::cmp::Ordering::Less),
+        BinOp::Gt => compare(l, r, std::cmp::Ordering::Greater),
+        BinOp::Ge => compare_or_eq(l, r, std::cmp::Ordering::Greater),
+        BinOp::And => Ok(Value::Bool(is_truthy(&l) && is_truthy(&r))),
+        BinOp::Or => Ok(Value::Bool(is_truthy(&l) || is_truthy(&r))),
+        BinOp::IntDiv => arithmetic(
+            l,
+            r,
+            |a, b| {
+                if b == 0 {
+                    Err(Error::Eval("division by zero".into()))
+                } else {
+                    Ok(a / b)
+                }
+            },
+            |a, b| Ok((a / b).floor()),
+        ),
+        BinOp::Pow => arithmetic(
+            l,
+            r,
+            |a, b| {
+                if b < 0 {
+                    Err(Error::Eval(
+                        "integer exponentiation with negative exponent is not supported".into(),
+                    ))
+                } else {
+                    Ok(a.pow(b as u32))
+                }
+            },
+            |a, b| Ok(a.powf(b)),
+        ),
+        BinOp::NullCoalesce => {
+            if is_null_value(&l) {
+                Ok(r)
+            } else {
+                Ok(l)
+            }
+        }
+        BinOp::Pipe => unreachable!("`|>` calls a function; see eval_binop"),
+    }
 }
 
 fn regex_value(pattern: Value) -> Value {
@@ -3724,7 +3860,7 @@ impl Evaluator {
     /// future that a recursive evaluation needs.
     async fn eval_expr(&mut self, expr: &Expr, scope: &Scope, depth: usize) -> Result<Value> {
         if depth <= self.max_depth
-            && let Some(result) = eval_simple_expr(expr, scope)
+            && let Some(result) = eval_simple_expr(expr, scope, depth, self.max_depth)
         {
             return result;
         }
@@ -4834,74 +4970,6 @@ impl Evaluator {
         let l = self.eval_expr(left, scope, depth + 1).await?;
         let r = self.eval_expr(right, scope, depth + 1).await?;
         match op {
-            BinOp::Add => add_values(l, r),
-            BinOp::Sub => arithmetic(l, r, |a, b| Ok(a - b), |a, b| Ok(a - b)),
-            BinOp::Mul => arithmetic(l, r, |a, b| Ok(a * b), |a, b| Ok(a * b)),
-            BinOp::Div => arithmetic(
-                l,
-                r,
-                |a, b| {
-                    if b == 0 {
-                        Err(Error::Eval("division by zero".into()))
-                    } else {
-                        Ok(a / b)
-                    }
-                },
-                |a, b| Ok(a / b),
-            ),
-            BinOp::Mod => arithmetic(
-                l,
-                r,
-                |a, b| {
-                    if b == 0 {
-                        Err(Error::Eval("modulo by zero".into()))
-                    } else {
-                        Ok(a % b)
-                    }
-                },
-                |a, b| Ok(a % b),
-            ),
-            BinOp::Eq => Ok(Value::Bool(values_eq(&l, &r))),
-            BinOp::Ne => Ok(Value::Bool(!values_eq(&l, &r))),
-            BinOp::Lt => compare(l, r, std::cmp::Ordering::Less),
-            BinOp::Le => compare_or_eq(l, r, std::cmp::Ordering::Less),
-            BinOp::Gt => compare(l, r, std::cmp::Ordering::Greater),
-            BinOp::Ge => compare_or_eq(l, r, std::cmp::Ordering::Greater),
-            BinOp::And => Ok(Value::Bool(is_truthy(&l) && is_truthy(&r))),
-            BinOp::Or => Ok(Value::Bool(is_truthy(&l) || is_truthy(&r))),
-            BinOp::IntDiv => arithmetic(
-                l,
-                r,
-                |a, b| {
-                    if b == 0 {
-                        Err(Error::Eval("division by zero".into()))
-                    } else {
-                        Ok(a / b)
-                    }
-                },
-                |a, b| Ok((a / b).floor()),
-            ),
-            BinOp::Pow => arithmetic(
-                l,
-                r,
-                |a, b| {
-                    if b < 0 {
-                        Err(Error::Eval(
-                            "integer exponentiation with negative exponent is not supported".into(),
-                        ))
-                    } else {
-                        Ok(a.pow(b as u32))
-                    }
-                },
-                |a, b| Ok(a.powf(b)),
-            ),
-            BinOp::NullCoalesce => {
-                if is_null_value(&l) {
-                    Ok(r)
-                } else {
-                    Ok(l)
-                }
-            }
             BinOp::Pipe => {
                 // x |> f  is equivalent to  f(x)
                 match r {
@@ -4921,6 +4989,7 @@ impl Evaluator {
                     )),
                 }
             }
+            _ => apply_binop(op, l, r),
         }
     }
 
