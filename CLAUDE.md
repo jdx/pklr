@@ -17,6 +17,7 @@ cargo test test_name                           # Run a single test by name
 cargo clippy --all-targets -- -D warnings      # Lint (warnings are errors)
 cargo fmt --check                              # Check formatting
 cargo fmt                                      # Auto-format
+scripts/conformance.py -v                      # Compare with the pkl CLI on Apple's snippet tests
 ```
 
 CI runs tests, clippy, and fmt check on all PRs.
@@ -43,6 +44,7 @@ Source (.pkl) → lexer.rs (tokens) → parser.rs (AST) → eval.rs (Value) → 
 - **`tests/fixtures/`** — Real-world `.pkl` files
 - Helper functions: `eval(src)` returns `serde_json::Value`, `eval_fails(src)` returns error string, `lex_kinds(src)` returns token kinds
 - Tests marked `#[ignore]` document unimplemented features
+- `scripts/conformance.py` evaluates Apple's language snippet tests (apple/pkl at the tag matching `pkl --version`, pinned in `mise.toml`) with both pkl and pklr and compares the JSON. `--save base.json` before a change and `--compare base.json` after it lists files fixed and broken
 
 ## Conventions
 
