@@ -1,7 +1,11 @@
 use super::*;
 
 /// Expand a Pkl glob pattern relative to a base directory.
+///
+/// An empty `base` (the parent of a bare relative path like `main.pkl`) means
+/// the current directory.
 pub fn expand_glob(base: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
+    let base = module_dir(base);
     if !base.is_dir() {
         return Ok(vec![]);
     }
@@ -114,6 +118,16 @@ pub(super) fn max_glob_depth(pattern: &str) -> Option<usize> {
 }
 
 /// Get a relative path string from `path` relative to `base`, or the full path if not a prefix.
+/// Treat an empty directory (the parent of a bare relative path) as `.`, so it
+/// can be read from and stripped as a prefix of the paths found under it.
+pub(super) fn module_dir(dir: &Path) -> &Path {
+    if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    }
+}
+
 pub(super) fn pathdiff_or_full(path: &Path, base: &Path) -> String {
     let path = path
         .strip_prefix(base)
