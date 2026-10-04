@@ -137,3 +137,44 @@ url_api = "https://api.github.com/repos/apple/pkl/releases/assets/487426570"
 checksum = "sha256:8550a00fcf027335e42c5e2cd553b88e98845408cb1880b3e3d1860caf46d22a"
 url = "https://github.com/apple/pkl/releases/download/0.32.1/pkl-windows-amd64.exe"
 url_api = "https://api.github.com/repos/apple/pkl/releases/assets/487426668"
+
+[[tools.tak]]
+version = "0.0.14"
+backend = "github:jdx/tak"
+specifiers = ["0.0.14"]
+
+[tools.tak."platforms.linux-arm64"]
+checksum = "sha256:9f67ef4896e522743e312909fd090b725523e2fbf8e43bed9c5ef215f9dd09b9"
+url = "https://github.com/jdx/tak/releases/download/v0.0.14/tak-aarch64-unknown-linux-gnu.tar.gz"
+url_api = "https://api.github.com/repos/jdx/tak/releases/assets/605344419"
+provenance = "github-attestations"
+
+[tools.tak."platforms.linux-arm64-musl"]
+checksum = "sha256:b072ac2d71c89e2f934a3d3ea6506b07fcec8404add3e905374728ca865b7535"
+url = "https://github.com/jdx/tak/releases/download/v0.0.14/tak-aarch64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/jdx/tak/releases/assets/605344418"
+provenance = "github-attestations"
+
+[tools.tak."platforms.linux-x64"]
+checksum = "sha256:1822955f2a101508ddfb524aea64f924a01bf4f0f14660c5f94ab0f8275971e0"
+url = "https://github.com/jdx/tak/releases/download/v0.0.14/tak-x86_64-unknown-linux-gnu.tar.gz"
+url_api = "https://api.github.com/repos/jdx/tak/releases/assets/605344432"
+provenance = "github-attestations"
+
+[tools.tak."platforms.linux-x64-musl"]
+checksum = "sha256:995c71f45c809136de9d44bec05f9c2763eee63673454e8249456f665c8ab339"
+url = "https://github.com/jdx/tak/releases/download/v0.0.14/tak-x86_64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/jdx/tak/releases/assets/605344433"
+provenance = "github-attestations"
+
+[tools.tak."platforms.macos-arm64"]
+checksum = "sha256:e68d308f3ecc6a2eba42d6a48768809a34898503196e0fb8bfb068592b57deba"
+url = "https://github.com/jdx/tak/releases/download/v0.0.14/tak-aarch64-apple-darwin.tar.gz"
+url_api = "https://api.github.com/repos/jdx/tak/releases/assets/605344420"
+provenance = "github-attestations"
+
+[tools.tak."platforms.windows-x64"]
+checksum = "sha256:2dced8796b4028e637dac5c206c70a4c2589ab09d0b3ff4d73da9693e1a49b3f"
+url = "https://github.com/jdx/tak/releases/download/v0.0.14/tak-x86_64-pc-windows-msvc.zip"
+url_api = "https://api.github.com/repos/jdx/tak/releases/assets/605344430"
+provenance = "github-attestations"
