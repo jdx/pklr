@@ -363,10 +363,15 @@ pub(super) fn scope_for_object_entry(
             .owners
             .get(entry_index)
             .map_or(&none, Rc::as_ref);
-        return scope_with_object_bindings(&lexical, object, owned);
+        return entry_owners.bindings(Arc::as_ptr(captured) as usize, &lexical, object, owned);
     }
     match own_body {
-        Some((definition, owned)) => scope_with_object_bindings(definition, object, owned),
+        Some((definition, owned)) => entry_owners.bindings(
+            definition as *const Scope as usize,
+            definition,
+            object,
+            owned,
+        ),
         None => object.clone(),
     }
 }
@@ -381,9 +386,56 @@ pub(super) struct EntryOwners {
     /// one body share a captured scope, so each is restored once rather than
     /// once per entry.
     restored: RefCell<HashMap<*const CapturedScope, Scope>>,
+    /// The last entry scope built for each lexical scope, keyed by the
+    /// lexical scope's address.
+    /// The object only gains or rebinds members between entries, so the next
+    /// entry's scope is that one updated in place rather than rebuilt.
+    bindings: RefCell<HashMap<usize, ObjectBindings>>,
+}
+
+/// An entry scope built over an object, kept for updating.
+struct ObjectBindings {
+    scope: Scope,
+    /// Object members hidden because the lexical scope declares the name.
+    hidden: FxHashSet<Name>,
 }
 
 impl EntryOwners {
+    /// The entry scope over `object` for the lexical scope identified by
+    /// `key` (see [`update_object_bindings`]), updated from the previous
+    /// call's result.
+    fn bindings(
+        &self,
+        key: usize,
+        lexical: &Scope,
+        object: &Scope,
+        owned: &HashSet<String>,
+    ) -> Scope {
+        let mut cache = self.bindings.borrow_mut();
+        let cached = cache.entry(key).or_insert_with(|| ObjectBindings {
+            scope: lexical.child(),
+            hidden: FxHashSet::default(),
+        });
+        update_object_bindings(cached, lexical, object, owned);
+        cached.scope.clone()
+    }
+
+    /// Drop the cached entry scopes' references to the object's current
+    /// `this` snapshot, like `release_this_aliases` does for the object scope,
+    /// so the property map can grow in place. The next entry rebinds them.
+    ///
+    /// A cached scope still shared with a live entry scope (as in a `for`
+    /// generator, whose scope outlives each iteration) is left alone: the live
+    /// scope holds the snapshot regardless, and releasing would only copy the
+    /// cached bindings.
+    pub(super) fn release_this(&self, aliases: &[String]) {
+        for cached in self.bindings.borrow_mut().values_mut() {
+            if Rc::strong_count(&cached.scope.vars) == 1 {
+                release_this_aliases(&mut cached.scope, aliases);
+            }
+        }
+    }
+
     fn restored(&self, captured: &Arc<CapturedScope>) -> Scope {
         self.restored
             .borrow_mut()
@@ -439,6 +491,7 @@ pub(super) fn entry_scope_owners(
     EntryOwners {
         owners,
         restored: RefCell::default(),
+        bindings: RefCell::default(),
     }
 }
 
@@ -485,50 +538,99 @@ pub(super) fn own_body_names(
 /// through implicit `this` after the lexically enclosing bodies, so a name
 /// declared in an enclosing body (such as a `local` of an outer object) is not
 /// shadowed by an inherited member of the same name.
-pub(super) fn scope_with_object_bindings(
+///
+/// The entry scope is a child of `lexical` holding the object's members, and
+/// is brought up to date with `object` in place: an object only gains members
+/// or rebinds them, so members already bound to the same value are left alone.
+fn update_object_bindings(
+    bindings: &mut ObjectBindings,
     lexical: &Scope,
     object: &Scope,
     owned: &HashSet<String>,
-) -> Scope {
-    let mut scope = lexical.child();
+) {
+    let ObjectBindings { scope, hidden } = bindings;
     scope.receiver_entries = object.receiver_entries.clone();
     scope.receiver_list_base = object.receiver_list_base;
-    // `scope` starts empty, so the bindings can be collected directly instead
-    // of going through `declare`/`set`, which also clear stale poison and
-    // module identities for each name.
-    let mut vars = FxIndexMap::with_capacity_and_hasher(object.vars.len(), FxBuildHasher);
-    let mut declared =
-        FxHashSet::with_capacity_and_hasher(owned.len().min(object.vars.len()), FxBuildHasher);
+    // The scope's own bindings come only from the object, so they can be
+    // written directly instead of going through `declare`/`set`, which also
+    // clear stale poison and module identities for each name.
     for (name, value) in object.vars.iter() {
         // `super` belongs to the body that declared the entry. A later
         // amendment must not replace an inherited entry's parent binding.
-        if &**name == "super" {
+        if &**name == "super" || hidden.contains(&**name) {
+            continue;
+        }
+        if scope
+            .vars
+            .get(&**name)
+            .is_some_and(|bound| same_value(bound, value))
+        {
             continue;
         }
         if owned.contains(&**name) {
-            declared.insert(name.clone());
-            vars.insert(name.clone(), value.clone());
-        } else if !lexical.is_declared(name) {
-            vars.insert(name.clone(), value.clone());
+            if !scope.declared.contains(&**name) {
+                Rc::make_mut(&mut scope.declared).insert(name.clone());
+            }
+        } else if !scope.vars.contains_key(&**name) && lexical.is_declared(name) {
+            // `lexical` is fixed for this cache entry and `owned` for its key,
+            // so a hidden name stays hidden for the life of the cache.
+            hidden.insert(name.clone());
+            continue;
         }
+        Rc::make_mut(&mut scope.vars).insert(name.clone(), value.clone());
     }
-    let mut poisoned = FxIndexMap::default();
-    for (name, message) in object.poisoned.iter() {
-        if owned.contains(&**name) {
-            declared.insert(name.clone());
-            poisoned.insert(name.clone(), message.clone());
-        } else if !lexical.is_declared(name) {
-            poisoned.insert(name.clone(), message.clone());
+    // Rebuilt whenever either side has poisoned names, so names no longer
+    // poisoned on the object are dropped from the scope.
+    if !object.poisoned.is_empty() || !scope.poisoned.is_empty() {
+        let mut poisoned = FxIndexMap::default();
+        for (name, message) in object.poisoned.iter() {
+            if owned.contains(&**name) {
+                if !scope.declared.contains(&**name) {
+                    Rc::make_mut(&mut scope.declared).insert(name.clone());
+                }
+                poisoned.insert(name.clone(), message.clone());
+            } else if !lexical.is_declared(name) {
+                poisoned.insert(name.clone(), message.clone());
+            }
         }
+        scope.poisoned = Rc::new(poisoned);
     }
-    scope.vars = Rc::new(vars);
-    scope.declared = Rc::new(declared);
-    scope.poisoned = Rc::new(poisoned);
     scope.this_aliases = object.this_aliases.clone();
-    // The child's own maps are empty, so it can share the object's.
+    // The scope's own maps for these start empty, so it can share the object's.
     scope.type_aliases = object.type_aliases.clone();
     scope.module_identities = object.module_identities.clone();
-    scope
+}
+
+/// Whether two values are the same binding, compared by identity where a
+/// value is shared. A `false` only costs rebinding an equal value.
+fn same_value(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Null, Value::Null) => true,
+        (Value::Bool(a), Value::Bool(b)) => a == b,
+        (Value::Int(a), Value::Int(b)) => a == b,
+        (Value::Float(a), Value::Float(b)) => a.to_bits() == b.to_bits(),
+        (Value::String(a), Value::String(b)) => a == b,
+        (Value::Object(a, a_src), Value::Object(b, b_src)) => {
+            Arc::ptr_eq(a, b)
+                && match (a_src, b_src) {
+                    (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                    (None, None) => true,
+                    _ => false,
+                }
+        }
+        (Value::List(a), Value::List(b)) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| same_value(a, b))
+        }
+        (
+            Value::Lambda(a_params, a_body, a_captured),
+            Value::Lambda(b_params, b_body, b_captured),
+        ) => {
+            Arc::ptr_eq(a_params, b_params)
+                && Arc::ptr_eq(a_body, b_body)
+                && Arc::ptr_eq(a_captured, b_captured)
+        }
+        _ => false,
+    }
 }
 
 /// Keep inherited entries bound to the imports they captured while letting an

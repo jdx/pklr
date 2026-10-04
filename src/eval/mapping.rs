@@ -16,7 +16,7 @@ pub(super) fn refresh_this_aliases(
 /// Drop the scope's references to the current `this` snapshot so the property
 /// map is uniquely owned again and can grow in place instead of being copied.
 /// Callers refresh the snapshot after the insert.
-fn release_this_aliases(scope: &mut Scope, aliases: &[String]) {
+pub(super) fn release_this_aliases(scope: &mut Scope, aliases: &[String]) {
     for name in std::iter::once("this").chain(aliases.iter().map(String::as_str)) {
         if scope.vars.contains_key(name)
             && let Some(slot) = Rc::make_mut(&mut scope.vars).get_mut(name)

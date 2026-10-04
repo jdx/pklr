@@ -2481,6 +2481,7 @@ impl Evaluator {
                             child_scope.set(prop.name.clone(), v.clone());
                         }
                         drop(active_scope);
+                        entry_owners.release_this(&this_aliases);
                         props_insert(
                             &mut child_scope,
                             &this_aliases,
@@ -2525,6 +2526,7 @@ impl Evaluator {
                             .eval_value_amendment(existing, body, &active_scope, depth)
                             .await?;
                         drop(active_scope);
+                        entry_owners.release_this(&this_aliases);
                         props_insert(
                             &mut child_scope,
                             &this_aliases,
@@ -2584,6 +2586,7 @@ impl Evaluator {
                         val
                     };
                     drop(active_scope);
+                    entry_owners.release_this(&this_aliases);
                     props_insert(
                         &mut child_scope,
                         &this_aliases,
@@ -2605,6 +2608,7 @@ impl Evaluator {
                     let val = self.eval_expr(expr, &active_scope, depth).await?;
                     if let Value::Object(m, _) = val {
                         drop(active_scope);
+                        entry_owners.release_this(&this_aliases);
                         props_extend(
                             &mut child_scope,
                             &this_aliases,
@@ -2643,6 +2647,7 @@ impl Evaluator {
                             )
                             .await?;
                         if let Value::Object(m, _) = body_val {
+                            entry_owners.release_this(&this_aliases);
                             props_extend(
                                 &mut child_scope,
                                 &this_aliases,
@@ -2676,6 +2681,7 @@ impl Evaluator {
                             )
                             .await?;
                         if let Value::Object(m, _) = body_val {
+                            entry_owners.release_this(&this_aliases);
                             props_extend(
                                 &mut child_scope,
                                 &this_aliases,
@@ -2696,6 +2702,7 @@ impl Evaluator {
                             )
                             .await?;
                         if let Value::Object(m, _) = else_val {
+                            entry_owners.release_this(&this_aliases);
                             props_extend(
                                 &mut child_scope,
                                 &this_aliases,
