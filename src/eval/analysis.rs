@@ -1060,7 +1060,8 @@ pub(super) fn is_module_sibling_ref(expr: &Expr, include_this: bool) -> bool {
 
 /// Names, in declaration order, of the module members in `entries` that must
 /// be evaluated again once the module's properties are available: classes
-/// whose bodies read `module`, and the members that reference such a member
+/// whose bodies read `module` or a module property by name (`a = min`), and
+/// the members that reference such a member
 /// (a subclass, a type alias naming it, a local, or a module function
 /// building an instance).
 pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<String> {
@@ -1071,19 +1072,135 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
         (root == "module" || (include_this && root == "this"))
             .then(|| rest.split('.').next().unwrap_or(rest))
     }
-    // Only a class that mentions `module` starts a dependency chain. Most
-    // modules have none, so check that without collecting any names.
+    // Only a class that reads the module's properties starts a dependency
+    // chain. Most modules have no classes, so check for one first.
     if !entries
         .iter()
-        .any(|entry| matches!(entry, Entry::ClassDef(..)) && entry_mentions(entry, "module"))
+        .any(|entry| matches!(entry, Entry::ClassDef(..)))
     {
         return indexmap::IndexSet::new();
+    }
+    let module_properties: HashSet<&str> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::Property(prop) if !has_modifier(&prop.modifiers, Modifier::Local) => {
+                Some(prop.name.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    let classes: HashMap<&str, (Option<&str>, &[Entry])> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::ClassDef(name, _, parent, body) => {
+                Some((name.as_str(), (parent.as_deref(), body.as_slice())))
+            }
+            _ => None,
+        })
+        .collect();
+    // The non-local properties `class` inherits from ancestors declared in
+    // this module.
+    fn inherited_properties<'a>(
+        classes: &HashMap<&'a str, (Option<&'a str>, &'a [Entry])>,
+        class: &'a str,
+    ) -> HashSet<&'a str> {
+        let mut names = HashSet::new();
+        let mut seen = HashSet::from([class]);
+        // `extends module.Parent` names the same class as `extends Parent`.
+        let unqualified = |name: &'a str| name.strip_prefix("module.").unwrap_or(name);
+        let mut next = classes
+            .get(class)
+            .and_then(|(parent, _)| *parent)
+            .map(unqualified);
+        while let Some(class) = next
+            && seen.insert(class)
+            && let Some((parent, body)) = classes.get(class)
+        {
+            names.extend(body.iter().filter_map(|entry| match entry {
+                Entry::Property(prop) if !has_modifier(&prop.modifiers, Modifier::Local) => {
+                    Some(prop.name.as_str())
+                }
+                _ => None,
+            }));
+            next = parent.map(unqualified);
+        }
+        names
+    }
+    // The names a class body reads while its defaults are evaluated: those
+    // of its non-method entries, and of the methods they call (by name, as a
+    // member of the instance, or any of them once the instance escapes; see
+    // `InstanceReads`). Other method bodies only run on a built instance.
+    fn eager_class_refs(body: &[Entry]) -> HashSet<String> {
+        fn is_method(entry: &Entry) -> bool {
+            matches!(entry, Entry::Property(prop) if matches!(prop.value, Some(Expr::Lambda(..))))
+        }
+        let defaults: Vec<Entry> = body.iter().filter(|e| !is_method(e)).cloned().collect();
+        let mut refs = referenced_roots(&defaults);
+        let mut instance = InstanceReads {
+            members: HashSet::new(),
+            escapes: false,
+        };
+        instance.entries(&defaults, 0);
+        let mut followed = HashSet::new();
+        loop {
+            let calls_all = instance.escapes;
+            let next: Vec<&Entry> = body
+                .iter()
+                .filter(|entry| match entry {
+                    Entry::Property(prop) if is_method(entry) => {
+                        (calls_all
+                            || refs.contains(&prop.name)
+                            || instance.members.contains(&prop.name))
+                            && followed.insert(prop.name.as_str())
+                    }
+                    _ => false,
+                })
+                .collect();
+            if next.is_empty() {
+                return refs;
+            }
+            for method in next {
+                let method = std::slice::from_ref(method);
+                refs.extend(referenced_roots(method));
+                instance.entries(method, 0);
+            }
+        }
     }
     let members: Vec<(&String, bool, HashSet<String>)> = entries
         .iter()
         .filter_map(|entry| match entry {
             Entry::ClassDef(name, _, parent, body) => {
                 let mut refs = referenced_roots(body);
+                // A bare root naming a module property that the body doesn't
+                // declare itself reads it like `module.name`. The body's
+                // defaults are first evaluated before the parent's members
+                // are merged in, so an inherited property of that name read
+                // by a default still needs the refresh. A method runs on the
+                // built instance, where it reads the inherited property.
+                let module_reads: Vec<&String> = refs
+                    .iter()
+                    .filter(|root| {
+                        module_properties.contains(root.as_str())
+                            && !body.iter().any(|entry| {
+                                matches!(entry, Entry::Property(prop) if prop.name == **root)
+                            })
+                    })
+                    .collect();
+                let reads_module = !module_reads.is_empty() && {
+                    let inherited = inherited_properties(&classes, name);
+                    module_reads
+                        .iter()
+                        .any(|root| !inherited.contains(root.as_str()))
+                        || {
+                            let default_refs = eager_class_refs(body);
+                            module_reads
+                                .iter()
+                                .any(|root| default_refs.contains(root.as_str()))
+                        }
+                };
+                if reads_module {
+                    refs.insert("module".to_string());
+                }
                 // Inside a class body `this` is the instance, so only
                 // `module.C` names a module member.
                 collect_sibling_field_refs_entries(body, &mut refs);
@@ -1900,6 +2017,135 @@ fn expr_mentions(expr: &Expr, name: &str) -> bool {
         | Expr::String(_)
         | Expr::Import(..)
         | Expr::ImportGlob(..) => false,
+    }
+}
+
+/// How a class body's expressions reach the class instance: `this` in the
+/// body itself (and in its methods), `outer` one object body down, and
+/// `outer.outer` (and so on) further down. Names
+/// read as `ref.name` or `ref["name"]` go to `members`; any other use of the
+/// reference (bound by a `let`, passed to a call, indexed by a computed key)
+/// sets `escapes`, after which any member may be read.
+struct InstanceReads {
+    members: HashSet<String>,
+    escapes: bool,
+}
+
+impl InstanceReads {
+    /// How many object bodies below the class body `expr` names the
+    /// instance, if it is `this` or a chain of `outer`s.
+    fn reference_depth(expr: &Expr) -> Option<usize> {
+        match expr {
+            Expr::Ident(name) if name == "this" => Some(0),
+            Expr::Ident(name) if name == "outer" => Some(1),
+            Expr::Field(base, field) if field == "outer" => match Self::reference_depth(base)? {
+                0 => None,
+                depth => Some(depth + 1),
+            },
+            _ => None,
+        }
+    }
+
+    fn entries(&mut self, entries: &[Entry], depth: usize) {
+        for entry in entries {
+            match entry {
+                Entry::Property(prop) => {
+                    if let Some(value) = &prop.value {
+                        self.expr(value, depth);
+                    }
+                    // A property's object body is one level further down.
+                    if let Some(body) = &prop.body {
+                        self.entries(body, depth + 1);
+                    }
+                }
+                Entry::DynProperty(key, value) => {
+                    self.expr(key, depth);
+                    self.expr(value, depth);
+                }
+                Entry::Spread(expr) | Entry::Elem(expr) => self.expr(expr, depth),
+                Entry::ForGenerator(fgen) => {
+                    self.expr(&fgen.collection, depth);
+                    self.entries(&fgen.body, depth);
+                }
+                Entry::WhenGenerator(wgen) => {
+                    self.expr(&wgen.condition, depth);
+                    self.entries(&wgen.body, depth);
+                    if let Some(else_body) = &wgen.else_body {
+                        self.entries(else_body, depth);
+                    }
+                }
+                Entry::ClassDef(..) | Entry::TypeAlias(..) => {}
+            }
+        }
+    }
+
+    fn expr(&mut self, expr: &Expr, depth: usize) {
+        let is_reference = |expr: &Expr| Self::reference_depth(expr) == Some(depth);
+        match expr {
+            // The instance used as a value.
+            _ if is_reference(expr) => self.escapes = true,
+            Expr::Field(base, field) | Expr::NullSafeField(base, field) if is_reference(base) => {
+                self.members.insert(field.clone());
+            }
+            Expr::Index(base, index) if is_reference(base) => match index.as_ref() {
+                Expr::String(key) => {
+                    self.members.insert(key.clone());
+                }
+                index => {
+                    self.escapes = true;
+                    self.expr(index, depth);
+                }
+            },
+            // `this` or an `outer` chain naming some other object.
+            Expr::Field(base, _) | Expr::NullSafeField(base, _)
+                if Self::reference_depth(base).is_some() => {}
+            Expr::Ident(_) => {}
+            Expr::New(_, entries, _)
+            | Expr::ObjectBody(entries)
+            | Expr::InferredNew(_, entries) => self.entries(entries, depth + 1),
+            Expr::Field(base, _) | Expr::NullSafeField(base, _) => self.expr(base, depth),
+            Expr::Index(left, right) | Expr::Binop(_, left, right) => {
+                self.expr(left, depth);
+                self.expr(right, depth);
+            }
+            Expr::Call(callee, args) => {
+                self.expr(callee, depth);
+                for arg in args {
+                    self.expr(arg, depth);
+                }
+            }
+            Expr::If(cond, then_expr, else_expr) => {
+                self.expr(cond, depth);
+                self.expr(then_expr, depth);
+                self.expr(else_expr, depth);
+            }
+            Expr::Let(_, value, body) => {
+                self.expr(value, depth);
+                self.expr(body, depth);
+            }
+            // A type's constraints bind `this` to the checked value.
+            Expr::Is(value, _) | Expr::As(value, _) => self.expr(value, depth),
+            Expr::Lambda(_, value)
+            | Expr::Unop(_, value)
+            | Expr::Throw(value)
+            | Expr::Trace(value)
+            | Expr::Read(value)
+            | Expr::ReadOrNull(value) => self.expr(value, depth),
+            Expr::StringInterpolation(parts) => {
+                for part in parts {
+                    if let StringInterpPart::Expr(expr) = part {
+                        self.expr(expr, depth);
+                    }
+                }
+            }
+            Expr::Null
+            | Expr::Bool(_)
+            | Expr::Int(_)
+            | Expr::Float(_)
+            | Expr::String(_)
+            | Expr::Import(..)
+            | Expr::ImportGlob(..) => {}
+        }
     }
 }
 

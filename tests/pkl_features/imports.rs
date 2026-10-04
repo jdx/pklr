@@ -2299,6 +2299,191 @@ async fn narrowed_import_follows_type_alias_constraints() {
 }
 
 #[tokio::test]
+async fn narrowed_import_follows_module_reads_in_class_defaults() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_class_default");
+    let dir = temp.path();
+    // `Bar`'s default reads the module property `min` without `module.`, so
+    // building `Bar` from a requested property still needs `min`.
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "min = 1\nclass Bar {\n  a: Int = min\n}\nresult {\n  bar = new Bar {}\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as D\nout = D.result\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("class.pkl"),
+        "import \"dep.pkl\" as D\nout = new D.Bar {}\n",
+    )
+    .unwrap();
+
+    let dep = pklr::eval_to_json_async(&dir.join("dep.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        dep,
+        serde_json::json!({"min": 1, "result": {"bar": {"a": 1}}})
+    );
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val, serde_json::json!({"out": {"bar": {"a": 1}}}));
+    let class = pklr::eval_to_json_async(&dir.join("class.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(class, serde_json::json!({"out": {"a": 1}}));
+}
+
+#[tokio::test]
+async fn narrowed_import_ignores_class_properties_named_like_module_properties() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_class_property_shadow");
+    let dir = temp.path();
+    // `b = a` reads the instance's own `a`, not the unused module property
+    // `a`.
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "a = throw(\"unused\")\nclass D { a = 6; b = a }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as Dep\nd = new Dep.D {}\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val, serde_json::json!({"d": {"a": 6, "b": 6}}));
+}
+
+#[tokio::test]
+async fn narrowed_import_follows_module_reads_named_like_inherited_properties() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_inherited_name");
+    let dir = temp.path();
+    // `min` in `Child` is the inherited property, but `Child`'s defaults are
+    // first evaluated before `Parent`'s members are merged in, so the class
+    // must still be refreshed once the module's `min` exists.
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "min = 1\nopen class Parent { min = 2 }\nclass Child extends Parent { a = min }\nout = new Child {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as D\nout = D.out\n",
+    )
+    .unwrap();
+
+    let dep = pklr::eval_to_json_async(&dir.join("dep.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(dep["out"], serde_json::json!({"min": 2, "a": 2}));
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val, serde_json::json!({"out": {"min": 2, "a": 2}}));
+}
+
+#[tokio::test]
+async fn narrowed_import_skips_module_properties_named_like_inherited_method_reads() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_inherited_method");
+    let dir = temp.path();
+    // A method body runs on a built instance, where `min` is the inherited
+    // property, so the unused module `min` is not needed.
+    std::fs::write(
+        dir.join("inherited.pkl"),
+        "min = throw(\"unused\")\nopen class Parent { min = 2 }\nclass Child extends Parent { function getMin() = min }\n",
+    )
+    .unwrap();
+    // A module property the instance doesn't have is still read by a method.
+    std::fs::write(
+        dir.join("module.pkl"),
+        "max = 3\nopen class Parent { min = 2 }\nclass Child extends Parent { function getMax() = max }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"inherited.pkl\" as I\nimport \"module.pkl\" as M\nmin = (new I.Child {}).getMin()\nmax = (new M.Child {}).getMax()\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["min"], 2);
+    assert_eq!(val["max"], 3);
+}
+
+#[tokio::test]
+async fn narrowed_import_follows_methods_called_by_class_defaults() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_default_method_call");
+    let dir = temp.path();
+    // `a` calls `getMin` while `Child`'s defaults are first evaluated, before
+    // `Parent`'s `min` is merged in, so the class must still be refreshed,
+    // also when the method is called through an alias of `this` or through
+    // a nested object's `outer` (or `outer.outer` from deeper down).
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "min = 1\nopen class Parent { min = 2 }\nclass Child extends Parent {\n  function getMin() = min\n  a = getMin()\n}\nclass ThisChild extends Parent {\n  function getMin() = min\n  a = this.getMin()\n}\nclass AliasChild extends Parent {\n  function getMin() = min\n  a = let (self = this) self.getMin()\n}\nclass OuterChild extends Parent {\n  function getMin() = min\n  obj { a = outer.getMin() }\n  deep { inner { a = outer.outer.getMin() } }\n}\nchild = new Child {}\nthisChild = new ThisChild {}\naliasChild = new AliasChild {}\nouterChild = new OuterChild {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as D\nchild = D.child\nthisChild = D.thisChild\naliasChild = D.aliasChild\nouterChild = D.outerChild\n",
+    )
+    .unwrap();
+
+    let dep = pklr::eval_to_json_async(&dir.join("dep.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(dep["child"]["a"], 2);
+    assert_eq!(dep["thisChild"]["a"], 2);
+    assert_eq!(dep["aliasChild"]["a"], 2);
+    assert_eq!(dep["outerChild"]["obj"]["a"], 2);
+    assert_eq!(dep["outerChild"]["deep"]["inner"]["a"], 2);
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["child"]["a"], 2);
+    assert_eq!(val["thisChild"]["a"], 2);
+    assert_eq!(val["aliasChild"]["a"], 2);
+    assert_eq!(val["outerChild"]["obj"]["a"], 2);
+    assert_eq!(val["outerChild"]["deep"]["inner"]["a"], 2);
+}
+
+#[tokio::test]
+async fn narrowed_import_skips_methods_class_defaults_do_not_call() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_default_this_read");
+    let dir = temp.path();
+    // `a` reads `this.x` and `obj` reads `outer.x` but neither calls a
+    // method, and `this` in `obj` (or `outer` deeper down) is not the
+    // instance, so `getMin` only runs on the built instance, where `min` is
+    // the inherited property.
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "min = throw(\"unused\")\nopen class Parent { min = 2 }\nclass Child extends Parent {\n  x = 3\n  a = this.x\n  obj { y = 4; b = this.y; c = outer.x; inner { d = outer.y; e = (outer) } }\n  function getMin() = min\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as D\nchild = new D.Child {}\na = child.a\nb = child.obj.b\nc = child.obj.c\nmin = child.getMin()\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["a"], 3);
+    assert_eq!(val["b"], 4);
+    assert_eq!(val["c"], 3);
+    assert_eq!(val["min"], 2);
+}
+
+#[tokio::test]
 async fn narrowed_import_follows_module_reads_but_not_checked_value_members() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_constraint_names");
     let dir = temp.path();
