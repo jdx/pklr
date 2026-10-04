@@ -1078,7 +1078,7 @@ fn same_value(a: &Value, b: &Value) -> bool {
                 }
         }
         (Value::List(a), Value::List(b)) => {
-            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| same_value(a, b))
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(a, b)| same_value(a, b))
         }
         (
             Value::Lambda(a_params, a_body, a_captured),
@@ -1213,7 +1213,7 @@ mod source_scope_tests {
     fn does_not_keep_shadowed_this_snapshots() {
         let root = Scope::default();
         let mut object = root.child();
-        let props = Arc::new(IndexMap::new());
+        let props = Arc::default();
         object.set("this", Value::Object(Arc::clone(&props), None));
         object.set("member", Value::Int(1));
         let mut nested = object.child();

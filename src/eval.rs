@@ -14,7 +14,9 @@ use crate::lexer;
 use crate::parser::{
     self, BinOp, Body, Entry, Expr, Modifier, Module, Property, StringInterpPart, UnOp,
 };
-use crate::value::{CapturedScope, NameSet, ObjectSource, ScopeMap, TypeAliasMap, Value};
+use crate::value::{
+    CapturedScope, NameSet, ObjectMap, ObjectSource, ScopeMap, TypeAliasMap, Value,
+};
 
 mod analysis;
 mod bridge;
@@ -150,7 +152,7 @@ struct FinishedBody<'a> {
     entry_owners: &'a EntryOwners,
     own_body_scope: Option<(&'a Scope, &'a HashSet<String>)>,
     local_bindings: &'a FxHashMap<usize, std::result::Result<Value, String>>,
-    all_props: &'a IndexMap<String, Value>,
+    all_props: &'a ObjectMap,
     /// Names a later type alias or class of the body rebinds; entries
     /// before it are checked with the earlier binding, as they evaluated.
     shadowed: &'a [ShadowedName],
@@ -401,17 +403,17 @@ struct ModuleScopeSnapshot {
 /// last. Returns the names set or poisoned on `scope`.
 fn layer_finished_members(
     scope: &mut Scope,
-    members: &IndexMap<String, Value>,
+    members: &ObjectMap,
     lexical: impl Fn(&str) -> bool,
     own_bindings: &[(String, std::result::Result<Value, String>)],
 ) -> FxHashSet<String> {
     let mut layered = FxHashSet::default();
     for (name, value) in members.iter() {
-        if own_bindings.iter().any(|(own, _)| own == name) || lexical(name) {
+        if own_bindings.iter().any(|(own, _)| **own == **name) || lexical(name) {
             continue;
         }
-        scope.set(name.clone(), value.clone());
-        layered.insert(name.clone());
+        scope.set(Arc::clone(name), value.clone());
+        layered.insert(name.to_string());
     }
     for (name, binding) in own_bindings {
         match binding {
@@ -1019,7 +1021,7 @@ fn eval_simple_expr(
         Expr::Bool(b) => Ok(Value::Bool(*b)),
         Expr::Int(n) => Ok(Value::Int(*n)),
         Expr::Float(f) => Ok(Value::Float(*f)),
-        Expr::String(s) => Ok(Value::String(s.clone())),
+        Expr::String(s) => Ok(Value::String(s.as_str().into())),
         Expr::Ident(name) => scope.get(name).cloned().ok_or_else(|| {
             Error::Eval(
                 scope
@@ -1161,9 +1163,9 @@ fn apply_binop(op: BinOp, l: Value, r: Value) -> Result<Value> {
 }
 
 fn regex_value(pattern: Value) -> Value {
-    let mut map = IndexMap::new();
-    map.insert("_type".to_string(), Value::String("regex".to_string()));
-    map.insert("pattern".to_string(), pattern);
+    let mut map = ObjectMap::default();
+    map.insert("_type".into(), Value::String("regex".into()));
+    map.insert("pattern".into(), pattern);
     Value::Object(Arc::new(map), None)
 }
 
@@ -1599,7 +1601,7 @@ impl Evaluator {
         if let Some(path) = uri.strip_prefix("file://") {
             // file:// — read local file
             let content = self.read_to_string_io(Path::new(path))?;
-            Ok(Value::String(content))
+            Ok(Value::String(content.into()))
         } else if let Some(var_name) = uri.strip_prefix("env:") {
             // env: — read environment variable
             let value = self.read_env_io(var_name)?;
@@ -1609,7 +1611,7 @@ impl Evaluator {
                     "environment variable not found: {var_name}"
                 )));
             };
-            Ok(Value::String(val))
+            Ok(Value::String(val.into()))
         } else if let Some(prop_name) = uri.strip_prefix("prop:") {
             // prop: — system properties (not standard in Rust, return empty)
             Err(Error::Eval(format!(
@@ -1618,12 +1620,12 @@ impl Evaluator {
         } else if uri.starts_with("https://") || uri.starts_with("http://") {
             // HTTP/HTTPS
             let content = self.fetch_source(uri)?;
-            Ok(Value::String(content))
+            Ok(Value::String(content.into()))
         } else {
             // Bare path — treat as file relative to base_path
             let file_path = self.base_path.join(uri);
             let content = self.read_to_string_io(&file_path)?;
-            Ok(Value::String(content))
+            Ok(Value::String(content.into()))
         }
     }
 
@@ -1942,10 +1944,8 @@ impl Evaluator {
         // placeholder is not cached.
         let canonical = self.canonicalize_io(path).ok();
         if let Some(canonical) = &canonical {
-            self.import_cache.insert(
-                canonical.clone(),
-                Value::Object(Arc::new(IndexMap::new()), None),
-            );
+            self.import_cache
+                .insert(canonical.clone(), Value::Object(Arc::default(), None));
             self.imports_in_flight.insert(canonical.clone());
         }
         let result = self.eval_entry_module(source, path);
@@ -2005,10 +2005,8 @@ impl Evaluator {
             return Ok(cached);
         }
         // Insert empty placeholder to break circular imports
-        self.import_cache.insert(
-            canonical.clone(),
-            Value::Object(Arc::new(IndexMap::new()), None),
-        );
+        self.import_cache
+            .insert(canonical.clone(), Value::Object(Arc::default(), None));
         self.imports_in_flight.insert(canonical.clone());
         let result = self.eval_file_inner(path, &canonical, depth);
         self.imports_in_flight.remove(&canonical);
@@ -2038,10 +2036,8 @@ impl Evaluator {
         if let Some(cached) = self.narrowed_import_cache.get(&key) {
             return Ok(cached.clone());
         }
-        self.import_cache.insert(
-            canonical.clone(),
-            Value::Object(Arc::new(IndexMap::new()), None),
-        );
+        self.import_cache
+            .insert(canonical.clone(), Value::Object(Arc::default(), None));
         self.imports_in_flight.insert(canonical.clone());
         let placeholder_reads = self.placeholder_reads;
         let result = self.eval_file_requested_fields_inner(path, depth, requested_fields);
@@ -2097,7 +2093,7 @@ impl Evaluator {
         let canonical = self.canonicalize_io(path)?;
         if !self.scoped_imports_in_flight.insert(canonical.clone()) {
             self.placeholder_reads += 1;
-            return Ok(Value::Object(Arc::new(IndexMap::new()), None));
+            return Ok(Value::Object(Arc::default(), None));
         }
         let result = self.eval_file_inner_with_scope(path, depth, inherited_scope);
         self.scoped_imports_in_flight.remove(&canonical);
@@ -2176,7 +2172,7 @@ impl Evaluator {
     ) -> Result<Value> {
         // Non-local glob imports resolve to an empty mapping.
         if uri.contains("://") {
-            return Ok(Value::Object(Arc::new(IndexMap::new()), None));
+            return Ok(Value::Object(Arc::default(), None));
         }
         // Match `expand_glob`, which walks `.` for a bare entry path, so the
         // matched paths share this prefix and the keys come out relative.
@@ -2194,7 +2190,7 @@ impl Evaluator {
                 .iter()
                 .all(|key| matched.iter().any(|(_, rel_key)| rel_key == key))
         });
-        let mut mapping = IndexMap::new();
+        let mut mapping = ObjectMap::default();
         for (matched_path, rel_key) in matched {
             if requested.is_some_and(|requested| !requested.contains(&rel_key)) {
                 continue;
@@ -2203,7 +2199,7 @@ impl Evaluator {
                 continue;
             }
             let val = self.eval_file_with_requested_fields(&matched_path, depth + 1, None)?;
-            mapping.insert(rel_key, val);
+            mapping.insert(rel_key.into(), val);
         }
         Ok(Value::Object(Arc::new(mapping), None))
     }
@@ -2370,7 +2366,7 @@ impl Evaluator {
                 }
                 return Ok(match field {
                     "length" => Value::Int(keys.len() as i64),
-                    "keys" => Value::List(keys.into_keys().map(Value::String).collect()),
+                    "keys" => Value::List(Arc::new(keys.into_keys().map(Value::String).collect())),
                     "isEmpty" => Value::Bool(keys.is_empty()),
                     _ => Value::Bool(!keys.is_empty()),
                 });
@@ -2387,7 +2383,7 @@ impl Evaluator {
                 .as_ref()
                 .is_none_or(|source| source.type_name.is_none())
         {
-            return Ok(Value::Object(Arc::new(IndexMap::new()), None));
+            return Ok(Value::Object(Arc::default(), None));
         }
         Err(Error::Eval(format!("field not found: {field}")))
     }
@@ -2399,7 +2395,7 @@ impl Evaluator {
         entries: &[Entry],
         scope: &Scope,
         depth: usize,
-        keys: &mut IndexMap<String, ()>,
+        keys: &mut IndexMap<Arc<str>, ()>,
     ) -> Result<()> {
         if depth > self.max_depth {
             return Err(Error::Eval("maximum recursion depth exceeded".into()));
@@ -2414,7 +2410,7 @@ impl Evaluator {
                     if prop.name != "default"
                         && !has_modifier(&prop.modifiers, Modifier::Hidden) =>
                 {
-                    keys.insert(prop.name.clone(), ());
+                    keys.insert(prop.name.as_str().into(), ());
                 }
                 Entry::DynProperty(key, _) => {
                     let key = self.eval_expr(key, &scope, depth + 1)?;
@@ -2826,7 +2822,7 @@ impl Evaluator {
         }
 
         // Process amends: load base module as starting values
-        let mut base_obj = IndexMap::new();
+        let mut base_obj = ObjectMap::default();
         let mut late_inherited_properties = Vec::new();
         if let Some(amends_uri) = &module.amends {
             // A relative amends inside a remote module resolves against that URL.
@@ -2953,7 +2949,7 @@ impl Evaluator {
                         // Remove inherited class definitions from base output —
                         // they were included at depth > 0 for dotted access but
                         // should not appear in the amending module's data output.
-                        base_obj.shift_remove(name);
+                        base_obj.shift_remove(name.as_str());
                     }
                     // Extract converters from the base module's output block
                     // (the amending module inherits them; child overrides if present).
@@ -3020,7 +3016,7 @@ impl Evaluator {
                                     depth,
                                 )?;
                                 scope.set(cls_name, defaults);
-                                base_obj.shift_remove(cls_name);
+                                base_obj.shift_remove(cls_name.as_str());
                             }
                             Entry::TypeAlias(name, ty) => {
                                 self.eval_type_alias(name, ty, &mut scope);
@@ -3071,7 +3067,7 @@ impl Evaluator {
                             depth,
                         )?;
                         scope.set(cls_name, defaults);
-                        base_obj.shift_remove(cls_name);
+                        base_obj.shift_remove(cls_name.as_str());
                     }
                     if let Entry::Property(prop) = entry
                         && !has_modifier(&prop.modifiers, Modifier::Local)
@@ -3206,7 +3202,7 @@ impl Evaluator {
         for entry in module.body.iter() {
             if let Entry::ClassDef(name, ..) = entry {
                 if let Some(cls_val) = scope.get(name) {
-                    base_obj.insert(name.clone(), cls_val.clone());
+                    base_obj.insert(name.as_str().into(), cls_val.clone());
                     class_names.insert(name.clone());
                 } else if module_members.contains(name) {
                     class_names.insert(name.clone());
@@ -3257,7 +3253,7 @@ impl Evaluator {
                     && prop.value.is_none()
                     && prop.body.is_none()
                 {
-                    if let Some(v) = out.get(&prop.name) {
+                    if let Some(v) = out.get(prop.name.as_str()) {
                         // Satisfied by base — add to scope so other properties can reference it
                         scope.set(&prop.name, v.clone());
                     } else if has_modifier(mods, Modifier::External) {
@@ -3307,7 +3303,7 @@ impl Evaluator {
                 if let Some(v) = val {
                     // const/fixed: error if overriding an immutable property from base
                     if (has_modifier(mods, Modifier::Const) || has_modifier(mods, Modifier::Fixed))
-                        && out.contains_key(&prop.name)
+                        && out.contains_key(prop.name.as_str())
                     {
                         let kind = if has_modifier(mods, Modifier::Const) {
                             "const"
@@ -3329,7 +3325,7 @@ impl Evaluator {
                             .as_ref()
                             .is_none_or(|fields| fields.contains(&prop.name))
                     {
-                        out.insert(prop.name.clone(), v);
+                        out.insert(prop.name.as_str().into(), v);
                     }
                     // Update `this` and `module` with all properties (including hidden)
                     let snapshot = Value::Object(Arc::clone(&all_props), None);
@@ -3437,7 +3433,7 @@ impl Evaluator {
                                 .as_ref()
                                 .is_none_or(|fields| fields.contains(&prop.name))
                         {
-                            out.insert(prop.name.clone(), value);
+                            out.insert(prop.name.as_str().into(), value);
                         }
                         let snapshot = Value::Object(Arc::clone(&all_props), None);
                         scope.set("this", snapshot.clone());
@@ -3482,7 +3478,7 @@ impl Evaluator {
                                 .as_ref()
                                 .is_none_or(|fields| fields.contains(&prop.name))
                         {
-                            out.insert(prop.name.clone(), value);
+                            out.insert(prop.name.as_str().into(), value);
                         }
                         let snapshot = Value::Object(Arc::clone(&all_props), None);
                         scope.set("this", snapshot.clone());
@@ -3522,17 +3518,17 @@ impl Evaluator {
             for name in &module_members {
                 if class_names.contains(name) {
                     if let Some(value) = scope.get(name) {
-                        out.insert(name.clone(), value.clone());
+                        out.insert(name.as_str().into(), value.clone());
                     } else {
-                        out.shift_remove(name);
+                        out.shift_remove(name.as_str());
                         if let Some(message) = scope.poison_of(name) {
                             poisoned_members.insert(name.clone(), message.clone());
                         }
                     }
-                } else if out.contains_key(name)
+                } else if out.contains_key(name.as_str())
                     && let Some(value) = scope.get(name)
                 {
-                    out.insert(name.clone(), value.clone());
+                    out.insert(name.as_str().into(), value.clone());
                 }
             }
         }
@@ -3622,7 +3618,7 @@ impl Evaluator {
             {
                 continue;
             }
-            let Some(value) = all_props.get(&prop.name) else {
+            let Some(value) = all_props.get(prop.name.as_str()) else {
                 continue;
             };
             self.check_declared_property_type(prop, value, check_scope, depth)?;
@@ -3630,11 +3626,11 @@ impl Evaluator {
 
         if depth == 0 {
             for prop in &late_inherited_properties {
-                if let Some(value) = all_props.get(&prop.name)
+                if let Some(value) = all_props.get(prop.name.as_str())
                     && !should_render_property_value(prop, value)
                     && !child_property_names.contains(prop.name.as_str())
                 {
-                    out.shift_remove(&prop.name);
+                    out.shift_remove(prop.name.as_str());
                 }
             }
         }
@@ -3645,12 +3641,12 @@ impl Evaluator {
         // (e.g., `helpers.ClassName`).
         if depth == 0 {
             for name in &class_names {
-                out.shift_remove(name);
+                out.shift_remove(name.as_str());
             }
             out.retain(|_, v| !matches!(v, Value::Lambda(..)));
         }
         if let Some(fields) = &requested_output_fields {
-            out.retain(|name, _| fields.contains(name));
+            out.retain(|name, _| fields.contains(&**name));
         }
         // If the module declares any `@Deprecated` properties, attach a
         // minimal ObjectSource carrying just the deprecation map so field
@@ -3738,13 +3734,18 @@ impl Evaluator {
             {
                 let mut items = match amendment_base {
                     Some(Value::List(existing)) => existing.clone(),
-                    _ => Vec::new(),
+                    _ => Vec::new().into(),
                 };
                 let mut amendment_scope = scope.child();
                 amendment_scope.set("super", Value::List(items.clone()));
                 amendment_scope.receiver_entries = Some(body.clone());
                 amendment_scope.receiver_list_base = Some(items.len());
-                self.eval_listing_entries(body, &amendment_scope, depth, &mut items)?;
+                self.eval_listing_entries(
+                    body,
+                    &amendment_scope,
+                    depth,
+                    Arc::make_mut(&mut items),
+                )?;
                 return Ok(Some(Value::List(items)));
             }
             // `foo { ... }` — object body amendment.
@@ -3764,7 +3765,7 @@ impl Evaluator {
                     );
                     let mut receiver_entries = existing_map
                         .keys()
-                        .map(|key| Entry::DynProperty(Expr::String(key.clone()), Expr::Null))
+                        .map(|key| Entry::DynProperty(Expr::String(key.to_string()), Expr::Null))
                         .collect::<Vec<_>>();
                     receiver_entries.extend_from_slice(body);
                     amendment_scope.receiver_entries = Some(Arc::new(receiver_entries));
@@ -3778,7 +3779,7 @@ impl Evaluator {
                         .collect::<Vec<_>>();
                     let inherited_default =
                         self.find_default_template(&src.entries, &inherited_scope, depth)?;
-                    let mut amended = IndexMap::new();
+                    let mut amended = ObjectMap::default();
                     self.eval_mapping_entries_with_type_default(
                         &src.entries,
                         &inherited_scope,
@@ -3815,7 +3816,7 @@ impl Evaluator {
                 )?));
             }
             let mut body_scope = scope.child();
-            body_scope.set("super", Value::Object(Arc::new(IndexMap::new()), None));
+            body_scope.set("super", Value::Object(Arc::default(), None));
             let val = self.eval_entries(body, &body_scope, depth)?;
             return Ok(Some(val));
         }
@@ -4058,22 +4059,14 @@ impl Evaluator {
                     outer_map.insert(prop.name.as_str().into(), Value::Null);
                 }
             }
-            let outer_obj = Value::Object(
-                Arc::new(
-                    outer_map
-                        .into_iter()
-                        .map(|(k, v)| (k.to_string(), v))
-                        .collect(),
-                ),
-                None,
-            );
+            let outer_obj = Value::Object(Arc::new(outer_map), None);
             child_scope.set("outer", outer_obj);
         }
         // Class-as-a-function definitions commonly use `local self = this` so
         // output properties can close over the amended instance. Bind `this`
         // before locals are evaluated, then keep direct aliases synchronized as
         // properties populate the instance.
-        let mut all_props: Arc<IndexMap<String, Value>> = Arc::default();
+        let mut all_props: Arc<ObjectMap> = Arc::default();
         let mut this_aliases = Vec::new();
         refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
         // First pass: collect locals, class definitions, and type aliases in
@@ -4229,7 +4222,7 @@ impl Evaluator {
             default_template = self.eval_property(prop, &active_scope, depth)?;
         }
 
-        let mut map: IndexMap<String, Value> = IndexMap::new();
+        let mut map: ObjectMap = ObjectMap::default();
         for (entry_index, entry) in entries.iter().enumerate() {
             match entry {
                 Entry::Property(prop) => {
@@ -4281,7 +4274,7 @@ impl Evaluator {
                             v.clone(),
                         );
                         if !has_modifier(mods, Modifier::Hidden) {
-                            map.insert(prop.name.clone(), v);
+                            map.insert(prop.name.as_str().into(), v);
                         }
                         refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                     }
@@ -4662,7 +4655,7 @@ impl Evaluator {
             parent_type_names: Vec::new(),
             parent_type_identities: Vec::new(),
             entry_scopes: entry_scopes.map(<[_]>::to_vec).unwrap_or_default(),
-            evaluated_properties: all_props.keys().cloned().collect(),
+            evaluated_properties: all_props.keys().map(|k| k.to_string()).collect(),
             mapping_value_types: Vec::new(),
             deprecated: collect_deprecated(entries),
             poisoned_members: None,
@@ -4683,7 +4676,7 @@ impl Evaluator {
         module: &Module,
         members: &indexmap::IndexSet<String>,
         scope: &mut Scope,
-        module_props: &mut Arc<IndexMap<String, Value>>,
+        module_props: &mut Arc<ObjectMap>,
         poisoned_locals: &PoisonedLocals,
         depth: usize,
     ) -> Result<()> {
@@ -4819,7 +4812,8 @@ impl Evaluator {
                         Err(error) => return Err(error),
                     };
                     // Keep `this.C` and `module.C` in step with the bare name.
-                    if module_member && (module_value.is_some() || module_props.contains_key(name))
+                    if module_member
+                        && (module_value.is_some() || module_props.contains_key(name.as_str()))
                     {
                         pending.push((name.clone(), module_value));
                     }
@@ -4919,7 +4913,7 @@ impl Evaluator {
             self.eval_entries_checked(body, &child_scope, depth + 1, TypeChecks::Nothing)?;
         if let Some(Value::Object(parent_map, parent_src)) = parent_val {
             // Merge: parent defaults first, child overrides on top
-            let mut merged: IndexMap<String, Value> = (*parent_map).clone();
+            let mut merged: ObjectMap = (*parent_map).clone();
             if let Value::Object(child_map, child_src) = child_defaults {
                 for (k, v) in child_map.iter() {
                     merged.insert(k.clone(), v.clone());
@@ -5048,8 +5042,7 @@ impl Evaluator {
                     })
                     .collect::<HashSet<_>>();
                 let mut map = map;
-                Arc::make_mut(&mut map)
-                    .retain(|key, _| !schema_member_names.contains(key.as_str()));
+                Arc::make_mut(&mut map).retain(|key, _| !schema_member_names.contains(&**key));
                 let mut new_src = Arc::unwrap_or_clone(src);
                 new_src.is_open = is_open;
                 new_src.type_name = Some(class_name.to_string());
@@ -5396,7 +5389,7 @@ impl Evaluator {
             {
                 continue;
             }
-            let Some(value) = body.all_props.get(&prop.name).cloned() else {
+            let Some(value) = body.all_props.get(prop.name.as_str()).cloned() else {
                 continue;
             };
             let active_scope = body.entry_scope(entry_index);
@@ -5482,7 +5475,7 @@ impl Evaluator {
                 Some(_) => check.value.clone(),
                 None => body
                     .all_props
-                    .get(&check.name)
+                    .get(check.name.as_str())
                     .cloned()
                     .unwrap_or_else(|| check.value.clone()),
             };
@@ -5627,7 +5620,7 @@ impl Evaluator {
         match ty {
             TypeExpr::Named(name) => {
                 if let Some(expected) = string_literal_type_value(name) {
-                    return Ok(matches!(val, Value::String(actual) if actual == expected));
+                    return Ok(matches!(val, Value::String(actual) if &**actual == expected));
                 }
                 // Check if name is a type alias; if so, resolve to the aliased type
                 if let Some(resolved) = scope.get_type_alias(name) {
@@ -5724,7 +5717,7 @@ impl Evaluator {
 
     fn eval_amended_object(
         &mut self,
-        base_map: &Arc<IndexMap<String, Value>>,
+        base_map: &Arc<ObjectMap>,
         base_source: &Arc<ObjectSource>,
         overlay_entries: &[Entry],
         current_scope: &Scope,
@@ -5753,10 +5746,10 @@ impl Evaluator {
         // accessible through super. Mapping keys, in contrast, need the map:
         // they need not have a binding in the lexical scope.
         for name in &base_source.evaluated_properties {
-            if !parent_members.contains_key(name)
+            if !parent_members.contains_key(name.as_str())
                 && let Some(value) = base_source.scope().get(name.as_str())
             {
-                parent_members.insert(name.clone(), value.clone());
+                parent_members.insert(name.as_str().into(), value.clone());
             }
         }
         amendment_scope.values.insert(
@@ -6026,7 +6019,7 @@ impl Evaluator {
                 let Some(type_ann) = &prop.type_ann else {
                     continue;
                 };
-                let value = map.get(&prop.name).or_else(|| {
+                let value = map.get(prop.name.as_str()).or_else(|| {
                     assigned_property_names
                         .contains(prop.name.as_str())
                         .then(|| {
@@ -6069,9 +6062,9 @@ impl Evaluator {
 
     fn eval_object_body_over_template(
         &mut self,
-        template_map: &Arc<IndexMap<String, Value>>,
+        template_map: &Arc<ObjectMap>,
         template_src: &Arc<ObjectSource>,
-        explicit_map: &IndexMap<String, Value>,
+        explicit_map: &ObjectMap,
         body: &[Entry],
         scope: &Scope,
         depth: usize,
@@ -6094,7 +6087,7 @@ impl Evaluator {
             let mut replaced = false;
             for (index, entry) in Arc::make_mut(&mut source.entries).iter_mut().enumerate() {
                 if let Entry::Property(prop) = entry
-                    && prop.name == *key
+                    && *prop.name == **key
                     && !has_modifier(&prop.modifiers, Modifier::Local)
                 {
                     prop.value = Some(Expr::Ident(binding.clone()));
@@ -6109,14 +6102,14 @@ impl Evaluator {
                 Arc::make_mut(&mut source.entries).push(Entry::Property(Property {
                     annotations: Vec::new(),
                     modifiers: Vec::new(),
-                    name: key.clone(),
+                    name: key.to_string(),
                     type_ann: None,
                     value: Some(Expr::Ident(binding)),
                     body: None,
                 }));
                 source.entry_scopes.resize(source.entries.len(), None);
             }
-            source.body_members.insert(key.clone());
+            source.body_members.insert(key.to_string());
         }
         self.eval_amended_object(template_map, &Arc::new(source), body, scope, depth)
     }
@@ -6195,8 +6188,8 @@ impl Evaluator {
                 Entry::Spread(expr) => {
                     let values = match self.eval_expr(expr, &scope, depth + 1)? {
                         Value::List(values) => values,
-                        Value::Object(values, _) => values.values().cloned().collect(),
-                        value => vec![value],
+                        Value::Object(values, _) => Arc::new(values.values().cloned().collect()),
+                        value => Arc::new(vec![value]),
                     };
                     if target >= *position && target - *position < values.len() {
                         *value = Some(values[target - *position].clone());
@@ -6311,7 +6304,7 @@ impl Evaluator {
                     }
                 }
                 Entry::Spread(expr) => match self.eval_expr(expr, &listing_scope, depth + 1)? {
-                    Value::List(values) => items.extend(values),
+                    Value::List(values) => items.extend(values.iter().cloned()),
                     Value::Object(values, _) => items.extend(values.values().cloned()),
                     value => items.push(value),
                 },
@@ -6367,7 +6360,7 @@ impl Evaluator {
             Expr::Bool(b) => Ok(Value::Bool(*b)),
             Expr::Int(n) => Ok(Value::Int(*n)),
             Expr::Float(f) => Ok(Value::Float(*f)),
-            Expr::String(s) => Ok(Value::String(s.clone())),
+            Expr::String(s) => Ok(Value::String(s.as_str().into())),
             Expr::StringInterpolation(parts) => {
                 let mut result = String::new();
                 for part in parts {
@@ -6379,7 +6372,7 @@ impl Evaluator {
                         }
                     }
                 }
-                Ok(Value::String(result))
+                Ok(Value::String(result.into()))
             }
             Expr::Ident(name) => scope.get(name).cloned().ok_or_else(|| {
                 Error::Eval(
@@ -6442,18 +6435,18 @@ impl Evaluator {
             }
             Expr::New(type_name, entries, generic_params) => {
                 let mut constructor_scope = scope.child();
-                constructor_scope.set("super", Value::Object(Arc::new(IndexMap::new()), None));
+                constructor_scope.set("super", Value::Object(Arc::default(), None));
                 constructor_scope.receiver_entries = Some(entries.clone());
                 constructor_scope.receiver_list_base = None;
                 let scope = &constructor_scope;
                 match type_name.as_deref() {
                     Some("Listing") => {
                         let mut listing_scope = scope.child();
-                        listing_scope.set("super", Value::List(Vec::new()));
+                        listing_scope.set("super", Value::List(Vec::new().into()));
                         listing_scope.receiver_list_base = Some(0);
                         let mut items = Vec::new();
                         self.eval_listing_entries(entries, &listing_scope, depth + 1, &mut items)?;
-                        Ok(Value::List(items))
+                        Ok(Value::List(items.into()))
                     }
                     Some("Mapping") | Some("Map") => {
                         // If the Mapping has a value type param (e.g., Mapping<String, Step>),
@@ -6465,7 +6458,7 @@ impl Evaluator {
                                 resolve_dotted(scope, name).map(|value| (name.clone(), value))
                             })
                             .collect::<Vec<_>>();
-                        let mut map = IndexMap::new();
+                        let mut map = ObjectMap::default();
                         self.eval_mapping_entries_with_type_default(
                             entries,
                             scope,
@@ -6515,7 +6508,7 @@ impl Evaluator {
                             parent_type_names: Vec::new(),
                             parent_type_identities: Vec::new(),
                             entry_scopes: Vec::new(),
-                            evaluated_properties: map.keys().cloned().collect(),
+                            evaluated_properties: map.keys().map(|k| k.to_string()).collect(),
                             mapping_value_types: generic_params.iter().skip(1).cloned().collect(),
                             deprecated,
                             poisoned_members: None,
@@ -6561,7 +6554,7 @@ impl Evaluator {
                                             None
                                         }
                                     })
-                                    .chain(base_map.keys().cloned())
+                                    .chain(base_map.keys().map(|k| k.to_string()))
                                     .collect();
                                 for entry in entries.iter() {
                                     match entry {
@@ -6629,7 +6622,7 @@ impl Evaluator {
                         } else if let Some(Value::Object(base_map, base_src)) = base {
                             // Fallback: eager merge
                             let overlay = self.eval_entries(entries, scope, depth + 1)?;
-                            let mut merged: IndexMap<String, Value> = (*base_map).clone();
+                            let mut merged: ObjectMap = (*base_map).clone();
                             let mut deprecated = base_src
                                 .as_ref()
                                 .map(|s| s.deprecated.clone())
@@ -6668,7 +6661,7 @@ impl Evaluator {
             }
             Expr::ObjectBody(entries) => {
                 let mut body_scope = scope.child();
-                body_scope.set("super", Value::Object(Arc::new(IndexMap::new()), None));
+                body_scope.set("super", Value::Object(Arc::default(), None));
                 self.eval_entries(entries, &body_scope, depth + 1)
             }
             Expr::Field(obj_expr, field) => {
@@ -6703,12 +6696,12 @@ impl Evaluator {
                     (Value::Object(map, _), "length") => return Ok(Value::Int(map.len() as i64)),
                     (Value::Object(map, _), "isEmpty") => return Ok(Value::Bool(map.is_empty())),
                     (Value::Object(map, _), "keys") => {
-                        return Ok(Value::List(
+                        return Ok(Value::List(Arc::new(
                             map.keys().map(|k| Value::String(k.clone())).collect(),
-                        ));
+                        )));
                     }
                     (Value::Object(map, _), "values") => {
-                        return Ok(Value::List(map.values().cloned().collect()));
+                        return Ok(Value::List(Arc::new(map.values().cloned().collect())));
                     }
                     // Duration and DataSize units on numbers
                     (
@@ -6722,7 +6715,7 @@ impl Evaluator {
                 }
                 match &obj {
                     Value::Object(map, source) => {
-                        let val = map.get(field).cloned().ok_or_else(|| {
+                        let val = map.get(field.as_str()).cloned().ok_or_else(|| {
                             Error::Eval(
                                 missing_member_error(source, obj_expr, field, scope)
                                     .unwrap_or_else(|| format!("field not found: {field}")),
@@ -6748,7 +6741,7 @@ impl Evaluator {
                         {
                             return Err(Error::Eval(message));
                         }
-                        let val = map.get(field).cloned().unwrap_or(Value::Null);
+                        let val = map.get(field.as_str()).cloned().unwrap_or(Value::Null);
                         if !is_null_value(&val) {
                             self.warn_if_deprecated_access(source, field);
                         }
@@ -6996,7 +6989,7 @@ impl Evaluator {
                     for a in args {
                         items.push(self.eval_expr(a, scope, depth + 1)?);
                     }
-                    return Ok(Value::List(items));
+                    return Ok(Value::List(items.into()));
                 }
                 "Set" => {
                     let mut items = Vec::new();
@@ -7006,7 +6999,7 @@ impl Evaluator {
                             items.push(val);
                         }
                     }
-                    return Ok(Value::List(items)); // deduplicated
+                    return Ok(Value::List(items.into())); // deduplicated
                 }
                 "IntSeq" if int_seq_is_builtin(scope) => {
                     let (start, end) = self.eval_int_seq_bounds(args, scope, depth)?;
@@ -7021,7 +7014,7 @@ impl Evaluator {
                 }
                 "Map" => {
                     // Map(k1, v1, k2, v2, ...)
-                    let mut map = IndexMap::new();
+                    let mut map = ObjectMap::default();
                     let mut evaled = Vec::new();
                     for a in args {
                         evaled.push(self.eval_expr(a, scope, depth + 1)?);
@@ -7063,7 +7056,7 @@ impl Evaluator {
 
         // Built-in type constructors resolved from scope (e.g. base.Regex)
         if let Value::String(ref name) = func_val
-            && name == "Regex"
+            && &**name == "Regex"
             && let Some(arg) = args.first()
         {
             let val = self.eval_expr(arg, scope, depth + 1)?;
@@ -7088,7 +7081,7 @@ impl Evaluator {
         {
             self.warn_if_deprecated_access(source, method);
             if let Value::String(ref name) = func_val
-                && name == "Regex"
+                && &**name == "Regex"
                 && let Some(arg) = evaled_args.first()
             {
                 return Ok(Some(regex_value(arg.clone())));
@@ -7152,28 +7145,28 @@ impl Evaluator {
             (Value::String(s), "replaceLast") => {
                 let from = require_str_arg(args, 0, "replaceLast")?;
                 let to = require_str_arg(args, 1, "replaceLast")?;
-                let mut result = s.clone();
+                let mut result = s.to_string();
                 if let Some(start) = s.rfind(from) {
                     result.replace_range(start..start + from.len(), to);
                 }
-                Ok(Some(Value::String(result)))
+                Ok(Some(Value::String(result.into())))
             }
             (Value::String(s), "replaceAll") => {
                 let from = require_str_arg(args, 0, "replaceAll")?;
                 let to = require_str_arg(args, 1, "replaceAll")?;
-                Ok(Some(Value::String(s.replace(from, to))))
+                Ok(Some(Value::String(s.replace(from, to).into())))
             }
             (Value::String(s), "split") => {
                 let sep = require_str_arg(args, 0, "split")?;
-                Ok(Some(Value::List(
-                    s.split(sep).map(|p| Value::String(p.to_string())).collect(),
-                )))
+                Ok(Some(Value::List(Arc::new(
+                    s.split(sep).map(|p| Value::String(p.into())).collect(),
+                ))))
             }
-            (Value::String(s), "trim") => Ok(Some(Value::String(s.trim().to_string()))),
-            (Value::String(s), "trimStart") => Ok(Some(Value::String(s.trim_start().to_string()))),
-            (Value::String(s), "trimEnd") => Ok(Some(Value::String(s.trim_end().to_string()))),
-            (Value::String(s), "toUpperCase") => Ok(Some(Value::String(s.to_uppercase()))),
-            (Value::String(s), "toLowerCase") => Ok(Some(Value::String(s.to_lowercase()))),
+            (Value::String(s), "trim") => Ok(Some(Value::String(s.trim().into()))),
+            (Value::String(s), "trimStart") => Ok(Some(Value::String(s.trim_start().into()))),
+            (Value::String(s), "trimEnd") => Ok(Some(Value::String(s.trim_end().into()))),
+            (Value::String(s), "toUpperCase") => Ok(Some(Value::String(s.to_uppercase().into()))),
+            (Value::String(s), "toLowerCase") => Ok(Some(Value::String(s.to_lowercase().into()))),
             (Value::String(s), "toInt") => s
                 .parse::<i64>()
                 .map(|n| Some(Value::Int(n)))
@@ -7192,57 +7185,58 @@ impl Evaluator {
             (Value::List(items), "toList") => Ok(Some(Value::List(items.clone()))),
             (Value::List(items), "toSet") => {
                 let mut seen = Vec::new();
-                for item in items {
+                for item in items.iter() {
                     if !seen.contains(item) {
                         seen.push(item.clone());
                     }
                 }
-                Ok(Some(Value::List(seen)))
+                Ok(Some(Value::List(seen.into())))
             }
             (Value::List(items), "map") => {
                 let lambda = args
                     .first()
                     .ok_or_else(|| Error::Eval("map requires a function argument".into()))?;
                 let mut result = Vec::new();
-                for item in items {
+                for item in items.iter() {
                     result.push(self.invoke_lambda(lambda, std::slice::from_ref(item), depth)?);
                 }
-                Ok(Some(Value::List(result)))
+                Ok(Some(Value::List(result.into())))
             }
             (Value::List(items), "flatMap") => {
                 let lambda = args
                     .first()
                     .ok_or_else(|| Error::Eval("flatMap requires a function argument".into()))?;
                 let mut result = Vec::new();
-                for item in items {
+                for item in items.iter() {
                     let val = self.invoke_lambda(lambda, std::slice::from_ref(item), depth)?;
                     if let Value::List(inner) = val {
-                        result.extend(inner);
+                        result.extend(inner.iter().cloned());
                     } else {
                         result.push(val);
                     }
                 }
-                Ok(Some(Value::List(result)))
+                Ok(Some(Value::List(result.into())))
             }
             (Value::List(items), "filter") => {
                 let lambda = args
                     .first()
                     .ok_or_else(|| Error::Eval("filter requires a function argument".into()))?;
                 let mut result = Vec::new();
-                for item in items {
+                for item in items.iter() {
                     let cond = self.invoke_lambda(lambda, std::slice::from_ref(item), depth)?;
                     if is_truthy(&cond) {
                         result.push(item.clone());
                     }
                 }
-                Ok(Some(Value::List(result)))
+                Ok(Some(Value::List(result.into())))
             }
             (Value::List(items), "filterNonNull") => Ok(Some(Value::List(
                 items
                     .iter()
                     .filter(|item| !is_null_value(item))
                     .cloned()
-                    .collect(),
+                    .collect::<Vec<_>>()
+                    .into(),
             ))),
             (Value::List(items), "fold") => {
                 let init = args
@@ -7253,7 +7247,7 @@ impl Evaluator {
                     .get(1)
                     .ok_or_else(|| Error::Eval("fold requires a function argument".into()))?;
                 let mut acc = init;
-                for item in items {
+                for item in items.iter() {
                     acc = self.invoke_lambda(lambda, &[acc, item.clone()], depth)?;
                 }
                 Ok(Some(acc))
@@ -7262,7 +7256,7 @@ impl Evaluator {
                 let lambda = args
                     .first()
                     .ok_or_else(|| Error::Eval("any requires a function argument".into()))?;
-                for item in items {
+                for item in items.iter() {
                     if is_truthy(&self.invoke_lambda(lambda, std::slice::from_ref(item), depth)?) {
                         return Ok(Some(Value::Bool(true)));
                     }
@@ -7273,7 +7267,7 @@ impl Evaluator {
                 let lambda = args
                     .first()
                     .ok_or_else(|| Error::Eval("every requires a function argument".into()))?;
-                for item in items {
+                for item in items.iter() {
                     if !is_truthy(&self.invoke_lambda(lambda, std::slice::from_ref(item), depth)?) {
                         return Ok(Some(Value::Bool(false)));
                     }
@@ -7283,11 +7277,11 @@ impl Evaluator {
             (Value::List(items), "join") => {
                 let sep = args.first().and_then(|v| v.as_str()).unwrap_or(",");
                 let s: Vec<String> = items.iter().map(value_to_display).collect();
-                Ok(Some(Value::String(s.join(sep))))
+                Ok(Some(Value::String(s.join(sep).into())))
             }
             (Value::List(items), "reverse") => {
                 let mut rev = items.clone();
-                rev.reverse();
+                Arc::make_mut(&mut rev).reverse();
                 Ok(Some(Value::List(rev)))
             }
 
@@ -7303,7 +7297,7 @@ impl Evaluator {
                 let lambda = args
                     .first()
                     .ok_or_else(|| Error::Eval("mapValues requires a function".into()))?;
-                let mut result = IndexMap::new();
+                let mut result = ObjectMap::default();
                 for (k, v) in map.iter() {
                     let new_v =
                         self.invoke_lambda(lambda, &[Value::String(k.clone()), v.clone()], depth)?;
@@ -7315,7 +7309,7 @@ impl Evaluator {
                 let lambda = args
                     .first()
                     .ok_or_else(|| Error::Eval("filter requires a function".into()))?;
-                let mut result = IndexMap::new();
+                let mut result = ObjectMap::default();
                 for (k, v) in map.iter() {
                     let keep =
                         self.invoke_lambda(lambda, &[Value::String(k.clone()), v.clone()], depth)?;
@@ -7329,9 +7323,9 @@ impl Evaluator {
             (Value::Object(map, _), "toDynamic") => Ok(Some(Value::Object(map.clone(), None))),
 
             // Int/Float methods
-            (Value::Int(n), "toString") => Ok(Some(Value::String(n.to_string()))),
-            (Value::Float(f), "toString") => Ok(Some(Value::String(f.to_string()))),
-            (Value::Bool(b), "toString") => Ok(Some(Value::String(b.to_string()))),
+            (Value::Int(n), "toString") => Ok(Some(Value::String(n.to_string().into()))),
+            (Value::Float(f), "toString") => Ok(Some(Value::String(f.to_string().into()))),
+            (Value::Bool(b), "toString") => Ok(Some(Value::String(b.to_string().into()))),
 
             // Lambda.apply()
             (Value::Lambda(params, body, captured), "apply") => {
@@ -7371,7 +7365,12 @@ impl Evaluator {
             amendment_scope.set("super", Value::List(amended.clone()));
             amendment_scope.receiver_entries = Some(overlay_entries.clone());
             amendment_scope.receiver_list_base = Some(amended.len());
-            self.eval_listing_entries(overlay_entries, &amendment_scope, depth + 1, &mut amended)?;
+            self.eval_listing_entries(
+                overlay_entries,
+                &amendment_scope,
+                depth + 1,
+                Arc::make_mut(&mut amended),
+            )?;
             return Ok(Value::List(amended));
         }
         if let Value::Object(base_map, Some(base_src)) = &base
@@ -7383,7 +7382,7 @@ impl Evaluator {
                 amendment_scope.set("super", base.clone());
                 let mut receiver_entries = base_map
                     .keys()
-                    .map(|key| Entry::DynProperty(Expr::String(key.clone()), Expr::Null))
+                    .map(|key| Entry::DynProperty(Expr::String(key.to_string()), Expr::Null))
                     .collect::<Vec<_>>();
                 receiver_entries.extend_from_slice(overlay_entries);
                 amendment_scope.receiver_entries = Some(Arc::new(receiver_entries));
@@ -7396,7 +7395,7 @@ impl Evaluator {
                     .collect::<Vec<_>>();
                 let inherited_default =
                     self.find_default_template(&base_src.entries, &inherited_scope, depth)?;
-                let mut amended = IndexMap::new();
+                let mut amended = ObjectMap::default();
                 self.eval_mapping_entries_with_type_default(
                     &base_src.entries,
                     &inherited_scope,
@@ -7518,7 +7517,7 @@ impl Evaluator {
         entries: &[crate::parser::Entry],
         scope: &Scope,
         depth: usize,
-        map: &mut IndexMap<String, Value>,
+        map: &mut ObjectMap,
         type_defaults: &[(String, Value)],
         value_type_names: &[String],
         inherited_default: MappingInheritedDefault,
@@ -7947,7 +7946,7 @@ impl Evaluator {
                 }
 
                 // No converter matched — recurse into children
-                let mut new_map: Option<IndexMap<String, Value>> = None;
+                let mut new_map: Option<ObjectMap> = None;
                 for (index, (k, v)) in map.iter().enumerate() {
                     let converted = self.apply_converters_recursive(v, converters, Vec::new())?;
                     match (&mut new_map, converted) {
@@ -7955,7 +7954,8 @@ impl Evaluator {
                             new_map.insert(k.clone(), converted.unwrap_or_else(|| v.clone()));
                         }
                         (None, Some(converted)) => {
-                            let mut changed = IndexMap::with_capacity(map.len());
+                            let mut changed =
+                                ObjectMap::with_capacity_and_hasher(map.len(), Default::default());
                             changed.extend(
                                 map.iter().take(index).map(|(k, v)| (k.clone(), v.clone())),
                             );
@@ -7985,7 +7985,7 @@ impl Evaluator {
                         (None, None) => {}
                     }
                 }
-                Ok(new_items.map(Value::List))
+                Ok(new_items.map(|items| Value::List(Arc::new(items))))
             }
             _ => Ok(None),
         }
@@ -8206,9 +8206,9 @@ impl Evaluator {
 }
 
 fn stdlib_module(name: &str) -> Value {
-    let mut map = IndexMap::new();
+    let mut map = ObjectMap::default();
     if name == "base" {
-        map.insert("Regex".to_string(), Value::String("Regex".to_string()));
+        map.insert("Regex".into(), Value::String("Regex".into()));
     }
     Value::Object(Arc::new(map), None)
 }
@@ -8223,14 +8223,14 @@ fn seed_builtins(scope: &mut Scope) {
         "IntSeq",
         "Pair",
     ] {
-        scope.set(name, Value::String(name.to_string()));
+        scope.set(name, Value::String(name.into()));
     }
 }
 
 /// Whether `IntSeq` in `scope` is still the built-in, which `seed_builtins`
 /// binds to a marker string, rather than a user binding of that name.
 fn int_seq_is_builtin(scope: &Scope) -> bool {
-    matches!(scope.get("IntSeq"), Some(Value::String(name)) if name == "IntSeq")
+    matches!(scope.get("IntSeq"), Some(Value::String(name)) if &**name == "IntSeq")
 }
 
 /// Largest number of elements an `IntSeq` may produce. IntSeq is
@@ -8258,14 +8258,16 @@ fn int_seq(start: i64, end: i64, step: i64) -> Result<Value> {
     Ok(Value::List(
         (0..len)
             .map(|i| Value::Int((start_w + i * step_w) as i64))
-            .collect(),
+            .collect::<Vec<_>>()
+            .into(),
     ))
 }
 
 fn collection_to_items(v: Value) -> Vec<(Value, Value)> {
     match v {
         Value::List(items) => items
-            .into_iter()
+            .iter()
+            .cloned()
             .enumerate()
             .map(|(i, v)| (Value::Int(i as i64), v))
             .collect(),

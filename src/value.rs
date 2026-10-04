@@ -6,9 +6,13 @@ use serde_json::json;
 
 use crate::parser::{Expr, TypeExpr};
 
-/// Captured lexical bindings, keyed by shared names so capturing a scope does
-/// not allocate a string per binding.
-pub type ScopeMap = IndexMap<Arc<str>, Value, rustc_hash::FxBuildHasher>;
+/// The members of an evaluated object, in declaration order. Keys are shared
+/// names so copying members between objects and scopes does not allocate.
+pub type ObjectMap = IndexMap<Arc<str>, Value, rustc_hash::FxBuildHasher>;
+
+/// Captured lexical bindings. The same type as [`ObjectMap`], so a scope can
+/// become an object (and back) without rebuilding it.
+pub type ScopeMap = ObjectMap;
 
 /// Type aliases captured with a scope. The types are shared so capturing a
 /// scope does not copy every alias's type expression.
@@ -36,7 +40,7 @@ pub(crate) struct CapturedScope {
 /// properties pick up overridden values.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObjectSource {
-    pub entries: crate::parser::Body,
+    pub(crate) entries: crate::parser::Body,
     /// The bindings visible where the object was defined (see
     /// [`ObjectSource::scope`]).
     pub(crate) captured: crate::eval::SourceScope,
@@ -44,15 +48,15 @@ pub struct ObjectSource {
     /// amendment has since replaced.
     pub(crate) body_members: HashSet<String>,
     /// Whether the class was declared `open` (allows adding new properties)
-    pub is_open: bool,
+    pub(crate) is_open: bool,
     /// The pkl class name this object was instantiated from (e.g., "Step", "Group").
     /// Used by `output.renderer.converters` to apply type-specific transforms.
-    pub type_name: Option<String>,
+    pub(crate) type_name: Option<String>,
     /// Stable definition-site identity used to distinguish same-named classes.
     pub(crate) type_identity: Option<String>,
     /// Parent class names, nearest first. Converters declared for a base class
     /// also apply to instances of its subclasses.
-    pub parent_type_names: Vec<String>,
+    pub(crate) parent_type_names: Vec<String>,
     /// Stable definition-site identities for parent classes, nearest first.
     pub(crate) parent_type_identities: Vec<String>,
     /// Lexical scopes for entries introduced by earlier amendments. `None`
@@ -65,7 +69,7 @@ pub struct ObjectSource {
     /// Possible value type names for mapping entries, e.g. `Step | Group` from
     /// `Mapping<String, Step | Group>`. Used when amending mappings so bare
     /// entries inherit the right class template.
-    pub mapping_value_types: Vec<String>,
+    pub(crate) mapping_value_types: Vec<String>,
     /// Map of property name → optional deprecation message for properties
     /// annotated with `@Deprecated`. Consulted on field access so the
     /// warning fires when a deprecated property is *used*, not when the
@@ -80,6 +84,26 @@ pub struct ObjectSource {
 }
 
 impl ObjectSource {
+    /// The object's original body entries.
+    pub fn entries(&self) -> &[crate::parser::Entry] {
+        &self.entries
+    }
+
+    /// Whether the object's class was declared `open`.
+    pub fn is_open(&self) -> bool {
+        self.is_open
+    }
+
+    /// The pkl class this object was instantiated from, if any.
+    pub fn type_name(&self) -> Option<&str> {
+        self.type_name.as_deref()
+    }
+
+    /// Parent class names, nearest first.
+    pub fn parent_type_names(&self) -> &[String] {
+        &self.parent_type_names
+    }
+
     /// The bindings visible where the object was defined.
     pub fn scope(&self) -> &ScopeMap {
         &self.captured.parts().values
@@ -117,20 +141,22 @@ impl ObjectSource {
 /// keys are strings — which is the only case supported by JSON output. All
 /// `new Mapping { ["key"] = ... }` expressions therefore produce `Object`.
 #[derive(Debug, Clone, PartialEq, Default)]
+#[non_exhaustive]
 pub enum Value {
     #[default]
     Null,
     Bool(bool),
     Int(i64),
     Float(f64),
-    String(String),
+    /// Strings are shared so copying a string value does not allocate.
+    String(Arc<str>),
     /// Object (ordered string-keyed map). Represents both pkl objects and
     /// string-keyed Mappings.  The optional [`ObjectSource`] stores the
     /// original entry definitions so late binding works on amendment.
     /// The map is Arc-wrapped so cloning a Value::Object is O(1).
-    Object(Arc<IndexMap<String, Value>>, Option<Arc<ObjectSource>>),
-    /// Listing (ordered list).
-    List(Vec<Value>),
+    Object(Arc<ObjectMap>, Option<Arc<ObjectSource>>),
+    /// Listing (ordered list). Arc-wrapped so cloning is O(1).
+    List(Arc<Vec<Value>>),
     /// Lambda function: param names + body expression + captured scope values.
     /// All three are Arc-wrapped so cloning a Lambda is O(1): lambdas are
     /// copied whenever a scope holding them is captured, and deep-copying the
@@ -145,11 +171,11 @@ impl Value {
             Value::Bool(b) => json!(b),
             Value::Int(n) => json!(n),
             Value::Float(f) => json!(f),
-            Value::String(s) => json!(s),
+            Value::String(s) => serde_json::Value::String(s.to_string()),
             Value::Object(map, _) => {
                 let mut obj = serde_json::Map::new();
                 for (k, v) in map.iter() {
-                    obj.insert(k.clone(), v.to_json());
+                    obj.insert(k.to_string(), v.to_json());
                 }
                 serde_json::Value::Object(obj)
             }
@@ -168,7 +194,7 @@ impl Value {
         }
     }
 
-    pub fn as_object_mut(&mut self) -> Option<&mut IndexMap<String, Value>> {
+    pub fn as_object_mut(&mut self) -> Option<&mut ObjectMap> {
         if let Value::Object(m, _) = self {
             Some(Arc::make_mut(m))
         } else {
@@ -202,12 +228,14 @@ impl From<serde_json::Value> for Value {
                     Value::Float(n.as_f64().unwrap_or(f64::NAN))
                 }
             }
-            serde_json::Value::String(s) => Value::String(s),
-            serde_json::Value::Array(a) => Value::List(a.into_iter().map(Value::from).collect()),
+            serde_json::Value::String(s) => Value::String(s.into()),
+            serde_json::Value::Array(a) => {
+                Value::List(Arc::new(a.into_iter().map(Value::from).collect()))
+            }
             serde_json::Value::Object(o) => {
-                let mut map = IndexMap::new();
+                let mut map = ObjectMap::default();
                 for (k, v) in o {
-                    map.insert(k, Value::from(v));
+                    map.insert(k.into(), Value::from(v));
                 }
                 Value::Object(Arc::new(map), None)
             }
