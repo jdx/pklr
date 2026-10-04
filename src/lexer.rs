@@ -58,19 +58,26 @@ impl<'a> Lexer<'a> {
 
     fn skip_whitespace_and_comments(&mut self) {
         loop {
-            // Skip whitespace
-            while self
-                .peek()
-                .map(|c| c.is_ascii_whitespace())
-                .unwrap_or(false)
+            // Skip whitespace. ASCII whitespace is one byte per column, so
+            // scan bytes rather than decoding a char at a time.
+            let bytes = self.source.as_bytes();
+            while let Some(&byte) = bytes.get(self.pos)
+                && byte.is_ascii_whitespace()
             {
-                self.advance();
-            }
-            // Skip line comments
-            if self.source[self.pos..].starts_with("//") {
-                while self.peek().map(|c| c != '\n').unwrap_or(false) {
-                    self.advance();
+                self.pos += 1;
+                if byte == b'\n' {
+                    self.line += 1;
+                    self.col = 1;
+                } else {
+                    self.col += 1;
                 }
+            }
+            // Skip line comments, up to (not including) the newline
+            if self.source[self.pos..].starts_with("//") {
+                let rest = &self.source[self.pos..];
+                let len = rest.find('\n').unwrap_or(rest.len());
+                self.col += rest[..len].chars().count();
+                self.pos += len;
                 continue;
             }
             // Skip block comments /* ... */
