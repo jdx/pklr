@@ -3419,3 +3419,37 @@ result {
     assert_eq!(json["result"]["b"], false);
     assert_eq!(json["result"]["c"], true);
 }
+
+#[test]
+fn lambda_with_self_referential_alias_constraint_is_created() {
+    let json = eval(
+        r#"
+typealias A = Int(this == 0 || this is A)
+f = (x) -> x is A
+a = f.apply(0)
+"#,
+    );
+    assert_eq!(json["a"], true);
+}
+
+#[test]
+fn lambda_resolves_alias_chain_in_its_defining_scope() {
+    // `A` means the enclosing `B`, even where a body inside the lambda
+    // declares a `B` of its own.
+    let json = eval(
+        r#"
+result {
+  typealias B = Int
+  typealias A = B
+  f = (x) -> new Dynamic {
+    typealias B = String
+    inner = x is A
+  }.inner
+  a = f.apply(1)
+  b = f.apply("s")
+}
+"#,
+    );
+    assert_eq!(json["result"]["a"], true);
+    assert_eq!(json["result"]["b"], false);
+}
