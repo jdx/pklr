@@ -1633,7 +1633,7 @@ fn collect_field_names_expr(expr: &Expr, out: &mut HashSet<String>) {
         Expr::Index(base, index) => {
             match index.as_ref() {
                 Expr::String(key) => {
-                    out.insert(key.clone());
+                    out.insert(key.to_string());
                 }
                 _ => {
                     out.insert(DYNAMIC_SIBLING_REF.to_string());
@@ -1669,9 +1669,9 @@ fn collect_field_names_expr(expr: &Expr, out: &mut HashSet<String>) {
             collect_field_names_expr(value, out);
             collect_field_names_expr(body, out);
         }
+        Expr::Lambda(_, value) => collect_field_names_expr(value, out),
         Expr::Is(value, _)
         | Expr::As(value, _)
-        | Expr::Lambda(_, value)
         | Expr::Unop(_, value)
         | Expr::Throw(value)
         | Expr::Trace(value)
