@@ -2353,6 +2353,12 @@ async fn narrowed_import_ignores_checked_value_names_in_is_expressions() {
         "length = throw(\"unused\")\nresult = List(1) is Listing<Int>(length == 1)\n",
     )
     .unwrap();
+    // A nullable base runs its constraint on `null`, which binds no `length`.
+    std::fs::write(
+        dir.join("nullable.pkl"),
+        "length = 1\nresult = null is Listing<Int>?(length == 1)\n",
+    )
+    .unwrap();
     // `N` can't be resolved during analysis, so `length` stays a module read;
     // a number's check doesn't bind it.
     std::fs::write(
@@ -2362,7 +2368,7 @@ async fn narrowed_import_ignores_checked_value_names_in_is_expressions() {
     .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"plain.pkl\" as Plain\nimport \"class.pkl\" as Class\nimport \"alias.pkl\" as Alias\nimport \"generic.pkl\" as Generic\nplain = Plain.result\nclassed = Class.result.ok\naliased = Alias.result\ngeneric = Generic.result\n",
+        "import \"plain.pkl\" as Plain\nimport \"class.pkl\" as Class\nimport \"alias.pkl\" as Alias\nimport \"generic.pkl\" as Generic\nimport \"nullable.pkl\" as Nullable\nplain = Plain.result\nclassed = Class.result.ok\naliased = Alias.result\ngeneric = Generic.result\nnullable = Nullable.result\n",
     )
     .unwrap();
 
@@ -2373,4 +2379,5 @@ async fn narrowed_import_ignores_checked_value_names_in_is_expressions() {
     assert_eq!(val["classed"], true);
     assert_eq!(val["aliased"], true);
     assert_eq!(val["generic"], true);
+    assert_eq!(val["nullable"], true);
 }

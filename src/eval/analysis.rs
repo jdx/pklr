@@ -475,7 +475,11 @@ pub(super) fn collect_sibling_field_refs_entries(entries: &[Entry], refs: &mut H
 /// here, those two are kept as references: keeping an unneeded reference only
 /// evaluates more, while dropping a needed one breaks the check.
 fn constraint_bound_names(base: &str) -> &'static [&'static str] {
-    let base = base.trim_start_matches('*').trim_end_matches('?');
+    // A nullable base also runs its constraint on `null`, which binds nothing.
+    if base.ends_with('?') {
+        return &["this"];
+    }
+    let base = base.trim_start_matches('*');
     // A generic base such as `Listing<String>` checks as its class.
     let base = base.split('<').next().unwrap_or(base).trim();
     match base {
