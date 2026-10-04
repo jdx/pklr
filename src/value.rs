@@ -615,13 +615,24 @@ impl Value {
             Value::Object(map, _) => {
                 let mut obj = serde_json::Map::new();
                 for (k, v) in map.iter() {
+                    // The result is discarded once a value fails.
+                    if unrenderable.is_some() {
+                        break;
+                    }
                     obj.insert(display_storage_key(k).to_string(), v.json_checked(unrenderable));
                 }
                 serde_json::Value::Object(obj)
             }
-            Value::List(items) => serde_json::Value::Array(
-                items.iter().map(|v| v.json_checked(unrenderable)).collect(),
-            ),
+            Value::List(items) => {
+                let mut array = Vec::with_capacity(items.len());
+                for item in items.iter() {
+                    if unrenderable.is_some() {
+                        break;
+                    }
+                    array.push(item.json_checked(unrenderable));
+                }
+                serde_json::Value::Array(array)
+            }
             _ => self.to_json(),
         }
     }
