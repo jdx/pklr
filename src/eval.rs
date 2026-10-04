@@ -5563,11 +5563,48 @@ impl Evaluator {
                 source.type_identity.as_deref().unwrap_or_default()
             )));
         }
-        if let Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::String(_) = base {
+        if let Value::Null
+        | Value::Int(_)
+        | Value::Float(_)
+        | Value::Bool(_)
+        | Value::String(_)
+        | Value::Lambda(..) = base
+        {
             return Err(Error::Eval(format!(
                 "Cannot instantiate, or amend an instance of, external class `{}`.",
                 value_type_name(&base)
             )));
+        }
+        if let Value::Object(base_map, Some(base_src)) = &base
+            && base_src.kind == ObjectKind::Mapping
+            && base_src.is_metadata_only()
+        {
+            check_no_elements(base_src, overlay_entries)?;
+            let (_, mut amendment_scope) =
+                mapping_amendment_scopes(base_src.scope(), base_src.scope_declared(), scope);
+            amendment_scope.set("super", base.clone());
+            let mut receiver_entries = base_map
+                .keys()
+                .map(|key| Entry::DynProperty(Expr::String(Arc::clone(key)), Expr::Null))
+                .collect::<Vec<_>>();
+            receiver_entries.extend_from_slice(overlay_entries);
+            amendment_scope.receiver_entries = Some(Arc::new(receiver_entries));
+            let mut amended = ObjectMap::default();
+            amended.extend(
+                base_map
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone())),
+            );
+            self.eval_mapping_entries_with_type_default(
+                overlay_entries,
+                &amendment_scope,
+                depth,
+                &mut amended,
+                &[],
+                &[],
+                MappingInheritedDefault::default(),
+            )?;
+            return Ok(Value::Object(Arc::new(amended), Some(Arc::clone(base_src))));
         }
         if let Value::List(existing) = base {
             let mut amended = existing;
@@ -6912,6 +6949,7 @@ fn check_no_elements(source: &ObjectSource, entries: &[Entry]) -> Result<()> {
             entries,
             true,
         ),
+        None if source.kind == ObjectKind::Mapping => check_member_kinds("Mapping", entries, false),
         None => Ok(()),
     }
 }

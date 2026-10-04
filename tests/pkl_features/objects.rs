@@ -3918,6 +3918,22 @@ fn amending_the_wrong_kind_of_parent_is_rejected() {
             "res = new Mapping { \"pigeon\" }\n",
             "Object of type `Mapping` cannot have an element.",
         ),
+        (
+            "res = (new Mapping {}) { \"pigeon\" }\n",
+            "Object of type `Mapping` cannot have an element.",
+        ),
+        (
+            "res = (new Mapping {}) { ...List(1, 2) }\n",
+            "Cannot spread value of type `List` into object of type `Mapping`.",
+        ),
+        (
+            "res = (null) { pigeon = true }\n",
+            "Cannot instantiate, or amend an instance of, external class `Null`.",
+        ),
+        (
+            "local f = (x) -> x\nres = (f) { pigeon = true }\n",
+            "Cannot instantiate, or amend an instance of, external class `Function`.",
+        ),
     ] {
         let err = eval_fails(src);
         assert!(err.contains(message), "{src}: {err}");
