@@ -12,6 +12,7 @@ Files are classified as:
   mismatch     both succeed but the JSON differs
   error        pkl succeeds, pklr fails
   timeout      pklr did not finish in time
+  crash        pklr panicked or was killed (any exit other than 0 or 1)
   expected-err pkl rejects the file and pklr fails too
   missed-err   pkl rejects the file but pklr succeeds
   skipped      pkl fails for a reason outside the language: the value can't be
@@ -153,19 +154,23 @@ def check(rel, inputs, exe, timeout):
     if prc != 0 and SKIP_ERRORS.search(perr):
         return "skipped", pkl_message(perr)
     rrc, rout, rerr = run([str(exe), path], timeout)
-    if prc != 0:
-        if rrc is None:
-            return "timeout", ""
-        return ("expected-err", "") if rrc != 0 else ("missed-err", pkl_message(perr))
     if rrc is None:
         return "timeout", ""
-    if rrc != 0:
-        return "error", first_line(rerr)
+    # eval_json exits 1 for an evaluation error; anything else is a crash
+    # (101 for a Rust panic, negative for a signal) and never counts as a
+    # correct rejection.
+    if rrc not in (0, 1):
+        return "crash", first_line(rerr)
+    if prc != 0:
+        return ("expected-err", "") if rrc == 1 else ("missed-err", pkl_message(perr))
+    # Check pkl's output before pklr's exit status, so a module with its own
+    # (non-JSON) renderer is skipped whether or not pklr fails on it.
     try:
         a = normalize(json.loads(pout))
     except json.JSONDecodeError:
-        # The module sets its own output renderer, so pkl's output isn't JSON.
         return "skipped", "pkl output is not JSON"
+    if rrc != 0:
+        return "error", first_line(rerr)
     try:
         b = normalize(json.loads(rout))
     except json.JSONDecodeError:
@@ -211,7 +216,8 @@ def main():
             if status not in ("match", "expected-err", "skipped"):
                 print(f"{status:12} {f}  {detail}")
         print()
-    order = ["match", "mismatch", "error", "timeout", "expected-err", "missed-err", "skipped"]
+    order = ["match", "mismatch", "error", "timeout", "crash", "expected-err", "missed-err",
+             "skipped"]
     print(f"pkl {version}: " + ", ".join(f"{s} {counts.get(s, 0)}" for s in order))
     comparable = sum(counts.get(s, 0) for s in order if s != "skipped")
     passing = counts.get("match", 0) + counts.get("expected-err", 0)
