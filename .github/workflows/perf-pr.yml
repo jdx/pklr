@@ -30,13 +30,26 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
           persist-credentials: false
-      # This must be the first step after checkout. `run` executes after the
-      # action has removed every credential. Keep the runner class in step with
-      # perf.yml.
+      # Reads only git objects from the base branch, never the pull request's
+      # files. A base without tak.toml has never been measured, so the pull
+      # request that adds tak there has nothing to compare against.
+      - id: base
+        name: Check the base adopts tak
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if git cat-file -e "$(git merge-base "$BASE_SHA" HEAD):tak.toml" 2>/dev/null; then
+            echo "fail-on-nothing-compared=auto" >> "$GITHUB_OUTPUT"
+          else
+            echo "fail-on-nothing-compared=false" >> "$GITHUB_OUTPUT"
+          fi
+      # `run` executes after the action has removed every credential. Keep the
+      # runner class in step with perf.yml.
       - uses: jdx/tak-action@9096b7637c553324121c8f2b14c2db2af7fc1e55 # v0.1.1
         with:
           mode: compare
           version: 0.0.14 # keep in step with mise.toml
+          fail-on-nothing-compared: ${{ steps.base.outputs.fail-on-nothing-compared }}
           run: |
             export TAK_RUNNER="gha-${ImageOS}-${ImageVersion}-x64-rust$(rustc -V | cut -d' ' -f2)"
             cargo build --release --example eval_json
