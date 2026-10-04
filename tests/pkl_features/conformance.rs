@@ -32,6 +32,8 @@ async fn matches_reference_implementation() {
         let (matches, expected) = match std::fs::read_to_string(case.with_extension("error")) {
             Ok(message) => {
                 let message = message.trim();
+                // An empty message would accept any error.
+                assert!(!message.is_empty(), "{name}: empty expected error");
                 (
                     actual
                         .as_ref()

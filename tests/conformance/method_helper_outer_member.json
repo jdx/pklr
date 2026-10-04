@@ -1,0 +1,13 @@
+{
+  "s": {
+    "env": {
+      "RUST_LOG": "warn"
+    },
+    "tests": {
+      "a": {
+        "env": {},
+        "run": "check"
+      }
+    }
+  }
+}

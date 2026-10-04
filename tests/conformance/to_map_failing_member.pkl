@@ -1,0 +1,2 @@
+local o = new Dynamic { bad = throw("boom"); ok = 1 }
+result = o.toMap()

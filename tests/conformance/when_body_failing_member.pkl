@@ -1,0 +1,1 @@
+o { when (true) { bad = throw("boom"); ok = 1 } }

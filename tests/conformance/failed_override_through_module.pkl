@@ -1,0 +1,3 @@
+extends "lib/hidden_base.pkl"
+hidden x = throw("boom")
+y = module.x
