@@ -66,6 +66,10 @@ pub struct Property {
     pub value: Option<Expr>,
     /// Object body amendment: `foo { ... }` (no `=`)
     pub body: Option<Body>,
+    /// Declared with `function`: a method, whose `value` is the lambda it
+    /// evaluates to. Methods are not members, so they take no part in an
+    /// object's equality.
+    pub is_method: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

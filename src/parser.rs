@@ -564,6 +564,7 @@ impl<'a> Parser<'a> {
             body: None,
             modifiers,
             annotations: Vec::new(),
+            is_method: true,
         }))))
     }
 
@@ -720,6 +721,16 @@ impl<'a> Parser<'a> {
                         | TokenKind::KwImport
                         | TokenKind::KwImportStar
                         | TokenKind::LParen
+                        | TokenKind::Bang
+                        | TokenKind::Minus
+                        | TokenKind::KwThis
+                        | TokenKind::KwModule
+                        | TokenKind::KwIf
+                        | TokenKind::KwLet
+                        | TokenKind::KwThrow
+                        | TokenKind::KwTrace
+                        | TokenKind::KwRead
+                        | TokenKind::KwReadOrNull
                 );
                 let is_bare_ident = matches!(self.peek(), TokenKind::Ident(_))
                     && self.pos + 1 < self.tokens.len()
@@ -797,6 +808,7 @@ impl<'a> Parser<'a> {
                     type_ann,
                     value,
                     body: body.map(Into::into),
+                    is_method: false,
                 })))
             }
         }

@@ -81,6 +81,21 @@ pub struct ObjectSource {
     /// resolved. Reading or instantiating such a member reports the error
     /// instead of treating it as absent.
     pub(crate) poisoned_members: Option<Arc<IndexMap<String, String>>>,
+    /// Whether this is a `Mapping`, a class, or another object.
+    pub(crate) kind: ObjectKind,
+}
+
+/// What an object with an [`ObjectSource`] is, beyond its members. Objects
+/// of different kinds never compare equal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum ObjectKind {
+    /// A `Dynamic` object, or an instance of the class in `type_name`.
+    #[default]
+    Object,
+    /// A `Mapping`.
+    Mapping,
+    /// The class named by `type_name` itself, holding its defaults.
+    Class,
 }
 
 impl ObjectSource {
@@ -125,13 +140,86 @@ impl ObjectSource {
         &self.captured.parts().type_aliases
     }
 
-    /// Whether this source only carries a module object's failed members,
-    /// with no entries to rebuild the object from on amendment.
+    /// Whether this source only carries metadata (a module object's failed
+    /// members, or that a mapping is a mapping), with no entries to rebuild
+    /// the object from on amendment: amendments merge into its members.
     pub(crate) fn is_metadata_only(&self) -> bool {
-        self.poisoned_members.is_some()
+        (self.poisoned_members.is_some()
+            || (self.kind == ObjectKind::Mapping && self.mapping_value_types.is_empty()))
             && self.entries.is_empty()
             && self.evaluated_properties.is_empty()
             && self.type_name.is_none()
+    }
+}
+
+/// Which Pkl collection a [`Value::List`] is. All three render the same, but
+/// they never equal each other, and a `Set` compares without regard to order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum ListKind {
+    #[default]
+    List,
+    Listing,
+    Set,
+}
+
+/// The items of a [`Value::List`] and which collection they form. Derefs to
+/// the items.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ListValue {
+    items: Arc<Vec<Value>>,
+    kind: ListKind,
+}
+
+impl ListValue {
+    pub fn new(kind: ListKind, items: impl Into<Arc<Vec<Value>>>) -> Self {
+        ListValue {
+            items: items.into(),
+            kind,
+        }
+    }
+
+    pub fn kind(&self) -> ListKind {
+        self.kind
+    }
+
+    /// The same items as a collection of another kind.
+    pub fn with_kind(mut self, kind: ListKind) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    /// The address of the shared items, which identifies them while they are
+    /// alive.
+    pub(crate) fn items_ptr(&self) -> *const Vec<Value> {
+        Arc::as_ptr(&self.items)
+    }
+
+    /// Mutable access to the items, copying them first if they are shared.
+    pub fn make_mut(&mut self) -> &mut Vec<Value> {
+        Arc::make_mut(&mut self.items)
+    }
+}
+
+impl std::ops::Deref for ListValue {
+    type Target = Vec<Value>;
+
+    fn deref(&self) -> &Vec<Value> {
+        &self.items
+    }
+}
+
+/// A `List` of the given items.
+impl From<Vec<Value>> for ListValue {
+    fn from(items: Vec<Value>) -> Self {
+        ListValue::new(ListKind::List, items)
+    }
+}
+
+/// A `List` of the given items.
+impl From<Arc<Vec<Value>>> for ListValue {
+    fn from(items: Arc<Vec<Value>>) -> Self {
+        ListValue::new(ListKind::List, items)
     }
 }
 
@@ -155,8 +243,9 @@ pub enum Value {
     /// original entry definitions so late binding works on amendment.
     /// The map is Arc-wrapped so cloning a Value::Object is O(1).
     Object(Arc<ObjectMap>, Option<Arc<ObjectSource>>),
-    /// Listing (ordered list). Arc-wrapped so cloning is O(1).
-    List(Arc<Vec<Value>>),
+    /// A `List`, `Listing` or `Set` (see [`ListKind`]). The items are
+    /// Arc-wrapped so cloning is O(1).
+    List(ListValue),
     /// Lambda function: param names + body expression + captured scope values.
     /// All three are Arc-wrapped so cloning a Lambda is O(1): lambdas are
     /// copied whenever a scope holding them is captured, and deep-copying the
@@ -230,7 +319,8 @@ impl From<serde_json::Value> for Value {
             }
             serde_json::Value::String(s) => Value::String(s.into()),
             serde_json::Value::Array(a) => {
-                Value::List(Arc::new(a.into_iter().map(Value::from).collect()))
+                let items: Vec<Value> = a.into_iter().map(Value::from).collect();
+                Value::List(ListValue::new(ListKind::Listing, items))
             }
             serde_json::Value::Object(o) => {
                 let mut map = ObjectMap::default();

@@ -14,7 +14,8 @@ use crate::parser::{
     self, BinOp, Body, Entry, Expr, Modifier, Module, Property, StringInterpPart, UnOp,
 };
 use crate::value::{
-    CapturedScope, NameSet, ObjectMap, ObjectSource, ScopeMap, TypeAliasMap, Value,
+    CapturedScope, ListKind, ListValue, NameSet, ObjectKind, ObjectMap, ObjectSource, ScopeMap,
+    TypeAliasMap, Value,
 };
 
 mod analysis;
@@ -1490,7 +1491,10 @@ impl Evaluator {
                 }
                 return Ok(match field {
                     "length" => Value::Int(keys.len() as i64),
-                    "keys" => Value::List(Arc::new(keys.into_keys().map(Value::String).collect())),
+                    "keys" => Value::List(ListValue::new(
+                        ListKind::Set,
+                        keys.into_keys().map(Value::String).collect::<Vec<_>>(),
+                    )),
                     "isEmpty" => Value::Bool(keys.is_empty()),
                     _ => Value::Bool(!keys.is_empty()),
                 });
@@ -2616,6 +2620,7 @@ impl Evaluator {
                 deprecated,
                 poisoned_members: (!poisoned_members.is_empty())
                     .then(|| Arc::new(poisoned_members)),
+                kind: ObjectKind::Object,
             }))
         };
         let mut effective_late_properties = IndexMap::new();
@@ -2679,18 +2684,13 @@ impl Evaluator {
             {
                 let mut items = match amendment_base {
                     Some(Value::List(existing)) => existing.clone(),
-                    _ => Vec::new().into(),
+                    _ => ListValue::new(ListKind::Listing, Vec::new()),
                 };
                 let mut amendment_scope = scope.child();
                 amendment_scope.set("super", Value::List(items.clone()));
                 amendment_scope.receiver_entries = Some(body.clone());
                 amendment_scope.receiver_list_base = Some(items.len());
-                self.eval_listing_entries(
-                    body,
-                    &amendment_scope,
-                    depth,
-                    Arc::make_mut(&mut items),
-                )?;
+                self.eval_listing_entries(body, &amendment_scope, depth, items.make_mut())?;
                 return Ok(Some(Value::List(items)));
             }
             // `foo { ... }` — object body amendment.
@@ -3127,6 +3127,7 @@ impl Evaluator {
                                     mapping_value_types: Vec::new(),
                                     deprecated: merge_deprecated(&src.deprecated, body),
                                     poisoned_members: None,
+                                    kind: ObjectKind::Object,
                                 },
                             };
                             *result_src = Some(std::sync::Arc::new(new_src));
@@ -3309,6 +3310,7 @@ impl Evaluator {
             mapping_value_types: Vec::new(),
             deprecated: collect_deprecated(entries),
             poisoned_members: None,
+            kind: ObjectKind::Object,
         };
         Ok(Value::Object(Arc::new(map), Some(Arc::new(source))))
     }
@@ -3669,6 +3671,7 @@ impl Evaluator {
                 new_src.type_identity = Some(scope.runtime_type_identity(class_name));
                 new_src.parent_type_names = parent_type_names;
                 new_src.parent_type_identities = parent_type_identities;
+                new_src.kind = ObjectKind::Class;
                 Value::Object(map, Some(Arc::new(new_src)))
             } else {
                 val
@@ -4119,6 +4122,14 @@ impl Evaluator {
                 new_src.parent_type_identities = base_type.parent_identities;
                 Ok(Value::Object(map, Some(Arc::new(new_src))))
             }
+            // An amended mapping is still a mapping.
+            (None, Value::Object(map, Some(src)))
+                if base_source.kind == ObjectKind::Mapping && src.kind != ObjectKind::Mapping =>
+            {
+                let mut new_src = Arc::unwrap_or_clone(src);
+                new_src.kind = ObjectKind::Mapping;
+                Ok(Value::Object(map, Some(Arc::new(new_src))))
+            }
             (_, other) => Ok(other),
         }
     }
@@ -4170,6 +4181,7 @@ impl Evaluator {
                     type_ann: None,
                     value: Some(Expr::Ident(binding)),
                     body: None,
+                    is_method: false,
                 })));
                 source.entry_scopes.resize(source.entries.len(), None);
             }
@@ -4252,8 +4264,10 @@ impl Evaluator {
                 Entry::Spread(expr) => {
                     let values = match self.eval_expr(expr, &scope, depth + 1)? {
                         Value::List(values) => values,
-                        Value::Object(values, _) => Arc::new(values.values().cloned().collect()),
-                        value => Arc::new(vec![value]),
+                        Value::Object(values, _) => {
+                            values.values().cloned().collect::<Vec<_>>().into()
+                        }
+                        value => vec![value].into(),
                     };
                     if target >= *position && target - *position < values.len() {
                         *value = Some(values[target - *position].clone());
@@ -4321,20 +4335,40 @@ impl Evaluator {
         items: &mut Vec<Value>,
     ) -> Result<()> {
         let mut listing_scope = scope.child();
+        // A body's locals and properties (`default`) are visible to all of
+        // its entries, including ones written before them, and to each other
+        // regardless of order. Bind each once the members of this body it
+        // reads are bound, so a function captures them too.
+        let mut pending: Vec<_> = entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Property(prop) => Some((prop, prop.value.as_ref()?)),
+                _ => None,
+            })
+            .collect();
+        let mut unbound: HashSet<String> =
+            pending.iter().map(|(prop, _)| prop.name.clone()).collect();
+        while !pending.is_empty() {
+            let ready = pending
+                .iter()
+                .position(|(prop, expr)| {
+                    let mut refs = HashSet::default();
+                    collect_expr_refs(expr, &mut refs, &HashSet::default());
+                    !refs
+                        .iter()
+                        .any(|name| *name != prop.name && unbound.contains(name))
+                })
+                // A cycle: bind in declaration order.
+                .unwrap_or(0);
+            let (prop, expr) = pending.remove(ready);
+            let value = self.eval_expr(expr, &listing_scope, depth + 1)?;
+            bind_listing_member(&mut listing_scope, prop, value);
+            unbound.remove(&prop.name);
+        }
         for entry in entries {
             match entry {
-                Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {
-                    if let Some(expr) = &prop.value {
-                        let value = self.eval_expr(expr, &listing_scope, depth + 1)?;
-                        listing_scope.declare(&prop.name, value);
-                    }
-                }
+                Entry::Property(_) => {}
                 Entry::Elem(expr) => items.push(self.eval_expr(expr, &listing_scope, depth + 1)?),
-                Entry::Property(prop) if prop.value.is_some() => {
-                    let value =
-                        self.eval_expr(prop.value.as_ref().unwrap(), &listing_scope, depth + 1)?;
-                    listing_scope.set(&prop.name, value);
-                }
                 Entry::DynProperty(index, value) => {
                     let index = self.eval_expr(index, &listing_scope, depth + 1)?;
                     let Value::Int(index) = index else {
@@ -4508,11 +4542,14 @@ impl Evaluator {
                 match type_name.as_deref() {
                     Some("Listing") => {
                         let mut listing_scope = scope.child();
-                        listing_scope.set("super", Value::List(Vec::new().into()));
+                        listing_scope.set(
+                            "super",
+                            Value::List(ListValue::new(ListKind::Listing, Vec::new())),
+                        );
                         listing_scope.receiver_list_base = Some(0);
                         let mut items = Vec::new();
                         self.eval_listing_entries(entries, &listing_scope, depth + 1, &mut items)?;
-                        Ok(Value::List(items.into()))
+                        Ok(Value::List(ListValue::new(ListKind::Listing, items)))
                     }
                     Some("Mapping") | Some("Map") => {
                         // If the Mapping has a value type param (e.g., Mapping<String, Step>),
@@ -4552,6 +4589,7 @@ impl Evaluator {
                                 type_ann: None,
                                 value: Some(Expr::New(Some(vt_name), vec![].into(), vec![])),
                                 body: None,
+                                is_method: false,
                             })));
                         }
                         let source_body_members = src_entries
@@ -4578,6 +4616,7 @@ impl Evaluator {
                             mapping_value_types: generic_params.iter().skip(1).cloned().collect(),
                             deprecated,
                             poisoned_members: None,
+                            kind: ObjectKind::Mapping,
                         };
                         Ok(Value::Object(Arc::new(map), Some(Arc::new(source))))
                     }
@@ -4680,6 +4719,7 @@ impl Evaluator {
                                         mapping_value_types: Vec::new(),
                                         deprecated: merge_deprecated(&base_src.deprecated, entries),
                                         poisoned_members: None,
+                                        kind: ObjectKind::Object,
                                     }
                                 };
                                 *src_slot = Some(Arc::new(new_src));
@@ -4717,6 +4757,7 @@ impl Evaluator {
                                 mapping_value_types: Vec::new(),
                                 deprecated,
                                 poisoned_members: None,
+                                kind: ObjectKind::Object,
                             };
                             Ok(Value::Object(Arc::new(merged), Some(Arc::new(src))))
                         } else {
@@ -4762,12 +4803,17 @@ impl Evaluator {
                     (Value::Object(map, _), "length") => return Ok(Value::Int(map.len() as i64)),
                     (Value::Object(map, _), "isEmpty") => return Ok(Value::Bool(map.is_empty())),
                     (Value::Object(map, _), "keys") => {
-                        return Ok(Value::List(Arc::new(
-                            map.keys().map(|k| Value::String(k.clone())).collect(),
+                        return Ok(Value::List(ListValue::new(
+                            ListKind::Set,
+                            map.keys()
+                                .map(|k| Value::String(k.clone()))
+                                .collect::<Vec<_>>(),
                         )));
                     }
                     (Value::Object(map, _), "values") => {
-                        return Ok(Value::List(Arc::new(map.values().cloned().collect())));
+                        return Ok(Value::List(
+                            map.values().cloned().collect::<Vec<_>>().into(),
+                        ));
                     }
                     // Duration and DataSize units on numbers
                     (
@@ -5057,11 +5103,11 @@ impl Evaluator {
                     let mut items = Vec::new();
                     for a in args {
                         let val = self.eval_expr(a, scope, depth + 1)?;
-                        if !items.contains(&val) {
+                        if !set_contains(&items, &val) {
                             items.push(val);
                         }
                     }
-                    return Ok(Value::List(items.into())); // deduplicated
+                    return Ok(Value::List(ListValue::new(ListKind::Set, items)));
                 }
                 "IntSeq" if int_seq_is_builtin(scope) => {
                     let (start, end) = self.eval_int_seq_bounds(args, scope, depth)?;
@@ -5220,9 +5266,12 @@ impl Evaluator {
             }
             (Value::String(s), "split") => {
                 let sep = require_str_arg(args, 0, "split")?;
-                Ok(Some(Value::List(Arc::new(
-                    s.split(sep).map(|p| Value::String(p.into())).collect(),
-                ))))
+                Ok(Some(Value::List(
+                    s.split(sep)
+                        .map(|p| Value::String(p.into()))
+                        .collect::<Vec<_>>()
+                        .into(),
+                )))
             }
             (Value::String(s), "trim") => Ok(Some(Value::String(s.trim().into()))),
             (Value::String(s), "trimStart") => Ok(Some(Value::String(s.trim_start().into()))),
@@ -5242,17 +5291,22 @@ impl Evaluator {
             // List methods
             (Value::List(items), "contains") => {
                 let arg = args.first().cloned().unwrap_or(Value::Null);
-                Ok(Some(Value::Bool(items.contains(&arg))))
+                Ok(Some(Value::Bool(set_contains(items, &arg))))
             }
-            (Value::List(items), "toList") => Ok(Some(Value::List(items.clone()))),
+            (Value::List(items), "toList") => {
+                Ok(Some(Value::List(items.clone().with_kind(ListKind::List))))
+            }
             (Value::List(items), "toSet") => {
+                if items.kind() == ListKind::Set {
+                    return Ok(Some(obj.clone()));
+                }
                 let mut seen = Vec::new();
                 for item in items.iter() {
-                    if !seen.contains(item) {
+                    if !set_contains(&seen, item) {
                         seen.push(item.clone());
                     }
                 }
-                Ok(Some(Value::List(seen.into())))
+                Ok(Some(Value::List(ListValue::new(ListKind::Set, seen))))
             }
             (Value::List(items), "map") => {
                 let lambda = args
@@ -5262,7 +5316,7 @@ impl Evaluator {
                 for item in items.iter() {
                     result.push(self.invoke_lambda(lambda, std::slice::from_ref(item), depth)?);
                 }
-                Ok(Some(Value::List(result.into())))
+                Ok(Some(collection_result(items.kind(), result)))
             }
             (Value::List(items), "flatMap") => {
                 let lambda = args
@@ -5277,7 +5331,7 @@ impl Evaluator {
                         result.push(val);
                     }
                 }
-                Ok(Some(Value::List(result.into())))
+                Ok(Some(collection_result(items.kind(), result)))
             }
             (Value::List(items), "filter") => {
                 let lambda = args
@@ -5290,15 +5344,15 @@ impl Evaluator {
                         result.push(item.clone());
                     }
                 }
-                Ok(Some(Value::List(result.into())))
+                Ok(Some(collection_result(items.kind(), result)))
             }
-            (Value::List(items), "filterNonNull") => Ok(Some(Value::List(
+            (Value::List(items), "filterNonNull") => Ok(Some(collection_result(
+                items.kind(),
                 items
                     .iter()
                     .filter(|item| !is_null_value(item))
                     .cloned()
-                    .collect::<Vec<_>>()
-                    .into(),
+                    .collect(),
             ))),
             (Value::List(items), "fold") => {
                 let init = args
@@ -5343,7 +5397,7 @@ impl Evaluator {
             }
             (Value::List(items), "reverse") => {
                 let mut rev = items.clone();
-                Arc::make_mut(&mut rev).reverse();
+                rev.make_mut().reverse();
                 Ok(Some(Value::List(rev)))
             }
 
@@ -5431,7 +5485,7 @@ impl Evaluator {
                 overlay_entries,
                 &amendment_scope,
                 depth + 1,
-                Arc::make_mut(&mut amended),
+                amended.make_mut(),
             )?;
             return Ok(Value::List(amended));
         }
@@ -5792,6 +5846,7 @@ impl Evaluator {
                                         mapping_value_types: Vec::new(),
                                         deprecated: merge_deprecated(&src.deprecated, body),
                                         poisoned_members: None,
+                                        kind: ObjectKind::Object,
                                     },
                                 };
                                 *result_src = Some(std::sync::Arc::new(new_src));
@@ -5982,7 +6037,7 @@ impl Evaluator {
                 src.as_ref().map_or(0, |src| Arc::as_ptr(src) as usize),
             )),
             Value::List(items) if blocked_root_converters.is_empty() => {
-                Some((Arc::as_ptr(items) as usize, 0))
+                Some((items.items_ptr() as usize, items.kind() as usize))
             }
             _ => None,
         };
@@ -6086,7 +6141,7 @@ impl Evaluator {
                         (None, None) => {}
                     }
                 }
-                Ok(new_items.map(|items| Value::List(Arc::new(items))))
+                Ok(new_items.map(|new_items| Value::List(ListValue::new(items.kind(), new_items))))
             }
             _ => Ok(None),
         }
@@ -6307,6 +6362,15 @@ impl Evaluator {
             }
         }
         Ok(())
+    }
+}
+
+/// Bind a local or property of a listing body for the body's entries.
+fn bind_listing_member(scope: &mut Scope, prop: &Property, value: Value) {
+    if has_modifier(&prop.modifiers, Modifier::Local) {
+        scope.declare(&prop.name, value);
+    } else {
+        scope.set(&prop.name, value);
     }
 }
 
