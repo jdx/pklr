@@ -1166,7 +1166,7 @@ x = "hello"
 
 #[test]
 fn typealias_with_constraint() {
-    // typealias with type constraint -- constraint is skipped but should parse
+    // typealias with type constraint parses; an untyped property is unaffected
     let json = eval(
         r#"
 typealias Port = Int(isBetween(1, 65535))
@@ -1174,6 +1174,145 @@ x = 8080
 "#,
     );
     assert_eq!(json["x"], 8080);
+}
+
+#[test]
+fn typealias_constraint_accepts_satisfying_property() {
+    let json = eval(
+        r#"
+typealias IsB = String(this == "b")
+typealias AlsoB = IsB
+checked: IsB = "b"
+chained: AlsoB = "b"
+nullable: IsB? = null
+nullableSet: IsB? = "b"
+unionAlias: IsB|Int = "b"
+unionOther: IsB|Int = 3
+obj {
+  inner: IsB = "b"
+}
+"#,
+    );
+    assert_eq!(json["checked"], "b");
+    assert_eq!(json["chained"], "b");
+    assert_eq!(json["nullable"], serde_json::Value::Null);
+    assert_eq!(json["nullableSet"], "b");
+    assert_eq!(json["unionAlias"], "b");
+    assert_eq!(json["unionOther"], 3);
+    assert_eq!(json["obj"]["inner"], "b");
+}
+
+#[test]
+fn typealias_constraint_rejects_violating_property() {
+    let message = eval_fails(
+        r#"
+typealias IsB = String(this == "b")
+checked: IsB = "x"
+"#,
+    );
+    assert!(
+        message.contains("property 'checked' expected IsB"),
+        "{message}"
+    );
+}
+
+#[test]
+fn inline_constraint_rejects_violating_property() {
+    let message = eval_fails(r#"checked: String(this == "b") = "x""#);
+    assert!(message.contains("property 'checked' expected"), "{message}");
+}
+
+#[test]
+fn typealias_constraint_rejects_violating_nullable_and_union() {
+    let alias = "typealias IsB = String(this == \"b\")\n";
+    let message = eval_fails(&format!("{alias}checked: IsB? = \"x\""));
+    assert!(
+        message.contains("property 'checked' expected IsB?"),
+        "{message}"
+    );
+    let message = eval_fails(&format!("{alias}checked: IsB|Int = \"x\""));
+    assert!(
+        message.contains("property 'checked' expected IsB|Int"),
+        "{message}"
+    );
+}
+
+#[test]
+fn typealias_of_typealias_constraint_rejects_violating_property() {
+    let message = eval_fails(
+        r#"
+typealias IsB = String(this == "b")
+typealias AlsoB = IsB
+checked: AlsoB = "x"
+"#,
+    );
+    assert!(
+        message.contains("property 'checked' expected AlsoB"),
+        "{message}"
+    );
+}
+
+#[test]
+fn typealias_constraint_rejects_violating_object_property() {
+    let message = eval_fails(
+        r#"
+typealias IsB = String(this == "b")
+obj {
+  checked: IsB = "x"
+}
+"#,
+    );
+    assert!(
+        message.contains("property 'checked' expected IsB"),
+        "{message}"
+    );
+}
+
+#[test]
+fn typealias_constraint_on_unread_local_is_lazy() {
+    // A typed local is checked when read, so an unused violating local is fine
+    let json = eval(
+        r#"
+typealias IsB = String(this == "b")
+local unused: IsB = "x"
+local used: IsB = "b"
+out = used
+"#,
+    );
+    assert_eq!(json["out"], "b");
+    let message = eval_fails(
+        r#"
+typealias IsB = String(this == "b")
+local bad: IsB = "x"
+out = bad
+"#,
+    );
+    assert!(message.contains("property 'bad' expected IsB"), "{message}");
+}
+
+#[test]
+fn class_default_violating_constraint_is_checked_on_instance_only() {
+    // Overridden class defaults are never read, so they are not checked
+    let json = eval(
+        r#"
+typealias IsB = String(this == "b")
+class C {
+  v: IsB = "x"
+}
+c = new C { v = "b" }
+"#,
+    );
+    assert_eq!(json["c"]["v"], "b");
+    let message = eval_fails(
+        r#"
+typealias IsB = String(this == "b")
+class C {
+  v: IsB = "x"
+}
+c = new C {}
+"#,
+    );
+    assert!(message.contains("property 'v' expected IsB"), "{message}");
 }
 
 #[test]

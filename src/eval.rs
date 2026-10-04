@@ -82,6 +82,10 @@ pub struct Evaluator {
     /// Used to deduplicate `@Deprecated` warnings so a deprecated property
     /// referenced inside a loop or template doesn't flood stderr.
     warned_deprecated: std::collections::HashSet<(String, Option<String>)>,
+    /// Number of class definitions currently being evaluated. Class property
+    /// defaults are checked against their declared types when an instance
+    /// reads them, not when the class is defined.
+    class_def_depth: usize,
 }
 
 #[derive(Clone, Default)]
@@ -131,6 +135,7 @@ impl Default for Evaluator {
             http_rewrites: Vec::new(),
             converters: Vec::new(),
             warned_deprecated: std::collections::HashSet::new(),
+            class_def_depth: 0,
         }
     }
 }
@@ -170,6 +175,7 @@ impl Evaluator {
             http_rewrites: Vec::new(),
             converters: Vec::new(),
             warned_deprecated: std::collections::HashSet::new(),
+            class_def_depth: 0,
         }
     }
 
@@ -1782,10 +1788,17 @@ impl Evaluator {
                 Entry::Property(prop)
                     if has_modifier(&prop.modifiers, Modifier::Local) && prop.value.is_some() =>
                 {
-                    match self
+                    let value = match self
                         .eval_expr(prop.value.as_ref().unwrap(), &scope, depth)
                         .await
                     {
+                        Ok(val) => self
+                            .check_declared_property_type(prop, &val, &scope, depth)
+                            .await
+                            .map(|()| val),
+                        Err(error) => Err(error),
+                    };
+                    match value {
                         Ok(val) => scope.declare(prop.name.clone(), val),
                         Err(Error::Eval(message)) => {
                             scope.declare_poisoned(prop.name.clone(), message)
@@ -1884,7 +1897,7 @@ impl Evaluator {
                     }
                     continue;
                 }
-                let val = match self.eval_property(prop, &scope, depth).await {
+                let val = match self.eval_checked_property(prop, &scope, depth).await {
                     Ok(value) => value,
                     // Module properties are late-bound. Keep an unresolved
                     // template expression deferred until a consumer actually
@@ -2033,7 +2046,7 @@ impl Evaluator {
                 }
             }
             for prop in &late_child_properties {
-                match self.eval_property(prop, &scope, depth).await {
+                match self.eval_checked_property(prop, &scope, depth).await {
                     Ok(Some(value)) => {
                         scope.set(prop.name.clone(), value.clone());
                         if has_modifier(&prop.modifiers, Modifier::Local) {
@@ -2407,7 +2420,14 @@ impl Evaluator {
                     // Bind every local in declaration order so later locals and
                     // entries can reference it (e.g. a non-lambda local that
                     // calls a lambda local defined just above it).
-                    match self.eval_expr(expr, &active_scope, depth).await {
+                    let value = match self.eval_expr(expr, &active_scope, depth).await {
+                        Ok(val) => self
+                            .check_declared_property_type(prop, &val, &active_scope, depth)
+                            .await
+                            .map(|()| val),
+                        Err(error) => Err(error),
+                    };
+                    match value {
                         Ok(val) => {
                             if binds_declared(&prop.name) {
                                 child_scope.declare(prop.name.clone(), val);
@@ -2510,7 +2530,15 @@ impl Evaluator {
                         &entry_owners,
                         own_body_scope,
                     );
-                    if let Some(v) = self.eval_property(prop, &active_scope, depth).await? {
+                    let value = if inherited_source.is_none() {
+                        self.eval_checked_property(prop, &active_scope, depth)
+                            .await?
+                    } else {
+                        // Amended objects check their declared properties
+                        // once the whole object is built.
+                        self.eval_property(prop, &active_scope, depth).await?
+                    };
+                    if let Some(v) = value {
                         if binds_declared(&prop.name) {
                             child_scope.declare(prop.name.clone(), v.clone());
                         } else {
@@ -2843,7 +2871,10 @@ impl Evaluator {
             child_scope.set("super".into(), pv.clone());
         }
 
-        let child_defaults = self.eval_entries(body, &child_scope, depth + 1).await?;
+        self.class_def_depth += 1;
+        let child_defaults = self.eval_entries(body, &child_scope, depth + 1).await;
+        self.class_def_depth -= 1;
+        let child_defaults = child_defaults?;
         if let Some(Value::Object(parent_map, parent_src)) = parent_val {
             // Merge: parent defaults first, child overrides on top
             let mut merged: IndexMap<String, Value> = (*parent_map).clone();
@@ -3024,6 +3055,56 @@ impl Evaluator {
         if let Some(val) = scope.get(target.trim_end_matches('?')).cloned() {
             scope.declare(name.to_string(), val);
         }
+    }
+
+    /// Check a property's assigned value against its declared type, running
+    /// the constraints of the type and of any type aliases it names.
+    ///
+    /// Only `name: Type = value` declarations are checked; amendments and
+    /// type defaults carry no value of their own to check. Class property
+    /// defaults are skipped while the class is being defined: an instance
+    /// checks them when it is built.
+    async fn check_declared_property_type(
+        &mut self,
+        prop: &Property,
+        value: &Value,
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<()> {
+        if self.class_def_depth > 0 || prop.value.is_none() {
+            return Ok(());
+        }
+        let Some(type_ann) = &prop.type_ann else {
+            return Ok(());
+        };
+        if type_is_runtime_checkable(type_ann, scope)
+            && !self
+                .eval_type_check(value, type_ann, scope, depth + 1)
+                .await?
+        {
+            return Err(Error::Eval(format!(
+                "property '{}' expected {}, got {}",
+                prop.name,
+                display_type_expr(type_ann),
+                value_type_name(value)
+            )));
+        }
+        Ok(())
+    }
+
+    /// Evaluate a property and check an assigned value against its declared type.
+    async fn eval_checked_property(
+        &mut self,
+        prop: &Property,
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<Option<Value>> {
+        let value = self.eval_property(prop, scope, depth).await?;
+        if let Some(value) = &value {
+            self.check_declared_property_type(prop, value, scope, depth)
+                .await?;
+        }
+        Ok(value)
     }
 
     /// Check if a value matches a type expression, including constraint evaluation.

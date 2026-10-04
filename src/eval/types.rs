@@ -427,7 +427,14 @@ pub(super) fn type_is_runtime_checkable(ty: &crate::parser::TypeExpr, scope: &Sc
         TypeExpr::Union(variants) => variants
             .iter()
             .all(|variant| type_is_runtime_checkable(variant, scope)),
-        TypeExpr::Generic(_, _) => true,
+        // Only collection generics have a runtime representation to check;
+        // other generics (`Function1<...>`, `Pair<...>`) are not modeled.
+        TypeExpr::Generic(name, _) => {
+            matches!(
+                name.as_str(),
+                "List" | "Listing" | "Set" | "Map" | "Mapping"
+            )
+        }
         TypeExpr::Constrained(base, _) => {
             let runtime_name = base
                 .trim_start_matches('*')
