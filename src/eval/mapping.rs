@@ -338,6 +338,7 @@ pub(super) fn apply_mapping_type_annotation(
             evaluated_properties: Vec::new(),
             mapping_value_types: Vec::new(),
             deprecated: IndexMap::new(),
+            poisoned_members: IndexMap::new(),
         });
     for name in type_names {
         if !src.mapping_value_types.contains(&name) {

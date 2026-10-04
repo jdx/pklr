@@ -3349,6 +3349,57 @@ fn unused_class_reading_missing_module_property_is_not_an_error() {
 }
 
 #[test]
+fn subclass_of_class_reading_missing_module_property_reports_error() {
+    let err = eval_fails(
+        r#"
+class C { v = module.missing }
+class D extends C { w = 1 }
+result = new D {}
+"#,
+    );
+    assert!(err.contains("missing"), "{err}");
+}
+
+#[test]
+fn subclass_recovers_once_module_property_is_evaluated() {
+    let val = eval(
+        r#"
+class C { v = module.expected }
+class D extends C { w = 1 }
+expected = "b"
+result = new D {}
+"#,
+    );
+    assert_eq!(val["result"], serde_json::json!({"v": "b", "w": 1}));
+}
+
+#[test]
+fn type_alias_of_class_reading_module_is_refreshed() {
+    let val = eval(
+        r#"
+class C { v = module.expected }
+typealias A = C
+expected = "b"
+result = new A {}
+"#,
+    );
+    assert_eq!(val["result"], serde_json::json!({"v": "b"}));
+}
+
+#[test]
+fn module_function_building_class_reading_module_is_refreshed() {
+    let val = eval(
+        r#"
+class C { v = module.expected }
+function make() = new C {}
+expected = "b"
+result = make()
+"#,
+    );
+    assert_eq!(val["result"], serde_json::json!({"v": "b"}));
+}
+
+#[test]
 fn outer_in_type_position_is_bound() {
     let json = eval(
         r#"

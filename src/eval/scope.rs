@@ -329,6 +329,28 @@ impl Scope {
     }
 }
 
+/// The error of a poisoned member a dotted name refers to: either the root
+/// binding itself, or a member of a module object that failed to evaluate
+/// (`dep.C` where `dep`'s class `C` could not be built). `None` when the name
+/// resolves or is simply absent.
+pub(super) fn poisoned_member(scope: &Scope, name: &str) -> Option<String> {
+    let mut parts = name.trim_end_matches('?').split('.');
+    let root = parts.next()?;
+    let Some(mut value) = scope.get(root) else {
+        return scope.poison_of(root).cloned();
+    };
+    for part in parts {
+        let Value::Object(map, source) = value else {
+            return None;
+        };
+        match map.get(part) {
+            Some(member) => value = member,
+            None => return source.as_ref()?.poisoned_members.get(part).cloned(),
+        }
+    }
+    None
+}
+
 pub(super) fn capture_scope(scope: &Scope) -> CapturedScope {
     CapturedScope {
         values: scope.flatten(),

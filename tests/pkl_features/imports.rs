@@ -2407,3 +2407,29 @@ async fn module_in_imported_class_body_means_the_class_module() {
     assert_eq!(val["r"], "b");
     assert_eq!(val["fresh"]["v"], "b");
 }
+
+#[tokio::test]
+async fn imported_class_reading_missing_module_property_reports_error() {
+    let temp = TestTempDir::new("pklr_test_imported_poisoned_class");
+    let dir = temp.path();
+    std::fs::write(dir.join("dep.pkl"), "class C { v = module.missing }\n").unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\"\nresult = new dep.C {}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("read.pkl"), "import \"dep.pkl\"\nresult = dep.C\n").unwrap();
+
+    // The module defining the class still evaluates; the class is unused.
+    let val = pklr::eval_to_json_async(&dir.join("dep.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val, serde_json::json!({}));
+    for importer in ["main.pkl", "read.pkl"] {
+        let err = pklr::eval_to_json_async(&dir.join(importer))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("missing"), "{importer}: {err}");
+    }
+}

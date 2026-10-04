@@ -2261,22 +2261,31 @@ impl Evaluator {
         }
 
         // Export the classes that read `module` as evaluated against the
-        // complete module, which is what `module` means to importers. A class
-        // whose defaults still fail is left out, like any unused failing
-        // member: Pkl only reports the error when the class is instantiated.
+        // complete module, which is what `module` means to importers, along
+        // with the module functions re-bound to them. A class whose defaults
+        // still fail is not exported. As in Pkl, the module itself still
+        // evaluates, and the class's error is kept so an importer that reads
+        // or instantiates it gets that error instead of a missing member.
+        let mut poisoned_members = IndexMap::new();
         if !module_members.is_empty() {
             if module_members_stale {
                 self.refresh_module_members(module, &module_members, &mut scope, depth)
                     .await?;
             }
-            for name in module_members
-                .iter()
-                .filter(|name| class_names.contains(*name))
-            {
-                if let Some(value) = scope.get(name) {
+            for name in &module_members {
+                if class_names.contains(name) {
+                    if let Some(value) = scope.get(name) {
+                        out.insert(name.clone(), value.clone());
+                    } else {
+                        out.shift_remove(name);
+                        if let Some(message) = scope.poison_of(name) {
+                            poisoned_members.insert(name.clone(), message.clone());
+                        }
+                    }
+                } else if out.contains_key(name)
+                    && let Some(value) = scope.get(name)
+                {
                     out.insert(name.clone(), value.clone());
-                } else {
-                    out.shift_remove(name);
                 }
             }
         }
@@ -2310,7 +2319,7 @@ impl Evaluator {
         // access can warn lazily. Modules without @Deprecated keep `None`
         // source to avoid changing amend behavior in the common case.
         let deprecated = collect_deprecated(&module.body);
-        let source = if deprecated.is_empty() {
+        let source = if deprecated.is_empty() && poisoned_members.is_empty() {
             None
         } else {
             Some(Arc::new(ObjectSource {
@@ -2329,6 +2338,7 @@ impl Evaluator {
                 evaluated_properties: Vec::new(),
                 mapping_value_types: Vec::new(),
                 deprecated,
+                poisoned_members,
             }))
         };
         let mut effective_late_properties = IndexMap::new();
@@ -2832,6 +2842,7 @@ impl Evaluator {
                                     evaluated_properties: Vec::new(),
                                     mapping_value_types: Vec::new(),
                                     deprecated: merge_deprecated(&src.deprecated, body),
+                                    poisoned_members: IndexMap::new(),
                                 },
                             };
                             *result_src = Some(std::sync::Arc::new(new_src));
@@ -3022,6 +3033,7 @@ impl Evaluator {
             evaluated_properties: all_props.keys().cloned().collect(),
             mapping_value_types: Vec::new(),
             deprecated: collect_deprecated(entries),
+            poisoned_members: IndexMap::new(),
         };
         Ok(Value::Object(Arc::new(map), Some(Arc::new(source))))
     }
@@ -3045,11 +3057,24 @@ impl Evaluator {
                     self.eval_class_def(name, class_mods, parent.as_deref(), body, scope, depth)
                         .await,
                 ),
-                Entry::Property(prop)
-                    if has_modifier(&prop.modifiers, Modifier::Local)
-                        && members.contains(&prop.name)
-                        && let Some(expr) = &prop.value =>
-                {
+                Entry::TypeAlias(name, ty) if members.contains(name) => {
+                    match type_alias_target(ty).and_then(|target| poisoned_member(scope, target)) {
+                        Some(message) => scope.redeclare_poisoned(name.clone(), message),
+                        None => self.eval_type_alias(name, ty, scope),
+                    }
+                    continue;
+                }
+                Entry::Property(prop) if members.contains(&prop.name) => {
+                    let Some(expr) = &prop.value else {
+                        continue;
+                    };
+                    // A module function is bound when the property pass
+                    // reaches it; only re-bind it once it has been.
+                    if !has_modifier(&prop.modifiers, Modifier::Local)
+                        && scope.get(&prop.name).is_none()
+                    {
+                        continue;
+                    }
                     (&prop.name, self.eval_expr(expr, scope, depth).await)
                 }
                 _ => continue,
@@ -3079,6 +3104,13 @@ impl Evaluator {
         depth: usize,
     ) -> Result<Value> {
         let parent_val = parent_name.and_then(|name| resolve_dotted(scope, name));
+        // A parent class that failed to evaluate fails its subclasses too,
+        // rather than leaving them without the inherited members.
+        if parent_val.is_none()
+            && let Some(message) = parent_name.and_then(|name| poisoned_member(scope, name))
+        {
+            return Err(Error::Eval(message));
+        }
         let (parent_type_names, parent_type_identities) = match &parent_val {
             Some(Value::Object(_, Some(source))) => {
                 let names = source
@@ -4128,6 +4160,7 @@ impl Evaluator {
                             evaluated_properties: map.keys().cloned().collect(),
                             mapping_value_types: generic_params.iter().skip(1).cloned().collect(),
                             deprecated,
+                            poisoned_members: IndexMap::new(),
                         };
                         Ok(Value::Object(Arc::new(map), Some(Arc::new(source))))
                     }
@@ -4149,14 +4182,11 @@ impl Evaluator {
                         // reading a `module` property not evaluated yet) is
                         // poisoned; report why instead of building a bare object.
                         if base.is_none()
-                            && let Some(root) = type_name.as_deref().and_then(|name| {
-                                name.split('.')
-                                    .next()
-                                    .filter(|root| scope.get(root).is_none())
-                            })
-                            && let Some(message) = scope.poison_of(root)
+                            && let Some(message) = type_name
+                                .as_deref()
+                                .and_then(|name| poisoned_member(scope, name))
                         {
-                            return Err(Error::Eval(message.clone()));
+                            return Err(Error::Eval(message));
                         }
                         if let Some(Value::Object(ref base_map, Some(ref base_src))) = base {
                             // Enforce open modifier: non-open classes reject new properties
@@ -4236,6 +4266,7 @@ impl Evaluator {
                                         evaluated_properties: Vec::new(),
                                         mapping_value_types: Vec::new(),
                                         deprecated: merge_deprecated(&base_src.deprecated, entries),
+                                        poisoned_members: IndexMap::new(),
                                     }
                                 };
                                 *src_slot = Some(Arc::new(new_src));
@@ -4275,6 +4306,7 @@ impl Evaluator {
                                 evaluated_properties: Vec::new(),
                                 mapping_value_types: Vec::new(),
                                 deprecated,
+                                poisoned_members: IndexMap::new(),
                             };
                             Ok(Value::Object(Arc::new(merged), Some(Arc::new(src))))
                         } else {
@@ -4344,10 +4376,15 @@ impl Evaluator {
                 }
                 match &obj {
                     Value::Object(map, source) => {
-                        let val = map
-                            .get(field)
-                            .cloned()
-                            .ok_or_else(|| Error::Eval(format!("field not found: {field}")))?;
+                        let val = map.get(field).cloned().ok_or_else(|| {
+                            Error::Eval(
+                                source
+                                    .as_ref()
+                                    .and_then(|source| source.poisoned_members.get(field.as_str()))
+                                    .cloned()
+                                    .unwrap_or_else(|| format!("field not found: {field}")),
+                            )
+                        })?;
                         self.warn_if_deprecated_access(source, field);
                         Ok(val)
                     }
@@ -5350,6 +5387,7 @@ impl Evaluator {
                                         evaluated_properties: Vec::new(),
                                         mapping_value_types: Vec::new(),
                                         deprecated: merge_deprecated(&src.deprecated, body),
+                                        poisoned_members: IndexMap::new(),
                                     },
                                 };
                                 *result_src = Some(std::sync::Arc::new(new_src));

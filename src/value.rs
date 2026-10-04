@@ -73,6 +73,11 @@ pub struct ObjectSource {
     /// containing module is loaded. Crate-private: only the evaluator
     /// reads/writes this; not part of the public API.
     pub(crate) deprecated: IndexMap<String, Option<String>>,
+    /// Members of a module object that failed to evaluate, mapped to their
+    /// error: a class whose defaults read a `module` property that never
+    /// resolved. Reading or instantiating such a member reports the error
+    /// instead of treating it as absent.
+    pub(crate) poisoned_members: IndexMap<String, String>,
 }
 
 /// A pkl runtime value.

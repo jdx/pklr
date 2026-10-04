@@ -610,8 +610,9 @@ pub(super) fn is_module_sibling_ref(expr: &Expr, include_this: bool) -> bool {
 
 /// Names, in declaration order, of the module members in `entries` that must
 /// be evaluated again once the module's properties are available: classes
-/// whose bodies read `module`, and the classes and locals that reference such
-/// a member (a subclass, or a `local function` building an instance).
+/// whose bodies read `module`, and the members that reference such a member
+/// (a subclass, a type alias naming it, a local, or a module function
+/// building an instance).
 pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<String> {
     let members: Vec<(&String, bool, HashSet<String>)> = entries
         .iter()
@@ -623,7 +624,18 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
                 }
                 Some((name, true, refs))
             }
-            Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {
+            Entry::TypeAlias(name, ty) => {
+                let mut refs = HashSet::new();
+                collect_type_refs(ty, &mut refs, &HashSet::new());
+                Some((name, false, refs))
+            }
+            // Locals, and module functions (a non-local property whose value
+            // is a lambda). Other module properties are evaluated in order by
+            // the property pass and already see the refreshed classes.
+            Entry::Property(prop)
+                if has_modifier(&prop.modifiers, Modifier::Local)
+                    || matches!(prop.value, Some(Expr::Lambda(..))) =>
+            {
                 let mut refs = HashSet::new();
                 collect_expr_refs(prop.value.as_ref()?, &mut refs, &HashSet::new());
                 Some((&prop.name, false, refs))
@@ -652,6 +664,20 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
         .filter(|(name, ..)| dependent.contains(name.as_str()))
         .map(|(name, ..)| name.clone())
         .collect()
+}
+
+/// The class or alias a type alias binds to at runtime (`typealias A = C`,
+/// `C?` or `C(constraint)`), as `eval_type_alias` resolves it.
+pub(super) fn type_alias_target(ty: &crate::parser::TypeExpr) -> Option<&str> {
+    match ty {
+        crate::parser::TypeExpr::Named(target)
+        | crate::parser::TypeExpr::Constrained(target, _) => Some(target),
+        crate::parser::TypeExpr::Nullable(inner) => match inner.as_ref() {
+            crate::parser::TypeExpr::Named(target) => Some(target),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 pub(super) fn referenced_roots(entries: &[Entry]) -> HashSet<String> {
