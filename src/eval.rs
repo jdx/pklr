@@ -2430,7 +2430,7 @@ impl Evaluator {
         for entry in module.body.iter() {
             if let Entry::Property(prop) = entry
                 && !has_modifier(&prop.modifiers, Modifier::Local)
-                && prop.value.is_some()
+                && (prop.value.is_some() || prop.body.is_some())
                 && prop.type_ann.is_some()
                 && let Some(value) = scope.get(&prop.name)
             {
@@ -3150,19 +3150,6 @@ impl Evaluator {
             })
             .map(|name| name_of(name))
             .collect();
-        // Object bodies use the finished lexical scope for the same reason as
-        // modules: declared aliases and constraint dependencies are late-bound.
-        for entry in entries.iter() {
-            if let Entry::Property(prop) = entry
-                && !has_modifier(&prop.modifiers, Modifier::Local)
-                && prop.value.is_some()
-                && prop.type_ann.is_some()
-                && let Some(value) = child_scope.get(&prop.name)
-            {
-                self.check_declared_property_type(prop, value, &child_scope, depth)?;
-            }
-        }
-
         let source = ObjectSource {
             entries: entries.clone(),
             captured: SourceScope::lazy(&child_scope, hidden_aliases, Vec::new()),
@@ -3607,7 +3594,7 @@ impl Evaluator {
         scope: &Scope,
         depth: usize,
     ) -> Result<()> {
-        if prop.value.is_none() {
+        if prop.value.is_none() && prop.body.is_none() {
             return Ok(());
         }
         let Some(ty) = &prop.type_ann else {

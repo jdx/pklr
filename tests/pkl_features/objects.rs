@@ -3961,3 +3961,21 @@ limit = 0
     );
     assert!(later.contains("property 'checked'"), "{later}");
 }
+
+#[test]
+fn declared_property_type_checks_wait_for_instances_and_cover_body_forms() {
+    let json = eval(
+        r#"
+class C { value: Int = "bad" }
+instance = new C { value = 1 }
+function: Function1<Int, Int> = (x) -> x
+"#,
+    );
+    assert_eq!(json["instance"]["value"], 1);
+
+    let class_default = eval_fails("class C { value: Int = \"bad\" }\ninstance = new C {}\n");
+    assert!(class_default.contains("property 'value'"), "{class_default}");
+
+    let body = eval_fails("items: Listing(this.length == 1) { 1; 2 }\n");
+    assert!(body.contains("property 'items'"), "{body}");
+}
