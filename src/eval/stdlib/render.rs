@@ -308,9 +308,33 @@ fn render(value: &Value, explicit: bool, out: &mut String) {
             out.push_str(&quote_string(regex.pattern(), true));
             out.push(')');
         }
+        Value::Duration(d) => {
+            out.push_str(&format_unit_value(d.value));
+            out.push('.');
+            out.push_str(d.unit.symbol());
+        }
+        Value::DataSize(d) => {
+            out.push_str(&format_unit_value(d.value));
+            out.push('.');
+            out.push_str(d.unit.symbol());
+        }
     }
 }
 
+/// A duration's or data size's value as pkl prints it: without a fraction
+/// when it is a whole number.
+fn format_unit_value(value: f64) -> String {
+    if is_mathematical_integer(value) {
+        (value as i64).to_string()
+    } else {
+        format_float(value)
+    }
+}
+
+/// Whether `f` is a finite whole number.
+pub(crate) fn is_mathematical_integer(f: f64) -> bool {
+    f.is_finite() && f.fract() == 0.0
+}
 /// An integer as Java's `MessageFormat` prints it in error messages, with
 /// `,` grouping (`1,114,112`).
 pub(crate) fn group_digits(n: i64) -> String {

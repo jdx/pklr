@@ -327,6 +327,164 @@ pub enum Value {
     Lambda(Arc<[String]>, Arc<Expr>, Arc<ScopeMap>),
     /// A compiled regular expression (`Regex(pattern)`).
     Regex(Arc<Regex>),
+    /// A quantity of time (`5.min`).
+    Duration(Duration),
+    /// A quantity of digital information (`5.mb`).
+    DataSize(DataSize),
+}
+
+/// The unit of a [`Duration`], smallest first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DurationUnit {
+    Nanos,
+    Micros,
+    Millis,
+    Seconds,
+    Minutes,
+    Hours,
+    Days,
+}
+
+impl DurationUnit {
+    pub const ALL: [DurationUnit; 7] = [
+        DurationUnit::Nanos,
+        DurationUnit::Micros,
+        DurationUnit::Millis,
+        DurationUnit::Seconds,
+        DurationUnit::Minutes,
+        DurationUnit::Hours,
+        DurationUnit::Days,
+    ];
+
+    /// The unit's pkl name, as in `5.min`.
+    pub fn symbol(self) -> &'static str {
+        match self {
+            DurationUnit::Nanos => "ns",
+            DurationUnit::Micros => "us",
+            DurationUnit::Millis => "ms",
+            DurationUnit::Seconds => "s",
+            DurationUnit::Minutes => "min",
+            DurationUnit::Hours => "h",
+            DurationUnit::Days => "d",
+        }
+    }
+
+    /// The unit named `symbol`, if any.
+    pub fn parse(symbol: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|unit| unit.symbol() == symbol)
+    }
+
+    /// Nanoseconds per unit.
+    pub fn nanos(self) -> f64 {
+        match self {
+            DurationUnit::Nanos => 1.0,
+            DurationUnit::Micros => 1e3,
+            DurationUnit::Millis => 1e6,
+            DurationUnit::Seconds => 1e9,
+            DurationUnit::Minutes => 60e9,
+            DurationUnit::Hours => 3600e9,
+            DurationUnit::Days => 86400e9,
+        }
+    }
+}
+
+/// A pkl `Duration`. Like pkl, the value is kept as a float in its unit.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Duration {
+    pub value: f64,
+    pub unit: DurationUnit,
+}
+
+impl Duration {
+    /// The value converted to `unit`.
+    pub fn value_in(&self, unit: DurationUnit) -> f64 {
+        self.value * self.unit.nanos() / unit.nanos()
+    }
+}
+
+/// The unit of a [`DataSize`], smallest first, decimal before binary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DataSizeUnit {
+    Bytes,
+    Kilobytes,
+    Kibibytes,
+    Megabytes,
+    Mebibytes,
+    Gigabytes,
+    Gibibytes,
+    Terabytes,
+    Tebibytes,
+    Petabytes,
+    Pebibytes,
+}
+
+impl DataSizeUnit {
+    pub const ALL: [DataSizeUnit; 11] = [
+        DataSizeUnit::Bytes,
+        DataSizeUnit::Kilobytes,
+        DataSizeUnit::Kibibytes,
+        DataSizeUnit::Megabytes,
+        DataSizeUnit::Mebibytes,
+        DataSizeUnit::Gigabytes,
+        DataSizeUnit::Gibibytes,
+        DataSizeUnit::Terabytes,
+        DataSizeUnit::Tebibytes,
+        DataSizeUnit::Petabytes,
+        DataSizeUnit::Pebibytes,
+    ];
+
+    /// The unit's pkl name, as in `5.mb`.
+    pub fn symbol(self) -> &'static str {
+        match self {
+            DataSizeUnit::Bytes => "b",
+            DataSizeUnit::Kilobytes => "kb",
+            DataSizeUnit::Kibibytes => "kib",
+            DataSizeUnit::Megabytes => "mb",
+            DataSizeUnit::Mebibytes => "mib",
+            DataSizeUnit::Gigabytes => "gb",
+            DataSizeUnit::Gibibytes => "gib",
+            DataSizeUnit::Terabytes => "tb",
+            DataSizeUnit::Tebibytes => "tib",
+            DataSizeUnit::Petabytes => "pb",
+            DataSizeUnit::Pebibytes => "pib",
+        }
+    }
+
+    /// The unit named `symbol`, if any.
+    pub fn parse(symbol: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|unit| unit.symbol() == symbol)
+    }
+
+    /// Bytes per unit.
+    pub fn bytes(self) -> i64 {
+        match self {
+            DataSizeUnit::Bytes => 1,
+            DataSizeUnit::Kilobytes => 1000,
+            DataSizeUnit::Kibibytes => 1024,
+            DataSizeUnit::Megabytes => 1000_i64.pow(2),
+            DataSizeUnit::Mebibytes => 1024_i64.pow(2),
+            DataSizeUnit::Gigabytes => 1000_i64.pow(3),
+            DataSizeUnit::Gibibytes => 1024_i64.pow(3),
+            DataSizeUnit::Terabytes => 1000_i64.pow(4),
+            DataSizeUnit::Tebibytes => 1024_i64.pow(4),
+            DataSizeUnit::Petabytes => 1000_i64.pow(5),
+            DataSizeUnit::Pebibytes => 1024_i64.pow(5),
+        }
+    }
+}
+
+/// A pkl `DataSize`. Like pkl, the value is kept as a float in its unit.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DataSize {
+    pub value: f64,
+    pub unit: DataSizeUnit,
+}
+
+impl DataSize {
+    /// The value converted to `unit`.
+    pub fn value_in(&self, unit: DataSizeUnit) -> f64 {
+        self.value * self.unit.bytes() as f64 / unit.bytes() as f64
+    }
 }
 
 /// A pkl `Regex`: the pattern as written and its compiled form.
@@ -426,6 +584,8 @@ impl Value {
                 _ => "Function5",
             },
             Value::Regex(_) => "Regex",
+            Value::Duration(_) => "Duration",
+            Value::DataSize(_) => "DataSize",
         }
     }
 
@@ -433,11 +593,23 @@ impl Value {
     /// cannot represent.
     pub fn try_to_json(&self) -> Result<serde_json::Value, crate::Error> {
         match self {
-            Value::Regex(_) => Err(crate::Error::Eval(format!(
-                "Cannot render value of type `{}` as JSON.\nValue: {}",
-                self.type_name(),
-                crate::eval::stdlib::render_value(self)
+            Value::Float(f) if !f.is_finite() => Err(crate::Error::Eval(format!(
+                "Cannot render value `{}` as JSON.",
+                if f.is_nan() {
+                    "NaN"
+                } else if *f > 0.0 {
+                    "∞"
+                } else {
+                    "-∞"
+                }
             ))),
+            Value::Regex(_) | Value::Duration(_) | Value::DataSize(_) => {
+                Err(crate::Error::Eval(format!(
+                    "Cannot render value of type `{}` as JSON.\nValue: {}",
+                    self.type_name(),
+                    crate::eval::render_value(self)
+                )))
+            }
             Value::Object(map, _) => {
                 let mut obj = serde_json::Map::new();
                 for (k, v) in map.iter() {
@@ -477,6 +649,7 @@ impl Value {
             }
             Value::Lambda(..) => json!("<lambda>"),
             Value::Regex(regex) => json!({ "_type": "regex", "pattern": regex.pattern() }),
+            Value::Duration(_) | Value::DataSize(_) => json!(crate::eval::render_value(self)),
         }
     }
 

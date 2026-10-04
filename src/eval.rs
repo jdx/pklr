@@ -209,17 +209,20 @@ fn eval_simple_expr(
                 Err(error) => return Some(Err(error)),
             };
             if matches!(op, BinOp::And | BinOp::Or) {
-                let left_truthy = is_truthy(&l);
+                let left = match stdlib::logical_left(*op, &l) {
+                    Ok(left) => left,
+                    Err(error) => return Some(Err(error)),
+                };
                 let short_circuit = match op {
-                    BinOp::And => !left_truthy,
-                    _ => left_truthy,
+                    BinOp::And => !left,
+                    _ => left,
                 };
                 if short_circuit {
-                    return Some(Ok(Value::Bool(left_truthy)));
+                    return Some(Ok(Value::Bool(left)));
                 }
                 return Some(
                     eval_simple_expr(right, scope, depth + 1, max_depth)?
-                        .map(|r| Value::Bool(is_truthy(&r))),
+                        .and_then(|r| stdlib::logical_right(*op, &l, &r).map(Value::Bool)),
                 );
             }
             let r = match eval_simple_expr(right, scope, depth + 1, max_depth)? {
@@ -253,6 +256,9 @@ fn is_simple_expr(expr: &Expr) -> bool {
 
 /// Apply a binary operator other than `|>` to evaluated operands.
 fn apply_binop(op: BinOp, l: Value, r: Value) -> Result<Value> {
+    if let Some(result) = stdlib::binary_op(op, &l, &r) {
+        return result;
+    }
     match op {
         BinOp::Add => add_values(l, r),
         BinOp::Sub => arithmetic(l, r, |a, b| Ok(a - b), |a, b| Ok(a - b)),
@@ -287,8 +293,13 @@ fn apply_binop(op: BinOp, l: Value, r: Value) -> Result<Value> {
         BinOp::Le => compare_or_eq(l, r, std::cmp::Ordering::Less),
         BinOp::Gt => compare(l, r, std::cmp::Ordering::Greater),
         BinOp::Ge => compare_or_eq(l, r, std::cmp::Ordering::Greater),
-        BinOp::And => Ok(Value::Bool(is_truthy(&l) && is_truthy(&r))),
-        BinOp::Or => Ok(Value::Bool(is_truthy(&l) || is_truthy(&r))),
+        BinOp::And | BinOp::Or => {
+            let left = stdlib::logical_left(op, &l)?;
+            if left == matches!(op, BinOp::Or) {
+                return Ok(Value::Bool(left));
+            }
+            stdlib::logical_right(op, &l, &r).map(Value::Bool)
+        }
         BinOp::IntDiv => arithmetic(
             l,
             r,
@@ -4840,14 +4851,6 @@ impl Evaluator {
                             map.values().cloned().collect::<Vec<_>>().into(),
                         ));
                     }
-                    // Duration and DataSize units on numbers
-                    (
-                        Value::Int(_) | Value::Float(_),
-                        "ns" | "us" | "ms" | "s" | "min" | "h" | "d" | "b" | "kb" | "mb" | "gb"
-                        | "tb" | "pb" | "kib" | "mib" | "gib" | "tib" | "pib",
-                    ) => {
-                        return Ok(make_unit_object(obj, field));
-                    }
                     _ => {}
                 }
                 match &obj {
@@ -4953,12 +4956,9 @@ impl Evaluator {
             Expr::Unop(op, operand) => {
                 let v = self.eval_expr(operand, scope, depth + 1)?;
                 match op {
-                    UnOp::Neg => match v {
-                        Value::Int(n) => Ok(Value::Int(-n)),
-                        Value::Float(f) => Ok(Value::Float(-f)),
-                        _ => Err(Error::Eval("cannot negate non-number".into())),
-                    },
-                    UnOp::Not => Ok(Value::Bool(!is_truthy(&v))),
+                    UnOp::Neg => stdlib::negate(&v)
+                        .unwrap_or_else(|| Err(Error::Eval("cannot negate non-number".into()))),
+                    UnOp::Not => stdlib::logical_not(&v),
                     UnOp::NonNull => {
                         if is_null_value(&v) {
                             Err(Error::Eval(
@@ -5705,16 +5705,17 @@ impl Evaluator {
         // `x is Foo && x.fooField` must not touch `fooField` when `x` is not a
         // `Foo`).
         if matches!(op, BinOp::And | BinOp::Or) {
-            let left_truthy = is_truthy(&self.eval_expr(left, scope, depth + 1)?);
+            let l = self.eval_expr(left, scope, depth + 1)?;
+            let left_value = stdlib::logical_left(op, &l)?;
             let short_circuit = match op {
-                BinOp::And => !left_truthy,
-                _ => left_truthy,
+                BinOp::And => !left_value,
+                _ => left_value,
             };
             if short_circuit {
-                return Ok(Value::Bool(left_truthy));
+                return Ok(Value::Bool(left_value));
             }
-            let right_truthy = is_truthy(&self.eval_expr(right, scope, depth + 1)?);
-            return Ok(Value::Bool(right_truthy));
+            let r = self.eval_expr(right, scope, depth + 1)?;
+            return stdlib::logical_right(op, &l, &r).map(Value::Bool);
         }
 
         let l = self.eval_expr(left, scope, depth + 1)?;
@@ -6338,6 +6339,23 @@ impl Evaluator {
                 }
                 Ok(new_items.map(|new_items| Value::List(ListValue::new(items.kind(), new_items))))
             }
+            // Built-in values such as a `Regex` match a converter by class name.
+            Value::Regex(_) | Value::Duration(_) | Value::DataSize(_) => {
+                let class_name = value.type_name();
+                for (conv_name, lambda) in converters {
+                    if type_names_match(conv_name, class_name)
+                        && !blocked_root_converters.contains(conv_name)
+                    {
+                        let result = self.invoke_lambda(lambda, std::slice::from_ref(value), 0)?;
+                        let mut blocked = blocked_root_converters;
+                        blocked.push(conv_name.clone());
+                        let converted =
+                            self.apply_converters_recursive(&result, converters, blocked, memo)?;
+                        return Ok(Some(converted.unwrap_or(result)));
+                    }
+                }
+                Ok(None)
+            }
             _ => Ok(None),
         }
     }
@@ -6883,6 +6901,9 @@ fn inherit_stdlib_module(name: &str, base_obj: &mut ObjectMap, scope: &mut Scope
 }
 
 fn stdlib_module(name: &str) -> Value {
+    if let Some(module) = stdlib::module(name) {
+        return module;
+    }
     let mut map = ObjectMap::default();
     if name == "base" {
         map.insert("Regex".into(), Value::String("Regex".into()));

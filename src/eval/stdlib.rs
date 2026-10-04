@@ -6,10 +6,17 @@
 
 use super::*;
 
+mod fdlibm;
+mod math;
+mod numbers;
 mod regex;
 pub(crate) mod render;
 pub(crate) mod string;
+mod units;
 
+pub(crate) use numbers::{
+    binary_op, logical_left, logical_not, logical_right, negate, units_equal,
+};
 pub(crate) use regex::compile as compile_regex;
 pub(crate) use render::render_value;
 use render::{render_value_limited, to_pkl_string};
@@ -151,6 +158,15 @@ pub(super) fn index(value: &Value, key: &Value) -> Option<Result<Value>> {
     }
 }
 
+/// The object for the standard library module `pkl:<name>`, for the modules
+/// implemented here.
+pub(super) fn module(name: &str) -> Option<Value> {
+    match name {
+        "math" => Some(math::module()),
+        _ => None,
+    }
+}
+
 impl Evaluator {
     /// `value.toString()`, as string interpolation uses it: a class that
     /// defines `toString()` gets to choose its text.
@@ -177,6 +193,10 @@ impl Evaluator {
         match value {
             Value::String(s) => string::property(s, name),
             Value::Regex(regex) => regex::property(regex, name),
+            Value::Int(n) => numbers::int_property(*n, name),
+            Value::Float(f) => numbers::float_property(*f, name),
+            Value::Duration(d) => units::duration_property(d, name),
+            Value::DataSize(d) => units::data_size_property(d, name),
             _ => None,
         }
     }
@@ -207,6 +227,12 @@ impl Evaluator {
         match value {
             Value::String(s) => self.string_method(s, name, args, depth),
             Value::Regex(regex) => self.regex_method(regex, name, args),
+            Value::Int(n) => numbers::int_method(*n, name, args),
+            Value::Float(f) => numbers::float_method(*f, name, args),
+            Value::Bool(b) => numbers::bool_method(*b, name, args),
+            Value::Duration(d) => units::duration_method(d, name, args),
+            Value::DataSize(d) => units::data_size_method(d, name, args),
+            Value::Object(..) if is_typed_object(value, math::MODULE) => math::call(name, args),
             _ => None,
         }
     }

@@ -598,6 +598,8 @@ pub(super) fn value_type_name(v: &Value) -> &'static str {
         Value::Object(..) => "Object",
         Value::List(_) => "List",
         Value::Lambda(..) => "Function",
+        Value::Duration(_) => "Duration",
+        Value::DataSize(_) => "DataSize",
     }
 }
 
@@ -683,6 +685,8 @@ pub(super) fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
             "List" | "Listing" | "Set" => matches!(val, Value::List(_)),
             "Map" | "Mapping" | "Object" | "Dynamic" => matches!(val, Value::Object(..)),
             "Function" => matches!(val, Value::Lambda(..)),
+            "Duration" => matches!(val, Value::Duration(_)),
+            "DataSize" => matches!(val, Value::DataSize(_)),
             "Any" => true,
             _ => {
                 // Unknown type name -- could be a class; treat objects as matching
@@ -776,6 +780,9 @@ pub(super) fn type_is_runtime_checkable(ty: &crate::parser::TypeExpr, scope: &Sc
                         | "Object"
                         | "Dynamic"
                         | "Function"
+                        | "Regex"
+                        | "Duration"
+                        | "DataSize"
                         | "Any"
                 )
                 || scope.get_type_alias(runtime_name).is_some()
@@ -854,7 +861,7 @@ pub(super) fn values_eq(a: &Value, b: &Value) -> bool {
         (Value::Lambda(_, a_body, a_captured), Value::Lambda(_, b_body, b_captured)) => {
             Arc::ptr_eq(a_body, b_body) && Arc::ptr_eq(a_captured, b_captured)
         }
-        _ => false,
+        (a, b) => super::stdlib::units_equal(a, b).unwrap_or(false),
     }
 }
 
@@ -1058,11 +1065,4 @@ pub(super) fn merge_values(base: Value, overlay: Value) -> Value {
         }
         (_, overlay) => overlay,
     }
-}
-
-pub(super) fn make_unit_object(value: Value, unit: &str) -> Value {
-    let mut map = ObjectMap::default();
-    map.insert("value".into(), value);
-    map.insert("unit".into(), Value::String(unit.into()));
-    Value::Object(Arc::new(map), None)
 }
