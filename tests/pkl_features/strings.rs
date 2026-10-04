@@ -281,20 +281,23 @@ fn regex_syntax_errors_are_reported() {
     assert!(eval_fails(r#"x = Regex("a(b")"#).contains("Syntax error in regex `a(b`"));
 }
 
-#[test]
-fn regex_cannot_be_rendered_as_json() {
+#[tokio::test]
+async fn regex_cannot_be_rendered_as_json() {
     let temp = TestTempDir::new("pklr_test_regex_json");
     let path = temp.path().join("test.pkl");
     std::fs::write(&path, "glob = Regex(\"a.*\")\n").unwrap();
-    let error = pklr::eval_to_json(&path).unwrap_err().to_string();
+    let error = pklr::eval_to_json_async(&path)
+        .await
+        .unwrap_err()
+        .to_string();
     assert!(
         error.contains("Cannot render value of type `Regex` as JSON.\nValue: Regex(\"a.*\")"),
         "{error}"
     );
 }
 
-#[test]
-fn regex_converter_renders_regex_as_json() {
+#[tokio::test]
+async fn regex_converter_renders_regex_as_json() {
     let temp = TestTempDir::new("pklr_test_regex_converter");
     let path = temp.path().join("test.pkl");
     std::fs::write(
@@ -314,9 +317,69 @@ output {
 "##,
     )
     .unwrap();
-    let json = pklr::eval_to_json(&path).unwrap();
+    let json = pklr::eval_to_json_async(&path).await.unwrap();
     assert_eq!(
         json["glob"],
         serde_json::json!({"_type": "regex", "pattern": r"^.*\.json$"})
     );
+}
+
+#[test]
+fn regexes_with_equal_patterns_are_equal() {
+    let json = eval(r#"x = List(Regex("a+") == Regex("a+"), Regex("a+") == Regex("a*"))"#);
+    assert_eq!(json["x"], serde_json::json!([true, false]));
+}
+
+#[test]
+fn regex_ends_with_checks_the_last_match_like_pkl() {
+    // pkl finds matches left to right and checks where the last one ends,
+    // so a suffix that overlaps an earlier match does not count.
+    let json = eval(r#"x = List("aaa".endsWith(Regex("aa")), "abab".endsWith(Regex("ab")))"#);
+    assert_eq!(json["x"], serde_json::json!([false, true]));
+}
+
+#[test]
+fn empty_regex_matches_count_utf16_positions() {
+    // Java resumes an empty-match search one UTF-16 code unit later, which
+    // lands between the surrogates of a non-BMP character.
+    let json = eval(r#"x = Regex("").findMatchesIn("\u{1F600}x").map((m) -> m.start)"#);
+    assert_eq!(json["x"], serde_json::json!([0, 1, 2, 3]));
+}
+
+#[test]
+fn regex_group_names_follow_java() {
+    assert!(
+        eval_fails(r#"x = Regex("(?<my_g>a)")"#)
+            .contains("named capturing group is missing trailing '>'")
+    );
+    assert!(
+        eval_fails(r#"x = "ab".replaceAll(Regex("(?<g1>a)"), "${g_1}")"#)
+            .contains("named capturing group is missing trailing '}'")
+    );
+    let json = eval(r#"x = "ab".replaceAll(Regex("(?<g1>a)"), "[${g1}]")"#);
+    assert_eq!(json["x"], "[a]b");
+}
+
+#[test]
+fn padding_widths_follow_pkl() {
+    let json = eval(r#"x = "abc".padStart(-1, "x")"#);
+    assert_eq!(json["x"], "abc");
+    assert!(
+        eval_fails(r#"x = "a".padEnd(3000000000, "x")"#)
+            .contains("Int value `3,000,000,000` is too large (only Int32 supported here).")
+    );
+}
+
+#[test]
+fn first_and_last_replacements_and_split_limits() {
+    let json = eval(
+        r##"
+first = "a1b2c3".replaceFirstMapped(Regex(#"\d"#), (m) -> "<\(m)>")
+last = "a1b2c3".replaceLast(Regex(#"\d"#), "#")
+split = "a1b2c3".splitLimit(Regex(#"\d"#), 2)
+"##,
+    );
+    assert_eq!(json["first"], "a<1>b2c3");
+    assert_eq!(json["last"], "a1b2c#");
+    assert_eq!(json["split"], serde_json::json!(["a", "b2c3"]));
 }

@@ -22,8 +22,45 @@ impl<'a> Pattern<'a> {
 
 /// Compile `pattern`, failing with pkl's message for a syntax error.
 pub(crate) fn compile(pattern: &str) -> Result<Regex> {
-    Regex::new(pattern)
-        .map_err(|message| Error::Eval(format!("Syntax error in regex `{pattern}`: {message}")))
+    let syntax_error =
+        |message: String| Error::Eval(format!("Syntax error in regex `{pattern}`: {message}"));
+    check_group_names(pattern).map_err(syntax_error)?;
+    Regex::new(pattern).map_err(syntax_error)
+}
+
+/// Java only accepts group names made of ASCII letters and digits, starting
+/// with a letter; the Rust engine also accepts `_`.
+fn check_group_names(pattern: &str) -> std::result::Result<(), String> {
+    let bytes = pattern.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 1,
+            b'(' if bytes[i + 1..].starts_with(b"?<")
+                && !matches!(bytes.get(i + 3), Some(b'=' | b'!')) =>
+            {
+                let name_start = i + 3;
+                let name_len = bytes[name_start..]
+                    .iter()
+                    .take_while(|b| b.is_ascii_alphanumeric())
+                    .count();
+                if name_len == 0 || !bytes[name_start].is_ascii_alphabetic() {
+                    return Err(format!(
+                        "capturing group name does not start with a Latin letter near index {name_start}"
+                    ));
+                }
+                if bytes.get(name_start + name_len) != Some(&b'>') {
+                    return Err(format!(
+                        "named capturing group is missing trailing '>' near index {}",
+                        name_start + name_len
+                    ));
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    Ok(())
 }
 
 /// A regex matching `literal` verbatim.
@@ -67,8 +104,42 @@ fn next_search_start(text: &str, start: usize, end: usize) -> usize {
     }
 }
 
+/// The matches of a regex in a text, found one at a time as Java's
+/// `Matcher.find` does, so callers that need only the first few stop early.
+pub(super) struct Matches<'a> {
+    regex: &'a Regex,
+    text: &'a str,
+    pos: usize,
+}
+
+impl Iterator for Matches<'_> {
+    type Item = Result<Groups>;
+
+    fn next(&mut self) -> Option<Result<Groups>> {
+        if self.pos > self.text.len() {
+            return None;
+        }
+        let caps = match self.regex.compiled().captures_from_pos(self.text, self.pos) {
+            Ok(Some(caps)) => caps,
+            Ok(None) => {
+                self.pos = usize::MAX;
+                return None;
+            }
+            Err(e) => {
+                self.pos = usize::MAX;
+                return Some(Err(engine_error(e)));
+            }
+        };
+        let groups = groups_of(&caps);
+        let (start, end) = groups[0].expect("group 0 always matches");
+        self.pos = next_search_start(self.text, start, end);
+        Some(Ok(groups))
+    }
+}
+
 pub(super) trait RegexExt {
     fn find_at(&self, text: &str, pos: usize) -> Result<Option<Span>>;
+    fn matches<'a>(&'a self, text: &'a str) -> Matches<'a>;
     fn find_all(&self, text: &str) -> Result<Vec<Span>>;
     fn captures_all(&self, text: &str) -> Result<Vec<Groups>>;
 }
@@ -85,6 +156,14 @@ impl RegexExt for Regex {
             }))
     }
 
+    fn matches<'a>(&'a self, text: &'a str) -> Matches<'a> {
+        Matches {
+            regex: self,
+            text,
+            pos: 0,
+        }
+    }
+
     fn find_all(&self, text: &str) -> Result<Vec<Span>> {
         let mut out = Vec::new();
         let mut pos = 0;
@@ -99,22 +178,7 @@ impl RegexExt for Regex {
     }
 
     fn captures_all(&self, text: &str) -> Result<Vec<Groups>> {
-        let mut out = Vec::new();
-        let mut pos = 0;
-        while pos <= text.len() {
-            let Some(caps) = self
-                .compiled()
-                .captures_from_pos(text, pos)
-                .map_err(engine_error)?
-            else {
-                break;
-            };
-            let groups = groups_of(&caps);
-            let (start, end) = groups[0].expect("group 0 always matches");
-            out.push(groups);
-            pos = next_search_start(text, start, end);
-        }
-        Ok(out)
+        self.matches(text).collect()
     }
 }
 
@@ -147,10 +211,12 @@ pub(super) fn java_split(text: &str, regex: &Regex, limit: usize) -> Result<Vec<
     let mut parts = Vec::new();
     let mut index = 0;
     let mut matched = false;
-    for m in regex.find_all(text)? {
+    for groups in regex.matches(text) {
         if limit > 0 && parts.len() + 1 >= limit {
             break;
         }
+        let (start, end) = groups?[0].expect("group 0 always matches");
+        let m = Span { start, end };
         if m.end == 0 {
             // A zero-width match at the beginning never produces an empty
             // leading substring.
@@ -179,6 +245,20 @@ pub(super) enum Which {
     All,
 }
 
+/// The matches `which` selects, searching no further than needed.
+pub(super) fn select_matches(regex: &Regex, text: &str, which: Which) -> Result<Vec<Groups>> {
+    match which {
+        Which::First => regex.matches(text).take(1).collect(),
+        Which::Last => Ok(regex
+            .matches(text)
+            .last()
+            .transpose()?
+            .into_iter()
+            .collect()),
+        Which::All => regex.captures_all(text),
+    }
+}
+
 /// Replace matches of `regex` in `text` with `replacement`, expanding
 /// Java's `$n`, `${name}` and `\x` syntax.
 pub(super) fn replace(
@@ -187,12 +267,7 @@ pub(super) fn replace(
     which: Which,
     replacement: &str,
 ) -> Result<String> {
-    let all = regex.captures_all(text)?;
-    let selected: Vec<Groups> = match which {
-        Which::First => all.into_iter().take(1).collect(),
-        Which::Last => all.into_iter().last().into_iter().collect(),
-        Which::All => all,
-    };
+    let selected = select_matches(regex, text, which)?;
     let mut out = String::with_capacity(text.len());
     let mut last_end = 0;
     for groups in &selected {
@@ -306,6 +381,27 @@ fn group_match_value(text: &str, (start, end): (usize, usize), groups: Option<&G
     typed_object("RegexMatch", map)
 }
 
+/// The empty `RegexMatch` Java reports between the two UTF-16 code units of
+/// a character, at code unit `position`, for a regex with `groups`.
+fn mid_surrogate_empty_match(position: i64, groups: &Groups) -> Value {
+    let empty = |groups: Vec<Value>| {
+        let mut map = ObjectMap::default();
+        map.insert("value".into(), Value::String("".into()));
+        map.insert("start".into(), Value::Int(position));
+        map.insert("end".into(), Value::Int(position));
+        map.insert("groups".into(), Value::List(groups.into()));
+        typed_object("RegexMatch", map)
+    };
+    let group_values = groups
+        .iter()
+        .map(|group| match group {
+            Some(_) => empty(Vec::new()),
+            None => Value::Null,
+        })
+        .collect();
+    empty(group_values)
+}
+
 /// The `RegexMatch` for a match with `groups`. `with_groups` is false for a
 /// group's own match, which lists no groups.
 pub(super) fn regex_match_value(text: &str, groups: &Groups, with_groups: bool) -> Value {
@@ -335,14 +431,28 @@ impl Evaluator {
             check_arity(args, 1)?;
             let text = Args { method: name, args }.string(0)?;
             Ok(if name == "findMatchesIn" {
-                Value::List(
-                    regex
-                        .captures_all(text)?
-                        .iter()
-                        .map(|groups| regex_match_value(text, groups, true))
-                        .collect::<Vec<_>>()
-                        .into(),
-                )
+                let mut matches = Vec::new();
+                for groups in regex.matches(text) {
+                    let groups = groups?;
+                    matches.push(regex_match_value(text, &groups, true));
+                    // After an empty match Java resumes one UTF-16 code unit
+                    // later, which inside a surrogate pair is the middle of a
+                    // character. The empty match it finds there has no text
+                    // a Rust string can slice, so report it directly.
+                    let (start, end) = groups[0].expect("group 0 always matches");
+                    if start == end
+                        && text[end..]
+                            .chars()
+                            .next()
+                            .is_some_and(|c| c.len_utf16() == 2)
+                    {
+                        matches.push(mid_surrogate_empty_match(
+                            utf16_offset(text, end) + 1,
+                            &groups,
+                        ));
+                    }
+                }
+                Value::List(matches.into())
             } else {
                 match matches_entire(regex, text)? {
                     Some(groups) => regex_match_value(text, &groups, true),

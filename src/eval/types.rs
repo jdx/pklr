@@ -818,6 +818,8 @@ pub(super) fn values_eq(a: &Value, b: &Value) -> bool {
         (Value::Int(a), Value::Float(b)) => (*a as f64) == *b,
         (Value::Float(a), Value::Int(b)) => *a == (*b as f64),
         (Value::String(a), Value::String(b)) => a == b,
+        // Regexes are equal when their patterns are.
+        (Value::Regex(a), Value::Regex(b)) => a == b,
         (Value::List(a), Value::List(b)) => {
             a.kind() == b.kind()
                 && a.len() == b.len()

@@ -552,12 +552,12 @@ impl Evaluator {
                     Pattern::Literal(p) => super::regex::literal(p)?,
                     Pattern::Regex(re) => re,
                 };
-                let matches = re.captures_all(s)?;
-                let selected: Vec<_> = match name {
-                    "replaceFirstMapped" => matches.into_iter().take(1).collect(),
-                    "replaceLastMapped" => matches.into_iter().last().into_iter().collect(),
-                    _ => matches,
+                let which = match name {
+                    "replaceFirstMapped" => super::regex::Which::First,
+                    "replaceLastMapped" => super::regex::Which::Last,
+                    _ => super::regex::Which::All,
                 };
+                let selected = super::regex::select_matches(&re, s, which)?;
                 let mut out = String::with_capacity(s.len());
                 let mut last_end = 0;
                 for groups in selected {
@@ -597,6 +597,14 @@ impl Evaluator {
                 if length >= width {
                     this()
                 } else {
+                    // pkl builds the result in a buffer of `width` UTF-16
+                    // code units, which must fit in an Int32.
+                    if width > i64::from(i32::MAX) {
+                        return Err(Error::Eval(format!(
+                            "Int value `{}` is too large (only Int32 supported here).",
+                            super::render::group_digits(width)
+                        )));
+                    }
                     let padding = fill.repeat((width - length) as usize);
                     string_value(if name == "padStart" {
                         format!("{padding}{s}")

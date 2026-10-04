@@ -298,6 +298,23 @@ fn render(value: &Value, explicit: bool, out: &mut String) {
     }
 }
 
+/// An integer as Java's `MessageFormat` prints it in error messages, with
+/// `,` grouping (`1,114,112`).
+pub(crate) fn group_digits(n: i64) -> String {
+    let digits = n.unsigned_abs().to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3 + 1);
+    if n < 0 {
+        out.push('-');
+    }
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,6 +340,14 @@ mod tests {
         ] {
             assert_eq!(format_float(f), s, "{f}");
         }
+    }
+
+    #[test]
+    fn digits_are_grouped_like_message_format() {
+        assert_eq!(group_digits(1_114_112), "1,114,112");
+        assert_eq!(group_digits(-1000), "-1,000");
+        assert_eq!(group_digits(999), "999");
+        assert_eq!(group_digits(i64::MIN), "-9,223,372,036,854,775,808");
     }
 
     #[test]
