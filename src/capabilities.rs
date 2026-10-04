@@ -471,6 +471,9 @@ fn ureq_fetch_within(agent: &ureq::Agent, url: &str, budget: &FetchBudget) -> Re
             return Ok(body);
         }
         if !budget.try_take(read as u64) {
+            // What is left is too little for this body: spend it, so no
+            // further request starts.
+            budget.charge(read as u64);
             return Err(budget_spent(url));
         }
         body.extend_from_slice(&chunk[..read]);
@@ -606,6 +609,9 @@ mod reqwest_backend {
                 )));
             }
             if !budget.try_take(chunk.len() as u64) {
+                // What is left is too little for this body: spend it, so no
+                // further request starts.
+                budget.charge(chunk.len() as u64);
                 return Err(budget_spent(url));
             }
             body.extend_from_slice(&chunk);
