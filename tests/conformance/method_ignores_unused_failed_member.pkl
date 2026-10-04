@@ -1,0 +1,5 @@
+class C {
+  bad = throw("x")
+  function ok() = 1
+}
+r = new C {}.ok()

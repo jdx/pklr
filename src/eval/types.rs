@@ -426,7 +426,7 @@ pub(super) fn entries_are_listing_amendment(entries: &[Entry]) -> bool {
 
 pub(super) fn resolve_dotted(scope: &Scope, name: &str) -> Option<Value> {
     let parts: Vec<&str> = name.split('.').collect();
-    let mut val = scope.get(parts[0])?.clone();
+    let mut val = scope.get_type(parts[0])?.clone();
     for part in &parts[1..] {
         val = match val {
             Value::Object(ref map, _) => map.get(*part)?.clone(),

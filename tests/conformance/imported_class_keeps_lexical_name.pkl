@@ -1,0 +1,3 @@
+import "lib/class_min.pkl" as L
+min = 7
+r = new L.C { min = 3 }

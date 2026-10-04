@@ -4265,19 +4265,33 @@ impl Evaluator {
         // the same name still resolves through its own `this`.
         let binds_declared = |name: &str| own_body.as_ref().is_none_or(|own| own.contains(name));
         let own_body_scope = own_body.as_ref().map(|own| (scope, own));
+        // The properties these entries assign are members of the object
+        // (Pkl reads them through `this`), so an entry reading one before it
+        // is evaluated waits for it (it is evaluated again after the others)
+        // instead of reading an inherited value or a binding around the
+        // body: the name is marked pending until it is bound. Names declared
+        // lexically around an entry from another body still win (see
+        // `update_object_bindings`).
+        let assigned: HashSet<&str> = entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Property(prop)
+                    if !has_modifier(&prop.modifiers, Modifier::Local)
+                        && (prop.value.is_some() || prop.body.is_some()) =>
+                {
+                    Some(prop.name.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        // Without a binding around the body, reading the name before it is
+        // evaluated fails anyway, so only a name bound there needs marking.
+        for name in &assigned {
+            if scope.get(name).is_some() {
+                child_scope.poison(name.to_string(), format!("undefined variable: {name}"));
+            }
+        }
         if let Some(source) = inherited_source {
-            // A property this body assigns again gets its new value, so an
-            // entry reading it before then waits for it (it is evaluated again
-            // after the others) rather than read the inherited value.
-            let assigned: HashSet<&str> = entries
-                .iter()
-                .filter_map(|entry| match entry {
-                    Entry::Property(prop) if prop.value.is_some() || prop.body.is_some() => {
-                        Some(prop.name.as_str())
-                    }
-                    _ => None,
-                })
-                .collect();
             for entry in source.entries.iter() {
                 if let Entry::Property(prop) = entry
                     && !has_modifier(&prop.modifiers, Modifier::Local)
@@ -4521,7 +4535,11 @@ impl Evaluator {
         let mut retrying = false;
         let mut retried = false;
         let mut fallbacks: HashMap<usize, Value> = HashMap::default();
+        // Each retry pass covers only the previous pass's failures, so it
+        // makes progress or stops; at most one pass per entry is needed.
+        let mut passes = 0;
         let failed = loop {
+            passes += 1;
             let mut failed: Vec<(usize, String)> = Vec::new();
             // Properties set aside in this pass. A later entry for the same
             // property (a body amendment of it) waits for it.
@@ -4903,7 +4921,10 @@ impl Evaluator {
                     }
                 }
             }
-            if failed.is_empty() || (retrying && failed.len() == pass.len()) {
+            if failed.is_empty()
+                || (retrying && failed.len() == pass.len())
+                || passes > entries.len()
+            {
                 // Keep the values that only hold failed members; their
                 // errors surface where those members are read or rendered.
                 let mut remaining = Vec::new();
@@ -5113,7 +5134,7 @@ impl Evaluator {
             .collect();
         let source = ObjectSource {
             entries: entries.clone(),
-            captured: SourceScope::lazy(&child_scope, hidden_aliases, Vec::new()),
+            captured: SourceScope::lazy(scope, hidden_aliases, Vec::new()),
             body_members: own_body.clone().unwrap_or_else(|| {
                 entries
                     .iter()
@@ -6086,23 +6107,7 @@ impl Evaluator {
             type_namespace: object_source_type_namespace(base_source),
             ..Scope::default()
         };
-        // The base's own members are in its captured scope with the base's
-        // values. A member assigned again here is the instance's, so an entry
-        // reading it before it is evaluated waits for it (see
-        // `eval_entries_with_lexical_scopes`) instead of reading the base's.
-        let reassigned: HashSet<&str> = merged
-            .iter()
-            .filter_map(|entry| match entry {
-                Entry::Property(prop) if prop.value.is_some() || prop.body.is_some() => {
-                    Some(prop.name.as_str())
-                }
-                _ => None,
-            })
-            .collect();
         for (k, v) in base_scope {
-            if reassigned.contains(&**k) && base_source.evaluated_properties.contains_key(&**k) {
-                continue;
-            }
             if base_source.scope_declared().contains(&**k) {
                 eval_scope.declare_name(k.clone(), v.clone());
             } else {
@@ -6173,7 +6178,6 @@ impl Evaluator {
                 && prop.value.is_none()
                 && prop.body.is_none()
                 && !has_modifier(&prop.modifiers, Modifier::Local)
-                && !reassigned.contains(prop.name.as_str())
                 && eval_scope.get(&prop.name).is_none()
                 && matches!(prop.type_ann, Some(crate::parser::TypeExpr::Nullable(_)))
             {
@@ -6289,9 +6293,9 @@ impl Evaluator {
                     assigned_property_names
                         .contains(prop.name.as_str())
                         .then(|| {
-                            source
-                                .as_ref()
-                                .and_then(|source| source.scope().get(prop.name.as_str()))
+                            source.as_ref().and_then(|source| {
+                                source.evaluated_properties.get(prop.name.as_str())
+                            })
                         })
                         .flatten()
                 });
@@ -6788,7 +6792,7 @@ impl Evaluator {
                         // Check if type name matches a class in scope (supports dotted names)
                         let base = type_name.as_ref().and_then(|name| {
                             let parts: Vec<&str> = name.split('.').collect();
-                            let mut val = scope.get(parts[0])?.clone();
+                            let mut val = scope.get_type(parts[0])?.clone();
                             for part in &parts[1..] {
                                 val = match val {
                                     Value::Object(ref map, _) => map.get(*part)?.clone(),
@@ -7388,10 +7392,12 @@ impl Evaluator {
         args: &[Value],
         depth: usize,
     ) -> Result<Option<Value>> {
-        // A method that reads an object's member values reads a failed one
-        // too, which reports its error, as reading it directly would.
-        if let Value::Object(_, Some(source)) = obj
+        // A built-in method that reads an object's member values reads a
+        // failed one too, which reports its error, as reading it directly
+        // would. The object's own methods read only what they name.
+        if let Value::Object(map, Some(source)) = obj
             && let Some(members) = &source.poisoned_members
+            && !matches!(map.get(method), Some(Value::Lambda(..)))
         {
             let failure = match method {
                 "containsKey" | "hasProperty" | "keys" | "length" | "isEmpty" => None,
