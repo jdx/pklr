@@ -1001,15 +1001,36 @@ fn entry_mentions(entry: &Entry, name: &str) -> bool {
                     .is_some_and(|body| entries_mention(body, name))
         }
         Entry::Spread(expr) | Entry::Elem(expr) => expr_mentions(expr, name),
-        Entry::ClassDef(_, _, _, body) => entries_mention(body, name),
+        Entry::ClassDef(_, _, parent, body) => {
+            parent
+                .as_deref()
+                .is_some_and(|parent| type_name_mentions(parent, name))
+                || entries_mention(body, name)
+        }
         Entry::TypeAlias(_, ty) => type_mentions(ty, name),
     }
+}
+
+/// Whether a type name as written (`outer.Step`, `*Foo<Bar>?`, a quoted name)
+/// contains `name` as an identifier, so a type resolved through that binding
+/// counts as a mention.
+fn type_name_mentions(type_name: &str, name: &str) -> bool {
+    type_name
+        .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$'))
+        .any(|token| token == name)
 }
 
 fn expr_mentions(expr: &Expr, name: &str) -> bool {
     match expr {
         Expr::Ident(ident) => ident == name,
-        Expr::New(_, entries, _) | Expr::ObjectBody(entries) => entries_mention(entries, name),
+        Expr::New(type_name, entries, generic_params) => {
+            type_name
+                .iter()
+                .chain(generic_params)
+                .any(|type_name| type_name_mentions(type_name, name))
+                || entries_mention(entries, name)
+        }
+        Expr::ObjectBody(entries) => entries_mention(entries, name),
         Expr::InferredNew(ty, entries) => type_mentions(ty, name) || entries_mention(entries, name),
         Expr::Field(base, _) | Expr::NullSafeField(base, _) => expr_mentions(base, name),
         Expr::Index(base, index) | Expr::Binop(_, base, index) => {
@@ -1049,11 +1070,14 @@ fn expr_mentions(expr: &Expr, name: &str) -> bool {
 
 fn type_mentions(ty: &crate::parser::TypeExpr, name: &str) -> bool {
     match ty {
-        crate::parser::TypeExpr::Constrained(_, constraint) => expr_mentions(constraint, name),
-        crate::parser::TypeExpr::Nullable(inner) => type_mentions(inner, name),
-        crate::parser::TypeExpr::Union(types) | crate::parser::TypeExpr::Generic(_, types) => {
-            types.iter().any(|ty| type_mentions(ty, name))
+        crate::parser::TypeExpr::Constrained(base, constraint) => {
+            type_name_mentions(base, name) || expr_mentions(constraint, name)
         }
-        crate::parser::TypeExpr::Named(_) => false,
+        crate::parser::TypeExpr::Nullable(inner) => type_mentions(inner, name),
+        crate::parser::TypeExpr::Union(types) => types.iter().any(|ty| type_mentions(ty, name)),
+        crate::parser::TypeExpr::Generic(base, types) => {
+            type_name_mentions(base, name) || types.iter().any(|ty| type_mentions(ty, name))
+        }
+        crate::parser::TypeExpr::Named(type_name) => type_name_mentions(type_name, name),
     }
 }

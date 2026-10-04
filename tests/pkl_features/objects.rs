@@ -3273,3 +3273,19 @@ x = new Test {
     assert_eq!(val["x"]["files"], serde_json::json!(["a"]));
     assert_eq!(val["x"]["expect"]["files"], serde_json::json!({"a": "b"}));
 }
+
+#[test]
+fn outer_in_type_position_is_bound() {
+    let json = eval(
+        r#"
+class Step { v = 1 }
+obj {
+  inner { s = new outer.Step {} }
+  x: outer.Step = new Step {}
+  ok = x is outer.Step
+}
+"#,
+    );
+    assert_eq!(json["obj"]["inner"]["s"]["v"], 1);
+    assert_eq!(json["obj"]["ok"], true);
+}
