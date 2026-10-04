@@ -2501,6 +2501,10 @@ async fn narrowed_import_follows_module_reads_made_before_class_properties_are_b
         "a = 1\nmax = 3\nclass D {\n  class Reader { function f() = a }\n  r = new Reader {}.f()\n  a = 6\n  c = module.max\n}\n",
         // ...or through another of its methods.
         "a = 1\nmax = 3\nclass D {\n  class Reader {\n    function g() = a\n    function f() = g()\n  }\n  r = new Reader {}.f()\n  a = 6\n  c = module.max\n}\n",
+        // ...or through another nested class's method, or a property storing
+        // the method.
+        "a = 1\nmax = 3\nclass D {\n  class Reader { function f() = a }\n  class Caller { function go() = new Reader {}.f() }\n  r = new Caller {}.go()\n  a = 6\n  c = module.max\n}\n",
+        "a = 1\nmax = 3\nclass D {\n  class Reader {\n    function g() = a\n    callback = g\n  }\n  r = new Reader {}.callback.apply()\n  a = 6\n  c = module.max\n}\n",
     ];
     for (i, dep) in deps.iter().enumerate() {
         let name = format!("dep{i}.pkl");

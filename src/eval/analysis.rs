@@ -1223,26 +1223,7 @@ fn eager_class_refs<'e>(
             _ => None,
         })
         .collect();
-    // Properties storing a method (`callback = getMin` or `= this.getMin`),
-    // with the method each stores.
-    let stored: HashMap<&str, &str> = body
-        .iter()
-        .filter_map(|entry| match entry {
-            Entry::Property(prop) if !has_modifier(&prop.modifiers, Modifier::Local) => {
-                let method = match prop.value.as_ref()? {
-                    Expr::Ident(name) => name,
-                    Expr::Field(base, name) if matches!(&**base, Expr::Ident(this) if this == "this") => {
-                        name
-                    }
-                    _ => return None,
-                };
-                methods
-                    .contains(method.as_str())
-                    .then_some((prop.name.as_str(), method.as_str()))
-            }
-            _ => None,
-        })
-        .collect();
+    let stored = stored_methods(body, is_method);
     let mut classes = scope.clone();
     classes.extend(body.iter().filter_map(|entry| match entry {
         Entry::ClassDef(name, _, parent, class_body) => {
@@ -1294,7 +1275,9 @@ fn eager_class_refs<'e>(
                     Entry::Property(prop) => Some(prop.name.as_str()),
                     _ => None,
                 }));
-                // Its methods called here, and the ones they call.
+                // Its methods called here, and the ones they call. Reading a
+                // property that only stores a method (see `stored`) calls it.
+                let stored = stored_methods(class_body, is_method);
                 let mut called = fields.clone();
                 loop {
                     let calls_all = called.contains(DYNAMIC_SIBLING_REF);
@@ -1302,7 +1285,11 @@ fn eager_class_refs<'e>(
                         .iter()
                         .filter(|entry| match entry {
                             Entry::Property(prop) if is_method(entry) => {
-                                (calls_all || called.contains(&prop.name))
+                                (calls_all
+                                    || called.contains(&prop.name)
+                                    || stored.iter().any(|(property, method)| {
+                                        *method == prop.name && called.contains(*property)
+                                    }))
                                     && followed_nested.insert((name.as_str(), prop.name.as_str()))
                             }
                             _ => false,
@@ -1316,6 +1303,8 @@ fn eager_class_refs<'e>(
                         let roots = referenced_roots(method);
                         called.extend(roots.iter().cloned());
                         collect_field_names_entries(method, &mut called);
+                        // Other classes' methods it calls run here too.
+                        collect_field_names_entries(method, &mut fields);
                         refs.extend(
                             roots
                                 .into_iter()
@@ -1377,6 +1366,36 @@ fn eager_class_refs<'e>(
         .map(|(_, entry)| entry.clone())
         .collect();
     reads(seeds).0
+}
+
+/// The properties of a class `body` that store one of its methods (those
+/// `is_method` accepts) rather than compute a value (`callback = getMin` or
+/// `= this.getMin`), with the method each stores.
+fn stored_methods(body: &[Entry], is_method: fn(&Entry) -> bool) -> HashMap<&str, &str> {
+    let methods: HashSet<&str> = body
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::Property(prop) if is_method(entry) => Some(prop.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    body.iter()
+        .filter_map(|entry| match entry {
+            Entry::Property(prop) if !has_modifier(&prop.modifiers, Modifier::Local) => {
+                let method = match prop.value.as_ref()? {
+                    Expr::Ident(name) => name,
+                    Expr::Field(base, name) if matches!(&**base, Expr::Ident(this) if this == "this") => {
+                        name
+                    }
+                    _ => return None,
+                };
+                methods
+                    .contains(method.as_str())
+                    .then_some((prop.name.as_str(), method.as_str()))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// The names a class body's defaults read from its enclosing scope while
