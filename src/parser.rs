@@ -331,9 +331,8 @@ impl<'a> Parser<'a> {
                 let name = self.expect_ident()?;
                 self.check_type_alias(member_offset, &[], &name)?;
                 if matches!(self.peek(), TokenKind::Lt) {
-                    let params_offset = self.peek_tok().offset;
-                    let params = self.collect_generic_params()?;
-                    self.check_type_parameters(params_offset, &params)?;
+                    self.check_type_parameters(self.pos)?;
+                    self.skip_generic_params()?;
                 }
                 self.expect(&TokenKind::Equals)?;
                 let ty = self.parse_type()?;
@@ -359,6 +358,12 @@ impl<'a> Parser<'a> {
                         self.tokens.get(self.pos + 1).map(|tok| &tok.kind)
                     {
                         self.check_type_alias(member_offset, &mods, name)?;
+                    }
+                    if matches!(
+                        self.tokens.get(self.pos + 2).map(|tok| &tok.kind),
+                        Some(TokenKind::Lt)
+                    ) {
+                        self.check_type_parameters(self.pos + 2)?;
                     }
                     self.skip_declaration();
                 }

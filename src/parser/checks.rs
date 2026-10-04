@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use super::Parser;
 use super::ast::{Expr, Import, Modifier, Property};
 use crate::error::Result;
+use crate::lexer::TokenKind;
 
 /// The kind of body whose members are being parsed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -267,13 +268,39 @@ impl Parser<'_> {
         self.declare(offset, name, false, modifiers.contains(&Modifier::Local))
     }
 
-    /// Reject a duplicate type parameter of a type alias.
-    pub(super) fn check_type_parameters(&self, offset: usize, params: &[String]) -> Result<()> {
-        for (i, param) in params.iter().enumerate() {
-            if params[..i].contains(param) {
-                return Err(
-                    self.semantic_error(offset, format!("Duplicate type parameter `{param}`."))
-                );
+    /// Reject a duplicate type parameter in the `<...>` list starting at
+    /// token `start`, ignoring the `in`/`out` variance markers.
+    pub(super) fn check_type_parameters(&self, start: usize) -> Result<()> {
+        let mut seen: Vec<&str> = Vec::new();
+        let mut depth = 0;
+        for (i, tok) in self.tokens.iter().enumerate().skip(start) {
+            match &tok.kind {
+                TokenKind::Lt => depth += 1,
+                TokenKind::Gt => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                TokenKind::Ident(name) if depth == 1 => {
+                    let is_variance = name == "out"
+                        && matches!(
+                            self.tokens.get(i + 1).map(|t| &t.kind),
+                            Some(TokenKind::Ident(_))
+                        );
+                    if is_variance {
+                        continue;
+                    }
+                    if seen.contains(&name.as_str()) {
+                        return Err(self.semantic_error(
+                            tok.offset,
+                            format!("Duplicate type parameter `{name}`."),
+                        ));
+                    }
+                    seen.push(name);
+                }
+                TokenKind::Eof => break,
+                _ => {}
             }
         }
         Ok(())

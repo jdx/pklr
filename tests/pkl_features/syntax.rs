@@ -1230,6 +1230,12 @@ obj {
     // Duplicates a generator adds are only found when it runs.
     let json = eval("gen {\n  a = 1\n  when (false) { a = 2 }\n}\n");
     assert_eq!(json["gen"]["a"], 1);
+
+    // Variance markers are not type parameter names.
+    let json = eval("typealias P<out A, out B> = List<A|B>\nx: P<Int, Int> = List(1, 2)\n");
+    assert_eq!(json["x"], serde_json::json!([1, 2]));
+    let json = eval("gen {\n  a = 1\n  when (false) { a = 2 }\n}\n");
+    assert_eq!(json["gen"]["a"], 1);
 }
 
 #[test]
@@ -1311,6 +1317,14 @@ fn invalid_member_definitions_are_rejected() {
         ),
         (
             "typealias Pair<A, A> = List<A>\n",
+            "Duplicate type parameter `A`.",
+        ),
+        (
+            "local typealias Pair<A, A> = List<A>\nx = 1\n",
+            "Duplicate type parameter `A`.",
+        ),
+        (
+            "typealias Pair<out A, out A> = List<A>\n",
             "Duplicate type parameter `A`.",
         ),
         (
