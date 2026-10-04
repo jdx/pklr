@@ -779,7 +779,13 @@ impl<'a> Parser<'a> {
 
                 let (value, body) = if matches!(self.peek(), TokenKind::Equals) {
                     self.advance();
-                    (Some(self.parse_expr()?), None)
+                    let mut value = self.parse_expr()?;
+                    // `name: T = new { ... }` amends T's default, just like a
+                    // method result, so a typed listing default stays a listing.
+                    if let Some(type_ann) = &type_ann {
+                        infer_method_return_new(&mut value, type_ann);
+                    }
+                    (Some(value), None)
                 } else if matches!(self.peek(), TokenKind::LBrace) {
                     self.advance();
                     let entries = self.parse_entries()?;

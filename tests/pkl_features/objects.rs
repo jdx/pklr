@@ -3683,3 +3683,62 @@ f = new F { p { ["a"] { w = 1 } } }
     assert_eq!(json["x"], expected);
     assert_eq!(json["f"]["p"], expected);
 }
+
+#[test]
+fn untyped_new_in_amendment_amends_class_property_default() {
+    let json = eval(
+        r#"
+class C { l: Listing<Int> = new { 1 } }
+c3 = new C { l = new { 9 } }
+c4 = (c3) { l = new { 8 } }
+c5 = (c3) { l { 7 } }
+class F { a = 1; b = 3 }
+class H { f: F = new { a = 5 } }
+h = new H { f = new { b = 10 } }
+h3 = (h) { f = new { a = 6 } }
+"#,
+    );
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "c3": {"l": [1, 9]},
+            "c4": {"l": [1, 8]},
+            "c5": {"l": [1, 9, 7]},
+            "h": {"f": {"a": 5, "b": 10}},
+            "h3": {"f": {"a": 6, "b": 3}},
+        })
+    );
+}
+
+#[test]
+fn untyped_new_in_amendment_infers_class_property_type() {
+    let json = eval(
+        r#"
+class F { a = 1; b = 3 }
+class H2 { f: F }
+h2 = new H2 { f = new { b = 10 } }
+h4 = (h2) { f = new { a = 7 } }
+"#,
+    );
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "h2": {"f": {"a": 1, "b": 10}},
+            "h4": {"f": {"a": 7, "b": 3}},
+        })
+    );
+}
+
+#[test]
+#[ignore = "a full replacement drops the class default from the amendment chain"]
+fn untyped_new_after_full_replacement_amends_class_property_default() {
+    let json = eval(
+        r#"
+class C { l: Listing<Int> = new { 1 } }
+c6 = new C { l = new Listing { 4 } }
+c7 = (c6) { l = new { 5 } }
+"#,
+    );
+    assert_eq!(json["c6"]["l"], serde_json::json!([4]));
+    assert_eq!(json["c7"]["l"], serde_json::json!([1, 5]));
+}

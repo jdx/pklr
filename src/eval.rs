@@ -3891,6 +3891,21 @@ impl Evaluator {
                 _ => None,
             })
             .collect::<HashMap<_, _>>();
+        let mut first_base_property_index = HashMap::default();
+        for (index, entry) in base_entries.iter().enumerate() {
+            if let Entry::Property(prop) = entry {
+                first_base_property_index
+                    .entry(prop.name.as_str())
+                    .or_insert(index);
+            }
+        }
+        // An untyped `new { ... }` assigned to a class property takes its
+        // parent from the property's declared default (or its declared type
+        // when there is none), not from the current value.
+        let is_class_instance = base_source
+            .type_name
+            .as_deref()
+            .is_some_and(|name| name != "Dynamic");
 
         // Walk base entries: substitute overridden properties in-place.
         // If the overlay has a body amendment (no `=`), keep the base entry first
@@ -3905,6 +3920,47 @@ impl Evaluator {
             if let Entry::Property(prop) = entry
                 && let Some(replacement) = overlay_by_name.get(prop.name.as_str())
             {
+                if let Entry::Property(overlay_prop) = replacement
+                    && overlay_prop.body.is_none()
+                    && let Some(Expr::New(None, body, _)) = &overlay_prop.value
+                    && let Some(&first_index) = first_base_property_index.get(prop.name.as_str())
+                    && let Entry::Property(declared) = &base_entries[first_index]
+                    && (is_class_instance || declared.type_ann.is_some())
+                {
+                    let has_default = declared.value.is_some() || declared.body.is_some();
+                    if entry_index == first_index {
+                        // The declared default, in its own lexical scope. A
+                        // declaration without one is kept too, so the next
+                        // amendment still sees that the property has none.
+                        merged.push(entry.clone());
+                        merged_entry_scopes.push(inherited_entry_scope.clone());
+                    }
+                    // Later entries for this property come from earlier
+                    // amendments, which the new object replaces.
+                    if last_base_property_index.get(prop.name.as_str()) != Some(&entry_index) {
+                        continue;
+                    }
+                    let mut overlay_prop = (**overlay_prop).clone();
+                    if overlay_prop.type_ann.is_none() {
+                        overlay_prop.type_ann = declared.type_ann.clone();
+                    }
+                    if has_default {
+                        overlay_prop.value = None;
+                        overlay_prop.body = Some(body.clone());
+                    } else if let Some(type_ann) = &overlay_prop.type_ann {
+                        overlay_prop.value =
+                            Some(Expr::InferredNew(type_ann.clone(), body.clone()));
+                    }
+                    if has_modifier(&declared.modifiers, Modifier::Hidden)
+                        && !has_modifier(&overlay_prop.modifiers, Modifier::Hidden)
+                    {
+                        overlay_prop.modifiers.push(Modifier::Hidden);
+                    }
+                    merged.push(Entry::Property(Arc::new(overlay_prop)));
+                    merged_entry_scopes.push(amendment_entry_scope.clone());
+                    used_overlay.insert(prop.name.as_str());
+                    continue;
+                }
                 if let Entry::Property(overlay_prop) = replacement
                     && overlay_prop.body.is_some()
                     && overlay_prop.value.is_none()
