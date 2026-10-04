@@ -1155,7 +1155,7 @@ impl<'a> ModuleClasses<'a> {
         roots: &'r HashSet<String>,
     ) -> Vec<&'r String> {
         let mut inherited = None;
-        let mut default_refs = None;
+        let mut eager = None;
         roots
             .iter()
             .filter(|root| {
@@ -1166,7 +1166,9 @@ impl<'a> ModuleClasses<'a> {
                     |entry| matches!(entry, Entry::Property(prop) if prop.name == **root),
                 );
                 if let Some(declared) = declared {
-                    return eager_class_refs(body, Some(declared), &self.classes)
+                    return eager
+                        .get_or_insert_with(|| EagerReads::new(body, &self.classes))
+                        .upto(declared)
                         .contains(root.as_str());
                 }
                 if !inherited
@@ -1175,8 +1177,9 @@ impl<'a> ModuleClasses<'a> {
                 {
                     return true;
                 }
-                default_refs
-                    .get_or_insert_with(|| eager_class_refs(body, None, &self.classes))
+                eager
+                    .get_or_insert_with(|| EagerReads::new(body, &self.classes))
+                    .all
                     .contains(root.as_str())
             })
             .collect()
@@ -1194,68 +1197,117 @@ impl<'a> ModuleClasses<'a> {
 /// its non-method entries, and of the methods they run. A method (a property
 /// or local whose value is a lambda) runs when they read it (calling it by
 /// name, as a member of the instance, or any of them once the instance
-/// escapes; see `InstanceReads`),
-/// except that a property whose value is just the method
-/// (`callback = getMin`) only stores it: the method then runs when they read
-/// that property. Other method bodies only run on a built instance.
-///
-/// With `upto`, only the entries a class property at that index doesn't hide
-/// its name from: the defaults at or before it, the locals and nested
-/// classes (evaluated before any property), and the local methods any default
-/// runs (which capture the scope the locals see).
-///
-/// `scope` holds the classes the body's nested classes may extend.
-fn eager_class_refs<'e>(
+/// escapes; see `InstanceReads`), except that a property whose value is just
+/// the method (`callback = getMin`) only stores it: the method then runs when
+/// they read that property. Other method bodies only run on a built instance.
+struct EagerReads<'e> {
     body: &'e [Entry],
-    upto: Option<usize>,
-    scope: &ClassMap<'e>,
-) -> HashSet<String> {
+    /// The classes the body's nested classes may extend: the enclosing
+    /// scope's and the body's own.
+    classes: ClassMap<'e>,
+    methods: HashSet<&'e str>,
+    stored: HashMap<&'e str, &'e str>,
+    /// What all of the body's defaults read.
+    all: HashSet<String>,
+    /// The methods all of the body's defaults run.
+    runs: HashSet<&'e str>,
+}
+
+impl<'e> EagerReads<'e> {
     fn is_method(entry: &Entry) -> bool {
         matches!(entry, Entry::Property(prop) if matches!(prop.value, Some(Expr::Lambda(..))))
     }
+
     fn is_local(entry: &Entry) -> bool {
         matches!(entry, Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local))
     }
-    let methods: HashSet<&str> = body
-        .iter()
-        .filter_map(|entry| match entry {
-            Entry::Property(prop) if is_method(entry) => Some(prop.name.as_str()),
+
+    /// `scope` holds the classes the body's nested classes may extend.
+    fn new(body: &'e [Entry], scope: &ClassMap<'e>) -> Self {
+        let mut classes = scope.clone();
+        classes.extend(body.iter().filter_map(|entry| match entry {
+            Entry::ClassDef(name, _, parent, class_body) => {
+                Some((name.as_str(), (parent.as_deref(), class_body.as_slice())))
+            }
             _ => None,
-        })
-        .collect();
-    let stored = stored_methods(body, is_method);
-    let mut classes = scope.clone();
-    classes.extend(body.iter().filter_map(|entry| match entry {
-        Entry::ClassDef(name, _, parent, class_body) => {
-            Some((name.as_str(), (parent.as_deref(), class_body.as_slice())))
-        }
-        _ => None,
-    }));
-    let is_default = |entry: &Entry| {
-        !is_method(entry)
-            && !matches!(entry, Entry::Property(prop) if stored.contains_key(prop.name.as_str()))
-    };
-    // What `seeds` read, with the methods they run (transitively). A nested
-    // class reads only what its own defaults do (see `class_default_reads`),
-    // and once they use it, what the methods they call on it (by name, as
-    // any object's member) read from outside it.
-    let reads = |seeds: Vec<Entry>| {
-        let (nested, seeds): (Vec<Entry>, Vec<Entry>) = seeds
+        }));
+        let mut reads = EagerReads {
+            body,
+            classes,
+            methods: body
+                .iter()
+                .filter_map(|entry| match entry {
+                    Entry::Property(prop) if Self::is_method(entry) => Some(prop.name.as_str()),
+                    _ => None,
+                })
+                .collect(),
+            stored: stored_methods(body, Self::is_method),
+            all: HashSet::default(),
+            runs: HashSet::default(),
+        };
+        let defaults = body
+            .iter()
+            .filter(|entry| reads.is_default(entry))
+            .collect();
+        (reads.all, reads.runs) = reads.reads(defaults);
+        reads
+    }
+
+    fn is_default(&self, entry: &Entry) -> bool {
+        !Self::is_method(entry)
+            && !matches!(entry, Entry::Property(prop) if self.stored.contains_key(prop.name.as_str()))
+    }
+
+    /// What the entries a class property at index `upto` doesn't hide its
+    /// name from read: the defaults at or before it, the locals and nested
+    /// classes (evaluated before any property), and the local methods any
+    /// default runs (which capture the scope the locals see).
+    fn upto(&self, upto: usize) -> HashSet<String> {
+        let seeds = self
+            .body
+            .iter()
+            .enumerate()
+            .filter(|(index, entry)| match entry {
+                Entry::Property(prop) if Self::is_method(entry) => {
+                    Self::is_local(entry) && self.runs.contains(prop.name.as_str())
+                }
+                _ => {
+                    self.is_default(entry)
+                        && (*index <= upto
+                            || Self::is_local(entry)
+                            || matches!(entry, Entry::ClassDef(..)))
+                }
+            })
+            .map(|(_, entry)| entry)
+            .collect();
+        self.reads(seeds).0
+    }
+
+    /// What `seeds` read, with the methods they run (transitively). A nested
+    /// class reads only what its own defaults do (see `class_default_reads`),
+    /// and once they use it, what the methods they call on it (by name, as
+    /// any object's member) read from outside it.
+    fn reads(&self, seeds: Vec<&'e Entry>) -> (HashSet<String>, HashSet<&'e str>) {
+        let body = self.body;
+        let (nested, seeds): (Vec<&Entry>, Vec<&Entry>) = seeds
             .into_iter()
             .partition(|entry| matches!(entry, Entry::ClassDef(..)));
-        let mut refs = referenced_roots(&seeds);
+        let mut refs = referenced_roots_of(&seeds);
         for class in &nested {
             if let Entry::ClassDef(_, _, _, class_body) = class {
-                refs.extend(class_default_reads(class_body, &classes));
+                refs.extend(class_default_reads(class_body, &self.classes));
             }
         }
         let mut fields = HashSet::default();
-        collect_field_names_entries(&seeds, &mut fields);
         let mut instance = InstanceReads {
             members: HashSet::default(),
             escapes: false,
         };
-        instance.entries(&seeds, 0);
+        for seed in &seeds {
+            let seed = std::slice::from_ref(*seed);
+            collect_field_names_entries(seed, &mut fields);
+            instance.entries(seed, 0);
+        }
         let mut followed = HashSet::default();
         let mut used_classes = HashSet::default();
         let mut followed_nested = HashSet::default();
@@ -1270,21 +1322,21 @@ fn eager_class_refs<'e>(
                 }
                 used_classes.insert(name.as_str());
                 // The names an instance of the class has itself.
-                let mut own: HashSet<&str> = ancestor_properties(&classes, parent.as_deref());
+                let mut own: HashSet<&str> = ancestor_properties(&self.classes, parent.as_deref());
                 own.extend(class_body.iter().filter_map(|entry| match entry {
                     Entry::Property(prop) => Some(prop.name.as_str()),
                     _ => None,
                 }));
                 // Its methods called here, and the ones they call. Reading a
                 // property that only stores a method (see `stored`) calls it.
-                let stored = stored_methods(class_body, is_method);
+                let stored = stored_methods(class_body, Self::is_method);
                 let mut called = fields.clone();
                 loop {
                     let calls_all = called.contains(DYNAMIC_SIBLING_REF);
                     let next: Vec<&Entry> = class_body
                         .iter()
                         .filter(|entry| match entry {
-                            Entry::Property(prop) if is_method(entry) => {
+                            Entry::Property(prop) if Self::is_method(entry) => {
                                 (calls_all
                                     || called.contains(&prop.name)
                                     || stored.iter().any(|(property, method)| {
@@ -1316,13 +1368,14 @@ fn eager_class_refs<'e>(
             }
             let calls_all = instance.escapes;
             let read = |name: &str| refs.contains(name) || instance.members.contains(name);
-            let mut runs: HashSet<&str> = methods
+            let mut runs: HashSet<&str> = self
+                .methods
                 .iter()
                 .copied()
                 .filter(|method| calls_all || read(method))
                 .collect();
             runs.extend(
-                stored
+                self.stored
                     .iter()
                     .filter(|(property, _)| read(property))
                     .map(|(_, method)| *method),
@@ -1330,7 +1383,7 @@ fn eager_class_refs<'e>(
             let next: Vec<&Entry> = body
                 .iter()
                 .filter(|entry| match entry {
-                    Entry::Property(prop) if is_method(entry) => {
+                    Entry::Property(prop) if Self::is_method(entry) => {
                         runs.contains(prop.name.as_str()) && followed.insert(prop.name.as_str())
                     }
                     _ => false,
@@ -1346,26 +1399,21 @@ fn eager_class_refs<'e>(
                 instance.entries(method, 0);
             }
         }
-    };
-    let (refs, runs) = reads(body.iter().filter(|e| is_default(e)).cloned().collect());
-    let Some(upto) = upto else {
-        return refs;
-    };
-    let seeds = body
-        .iter()
-        .enumerate()
-        .filter(|(index, entry)| match entry {
-            Entry::Property(prop) if is_method(entry) => {
-                is_local(entry) && runs.contains(prop.name.as_str())
-            }
-            _ => {
-                is_default(entry)
-                    && (*index <= upto || is_local(entry) || matches!(entry, Entry::ClassDef(..)))
-            }
-        })
-        .map(|(_, entry)| entry.clone())
-        .collect();
-    reads(seeds).0
+    }
+}
+
+/// `referenced_roots` for entries of one body that aren't contiguous: a
+/// local or method any of them declares shadows its name in all of them.
+fn referenced_roots_of(entries: &[&Entry]) -> HashSet<String> {
+    let mut shadows = HashSet::default();
+    for entry in entries {
+        shadows.extend(declared_entry_roots(std::slice::from_ref(*entry)));
+    }
+    let mut refs = HashSet::default();
+    for entry in entries {
+        collect_entry_refs(std::slice::from_ref(*entry), &mut refs, &shadows);
+    }
+    refs
 }
 
 /// The properties of a class `body` that store one of its methods (those
@@ -1399,17 +1447,21 @@ fn stored_methods(body: &[Entry], is_method: fn(&Entry) -> bool) -> HashMap<&str
 }
 
 /// The names a class body's defaults read from its enclosing scope while
-/// they are evaluated (see `eager_class_refs`): those it doesn't bind itself
+/// they are evaluated (see `EagerReads`): those it doesn't bind itself
 /// by then. A name inherited from its parent is kept, as is one any default
 /// reads before the body's own property of that name is bound.
 fn class_default_reads<'e>(body: &'e [Entry], scope: &ClassMap<'e>) -> HashSet<String> {
-    let mut refs = eager_class_refs(body, None, scope);
-    refs.retain(|root| {
-        body.iter()
-            .rposition(|entry| matches!(entry, Entry::Property(prop) if prop.name == *root))
-            .is_none_or(|declared| eager_class_refs(body, Some(declared), scope).contains(root))
-    });
-    refs
+    let eager = EagerReads::new(body, scope);
+    eager
+        .all
+        .iter()
+        .filter(|root| {
+            body.iter()
+                .rposition(|entry| matches!(entry, Entry::Property(prop) if prop.name == **root))
+                .is_none_or(|declared| eager.upto(declared).contains(*root))
+        })
+        .cloned()
+        .collect()
 }
 
 /// Adds to `out` every member name `entries` read from any object (`x.name`,
