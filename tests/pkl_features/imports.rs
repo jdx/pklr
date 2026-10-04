@@ -2275,3 +2275,25 @@ async fn import_glob_in_a_base_keeps_modules_its_children_read() {
     let amended = pklr::eval_to_json_async(&dir.join("C.pkl")).await.unwrap();
     assert_eq!(amended["c"], "b");
 }
+
+#[tokio::test]
+async fn narrowed_import_follows_type_alias_constraints() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_type_alias");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "expected = \"b\"\ntypealias IsB = String(this == expected)\nresult = \"b\" is IsB\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as Dep\ntypealias IsTrue = Boolean(this == Dep.result)\nok = true is IsTrue\nout = Dep.result\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["ok"], true);
+    assert_eq!(val["out"], true);
+}

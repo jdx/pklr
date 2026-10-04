@@ -352,6 +352,16 @@ pub(super) fn expand_requested_fields(
             _ => None,
         })
         .collect();
+    // Type aliases and classes evaluate their constraints and defaults when a
+    // value is checked or built, so a property using one also depends on what
+    // the definition reads.
+    let definitions: HashMap<&str, &Entry> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::TypeAlias(name, _) | Entry::ClassDef(name, ..) => Some((name.as_str(), entry)),
+            _ => None,
+        })
+        .collect();
     let mut expanded = requested.clone();
     let mut changed = true;
     while changed {
@@ -375,6 +385,27 @@ pub(super) fn expand_requested_fields(
             if let Some(body) = &prop.body {
                 collect_entry_refs(body, &mut refs, &shadows);
                 collect_sibling_field_refs_entries(body, &mut refs);
+            }
+            let mut pending: Vec<String> = refs.iter().cloned().collect();
+            let mut visited = HashSet::new();
+            while let Some(name) = pending.pop() {
+                let Some(definition) = definitions.get(name.as_str()) else {
+                    continue;
+                };
+                if !visited.insert(name) {
+                    continue;
+                }
+                let mut definition_refs = HashSet::new();
+                collect_entry_refs(
+                    std::slice::from_ref(*definition),
+                    &mut definition_refs,
+                    &shadows,
+                );
+                for dep in definition_refs {
+                    if refs.insert(dep.clone()) {
+                        pending.push(dep);
+                    }
+                }
             }
             for dep in refs {
                 if dep == DYNAMIC_SIBLING_REF {
