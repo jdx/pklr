@@ -3942,3 +3942,22 @@ fn nested_amendments_of_class_instances_reject_elements() {
         );
     }
 }
+
+#[test]
+fn declared_property_types_check_aliases_constraints_and_late_members() {
+    let alias = eval_fails(
+        r#"
+typealias IsB = String(this == "b")
+checked: IsB = "x"
+"#,
+    );
+    assert!(alias.contains("property 'checked'"), "{alias}");
+
+    let later = eval_fails(
+        r#"
+checked: Int(this < limit) = 1
+limit = 0
+"#,
+    );
+    assert!(later.contains("property 'checked'"), "{later}");
+}

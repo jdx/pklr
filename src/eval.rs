@@ -2425,6 +2425,17 @@ impl Evaluator {
             }
         }
 
+        // Check declarations only after this module's final scope is complete:
+        // constraints and aliases may refer to members declared later.
+        for entry in module.body.iter() {
+            if let Entry::Property(prop) = entry
+                && !has_modifier(&prop.modifiers, Modifier::Local)
+                && let Some(value) = scope.get(&prop.name)
+            {
+                self.check_declared_property_type(prop, value, &scope, depth)?;
+            }
+        }
+
         // At the top level (depth 0), strip class definitions and lambdas from
         // the serialized output — they're schema/functions, not data.
         // Imported modules (depth > 0) keep them so dotted access works
@@ -3137,6 +3148,17 @@ impl Evaluator {
             })
             .map(|name| name_of(name))
             .collect();
+        // Object bodies use the finished lexical scope for the same reason as
+        // modules: declared aliases and constraint dependencies are late-bound.
+        for entry in entries.iter() {
+            if let Entry::Property(prop) = entry
+                && !has_modifier(&prop.modifiers, Modifier::Local)
+                && let Some(value) = child_scope.get(&prop.name)
+            {
+                self.check_declared_property_type(prop, value, &child_scope, depth)?;
+            }
+        }
+
         let source = ObjectSource {
             entries: entries.clone(),
             captured: SourceScope::lazy(&child_scope, hidden_aliases, Vec::new()),
@@ -3569,6 +3591,35 @@ impl Evaluator {
         if let Some(val) = scope.get(target.trim_end_matches('?')).cloned() {
             scope.declare(name, val);
         }
+    }
+
+    /// Check a concrete property value after its defining scope is complete.
+    /// Defaults and declarations without values are checked when they are
+    /// materialized, not merely declared.
+    fn check_declared_property_type(
+        &mut self,
+        prop: &Property,
+        value: &Value,
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<()> {
+        if prop.value.is_none() {
+            return Ok(());
+        }
+        let Some(ty) = &prop.type_ann else {
+            return Ok(());
+        };
+        if !type_is_runtime_checkable(ty, scope)
+            || self.eval_type_check(value, ty, scope, depth + 1)?
+        {
+            return Ok(());
+        }
+        Err(Error::Eval(format!(
+            "property '{}' expected {}, got {}",
+            prop.name,
+            display_type_expr(ty),
+            value_type_name(value)
+        )))
     }
 
     /// Check if a value matches a type expression, including constraint evaluation.
