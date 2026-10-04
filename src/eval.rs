@@ -3630,6 +3630,56 @@ impl Evaluator {
         scope: &Scope,
         depth: usize,
     ) -> Result<bool> {
+        self.eval_type_check_in(val, ty, scope, depth, &mut Vec::new())
+    }
+
+    /// Resolve aliases with a guard: malformed or recursively-expanded
+    /// aliases must report an evaluation error instead of recursing until the
+    /// process stack overflows.
+    fn eval_alias_check(
+        &mut self,
+        val: &Value,
+        name: &str,
+        resolved: &crate::parser::TypeExpr,
+        scope: &Scope,
+        depth: usize,
+        resolving: &mut Vec<String>,
+    ) -> Result<bool> {
+        if resolving.iter().any(|seen| seen == name) {
+            return Err(Error::Eval(format!("type alias '{name}' refers to itself")));
+        }
+        resolving.push(name.to_string());
+        // Long chains (`A0 = A1`, …) are valid Pkl and must not consume the
+        // Rust call stack once per alias.  Flatten the simple-name part here;
+        // compound targets still go through the regular checker below.
+        let mut target = resolved.clone();
+        loop {
+            let crate::parser::TypeExpr::Named(next) = &target else {
+                break;
+            };
+            let Some(next_target) = scope.get_type_alias(next) else {
+                break;
+            };
+            if resolving.iter().any(|seen| seen == next) {
+                while resolving.pop().as_deref() != Some(name) {}
+                return Err(Error::Eval(format!("type alias '{next}' refers to itself")));
+            }
+            resolving.push(next.clone());
+            target = next_target.clone();
+        }
+        let result = self.eval_type_check_in(val, &target, scope, depth + 1, resolving);
+        while resolving.pop().as_deref() != Some(name) {}
+        result
+    }
+
+    fn eval_type_check_in(
+        &mut self,
+        val: &Value,
+        ty: &crate::parser::TypeExpr,
+        scope: &Scope,
+        depth: usize,
+        resolving: &mut Vec<String>,
+    ) -> Result<bool> {
         use crate::parser::TypeExpr;
         match ty {
             TypeExpr::Named(name) => {
@@ -3639,7 +3689,7 @@ impl Evaluator {
                 // Check if name is a type alias; if so, resolve to the aliased type
                 if let Some(resolved) = scope.get_type_alias(name) {
                     let resolved = resolved.clone();
-                    return self.eval_type_check(val, &resolved, scope, depth + 1);
+                    return self.eval_alias_check(val, name, &resolved, scope, depth, resolving);
                 }
                 if let Some(matches) = value_is_class_type(val, name, scope) {
                     return Ok(matches);
@@ -3654,7 +3704,7 @@ impl Evaluator {
                     true
                 } else if let Some(resolved) = scope.get_type_alias(class_name) {
                     let resolved = resolved.clone();
-                    self.eval_type_check(val, &resolved, scope, depth + 1)?
+                    self.eval_alias_check(val, class_name, &resolved, scope, depth, resolving)?
                 } else {
                     value_is_class_type(val, class_name, scope)
                         .unwrap_or_else(|| value_is_named_type(val, base))
@@ -3689,18 +3739,25 @@ impl Evaluator {
                 if is_null_value(val) {
                     return Ok(true);
                 }
-                self.eval_type_check(val, inner, scope, depth)
+                self.eval_type_check_in(val, inner, scope, depth, resolving)
             }
             TypeExpr::Union(variants) => {
                 for v in variants {
-                    if self.eval_type_check(val, v, scope, depth)? {
+                    if !type_is_runtime_checkable(v, scope)
+                        || self.eval_type_check_in(val, v, scope, depth, resolving)?
+                    {
                         return Ok(true);
                     }
                 }
                 Ok(false)
             }
-            // Non-constrained types: delegate to the simple check
-            _ => Ok(value_is_type(val, ty)),
+            TypeExpr::Generic(name, _) => {
+                if let Some(resolved) = scope.get_type_alias(name) {
+                    let resolved = resolved.clone();
+                    return self.eval_alias_check(val, name, &resolved, scope, depth, resolving);
+                }
+                Ok(value_is_type(val, ty))
+            }
         }
     }
 
