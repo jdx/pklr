@@ -1693,6 +1693,8 @@ fn annotations_must_name_annotation_classes() {
             "@Int foo: String = \"hi\"\n",
             "Expected an annotation class.",
         ),
+        ("@Function0 foo = 1\n", "Expected an annotation class."),
+        ("@Int function foo() = 1\n", "Expected an annotation class."),
         (
             "integer: Int = 1\n@integer foo: String = \"hi\"\n",
             "Expected `integer` to be a type, but it is not.",

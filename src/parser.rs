@@ -369,7 +369,12 @@ impl<'a> Parser<'a> {
                 continue;
             }
             if matches!(self.peek(), TokenKind::KwFunction) {
-                if let Some(entry) = self.try_parse_function_def(member_offset, Vec::new())? {
+                if let Some(mut entry) = self.try_parse_function_def(member_offset, Vec::new())? {
+                    if !entry_annotations.is_empty()
+                        && let Entry::Property(ref mut prop) = entry
+                    {
+                        std::sync::Arc::make_mut(prop).annotations = entry_annotations;
+                    }
                     entries.push(entry);
                 }
                 continue;
@@ -378,7 +383,12 @@ impl<'a> Parser<'a> {
             if self.peek_is_modifier() && self.peek_past_modifiers_is_decl() {
                 let mods = self.collect_modifiers();
                 if matches!(self.peek(), TokenKind::KwFunction) {
-                    if let Some(entry) = self.try_parse_function_def(member_offset, mods)? {
+                    if let Some(mut entry) = self.try_parse_function_def(member_offset, mods)? {
+                        if !entry_annotations.is_empty()
+                            && let Entry::Property(ref mut prop) = entry
+                        {
+                            std::sync::Arc::make_mut(prop).annotations = entry_annotations;
+                        }
                         entries.push(entry);
                     }
                 } else {
