@@ -4025,6 +4025,13 @@ impl Evaluator {
                 used_overlay.insert(prop.name.clone());
                 continue;
             }
+            if matches!(entry, Entry::ForGenerator(_) | Entry::WhenGenerator(_)) {
+                // The post-build check below sees only the base's direct
+                // properties, and a class body's generators were not checked
+                // when the class was defined. Re-checking a generator from an
+                // earlier amendment gives the same result.
+                overlay_checked.insert(merged.len());
+            }
             merged.push(entry.clone());
             merged_entry_scopes.push(inherited_entry_scope);
         }

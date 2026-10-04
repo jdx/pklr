@@ -1838,6 +1838,26 @@ obj = (base) {}
 }
 
 #[test]
+fn class_generator_property_is_checked_on_instance() {
+    let message = eval_fails(
+        r#"
+typealias IsB = String(this == "b")
+class C { for (x in List(1)) { v: IsB = "x" } }
+c = new C {}
+"#,
+    );
+    assert!(message.contains("property 'v' expected IsB"), "{message}");
+    let json = eval(
+        r#"
+typealias IsB = String(this == "b")
+class C { for (x in List(1)) { v: IsB = "b" } }
+c = new C {}
+"#,
+    );
+    assert_eq!(json["c"]["v"], "b");
+}
+
+#[test]
 fn amendment_generator_declared_property_is_checked() {
     let message = eval_fails(
         r#"
