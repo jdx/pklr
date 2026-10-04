@@ -677,6 +677,32 @@ fn collect_entry_refs_in(
 ) {
     let mut entry_shadows = shadows.clone();
     entry_shadows.extend(declared_entry_roots(entries));
+    // A type alias or class declared in this body shadows a module alias of
+    // the same name, so stop resolving that name here (keeping the
+    // conservative reading of its constraints) rather than resolving it to the
+    // outer definition.
+    let narrowed_aliases;
+    let aliases = match aliases {
+        Some(outer)
+            if entries.iter().any(|entry| {
+                matches!(entry, Entry::TypeAlias(name, _) | Entry::ClassDef(name, ..)
+                    if outer.contains_key(name.as_str()))
+            }) =>
+        {
+            narrowed_aliases = outer
+                .iter()
+                .filter(|(name, _)| {
+                    !entries.iter().any(|entry| {
+                        matches!(entry, Entry::TypeAlias(declared, _) | Entry::ClassDef(declared, ..)
+                            if declared == *name)
+                    })
+                })
+                .map(|(name, ty)| (*name, *ty))
+                .collect::<TypeAliases>();
+            Some(&narrowed_aliases)
+        }
+        other => other,
+    };
     for entry in entries {
         match entry {
             Entry::Property(prop) => {

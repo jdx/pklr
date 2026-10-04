@@ -2429,3 +2429,26 @@ async fn narrowed_import_resolves_local_aliases_in_constraint_bases() {
     assert_eq!(val["number"], true);
     assert_eq!(val["nullable"], true);
 }
+
+#[tokio::test]
+async fn narrowed_import_respects_aliases_redeclared_in_nested_bodies() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_nested_alias");
+    let dir = temp.path();
+    // The nested `S` is `Int`, whose check binds no `length`, so the module's
+    // `length` is still needed even though the module-level `S` is a String.
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "length = 1\ntypealias S = String\nresult {\n  typealias S = Int\n  ok = 1 is S(this == length)\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as Dep\nout = Dep.result.ok\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["out"], true);
+}
