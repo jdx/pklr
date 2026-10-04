@@ -2107,3 +2107,47 @@ async fn import_glob_keys_still_see_every_module() {
     assert_eq!(val["a"], "a");
     assert_eq!(val["count"], 2);
 }
+
+#[tokio::test]
+async fn import_glob_keeps_modules_an_amended_base_reads() {
+    let temp = TestTempDir::new("pklr_test_glob_amended_base_reads");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("parts")).unwrap();
+    std::fs::write(dir.join("parts/a.pkl"), "value = \"a\"\n").unwrap();
+    std::fs::write(dir.join("parts/b.pkl"), "value = \"b\"\n").unwrap();
+    std::fs::write(
+        dir.join("base.pkl"),
+        "fromBase = Parts[\"parts/b.pkl\"].value\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "amends \"base.pkl\"\nimport* \"parts/*.pkl\" as Parts\nfromChild = Parts[\"parts/a.pkl\"].value\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["fromBase"], "b");
+    assert_eq!(val["fromChild"], "a");
+}
+
+#[tokio::test]
+async fn import_glob_field_read_named_like_a_module_sees_every_module() {
+    let temp = TestTempDir::new("pklr_test_glob_field_named_like_module");
+    let dir = temp.path();
+    std::fs::write(dir.join("length"), "value = \"L\"\n").unwrap();
+    std::fs::write(dir.join("other"), "value = \"O\"\n").unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import* \"*\" as Parts\nl = Parts[\"length\"].value\ncount = Parts.length\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["l"], "L");
+    assert_eq!(val["count"], 2);
+}

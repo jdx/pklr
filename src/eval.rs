@@ -1295,7 +1295,13 @@ impl Evaluator {
                     continue;
                 }
 
-                let requested = requested_fields_for_import(&import_field_uses, &alias);
+                // An amended or extended base can read the alias from this
+                // module's scope, and those reads are not analyzed here.
+                let requested = if module.amends.is_none() && module.extends.is_none() {
+                    glob_index_keys(&import_field_uses, &alias)
+                } else {
+                    None
+                };
                 let mapping = self
                     .eval_glob_import(uri, path, depth, requested.as_ref())
                     .await?;
