@@ -278,6 +278,15 @@ impl Scope {
                 .is_some_and(|parent| parent.type_aliases_mention(name))
     }
 
+    /// Whether any type alias is visible from this scope.
+    pub(super) fn has_type_aliases(&self) -> bool {
+        !self.type_aliases.is_empty()
+            || self
+                .parent
+                .as_ref()
+                .is_some_and(|parent| parent.has_type_aliases())
+    }
+
     pub(super) fn get_type_alias(&self, name: &str) -> Option<&crate::parser::TypeExpr> {
         self.type_aliases
             .get(name)
