@@ -484,8 +484,19 @@ pub(super) fn expand_requested_fields(
 /// evaluated at module level). A type alias or class is reached through a
 /// type reference, or through a value read of its name when no module
 /// property has that name; a local through a value read.
+///
+/// A type reference that names none of the module's type aliases or classes
+/// may name a property or local holding a class (`new x {}` with
+/// `local x = module.C`), so it is added to `refs` as a value read too.
 fn follow_definitions(definitions: &Definitions, refs: &mut Names, aliases: Option<&TypeAliases>) {
     let shadows = Names::default();
+    let types_as_values: Vec<String> = refs
+        .types
+        .iter()
+        .filter(|name| !definitions.types.contains_key(name.as_str()))
+        .cloned()
+        .collect();
+    refs.values.extend(types_as_values);
     // Each name with whether it was reached through a local, and whether it
     // is a type reference. A name reached both through a local and not is
     // followed both ways, as the aliases may differ.
@@ -549,6 +560,10 @@ fn follow_definitions(definitions: &Definitions, refs: &mut Names, aliases: Opti
         }
         for (deps, module_scope) in [(definition_refs, module_scope), (local_refs, true)] {
             for dep in deps.types {
+                if !definitions.types.contains_key(dep.as_str()) && refs.values.insert(dep.clone())
+                {
+                    pending.push((dep.clone(), module_scope, false));
+                }
                 refs.types.insert(dep.clone());
                 pending.push((dep, module_scope, true));
             }

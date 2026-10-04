@@ -2938,3 +2938,32 @@ async fn narrowed_import_reads_qualified_type_roots_and_nested_classes() {
     assert_eq!(val["out"], serde_json::json!({ "a": 1 }));
     assert_eq!(val["outClass"], serde_json::json!({ "a": 1 }));
 }
+
+#[tokio::test]
+async fn narrowed_import_reads_values_named_as_types() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_values_named_as_types");
+    let dir = temp.path();
+    // A type name that isn't one of the module's types can name a property
+    // or local holding a class, which building or checking one reads.
+    std::fs::write(
+        dir.join("dep_property.pkl"),
+        "Foo = Item\nclass Item {\n  a: Int = 1\n}\nresult: Foo = new Foo {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep_local.pkl"),
+        "class C {\n  v = module.expected\n}\nlocal x = module.C\nexpected = \"b\"\nresult = new x {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep_property.pkl\" as DepProperty\nimport \"dep_local.pkl\" as DepLocal\noutProperty = DepProperty.result\noutLocal = DepLocal.result\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["outProperty"], serde_json::json!({ "a": 1 }));
+    assert_eq!(val["outLocal"], serde_json::json!({ "v": "b" }));
+}
