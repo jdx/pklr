@@ -39,6 +39,10 @@ pub(super) struct Scope {
     // same map type) can be used as a scope without copying them.
     pub(super) vars: Arc<FxIndexMap<Name, Value>>,
     pub(super) type_aliases: Rc<FxIndexMap<Name, crate::parser::TypeExpr>>,
+    /// Whether a type alias in this scope, or in a scope it was built over,
+    /// may have a built-in type's name (`typealias String = ...`). Without
+    /// one, a built-in type name needs no alias lookup. May over-approximate.
+    pub(super) shadows_builtin_type: bool,
     pub(super) module_identities: Rc<FxIndexMap<Name, String>>,
     pub(super) poisoned: Rc<FxIndexMap<Name, String>>,
     /// Names in `vars` or `poisoned` declared by an entry written in the body
@@ -74,6 +78,7 @@ impl Scope {
         Self {
             vars: Arc::default(),
             type_aliases: Rc::default(),
+            shadows_builtin_type: self.shadows_builtin_type,
             module_identities: Rc::default(),
             poisoned: Rc::default(),
             declared: Rc::default(),
@@ -264,6 +269,9 @@ impl Scope {
     }
 
     pub(super) fn set_type_alias(&mut self, name: String, ty: crate::parser::TypeExpr) {
+        if super::types::is_builtin_type_name(&name) {
+            self.shadows_builtin_type = true;
+        }
         Rc::make_mut(&mut self.type_aliases).insert(name.into(), ty);
     }
 
@@ -745,6 +753,7 @@ fn update_object_bindings(
     scope.this_aliases = object.this_aliases.clone();
     // The scope's own maps for these start empty, so it can share the object's.
     scope.type_aliases = object.type_aliases.clone();
+    scope.shadows_builtin_type |= object.shadows_builtin_type;
     scope.module_identities = object.module_identities.clone();
 }
 

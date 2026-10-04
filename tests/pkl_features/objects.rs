@@ -2174,6 +2174,72 @@ out = bad
 }
 
 #[test]
+fn typed_local_of_later_class_is_checked_when_read() {
+    let message = eval_fails(
+        r#"
+local bad: C = 1
+class C {}
+out = bad
+"#,
+    );
+    assert!(message.contains("property 'bad' expected C"), "{message}");
+    let message = eval_fails(
+        r#"
+obj { local bad: C = 1; class C {}; out = bad }
+"#,
+    );
+    assert!(message.contains("property 'bad' expected C"), "{message}");
+    let json = eval(
+        r#"
+local unread: C = 1
+local ok: C? = null
+class C {}
+out = ok
+"#,
+    );
+    assert!(json["out"].is_null());
+}
+
+#[test]
+fn generator_typed_local_constraint_reads_enclosing_later_member() {
+    let message = eval_fails(
+        r#"
+limit = 10
+obj { when (true) { local bad: Int(this < limit) = 3; out = bad }; limit = 2 }
+"#,
+    );
+    assert!(message.contains("property 'bad' expected"), "{message}");
+    let message = eval_fails(
+        r#"
+obj { for (x in List(3)) { local bad: Int(this < limit) = x; out = bad }; limit = 2 }
+"#,
+    );
+    assert!(message.contains("property 'bad' expected"), "{message}");
+    // The reversed values pass, and an unread failing local does not fail.
+    let json = eval(
+        r#"
+limit = 0
+obj { when (true) { local ok: Int(this < limit) = 1; out = ok }; limit = 2 }
+other { when (true) { local bad: Int(this < limit) = 3; out = 1 }; limit = 2 }
+"#,
+    );
+    assert_eq!(json["obj"]["out"], 1);
+    assert_eq!(json["other"]["out"], 1);
+    // The object's own local of the same name is a different local.
+    let json = eval(
+        r#"
+obj {
+  local bad: Int = 1
+  when (true) { local bad: Int(this < limit) = 3; other = 1 }
+  limit = 2
+  out = bad
+}
+"#,
+    );
+    assert_eq!(json["obj"]["out"], 1);
+}
+
+#[test]
 fn alias_shadowing_builtin_name_is_resolved_first() {
     // `String` here is an alias of `Function1`, which is not checked.
     let json = eval(

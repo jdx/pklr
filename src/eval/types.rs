@@ -398,6 +398,7 @@ pub(super) fn value_is_class_type(val: &Value, name: &str, scope: &Scope) -> Opt
 /// Whether `name` (optionally `*`-prefixed) is a built-in type checked at
 /// runtime, or a string-literal type. An alias of the same name in scope
 /// takes precedence over it.
+#[inline]
 pub(super) fn is_builtin_type_name(name: &str) -> bool {
     string_literal_type_value(name).is_some()
         || matches!(
@@ -436,6 +437,12 @@ fn type_is_runtime_checkable_inner(
     match ty {
         TypeExpr::Named(name) => {
             let runtime_name = name.strip_prefix('*').unwrap_or(name);
+            let builtin = is_builtin_type_name(name);
+            // A built-in type name is decided without walking the scope chain
+            // for an alias, unless an alias in scope may shadow one.
+            if builtin && !scope.shadows_builtin_type {
+                return true;
+            }
             // An alias may shadow a built-in name (`typealias String = ...`),
             // so it is resolved first, as `eval_type_check` does.
             if let Some(alias) = scope.get_type_alias(runtime_name) {
@@ -447,7 +454,7 @@ fn type_is_runtime_checkable_inner(
                 resolving.pop();
                 return checkable;
             }
-            if is_builtin_type_name(name) {
+            if builtin {
                 return true;
             }
             resolve_dotted(scope, runtime_name).is_some()
