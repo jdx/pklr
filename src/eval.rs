@@ -2741,6 +2741,9 @@ impl Evaluator {
         // the same name still resolves through its own `this`.
         let binds_declared = |name: &str| own_body.as_ref().is_none_or(|own| own.contains(name));
         let own_body_scope = own_body.as_ref().map(|own| (scope, own));
+        // Inherited members whose entries are evaluated again below. Until its
+        // first entry runs, a member holds the parent's final value.
+        let mut inherited_seeded: HashSet<&str> = HashSet::default();
         if let Some(source) = inherited_source {
             for entry in source.entries.iter() {
                 if let Entry::Property(prop) = entry
@@ -2749,6 +2752,7 @@ impl Evaluator {
                     && let Some(value) = source.scope().get(prop.name.as_str())
                 {
                     child_scope.set(&prop.name, value.clone());
+                    inherited_seeded.insert(prop.name.as_str());
                 }
             }
         }
@@ -2938,6 +2942,16 @@ impl Evaluator {
                         && prop.body.is_none()
                     {
                         continue; // abstract without value — skip (must be overridden)
+                    }
+                    // The first entry of a re-evaluated inherited member starts
+                    // its amendment chain. Amending the parent's final value
+                    // would apply the inherited bodies twice (`l { 1 }`
+                    // amended again with `1`), so it starts from no value.
+                    if inherited_seeded.remove(prop.name.as_str())
+                        && prop.value.is_none()
+                        && prop.body.is_some()
+                    {
+                        child_scope.set(&prop.name, Value::Null);
                     }
                     refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                     let mut active_scope = scope_for_object_entry(
