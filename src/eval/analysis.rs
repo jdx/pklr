@@ -745,8 +745,10 @@ fn mentioned_type_names<'t>(ty: &'t crate::parser::TypeExpr, out: &mut Vec<&'t s
 
 /// `aliases` without each alias whose meaning may differ where the `declared`
 /// type names are in scope: one that is itself declared, or whose definition,
-/// followed through the other `aliases`, mentions a declared name. `None`
-/// when every alias is kept.
+/// followed through the other `aliases`, mentions a declared name. Such an
+/// alias named after a built-in that `constraint_bound_names` reads is marked
+/// unresolvable rather than dropped, since dropped it would read as the
+/// built-in. `None` when every alias is kept.
 fn narrow_aliases<'a>(
     aliases: &TypeAliases<'a>,
     declared: &HashSet<&str>,
@@ -770,12 +772,20 @@ fn narrow_aliases<'a>(
         }
         false
     };
+    let mut changed = false;
     let kept: TypeAliases<'a> = aliases
         .iter()
-        .filter(|(name, _)| !affected(name))
-        .map(|(name, ty)| (*name, *ty))
+        .filter_map(|(name, ty)| {
+            if ty.is_none() || !affected(name) {
+                return Some((*name, *ty));
+            }
+            changed = true;
+            BINDING_BUILTIN_TYPES
+                .contains(name)
+                .then_some((*name, None))
+        })
         .collect();
-    (kept.len() != aliases.len()).then_some(kept)
+    changed.then_some(kept)
 }
 
 /// `aliases` with each of the `declared` names that `constraint_bound_names`
