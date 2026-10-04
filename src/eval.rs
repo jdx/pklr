@@ -2094,7 +2094,8 @@ impl Evaluator {
                         match self.eval_expr(prop.value.as_ref().unwrap(), &scope, depth) {
                             Ok(val) => scope.declare(&prop.name, val),
                             Err(Error::Eval(message)) => {
-                                scope.declare_poisoned(prop.name.clone(), message);
+                                scope.declare_poisoned(prop.name.clone(), message.clone());
+                                failed.insert(&prop.name, message);
                                 failed_indices.insert(index);
                             }
                             Err(error) => return Err(error),
@@ -2286,6 +2287,11 @@ impl Evaluator {
             let Entry::Property(prop) = entry else {
                 continue;
             };
+            // Locals participate in failure convergence but are never module
+            // members or rendered output.
+            if has_modifier(&prop.modifiers, Modifier::Local) {
+                continue;
+            }
             let rendered = !has_modifier(&prop.modifiers, Modifier::Hidden)
                 && requested_output_fields
                     .as_ref()
