@@ -62,10 +62,18 @@ def checkout(version, repo):
 
 
 def build():
-    subprocess.run(
-        ["cargo", "build", "-q", "--release", "--example", "eval_json"], cwd=ROOT, check=True
-    )
-    return ROOT / "target" / "release" / "examples" / "eval_json"
+    # Ask cargo where it put the binary, so CARGO_TARGET_DIR and the like work.
+    out = subprocess.run(
+        ["cargo", "build", "-q", "--release", "--example", "eval_json",
+         "--message-format=json"],
+        cwd=ROOT, check=True, capture_output=True, text=True,
+    ).stdout
+    for line in out.splitlines():
+        msg = json.loads(line)
+        if (msg.get("reason") == "compiler-artifact"
+                and msg["target"]["name"] == "eval_json" and msg.get("executable")):
+            return Path(msg["executable"])
+    sys.exit("cargo did not report the eval_json executable")
 
 
 def run(cmd, timeout):
@@ -79,6 +87,10 @@ def run(cmd, timeout):
 
 
 def normalize(v):
+    """Make JSON values comparable with ==: integral floats equal their ints,
+    but booleans stay distinct from 0 and 1 (Python treats True == 1)."""
+    if isinstance(v, bool):
+        return ("bool", v)
     if isinstance(v, float) and v.is_integer():
         return int(v)
     if isinstance(v, dict):
@@ -129,6 +141,8 @@ def diff_paths(a, b, path=""):
 def check(rel, inputs, exe, timeout):
     path = str(inputs / rel)
     prc, pout, perr = run(["pkl", "eval", "-f", "json", path], timeout)
+    if prc is None:
+        return "skipped", "pkl timed out"
     if prc != 0 and SKIP_ERRORS.search(perr):
         return "skipped", pkl_message(perr)
     rrc, rout, rerr = run([str(exe), path], timeout)
@@ -162,12 +176,19 @@ def main():
     ap.add_argument("--compare", help="report changes against results saved with --save")
     args = ap.parse_args()
 
+    # Read the baseline first: --save may point at the same file.
+    base = json.loads(Path(args.compare).read_text()) if args.compare else None
+
     version = pkl_version()
     inputs = checkout(version, args.repo) / SNIPPETS
+    if not inputs.is_dir():
+        sys.exit(f"no snippet tests at {inputs}")
     exe = build()
     files = sorted(str(p.relative_to(inputs)) for p in inputs.rglob("*.pkl"))
     if args.filters:
         files = [f for f in files if any(x in f for x in args.filters)]
+    if not files:
+        sys.exit("no snippet tests selected")
 
     with concurrent.futures.ThreadPoolExecutor(args.jobs) as pool:
         results = dict(zip(files, pool.map(lambda f: check(f, inputs, exe, args.timeout), files)))
@@ -188,8 +209,7 @@ def main():
 
     if args.save:
         Path(args.save).write_text(json.dumps({f: s for f, (s, _) in results.items()}, indent=1))
-    if args.compare:
-        base = json.loads(Path(args.compare).read_text())
+    if base is not None:
         good = {"match", "expected-err"}
         fixed = [f for f, (s, _) in results.items() if s in good and base.get(f) not in good]
         broke = [f for f, (s, _) in results.items() if s not in good and base.get(f) in good]
