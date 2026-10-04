@@ -44,6 +44,14 @@ impl<'a> Lexer<'a> {
         Error::lex(&self.name, self.source, self.pos, message.into())
     }
 
+    #[cold]
+    #[inline(never)]
+    fn interpolation_depth_error(&self) -> Error {
+        self.lex_error(format!(
+            "string interpolations nest more than {MAX_INTERPOLATION_DEPTH} levels deep"
+        ))
+    }
+
     fn peek(&self) -> Option<char> {
         self.source[self.pos..].chars().next()
     }
@@ -174,9 +182,7 @@ impl<'a> Lexer<'a> {
                             has_interpolation = true;
                             parts.push(StringPart::Literal(std::mem::take(&mut current)));
                             if self.interpolation_depth >= MAX_INTERPOLATION_DEPTH {
-                                return Err(self.lex_error(format!(
-                                    "string interpolations nest more than {MAX_INTERPOLATION_DEPTH} levels deep"
-                                )));
+                                return Err(self.interpolation_depth_error());
                             }
                             self.interpolation_depth += 1;
                             // Lex tokens until matching ')'

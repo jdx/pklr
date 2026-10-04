@@ -128,19 +128,23 @@ impl<'a> Parser<'a> {
     /// [`MAX_NESTING_DEPTH`].
     #[inline(always)]
     fn nested<T>(&mut self, parse: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
-        if self.depth >= MAX_NESTING_DEPTH {
+        let depth = self.depth;
+        if depth >= MAX_NESTING_DEPTH {
             return Err(self.nesting_error());
         }
-        self.depth += 1;
+        self.depth = depth + 1;
         let result = parse(self);
-        self.depth -= 1;
+        // Restore the depth even when `parse` failed partway through an
+        // operator chain that had deepened it.
+        self.depth = depth;
         result
     }
 
     /// Count one more level of nesting for an operator chain that wraps the
     /// expression parsed so far (`a + b + c`, `a.b.c`, `a ** b ** c`), whose
-    /// tree grows a level per operator even though the parser loops. Callers
-    /// restore the depth with [`Parser::chain`].
+    /// tree grows a level per operator even though the parser loops. The
+    /// chain gives the levels back when it finishes; if it fails instead,
+    /// the enclosing [`Parser::nested`] restores the depth.
     #[inline(always)]
     fn deepen(&mut self) -> Result<()> {
         if self.depth >= MAX_NESTING_DEPTH {
@@ -148,16 +152,6 @@ impl<'a> Parser<'a> {
         }
         self.depth += 1;
         Ok(())
-    }
-
-    /// Run the operator chain `parse`, restoring the nesting depth its
-    /// [`Parser::deepen`] calls added, even when it fails.
-    #[inline(always)]
-    fn chain<T>(&mut self, parse: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
-        let depth = self.depth;
-        let result = parse(self);
-        self.depth = depth;
-        result
     }
 
     #[cold]
@@ -983,16 +977,16 @@ impl<'a> Parser<'a> {
             return Ok(base);
         }
         self.advance();
-        let constraint = self.chain(|parser| {
-            let mut constraint = parser.parse_expr()?;
-            while matches!(parser.peek(), TokenKind::Comma) {
-                parser.advance();
-                parser.deepen()?;
-                let next = parser.parse_expr()?;
-                constraint = Expr::Binop(BinOp::And, Box::new(constraint), Box::new(next));
-            }
-            Ok(constraint)
-        })?;
+        let mut added = 0;
+        let mut constraint = self.parse_expr()?;
+        while matches!(self.peek(), TokenKind::Comma) {
+            self.advance();
+            self.deepen()?;
+            added += 1;
+            let next = self.parse_expr()?;
+            constraint = Expr::Binop(BinOp::And, Box::new(constraint), Box::new(next));
+        }
+        self.depth -= added;
         self.expect(&TokenKind::RParen)?;
         Ok(TypeExpr::Constrained(
             type_expr_runtime_name(&base),
@@ -1005,70 +999,63 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_pipe(&mut self) -> Result<Expr> {
-        self.chain(Self::parse_pipe_chain)
-    }
-
-    fn parse_pipe_chain(&mut self) -> Result<Expr> {
+        let mut added = 0;
         let mut left = self.parse_null_coalesce()?;
         while matches!(self.peek(), TokenKind::PipeGt) {
             self.advance();
             self.deepen()?;
+            added += 1;
             let right = self.parse_null_coalesce()?;
             left = Expr::Binop(BinOp::Pipe, Box::new(left), Box::new(right));
         }
+        self.depth -= added;
         Ok(left)
     }
 
     fn parse_null_coalesce(&mut self) -> Result<Expr> {
-        self.chain(Self::parse_null_coalesce_chain)
-    }
-
-    fn parse_null_coalesce_chain(&mut self) -> Result<Expr> {
+        let mut added = 0;
         let mut left = self.parse_or()?;
         while matches!(self.peek(), TokenKind::QuestionQuestion) {
             self.advance();
             self.deepen()?;
+            added += 1;
             let right = self.parse_or()?;
             left = Expr::Binop(BinOp::NullCoalesce, Box::new(left), Box::new(right));
         }
+        self.depth -= added;
         Ok(left)
     }
 
     fn parse_or(&mut self) -> Result<Expr> {
-        self.chain(Self::parse_or_chain)
-    }
-
-    fn parse_or_chain(&mut self) -> Result<Expr> {
+        let mut added = 0;
         let mut left = self.parse_and()?;
         while matches!(self.peek(), TokenKind::PipePipe) {
             self.advance();
             self.deepen()?;
+            added += 1;
             let right = self.parse_and()?;
             left = Expr::Binop(BinOp::Or, Box::new(left), Box::new(right));
         }
+        self.depth -= added;
         Ok(left)
     }
 
     fn parse_and(&mut self) -> Result<Expr> {
-        self.chain(Self::parse_and_chain)
-    }
-
-    fn parse_and_chain(&mut self) -> Result<Expr> {
+        let mut added = 0;
         let mut left = self.parse_compare()?;
         while matches!(self.peek(), TokenKind::AmpAmp) {
             self.advance();
             self.deepen()?;
+            added += 1;
             let right = self.parse_compare()?;
             left = Expr::Binop(BinOp::And, Box::new(left), Box::new(right));
         }
+        self.depth -= added;
         Ok(left)
     }
 
     fn parse_compare(&mut self) -> Result<Expr> {
-        self.chain(Self::parse_compare_chain)
-    }
-
-    fn parse_compare_chain(&mut self) -> Result<Expr> {
+        let mut added = 0;
         let mut left = self.parse_add()?;
         loop {
             let op = match self.peek() {
@@ -1082,17 +1069,16 @@ impl<'a> Parser<'a> {
             };
             self.advance();
             self.deepen()?;
+            added += 1;
             let right = self.parse_add()?;
             left = Expr::Binop(op, Box::new(left), Box::new(right));
         }
+        self.depth -= added;
         Ok(left)
     }
 
     fn parse_add(&mut self) -> Result<Expr> {
-        self.chain(Self::parse_add_chain)
-    }
-
-    fn parse_add_chain(&mut self) -> Result<Expr> {
+        let mut added = 0;
         let mut left = self.parse_mul()?;
         loop {
             let op = match self.peek() {
@@ -1102,17 +1088,16 @@ impl<'a> Parser<'a> {
             };
             self.advance();
             self.deepen()?;
+            added += 1;
             let right = self.parse_mul()?;
             left = Expr::Binop(op, Box::new(left), Box::new(right));
         }
+        self.depth -= added;
         Ok(left)
     }
 
     fn parse_mul(&mut self) -> Result<Expr> {
-        self.chain(Self::parse_mul_chain)
-    }
-
-    fn parse_mul_chain(&mut self) -> Result<Expr> {
+        let mut added = 0;
         let mut left = self.parse_exp()?;
         loop {
             let op = match self.peek() {
@@ -1124,19 +1109,17 @@ impl<'a> Parser<'a> {
             };
             self.advance();
             self.deepen()?;
+            added += 1;
             let right = self.parse_exp()?;
             left = Expr::Binop(op, Box::new(left), Box::new(right));
         }
+        self.depth -= added;
         Ok(left)
-    }
-
-    fn parse_exp(&mut self) -> Result<Expr> {
-        self.chain(Self::parse_exp_chain)
     }
 
     /// `a ** b ** c` is right-associative: collect the operands, then fold
     /// them from the right, so a long chain does not recurse.
-    fn parse_exp_chain(&mut self) -> Result<Expr> {
+    fn parse_exp(&mut self) -> Result<Expr> {
         let first = self.parse_unary()?;
         if !matches!(self.peek(), TokenKind::StarStar) {
             return Ok(first);
@@ -1147,6 +1130,7 @@ impl<'a> Parser<'a> {
             self.deepen()?;
             operands.push(self.parse_unary()?);
         }
+        self.depth -= operands.len() - 1;
         let mut exp = operands.pop().expect("at least two operands");
         while let Some(base) = operands.pop() {
             exp = Expr::Binop(BinOp::Pow, Box::new(base), Box::new(exp));
@@ -1169,10 +1153,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_postfix(&mut self) -> Result<Expr> {
-        self.chain(Self::parse_postfix_chain)
-    }
-
-    fn parse_postfix_chain(&mut self) -> Result<Expr> {
+        let mut added = 0;
         let mut expr = self.parse_primary()?;
         loop {
             let wraps = matches!(
@@ -1190,6 +1171,7 @@ impl<'a> Parser<'a> {
                 break;
             }
             self.deepen()?;
+            added += 1;
             match self.peek() {
                 TokenKind::Dot => {
                     self.advance();
@@ -1257,6 +1239,7 @@ impl<'a> Parser<'a> {
                 _ => break,
             }
         }
+        self.depth -= added;
         Ok(expr)
     }
 
