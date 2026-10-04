@@ -79,11 +79,10 @@ pub struct ObjectSource {
     /// containing module is loaded. Crate-private: only the evaluator
     /// reads/writes this; not part of the public API.
     pub(crate) deprecated: IndexMap<String, Option<String>>,
-    /// Members of a module object that failed to evaluate, mapped to their
-    /// error: a class whose defaults read a `module` property that never
-    /// resolved. Reading or instantiating such a member reports the error
-    /// instead of treating it as absent.
-    pub(crate) poisoned_members: Option<Arc<IndexMap<String, String>>>,
+    /// Members of a module object that failed to evaluate. Reading or
+    /// instantiating such a member reports its error instead of treating it
+    /// as absent, and rendering the module reports a failed output member.
+    pub(crate) poisoned_members: Option<Arc<IndexMap<String, PoisonedMember>>>,
     /// Whether this is a `Mapping`, a class, or another object.
     pub(crate) kind: ObjectKind,
 }
@@ -99,6 +98,15 @@ pub(crate) enum ObjectKind {
     Mapping,
     /// The class named by `type_name` itself, holding its defaults.
     Class,
+}
+
+/// A module member that failed to evaluate (see
+/// [`ObjectSource::poisoned_members`]).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PoisonedMember {
+    pub(crate) message: String,
+    /// Whether the member is a property that rendering the module outputs.
+    pub(crate) rendered: bool,
 }
 
 impl ObjectSource {

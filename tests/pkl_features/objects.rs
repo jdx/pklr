@@ -3291,6 +3291,18 @@ overridden = new C { v = "o" }
 }
 
 #[test]
+fn module_qualified_class_read_is_not_shadowed_by_class_member() {
+    let val = eval(
+        r#"
+class C { expected = "class"; v = module.expected }
+expected = "module"
+result = new C {}
+"#,
+    );
+    assert_eq!(val["result"]["v"], "module");
+}
+
+#[test]
 fn module_in_class_body_reaches_subclasses_and_local_functions() {
     let val = eval(
         r#"
@@ -3314,15 +3326,15 @@ lambda = mk("y")
 }
 
 #[test]
-fn module_in_class_body_before_property_is_evaluated_reports_error() {
-    let err = eval_fails(
+fn module_in_class_body_reads_property_declared_after_use() {
+    let val = eval(
         r#"
 class C { v = module.expected }
 result = new C {}
 expected = "b"
 "#,
     );
-    assert!(err.contains("expected"), "{err}");
+    assert_eq!(val["result"], serde_json::json!({"v": "b"}));
 }
 
 #[test]

@@ -1,0 +1,15 @@
+{
+  "s": {
+    "name": "step",
+    "tests": {
+      "a": {
+        "run": "fix",
+        "env": {}
+      },
+      "b": {
+        "run": "check",
+        "env": {}
+      }
+    }
+  }
+}

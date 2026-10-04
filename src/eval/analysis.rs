@@ -1076,6 +1076,54 @@ pub(super) fn is_module_sibling_ref(expr: &Expr, include_this: bool) -> bool {
     matches!(expr, Expr::Ident(name) if name == "module" || (include_this && name == "this"))
 }
 
+/// The member a module-level entry declares: a property (local or not), a
+/// class, or a type alias.
+pub(super) fn module_member_name(entry: &Entry) -> Option<&str> {
+    match entry {
+        Entry::Property(prop) => Some(&prop.name),
+        Entry::ClassDef(name, ..) | Entry::TypeAlias(name, _) => Some(name),
+        _ => None,
+    }
+}
+
+/// The other module members that evaluating `entry` can read.  This keeps
+/// the current class-scope analysis while making the dependency planner cover
+/// locals, classes, aliases, and ordinary properties uniformly.
+fn module_member_dependencies(entry: &Entry) -> HashSet<String> {
+    let mut refs = referenced_roots(std::slice::from_ref(entry));
+    match entry {
+        Entry::Property(prop) => {
+            refs.extend(property_reference_names(prop));
+            if let Some(ty) = &prop.type_ann {
+                collect_sibling_field_refs_type(ty, &mut refs);
+            }
+        }
+        Entry::ClassDef(_, _, parent, body) => {
+            // Keep qualified `module.x` reads separate from lexical class
+            // member references. A class property named `x` shadows a bare
+            // `x`, but must not erase this explicit dependency on the
+            // module's `x` when we remove those lexical members below.
+            let mut module_refs = HashSet::default();
+            collect_sibling_field_refs_entries(body, &mut module_refs);
+            collect_sibling_field_refs_entries(body, &mut refs);
+            if let Some((root, rest)) = parent.as_deref().and_then(|name| name.split_once('.'))
+                && root == "module"
+            {
+                refs.insert(rest.split('.').next().unwrap_or(rest).to_string());
+            }
+            for entry in body.iter() {
+                if let Entry::Property(prop) = entry {
+                    refs.remove(&prop.name);
+                }
+            }
+            refs.extend(module_refs);
+        }
+        Entry::TypeAlias(_, ty) => collect_sibling_field_refs_type(ty, &mut refs),
+        _ => {}
+    }
+    refs
+}
+
 /// A class's parent and body.
 type ClassInfo<'e> = (Option<&'e str>, &'e [Entry]);
 
@@ -1734,6 +1782,142 @@ fn collect_field_names_expr(expr: &Expr, out: &mut HashSet<String>) {
     }
 }
 
+/// How to evaluate the module-level members of a body (see
+/// `module_evaluation_plan`).
+pub(super) struct EvaluationPlan {
+    /// Entry indices, each member after the members it reads.
+    pub(super) order: Vec<usize>,
+    /// For each entry, the entries that read it.
+    dependents: Vec<Vec<usize>>,
+}
+
+impl EvaluationPlan {
+    /// `failed`, and every entry that reads one of them directly or
+    /// transitively, in evaluation order.
+    pub(super) fn affected_by(&self, failed: &HashSet<usize>) -> Vec<usize> {
+        let mut affected = vec![false; self.dependents.len()];
+        let mut stack: Vec<usize> = failed.iter().copied().collect();
+        while let Some(index) = stack.pop() {
+            if !std::mem::replace(&mut affected[index], true) {
+                stack.extend(&self.dependents[index]);
+            }
+        }
+        self.order
+            .iter()
+            .copied()
+            .filter(|&index| affected[index])
+            .collect()
+    }
+}
+
+/// The order in which to evaluate the module-level `entries`: every member
+/// after the members it reads, so a member may read one declared after it.
+/// Entries that don't depend on each other, and members on a cycle, keep
+/// declaration order. A dynamic read through the module object
+/// (`module[key]`) may reach any member, so it comes after the other members
+/// unless they read it.
+pub(super) fn module_evaluation_plan(entries: &[Entry]) -> EvaluationPlan {
+    // A one-entry module has no sibling dependency to discover. This keeps
+    // the fixed evaluation cost of the planner out of simple configurations.
+    if entries.len() <= 1 {
+        return EvaluationPlan {
+            order: (0..entries.len()).collect(),
+            dependents: std::iter::repeat_with(Vec::new)
+                .take(entries.len())
+                .collect(),
+        };
+    }
+    let mut by_name: HashMap<&str, Vec<usize>> = HashMap::default();
+    for (index, entry) in entries.iter().enumerate() {
+        if let Some(name) = module_member_name(entry) {
+            by_name.entry(name).or_default().push(index);
+        }
+    }
+    let mut dynamic = vec![false; entries.len()];
+    let static_deps: Vec<Vec<usize>> = entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            if module_member_name(entry).is_none() {
+                return Vec::new();
+            }
+            let refs = module_member_dependencies(entry);
+            dynamic[index] = refs.contains(DYNAMIC_SIBLING_REF);
+            let mut deps: Vec<usize> = refs
+                .iter()
+                .filter_map(|name| by_name.get(name.as_str()))
+                .flatten()
+                .copied()
+                .filter(|&dep| dep != index)
+                .collect();
+            deps.sort_unstable();
+            deps.dedup();
+            deps
+        })
+        .collect();
+    // Whether `from` reads `to`, directly or through other members.
+    let reaches = |from: usize, to: usize| {
+        let mut seen = vec![false; entries.len()];
+        let mut stack = vec![from];
+        while let Some(i) = stack.pop() {
+            if i == to {
+                return true;
+            }
+            if !std::mem::replace(&mut seen[i], true) {
+                stack.extend(&static_deps[i]);
+            }
+        }
+        false
+    };
+    let deps: Vec<Vec<usize>> = (0..entries.len())
+        .map(|i| {
+            let mut deps = static_deps[i].clone();
+            if dynamic[i] {
+                deps.extend((0..entries.len()).filter(|&j| {
+                    j != i
+                        && !dynamic[j]
+                        && module_member_name(&entries[j]).is_some()
+                        && !reaches(j, i)
+                }));
+                deps.sort_unstable();
+                deps.dedup();
+            }
+            deps
+        })
+        .collect();
+    // 0 = unvisited, 1 = in progress, 2 = done.
+    fn visit(i: usize, deps: &[Vec<usize>], state: &mut [u8], order: &mut Vec<usize>) {
+        if state[i] != 0 {
+            return;
+        }
+        state[i] = 1;
+        for &j in &deps[i] {
+            visit(j, deps, state, order);
+        }
+        state[i] = 2;
+        order.push(i);
+    }
+    let mut state = vec![0u8; entries.len()];
+    let mut order = Vec::with_capacity(entries.len());
+    // Locals, classes and type aliases come first unless they read a
+    // property: objects built from them capture the scope they were
+    // evaluated in, which stays small before the properties join it.
+    let is_property = |entry: &Entry| matches!(entry, Entry::Property(prop) if !has_modifier(&prop.modifiers, Modifier::Local));
+    for i in (0..entries.len()).filter(|&i| !is_property(&entries[i])) {
+        visit(i, &deps, &mut state, &mut order);
+    }
+    for i in 0..entries.len() {
+        visit(i, &deps, &mut state, &mut order);
+    }
+    let mut dependents = vec![Vec::new(); entries.len()];
+    for (index, deps) in deps.iter().enumerate() {
+        for &dep in deps {
+            dependents[dep].push(index);
+        }
+    }
+    EvaluationPlan { order, dependents }
+}
+
 /// Names, in declaration order, of the module members in `entries` that must
 /// be evaluated again once the module's properties are available: classes
 /// whose bodies read `module` or a module property by name (`a = min`), and
@@ -1900,60 +2084,6 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
         visit(i, &deps, &mut state, &mut order);
     }
     order.into_iter().map(|i| tracked[i].0.clone()).collect()
-}
-
-/// The module members `entry` (a module-level class, alias, local or
-/// function) reads through the module object, as `module.C` (or `this.C`
-/// outside a class body, where `this` is the module).
-pub(super) fn qualified_module_member_refs(entry: &Entry) -> HashSet<String> {
-    let mut refs = HashSet::default();
-    match entry {
-        Entry::ClassDef(_, _, parent, body) => {
-            collect_sibling_field_refs_entries(body, &mut refs);
-            if let Some((root, rest)) = parent.as_deref().and_then(|name| name.split_once('.'))
-                && root == "module"
-            {
-                refs.insert(rest.split('.').next().unwrap_or(rest).to_string());
-            }
-        }
-        Entry::Property(prop) => {
-            if let Some(value) = &prop.value {
-                collect_sibling_field_refs_expr(value, &mut refs, true);
-            }
-            if let Some(ty) = &prop.type_ann {
-                collect_sibling_field_refs_type(ty, &mut refs);
-            }
-        }
-        _ => {}
-    }
-    refs
-}
-
-/// Whether evaluating module property `prop` can read one of `members` (see
-/// `module_dependent_members`). Members are only refreshed before such a
-/// property, so other properties cost nothing extra. Conservative: any
-/// dynamic `module[...]` read counts.
-pub(super) fn reads_module_members(prop: &Property, members: &indexmap::IndexSet<String>) -> bool {
-    let mut refs = property_reference_names(prop);
-    if let Some(ty) = &prop.type_ann {
-        collect_type_names(ty, &mut refs);
-        collect_sibling_field_refs_type(ty, &mut refs);
-    }
-    refs.contains(DYNAMIC_SIBLING_REF)
-        || refs.iter().any(|name| members.contains(name))
-        || members.iter().any(|name| property_mentions(prop, name))
-}
-
-/// Whether module member `entry`, evaluated during a refresh, can read one of
-/// `pending` (refreshed members not yet written to the module object): as
-/// `module.C`/`this.C`, through any dynamic `module[...]` read, or by name in
-/// a type (`x: module.C`, `is module.C`).
-pub(super) fn member_reads_pending(entry: &Entry, pending: &[(String, Option<Value>)]) -> bool {
-    let refs = qualified_module_member_refs(entry);
-    refs.contains(DYNAMIC_SIBLING_REF)
-        || pending
-            .iter()
-            .any(|(name, _)| refs.contains(name) || entry_mentions(entry, name))
 }
 
 /// The class or alias a type alias binds to at runtime (`typealias A = C`,
