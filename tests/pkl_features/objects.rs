@@ -1838,6 +1838,52 @@ obj = (base) {}
 }
 
 #[test]
+fn generator_check_reads_sibling_from_another_generator() {
+    let message = eval_fails(
+        r#"
+obj {
+  when (true) { limit = 2 }
+  when (true) { checked: Int(this < limit) = 3 }
+}
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+    let json = eval(
+        r#"
+obj {
+  when (true) { limit = 5 }
+  when (true) { checked: Int(this < limit) = 3 }
+}
+"#,
+    );
+    assert_eq!(json["obj"]["checked"], 3);
+}
+
+#[test]
+fn generator_check_prefers_generated_member_over_outer_binding() {
+    let message = eval_fails(
+        r#"
+limit = 10
+obj {
+  when (true) { limit = 2 }
+  when (true) { checked: Int(this < limit) = 3 }
+}
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+    let json = eval(
+        r#"
+limit = 0
+obj {
+  when (true) { limit = 5 }
+  when (true) { checked: Int(this < limit) = 3 }
+}
+"#,
+    );
+    assert_eq!(json["obj"]["checked"], 3);
+}
+
+#[test]
 fn class_generator_property_is_checked_on_instance() {
     let message = eval_fails(
         r#"

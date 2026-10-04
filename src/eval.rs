@@ -3460,7 +3460,11 @@ impl Evaluator {
                     if check.iteration_names.contains(name) {
                         continue;
                     }
-                    if let Some(value) = child_scope.get(name) {
+                    // The finished object map holds every member, including
+                    // ones a generator produced, which are not bound by name
+                    // in the body's scope. Only names not in it (the body's
+                    // locals) are looked up in the scope.
+                    if let Some(value) = all_props.get(name).or_else(|| child_scope.get(name)) {
                         check_scope.set(name.clone(), value.clone());
                         overlaid.insert(name.clone());
                     } else if let Some(message) = child_scope.poison_of(name) {
