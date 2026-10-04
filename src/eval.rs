@@ -547,14 +547,6 @@ impl Evaluator {
         self.module_names.clear();
     }
 
-    /// Set a custom HTTP client for fetching remote imports and packages.
-    /// Use this to configure proxy settings, CA certificates, timeouts, etc.
-    /// Returns an error when the installed capabilities use another HTTP backend.
-    #[cfg(feature = "http")]
-    pub fn set_http_client(&mut self, client: reqwest::Client) -> Result<()> {
-        self.capabilities.set_http_client(client)
-    }
-
     /// Add HTTP URL rewrite rules. Each rule is a `"source_prefix=target_prefix"` string
     /// (matching pkl CLI's `--http-rewrite` format). When a URL matches a source prefix,
     /// the prefix is replaced with the target. Longest matching prefix wins.
