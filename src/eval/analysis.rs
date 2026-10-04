@@ -476,6 +476,8 @@ pub(super) fn collect_sibling_field_refs_entries(entries: &[Entry], refs: &mut H
 /// evaluates more, while dropping a needed one breaks the check.
 fn constraint_bound_names(base: &str) -> &'static [&'static str] {
     let base = base.trim_start_matches('*').trim_end_matches('?');
+    // A generic base such as `Listing<String>` checks as its class.
+    let base = base.split('<').next().unwrap_or(base).trim();
     match base {
         "String" | "List" | "Listing" | "Map" | "Mapping" | "Set" | "Collection" => {
             &["this", "length", "isEmpty"]
