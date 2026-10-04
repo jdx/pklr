@@ -1553,6 +1553,103 @@ obj = (base) { local bad: IsB = "x"; out = if (false) bad else 1 }
 }
 
 #[test]
+fn typed_local_read_by_earlier_declared_reader_is_checked() {
+    // The reader appears before the local it reads through.
+    let message = eval_fails(
+        r#"
+local bad: Int = "x"
+out = viaLocal
+local viaLocal = bad
+"#,
+    );
+    assert!(message.contains("property 'bad' expected Int"), "{message}");
+}
+
+#[test]
+fn typed_local_read_through_called_function_is_checked() {
+    let message = eval_fails(
+        r#"
+local bad: Int = "x"
+function f() = bad
+out = f()
+"#,
+    );
+    assert!(message.contains("property 'bad' expected Int"), "{message}");
+    let message = eval_fails(
+        r#"
+local bad: Int = "x"
+f = (x) -> bad
+out = f.apply(0)
+"#,
+    );
+    assert!(message.contains("property 'bad' expected Int"), "{message}");
+    // A function that is never called does not read the local.
+    let json = eval(
+        r#"
+local bad: Int = "x"
+local function f() = bad
+out = 1
+"#,
+    );
+    assert_eq!(json["out"], 1);
+}
+
+#[test]
+fn typed_local_read_by_constraint_is_checked() {
+    let message = eval_fails(
+        r#"
+local bad: Int = "x"
+checked: Int(this == bad) = 1
+"#,
+    );
+    assert!(message.contains("property 'bad' expected Int"), "{message}");
+}
+
+#[test]
+fn generator_constraint_reads_later_object_member() {
+    let json = eval(
+        r#"
+obj { when (true) { checked: Int(this < limit) = 1 }; limit = 2 }
+"#,
+    );
+    assert_eq!(json["obj"]["checked"], 1);
+    let json = eval(
+        r#"
+obj { for (x in List(1)) { checked: Int(this < limit) = x }; limit = 2 }
+"#,
+    );
+    assert_eq!(json["obj"]["checked"], 1);
+    let message = eval_fails(
+        r#"
+obj { for (x in List(5)) { checked: Int(this < limit) = x }; limit = 2 }
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+}
+
+#[test]
+fn deferred_local_check_fails_only_when_read() {
+    // The constraint reads a property bound after the local, so its check
+    // waits for the module to be complete.
+    let message = eval_fails(
+        r#"
+local x: Int(this < limit) = 3
+limit = 2
+out = x
+"#,
+    );
+    assert!(message.contains("property 'x' expected"), "{message}");
+    let json = eval(
+        r#"
+local x: Int(this < limit) = 3
+limit = 2
+out = 1
+"#,
+    );
+    assert_eq!(json["out"], 1);
+}
+
+#[test]
 fn amendment_generator_declared_property_is_checked() {
     let message = eval_fails(
         r#"

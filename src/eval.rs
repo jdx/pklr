@@ -82,6 +82,31 @@ pub struct Evaluator {
     /// Used to deduplicate `@Deprecated` warnings so a deprecated property
     /// referenced inside a loop or template doesn't flood stderr.
     warned_deprecated: std::collections::HashSet<(String, Option<String>)>,
+    /// Typed locals whose type check could not run when they were bound
+    /// (their constraint reads a member bound later), with whether a name
+    /// lookup has read them since. Their body re-checks them once complete.
+    pending_local_reads: Vec<(String, bool)>,
+    /// Typed properties produced by `for`/`when` bodies, waiting to be
+    /// checked once the enclosing object is complete.
+    generator_type_checks: Vec<PendingTypeCheck>,
+}
+
+/// A declared-type check of a generator-produced property, with the scope
+/// (including the iteration's bindings) its value was evaluated in.
+struct PendingTypeCheck {
+    prop: Property,
+    value: Value,
+    scope: CapturedScope,
+}
+
+/// Outcome of checking a typed local when it is bound.
+enum LocalTypeCheck {
+    Passed,
+    /// The value does not match; reading the local must fail with this.
+    Failed(String),
+    /// The check could not run yet (its constraint reads a member that is
+    /// not bound yet).
+    Deferred,
 }
 
 /// Which entries of an object body have their declared types checked once
@@ -94,12 +119,15 @@ enum TypeChecks {
     Nothing,
     /// The entries at these indices: the ones an amendment wrote itself.
     Entries(Rc<HashSet<usize>>),
+    /// Every entry of a `for`/`when` body, handed to the enclosing object to
+    /// check once that object is complete.
+    Generator,
 }
 
 impl TypeChecks {
     fn includes(&self, entry_index: usize) -> bool {
         match self {
-            TypeChecks::All => true,
+            TypeChecks::All | TypeChecks::Generator => true,
             TypeChecks::Nothing => false,
             TypeChecks::Entries(indices) => indices.contains(&entry_index),
         }
@@ -108,7 +136,7 @@ impl TypeChecks {
     /// Checks for the body of the generator at `entry_index`.
     fn for_generator(&self, entry_index: usize) -> TypeChecks {
         if self.includes(entry_index) {
-            TypeChecks::All
+            TypeChecks::Generator
         } else {
             TypeChecks::Nothing
         }
@@ -319,6 +347,8 @@ impl Default for Evaluator {
             http_rewrites: Vec::new(),
             converters: Vec::new(),
             warned_deprecated: std::collections::HashSet::new(),
+            pending_local_reads: Vec::new(),
+            generator_type_checks: Vec::new(),
         }
     }
 }
@@ -358,6 +388,8 @@ impl Evaluator {
             http_rewrites: Vec::new(),
             converters: Vec::new(),
             warned_deprecated: std::collections::HashSet::new(),
+            pending_local_reads: Vec::new(),
+            generator_type_checks: Vec::new(),
         }
     }
 
@@ -1963,6 +1995,17 @@ impl Evaluator {
         scope.set("this".into(), inherited_snapshot.clone());
         scope.set("module".into(), inherited_snapshot);
 
+        // Type aliases are declarative: register them all up front so typed
+        // locals can be checked against any of them when they are bound.
+        for entry in module.body.iter() {
+            if let Entry::TypeAlias(name, ty) = entry {
+                scope.set_type_alias(name.clone(), ty.clone());
+            }
+        }
+        // Typed locals whose check waits for the module to be complete.
+        let pending_mark = self.pending_local_reads.len();
+        let mut deferred_locals = Vec::new();
+
         // First pass: collect locals, class definitions, and type aliases in
         // declaration order so they can reference each other
         for entry in module.body.iter() {
@@ -1974,7 +2017,18 @@ impl Evaluator {
                         .eval_expr(prop.value.as_ref().unwrap(), &scope, depth)
                         .await
                     {
-                        Ok(val) => scope.declare(prop.name.clone(), val),
+                        Ok(val) => match self.check_local_at_bind(prop, &val, &scope, depth).await?
+                        {
+                            LocalTypeCheck::Passed => scope.declare(prop.name.clone(), val),
+                            LocalTypeCheck::Failed(message) => {
+                                scope.declare_poisoned(prop.name.clone(), message)
+                            }
+                            LocalTypeCheck::Deferred => {
+                                deferred_locals.push((prop, self.pending_local_reads.len()));
+                                self.pending_local_reads.push((prop.name.clone(), false));
+                                scope.declare(prop.name.clone(), val);
+                            }
+                        },
                         Err(Error::Eval(message)) => {
                             scope.declare_poisoned(prop.name.clone(), message)
                         }
@@ -2256,34 +2310,42 @@ impl Evaluator {
             }
         }
 
+        // Settle typed locals whose check had to wait for later members.
+        for (prop, pending_index) in deferred_locals {
+            let read = self
+                .pending_local_reads
+                .get(pending_index)
+                .is_some_and(|(_, read)| *read);
+            let Some(value) = scope.get(&prop.name).cloned() else {
+                continue;
+            };
+            if let Some(message) = self
+                .settle_deferred_local(prop, &value, &scope, read, depth)
+                .await?
+            {
+                scope.poison(prop.name.clone(), message);
+            }
+        }
+        self.pending_local_reads.truncate(pending_mark);
+
         // Check declared types once every property is bound, so a constraint
         // can read properties declared after the one it checks.
-        for (entry_index, entry) in module.body.iter().enumerate() {
+        for entry in module.body.iter() {
             let Entry::Property(prop) = entry else {
                 continue;
             };
-            if prop.name == "output" || prop.value.is_none() || prop.type_ann.is_none() {
+            if prop.name == "output"
+                || prop.value.is_none()
+                || prop.type_ann.is_none()
+                || has_modifier(&prop.modifiers, Modifier::Local)
+            {
                 continue;
             }
-            let is_local = has_modifier(&prop.modifiers, Modifier::Local);
-            let value = if is_local {
-                scope.get(&prop.name).cloned()
-            } else {
-                all_props.get(&prop.name).cloned()
-            };
-            let Some(value) = value else {
+            let Some(value) = all_props.get(&prop.name).cloned() else {
                 continue;
             };
-            let checked = self
-                .check_declared_property_type(prop, &value, &scope, depth)
-                .await;
-            match checked {
-                Err(Error::Eval(message)) if is_local => {
-                    self.fail_if_local_is_read(&module.body, entry_index, message, &scope, depth)
-                        .await?;
-                }
-                other => other?,
-            }
+            self.check_declared_property_type(prop, &value, &scope, depth)
+                .await?;
         }
 
         if depth == 0 {
@@ -2532,6 +2594,39 @@ impl Evaluator {
         inherited_source: Option<&ObjectSource>,
         checks: TypeChecks,
     ) -> Result<Value> {
+        let pending_mark = self.pending_local_reads.len();
+        let generator_mark = self.generator_type_checks.len();
+        let result = self
+            .eval_body_entries(
+                entries,
+                scope,
+                depth,
+                entry_scopes,
+                inherited_source,
+                checks,
+            )
+            .await;
+        if result.is_err() {
+            // A caller may recover from the error (a failed local is
+            // poisoned); it must not inherit this body's pending checks.
+            self.pending_local_reads.truncate(pending_mark);
+            self.generator_type_checks.truncate(generator_mark);
+        }
+        result
+    }
+
+    async fn eval_body_entries(
+        &mut self,
+        entries: &Body,
+        scope: &Scope,
+        depth: usize,
+        entry_scopes: Option<&[Option<Arc<CapturedScope>>]>,
+        inherited_source: Option<&ObjectSource>,
+        checks: TypeChecks,
+    ) -> Result<Value> {
+        let pending_mark = self.pending_local_reads.len();
+        let generator_mark = self.generator_type_checks.len();
+        let mut deferred_locals: Vec<(&Property, usize, usize)> = Vec::new();
         let mut child_scope = scope.child();
         let entry_owners = entry_scope_owners(entries, entry_scopes, inherited_source);
         let own_body = own_body_names(entries, entry_scopes, inherited_source);
@@ -2623,6 +2718,13 @@ impl Evaluator {
         // Non-lambda locals are evaluated eagerly; lambda locals are deferred
         // to a second pass so they capture the fully-populated scope.
         let mut deferred_lambdas: Vec<(String, &crate::parser::Expr, usize)> = Vec::new();
+        // Type aliases are declarative: register them all up front so typed
+        // locals can be checked against any of them when they are bound.
+        for entry in entries.iter() {
+            if let Entry::TypeAlias(name, ty) = entry {
+                child_scope.set_type_alias(name.clone(), ty.clone());
+            }
+        }
         for (entry_index, entry) in entries.iter().enumerate() {
             // Only locals, classes and type aliases are handled in this pass,
             // so build the entry's scope only for those.
@@ -2649,7 +2751,35 @@ impl Evaluator {
                     // Bind every local in declaration order so later locals and
                     // entries can reference it (e.g. a non-lambda local that
                     // calls a lambda local defined just above it).
-                    match self.eval_expr(expr, &active_scope, depth).await {
+                    let mut type_failed = false;
+                    let evaluated = match self.eval_expr(expr, &active_scope, depth).await {
+                        Ok(val) => {
+                            match self
+                                .check_local_at_bind(prop, &val, &active_scope, depth)
+                                .await?
+                            {
+                                LocalTypeCheck::Passed => Ok(val),
+                                LocalTypeCheck::Failed(message) => {
+                                    // Re-binding it after the properties
+                                    // (below) would drop the poison.
+                                    type_failed = true;
+                                    Err(message)
+                                }
+                                LocalTypeCheck::Deferred => {
+                                    deferred_locals.push((
+                                        prop,
+                                        self.pending_local_reads.len(),
+                                        entry_index,
+                                    ));
+                                    self.pending_local_reads.push((prop.name.clone(), false));
+                                    Ok(val)
+                                }
+                            }
+                        }
+                        Err(Error::Eval(message)) => Err(message),
+                        Err(error) => return Err(error),
+                    };
+                    match evaluated {
                         Ok(val) => {
                             if binds_declared(&prop.name) {
                                 child_scope.declare(prop.name.clone(), val);
@@ -2662,13 +2792,12 @@ impl Evaluator {
                                 child_scope.mark_this_alias(&prop.name);
                             }
                         }
-                        Err(Error::Eval(message)) if binds_declared(&prop.name) => {
+                        Err(message) if binds_declared(&prop.name) => {
                             child_scope.declare_poisoned(prop.name.clone(), message)
                         }
-                        Err(Error::Eval(message)) => child_scope.poison(prop.name.clone(), message),
-                        Err(error) => return Err(error),
+                        Err(message) => child_scope.poison(prop.name.clone(), message),
                     }
-                    if matches!(expr, crate::parser::Expr::Lambda(..)) {
+                    if !type_failed && matches!(expr, crate::parser::Expr::Lambda(..)) {
                         // Lambda evaluation only captures the current scope; it
                         // does not run the body. Bind once for declaration-order
                         // visibility, then re-bind after properties for late
@@ -2999,6 +3128,32 @@ impl Evaluator {
                 Entry::ClassDef(..) | Entry::TypeAlias(..) => {} // handled in scope setup
             }
         }
+        // Settle typed locals whose check had to wait for later members,
+        // before functions are re-bound so they capture a failed one's poison.
+        for (prop, pending_index, entry_index) in deferred_locals {
+            let read = self
+                .pending_local_reads
+                .get(pending_index)
+                .is_some_and(|(_, read)| *read);
+            let Some(value) = child_scope.get(&prop.name).cloned() else {
+                continue;
+            };
+            let active_scope = scope_for_object_entry(
+                entry_index,
+                &child_scope,
+                entry_scopes,
+                &entry_owners,
+                own_body_scope,
+            );
+            if let Some(message) = self
+                .settle_deferred_local(prop, &value, &active_scope, read, depth)
+                .await?
+            {
+                drop(active_scope);
+                child_scope.poison(prop.name.clone(), message);
+            }
+        }
+        self.pending_local_reads.truncate(pending_mark);
         // Evaluate deferred local lambdas (function definitions) AFTER all
         // properties so they capture overridden values (late binding).
         refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
@@ -3017,20 +3172,19 @@ impl Evaluator {
         // can read members declared after the property it checks. Each entry
         // is checked in the scope it was evaluated in, so an amendment's
         // constraints see the amendment's own locals and type aliases.
+        // Typed locals were checked when bound (above).
         for (entry_index, entry) in entries.iter().enumerate() {
             let Entry::Property(prop) = entry else {
                 continue;
             };
-            if prop.value.is_none() || prop.type_ann.is_none() || !checks.includes(entry_index) {
+            if prop.value.is_none()
+                || prop.type_ann.is_none()
+                || has_modifier(&prop.modifiers, Modifier::Local)
+                || !checks.includes(entry_index)
+            {
                 continue;
             }
-            let is_local = has_modifier(&prop.modifiers, Modifier::Local);
-            let value = if is_local {
-                child_scope.get(&prop.name).cloned()
-            } else {
-                all_props.get(&prop.name).cloned()
-            };
-            let Some(value) = value else {
+            let Some(value) = all_props.get(&prop.name).cloned() else {
                 continue;
             };
             let active_scope = scope_for_object_entry(
@@ -3040,15 +3194,35 @@ impl Evaluator {
                 &entry_owners,
                 own_body_scope,
             );
-            let checked = self
-                .check_declared_property_type(prop, &value, &active_scope, depth)
-                .await;
-            match checked {
-                Err(Error::Eval(message)) if is_local => {
-                    self.fail_if_local_is_read(entries, entry_index, message, &active_scope, depth)
-                        .await?;
+            if matches!(checks, TypeChecks::Generator) {
+                // A `for`/`when` body: the enclosing object checks it once
+                // complete, so constraints can read its later members.
+                self.generator_type_checks.push(PendingTypeCheck {
+                    prop: prop.clone(),
+                    value,
+                    scope: capture_scope(&active_scope),
+                });
+                continue;
+            }
+            self.check_declared_property_type(prop, &value, &active_scope, depth)
+                .await?;
+        }
+        // Check what this object's `for`/`when` bodies produced, unless this
+        // is itself such a body, whose enclosing object does that. Each check
+        // runs in its own iteration's scope, with this object's members
+        // filled in where that scope does not already bind the name.
+        if !matches!(checks, TypeChecks::Generator) {
+            let pending = self.generator_type_checks.split_off(generator_mark);
+            for check in pending {
+                let iteration_scope = restore_scope(&check.scope);
+                let mut check_scope = iteration_scope.child();
+                for (name, value) in all_props.iter() {
+                    if iteration_scope.get(name).is_none() {
+                        check_scope.set(name.clone(), value.clone());
+                    }
                 }
-                other => other?,
+                self.check_declared_property_type(&check.prop, &check.value, &check_scope, depth)
+                    .await?;
             }
         }
         let mut source_scope = child_scope.flatten();
@@ -3327,77 +3501,91 @@ impl Evaluator {
         scope: &Scope,
         depth: usize,
     ) -> Result<()> {
+        match self
+            .declared_type_mismatch(prop, value, scope, depth)
+            .await?
+        {
+            Some(message) => Err(Error::Eval(message)),
+            None => Ok(()),
+        }
+    }
+
+    /// The error message when `value` does not match the type `prop`
+    /// declares, or `None` when it matches or nothing is checked. An error
+    /// evaluating a constraint is returned as is.
+    async fn declared_type_mismatch(
+        &mut self,
+        prop: &Property,
+        value: &Value,
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<Option<String>> {
         if prop.value.is_none() {
-            return Ok(());
+            return Ok(None);
         }
         let Some(type_ann) = &prop.type_ann else {
-            return Ok(());
+            return Ok(None);
         };
         if type_is_runtime_checkable(type_ann, scope)
             && !self
                 .eval_type_check(value, type_ann, scope, depth + 1)
                 .await?
         {
-            return Err(Error::Eval(format!(
+            return Ok(Some(format!(
                 "property '{}' expected {}, got {}",
                 prop.name,
                 display_type_expr(type_ann),
                 value_type_name(value)
             )));
         }
-        Ok(())
+        Ok(None)
     }
 
-    /// A typed local failed its type check with `message`. Pkl checks a local
-    /// when it is read, so this is an error only if the body reads it.
-    ///
-    /// The body has been evaluated already, so whether a read happened is
-    /// found by evaluating again, with the local poisoned, the entries that
-    /// mention it (directly or through other locals). Mentions that are never
-    /// evaluated, such as the untaken branch of an `if`, do not fail. A
-    /// generator or other non-property entry that mentions the local is
-    /// conservatively treated as a read.
-    async fn fail_if_local_is_read(
+    /// Check a typed local when it is bound. Pkl checks a local when it is
+    /// read, so a failure poisons the binding (as a failed evaluation does)
+    /// rather than failing here: any actual read then fails, through
+    /// functions and constraints alike, and an unread local never does.
+    async fn check_local_at_bind(
         &mut self,
-        entries: &[Entry],
-        local_index: usize,
-        message: String,
+        prop: &Property,
+        value: &Value,
         scope: &Scope,
         depth: usize,
-    ) -> Result<()> {
-        let Some(Entry::Property(local)) = entries.get(local_index) else {
-            return Ok(());
-        };
-        let mut probe = scope.child();
-        probe.poison(local.name.clone(), message.clone());
-        let mut affected = HashSet::from([local.name.clone()]);
-        for (entry_index, entry) in entries.iter().enumerate() {
-            if entry_index == local_index {
-                continue;
-            }
-            let refs = body_member_reads(std::slice::from_ref(entry));
-            if !refs.iter().any(|name| affected.contains(name)) {
-                continue;
-            }
-            match entry {
-                Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {
-                    let Some(expr) = &prop.value else {
-                        continue;
-                    };
-                    match self.eval_expr(expr, &probe, depth).await {
-                        Ok(value) => probe.set(prop.name.clone(), value),
-                        Err(Error::Eval(failure)) => probe.poison(prop.name.clone(), failure),
-                        Err(error) => return Err(error),
-                    }
-                    affected.insert(prop.name.clone());
-                }
-                Entry::Property(prop) => {
-                    self.eval_property(prop, &probe, depth).await?;
-                }
-                _ => return Err(Error::Eval(message)),
-            }
+    ) -> Result<LocalTypeCheck> {
+        if prop.type_ann.is_none() {
+            return Ok(LocalTypeCheck::Passed);
         }
-        Ok(())
+        match self.declared_type_mismatch(prop, value, scope, depth).await {
+            Ok(None) => Ok(LocalTypeCheck::Passed),
+            Ok(Some(message)) => Ok(LocalTypeCheck::Failed(message)),
+            // Typically a constraint reading a member bound later.
+            Err(Error::Eval(_)) => Ok(LocalTypeCheck::Deferred),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Re-check a typed local whose bind-time check was deferred, now that
+    /// its body is complete. A failure is an error when the local was read in
+    /// the meantime; otherwise the returned message poisons it so a later
+    /// read fails.
+    async fn settle_deferred_local(
+        &mut self,
+        prop: &Property,
+        value: &Value,
+        scope: &Scope,
+        read: bool,
+        depth: usize,
+    ) -> Result<Option<String>> {
+        let failure = match self.declared_type_mismatch(prop, value, scope, depth).await {
+            Ok(None) => return Ok(None),
+            Ok(Some(message)) | Err(Error::Eval(message)) => message,
+            Err(error) => return Err(error),
+        };
+        if read {
+            Err(Error::Eval(failure))
+        } else {
+            Ok(Some(failure))
+        }
     }
 
     /// Check if a value matches a type expression, including constraint evaluation.
@@ -4083,7 +4271,10 @@ impl Evaluator {
     /// expressions evaluated, are answered here without allocating the boxed
     /// future that a recursive evaluation needs.
     async fn eval_expr(&mut self, expr: &Expr, scope: &Scope, depth: usize) -> Result<Value> {
+        // While a typed local's check is pending, name lookups go through
+        // `eval_expr_boxed`, which records reads of it.
         if depth <= self.max_depth
+            && self.pending_local_reads.is_empty()
             && let Some(result) = eval_simple_expr(expr, scope, depth, self.max_depth)
         {
             return result;
@@ -4115,14 +4306,21 @@ impl Evaluator {
                 }
                 Ok(Value::String(result))
             }
-            Expr::Ident(name) => scope.get(name).cloned().ok_or_else(|| {
-                Error::Eval(
-                    scope
-                        .poison_of(name)
-                        .cloned()
-                        .unwrap_or_else(|| format!("undefined variable: {name}")),
-                )
-            }),
+            Expr::Ident(name) => {
+                for (pending, read) in &mut self.pending_local_reads {
+                    if pending == name {
+                        *read = true;
+                    }
+                }
+                scope.get(name).cloned().ok_or_else(|| {
+                    Error::Eval(
+                        scope
+                            .poison_of(name)
+                            .cloned()
+                            .unwrap_or_else(|| format!("undefined variable: {name}")),
+                    )
+                })
+            }
             Expr::Lambda(params, body) => {
                 let mut body = (**body).clone();
                 capture_method_result_types(&mut body, scope);

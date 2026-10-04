@@ -609,20 +609,6 @@ pub(super) fn referenced_roots(entries: &[Entry]) -> HashSet<String> {
     refs
 }
 
-/// Names read by any entry of a body, including the body's own members.
-///
-/// Unlike `referenced_roots`, a member declared by the body is not shadowed
-/// for its siblings, so a local read by another entry is reported. An entry
-/// reading only itself is not.
-pub(super) fn body_member_reads(entries: &[Entry]) -> HashSet<String> {
-    let mut refs = HashSet::new();
-    let shadows = HashSet::new();
-    for entry in entries {
-        collect_entry_refs(std::slice::from_ref(entry), &mut refs, &shadows);
-    }
-    refs
-}
-
 pub(super) fn collect_entry_refs(
     entries: &[Entry],
     refs: &mut HashSet<String>,
