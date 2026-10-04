@@ -248,6 +248,19 @@ fn eval_to_json_omits_nulls_only_when_renderer_asks() {
 
 #[cfg(feature = "native-io")]
 #[test]
+fn output_renderer_defaults_keep_nulls_when_only_converters_are_set() {
+    let (_dir, path) = module_file(
+        "pklr_render_converter_keeps_nulls",
+        "a = null\nb = 1\noutput { renderer = new JsonRenderer { converters { [Int] = (n) -> n + 1 } } }\n",
+    );
+    assert_eq!(
+        pklr::eval_to_json(&path).unwrap(),
+        serde_json::json!({"a": null, "b": 2})
+    );
+}
+
+#[cfg(feature = "native-io")]
+#[test]
 fn output_must_be_module_output() {
     for (src, message) in [
         (

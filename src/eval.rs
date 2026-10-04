@@ -119,6 +119,8 @@ pub struct Evaluator {
     module_output: Option<Value>,
     /// Whether an output declaration explicitly assigned `output.value`.
     output_sets_value: bool,
+    /// Whether an output declaration explicitly enabled JSON null omission.
+    output_sets_omit_nulls: bool,
     /// The default renderer used while evaluating module output.
     output_format: render::RendererKind,
     /// Set of (property_name, message) pairs already warned about.
@@ -427,6 +429,7 @@ impl Evaluator {
             output_props: Vec::new(),
             module_output: None,
             output_sets_value: false,
+            output_sets_omit_nulls: false,
             output_format: render::RendererKind::Json,
             warned_deprecated: std::collections::HashSet::default(),
             module_names: HashMap::default(),
@@ -563,6 +566,7 @@ impl Evaluator {
         self.output_props.clear();
         self.module_output = None;
         self.output_sets_value = false;
+        self.output_sets_omit_nulls = false;
         self.prefetch = prefetch::PrefetchState::new(self.cancel.clone());
         self.module_names.clear();
     }
@@ -6148,6 +6152,9 @@ impl Evaluator {
                 if let Ok(lambda) = self.eval_expr(val_expr, &converter_scope, depth)
                     && matches!(lambda, Value::Lambda(..))
                 {
+                    // Child output declarations override converters for the
+                    // same class while retaining unrelated inherited ones.
+                    self.converters.retain(|(name, _)| name != &class_name);
                     self.converters.push((class_name, lambda));
                 }
             }

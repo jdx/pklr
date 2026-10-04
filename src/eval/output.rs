@@ -211,6 +211,9 @@ impl Evaluator {
         let mut props = self.inherited_output_props(module, path)?;
         props.extend(own.into_iter().map(|prop| (prop, None)));
         self.output_sets_value = false;
+        self.output_sets_omit_nulls = props
+            .iter()
+            .any(|(prop, _)| output_enables_null_omission(prop));
         if props.is_empty() {
             self.module_output = None;
             return Ok(());
@@ -409,10 +412,7 @@ impl Evaluator {
         let converters = renderer_converters(&renderer)?;
         // Null properties stay in the JSON (unlike `pkl eval -f json`) unless
         // the module's renderer asks to omit them.
-        let omit_nulls = matches!(
-            &renderer,
-            Value::Object(map, _) if map.get("omitNullProperties") == Some(&Value::Bool(true))
-        );
+        let omit_nulls = self.output_sets_omit_nulls;
         render::to_json(
             &value,
             top_kind,
@@ -452,6 +452,36 @@ fn renderer_converters(renderer: &Value) -> Result<Converters> {
         Value::Object(map, _) => Converters::from_mapping(map.get("converters")),
         _ => Ok(Converters::default()),
     }
+}
+
+fn output_enables_null_omission(output: &Property) -> bool {
+    let Some(body) = &output.body else {
+        return false;
+    };
+    body.iter().any(|entry| {
+        let Entry::Property(renderer) = entry else {
+            return false;
+        };
+        if renderer.name != "renderer" {
+            return false;
+        }
+        let entries = renderer
+            .body
+            .as_deref()
+            .or_else(|| match renderer.value.as_ref() {
+                Some(Expr::New(_, entries, _)) => Some(entries.as_ref()),
+                _ => None,
+            });
+        entries.is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                matches!(entry,
+                    Entry::Property(prop)
+                        if prop.name == "omitNullProperties"
+                            && prop.value.as_ref() == Some(&Expr::Bool(true))
+                )
+            })
+        })
+    })
 }
 
 /// `a.b.C` for an identifier or a chain of field accesses.
