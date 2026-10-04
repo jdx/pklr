@@ -223,3 +223,19 @@ pow2 = List(math.isPowerOfTwo(64), math.isPowerOfTwo(0.25), math.isPowerOfTwo(6)
             .contains("Expected a positive number, but got `-4`.")
     );
 }
+
+#[test]
+fn huge_whole_unit_values_saturate_like_pkl() {
+    // pkl converts a whole duration value with Java's `(long)` cast, which
+    // saturates; the pkl CLI prints the same values.
+    let json = eval(
+        r##"
+value = 1e20.s.value
+text = "\(1e20.s)"
+negative = "\(-1e20.mb)"
+"##,
+    );
+    assert_eq!(json["value"], i64::MAX);
+    assert_eq!(json["text"], "9223372036854775807.s");
+    assert_eq!(json["negative"], "-9223372036854775808.mb");
+}
