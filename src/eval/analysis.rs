@@ -44,6 +44,29 @@ pub(super) fn requested_fields_for_import(
     }
 }
 
+/// The keys a glob import's mapping is read with, when it is read only as
+/// `Alias["key"]`. A field read such as `Alias.length` or `Alias.keys` reads
+/// the whole mapping, even when a matched module happens to have that name.
+pub(super) fn glob_index_keys(
+    uses: &HashMap<String, ImportUse>,
+    alias: &str,
+) -> Option<HashSet<String>> {
+    if uses.contains_key(&other_uses_key(alias)) {
+        return None;
+    }
+    requested_fields_for_import(uses, &index_reads_key(alias))
+}
+
+/// Marks that `Alias` is used other than as `Alias["key"]`.
+fn other_uses_key(alias: &str) -> String {
+    format!("{alias}\0*")
+}
+
+/// Where `Alias["key"]` reads are recorded alongside `Alias`'s own uses.
+fn index_reads_key(alias: &str) -> String {
+    format!("{alias}\0[]")
+}
+
 pub(super) fn import_field_uses(entries: &[Entry]) -> HashMap<String, ImportUse> {
     let mut uses = HashMap::new();
     let shadows = HashSet::new();
@@ -97,7 +120,8 @@ pub(super) fn collect_entry_import_field_uses(
             Entry::ClassDef(_, _, _, body) => {
                 collect_entry_import_field_uses(body, uses, &entry_shadows);
             }
-            Entry::TypeAlias(..) => {}
+            // A type alias's constraint runs when a value is checked against it.
+            Entry::TypeAlias(_, ty) => collect_type_import_field_uses(ty, uses, &entry_shadows),
         }
     }
 }
@@ -114,6 +138,20 @@ pub(super) fn collect_expr_import_field_uses(
                 record_field_import_use(uses, shadows, name, field);
             } else {
                 collect_expr_import_field_uses(base, uses, shadows);
+            }
+        }
+        // `Alias["key"]` names one matched module of a glob import, which
+        // `glob_index_keys` narrows to. An ordinary import read this way is
+        // still evaluated whole.
+        Expr::Index(base, index)
+            if matches!(base.as_ref(), Expr::Ident(_))
+                && matches!(index.as_ref(), Expr::String(_)) =>
+        {
+            if let (Expr::Ident(name), Expr::String(key)) = (base.as_ref(), index.as_ref())
+                && !shadows.contains(name)
+            {
+                uses.insert(name.clone(), ImportUse::Whole);
+                record_field_import_use(uses, shadows, &index_reads_key(name), key);
             }
         }
         Expr::Index(base, index) | Expr::Binop(_, base, index) => {
@@ -269,6 +307,7 @@ pub(super) fn record_field_import_use(
     if shadows.contains(name) {
         return;
     }
+    mark_other_use(uses, name);
     match uses.entry(name.to_string()) {
         std::collections::hash_map::Entry::Occupied(mut entry) => {
             if let ImportUse::Fields(fields) = entry.get_mut() {
@@ -287,7 +326,16 @@ pub(super) fn record_whole_import_use(
     name: &str,
 ) {
     if !shadows.contains(name) {
+        mark_other_use(uses, name);
         uses.insert(name.to_string(), ImportUse::Whole);
+    }
+}
+
+/// Record that `name` is used other than through a literal index, unless
+/// `name` is itself one of the internal per-alias keys.
+fn mark_other_use(uses: &mut HashMap<String, ImportUse>, name: &str) {
+    if !name.contains('\0') {
+        uses.insert(other_uses_key(name), ImportUse::Whole);
     }
 }
 
@@ -301,6 +349,16 @@ pub(super) fn expand_requested_fields(
             Entry::Property(prop) if !has_modifier(&prop.modifiers, Modifier::Local) => {
                 Some(prop.name.clone())
             }
+            _ => None,
+        })
+        .collect();
+    // Type aliases and classes evaluate their constraints and defaults when a
+    // value is checked or built, so a property using one also depends on what
+    // the definition reads.
+    let definitions: HashMap<&str, &Entry> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::TypeAlias(name, _) | Entry::ClassDef(name, ..) => Some((name.as_str(), entry)),
             _ => None,
         })
         .collect();
@@ -328,6 +386,32 @@ pub(super) fn expand_requested_fields(
                 collect_entry_refs(body, &mut refs, &shadows);
                 collect_sibling_field_refs_entries(body, &mut refs);
             }
+            let mut pending: Vec<String> = refs.iter().cloned().collect();
+            let mut visited = HashSet::new();
+            while let Some(name) = pending.pop() {
+                let Some(definition) = definitions.get(name.as_str()) else {
+                    continue;
+                };
+                if !visited.insert(name) {
+                    continue;
+                }
+                let mut definition_refs = HashSet::new();
+                collect_entry_refs(
+                    std::slice::from_ref(*definition),
+                    &mut definition_refs,
+                    &shadows,
+                );
+                collect_sibling_field_refs_entries(
+                    std::slice::from_ref(*definition),
+                    &mut definition_refs,
+                );
+                definition_refs.remove("this");
+                for dep in definition_refs {
+                    if refs.insert(dep.clone()) {
+                        pending.push(dep);
+                    }
+                }
+            }
             for dep in refs {
                 if dep == DYNAMIC_SIBLING_REF {
                     for name in &property_names {
@@ -350,6 +434,9 @@ pub(super) fn collect_sibling_field_refs_entries(entries: &[Entry], refs: &mut H
     for entry in entries {
         match entry {
             Entry::Property(prop) => {
+                if let Some(ty) = &prop.type_ann {
+                    collect_sibling_field_refs_type(ty, refs);
+                }
                 if let Some(expr) = &prop.value {
                     collect_sibling_field_refs_expr(expr, refs, false);
                 }
@@ -376,8 +463,47 @@ pub(super) fn collect_sibling_field_refs_entries(entries: &[Entry], refs: &mut H
                 collect_sibling_field_refs_expr(expr, refs, false);
             }
             Entry::ClassDef(_, _, _, body) => collect_sibling_field_refs_entries(body, refs),
-            Entry::TypeAlias(..) => {}
+            Entry::TypeAlias(_, ty) => collect_sibling_field_refs_type(ty, refs),
         }
+    }
+}
+
+/// The names a type check binds for the checked value inside a constraint on
+/// `base` (see `eval_type_check`): `this` always, and `length` and `isEmpty`
+/// only when the base is a string or collection type, which bind them. For
+/// any other base, including aliases and classes that can't be resolved
+/// here, those two are kept as references: keeping an unneeded reference only
+/// evaluates more, while dropping a needed one breaks the check.
+fn constraint_bound_names(base: &str) -> &'static [&'static str] {
+    // A nullable base also runs its constraint on `null`, which binds nothing.
+    if base.ends_with('?') {
+        return &["this"];
+    }
+    let base = base.trim_start_matches('*');
+    // A generic base such as `Listing<String>` checks as its class.
+    let base = base.split('<').next().unwrap_or(base).trim();
+    match base {
+        "String" | "List" | "Listing" | "Map" | "Mapping" | "Set" | "Collection" => {
+            &["this", "length", "isEmpty"]
+        }
+        _ => &["this"],
+    }
+}
+
+/// `module.field` reads in a type's constraints, which run when a value is
+/// checked against it.
+fn collect_sibling_field_refs_type(ty: &crate::parser::TypeExpr, refs: &mut HashSet<String>) {
+    match ty {
+        crate::parser::TypeExpr::Constrained(_, constraint) => {
+            collect_sibling_field_refs_expr(constraint, refs, false);
+        }
+        crate::parser::TypeExpr::Nullable(inner) => collect_sibling_field_refs_type(inner, refs),
+        crate::parser::TypeExpr::Union(types) | crate::parser::TypeExpr::Generic(_, types) => {
+            for ty in types {
+                collect_sibling_field_refs_type(ty, refs);
+            }
+        }
+        crate::parser::TypeExpr::Named(_) => {}
     }
 }
 
@@ -655,7 +781,15 @@ pub(super) fn collect_type_refs(
             for component in constrained_type_components(base) {
                 collect_name_root(component, refs, shadows);
             }
-            collect_expr_refs(constraint, refs, shadows);
+            // A type check binds the checked value's own names inside the
+            // constraint, so they are not references to the enclosing scope.
+            let mut constraint_shadows = shadows.clone();
+            constraint_shadows.extend(
+                constraint_bound_names(base)
+                    .iter()
+                    .map(|name| name.to_string()),
+            );
+            collect_expr_refs(constraint, refs, &constraint_shadows);
         }
     }
 }

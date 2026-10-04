@@ -2112,3 +2112,272 @@ async fn narrowed_import_that_read_a_cycle_placeholder_is_not_reused() {
     assert_eq!(val["hubDuring"], "placeholder");
     assert_eq!(val["after"], "T");
 }
+
+#[tokio::test]
+async fn import_glob_evaluates_only_referenced_modules() {
+    let temp = TestTempDir::new("pklr_test_glob_referenced_only");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("parts")).unwrap();
+    std::fs::write(dir.join("parts/used.pkl"), "value = \"used\"\n").unwrap();
+    // Evaluating this module fails, so it must not be evaluated unless read.
+    std::fs::write(
+        dir.join("parts/unused.pkl"),
+        "value = throw(\"unused module was evaluated\")\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import* \"parts/*.pkl\" as Parts\nresult = Parts[\"parts/used.pkl\"].value\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["result"], "used");
+}
+
+#[tokio::test]
+async fn import_glob_keys_still_see_every_module() {
+    let temp = TestTempDir::new("pklr_test_glob_keys_all");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("parts")).unwrap();
+    std::fs::write(dir.join("parts/a.pkl"), "value = \"a\"\n").unwrap();
+    std::fs::write(dir.join("parts/b.pkl"), "value = \"b\"\n").unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import* \"parts/*.pkl\" as Parts\na = Parts[\"parts/a.pkl\"].value\ncount = Parts.length\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["a"], "a");
+    assert_eq!(val["count"], 2);
+}
+
+#[tokio::test]
+async fn import_glob_keeps_modules_an_amended_base_reads() {
+    let temp = TestTempDir::new("pklr_test_glob_amended_base_reads");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("parts")).unwrap();
+    std::fs::write(dir.join("parts/a.pkl"), "value = \"a\"\n").unwrap();
+    std::fs::write(dir.join("parts/b.pkl"), "value = \"b\"\n").unwrap();
+    std::fs::write(
+        dir.join("base.pkl"),
+        "fromBase = Parts[\"parts/b.pkl\"].value\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "amends \"base.pkl\"\nimport* \"parts/*.pkl\" as Parts\nfromChild = Parts[\"parts/a.pkl\"].value\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["fromBase"], "b");
+    assert_eq!(val["fromChild"], "a");
+}
+
+#[tokio::test]
+async fn import_glob_field_read_named_like_a_module_sees_every_module() {
+    let temp = TestTempDir::new("pklr_test_glob_field_named_like_module");
+    let dir = temp.path();
+    std::fs::write(dir.join("length"), "value = \"L\"\n").unwrap();
+    std::fs::write(dir.join("other"), "value = \"O\"\n").unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import* \"*\" as Parts\nl = Parts[\"length\"].value\ncount = Parts.length\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["l"], "L");
+    assert_eq!(val["count"], 2);
+}
+
+#[tokio::test]
+async fn import_glob_keeps_modules_read_by_type_alias_constraints() {
+    let temp = TestTempDir::new("pklr_test_glob_type_alias_constraint");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("parts")).unwrap();
+    std::fs::write(dir.join("parts/a.pkl"), "value = \"a\"\n").unwrap();
+    std::fs::write(dir.join("parts/b.pkl"), "value = \"b\"\n").unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"import* "parts/*.pkl" as Parts
+typealias IsB = String(this == Parts["parts/b.pkl"].value)
+fromA = Parts["parts/a.pkl"].value
+ok = "b" is IsB
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["fromA"], "a");
+    assert_eq!(val["ok"], true);
+}
+
+#[tokio::test]
+async fn indexed_ordinary_import_is_evaluated_whole() {
+    let temp = TestTempDir::new("pklr_test_indexed_ordinary_import");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "expected = \"b\"\ntypealias IsB = String(this == expected)\nresult = \"b\" is IsB\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as Dep\nout = Dep[\"result\"]\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["out"], true);
+}
+
+#[tokio::test]
+async fn import_glob_in_a_base_keeps_modules_its_children_read() {
+    let temp = TestTempDir::new("pklr_test_glob_base_children_read");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("parts")).unwrap();
+    std::fs::write(dir.join("parts/a.pkl"), "value = \"a\"\n").unwrap();
+    std::fs::write(dir.join("parts/b.pkl"), "value = \"b\"\n").unwrap();
+    std::fs::write(
+        dir.join("A.pkl"),
+        "open module A\nimport* \"parts/*.pkl\" as X\na = X[\"parts/a.pkl\"].value\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("B.pkl"),
+        "extends \"A.pkl\"\nb = X[\"parts/b.pkl\"].value\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("C.pkl"),
+        "amends \"A.pkl\"\nc = X[\"parts/b.pkl\"].value\n",
+    )
+    .unwrap();
+
+    let extended = pklr::eval_to_json_async(&dir.join("B.pkl")).await.unwrap();
+    assert_eq!(extended["a"], "a");
+    assert_eq!(extended["b"], "b");
+    let amended = pklr::eval_to_json_async(&dir.join("C.pkl")).await.unwrap();
+    assert_eq!(amended["c"], "b");
+}
+
+#[tokio::test]
+async fn narrowed_import_follows_type_alias_constraints() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_type_alias");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "expected = \"b\"\ntypealias IsB = String(this == expected)\nresult = \"b\" is IsB\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as Dep\ntypealias IsTrue = Boolean(this == Dep.result)\nok = true is IsTrue\nout = Dep.result\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["ok"], true);
+    assert_eq!(val["out"], true);
+}
+
+#[tokio::test]
+async fn narrowed_import_follows_module_reads_but_not_checked_value_members() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_constraint_names");
+    let dir = temp.path();
+    // `length` in the constraint is the checked string's length, so the
+    // unused module property of that name must not be evaluated.
+    std::fs::write(
+        dir.join("short.pkl"),
+        "length = throw(\"unused\")\ntypealias IsShort = String(length == 1)\nresult = \"b\" is IsShort\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("module_read.pkl"),
+        "expected = \"b\"\ntypealias IsB = String(this == module.expected)\nresult = \"b\" is IsB\n",
+    )
+    .unwrap();
+    // A number's check binds no `length`, so here it is the module property.
+    std::fs::write(
+        dir.join("number.pkl"),
+        "length = 1\ntypealias IsOne = Int(this == length)\nresult = 1 is IsOne\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"short.pkl\" as Short\nimport \"module_read.pkl\" as ModuleRead\nimport \"number.pkl\" as Number\nshort = Short.result\nmoduleRead = ModuleRead.result\nnumber = Number.result\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["short"], true);
+    assert_eq!(val["moduleRead"], true);
+    assert_eq!(val["number"], true);
+}
+
+#[tokio::test]
+async fn narrowed_import_ignores_checked_value_names_in_is_expressions() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_is_constraint");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("plain.pkl"),
+        "length = throw(\"unused\")\nresult = \"b\" is String(length == 1)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("class.pkl"),
+        "length = throw(\"unused\")\nclass C { ok = \"b\" is String(length == 1) }\nresult = new C {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("generic.pkl"),
+        "length = throw(\"unused\")\nresult = List(1) is Listing<Int>(length == 1)\n",
+    )
+    .unwrap();
+    // A nullable base runs its constraint on `null`, which binds no `length`.
+    std::fs::write(
+        dir.join("nullable.pkl"),
+        "length = 1\nresult = null is Listing<Int>?(length == 1)\n",
+    )
+    .unwrap();
+    // `N` can't be resolved during analysis, so `length` stays a module read;
+    // a number's check doesn't bind it.
+    std::fs::write(
+        dir.join("alias.pkl"),
+        "length = 1\ntypealias N = Int\nresult = 1 is N(this == length)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"plain.pkl\" as Plain\nimport \"class.pkl\" as Class\nimport \"alias.pkl\" as Alias\nimport \"generic.pkl\" as Generic\nimport \"nullable.pkl\" as Nullable\nplain = Plain.result\nclassed = Class.result.ok\naliased = Alias.result\ngeneric = Generic.result\nnullable = Nullable.result\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["plain"], true);
+    assert_eq!(val["classed"], true);
+    assert_eq!(val["aliased"], true);
+    assert_eq!(val["generic"], true);
+    assert_eq!(val["nullable"], true);
+}
