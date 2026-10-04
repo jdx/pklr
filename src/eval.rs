@@ -1248,7 +1248,7 @@ impl Evaluator {
         let uri: &str = resolved.as_deref().unwrap_or(uri);
 
         if let Some(module_name) = uri.strip_prefix("pkl:") {
-            return Ok(stdlib_module(module_name));
+            return self.stdlib_module(module_name, depth);
         }
 
         if !uri.contains("://") || uri.starts_with("file://") {
@@ -1760,7 +1760,7 @@ impl Evaluator {
 
             // Handle pkl: standard library imports
             if let Some(module_name) = uri.strip_prefix("pkl:") {
-                let stdlib_val = stdlib_module(module_name);
+                let stdlib_val = self.stdlib_module(module_name, depth)?;
                 let alias = import
                     .alias
                     .clone()

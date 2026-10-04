@@ -21,8 +21,12 @@ use crate::parser::{Entry, Modifier};
 use crate::value::{ListValue, ObjectMap, ObjectSource, Value};
 
 pub(crate) mod json;
+pub(crate) mod jsonnet;
 pub(crate) mod pcf;
+pub(crate) mod plist;
 pub(crate) mod properties;
+pub(crate) mod xml;
+mod xml_names;
 pub(crate) mod yaml;
 
 /// Prefix of a mapping key that stands for a class (`[String] = ...` in
@@ -61,6 +65,9 @@ pub(crate) fn object_key(value: &Value) -> Arc<str> {
 
 /// Whether `key` stands for something other than a string.
 fn is_non_string_key(key: &str) -> bool {
+    if key.starts_with(crate::value::MAPPING_KEY_PREFIX) {
+        return !matches!(crate::value::mapping_storage_value(key), Value::String(_));
+    }
     key.starts_with('\0')
         && (key.starts_with(CLASS_KEY_PREFIX)
             || key.starts_with(DIRECTIVE_KEY_PREFIX)
@@ -70,6 +77,9 @@ fn is_non_string_key(key: &str) -> bool {
 /// The value an entry key stands for, as renderers see it: a string, a
 /// `RenderDirective`, or an object standing for another non-string key.
 fn key_value(key: &Arc<str>) -> Value {
+    if key.starts_with(crate::value::MAPPING_KEY_PREFIX) {
+        return crate::value::mapping_storage_value(key);
+    }
     if !is_non_string_key(key) {
         return Value::String(key.clone());
     }
@@ -123,13 +133,16 @@ const DATA_SIZE_UNITS: &[&str] = &[
     "b", "kb", "mb", "gb", "tb", "pb", "kib", "mib", "gib", "tib", "pib",
 ];
 
-/// The renderer classes pklr implements, by the class name instances carry.
+/// The renderer classes pklr implements.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RendererKind {
     Pcf,
     Json,
     Yaml,
     Properties,
+    PList,
+    Jsonnet,
+    Xml,
 }
 
 impl RendererKind {
@@ -138,23 +151,34 @@ impl RendererKind {
         RendererKind::Json,
         RendererKind::Yaml,
         RendererKind::Properties,
+        RendererKind::PList,
+        RendererKind::Jsonnet,
+        RendererKind::Xml,
     ];
 
-    /// The class instances of this renderer carry as their type name.
-    pub(crate) fn class_name(self) -> &'static str {
+    /// The module and name of the renderer's class.
+    fn class(self) -> (&'static str, &'static str) {
         match self {
-            RendererKind::Pcf => "PcfRenderer",
-            RendererKind::Json => "JsonRenderer",
-            RendererKind::Yaml => "YamlRenderer",
-            RendererKind::Properties => "PropertiesRenderer",
+            RendererKind::Pcf => ("pkl:base", "PcfRenderer"),
+            RendererKind::Json => ("pkl:base", "JsonRenderer"),
+            RendererKind::Yaml => ("pkl:base", "YamlRenderer"),
+            RendererKind::Properties => ("pkl:base", "PropertiesRenderer"),
+            RendererKind::PList => ("pkl:base", "PListRenderer"),
+            RendererKind::Jsonnet => ("pkl:jsonnet", "Renderer"),
+            RendererKind::Xml => ("pkl:xml", "Renderer"),
         }
     }
 
-    fn from_class_name(name: &str) -> Option<Self> {
-        Self::ALL
-            .iter()
-            .copied()
-            .find(|kind| kind.class_name() == name)
+    /// The unqualified class name used by the existing output setup path.
+    pub(crate) fn class_name(self) -> &'static str {
+        self.class().1
+    }
+
+    /// The type identity instances of this renderer carry (see
+    /// `Scope::runtime_type_identity`).
+    fn identity(self) -> String {
+        let (module, class) = self.class();
+        format!("{module}.{class}")
     }
 }
 
@@ -164,11 +188,43 @@ pub(crate) fn renderer_kind(value: &Value) -> Option<RendererKind> {
     let Value::Object(_, Some(source)) = value else {
         return None;
     };
-    source
-        .type_name
+    let by_identity = source
+        .type_identity
         .iter()
-        .chain(source.parent_type_names.iter())
-        .find_map(|name| RendererKind::from_class_name(name))
+        .chain(source.parent_type_identities.iter())
+        .find_map(|identity| {
+            RendererKind::ALL
+                .iter()
+                .copied()
+                .find(|kind| kind.identity() == *identity)
+        });
+    by_identity.or_else(|| {
+        // `pkl:base` renderers are known by name too. Imported renderers must
+        // retain their module identity so an unrelated user `Renderer` class
+        // cannot be mistaken for a standard-library renderer.
+        source
+            .type_name
+            .iter()
+            .chain(source.parent_type_names.iter())
+            .find_map(|name| {
+                RendererKind::ALL
+                    .iter()
+                    .copied()
+                    .find(|kind| kind.class() == ("pkl:base", name.as_str()))
+            })
+    })
+}
+
+/// Whether `value` is an instance of the class `class` of the standard
+/// library module `module` (such as `pkl:xml`'s `Comment`).
+pub(crate) fn typed_class_is(value: &Value, module: &str, class: &str) -> bool {
+    matches!(
+        value,
+        Value::Object(_, Some(source))
+            if source.type_identity.as_deref().is_some_and(|identity| {
+                identity.strip_prefix(module).and_then(|rest| rest.strip_prefix('.')) == Some(class)
+            })
+    )
 }
 
 /// What a pklr [`Value`] is to a renderer.
@@ -608,6 +664,9 @@ pub(crate) struct Settings {
     pub yaml_is_stream: bool,
     pub restrict_charset: bool,
     pub use_custom_string_delimiters: bool,
+    pub xml_version: String,
+    pub xml_root_name: String,
+    pub xml_root_attributes: Option<ObjectMap>,
 }
 
 impl Settings {
@@ -647,16 +706,32 @@ impl Settings {
                 "Expected value of type `\"compat\"|\"1.1\"|\"1.2\"`, but got \"{yaml_mode}\"."
             )));
         }
+        let xml_version = string("xmlVersion", "1.0")?;
+        if !matches!(xml_version.as_str(), "1.0" | "1.1") {
+            return Err(Error::Eval(format!(
+                "Expected value of type `\"1.0\"|\"1.1\"`, but got \"{xml_version}\"."
+            )));
+        }
         Ok(Settings {
             kind,
             converters: Converters::from_mapping(get("converters"))?,
-            indent: string("indent", "  ")?,
+            // Only `jsonnet.Renderer.indent` may be null, meaning no indent.
+            indent: match get("indent") {
+                Some(Value::Null) if kind == RendererKind::Jsonnet => String::new(),
+                _ => string("indent", "  ")?,
+            },
             omit_null_properties: boolean("omitNullProperties", kind != RendererKind::Pcf)?,
             yaml_mode,
             yaml_indent_width,
             yaml_is_stream: boolean("isStream", false)?,
             restrict_charset: boolean("restrictCharset", false)?,
             use_custom_string_delimiters: boolean("useCustomStringDelimiters", false)?,
+            xml_version,
+            xml_root_name: string("rootElementName", "root")?,
+            xml_root_attributes: match get("rootElementAttributes") {
+                Some(Value::Object(map, _)) => Some((**map).clone()),
+                _ => None,
+            },
         })
     }
 
@@ -681,6 +756,18 @@ impl Settings {
             RendererKind::Properties => {
                 properties::Properties::new(walk, self.restrict_charset).render(value, document)
             }
+            RendererKind::PList => plist::PList::new(walk, &self.indent).render(value, document),
+            RendererKind::Jsonnet => {
+                jsonnet::Jsonnet::new(walk, &self.indent).render(value, document)
+            }
+            RendererKind::Xml => xml::Xml::new(
+                walk,
+                &self.indent,
+                &self.xml_version,
+                &self.xml_root_name,
+                self.xml_root_attributes.clone(),
+            )
+            .render(value, document),
         }
     }
 }
@@ -760,6 +847,11 @@ pub(crate) trait StringRenderer<'a> {
     fn visit_float(&mut self, value: f64) -> Result<()>;
     fn visit_string(&mut self, value: &str) -> Result<()>;
     fn visit_render_directive(&mut self, text: &str) -> Result<()>;
+    /// Render a typed object the format treats specially (such as
+    /// `xml.Comment`), returning whether it did.
+    fn visit_typed(&mut self, _value: &Value) -> Result<bool> {
+        Ok(false)
+    }
     /// Durations, data sizes, regexes and functions, which these renderers
     /// cannot render.
     fn visit_other(&mut self, value: &Value, kind: Kind) -> Result<()> {
@@ -795,6 +887,12 @@ pub(crate) trait StringRenderer<'a> {
 
     fn visit(&mut self, value: &Value) -> Result<()> {
         let kind = self.walk().kind(value);
+        if kind == Kind::Typed
+            && typed_class_is(value, "pkl:xml", "CommentClass")
+            && matches!(value, Value::Object(map, _) if map.get("text").and_then(Value::as_str).is_some_and(|text| text.contains("--")))
+        {
+            return Err(Error::Eval("XML comments must not contain `--`.".into()));
+        }
         match (kind, value) {
             (Kind::Null, _) => self.visit_null(),
             (Kind::Boolean, Value::Bool(b)) => self.visit_bool(*b),
@@ -805,6 +903,7 @@ pub(crate) trait StringRenderer<'a> {
                 self.visit_render_directive(&render_directive_text(value)?)
             }
             (Kind::Listing, Value::List(items)) => self.visit_listing(items),
+            (Kind::Typed, _) if self.visit_typed(value)? => Ok(()),
             (kind, Value::Object(map, source)) if kind.is_object() => {
                 self.visit_object(kind, map, source.as_deref())
             }
@@ -1116,17 +1215,26 @@ impl JsonValue<'_> {
         }
     }
 
+    /// The storage representation of a converted entry key.
+    fn entry_storage_key(value: &Value) -> Arc<str> {
+        match value {
+            Value::String(value) => value.clone(),
+            Value::Object(_, _) | Value::List(_) => object_key(value),
+            value => crate::value::mapping_storage_key(value)
+                .unwrap_or_else(|| display_value(value).into()),
+        }
+    }
+
     /// The key an entry key converts to, or `None` if it is unchanged.
     fn convert_entry_key(&mut self, key: &Arc<str>) -> Result<Option<Arc<str>>> {
-        let value = Value::String(key.clone());
-        let Some(function) = self.converters.find(&value, Kind::String, &[]) else {
+        let value = key_value(key);
+        let kind = kind_of(&value);
+        let Some(function) = self.converters.find(&value, kind, &[]) else {
             return Ok(None);
         };
-        Ok(match self.invoke.invoke(function, value)? {
-            Value::String(new) if new == *key => None,
-            Value::String(new) => Some(new),
-            other => Some(object_key(&other)),
-        })
+        let converted = self.invoke.invoke(function, value)?;
+        let converted = Self::entry_storage_key(&converted);
+        Ok((converted != *key).then_some(converted))
     }
 
     /// Convert `member` and everything under it, or `None` if nothing
@@ -1182,26 +1290,28 @@ impl JsonValue<'_> {
                 Ok(changed.map(|changed| Value::List(ListValue::new(items.kind(), changed))))
             }
             (kind, Value::Object(map, source)) if kind.is_object() => {
-                // Entry keys (strings) go through the `String` converter, as
-                // the renderers' keys do.
-                let converts_keys = self.converters.class("String").is_some();
+                // Entry keys are converted with an empty path before their
+                // values. This includes typed keys stored with an internal
+                // mapping-key prefix.
+                let converts_keys = !self.converters.is_empty();
                 let members = (self.track_path || converts_keys)
                     .then(|| Members::new(kind, source.as_deref()));
                 let mut changed: Option<ObjectMap> = None;
                 for (index, (key, member)) in map.iter().enumerate() {
                     let member_kind = members.as_ref().map(|members| members.kind_of(key));
-                    let new_key = if converts_keys
-                        && member_kind == Some(MemberKind::Entry)
-                        && !is_non_string_key(key)
-                    {
+                    let new_key = if converts_keys && member_kind == Some(MemberKind::Entry) {
                         self.convert_entry_key(key)?
                     } else {
                         None
                     };
                     if self.track_path {
                         let key = new_key.clone().unwrap_or_else(|| key.clone());
+                        let key_value = key_value(&key);
                         self.path.push(match member_kind {
-                            Some(MemberKind::Entry) => PathPart::Entry(key),
+                            Some(MemberKind::Entry) => match key_value {
+                                Value::String(key) => PathPart::Entry(key),
+                                key => PathPart::Key(key),
+                            },
                             _ => PathPart::Property(key),
                         });
                     }
@@ -1239,6 +1349,12 @@ impl JsonValue<'_> {
 
     #[cfg(feature = "native-io")]
     fn value(&mut self, value: &Value, kind: Kind) -> Result<serde_json::Value> {
+        if kind == Kind::Typed
+            && typed_class_is(value, "pkl:xml", "CommentClass")
+            && matches!(value, Value::Object(map, _) if map.get("text").and_then(Value::as_str).is_some_and(|text| text.contains("--")))
+        {
+            return Err(Error::Eval("XML comments must not contain `--`.".into()));
+        }
         Ok(match (kind, value) {
             (Kind::Null, _) => serde_json::Value::Null,
             (_, Value::Bool(b)) => serde_json::Value::Bool(*b),

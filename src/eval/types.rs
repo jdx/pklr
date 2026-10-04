@@ -600,6 +600,12 @@ pub(super) fn value_type_name(v: &Value) -> &'static str {
 }
 
 pub(super) fn value_to_key(v: &Value) -> Result<Arc<str>> {
+    // Render directives need their text-preserving representation for
+    // renderer dispatch. Other compound keys keep main's typed storage so
+    // List kind and class identity remain distinct.
+    if super::render::kind_of(v) == super::render::Kind::RenderDirective {
+        return Ok(super::render::object_key(v));
+    }
     if let Some(key) = crate::value::mapping_storage_key(v) {
         return Ok(key);
     }

@@ -49,6 +49,13 @@ class YamlRenderer {
   convertPropertyTransformers = new Mapping {}
 }
 
+class PListRenderer {
+  extension = "plist"
+  indent: String = "  "
+  converters = new Mapping {}
+  convertPropertyTransformers = new Mapping {}
+}
+
 class PropertiesRenderer {
   extension = "properties"
   omitNullProperties: Boolean = true
@@ -66,6 +73,7 @@ pub(super) const BUILTIN_CLASS_NAMES: &[&str] = &[
     "JsonRenderer",
     "YamlRenderer",
     "PropertiesRenderer",
+    "PListRenderer",
 ];
 
 /// A module that the top-level module amends or extends, for evaluating its
@@ -96,6 +104,51 @@ fn lexical_names(module: &Module) -> Vec<String> {
     });
     imports.chain(members).collect()
 }
+
+/// `pkl:jsonnet`, as Pkl source. pklr keeps functions and classes in one
+/// namespace, so the classes its functions build are named `...Class`.
+const JSONNET_MODULE: &str = r#"
+function ImportStr(_path: String) = new ImportStrClass { path = _path }
+
+function ExtVar(_name: String) = new ExtVarClass { name = _name }
+
+class Renderer {
+  extension = "jsonnet"
+  indent: String? = "  "
+  omitNullProperties: Boolean = true
+  converters = new Mapping {}
+  convertPropertyTransformers = new Mapping {}
+}
+
+class ImportStrClass { path: String }
+class ExtVarClass { name: String }
+"#;
+
+/// `pkl:xml`, as Pkl source.
+const XML_MODULE: &str = r#"
+class Renderer {
+  extension = "xml"
+  indent: String = "  "
+  xmlVersion: String = "1.0"
+  rootElementName: String = "root"
+  rootElementAttributes = new Mapping {}
+  converters = new Mapping {}
+  convertPropertyTransformers = new Mapping {}
+}
+
+function Element(_name: String): Dynamic = new Dynamic {
+  _isXmlElement = true
+  name = _name
+  attributes = new Mapping {}
+  isBlockFormat = true
+}
+function Inline(_value) = new InlineClass { value = _value }
+class InlineClass { value: Any }
+function Comment(_text: String) = new CommentClass { text = _text }
+class CommentClass { text: String; isBlockFormat: Boolean = true }
+function CData(_text: String) = new CDataClass { text = _text }
+class CDataClass { text: String }
+"#;
 
 /// Calls converter functions through the evaluator, at the call depth of
 /// the rendering that runs them.
@@ -133,6 +186,23 @@ impl Evaluator {
         let template = self.eval_class_def(name, class_mods, None, body, &scope, 0)?;
         self.builtin_classes.insert(name, template.clone());
         Ok(Some(template))
+    }
+
+    /// The value of the standard library module `pkl:name`.
+    pub(super) fn stdlib_module(&mut self, name: &str, depth: usize) -> Result<Value> {
+        let (key, source) = match name {
+            "jsonnet" => ("pkl:jsonnet", JSONNET_MODULE),
+            "xml" => ("pkl:xml", XML_MODULE),
+            _ => return Ok(super::stdlib_module(name)),
+        };
+        if let Some(module) = self.builtin_classes.get(key) {
+            return Ok(module.clone());
+        }
+        let tokens = lexer::lex_named(source, key)?;
+        let module = parser::parse_named(&tokens, source, key)?;
+        let value = self.eval_module_with_scope(&module, Path::new(key), depth + 1, None, None)?;
+        self.builtin_classes.insert(key, value.clone());
+        Ok(value)
     }
 
     /// The class a mapping key expression such as `[String]` or
