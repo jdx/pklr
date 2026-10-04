@@ -2651,8 +2651,10 @@ impl Evaluator {
         // minimal ObjectSource carrying just the deprecation map so field
         // access can warn lazily. Modules without @Deprecated keep `None`
         // source to avoid changing amend behavior in the common case.
+        // An abstract module also keeps a source, so `new` can reject it.
         let deprecated = collect_deprecated(&module.body);
-        let source = if deprecated.is_empty() && poisoned_members.is_empty() {
+        let is_abstract = module_is_abstract(module);
+        let source = if deprecated.is_empty() && poisoned_members.is_empty() && !is_abstract {
             None
         } else {
             Some(Arc::new(ObjectSource {
@@ -2660,7 +2662,7 @@ impl Evaluator {
                 captured: SourceScope::default(),
                 body_members: HashSet::default(),
                 is_open: true,
-                is_abstract: false,
+                is_abstract,
                 type_name: None,
                 type_identity: None,
                 parent_type_names: Vec::new(),
@@ -6541,6 +6543,10 @@ fn check_instantiable(scope: &Scope, type_name: Option<&str>, class: Option<&Val
         return Ok(());
     };
     match class {
+        Some(Value::Object(_, Some(source))) if source.is_abstract => Err(Error::Eval(format!(
+            "Cannot instantiate abstract class `{}`.",
+            qualified_class_name(source.type_identity.as_deref(), type_name)
+        ))),
         // A class is bound under its own name, or under a type alias of it.
         // Any other binding of an object (`local Foo2 = Foo`) is a value.
         Some(Value::Object(_, Some(source)))
@@ -6552,10 +6558,6 @@ fn check_instantiable(scope: &Scope, type_name: Option<&str>, class: Option<&Val
                 "Expected `{type_name}` to be a type, but it is not."
             )))
         }
-        Some(Value::Object(_, Some(source))) if source.is_abstract => Err(Error::Eval(format!(
-            "Cannot instantiate abstract class `{}`.",
-            qualified_class_name(source.type_identity.as_deref(), type_name)
-        ))),
         // Built-ins are bound to a marker string of their own name.
         None | Some(Value::String(_)) if EXTERNAL_CLASSES.contains(&type_name) => Err(Error::Eval(
             format!("Cannot instantiate, or amend an instance of, external class `{type_name}`."),

@@ -3496,3 +3496,32 @@ fn module_min_pkl_version_is_checked() {
         );
     }
 }
+
+#[test]
+fn abstract_module_cannot_be_instantiated() {
+    let temp = TestTempDir::new("pklr_test_abstract_module_new");
+    let dir = temp.path();
+    std::fs::write(dir.join("modB.pkl"), "abstract module modB\nx = 1\n").unwrap();
+    std::fs::write(dir.join("modA.pkl"), "x = 1\n").unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"modB.pkl\"\ny = new modB {}\n",
+    )
+    .unwrap();
+    let err = pklr::eval_to_json(&dir.join("main.pkl"))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("Cannot instantiate abstract class `modB`."),
+        "{err}"
+    );
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"modA.pkl\"\ny = new modA { x = 2 }\n",
+    )
+    .unwrap();
+    assert_eq!(
+        pklr::eval_to_json(&dir.join("main.pkl")).unwrap()["y"]["x"],
+        2
+    );
+}
