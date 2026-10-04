@@ -50,17 +50,19 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # The baseline below is a commit on the base branch.
+          # The baseline below is the merge commit's base-branch parent.
           fetch-depth: 0
           persist-credentials: false
       # Compares with the base branch rather than the last release, so a pull
       # request is judged on its own changes and not on breaking changes that
-      # already landed on main ahead of a release.
+      # already landed on main ahead of a release. The checkout is the
+      # synthetic merge commit, and its first parent is the base it was merged
+      # onto; the event's base.sha can be older than that.
       - name: Check for breaking API changes
         if: github.event_name == 'pull_request' && !contains(github.event.pull_request.title, '!:')
         uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2
         with:
-          baseline-rev: ${{ github.event.pull_request.base.sha }}
+          baseline-rev: HEAD^1
   final:
     needs: [test, msrv, semver]
     runs-on: ubuntu-latest
