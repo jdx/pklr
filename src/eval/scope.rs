@@ -339,13 +339,32 @@ pub(super) fn poisoned_member(scope: &Scope, name: &str) -> Option<String> {
     let Some(mut value) = scope.get(root) else {
         return scope.poison_of(root).cloned();
     };
-    for part in parts {
+    // Inside the defining module, `module` (and `this` while it is the module
+    // object) is a snapshot of the module's members. A member that failed to
+    // evaluate is absent from it but poisoned in the module scope.
+    let names_current_module = root == "module"
+        || (root == "this"
+            && matches!(
+                (value, scope.get("module")),
+                (Value::Object(this, _), Some(Value::Object(module, _))) if Arc::ptr_eq(this, module)
+            ));
+    for (index, part) in parts.enumerate() {
         let Value::Object(map, source) = value else {
             return None;
         };
         match map.get(part) {
             Some(member) => value = member,
-            None => return source.as_ref()?.poisoned_members.get(part).cloned(),
+            None => {
+                if let Some(message) = source
+                    .as_ref()
+                    .and_then(|source| source.poisoned_members.get(part))
+                {
+                    return Some(message.clone());
+                }
+                return (index == 0 && names_current_module)
+                    .then(|| scope.poison_of(part).cloned())
+                    .flatten();
+            }
         }
     }
     None

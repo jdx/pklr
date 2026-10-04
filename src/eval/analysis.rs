@@ -540,7 +540,17 @@ pub(super) fn collect_sibling_field_refs_expr(
             collect_sibling_field_refs_expr(left, refs, include_this);
             collect_sibling_field_refs_expr(right, refs, include_this);
         }
-        Expr::New(_, entries, _) | Expr::InferredNew(_, entries) | Expr::ObjectBody(entries) => {
+        Expr::New(type_name, entries, _) => {
+            // `new module.C {}` reads the module member `C`.
+            if let Some((root, rest)) = type_name.as_deref().and_then(|name| name.split_once('.'))
+                && (root == "module" || (include_this && root == "this"))
+            {
+                let member = rest.split('.').next().unwrap_or(rest);
+                refs.insert(member.to_string());
+            }
+            collect_sibling_field_refs_entries(entries, refs);
+        }
+        Expr::InferredNew(_, entries) | Expr::ObjectBody(entries) => {
             collect_sibling_field_refs_entries(entries, refs);
         }
         Expr::Call(callee, args) => {
@@ -614,19 +624,33 @@ pub(super) fn is_module_sibling_ref(expr: &Expr, include_this: bool) -> bool {
 /// (a subclass, a type alias naming it, a local, or a module function
 /// building an instance).
 pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<String> {
+    // A member qualified through the module object (`module.C`, or `this.C`
+    // where `this` is the module) is a reference to `C` like a bare `C`.
+    fn qualified_member(name: &str, include_this: bool) -> Option<&str> {
+        let (root, rest) = name.split_once('.')?;
+        (root == "module" || (include_this && root == "this"))
+            .then(|| rest.split('.').next().unwrap_or(rest))
+    }
     let members: Vec<(&String, bool, HashSet<String>)> = entries
         .iter()
         .filter_map(|entry| match entry {
             Entry::ClassDef(name, _, parent, body) => {
                 let mut refs = referenced_roots(body);
+                // Inside a class body `this` is the instance, so only
+                // `module.C` names a module member.
+                collect_sibling_field_refs_entries(body, &mut refs);
                 if let Some(parent) = parent {
                     collect_name_root(parent, &mut refs, &HashSet::new());
+                    refs.extend(qualified_member(parent, false).map(str::to_string));
                 }
                 Some((name, true, refs))
             }
             Entry::TypeAlias(name, ty) => {
                 let mut refs = HashSet::new();
                 collect_type_refs(ty, &mut refs, &HashSet::new());
+                if let Some(target) = type_alias_target(ty) {
+                    refs.extend(qualified_member(target, true).map(str::to_string));
+                }
                 Some((name, false, refs))
             }
             // Locals, and module functions (a non-local property whose value
@@ -636,8 +660,11 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
                 if has_modifier(&prop.modifiers, Modifier::Local)
                     || matches!(prop.value, Some(Expr::Lambda(..))) =>
             {
+                let value = prop.value.as_ref()?;
                 let mut refs = HashSet::new();
-                collect_expr_refs(prop.value.as_ref()?, &mut refs, &HashSet::new());
+                collect_expr_refs(value, &mut refs, &HashSet::new());
+                // At module level `this` is the module object too.
+                collect_sibling_field_refs_expr(value, &mut refs, true);
                 Some((&prop.name, false, refs))
             }
             _ => None,

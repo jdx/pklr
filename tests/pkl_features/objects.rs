@@ -3410,6 +3410,31 @@ viaThis = this.make()
 }
 
 #[test]
+fn failed_class_reports_error_through_module_and_this() {
+    for src in [
+        "class C { v = module.missing }\nresult = new module.C {}\n",
+        "class C { v = module.missing }\nresult = new this.C {}\n",
+        "class C { v = module.missing }\nclass D extends module.C { w = 1 }\nresult = new D {}\n",
+    ] {
+        let err = eval_fails(src);
+        assert!(err.contains("missing"), "{src}: {err}");
+    }
+}
+
+#[test]
+fn qualified_class_refs_are_refreshed_when_class_recovers() {
+    for src in [
+        "class C { v = module.expected }\nfunction make() = new module.C {}\nexpected = \"b\"\nresult = make()\n",
+        "class C { v = module.expected }\nfunction make() = new this.C {}\nexpected = \"b\"\nresult = make()\n",
+        "class C { v = module.expected }\nlocal x = module.C\nexpected = \"b\"\nresult = new x {}\n",
+        "class C { v = module.expected }\nlocal x = this.C\nexpected = \"b\"\nresult = new x {}\n",
+    ] {
+        let val = eval(src);
+        assert_eq!(val["result"], serde_json::json!({"v": "b"}), "{src}");
+    }
+}
+
+#[test]
 fn module_function_building_class_reading_module_is_refreshed() {
     let val = eval(
         r#"
