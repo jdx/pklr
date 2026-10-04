@@ -1533,6 +1533,26 @@ obj = (base) {
 }
 
 #[test]
+fn amendment_typed_local_is_checked_when_read() {
+    let message = eval_fails(
+        r#"
+typealias IsB = String(this == "b")
+base {}
+obj = (base) { local bad: IsB = "x"; out = bad }
+"#,
+    );
+    assert!(message.contains("property 'bad' expected IsB"), "{message}");
+    let json = eval(
+        r#"
+typealias IsB = String(this == "b")
+base {}
+obj = (base) { local bad: IsB = "x"; out = if (false) bad else 1 }
+"#,
+    );
+    assert_eq!(json["obj"]["out"], 1);
+}
+
+#[test]
 fn amendment_generator_declared_property_is_checked() {
     let message = eval_fails(
         r#"
