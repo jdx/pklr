@@ -18,7 +18,15 @@ pub(crate) fn format_float(f: f64) -> String {
         return if f.is_sign_negative() { "-0.0" } else { "0.0" }.into();
     }
     // `{:e}` prints the shortest round-trip digits, e.g. `1.2345e7` or `5e-324`.
-    let sci = format!("{:e}", f.abs());
+    // `{:e}` finds how many digits the shortest round-trip form needs, but
+    // when two such forms are equally close it rounds up, where Java takes
+    // the even one; rounding the exact value to that many digits (`{:.Ne}`
+    // rounds half to even) picks Java's.
+    let shortest = format!("{:e}", f.abs());
+    let digit_count = shortest
+        .split_once('e')
+        .map_or(1, |(m, _)| m.chars().filter(char::is_ascii_digit).count());
+    let sci = format!("{:.*e}", digit_count - 1, f.abs());
     let (mantissa, exponent) = sci.split_once('e').expect("`{:e}` has an exponent");
     let exponent: i32 = exponent.parse().expect("`{:e}` exponent is an integer");
     let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
@@ -337,6 +345,8 @@ mod tests {
             (9999999.0, "9999999.0"),
             (-1.5, "-1.5"),
             (f64::MAX, "1.7976931348623157E308"),
+            // Two shortest forms are equally close; Java takes the even one.
+            (88_486_131_246_206.12, "8.848613124620612E13"),
         ] {
             assert_eq!(format_float(f), s, "{f}");
         }

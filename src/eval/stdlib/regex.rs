@@ -29,14 +29,38 @@ pub(crate) fn compile(pattern: &str) -> Result<Regex> {
 }
 
 /// Java only accepts group names made of ASCII letters and digits, starting
-/// with a letter; the Rust engine also accepts `_`.
+/// with a letter; the Rust engine also accepts `_`. Skips escapes, `\Q...\E`
+/// quotes, character classes and, in `(?x)` mode, `#` comments.
 fn check_group_names(pattern: &str) -> std::result::Result<(), String> {
     let bytes = pattern.as_bytes();
+    let extended = has_extended_flag(pattern);
+    let mut class_depth = 0usize;
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
+            b'\\' if bytes.get(i + 1) == Some(&b'Q') => {
+                i = pattern[i + 2..]
+                    .find("\\E")
+                    .map_or(bytes.len(), |end| i + 2 + end + 2);
+                continue;
+            }
             b'\\' => i += 1,
-            b'(' if bytes[i + 1..].starts_with(b"?<")
+            b'[' => {
+                class_depth += 1;
+                // A `]` right after `[` or `[^` is a literal.
+                if bytes.get(i + 1) == Some(&b'^') {
+                    i += 1;
+                }
+                if bytes.get(i + 1) == Some(&b']') {
+                    i += 1;
+                }
+            }
+            b']' if class_depth > 0 => class_depth -= 1,
+            b'#' if extended && class_depth == 0 => {
+                i = pattern[i..].find('\n').map_or(bytes.len(), |end| i + end);
+            }
+            b'(' if class_depth == 0
+                && bytes[i + 1..].starts_with(b"?<")
                 && !matches!(bytes.get(i + 3), Some(b'=' | b'!')) =>
             {
                 let name_start = i + 3;
@@ -61,6 +85,17 @@ fn check_group_names(pattern: &str) -> std::result::Result<(), String> {
         i += 1;
     }
     Ok(())
+}
+
+/// Whether `pattern` turns on extended (`x`) mode with an inline flag such as
+/// `(?x)` or `(?ix:`.
+fn has_extended_flag(pattern: &str) -> bool {
+    pattern.match_indices("(?").any(|(i, _)| {
+        pattern[i + 2..]
+            .chars()
+            .take_while(|c| c.is_ascii_alphabetic())
+            .any(|c| c == 'x')
+    })
 }
 
 /// A regex matching `literal` verbatim.
@@ -188,9 +223,24 @@ fn groups_of(caps: &fancy_regex::Captures<'_>) -> Groups {
         .collect()
 }
 
+/// What to put after a pattern being wrapped in a group: in extended mode a
+/// trailing `#` comment would swallow the closing parenthesis, so end it
+/// with a newline, which extended mode ignores.
+fn comment_end(regex: &Regex) -> &'static str {
+    if has_extended_flag(regex.pattern()) {
+        "\n"
+    } else {
+        ""
+    }
+}
+
 /// Java's `Matcher.matches`: a match of the whole of `text`.
 pub(super) fn matches_entire(regex: &Regex, text: &str) -> Result<Option<Groups>> {
-    let anchored = compile(&format!(r"\A(?:{})\z", regex.pattern()))?;
+    let anchored = compile(&format!(
+        r"\A(?:{}{})\z",
+        regex.pattern(),
+        comment_end(regex)
+    ))?;
     Ok(anchored
         .compiled()
         .captures(text)
@@ -200,7 +250,7 @@ pub(super) fn matches_entire(regex: &Regex, text: &str) -> Result<Option<Groups>
 
 /// Java's `Matcher.lookingAt`: a match starting at the beginning of `text`.
 pub(super) fn looking_at(regex: &Regex, text: &str) -> Result<bool> {
-    let anchored = compile(&format!(r"\A(?:{})", regex.pattern()))?;
+    let anchored = compile(&format!(r"\A(?:{}{})", regex.pattern(), comment_end(regex)))?;
     anchored.compiled().is_match(text).map_err(engine_error)
 }
 
@@ -381,6 +431,23 @@ fn group_match_value(text: &str, (start, end): (usize, usize), groups: Option<&G
     typed_object("RegexMatch", map)
 }
 
+/// Whether `regex` matches the empty string between the two UTF-16 code
+/// units of the character `c` at byte `offset`. The units are stood in for by
+/// two private-use characters, which Java's classes treat the same way as a
+/// lone surrogate (neither a word character nor whitespace).
+fn matches_empty_mid_char(regex: &Regex, text: &str, offset: usize, c: char) -> Result<bool> {
+    const STAND_IN: char = '\u{E000}';
+    let mut probe = String::with_capacity(text.len() + 2);
+    probe.push_str(&text[..offset]);
+    probe.push(STAND_IN);
+    let mid = probe.len();
+    probe.push(STAND_IN);
+    probe.push_str(&text[offset + c.len_utf8()..]);
+    Ok(regex
+        .find_at(&probe, mid)?
+        .is_some_and(|m| m.start() == mid && m.end() == mid))
+}
+
 /// The empty `RegexMatch` Java reports between the two UTF-16 code units of
 /// a character, at code unit `position`, for a regex with `groups`.
 fn mid_surrogate_empty_match(position: i64, groups: &Groups) -> Value {
@@ -441,10 +508,9 @@ impl Evaluator {
                     // a Rust string can slice, so report it directly.
                     let (start, end) = groups[0].expect("group 0 always matches");
                     if start == end
-                        && text[end..]
-                            .chars()
-                            .next()
-                            .is_some_and(|c| c.len_utf16() == 2)
+                        && let Some(c) = text[end..].chars().next()
+                        && c.len_utf16() == 2
+                        && matches_empty_mid_char(regex, text, end, c)?
                     {
                         matches.push(mid_surrogate_empty_match(
                             utf16_offset(text, end) + 1,

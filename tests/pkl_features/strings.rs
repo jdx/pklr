@@ -383,3 +383,53 @@ split = "a1b2c3".splitLimit(Regex(#"\d"#), 2)
     assert_eq!(json["last"], "a1b2c#");
     assert_eq!(json["split"], serde_json::json!(["a", "b2c3"]));
 }
+
+#[test]
+fn is_regex_agrees_with_regex_constructor() {
+    let json = eval(
+        r##"
+x = List("[(?<)]", "(?<a_b>x)", "(?x)a # (?<a_b>x)", #"\Q(?<a_b>\E"#).map((s) -> s.isRegex)
+"##,
+    );
+    assert_eq!(json["x"], serde_json::json!([true, false, true, true]));
+}
+
+#[test]
+fn extended_mode_comments_do_not_swallow_anchors() {
+    let json = eval(
+        r##"
+matches = "abc".matches(Regex("(?x)a b c # comment"))
+entire = Regex("(?x)ab # c").matchEntire("ab") != null
+starts = "abx".startsWith(Regex("(?x)ab # c"))
+"##,
+    );
+    assert_eq!(json["matches"], true);
+    assert_eq!(json["entire"], true);
+    assert_eq!(json["starts"], true);
+}
+
+#[test]
+fn only_real_empty_matches_land_mid_character() {
+    let json = eval(
+        r##"
+caret = Regex("^").findMatchesIn("\u{1F600}x").map((m) -> m.start)
+star = Regex("x*").findMatchesIn("\u{1F600}x").map((m) -> m.start)
+"##,
+    );
+    assert_eq!(json["caret"], serde_json::json!([0]));
+    assert_eq!(json["star"], serde_json::json!([0, 1, 2, 3]));
+}
+
+#[test]
+fn to_float_follows_java_parse_double() {
+    let json = eval(
+        r##"
+x = List("++1", "+-1", "0x1p3", "0x1.8p1", " 1.5f ", "NaNf", ".5", "5.", "+_1", "1e+_5")
+  .map((s) -> s.toFloatOrNull())
+"##,
+    );
+    assert_eq!(
+        json["x"],
+        serde_json::json!([null, null, 8.0, 3.0, 1.5, null, 0.5, 5.0, 1.0, 100000.0])
+    );
+}

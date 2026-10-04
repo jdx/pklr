@@ -93,35 +93,160 @@ fn parse_int(s: &str) -> Option<i64> {
 /// Java's `Double.parseDouble` after removing pkl's digit separators.
 fn parse_float(s: &str) -> Option<f64> {
     let s = remove_underscores(s)?;
-    let trimmed = s.trim_matches(|c: char| c <= ' ');
-    let body = trimmed.strip_prefix(['+', '-']).unwrap_or(trimmed);
-    if matches!(body, "NaN" | "Infinity") {
-        let value = if body == "NaN" {
-            f64::NAN
+    java_parse_double(s.trim_matches(|c: char| c <= ' '))
+}
+
+/// Java's `Double.parseDouble` grammar: an optional sign, then `NaN`,
+/// `Infinity`, a decimal or a hexadecimal (`0x1.8p1`) floating-point
+/// literal, which may end in a `f`/`F`/`d`/`D` type suffix.
+fn java_parse_double(s: &str) -> Option<f64> {
+    let (negative, body) = match s.as_bytes().first() {
+        Some(b'-') => (true, &s[1..]),
+        Some(b'+') => (false, &s[1..]),
+        _ => (false, s),
+    };
+    let magnitude = match body {
+        "NaN" => f64::NAN,
+        "Infinity" => f64::INFINITY,
+        _ => {
+            let body = body.strip_suffix(['f', 'F', 'd', 'D']).unwrap_or(body);
+            match body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) {
+                Some(hex) => parse_hex_float(hex)?,
+                None => parse_decimal_float(body)?,
+            }
+        }
+    };
+    Some(if negative { -magnitude } else { magnitude })
+}
+
+/// Digits with an optional fraction (`1`, `1.`, `.5`, `1.5`), then an
+/// optional exponent; no sign.
+fn parse_decimal_float(body: &str) -> Option<f64> {
+    let bytes = body.as_bytes();
+    let mut i = 0;
+    let int_digits = bytes.iter().take_while(|b| b.is_ascii_digit()).count();
+    i += int_digits;
+    let mut frac_digits = 0;
+    if bytes.get(i) == Some(&b'.') {
+        i += 1;
+        frac_digits = bytes[i..].iter().take_while(|b| b.is_ascii_digit()).count();
+        i += frac_digits;
+    }
+    if int_digits + frac_digits == 0 {
+        return None;
+    }
+    if matches!(bytes.get(i), Some(b'e' | b'E')) {
+        i += 1;
+        if matches!(bytes.get(i), Some(b'+' | b'-')) {
+            i += 1;
+        }
+        let exp_digits = bytes[i..].iter().take_while(|b| b.is_ascii_digit()).count();
+        if exp_digits == 0 {
+            return None;
+        }
+        i += exp_digits;
+    }
+    if i != bytes.len() {
+        return None;
+    }
+    body.parse().ok()
+}
+
+/// The part of a hexadecimal floating-point literal after `0x`: hex digits
+/// with an optional fraction, then a required binary exponent `p[+-]digits`.
+fn parse_hex_float(body: &str) -> Option<f64> {
+    let (mantissa, exponent) = body.split_once(['p', 'P'])?;
+    let exponent = exponent.strip_prefix('+').unwrap_or(exponent);
+    let exponent_digits = exponent.strip_prefix('-').unwrap_or(exponent);
+    if exponent_digits.is_empty() || !exponent_digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let (int_part, frac_part) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    if int_part.is_empty() && frac_part.is_empty()
+        || !int_part
+            .bytes()
+            .chain(frac_part.bytes())
+            .all(|b| b.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    // Accumulate the significant hex digits exactly in a u128, tracking the
+    // binary exponent, then let `f64` round once.
+    let mut significand: u128 = 0;
+    let mut binary_exponent: i64 = exponent.parse().unwrap_or(if exponent.starts_with('-') {
+        i64::MIN / 2
+    } else {
+        i64::MAX / 2
+    });
+    for (index, digit) in int_part.bytes().chain(frac_part.bytes()).enumerate() {
+        let value = u128::from((digit as char).to_digit(16).expect("checked hex digit"));
+        let is_fraction = index >= int_part.len();
+        if significand >> 120 == 0 {
+            significand = significand * 16 + value;
+            if is_fraction {
+                binary_exponent = binary_exponent.saturating_sub(4);
+            }
         } else {
-            f64::INFINITY
-        };
-        return Some(if trimmed.starts_with('-') {
-            -value
+            // Digits past u128 precision only matter for rounding; keep a
+            // sticky bit.
+            significand |= u128::from(value != 0);
+            if !is_fraction {
+                binary_exponent = binary_exponent.saturating_add(4);
+            }
+        }
+    }
+    if significand == 0 {
+        return Some(0.0);
+    }
+    // Normalize to 53 significant bits with round-half-even and a sticky bit.
+    let bits = 128 - significand.leading_zeros() as i64;
+    let mut exponent = binary_exponent + bits - 1;
+    if exponent > 1023 {
+        return Some(f64::INFINITY);
+    }
+    // Subnormals keep fewer bits.
+    let precision = if exponent < -1022 {
+        53 - (-1022 - exponent)
+    } else {
+        53
+    };
+    if precision <= 0 {
+        // Rounds to zero or the smallest subnormal.
+        return Some(if precision == 0 && significand > (1u128 << (bits - 1)) {
+            f64::from_bits(1)
         } else {
-            value
+            0.0
         });
     }
-    // Java accepts a trailing type suffix (`1.5f`, `2d`).
-    let body = body.strip_suffix(['f', 'F', 'd', 'D']).unwrap_or(body);
-    if body.starts_with("0x") || body.starts_with("0X") {
-        return None;
+    let shift = bits - precision;
+    let mut kept = if shift > 0 {
+        let kept = significand >> shift;
+        let rest = significand & ((1u128 << shift) - 1);
+        let half = 1u128 << (shift - 1);
+        if rest > half || (rest == half && kept & 1 == 1) {
+            kept + 1
+        } else {
+            kept
+        }
+    } else {
+        significand << -shift
+    };
+    if kept >> precision != 0 {
+        kept >>= 1;
+        exponent += 1;
+        if exponent > 1023 {
+            return Some(f64::INFINITY);
+        }
     }
-    let valid = !body.is_empty()
-        && body
-            .bytes()
-            .all(|b| b.is_ascii_digit() || matches!(b, b'.' | b'e' | b'E' | b'+' | b'-'))
-        && body.bytes().any(|b| b.is_ascii_digit());
-    if !valid {
-        return None;
+    // Scaling by a power of two is exact here; split it so no intermediate
+    // underflows before the final (possibly subnormal) result.
+    let mut scale = exponent - (precision - 1);
+    let mut value = kept as f64;
+    if scale < -1022 {
+        value *= 2f64.powi((scale + 1022) as i32);
+        scale = -1022;
     }
-    let sign = if trimmed.starts_with('-') { "-" } else { "" };
-    format!("{sign}{body}").parse().ok()
+    Some(value * 2f64.powi(scale as i32))
 }
 
 /// Remove `_` digit separators the way pkl's number literals allow them:
@@ -291,7 +416,7 @@ pub(super) fn property(s: &Arc<str>, name: &str) -> Option<Result<Value>> {
         "isNotEmpty" => Value::Bool(!s.is_empty()),
         "isBlank" => Value::Bool(s.chars().all(is_white_space)),
         "isNotBlank" => Value::Bool(!s.chars().all(is_white_space)),
-        "isRegex" => Value::Bool(crate::value::Regex::new(s).is_ok()),
+        "isRegex" => Value::Bool(super::regex::compile(s).is_ok()),
         "isGlobPattern" => Value::Bool(is_glob_pattern(s)),
         "isBase64" => Value::Bool(base64_decode(s).is_ok()),
         "md5" => {
@@ -732,5 +857,22 @@ mod tests {
         assert_eq!(parse_float("123._34"), None);
         assert_eq!(parse_float(".5"), Some(0.5));
         assert_eq!(parse_float("abc"), None);
+        assert_eq!(parse_float("++1"), None);
+        assert_eq!(parse_float("+-1"), None);
+        assert_eq!(parse_float("1e"), None);
+        assert_eq!(parse_float("."), None);
+        assert_eq!(parse_float("NaNf"), None);
+        assert_eq!(parse_float("0x1p3"), Some(8.0));
+        assert_eq!(parse_float("0x1.8p1"), Some(3.0));
+        assert_eq!(parse_float("-0x.8p-1"), Some(-0.25));
+        assert_eq!(parse_float("0x1.fffffffffffffp1023"), Some(f64::MAX));
+        assert_eq!(parse_float("0x1p-1074"), Some(f64::from_bits(1)));
+        assert_eq!(parse_float("0x1p"), None);
+        assert_eq!(parse_float(" 1.5f "), Some(1.5));
+        // pkl drops a separator after a sign or inside NaN, as Java's
+        // parsing of the result then accepts.
+        assert_eq!(parse_float("+_1"), Some(1.0));
+        assert_eq!(parse_float("1e+_5"), Some(1e5));
+        assert!(parse_float("N_aN").unwrap().is_nan());
     }
 }

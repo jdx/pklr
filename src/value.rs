@@ -336,7 +336,7 @@ pub struct Regex {
 impl Regex {
     /// Compile `pattern`, returning the regex engine's message on a syntax error.
     pub fn new(pattern: &str) -> Result<Self, String> {
-        let compiled = fancy_regex::RegexBuilder::new(pattern)
+        let compiled = fancy_regex::RegexBuilder::new(&expand_quotes(pattern))
             .build()
             .map_err(|e| e.to_string())?;
         Ok(Self {
@@ -353,6 +353,42 @@ impl Regex {
     pub(crate) fn compiled(&self) -> &fancy_regex::Regex {
         &self.compiled
     }
+}
+
+/// `pattern` with Java's `\Q...\E` quoted sections replaced by escaped
+/// literals, which the Rust engine has no syntax for.
+fn expand_quotes(pattern: &str) -> std::borrow::Cow<'_, str> {
+    if !pattern.contains("\\Q") {
+        return pattern.into();
+    }
+    let mut out = String::with_capacity(pattern.len());
+    let mut rest = pattern;
+    while let Some(i) = rest.find('\\') {
+        out.push_str(&rest[..i]);
+        let escaped = &rest[i + 1..];
+        match escaped.chars().next() {
+            Some('Q') => {
+                let quoted = &escaped[1..];
+                let (literal, after) = match quoted.find("\\E") {
+                    Some(end) => (&quoted[..end], &quoted[end + 2..]),
+                    None => (quoted, ""),
+                };
+                out.push_str(&fancy_regex::escape(literal));
+                rest = after;
+            }
+            Some(c) => {
+                out.push('\\');
+                out.push(c);
+                rest = &escaped[c.len_utf8()..];
+            }
+            None => {
+                out.push('\\');
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out.into()
 }
 
 impl std::fmt::Debug for Regex {
