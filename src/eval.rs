@@ -114,6 +114,15 @@ pub struct Evaluator {
     /// on the evaluator rather than on scopes, which capture and restore
     /// their bindings without such flags.
     builtin_named_class: bool,
+    /// While an amendment's merged body evaluates: the members deferred
+    /// only because a `for`/`when` of the amendment may amend them, not yet
+    /// produced by one. Any left when the body is done were never rebuilt,
+    /// so the amendment is evaluated again with them checked.
+    unrebuilt_members: Option<FxHashSet<String>>,
+    /// The members a `for`/`when` body about to be evaluated builds
+    /// unchecked (see `TypeChecks::deferred_generator_members`): set just
+    /// before `eval_entries_pending` for that body, and taken by it.
+    generator_deferred: Option<Arc<FxHashSet<String>>>,
 }
 
 /// A declared-type check of a generator-produced property. It runs in the
@@ -313,6 +322,9 @@ struct AmendmentChecks {
     /// objects nested in their values are built unchecked, as that
     /// amendment checks the result.
     amended: FxHashSet<usize>,
+    /// For `for`/`when` entries: the members their bodies write that a later
+    /// entry amends. Only those are deferred, by name.
+    generator_members: FxHashMap<usize, Arc<FxHashSet<String>>>,
 }
 
 impl TypeChecks {
@@ -326,6 +338,17 @@ impl TypeChecks {
 
     /// Whether objects nested in the entry at `entry_index` are built
     /// without checks, because an amendment of it checks the result.
+    /// For the `for`/`when` entry at `entry_index`: the members its bodies
+    /// write whose nested objects are built unchecked (see `defers_nested`).
+    fn deferred_generator_members(&self, entry_index: usize) -> Option<Arc<FxHashSet<String>>> {
+        match self {
+            TypeChecks::Entries(entries) if !entries.generator_members.is_empty() => {
+                entries.generator_members.get(&entry_index).cloned()
+            }
+            _ => None,
+        }
+    }
+
     fn defers_nested(&self, entry_index: usize) -> bool {
         matches!(self, TypeChecks::Entries(entries)
             if !entries.amended.is_empty() && entries.amended.contains(&entry_index))
@@ -556,7 +579,6 @@ fn restore_shadowed(scope: Scope, shadowed: &[ShadowedName], entry_index: usize)
         return scope;
     }
     let mut scope = scope.child();
-    let mut barrier = FxHashSet::default();
     // The earliest declaration's record holds the binding before the body
     // rebound the name at all, so it is applied last.
     for shadow in shadowed
@@ -572,18 +594,9 @@ fn restore_shadowed(scope: Scope, shadowed: &[ShadowedName], entry_index: usize)
             ),
         }
         match &shadow.alias {
-            Some(alias) => {
-                barrier.remove(&shadow.name);
-                scope.set_type_alias(shadow.name.clone(), alias.clone());
-            }
-            None => {
-                Arc::make_mut(&mut scope.type_aliases).shift_remove(shadow.name.as_str());
-                barrier.insert(shadow.name.clone());
-            }
+            Some(alias) => scope.set_type_alias(shadow.name.clone(), alias.clone()),
+            None => scope.hide_type_alias(shadow.name.as_str()),
         }
-    }
-    if !barrier.is_empty() {
-        scope.type_alias_barrier = Some(Arc::new(barrier));
     }
     scope
 }
@@ -631,8 +644,8 @@ impl DeclaredTypes {
         for (name, alias) in &self.aliases {
             scope.set_type_alias(name.clone(), alias.clone());
         }
-        if !self.unaliased.is_empty() {
-            scope.type_alias_barrier = Some(Arc::new(self.unaliased.clone()));
+        for name in &self.unaliased {
+            scope.hide_type_alias(name.as_str());
         }
     }
 }
@@ -944,6 +957,79 @@ fn same_body_local_bindings(
             _ => None,
         })
         .collect()
+}
+
+/// Which entries of an amendment's merged body build their nested objects
+/// unchecked, because a later entry amends them with a body: property
+/// entries by index, and `for`/`when` entries by index with the members
+/// they write that are amended. `(entry, member)` pairs in `never_deferred`
+/// are not deferred. Also returns the deferred pairs only a later
+/// `for`/`when` amends, which may not run.
+#[allow(clippy::type_complexity)]
+fn amendment_deferral(
+    merged: &[Entry],
+    never_deferred: &FxHashSet<(usize, String)>,
+) -> (
+    (FxHashSet<usize>, FxHashMap<usize, Arc<FxHashSet<String>>>),
+    Vec<(usize, String)>,
+) {
+    // Most amendments amend no member with a body at all.
+    if !merged.iter().any(|entry| match entry {
+        Entry::Property(prop) => prop.body.is_some() && prop.value.is_none(),
+        Entry::ForGenerator(_) | Entry::WhenGenerator(_) => true,
+        _ => false,
+    }) {
+        return Default::default();
+    }
+    let mut amended = FxHashSet::default();
+    let mut generator_members: FxHashMap<usize, FxHashSet<String>> = FxHashMap::default();
+    let mut uncertain = Vec::new();
+    // Names a later entry amends directly (always runs), or only inside a
+    // `for`/`when`.
+    let mut direct_later: FxHashSet<&str> = FxHashSet::default();
+    let mut generated_later: FxHashSet<&str> = FxHashSet::default();
+    let mut writes = Vec::new();
+    for (index, entry) in merged.iter().enumerate().rev() {
+        writes.clear();
+        generator_property_writes(std::slice::from_ref(entry), &mut writes);
+        let is_generator = matches!(entry, Entry::ForGenerator(_) | Entry::WhenGenerator(_));
+        if !direct_later.is_empty() || !generated_later.is_empty() {
+            for (name, _) in &writes {
+                let direct = direct_later.contains(name);
+                if !direct && !generated_later.contains(name)
+                    || !never_deferred.is_empty()
+                        && never_deferred.contains(&(index, name.to_string()))
+                {
+                    continue;
+                }
+                if !direct {
+                    uncertain.push((index, name.to_string()));
+                }
+                if is_generator {
+                    generator_members
+                        .entry(index)
+                        .or_default()
+                        .insert(name.to_string());
+                } else {
+                    amended.insert(index);
+                }
+            }
+        }
+        for (name, amends) in &writes {
+            if *amends {
+                if is_generator {
+                    generated_later.insert(name);
+                } else {
+                    direct_later.insert(name);
+                }
+            }
+        }
+    }
+    let generator_members = generator_members
+        .into_iter()
+        .map(|(index, names)| (index, Arc::new(names)))
+        .collect();
+    ((amended, generator_members), uncertain)
 }
 
 /// The non-local properties `entries` write, including those their
@@ -1321,6 +1407,8 @@ impl Default for Evaluator {
             warned_deprecated: std::collections::HashSet::default(),
             retry_passes: 0,
             builtin_named_class: false,
+            unrebuilt_members: None,
+            generator_deferred: None,
         }
     }
 }
@@ -1581,6 +1669,8 @@ impl Evaluator {
             warned_deprecated: std::collections::HashSet::default(),
             retry_passes: 0,
             builtin_named_class: false,
+            unrebuilt_members: None,
+            generator_deferred: None,
         }
     }
 
@@ -4078,12 +4168,15 @@ impl Evaluator {
         // body starts with what its enclosing object poisoned: locals whose
         // check was handed up to it.
         let mut poisoned_locals = inherited_poison.clone();
+        // Members a generator body builds unchecked, handed to each pass.
+        let deferred = self.generator_deferred.take();
         loop {
             let generator_mark = pending.len();
             let retrying = !poisoned_locals.is_empty();
             if retrying {
                 self.retry_passes += 1;
             }
+            self.generator_deferred = deferred.clone();
             let result = self.eval_body_entries(
                 entries,
                 scope,
@@ -4161,6 +4254,7 @@ impl Evaluator {
         } else {
             Vec::new()
         };
+        let inherited_deferred = self.generator_deferred.take();
         let mut child_scope = scope.child();
         let entry_owners = entry_scope_owners(entries, entry_scopes, inherited_source);
         let own_body = own_body_names(entries, entry_scopes, inherited_source);
@@ -4470,7 +4564,11 @@ impl Evaluator {
                             &shadowed,
                             entry_index,
                         );
-                        if checks.defers_nested(entry_index) {
+                        if checks.defers_nested(entry_index)
+                            || inherited_deferred
+                                .as_ref()
+                                .is_some_and(|names| names.contains(prop.name.as_str()))
+                        {
                             active_scope.defining_class = true;
                         }
                         let value = match self.eval_property(prop, &active_scope, depth) {
@@ -4655,7 +4753,7 @@ impl Evaluator {
                         }
                     }
                     Entry::ForGenerator(fgen) => {
-                        let mut active_scope = restore_shadowed(
+                        let active_scope = restore_shadowed(
                             scope_for_object_entry(
                                 entry_index,
                                 &child_scope,
@@ -4666,11 +4764,11 @@ impl Evaluator {
                             &shadowed,
                             entry_index,
                         );
-                        // Objects it writes that a later entry amends are checked by
+                        // Members it writes that a later entry amends are checked by
                         // that amendment (see `TypeChecks::defers_nested`).
-                        if checks.defers_nested(entry_index) {
-                            active_scope.defining_class = true;
-                        }
+                        let deferred = checks
+                            .deferred_generator_members(entry_index)
+                            .or_else(|| inherited_deferred.clone());
                         let collection = self.eval_expr(&fgen.collection, &active_scope, depth)?;
                         let items = collection_to_items(collection);
                         let body_typed = generator_body_has_typed_entries(&fgen.body);
@@ -4687,6 +4785,7 @@ impl Evaluator {
                                     names.extend(fgen.key_var.iter().cloned());
                                     names
                                 });
+                            self.generator_deferred = deferred.clone();
                             let body_val = self.eval_entries_pending(
                                 &fgen.body,
                                 &iter_scope,
@@ -4698,6 +4797,7 @@ impl Evaluator {
                                 poisoned_locals,
                             )?;
                             if let Value::Object(m, source) = body_val {
+                                self.note_rebuilt_members(&checks, &m);
                                 copy_member_failures(&mut copied_failures, source.as_deref());
                                 entry_owners.release_this(&this_aliases);
                                 props_extend(
@@ -4712,7 +4812,7 @@ impl Evaluator {
                         }
                     }
                     Entry::WhenGenerator(wgen) => {
-                        let mut active_scope = restore_shadowed(
+                        let active_scope = restore_shadowed(
                             scope_for_object_entry(
                                 entry_index,
                                 &child_scope,
@@ -4723,13 +4823,14 @@ impl Evaluator {
                             &shadowed,
                             entry_index,
                         );
-                        // Objects it writes that a later entry amends are checked by
+                        // Members it writes that a later entry amends are checked by
                         // that amendment (see `TypeChecks::defers_nested`).
-                        if checks.defers_nested(entry_index) {
-                            active_scope.defining_class = true;
-                        }
+                        let deferred = checks
+                            .deferred_generator_members(entry_index)
+                            .or_else(|| inherited_deferred.clone());
                         let cond = self.eval_expr(&wgen.condition, &active_scope, depth)?;
                         if is_truthy(&cond) {
+                            self.generator_deferred = deferred.clone();
                             let body_val = self.eval_entries_pending(
                                 &wgen.body,
                                 &active_scope,
@@ -4746,6 +4847,7 @@ impl Evaluator {
                                 poisoned_locals,
                             )?;
                             if let Value::Object(m, source) = body_val {
+                                self.note_rebuilt_members(&checks, &m);
                                 copy_member_failures(&mut copied_failures, source.as_deref());
                                 entry_owners.release_this(&this_aliases);
                                 props_extend(
@@ -4758,6 +4860,7 @@ impl Evaluator {
                                 refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                             }
                         } else if let Some(else_body) = &wgen.else_body {
+                            self.generator_deferred = deferred.clone();
                             let else_val = self.eval_entries_pending(
                                 else_body,
                                 &active_scope,
@@ -4774,6 +4877,7 @@ impl Evaluator {
                                 poisoned_locals,
                             )?;
                             if let Value::Object(m, source) = else_val {
+                                self.note_rebuilt_members(&checks, &m);
                                 copy_member_failures(&mut copied_failures, source.as_deref());
                                 entry_owners.release_this(&this_aliases);
                                 props_extend(
@@ -5382,6 +5486,15 @@ impl Evaluator {
                 (Ok(val), false)
             }
         })
+    }
+
+    /// After a `for`/`when` of an amendment's merged body (`checks` is
+    /// `Entries`) produced `members`: those are rebuilt, so deferring their
+    /// defaults to it was safe (see `unrebuilt_members`).
+    fn note_rebuilt_members(&mut self, checks: &TypeChecks, members: &ObjectMap) {
+        if let (TypeChecks::Entries(_), Some(unrebuilt)) = (checks, &mut self.unrebuilt_members) {
+            unrebuilt.retain(|name| !members.contains_key(name.as_str()));
+        }
     }
 
     /// Bind again, in `scope`, the functions `entries` declare (`local f =
@@ -6074,48 +6187,75 @@ impl Evaluator {
         // or an earlier amendment's chain): objects nested in them are built
         // unchecked, as that amendment checks them against the values it
         // leaves (here overriding a default `v: Int = "x"` of `o`).
-        // A `for`/`when` generator counts by the properties its bodies write.
-        let mut amended_bases = FxHashSet::default();
-        let mut amended_later: FxHashSet<&str> = FxHashSet::default();
-        let mut writes = Vec::new();
-        for (index, entry) in merged.iter().enumerate().rev() {
-            writes.clear();
-            generator_property_writes(std::slice::from_ref(entry), &mut writes);
-            if !amended_later.is_empty()
-                && writes.iter().any(|(name, _)| amended_later.contains(name))
-            {
-                amended_bases.insert(index);
-            }
-            for (name, amends) in &writes {
-                if *amends {
-                    amended_later.insert(name);
-                }
-            }
-        }
+        // A `for`/`when` generator counts by the properties its bodies write,
+        // and defers only those. An amendment inside a generator may not run
+        // (`when (false)`, an empty `for`): see `unrebuilt_members`.
         let merged: Body = Arc::new(merged);
         eval_scope.receiver_entries = Some(merged.clone());
         // An object amended as part of a class definition's defaults is
         // checked when an instance is built, like the class's properties.
         let defining_class = current_scope.defining_class;
         eval_scope.defining_class = defining_class;
-        let mut result = self.eval_entries_with_lexical_scopes(
-            &merged,
-            &eval_scope,
-            depth + 1,
-            Some(&merged_entry_scopes),
-            Some(base_source),
-            // Entries the amendment wrote are checked in their own scope once
-            // the body is done; the base's declared properties are checked
-            // below.
-            if defining_class {
-                TypeChecks::Nothing
-            } else {
-                TypeChecks::Entries(Rc::new(AmendmentChecks {
-                    checked: overlay_checked,
-                    amended: amended_bases,
-                }))
-            },
-        )?;
+        let mut overlay_checked = Some(overlay_checked);
+        let mut never_deferred: FxHashSet<(usize, String)> = FxHashSet::default();
+        let mut result = loop {
+            let (deferral, uncertain) = amendment_deferral(&merged, &never_deferred);
+            let checked = match overlay_checked.take() {
+                Some(checked) if !uncertain.is_empty() => {
+                    overlay_checked = Some(checked.clone());
+                    checked
+                }
+                Some(checked) => checked,
+                None => unreachable!("kept for each retry"),
+            };
+            let saved = std::mem::replace(
+                &mut self.unrebuilt_members,
+                (!uncertain.is_empty())
+                    .then(|| uncertain.iter().map(|(_, name)| name.clone()).collect()),
+            );
+            let uncertain_entries = uncertain;
+            let retrying = !never_deferred.is_empty();
+            if retrying {
+                self.retry_passes += 1;
+            }
+            let evaluated = self.eval_entries_with_lexical_scopes(
+                &merged,
+                &eval_scope,
+                depth + 1,
+                Some(&merged_entry_scopes),
+                Some(base_source),
+                // Entries the amendment wrote are checked in their own scope
+                // once the body is done; the base's declared properties are
+                // checked below.
+                if defining_class {
+                    TypeChecks::Nothing
+                } else {
+                    let (amended, generator_members) = deferral;
+                    TypeChecks::Entries(Rc::new(AmendmentChecks {
+                        checked,
+                        amended,
+                        generator_members,
+                    }))
+                },
+            );
+            if retrying {
+                self.retry_passes -= 1;
+            }
+            let unrebuilt = std::mem::replace(&mut self.unrebuilt_members, saved);
+            let evaluated = evaluated?;
+            match unrebuilt {
+                // A deferred default no amendment rebuilt: evaluate again
+                // with it checked.
+                Some(names) if !names.is_empty() && !defining_class => {
+                    never_deferred.extend(
+                        uncertain_entries
+                            .into_iter()
+                            .filter(|(_, name)| names.contains(name)),
+                    );
+                }
+                _ => break evaluated,
+            }
+        };
         if let Value::Object(map, Some(source)) = result {
             let mut source = Arc::unwrap_or_clone(source);
             source.entry_scopes = merged_entry_scopes;

@@ -5436,3 +5436,61 @@ fn class_generator_default_amended_by_an_instance_is_built_unchecked() {
     let json = eval("class C { when (true) { o { v: Int = \"x\" } } }\nc = new C { o { w = 1 } }");
     assert_eq!(json["c"]["o"], serde_json::json!({"w": 1}));
 }
+
+#[test]
+fn generator_defers_only_the_members_an_instance_amends() {
+    // Only `o` waits for the instance's amendment; `other` is checked.
+    for generator in ["when (true)", "for (k in List(1))"] {
+        let err = eval_fails(&format!(
+            "class C {{ {generator} {{ o {{ v: Int = \"x\" }}; other {{ v: Int = \"x\" }} }} }}\nc = new C {{ o {{ v = 1 }} }}"
+        ));
+        assert!(
+            err.contains("property 'v' expected Int"),
+            "{generator}: {err}"
+        );
+        let json = eval(&format!(
+            "class C {{ {generator} {{ o {{ v: Int = \"x\" }}; other {{ v: Int = 1 }} }} }}\nc = new C {{ o {{ v = 1 }} }}"
+        ));
+        assert_eq!(json["c"]["o"]["v"], 1, "{generator}");
+        assert_eq!(json["c"]["other"]["v"], 1, "{generator}");
+    }
+    // Through a nested generator too.
+    let err = eval_fails(
+        "class C { when (true) { when (true) { o { v: Int = \"x\" }; other { v: Int = \"x\" } } } }\nc = new C { o { v = 1 } }",
+    );
+    assert!(err.contains("property 'v' expected Int"), "{err}");
+    let json = eval(
+        "class C { when (true) { when (true) { o { v: Int = \"x\" } } } }\nc = new C { o { v = 1 } }",
+    );
+    assert_eq!(json["c"]["o"]["v"], 1);
+}
+
+#[test]
+fn default_amended_only_in_a_branch_that_does_not_run_is_checked() {
+    // The amendment never runs, so the default stays and is checked.
+    let err =
+        eval_fails("class C { o { v: Int = \"x\" } }\nc = new C { when (false) { o { v = 1 } } }");
+    assert!(err.contains("property 'v' expected Int"), "{err}");
+    let err = eval_fails(
+        "class C { o { v: Int = \"x\" } }\nc = new C { for (k in List()) { o { v = 1 } } }",
+    );
+    assert!(err.contains("property 'v' expected Int"), "{err}");
+    // It runs: the default is amended.
+    let json = eval("class C { o { v: Int = \"x\" } }\nc = new C { when (true) { o { v = 1 } } }");
+    assert_eq!(json["c"]["o"]["v"], 1);
+    let json =
+        eval("class C { o { v: Int = \"x\" } }\nc = new C { for (k in List(1)) { o { v = 1 } } }");
+    assert_eq!(json["c"]["o"]["v"], 1);
+    let json = eval(
+        "class C { o { v: Int = \"x\" } }\nc = new C { when (false) { other = 1 } else { o { v = 1 } } }",
+    );
+    assert_eq!(json["c"]["o"]["v"], 1);
+    // A valid default, amended in a branch that does not run.
+    let json = eval("class C { o { v: Int = 1 } }\nc = new C { when (false) { o { v = 2 } } }");
+    assert_eq!(json["c"]["o"]["v"], 1);
+    // A direct amendment rebuilds it whatever the branch does.
+    let json = eval(
+        "class C { o { v: Int = \"x\" } }\nc = new C { o { v = 1 }; when (false) { o { v = 2 } } }",
+    );
+    assert_eq!(json["c"]["o"]["v"], 1);
+}
