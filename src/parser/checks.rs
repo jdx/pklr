@@ -54,6 +54,9 @@ pub(super) struct BodyScope {
     /// The first duplicate found in an object body, reported once the body
     /// is known to have no generator.
     duplicate: Option<(usize, String)>,
+    /// Type aliases defined in the body: offset, name and the names their
+    /// type refers to.
+    type_aliases: Vec<(usize, String, Vec<String>)>,
 }
 
 impl BodyScope {
@@ -67,7 +70,67 @@ impl BodyScope {
             entries: HashSet::new(),
             has_generator: false,
             duplicate: None,
+            type_aliases: Vec::new(),
         }
+    }
+
+    /// Record a type alias and the type names its type uses, for the cycle
+    /// check. Its own type parameters shadow other types inside it.
+    pub(super) fn record_type_alias(
+        &mut self,
+        offset: usize,
+        name: &str,
+        mut refs: Vec<String>,
+        params: &[String],
+    ) {
+        refs.retain(|r| !params.contains(r));
+        self.type_aliases.push((offset, name.to_string(), refs));
+    }
+
+    /// The offset of a type alias that refers back to itself, directly or
+    /// through other aliases of the body.
+    fn cyclic_type_alias(&self) -> Option<usize> {
+        if self.type_aliases.is_empty() {
+            return None;
+        }
+        let index_of: std::collections::HashMap<&str, usize> = self
+            .type_aliases
+            .iter()
+            .enumerate()
+            .map(|(i, (_, name, _))| (name.as_str(), i))
+            .collect();
+        // 0 = unvisited, 1 = on the current path, 2 = done
+        let mut state = vec![0u8; self.type_aliases.len()];
+        for root in 0..self.type_aliases.len() {
+            if state[root] != 0 {
+                continue;
+            }
+            // Depth-first with an explicit stack of (alias, next ref).
+            let mut stack = vec![(root, 0usize)];
+            state[root] = 1;
+            while let Some((alias, next)) = stack.last_mut() {
+                let refs = &self.type_aliases[*alias].2;
+                if *next == refs.len() {
+                    state[*alias] = 2;
+                    stack.pop();
+                    continue;
+                }
+                let r = &refs[*next];
+                *next += 1;
+                let Some(&target) = index_of.get(r.as_str()) else {
+                    continue;
+                };
+                match state[target] {
+                    1 => return Some(self.type_aliases[target].0),
+                    0 => {
+                        state[target] = 1;
+                        stack.push((target, 0));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        None
     }
 
     /// Record the names a module's imports bind, which share the namespace
@@ -306,6 +369,9 @@ impl Parser<'_> {
     /// Report a duplicate member of a finished body, unless pkl only finds it
     /// at runtime.
     pub(super) fn finish_body(&self, scope: &BodyScope) -> Result<()> {
+        if let Some(offset) = scope.cyclic_type_alias() {
+            return Err(self.semantic_error(offset, "Type alias definitions must not be cyclic."));
+        }
         if scope.has_generator || matches!(scope.kind, BodyKind::When | BodyKind::For) {
             return Ok(());
         }
@@ -341,10 +407,34 @@ impl Parser<'_> {
         self.declare(offset, name, false, modifiers.contains(&Modifier::Local))
     }
 
-    /// Reject a duplicate type parameter in the `<...>` list starting at
-    /// token `start`, ignoring the `in`/`out` variance markers.
-    pub(super) fn check_type_parameters(&self, start: usize) -> Result<()> {
-        let mut seen: Vec<&str> = Vec::new();
+    /// A `*` default marker is only valid on one member of a union type.
+    pub(super) fn check_union_defaults(
+        &self,
+        offset: usize,
+        variants: &[(super::TypeExpr, bool)],
+    ) -> Result<()> {
+        let defaults = variants
+            .iter()
+            .filter(|(_, is_default)| *is_default)
+            .count();
+        if defaults == 0 {
+            Ok(())
+        } else if variants.len() == 1 {
+            Err(self.semantic_error(offset, "Only type unions can have a default marker (*)."))
+        } else if defaults > 1 {
+            Err(self.semantic_error(
+                offset,
+                "A type union cannot have more than one default type.",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// The names and offsets of the type parameters in the `<...>` list
+    /// starting at token `start`, without the `out` variance markers.
+    pub(super) fn type_parameter_names(&self, start: usize) -> Vec<(String, usize)> {
+        let mut names = Vec::new();
         let mut depth = 0;
         for (i, tok) in self.tokens.iter().enumerate().skip(start) {
             match &tok.kind {
@@ -361,19 +451,26 @@ impl Parser<'_> {
                             self.tokens.get(i + 1).map(|t| &t.kind),
                             Some(TokenKind::Ident(_))
                         );
-                    if is_variance {
-                        continue;
+                    if !is_variance {
+                        names.push((name.clone(), tok.offset));
                     }
-                    if seen.contains(&name.as_str()) {
-                        return Err(self.semantic_error(
-                            tok.offset,
-                            format!("Duplicate type parameter `{name}`."),
-                        ));
-                    }
-                    seen.push(name);
                 }
                 TokenKind::Eof => break,
                 _ => {}
+            }
+        }
+        names
+    }
+
+    /// Reject a duplicate type parameter in the `<...>` list starting at
+    /// token `start`.
+    pub(super) fn check_type_parameters(&self, start: usize) -> Result<()> {
+        let names = self.type_parameter_names(start);
+        for (i, (name, offset)) in names.iter().enumerate() {
+            if names[..i].iter().any(|(other, _)| other == name) {
+                return Err(
+                    self.semantic_error(*offset, format!("Duplicate type parameter `{name}`."))
+                );
             }
         }
         Ok(())

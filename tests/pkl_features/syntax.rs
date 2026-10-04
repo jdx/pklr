@@ -1638,3 +1638,147 @@ fn amending_module_member_rules() {
     .unwrap();
     assert_eq!(pklr::eval_to_json(&path).unwrap()["name"], "x!");
 }
+
+// ============================================================
+// Type definition checks
+// ============================================================
+
+#[test]
+fn invalid_type_definitions_are_rejected() {
+    for (src, message) in [
+        (
+            "typealias Foo = List<Foo>\n",
+            "Type alias definitions must not be cyclic.",
+        ),
+        (
+            "typealias Foo = List<Bar>\ntypealias Bar = Set<Baz>\ntypealias Baz = Map<String, Foo>\n",
+            "Type alias definitions must not be cyclic.",
+        ),
+        (
+            "foo: *Int|*String = 1\n",
+            "A type union cannot have more than one default type.",
+        ),
+        (
+            "foo: *\"foo\" = \"foo\"\n",
+            "Only type unions can have a default marker (*).",
+        ),
+        (
+            "local x = new {\n  y = 1\n}\nlisting = new x.y.Listing {}\n",
+            "Invalid type name `x.y.Listing`.",
+        ),
+    ] {
+        let err = eval_fails(src);
+        assert!(err.contains(message), "{src}: {err}");
+    }
+    // An alias may use its own type parameter names and refer to other
+    // aliases without a cycle.
+    let json = eval(
+        "typealias Pair<Foo> = List<Foo>\ntypealias Foo = Pair<Int>\nx: Foo = List(1)\ny: *Int|String = 1\n",
+    );
+    assert_eq!(json["x"], serde_json::json!([1]));
+}
+
+#[test]
+fn annotations_must_name_annotation_classes() {
+    for (src, message) in [
+        (
+            "class NoAnn {}\n@NoAnn\nfoo = \"hi\"\n",
+            "Expected an annotation class.",
+        ),
+        (
+            "@Mapping {\n  a = \"hi\"\n}\nfoo: String = \"hi\"\n",
+            "Expected an annotation class.",
+        ),
+        (
+            "@Int foo: String = \"hi\"\n",
+            "Expected an annotation class.",
+        ),
+        ("@Function0 foo = 1\n", "Expected an annotation class."),
+        ("@Int function foo() = 1\n", "Expected an annotation class."),
+        (
+            "integer: Int = 1\n@integer foo: String = \"hi\"\n",
+            "Expected `integer` to be a type, but it is not.",
+        ),
+        (
+            "class MyAnn extends Annotation {}\nlocal myAnn = MyAnn\n@myAnn\nfoo = 1\n",
+            "Expected `myAnn` to be a type, but it is not.",
+        ),
+    ] {
+        let err = eval_fails(src);
+        assert!(err.contains(message), "{src}: {err}");
+    }
+    let json = eval(
+        "open class MyAnn extends Annotation {}\nclass Sub extends MyAnn {}\n@MyAnn\na = 1\n@Sub\nb = 2\n@Deprecated\nc = 3\n",
+    );
+    assert_eq!(json["a"], 1);
+    assert_eq!(json["c"], 3);
+}
+
+#[test]
+fn type_alias_cycle_check_follows_type_structure() {
+    // A cycle through a default-marked union is still a cycle.
+    let err = eval_fails("typealias Foo = *Bar|Int\ntypealias Bar = Listing<Foo>\nx = 1\n");
+    assert!(
+        err.contains("Type alias definitions must not be cyclic."),
+        "{err}"
+    );
+    // String literal types and constraint expressions name no aliases, and
+    // pkl only resolves a local alias when something uses it.
+    let json = eval(
+        "typealias Tag = \"Tag\"\nt: Tag = \"Tag\"\ntypealias N = Int(this is N)\nlocal typealias L = List<L>\nx = 1\n",
+    );
+    assert_eq!(json["t"], "Tag");
+    // A long chain of aliases is checked without deep recursion.
+    let mut src = String::new();
+    for i in 0..5000 {
+        src.push_str(&format!("typealias A{i} = A{}\n", i + 1));
+    }
+    src.push_str("typealias A5000 = Int\nx: A0 = 1\n");
+    assert_eq!(eval(&src)["x"], 1);
+}
+
+#[test]
+fn annotation_checks_follow_aliases_and_trust_other_modules() {
+    let err = eval_fails("typealias I = Int\n@I\nfoo = 1\n");
+    assert!(err.contains("Expected an annotation class."), "{err}");
+    let json = eval("open class MyAnn extends Annotation {}\ntypealias A = MyAnn\n@A\nfoo = 1\n");
+    assert_eq!(json["foo"], 1);
+
+    let temp = TestTempDir::new("pklr_test_imported_annotation_parent");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Lib.pkl"),
+        "open class BaseAnn extends Annotation {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"Lib.pkl\"\nclass Sub extends Lib.BaseAnn {}\n@Sub\nfoo = 1\n",
+    )
+    .unwrap();
+    assert_eq!(pklr::eval_to_json(&dir.join("main.pkl")).unwrap()["foo"], 1);
+}
+
+#[test]
+fn annotation_aliases_must_name_annotation_classes() {
+    let err =
+        eval_fails("open class MyAnn extends Annotation {}\ntypealias A = MyAnn?\n@A\nfoo = 1\n");
+    assert!(err.contains("Expected an annotation class."), "{err}");
+    let json = eval(
+        "open class MyAnn extends Annotation {}\ntypealias B = MyAnn\ntypealias A = B\n@A\nfoo = 1\n",
+    );
+    assert_eq!(json["foo"], 1);
+}
+
+#[test]
+fn type_alias_cycle_check_uses_qualified_names() {
+    let temp = TestTempDir::new("pklr_test_alias_qualified_refs");
+    let dir = temp.path();
+    std::fs::write(dir.join("Lib.pkl"), "class Config { a = 1 }\n").unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"Lib.pkl\"\ntypealias Config = Listing<Lib.Config>\nx: Config = new Listing<Lib.Config> {}\ny = 1\n",
+    )
+    .unwrap();
+    assert_eq!(pklr::eval_to_json(&dir.join("main.pkl")).unwrap()["y"], 1);
+}
