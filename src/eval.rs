@@ -2430,6 +2430,8 @@ impl Evaluator {
         for entry in module.body.iter() {
             if let Entry::Property(prop) = entry
                 && !has_modifier(&prop.modifiers, Modifier::Local)
+                && prop.value.is_some()
+                && prop.type_ann.is_some()
                 && let Some(value) = scope.get(&prop.name)
             {
                 self.check_declared_property_type(prop, value, &scope, depth)?;
@@ -3153,6 +3155,8 @@ impl Evaluator {
         for entry in entries.iter() {
             if let Entry::Property(prop) = entry
                 && !has_modifier(&prop.modifiers, Modifier::Local)
+                && prop.value.is_some()
+                && prop.type_ann.is_some()
                 && let Some(value) = child_scope.get(&prop.name)
             {
                 self.check_declared_property_type(prop, value, &child_scope, depth)?;
