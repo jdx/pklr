@@ -2529,9 +2529,18 @@ literal = "a.*b.*".replaceLast(".*", "$1")
 
 #[test]
 fn string_replace_last_requires_string_arguments() {
-    assert!(eval_fails(r#"result = "abc".replaceLast(1, "x")"#).contains("replaceLast"));
-    assert!(eval_fails(r#"result = "abc".replaceLast("a", 1)"#).contains("replaceLast"));
-    assert!(eval_fails(r#"result = "abc".replaceLast("a")"#).contains("replaceLast"));
+    assert!(
+        eval_fails(r#"result = "abc".replaceLast(1, "x")"#)
+            .contains("Expected value of type `String | Regex`, but got type `Int`.")
+    );
+    assert!(
+        eval_fails(r#"result = "abc".replaceLast("a", 1)"#)
+            .contains("Expected value of type `String`, but got type `Int`.")
+    );
+    assert!(
+        eval_fails(r#"result = "abc".replaceLast("a")"#)
+            .contains("Expected 2 function arguments but got 1.")
+    );
 }
 
 #[test]

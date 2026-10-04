@@ -51,5 +51,5 @@ Source (.pkl) → lexer.rs (tokens) → parser.rs (AST) → eval.rs (Value) → 
 
 - No emoji in commits or code (per communique.toml)
 - Conventional commits for changelog generation (git-cliff)
-- Dependencies: `indexmap` (ordered maps), `miette` (error diagnostics), `rustc-hash` (fast hasher for evaluator scopes), `serde_json` (JSON output), `thiserror` (error derive)
+- Dependencies: `fancy-regex` (pkl `Regex`, which needs backreferences and lookaround), `indexmap` (ordered maps), `md-5`, `sha1`, `sha2` (`String.md5`/`sha1`/`sha256`), `miette` (error diagnostics), `rustc-hash` (fast hasher for evaluator scopes), `serde_json` (JSON output), `thiserror` (error derive)
 - Property modifiers (Local, Const, Fixed, Hidden, etc.) are parsed but only `Local` affects evaluation currently

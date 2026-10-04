@@ -323,9 +323,103 @@ pub enum Value {
     /// copied whenever a scope holding them is captured, and deep-copying the
     /// body each time dominated evaluation.
     Lambda(Arc<[String]>, Arc<Expr>, Arc<ScopeMap>),
+    /// A compiled regular expression (`Regex(pattern)`).
+    Regex(Arc<Regex>),
+}
+
+/// A pkl `Regex`: the pattern as written and its compiled form.
+pub struct Regex {
+    pattern: String,
+    compiled: fancy_regex::Regex,
+}
+
+impl Regex {
+    /// Compile `pattern`, returning the regex engine's message on a syntax error.
+    pub fn new(pattern: &str) -> Result<Self, String> {
+        let compiled = fancy_regex::RegexBuilder::new(pattern)
+            .build()
+            .map_err(|e| e.to_string())?;
+        Ok(Self {
+            pattern: pattern.to_string(),
+            compiled,
+        })
+    }
+
+    /// The pattern this regex was compiled from.
+    pub fn pattern(&self) -> &str {
+        &self.pattern
+    }
+
+    pub(crate) fn compiled(&self) -> &fancy_regex::Regex {
+        &self.compiled
+    }
+}
+
+impl std::fmt::Debug for Regex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Regex").field(&self.pattern).finish()
+    }
+}
+
+/// Regexes are equal when their patterns are, as in pkl.
+impl PartialEq for Regex {
+    fn eq(&self, other: &Self) -> bool {
+        self.pattern == other.pattern
+    }
 }
 
 impl Value {
+    /// The pkl class name of this value's type, as pkl reports it in errors.
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Value::Null => "Null",
+            Value::Bool(_) => "Boolean",
+            Value::Int(_) => "Int",
+            Value::Float(_) => "Float",
+            Value::String(_) => "String",
+            Value::Object(..) => "Dynamic",
+            Value::List(_) => "List",
+            Value::Lambda(params, ..) => match params.len() {
+                0 => "Function0",
+                1 => "Function1",
+                2 => "Function2",
+                3 => "Function3",
+                4 => "Function4",
+                _ => "Function5",
+            },
+            Value::Regex(_) => "Regex",
+        }
+    }
+
+    /// Convert to JSON, failing like `pkl eval -f json` does on values JSON
+    /// cannot represent.
+    pub fn try_to_json(&self) -> Result<serde_json::Value, crate::Error> {
+        match self {
+            Value::Regex(_) => Err(crate::Error::Eval(format!(
+                "Cannot render value of type `{}` as JSON.\nValue: {}",
+                self.type_name(),
+                crate::eval::render_value(self)
+            ))),
+            Value::Object(map, _) => {
+                let mut obj = serde_json::Map::new();
+                for (k, v) in map.iter() {
+                    obj.insert(k.to_string(), v.try_to_json()?);
+                }
+                Ok(serde_json::Value::Object(obj))
+            }
+            Value::List(items) => Ok(serde_json::Value::Array(
+                items
+                    .iter()
+                    .map(Value::try_to_json)
+                    .collect::<Result<_, _>>()?,
+            )),
+            _ => Ok(self.to_json()),
+        }
+    }
+
+    /// Convert to JSON. Values JSON cannot represent become a tagged object
+    /// (a `Regex` is `{"_type": "regex", "pattern": ...}`); see
+    /// [`Value::try_to_json`] to reject them as `pkl eval -f json` does.
     pub fn to_json(&self) -> serde_json::Value {
         match self {
             Value::Null => serde_json::Value::Null,
@@ -344,6 +438,7 @@ impl Value {
                 serde_json::Value::Array(items.iter().map(|v| v.to_json()).collect())
             }
             Value::Lambda(..) => json!("<lambda>"),
+            Value::Regex(regex) => json!({ "_type": "regex", "pattern": regex.pattern() }),
         }
     }
 
