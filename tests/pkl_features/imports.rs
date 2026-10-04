@@ -2483,9 +2483,22 @@ async fn narrowed_import_respects_aliases_redeclared_in_nested_bodies() {
         "length = 1\ntypealias S = String\nresult {\n  typealias String = Int\n  typealias S = String\n  ok = 1 is S(this == length)\n}\n",
     )
     .unwrap();
+    // A nested alias that no module alias refers to leaves `S` resolved, so
+    // the string's own `length` is used, directly or through `T`, and the
+    // module's unused `length` is not evaluated.
+    std::fs::write(
+        dir.join("dep_unrelated.pkl"),
+        "length = throw(\"unused\")\ntypealias S = String\nresult {\n  typealias U = Int\n  ok = \"b\" is S(length == 1)\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep_followed_unrelated.pkl"),
+        "length = throw(\"unused\")\ntypealias S = String\ntypealias T = S(length == 1)\nresult {\n  typealias U = Int\n  ok = \"b\" is T\n}\n",
+    )
+    .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"dep.pkl\" as Dep\nimport \"dep_string.pkl\" as DepString\nimport \"dep_order.pkl\" as DepOrder\nimport \"dep_followed.pkl\" as DepFollowed\nimport \"dep_followed_same.pkl\" as DepFollowedSame\nimport \"dep_followed_shadowed.pkl\" as DepFollowedShadowed\nimport \"dep_shadowed.pkl\" as DepShadowed\nout = Dep.result.ok\noutString = DepString.result.ok\noutOrder = DepOrder.result.ok\noutFollowed = DepFollowed.result.ok\noutFollowedSame = DepFollowedSame.result.ok\noutFollowedShadowed = DepFollowedShadowed.result.ok\noutShadowed = DepShadowed.result.ok\n",
+        "import \"dep.pkl\" as Dep\nimport \"dep_string.pkl\" as DepString\nimport \"dep_order.pkl\" as DepOrder\nimport \"dep_followed.pkl\" as DepFollowed\nimport \"dep_followed_same.pkl\" as DepFollowedSame\nimport \"dep_followed_shadowed.pkl\" as DepFollowedShadowed\nimport \"dep_shadowed.pkl\" as DepShadowed\nimport \"dep_unrelated.pkl\" as DepUnrelated\nimport \"dep_followed_unrelated.pkl\" as DepFollowedUnrelated\nout = Dep.result.ok\noutString = DepString.result.ok\noutOrder = DepOrder.result.ok\noutFollowed = DepFollowed.result.ok\noutFollowedSame = DepFollowedSame.result.ok\noutFollowedShadowed = DepFollowedShadowed.result.ok\noutShadowed = DepShadowed.result.ok\noutUnrelated = DepUnrelated.result.ok\noutFollowedUnrelated = DepFollowedUnrelated.result.ok\n",
     )
     .unwrap();
 
@@ -2499,4 +2512,29 @@ async fn narrowed_import_respects_aliases_redeclared_in_nested_bodies() {
     assert_eq!(val["outFollowedSame"], true);
     assert_eq!(val["outFollowedShadowed"], true);
     assert_eq!(val["outShadowed"], true);
+    assert_eq!(val["outUnrelated"], true);
+    assert_eq!(val["outFollowedUnrelated"], true);
+}
+
+#[tokio::test]
+async fn narrowed_import_resolves_aliases_in_followed_class_bodies() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_class_alias");
+    let dir = temp.path();
+    // Following `C` analyses its property's constraint with the module's
+    // aliases, so `S` is a String and `length` is the string's own.
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "length = throw(\"unused\")\ntypealias S = String\nclass C {\n  name: S(length == 1) = \"b\"\n}\nresult = new C {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as Dep\nout = Dep.result.name\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["out"], "b");
 }
