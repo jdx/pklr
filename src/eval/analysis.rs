@@ -339,9 +339,14 @@ fn mark_other_use(uses: &mut HashMap<String, ImportUse>, name: &str) {
     }
 }
 
+/// `inherited_builtins` are the built-in type names (of
+/// `BINDING_BUILTIN_TYPES`) that a module this one amends or extends may
+/// redefine: checks here also resolve its type aliases, which this analysis
+/// doesn't see.
 pub(super) fn expand_requested_fields(
     entries: &[Entry],
     requested: &HashSet<String>,
+    inherited_builtins: &[&str],
 ) -> HashSet<String> {
     let property_names: HashSet<String> = entries
         .iter()
@@ -373,37 +378,72 @@ pub(super) fn expand_requested_fields(
             })
             .collect(),
     };
-    let module_aliases: TypeAliases = entries
+    let mut module_aliases: TypeAliases = entries
         .iter()
         .filter_map(|entry| match entry {
             Entry::TypeAlias(name, ty) => Some((name.as_str(), Some(ty))),
             _ => None,
         })
         .collect();
+    // Leave the built-ins an inherited alias may redefine (and this module
+    // doesn't) unresolved.
+    for builtin in inherited_builtins {
+        module_aliases.entry(builtin).or_insert(None);
+    }
     let aliases = Some(&module_aliases);
+    // An importer reading `dep.ClassName` needs the module properties the
+    // class reads through `module` (it is evaluated against them). Other
+    // definitions don't see module properties, so they need nothing more.
+    let module_reading_definitions = if requested
+        .iter()
+        .any(|name| definitions.types.contains_key(name.as_str()))
+    {
+        module_dependent_members(entries)
+    } else {
+        indexmap::IndexSet::new()
+    };
     let mut expanded = requested.clone();
     let mut changed = true;
     while changed {
         changed = false;
         for entry in entries {
-            let Entry::Property(prop) = entry else {
-                continue;
-            };
-            if !expanded.contains(&prop.name) {
-                continue;
-            }
             let mut refs = Names::default();
             let shadows = Names::default();
-            if let Some(ty) = &prop.type_ann {
-                collect_type_refs(ty, &mut refs, &shadows, aliases, Some(&definitions));
-            }
-            if let Some(expr) = &prop.value {
-                collect_expr_refs_in(expr, &mut refs, &shadows, aliases, Some(&definitions));
-                collect_sibling_field_refs_expr(expr, &mut refs.values, true);
-            }
-            if let Some(body) = &prop.body {
-                collect_entry_refs_in(body, &mut refs, &shadows, aliases, Some(&definitions));
-                collect_sibling_field_refs_entries(body, &mut refs.values);
+            match entry {
+                Entry::Property(prop) if expanded.contains(&prop.name) => {
+                    if let Some(ty) = &prop.type_ann {
+                        collect_type_refs(ty, &mut refs, &shadows, aliases, Some(&definitions));
+                    }
+                    if let Some(expr) = &prop.value {
+                        collect_expr_refs_in(
+                            expr,
+                            &mut refs,
+                            &shadows,
+                            aliases,
+                            Some(&definitions),
+                        );
+                        collect_sibling_field_refs_expr(expr, &mut refs.values, true);
+                    }
+                    if let Some(body) = &prop.body {
+                        collect_entry_refs_in(
+                            body,
+                            &mut refs,
+                            &shadows,
+                            aliases,
+                            Some(&definitions),
+                        );
+                        collect_sibling_field_refs_entries(body, &mut refs.values);
+                    }
+                }
+                // A requested class or type alias that reads `module` (an
+                // importer reading `dep.ClassName`) depends on what its
+                // definition reads.
+                Entry::ClassDef(name, ..) | Entry::TypeAlias(name, _)
+                    if expanded.contains(name) && module_reading_definitions.contains(name) =>
+                {
+                    refs.types.insert(name.clone());
+                }
+                _ => continue,
             }
             // Bodies that change the aliases followed what they reach
             // themselves (see `collect_entry_refs_in`).
@@ -536,7 +576,7 @@ fn constraint_bound_names(base: &str) -> &'static [&'static str] {
 
 /// The built-in types whose constraints bind `length` and `isEmpty`; see
 /// `constraint_bound_names`.
-const BINDING_BUILTIN_TYPES: &[&str] = &[
+pub(super) const BINDING_BUILTIN_TYPES: &[&str] = &[
     "String",
     "List",
     "Listing",
@@ -706,21 +746,67 @@ fn narrow_aliases<'a>(
 
 /// `aliases` with each of the `declared` names that `constraint_bound_names`
 /// would read as a built-in marked unresolvable, since where the declaration
-/// is in scope the built-in's bindings no longer apply. `None` when
-/// `aliases` is unchanged.
+/// is in scope the built-in's bindings may no longer apply. A built-in that
+/// `entries` only redeclares as one type alias which binds the same names
+/// (such as `typealias String = List`) stays resolved, to that definition, when
+/// nothing in `aliases` already gave it another meaning: it binds them before
+/// and after the declaration alike, and a deeper body that redeclares what
+/// the definition refers to still sees it. `None` when `aliases` is
+/// unchanged.
 fn with_builtins_unresolved<'a>(
     aliases: &TypeAliases<'a>,
+    entries: &'a [Entry],
     declared: &HashSet<&str>,
 ) -> Option<TypeAliases<'a>> {
-    let mut marked = None;
-    for builtin in BINDING_BUILTIN_TYPES {
-        if declared.contains(builtin) && aliases.get(builtin) != Some(&None) {
-            marked
-                .get_or_insert_with(|| aliases.clone())
-                .insert(*builtin, None);
-        }
+    let redeclared: Vec<&str> = BINDING_BUILTIN_TYPES
+        .iter()
+        .copied()
+        .filter(|builtin| declared.contains(builtin) && aliases.get(builtin) != Some(&None))
+        .collect();
+    if redeclared.is_empty() {
+        return None;
     }
-    marked
+    let mut marked = aliases.clone();
+    for builtin in &redeclared {
+        marked.insert(builtin, None);
+    }
+    // Resolve the new definitions with every redeclared built-in unresolved,
+    // so one that reaches another still counts as unknown.
+    let binding_definition = |builtin: &str| {
+        if aliases.contains_key(builtin) {
+            return None;
+        }
+        let mut definitions = entries.iter().filter_map(|entry| match entry {
+            Entry::TypeAlias(name, ty) if name == builtin => Some(Some(ty)),
+            Entry::ClassDef(name, ..) if name == builtin => Some(None),
+            _ => None,
+        });
+        match (definitions.next(), definitions.next()) {
+            (Some(Some(ty)), None) if alias_binds_collection_names(ty, &marked) => Some(ty),
+            _ => None,
+        }
+    };
+    let kept: Vec<_> = redeclared
+        .iter()
+        .filter_map(|builtin| Some((*builtin, binding_definition(builtin)?)))
+        .collect();
+    for (builtin, ty) in kept {
+        marked.insert(builtin, Some(ty));
+    }
+    Some(marked)
+}
+
+/// Whether a check against the type alias definition `ty` binds `length` and
+/// `isEmpty`, resolving through `aliases`.
+fn alias_binds_collection_names(ty: &crate::parser::TypeExpr, aliases: &TypeAliases) -> bool {
+    match ty {
+        crate::parser::TypeExpr::Named(base)
+        | crate::parser::TypeExpr::Generic(base, _)
+        | crate::parser::TypeExpr::Constrained(base, _) => {
+            constraint_bound_names_resolving(base, Some(aliases)).contains(&"length")
+        }
+        crate::parser::TypeExpr::Nullable(_) | crate::parser::TypeExpr::Union(_) => false,
+    }
 }
 
 /// `constraint_bound_names`, after following `base` through `aliases` (with
@@ -809,7 +895,17 @@ pub(super) fn collect_sibling_field_refs_expr(
             collect_sibling_field_refs_expr(left, refs, include_this);
             collect_sibling_field_refs_expr(right, refs, include_this);
         }
-        Expr::New(_, entries, _) | Expr::InferredNew(_, entries) | Expr::ObjectBody(entries) => {
+        Expr::New(type_name, entries, _) => {
+            // `new module.C {}` reads the module member `C`.
+            if let Some((root, rest)) = type_name.as_deref().and_then(|name| name.split_once('.'))
+                && (root == "module" || (include_this && root == "this"))
+            {
+                let member = rest.split('.').next().unwrap_or(rest);
+                refs.insert(member.to_string());
+            }
+            collect_sibling_field_refs_entries(entries, refs);
+        }
+        Expr::InferredNew(_, entries) | Expr::ObjectBody(entries) => {
             collect_sibling_field_refs_entries(entries, refs);
         }
         Expr::Call(callee, args) => {
@@ -827,8 +923,10 @@ pub(super) fn collect_sibling_field_refs_expr(
             collect_sibling_field_refs_expr(value, refs, include_this);
             collect_sibling_field_refs_expr(body, refs, include_this);
         }
-        Expr::Is(value, _) | Expr::As(value, _) => {
+        Expr::Is(value, ty) | Expr::As(value, ty) => {
             collect_sibling_field_refs_expr(value, refs, include_this);
+            // `module.field` reads in the checked type's constraints.
+            collect_sibling_field_refs_type(ty, refs);
         }
         Expr::Lambda(_, body)
         | Expr::Unop(_, body)
@@ -877,6 +975,236 @@ pub(super) fn is_module_sibling_ref(expr: &Expr, include_this: bool) -> bool {
     matches!(expr, Expr::Ident(name) if name == "module" || (include_this && name == "this"))
 }
 
+/// Names, in declaration order, of the module members in `entries` that must
+/// be evaluated again once the module's properties are available: classes
+/// whose bodies read `module`, and the members that reference such a member
+/// (a subclass, a type alias naming it, a local, or a module function
+/// building an instance).
+pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<String> {
+    // A member qualified through the module object (`module.C`, or `this.C`
+    // where `this` is the module) is a reference to `C` like a bare `C`.
+    fn qualified_member(name: &str, include_this: bool) -> Option<&str> {
+        let (root, rest) = name.split_once('.')?;
+        (root == "module" || (include_this && root == "this"))
+            .then(|| rest.split('.').next().unwrap_or(rest))
+    }
+    // Only a class that mentions `module` starts a dependency chain. Most
+    // modules have none, so check that without collecting any names.
+    if !entries
+        .iter()
+        .any(|entry| matches!(entry, Entry::ClassDef(..)) && entry_mentions(entry, "module"))
+    {
+        return indexmap::IndexSet::new();
+    }
+    let members: Vec<(&String, bool, HashSet<String>)> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::ClassDef(name, _, parent, body) => {
+                let mut refs = referenced_roots(body);
+                // Inside a class body `this` is the instance, so only
+                // `module.C` names a module member.
+                collect_sibling_field_refs_entries(body, &mut refs);
+                if let Some(parent) = parent {
+                    let mut parent_refs = Names::default();
+                    collect_name_root(parent, &mut parent_refs, &Names::default());
+                    parent_refs.add_all_to(&mut refs);
+                    refs.extend(qualified_member(parent, false).map(str::to_string));
+                }
+                Some((name, true, refs))
+            }
+            Entry::TypeAlias(name, ty) => {
+                let mut refs = HashSet::new();
+                collect_type_names(ty, &mut refs);
+                // `typealias Ok = Int(module.C.v == "b")` reads `C` when a
+                // value is checked against it.
+                collect_sibling_field_refs_type(ty, &mut refs);
+                if let Some(target) = type_alias_target(ty) {
+                    refs.extend(qualified_member(target, true).map(str::to_string));
+                }
+                Some((name, false, refs))
+            }
+            // Locals, and module functions (a non-local property whose value
+            // is a lambda). Other module properties are evaluated in order by
+            // the property pass and already see the refreshed classes.
+            Entry::Property(prop)
+                if has_modifier(&prop.modifiers, Modifier::Local)
+                    || matches!(prop.value, Some(Expr::Lambda(..))) =>
+            {
+                let value = prop.value.as_ref()?;
+                let mut refs = HashSet::new();
+                collect_expr_refs(value, &mut refs, &HashSet::new());
+                // At module level `this` is the module object too.
+                collect_sibling_field_refs_expr(value, &mut refs, true);
+                Some((&prop.name, false, refs))
+            }
+            _ => None,
+        })
+        .collect();
+    let mut dependent = HashSet::new();
+    loop {
+        let before = dependent.len();
+        for (name, is_class, refs) in &members {
+            // A dynamic `module[key]` read can reach any tracked member.
+            if !dependent.contains(name.as_str())
+                && ((refs.contains(DYNAMIC_SIBLING_REF) && !dependent.is_empty())
+                    || refs.iter().any(|root| {
+                        (*is_class && root == "module") || dependent.contains(root.as_str())
+                    }))
+            {
+                dependent.insert(name.to_string());
+            }
+        }
+        if dependent.len() == before {
+            break;
+        }
+    }
+    // Refresh order: each member after the members it reads, so a function
+    // or class declared before a class it uses sees that class's new value.
+    // Ties and cycles keep declaration order; a dynamic `module[key]` read
+    // may reach any member, so it comes after the members without one.
+    let tracked: Vec<&(&String, bool, HashSet<String>)> = members
+        .iter()
+        .filter(|(name, ..)| dependent.contains(name.as_str()))
+        .collect();
+    let index: HashMap<&str, usize> = tracked
+        .iter()
+        .enumerate()
+        .map(|(i, (name, ..))| (name.as_str(), i))
+        .collect();
+    let dynamic: Vec<bool> = tracked
+        .iter()
+        .map(|(_, _, refs)| refs.contains(DYNAMIC_SIBLING_REF))
+        .collect();
+    let static_deps: Vec<Vec<usize>> = tracked
+        .iter()
+        .enumerate()
+        .map(|(i, (_, _, refs))| {
+            let mut deps: Vec<usize> = refs
+                .iter()
+                .filter_map(|name| index.get(name.as_str()).copied())
+                .filter(|&j| j != i)
+                .collect();
+            deps.sort_unstable();
+            deps
+        })
+        .collect();
+    // Whether `from` reads `to`, directly or through other members.
+    let reaches = |from: usize, to: usize| {
+        let mut seen = vec![false; tracked.len()];
+        let mut stack = vec![from];
+        while let Some(i) = stack.pop() {
+            if i == to {
+                return true;
+            }
+            if !std::mem::replace(&mut seen[i], true) {
+                stack.extend(&static_deps[i]);
+            }
+        }
+        false
+    };
+    // A dynamic reader goes after the other members, except those that read
+    // it: ordering it after them would put it after its own dependents.
+    let deps: Vec<Vec<usize>> = (0..tracked.len())
+        .map(|i| {
+            let mut deps = static_deps[i].clone();
+            if dynamic[i] {
+                deps.extend(
+                    (0..tracked.len()).filter(|&j| j != i && !dynamic[j] && !reaches(j, i)),
+                );
+                deps.sort_unstable();
+                deps.dedup();
+            }
+            deps
+        })
+        .collect();
+    // 0 = unvisited, 1 = in progress, 2 = done.
+    fn visit(i: usize, deps: &[Vec<usize>], state: &mut [u8], order: &mut Vec<usize>) {
+        if state[i] != 0 {
+            return;
+        }
+        state[i] = 1;
+        for &j in &deps[i] {
+            visit(j, deps, state, order);
+        }
+        state[i] = 2;
+        order.push(i);
+    }
+    let mut state = vec![0u8; tracked.len()];
+    let mut order = Vec::with_capacity(tracked.len());
+    for i in 0..tracked.len() {
+        visit(i, &deps, &mut state, &mut order);
+    }
+    order.into_iter().map(|i| tracked[i].0.clone()).collect()
+}
+
+/// The module members `entry` (a module-level class, alias, local or
+/// function) reads through the module object, as `module.C` (or `this.C`
+/// outside a class body, where `this` is the module).
+pub(super) fn qualified_module_member_refs(entry: &Entry) -> HashSet<String> {
+    let mut refs = HashSet::new();
+    match entry {
+        Entry::ClassDef(_, _, parent, body) => {
+            collect_sibling_field_refs_entries(body, &mut refs);
+            if let Some((root, rest)) = parent.as_deref().and_then(|name| name.split_once('.'))
+                && root == "module"
+            {
+                refs.insert(rest.split('.').next().unwrap_or(rest).to_string());
+            }
+        }
+        Entry::Property(prop) => {
+            if let Some(value) = &prop.value {
+                collect_sibling_field_refs_expr(value, &mut refs, true);
+            }
+            if let Some(ty) = &prop.type_ann {
+                collect_sibling_field_refs_type(ty, &mut refs);
+            }
+        }
+        _ => {}
+    }
+    refs
+}
+
+/// Whether evaluating module property `prop` can read one of `members` (see
+/// `module_dependent_members`). Members are only refreshed before such a
+/// property, so other properties cost nothing extra. Conservative: any
+/// dynamic `module[...]` read counts.
+pub(super) fn reads_module_members(prop: &Property, members: &indexmap::IndexSet<String>) -> bool {
+    let mut refs = property_reference_names(prop);
+    if let Some(ty) = &prop.type_ann {
+        collect_type_names(ty, &mut refs);
+        collect_sibling_field_refs_type(ty, &mut refs);
+    }
+    refs.contains(DYNAMIC_SIBLING_REF)
+        || refs.iter().any(|name| members.contains(name))
+        || members.iter().any(|name| property_mentions(prop, name))
+}
+
+/// Whether module member `entry`, evaluated during a refresh, can read one of
+/// `pending` (refreshed members not yet written to the module object): as
+/// `module.C`/`this.C`, through any dynamic `module[...]` read, or by name in
+/// a type (`x: module.C`, `is module.C`).
+pub(super) fn member_reads_pending(entry: &Entry, pending: &[(String, Option<Value>)]) -> bool {
+    let refs = qualified_module_member_refs(entry);
+    refs.contains(DYNAMIC_SIBLING_REF)
+        || pending
+            .iter()
+            .any(|(name, _)| refs.contains(name) || entry_mentions(entry, name))
+}
+
+/// The class or alias a type alias binds to at runtime (`typealias A = C`,
+/// `C?` or `C(constraint)`), as `eval_type_alias` resolves it.
+pub(super) fn type_alias_target(ty: &crate::parser::TypeExpr) -> Option<&str> {
+    match ty {
+        crate::parser::TypeExpr::Named(target)
+        | crate::parser::TypeExpr::Constrained(target, _) => Some(target),
+        crate::parser::TypeExpr::Nullable(inner) => match inner.as_ref() {
+            crate::parser::TypeExpr::Named(target) => Some(target),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Every name `entries` read or name as a type (an import used only in a
 /// type annotation, such as `x is Dep.Foo`, is still referenced).
 pub(super) fn referenced_roots(entries: &[Entry]) -> HashSet<String> {
@@ -921,7 +1249,8 @@ fn collect_entry_refs_in(
         let mut declared = HashSet::new();
         collect_entries_type_decls(entries, aliases, &mut declared);
         let narrowed = narrow_aliases(aliases, &declared);
-        with_builtins_unresolved(narrowed.as_ref().unwrap_or(aliases), &declared).or(narrowed)
+        with_builtins_unresolved(narrowed.as_ref().unwrap_or(aliases), entries, &declared)
+            .or(narrowed)
     };
     // A definition's constraints resolve aliases where the check happens, so
     // when following `definitions` and this body changes the aliases, follow
@@ -1032,6 +1361,13 @@ pub(super) fn with_listing_locals(expr: &Expr, locals: &[(String, Expr)]) -> Exp
         }
     }
     expr
+}
+
+/// Adds to `refs` every name `ty` names as a type or its constraints read.
+fn collect_type_names(ty: &crate::parser::TypeExpr, refs: &mut HashSet<String>) {
+    let mut collected = Names::default();
+    collect_type_refs(ty, &mut collected, &Names::default(), None, None);
+    collected.add_all_to(refs);
 }
 
 /// Adds to `refs` every name `expr` reads or names as a type.
@@ -1371,21 +1707,23 @@ pub(super) fn entries_mention(entries: &[Entry], name: &str) -> bool {
     entries.iter().any(|entry| entry_mentions(entry, name))
 }
 
+fn property_mentions(prop: &Property, name: &str) -> bool {
+    prop.type_ann
+        .as_ref()
+        .is_some_and(|ty| type_mentions(ty, name))
+        || prop
+            .value
+            .as_ref()
+            .is_some_and(|expr| expr_mentions(expr, name))
+        || prop
+            .body
+            .as_ref()
+            .is_some_and(|body| entries_mention(body, name))
+}
+
 fn entry_mentions(entry: &Entry, name: &str) -> bool {
     match entry {
-        Entry::Property(prop) => {
-            prop.type_ann
-                .as_ref()
-                .is_some_and(|ty| type_mentions(ty, name))
-                || prop
-                    .value
-                    .as_ref()
-                    .is_some_and(|expr| expr_mentions(expr, name))
-                || prop
-                    .body
-                    .as_ref()
-                    .is_some_and(|body| entries_mention(body, name))
-        }
+        Entry::Property(prop) => property_mentions(prop, name),
         Entry::DynProperty(key, value) => expr_mentions(key, name) || expr_mentions(value, name),
         Entry::ForGenerator(fgen) => {
             expr_mentions(&fgen.collection, name) || entries_mention(&fgen.body, name)

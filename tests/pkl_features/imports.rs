@@ -2592,9 +2592,51 @@ async fn narrowed_import_respects_builtins_redeclared_in_nested_bodies() {
         "typealias Foo = Int\nFoo = 5\nresult {\n  typealias String = Int\n  ok = Foo\n}\n",
     )
     .unwrap();
+    // Redeclared as a collection, `String` still binds the value's own
+    // `length`, directly or through `T`, so the module's unused `length` must
+    // not be evaluated.
+    std::fs::write(
+        dir.join("dep_collection.pkl"),
+        "length = throw(\"unused\")\ntypealias T = String(length == 1)\nresult {\n  typealias String = Listing<Int>\n  ok = List(1) is String(length == 1)\n  okFollowed = List(1) is T\n}\n",
+    )
+    .unwrap();
+    // A deeper body that redeclares `List` changes what the outer
+    // `String = List` means there, so its check reads the module's `length`.
+    std::fs::write(
+        dir.join("dep_deeper.pkl"),
+        "length = 1\nresult {\n  typealias String = List\n  inner {\n    typealias List = Int\n    ok = 1 is String(length == 1)\n  }\n}\n",
+    )
+    .unwrap();
+    // A base module's alias can redefine a built-in this module checks
+    // against, directly or through a nested redeclaration.
+    std::fs::write(dir.join("base.pkl"), "typealias List = Int\n").unwrap();
+    std::fs::write(
+        dir.join("dep_inherited.pkl"),
+        "extends \"base.pkl\"\nlength = 1\nresult {\n  ok = 1 is List(length == 1)\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep_inherited_nested.pkl"),
+        "amends \"base.pkl\"\nlength = 1\nresult {\n  typealias String = List\n  ok = 1 is String(length == 1)\n}\n",
+    )
+    .unwrap();
+    // Only the built-ins a base actually redefines count: `String` checks
+    // under an empty base, or one redefining only `List`, still bind the
+    // string's own `length`, so the module's unused `length` isn't read.
+    std::fs::write(dir.join("base_empty.pkl"), "").unwrap();
+    std::fs::write(
+        dir.join("dep_inherited_empty.pkl"),
+        "amends \"base_empty.pkl\"\nlength = throw(\"unused\")\nresult {\n  ok = \"b\" is String(length == 1)\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep_inherited_other.pkl"),
+        "extends \"base.pkl\"\nlength = throw(\"unused\")\nresult {\n  ok = \"b\" is String(length == 1)\n}\n",
+    )
+    .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"dep.pkl\" as Dep\nimport \"dep_direct.pkl\" as DepDirect\nimport \"dep_same_name.pkl\" as DepSameName\nimport \"dep_alias_sibling.pkl\" as DepAliasSibling\nimport \"dep_identical_shadowed.pkl\" as DepIdenticalShadowed\nimport \"dep_local.pkl\" as DepLocal\nimport \"dep_identical.pkl\" as DepIdentical\nimport \"dep_listing.pkl\" as DepListing\nimport \"dep_sibling.pkl\" as DepSibling\nimport \"dep_class.pkl\" as DepClass\nout = Dep.result.ok\noutDirect = DepDirect.result.ok\noutListing = DepListing.result.inner.ok\noutSibling = DepSibling.result.ok\noutClass = DepClass.result.ok\noutLocal = DepLocal.result.inner.ok\noutIdentical = DepIdentical.result.ok\noutIdenticalShadowed = DepIdenticalShadowed.result.ok\noutIdenticalShadowedDirect = DepIdenticalShadowed.result.okDirect\noutAliasSibling = DepAliasSibling.result.ok\noutSameName = DepSameName.result.ok\n",
+        "import \"dep.pkl\" as Dep\nimport \"dep_direct.pkl\" as DepDirect\nimport \"dep_inherited_empty.pkl\" as DepInheritedEmpty\nimport \"dep_inherited_other.pkl\" as DepInheritedOther\nimport \"dep_deeper.pkl\" as DepDeeper\nimport \"dep_inherited.pkl\" as DepInherited\nimport \"dep_inherited_nested.pkl\" as DepInheritedNested\nimport \"dep_collection.pkl\" as DepCollection\nimport \"dep_same_name.pkl\" as DepSameName\nimport \"dep_alias_sibling.pkl\" as DepAliasSibling\nimport \"dep_identical_shadowed.pkl\" as DepIdenticalShadowed\nimport \"dep_local.pkl\" as DepLocal\nimport \"dep_identical.pkl\" as DepIdentical\nimport \"dep_listing.pkl\" as DepListing\nimport \"dep_sibling.pkl\" as DepSibling\nimport \"dep_class.pkl\" as DepClass\nout = Dep.result.ok\noutDirect = DepDirect.result.ok\noutListing = DepListing.result.inner.ok\noutSibling = DepSibling.result.ok\noutClass = DepClass.result.ok\noutLocal = DepLocal.result.inner.ok\noutIdentical = DepIdentical.result.ok\noutIdenticalShadowed = DepIdenticalShadowed.result.ok\noutIdenticalShadowedDirect = DepIdenticalShadowed.result.okDirect\noutAliasSibling = DepAliasSibling.result.ok\noutSameName = DepSameName.result.ok\noutCollection = DepCollection.result.ok\noutCollectionFollowed = DepCollection.result.okFollowed\noutDeeper = DepDeeper.result.inner.ok\noutInherited = DepInherited.result.ok\noutInheritedNested = DepInheritedNested.result.ok\noutInheritedEmpty = DepInheritedEmpty.result.ok\noutInheritedOther = DepInheritedOther.result.ok\n",
     )
     .unwrap();
 
@@ -2612,6 +2654,13 @@ async fn narrowed_import_respects_builtins_redeclared_in_nested_bodies() {
     assert_eq!(val["outIdenticalShadowedDirect"], true);
     assert_eq!(val["outAliasSibling"], true);
     assert_eq!(val["outSameName"], 5);
+    assert_eq!(val["outCollection"], true);
+    assert_eq!(val["outCollectionFollowed"], true);
+    assert_eq!(val["outDeeper"], true);
+    assert_eq!(val["outInherited"], true);
+    assert_eq!(val["outInheritedNested"], true);
+    assert_eq!(val["outInheritedEmpty"], true);
+    assert_eq!(val["outInheritedOther"], true);
 }
 
 #[tokio::test]
@@ -2635,6 +2684,86 @@ async fn narrowed_import_resolves_aliases_in_followed_class_bodies() {
         .await
         .unwrap();
     assert_eq!(val["out"], "b");
+}
+
+#[tokio::test]
+async fn module_in_imported_class_body_means_the_class_module() {
+    let temp = TestTempDir::new("pklr_test_module_in_imported_class");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("dep2.pkl"),
+        "expected = \"b\"\nclass C { v = module.expected }\nresult = new C {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep2.pkl\"\nexpected = \"main\"\nr = dep2.result.v\nfresh = new dep2.C {}\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("dep2.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["result"]["v"], "b");
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["r"], "b");
+    assert_eq!(val["fresh"]["v"], "b");
+}
+
+#[tokio::test]
+async fn imported_class_reading_missing_module_property_reports_error() {
+    let temp = TestTempDir::new("pklr_test_imported_poisoned_class");
+    let dir = temp.path();
+    std::fs::write(dir.join("dep.pkl"), "class C { v = module.missing }\n").unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\"\nresult = new dep.C {}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("read.pkl"), "import \"dep.pkl\"\nresult = dep.C\n").unwrap();
+
+    // The module defining the class still evaluates; the class is unused.
+    let val = pklr::eval_to_json_async(&dir.join("dep.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val, serde_json::json!({}));
+    // The failed class's error metadata must not stop amending the module
+    // object from keeping its evaluated members.
+    std::fs::write(
+        dir.join("depx.pkl"),
+        "x = 1\nclass C { v = module.missing }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("amend.pkl"),
+        "import \"depx.pkl\" as dep\nresult = (dep) { y = 2 }\nr2 = dep { y = 3 }\n",
+    )
+    .unwrap();
+    let val = pklr::eval_to_json_async(&dir.join("amend.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["result"], serde_json::json!({"x": 1, "y": 2}));
+    assert_eq!(val["r2"], serde_json::json!({"x": 1, "y": 3}));
+    // Null-safe and index reads report the saved error too.
+    std::fs::write(
+        dir.join("nullsafe.pkl"),
+        "import \"dep.pkl\"\nresult = dep?.C\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("index.pkl"),
+        "import \"dep.pkl\"\nresult = dep[\"C\"]\n",
+    )
+    .unwrap();
+    for importer in ["main.pkl", "read.pkl", "nullsafe.pkl", "index.pkl"] {
+        let err = pklr::eval_to_json_async(&dir.join(importer))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("missing"), "{importer}: {err}");
+    }
 }
 
 #[tokio::test]

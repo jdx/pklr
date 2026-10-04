@@ -44,6 +44,41 @@ pub(super) fn module_props_insert(
     Arc::make_mut(properties).insert(key, value);
 }
 
+/// Write refreshed module members (`None`: the member failed and is
+/// removed) to the module's property map in one copy, releasing the scope's
+/// `this`/`module` snapshots first like `module_props_insert`, then rebind
+/// both to the updated map.
+pub(super) fn flush_module_members(
+    scope: &mut Scope,
+    properties: &mut Arc<IndexMap<String, Value>>,
+    pending: &mut Vec<(String, Option<Value>)>,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    for name in ["this", "module"] {
+        if scope.vars.contains_key(name)
+            && let Some(slot) = Arc::make_mut(&mut scope.vars).get_mut(name)
+        {
+            *slot = Value::Null;
+        }
+    }
+    let map = Arc::make_mut(properties);
+    for (name, value) in pending.drain(..) {
+        match value {
+            Some(value) => {
+                map.insert(name, value);
+            }
+            None => {
+                map.shift_remove(&name);
+            }
+        }
+    }
+    let snapshot = Value::Object(Arc::clone(properties), None);
+    scope.set("this".into(), snapshot.clone());
+    scope.set("module".into(), snapshot);
+}
+
 pub(super) fn props_insert(
     scope: &mut Scope,
     aliases: &[String],
@@ -338,6 +373,7 @@ pub(super) fn apply_mapping_type_annotation(
             evaluated_properties: Vec::new(),
             mapping_value_types: Vec::new(),
             deprecated: IndexMap::new(),
+            poisoned_members: None,
         });
     for name in type_names {
         if !src.mapping_value_types.contains(&name) {
