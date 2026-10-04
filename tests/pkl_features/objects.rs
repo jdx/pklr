@@ -3791,7 +3791,7 @@ fn generators_and_spreads_reject_non_iterable_values() {
         ),
         (
             "local m = new Mapping { [\"a\"] = 1 }\nres = new Listing { ...m }\n",
-            "Cannot spread object containing",
+            "Cannot spread object containing entries into object of type `Listing`.",
         ),
     ] {
         let err = eval_fails(src);
