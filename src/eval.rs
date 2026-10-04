@@ -5577,34 +5577,45 @@ impl Evaluator {
         }
         if let Value::Object(base_map, Some(base_src)) = &base
             && base_src.kind == ObjectKind::Mapping
-            && base_src.is_metadata_only()
         {
             check_no_elements(base_src, overlay_entries)?;
-            let (_, mut amendment_scope) =
-                mapping_amendment_scopes(base_src.scope(), base_src.scope_declared(), scope);
-            amendment_scope.set("super", base.clone());
-            let mut receiver_entries = base_map
-                .keys()
-                .map(|key| Entry::DynProperty(Expr::String(Arc::clone(key)), Expr::Null))
-                .collect::<Vec<_>>();
-            receiver_entries.extend_from_slice(overlay_entries);
-            amendment_scope.receiver_entries = Some(Arc::new(receiver_entries));
-            let mut amended = ObjectMap::default();
-            amended.extend(
-                base_map
-                    .iter()
-                    .map(|(key, value)| (key.clone(), value.clone())),
-            );
-            self.eval_mapping_entries_with_type_default(
-                overlay_entries,
-                &amendment_scope,
-                depth,
-                &mut amended,
-                &[],
-                &[],
-                MappingInheritedDefault::default(),
-            )?;
-            return Ok(Value::Object(Arc::new(amended), Some(Arc::clone(base_src))));
+            let needs_mapping_evaluation = body_has(overlay_entries, &|entry| {
+                matches!(entry, Entry::Spread(_))
+                    || matches!(entry, Entry::Property(prop) if prop.name == "default")
+            });
+            if !base_src.is_metadata_only() || !needs_mapping_evaluation {
+                // Unannotated mapping entries with bodies still use the general
+                // amendment path, which preserves Listing-shaped entry bodies.
+            } else {
+                let (_, mut amendment_scope) =
+                    mapping_amendment_scopes(base_src.scope(), base_src.scope_declared(), scope);
+                amendment_scope.set("super", base.clone());
+                let mut receiver_entries = base_map
+                    .keys()
+                    .map(|key| Entry::DynProperty(Expr::String(Arc::clone(key)), Expr::Null))
+                    .collect::<Vec<_>>();
+                receiver_entries.extend_from_slice(overlay_entries);
+                amendment_scope.receiver_entries = Some(Arc::new(receiver_entries));
+                let mut amended = ObjectMap::default();
+                amended.extend(
+                    base_map
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone())),
+                );
+                self.eval_mapping_entries_with_type_default(
+                    overlay_entries,
+                    &amendment_scope,
+                    depth,
+                    &mut amended,
+                    &[],
+                    &[],
+                    MappingInheritedDefault::default(),
+                )?;
+                let mut source = Arc::unwrap_or_clone(Arc::clone(base_src));
+                source.entries = overlay_entries.to_vec().into();
+                source.captured = SourceScope::lazy(scope, Vec::new(), Vec::new());
+                return Ok(Value::Object(Arc::new(amended), Some(Arc::new(source))));
+            }
         }
         if let Value::List(existing) = base {
             let mut amended = existing;
@@ -5624,7 +5635,13 @@ impl Evaluator {
             && !base_src.is_metadata_only()
         {
             check_no_elements(base_src, overlay_entries)?;
-            if !base_src.mapping_value_types.is_empty() {
+            let has_mapping_default = base_src
+                .entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::Property(prop) if prop.name == "default"));
+            if !base_src.mapping_value_types.is_empty()
+                || (base_src.kind == ObjectKind::Mapping && has_mapping_default)
+            {
                 let (inherited_scope, mut amendment_scope) =
                     mapping_amendment_scopes(base_src.scope(), base_src.scope_declared(), scope);
                 amendment_scope.set("super", base.clone());
@@ -6666,8 +6683,8 @@ fn check_instantiable(scope: &Scope, type_name: Option<&str>, class: Option<&Val
         Some(Value::String(name)) if EXTERNAL_CLASSES.contains(&name.as_ref()) => Err(Error::Eval(
             format!("Cannot instantiate, or amend an instance of, external class `{name}`."),
         )),
-        None | Some(Value::String(_)) if ABSTRACT_STDLIB_CLASSES.contains(&type_name) => Err(
-            Error::Eval(format!("Cannot instantiate abstract class `{type_name}`.")),
+        None | Some(Value::String(_)) if ABSTRACT_STDLIB_CLASSES.contains(&resolved) => Err(
+            Error::Eval(format!("Cannot instantiate abstract class `{resolved}`.")),
         ),
         _ => Ok(()),
     }

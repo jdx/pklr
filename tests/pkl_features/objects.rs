@@ -3915,6 +3915,10 @@ fn amending_the_wrong_kind_of_parent_is_rejected() {
             "Cannot instantiate abstract class `ValueRenderer`.",
         ),
         (
+            "typealias R = ValueRenderer\nres = new R {}\n",
+            "Cannot instantiate abstract class `ValueRenderer`.",
+        ),
+        (
             "res = new Mapping { \"pigeon\" }\n",
             "Object of type `Mapping` cannot have an element.",
         ),
@@ -3938,6 +3942,20 @@ fn amending_the_wrong_kind_of_parent_is_rejected() {
         let err = eval_fails(src);
         assert!(err.contains(message), "{src}: {err}");
     }
+}
+
+#[test]
+fn bare_mapping_amendment_preserves_default_for_later_amendments() {
+    let json = eval(
+        r#"
+local base = (new Mapping {}) { default { enabled = true } }
+result = (base) { ["example"] {} }
+"#,
+    );
+    assert_eq!(
+        json["result"],
+        serde_json::json!({"example": {"enabled": true}})
+    );
 }
 #[test]
 fn nested_amendments_of_class_instances_reject_elements() {
