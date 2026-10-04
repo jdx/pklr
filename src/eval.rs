@@ -99,6 +99,9 @@ struct PendingTypeCheck {
     /// Loop variables and the locals, classes and type aliases of the
     /// generator bodies around the property: these win over object members.
     iteration_names: HashSet<String>,
+    /// The enclosing object's generator entry that produced it, set once
+    /// that entry finishes.
+    entry_index: Option<usize>,
 }
 
 /// The result of checking a typed local.
@@ -179,6 +182,65 @@ struct ModuleScopeSnapshot {
     values: ScopeMap,
     type_aliases: IndexMap<String, crate::parser::TypeExpr>,
     late_properties: Vec<Property>,
+}
+
+/// Lay a finished object's members over `scope`, the scope a deferred type
+/// check of one of its entries runs in, following Pkl's lookup order: a name
+/// the entry resolves lexically keeps that binding, and any other member
+/// takes its final value from the finished object map.
+///
+/// `lexical(name)` says whether the entry resolves `name` lexically (to an
+/// enclosing body's or module's binding, see `EntryOwners::hides_member`).
+/// `own_bindings` are the locals of the entry's own body (and, for a
+/// generator, the iteration's own declarations), with their bindings: they
+/// are lexical too, even where a member has the same name, and are applied
+/// last. Returns the names set or poisoned on `scope`.
+fn layer_finished_members(
+    scope: &mut Scope,
+    members: &IndexMap<String, Value>,
+    lexical: impl Fn(&str) -> bool,
+    own_bindings: &[(String, std::result::Result<Value, String>)],
+) -> HashSet<String> {
+    let mut layered = HashSet::new();
+    for (name, value) in members.iter() {
+        if own_bindings.iter().any(|(own, _)| own == name) || lexical(name) {
+            continue;
+        }
+        scope.set(name.clone(), value.clone());
+        layered.insert(name.clone());
+    }
+    for (name, binding) in own_bindings {
+        match binding {
+            Ok(value) => scope.set(name.clone(), value.clone()),
+            Err(message) => scope.poison(name.clone(), message.clone()),
+        }
+        layered.insert(name.clone());
+    }
+    layered
+}
+
+/// The bindings of the locals written in the same body as the entry at
+/// `entry_index` (entries sharing its captured scope, per `owner`).
+fn same_body_local_bindings(
+    entries: &[Entry],
+    entry_index: usize,
+    owner: &impl Fn(usize) -> Option<*const CapturedScope>,
+    local_bindings: &HashMap<usize, std::result::Result<Value, String>>,
+) -> Vec<(String, std::result::Result<Value, String>)> {
+    let entry_owner = owner(entry_index);
+    entries
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| owner(*index) == entry_owner)
+        .filter_map(|(index, entry)| match entry {
+            Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {
+                local_bindings
+                    .get(&index)
+                    .map(|binding| (prop.name.clone(), binding.clone()))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// The names of a body's members, including properties its `for`/`when`
@@ -2803,6 +2865,17 @@ impl Evaluator {
         // Typed locals whose constraint reads a member of this body, with
         // their entry index: checked once the body is complete.
         let mut deferred_locals: Vec<(&Property, usize)> = Vec::new();
+        // Each local's binding (value or error) by entry index. The body's
+        // scope can later rebind the name to a member of the same name, but
+        // deferred checks resolve a body's own locals lexically.
+        let mut local_bindings: HashMap<usize, std::result::Result<Value, String>> = HashMap::new();
+        // Entries written in the same body share a captured scope (or none).
+        let entry_owner = |index: usize| {
+            entry_scopes
+                .and_then(|scopes| scopes.get(index))
+                .and_then(Option::as_ref)
+                .map(Arc::as_ptr)
+        };
         let body_members = body_member_names(entries);
         // What this body declares for itself rather than as object members:
         // inside a generator body these belong to the iteration.
@@ -2989,6 +3062,7 @@ impl Evaluator {
                             Err(error) => return Err(error),
                         }
                     };
+                    local_bindings.insert(entry_index, evaluated.clone());
                     match evaluated {
                         Ok(val) => {
                             if binds_declared(&prop.name) {
@@ -3340,50 +3414,38 @@ impl Evaluator {
                 Entry::Elem(_) => {} // bare elements only valid in Listing bodies
                 Entry::ClassDef(..) | Entry::TypeAlias(..) => {} // handled in scope setup
             }
+            // Checks a generator entry handed up resolve names the way that
+            // entry does.
+            if !checks.is_generator() {
+                for pending in &mut self.generator_type_checks[generator_mark..] {
+                    pending.entry_index.get_or_insert(entry_index);
+                }
+            }
         }
         // Check typed locals whose constraint reads members of this body
         // against the finished body. One that fails is poisoned in another
         // pass, so only an actual read fails.
         let mut failed_locals = Vec::new();
         for (prop, entry_index) in deferred_locals {
-            let Some(value) = child_scope.get(&prop.name).cloned() else {
+            let Some(Ok(value)) = local_bindings.get(&entry_index).cloned() else {
                 continue;
             };
-            // Members a `for`/`when` produced are in `all_props` but not bound
-            // by name in the body's scope. Layer the finished members over the
-            // local's scope: those written in the same body as the local
-            // (directly or by its generators) replace outer bindings, while
-            // members it inherits (from a base object or class) do not
-            // override a binding the entry's scope resolves, since Pkl looks
-            // up enclosing names before inherited members.
-            let entry_scope = scope_for_object_entry(
+            let mut check_scope = scope_for_object_entry(
                 entry_index,
                 &child_scope,
                 entry_scopes,
                 &entry_owners,
                 own_body_scope,
+            )
+            .child();
+            let own_bindings =
+                same_body_local_bindings(entries, entry_index, &entry_owner, &local_bindings);
+            layer_finished_members(
+                &mut check_scope,
+                &all_props,
+                |name| entry_owners.hides_member(entry_index, entry_scopes, own_body_scope, name),
+                &own_bindings,
             );
-            let owner = |index: usize| {
-                entry_scopes
-                    .and_then(|scopes| scopes.get(index))
-                    .and_then(Option::as_ref)
-                    .map(Arc::as_ptr)
-            };
-            let local_owner = owner(entry_index);
-            let same_body_members = entries
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| owner(*index) == local_owner)
-                .flat_map(|(_, entry)| body_member_names(std::slice::from_ref(entry)))
-                .collect::<HashSet<_>>();
-            let mut check_scope = entry_scope.child();
-            for (name, member) in all_props.iter() {
-                let keeps_own_binding = !same_body_members.contains(name)
-                    && (entry_scope.get(name).is_some() || entry_scope.poison_of(name).is_some());
-                if !keeps_own_binding {
-                    check_scope.set(name.clone(), member.clone());
-                }
-            }
             if let LocalCheck::Failed(message) = self
                 .typed_local_failure(prop, &value, &check_scope, depth)
                 .await?
@@ -3455,6 +3517,7 @@ impl Evaluator {
                     scope: capture_scope(&active_scope),
                     poisoned: active_scope.flatten_poisoned(),
                     iteration_names: names.clone(),
+                    entry_index: None,
                 });
                 continue;
             }
@@ -3469,32 +3532,45 @@ impl Evaluator {
         // iteration stay failed.
         if !checks.is_generator() {
             let pending = self.generator_type_checks.split_off(generator_mark);
-            let member_names = body_members
-                .iter()
-                .chain(all_props.keys())
-                .cloned()
-                .collect::<HashSet<_>>();
             for check in pending {
+                // The iteration's own declarations are lexical and already
+                // bound in its saved scope; the locals of the body holding
+                // the generator are lexical too. Other members resolve as
+                // the generator entry resolves them.
+                let own_bindings = check
+                    .entry_index
+                    .map(|entry_index| {
+                        same_body_local_bindings(
+                            entries,
+                            entry_index,
+                            &entry_owner,
+                            &local_bindings,
+                        )
+                    })
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|(name, _)| !check.iteration_names.contains(name))
+                    .collect::<Vec<_>>();
                 let mut check_scope = restore_scope(&check.scope).child();
-                let mut overlaid = HashSet::new();
-                for name in &member_names {
-                    if check.iteration_names.contains(name) {
-                        continue;
-                    }
-                    // The finished object map holds every member, including
-                    // ones a generator produced, which are not bound by name
-                    // in the body's scope. Only names not in it (the body's
-                    // locals) are looked up in the scope.
-                    if let Some(value) = all_props.get(name).or_else(|| child_scope.get(name)) {
-                        check_scope.set(name.clone(), value.clone());
-                        overlaid.insert(name.clone());
-                    } else if let Some(message) = child_scope.poison_of(name) {
-                        check_scope.poison(name.clone(), message.clone());
-                        overlaid.insert(name.clone());
-                    }
-                }
+                let layered = layer_finished_members(
+                    &mut check_scope,
+                    &all_props,
+                    |name| {
+                        check.iteration_names.contains(name)
+                            || check.entry_index.is_some_and(|entry_index| {
+                                entry_owners.hides_member(
+                                    entry_index,
+                                    entry_scopes,
+                                    own_body_scope,
+                                    name,
+                                )
+                            })
+                    },
+                    &own_bindings,
+                );
+                // Failed bindings of the saved scope stay failed.
                 for (name, message) in check.poisoned {
-                    if !overlaid.contains(&name) {
+                    if !layered.contains(&name) {
                         check_scope.poison(name, message);
                     }
                 }

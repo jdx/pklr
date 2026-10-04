@@ -480,6 +480,33 @@ impl EntryOwners {
         }
     }
 
+    /// Whether the scope `scope_for_object_entry` builds for this entry
+    /// resolves `name` lexically rather than to the object's member: the
+    /// entry's lexical scope declares it and the entry's own body does not.
+    /// This is the rule `update_object_bindings` applies.
+    pub(super) fn hides_member(
+        &self,
+        entry_index: usize,
+        entry_scopes: Option<&[Option<Arc<CapturedScope>>]>,
+        own_body: Option<(&Scope, &HashSet<String>)>,
+        name: &str,
+    ) -> bool {
+        if let Some(captured) = entry_scopes
+            .and_then(|scopes| scopes.get(entry_index))
+            .and_then(Option::as_ref)
+        {
+            let owned = self
+                .owners
+                .get(entry_index)
+                .is_some_and(|owned| owned.contains(name));
+            return !owned && self.restored(captured).is_declared(name);
+        }
+        match own_body {
+            Some((definition, owned)) => !owned.contains(name) && definition.is_declared(name),
+            None => false,
+        }
+    }
+
     fn restored(&self, captured: &Arc<CapturedScope>) -> Scope {
         self.restored
             .borrow_mut()

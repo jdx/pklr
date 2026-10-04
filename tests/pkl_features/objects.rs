@@ -1860,6 +1860,64 @@ c = new C {}
 }
 
 #[test]
+fn deferred_local_check_keeps_same_body_local_over_inherited_member() {
+    let message = eval_fails(
+        r#"
+base { limit = 10 }
+obj = (base) { local limit = 2; local checked: Int(this < limit) = 3; out = checked }
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+    let json = eval(
+        r#"
+base { limit = 1 }
+obj = (base) { local limit = 5; local checked: Int(this < limit) = 3; out = checked }
+"#,
+    );
+    assert_eq!(json["obj"]["out"], 3);
+}
+
+#[test]
+fn generator_check_keeps_enclosing_binding_over_base_generated_member() {
+    let message = eval_fails(
+        r#"
+local limit = 2
+base { when (true) { limit = 10 } }
+obj = (base) { when (true) { checked: Int(this < limit) = 3 } }
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+    let json = eval(
+        r#"
+local limit = 5
+base { when (true) { limit = 1 } }
+obj = (base) { when (true) { checked: Int(this < limit) = 3 } }
+"#,
+    );
+    assert_eq!(json["obj"]["checked"], 3);
+}
+
+#[test]
+fn deferred_local_check_uses_member_replaced_by_later_generator() {
+    let message = eval_fails(
+        r#"
+base { limit = 5 }
+first = (base) { local checked: Int(this < limit) = 3; out = checked }
+second = (first) { when (true) { limit = 2 } }
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+    let json = eval(
+        r#"
+base { limit = 5 }
+first = (base) { local checked: Int(this < limit) = 3; out = checked }
+second = (first) { when (true) { limit = 4 } }
+"#,
+    );
+    assert_eq!(json["second"]["out"], 3);
+}
+
+#[test]
 fn amendment_keeps_inherited_typed_local_lazy() {
     let json = eval(
         r#"
