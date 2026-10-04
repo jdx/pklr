@@ -940,21 +940,57 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
         names
     }
     // The names a class body reads while its defaults are evaluated: those
-    // of its non-method entries, and of the methods they call (by name, or
-    // any of them through `this`). Other method bodies only run on a built
-    // instance.
+    // of its non-method entries, and of the methods they call (by name, as
+    // `this.name`, or any of them through a dynamic `this[...]`). Other
+    // method bodies only run on a built instance.
     fn eager_class_refs(body: &[Entry]) -> HashSet<String> {
-        let is_method = |entry: &Entry| matches!(entry, Entry::Property(prop) if matches!(prop.value, Some(Expr::Lambda(..))));
+        fn is_method(entry: &Entry) -> bool {
+            matches!(entry, Entry::Property(prop) if matches!(prop.value, Some(Expr::Lambda(..))))
+        }
+        // The members `entries` read as `this.name`, where `this` is the
+        // instance (not a nested object body's own `this`).
+        fn instance_member_refs(entries: &[Entry], refs: &mut HashSet<String>) {
+            for entry in entries {
+                match entry {
+                    Entry::Property(prop) => {
+                        if let Some(value) = &prop.value {
+                            collect_sibling_field_refs_expr(value, refs, true);
+                        }
+                    }
+                    Entry::DynProperty(key, value) => {
+                        collect_sibling_field_refs_expr(key, refs, true);
+                        collect_sibling_field_refs_expr(value, refs, true);
+                    }
+                    Entry::Spread(expr) | Entry::Elem(expr) => {
+                        collect_sibling_field_refs_expr(expr, refs, true);
+                    }
+                    Entry::ForGenerator(fgen) => {
+                        collect_sibling_field_refs_expr(&fgen.collection, refs, true);
+                        instance_member_refs(&fgen.body, refs);
+                    }
+                    Entry::WhenGenerator(wgen) => {
+                        collect_sibling_field_refs_expr(&wgen.condition, refs, true);
+                        instance_member_refs(&wgen.body, refs);
+                        if let Some(else_body) = &wgen.else_body {
+                            instance_member_refs(else_body, refs);
+                        }
+                    }
+                    Entry::ClassDef(..) | Entry::TypeAlias(..) => {}
+                }
+            }
+        }
         let defaults: Vec<Entry> = body.iter().filter(|e| !is_method(e)).cloned().collect();
         let mut refs = referenced_roots(&defaults);
+        let mut members = HashSet::new();
+        instance_member_refs(&defaults, &mut members);
         let mut followed = HashSet::new();
         loop {
-            let calls_all = refs.contains("this") || refs.contains(DYNAMIC_SIBLING_REF);
+            let calls_all = members.contains(DYNAMIC_SIBLING_REF);
             let next: Vec<&Entry> = body
                 .iter()
                 .filter(|entry| match entry {
                     Entry::Property(prop) if is_method(entry) => {
-                        (calls_all || refs.contains(&prop.name))
+                        (calls_all || refs.contains(&prop.name) || members.contains(&prop.name))
                             && followed.insert(prop.name.as_str())
                     }
                     _ => false,
@@ -964,7 +1000,9 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
                 return refs;
             }
             for method in next {
-                refs.extend(referenced_roots(std::slice::from_ref(method)));
+                let method = std::slice::from_ref(method);
+                refs.extend(referenced_roots(method));
+                instance_member_refs(method, &mut members);
             }
         }
     }

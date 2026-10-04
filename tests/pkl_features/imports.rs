@@ -2448,6 +2448,30 @@ async fn narrowed_import_follows_methods_called_by_class_defaults() {
 }
 
 #[tokio::test]
+async fn narrowed_import_skips_methods_class_defaults_do_not_call() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_default_this_read");
+    let dir = temp.path();
+    // `a` reads `this.x` but calls no method, so `getMin` only runs on the
+    // built instance, where `min` is the inherited property.
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "min = throw(\"unused\")\nopen class Parent { min = 2 }\nclass Child extends Parent {\n  x = 3\n  a = this.x\n  function getMin() = min\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as D\nchild = new D.Child {}\na = child.a\nmin = child.getMin()\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["a"], 3);
+    assert_eq!(val["min"], 2);
+}
+
+#[tokio::test]
 async fn narrowed_import_follows_module_reads_but_not_checked_value_members() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_constraint_names");
     let dir = temp.path();
