@@ -113,6 +113,9 @@ pub struct Evaluator {
     /// Used to deduplicate `@Deprecated` warnings so a deprecated property
     /// referenced inside a loop or template doesn't flood stderr.
     warned_deprecated: std::collections::HashSet<(String, Option<String>)>,
+    /// Names declared by `module a.b.C` headers, by module identity (see
+    /// `module_type_namespace`), for error messages.
+    module_names: HashMap<String, String>,
 }
 
 #[derive(Clone, Default)]
@@ -409,6 +412,7 @@ impl Evaluator {
             http_rewrites: Vec::new(),
             converters: Vec::new(),
             warned_deprecated: std::collections::HashSet::default(),
+            module_names: HashMap::default(),
         }
     }
 
@@ -1549,6 +1553,10 @@ impl Evaluator {
         }
         self.check_cancelled()?;
         self.prefetch_remote_imports(module, path);
+        if let Some(name) = &module.name {
+            let identity = self.module_type_namespace(path);
+            self.module_names.insert(identity, name.clone());
+        }
         if module
             .body
             .iter()
@@ -1864,9 +1872,7 @@ impl Evaluator {
                     }
                 }
             } else if uri == "pkl:test" {
-                if let Value::Object(members, _) = stdlib_module("test") {
-                    base_obj.extend(members.iter().map(|(k, v)| (k.clone(), v.clone())));
-                }
+                inherit_stdlib_module("test", &mut base_obj, &mut scope);
             } else if !uri.starts_with("pkl:")
                 && (!uri.contains("://") || uri.starts_with("file://"))
             {
@@ -1936,8 +1942,9 @@ impl Evaluator {
                     }
                 }
             }
-            // Remove function values from base output (not data)
-            base_obj.retain(|_, v| !matches!(v, Value::Lambda(..)));
+            // Functions inherited from the base stay members, so `module.f`
+            // and `this.f` reach them. They are dropped when the module is
+            // rendered (see the end of this function).
         }
 
         // Process extends: load base module, inherit all members and scope
@@ -1945,10 +1952,8 @@ impl Evaluator {
             // A relative extends inside a remote module resolves against that URL.
             let resolved_extends = resolve_remote_relative(path, extends_uri);
             let uri: &str = resolved_extends.as_deref().unwrap_or(extends_uri);
-            if uri == "pkl:test"
-                && let Value::Object(members, _) = stdlib_module("test")
-            {
-                base_obj.extend(members.iter().map(|(k, v)| (k.clone(), v.clone())));
+            if uri == "pkl:test" {
+                inherit_stdlib_module("test", &mut base_obj, &mut scope);
             }
             if !uri.contains("://") || uri.starts_with("file://") {
                 let extends_path = self.local_file_path(path, uri)?;
@@ -2935,6 +2940,8 @@ impl Evaluator {
         // Names of members produced by generators and not since rebound by a
         // property entry.
         let mut generated: HashSet<Arc<str>> = HashSet::default();
+        // Members generators produced, by the body (layer) they belong to.
+        let mut generated_by_layer: HashSet<(usize, Arc<str>)> = HashSet::default();
         for (entry_index, entry) in entries.iter().enumerate() {
             match entry {
                 Entry::Property(prop) => {
@@ -3165,6 +3172,12 @@ impl Evaluator {
                             }),
                         )?;
                         if let Value::Object(m, _) = body_val {
+                            record_generated_members(
+                                &mut generated_by_layer,
+                                entry_layer(entry_scopes, entry_index),
+                                &m,
+                                &fgen.body,
+                            )?;
                             entry_owners.release_this(&this_aliases);
                             props_extend(
                                 &mut child_scope,
@@ -3200,6 +3213,12 @@ impl Evaluator {
                             }),
                         )?;
                         if let Value::Object(m, _) = body_val {
+                            record_generated_members(
+                                &mut generated_by_layer,
+                                entry_layer(entry_scopes, entry_index),
+                                &m,
+                                &wgen.body,
+                            )?;
                             entry_owners.release_this(&this_aliases);
                             props_extend(
                                 &mut child_scope,
@@ -3224,6 +3243,12 @@ impl Evaluator {
                             }),
                         )?;
                         if let Value::Object(m, _) = else_val {
+                            record_generated_members(
+                                &mut generated_by_layer,
+                                entry_layer(entry_scopes, entry_index),
+                                &m,
+                                else_body,
+                            )?;
                             entry_owners.release_this(&this_aliases);
                             props_extend(
                                 &mut child_scope,
@@ -4720,7 +4745,13 @@ impl Evaluator {
                             Error::Eval(
                                 missing_member_error(source, obj_expr, field, scope)
                                     .unwrap_or_else(|| {
-                                        missing_property_message(source, obj_expr, field, scope)
+                                        missing_property_message(
+                                            source,
+                                            obj_expr,
+                                            field,
+                                            scope,
+                                            &self.module_names,
+                                        )
                                     }),
                             )
                         })?;
@@ -5613,6 +5644,34 @@ impl Evaluator {
         value_type_names: &[String],
         inherited_default: MappingInheritedDefault,
     ) -> Result<()> {
+        self.eval_mapping_body(
+            entries,
+            scope,
+            depth,
+            map,
+            type_defaults,
+            value_type_names,
+            inherited_default,
+            &mut HashSet::default(),
+        )
+    }
+
+    /// Evaluate the entries of one mapping body into `map`. `defined_keys`
+    /// holds the keys the body has defined so far, including those its
+    /// generators produced: a body may amend its parent's entries, but may
+    /// define each key only once.
+    #[allow(clippy::too_many_arguments)]
+    fn eval_mapping_body(
+        &mut self,
+        entries: &[crate::parser::Entry],
+        scope: &Scope,
+        depth: usize,
+        map: &mut ObjectMap,
+        type_defaults: &[(String, Value)],
+        value_type_names: &[String],
+        inherited_default: MappingInheritedDefault,
+        defined_keys: &mut HashSet<(&'static str, Arc<str>)>,
+    ) -> Result<()> {
         let mut entry_scope = scope.child();
         let mut deferred_lambdas: Vec<(String, &crate::parser::Expr)> = Vec::new();
         for entry in entries {
@@ -5669,15 +5728,13 @@ impl Evaluator {
         let explicit_default_entries =
             find_default_body_entries(entries).or(inherited_default.entries);
 
-        // Keys this body defines. A body may amend its parent's entries, but
-        // may define each key only once.
-        let mut defined_keys = HashSet::default();
         for entry in entries {
             match entry {
                 Entry::DynProperty(key_expr, val_expr) => {
                     let key = self.eval_expr(key_expr, &entry_scope, depth + 1)?;
                     let key_str = value_to_key(&key)?;
-                    if !defined_keys.insert(key_str.clone()) {
+                    // Keys of different types (`1` and `"1"`) are different keys.
+                    if !defined_keys.insert((value_type_name(&key), key_str.clone())) {
                         let key = match &key {
                             Value::String(s) => format!("{s:?}"),
                             key => value_to_display(key),
@@ -5876,7 +5933,7 @@ impl Evaluator {
                         if let Some(kv) = &fgen.key_var {
                             iter_scope.set(kv, k);
                         }
-                        self.eval_mapping_entries_with_type_default(
+                        self.eval_mapping_body(
                             &fgen.body,
                             &iter_scope,
                             depth + 1,
@@ -5887,6 +5944,7 @@ impl Evaluator {
                                 value: explicit_default.clone(),
                                 entries: explicit_default_entries.clone(),
                             },
+                            defined_keys,
                         )?;
                     }
                 }
@@ -5899,7 +5957,7 @@ impl Evaluator {
                         generator.else_body.as_deref().map(Vec::as_slice)
                     };
                     if let Some(selected) = selected {
-                        self.eval_mapping_entries_with_type_default(
+                        self.eval_mapping_body(
                             selected,
                             &entry_scope,
                             depth + 1,
@@ -5910,6 +5968,7 @@ impl Evaluator {
                                 value: explicit_default.clone(),
                                 entries: explicit_default_entries.clone(),
                             },
+                            defined_keys,
                         )?;
                     }
                 }
@@ -6688,6 +6747,17 @@ fn check_module_annotations(module: &Module, scope: &Scope) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Make standard-library module members available through both the module
+/// object and bare names in a module that amends or extends it.
+fn inherit_stdlib_module(name: &str, base_obj: &mut ObjectMap, scope: &mut Scope) {
+    if let Value::Object(members, _) = stdlib_module(name) {
+        for (member, value) in members.iter() {
+            base_obj.insert(member.clone(), value.clone());
+            scope.set(member, value.clone());
+        }
+    }
 }
 
 fn stdlib_module(name: &str) -> Value {

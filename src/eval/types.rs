@@ -490,18 +490,20 @@ pub(super) fn is_unresolved_template_error(message: &str) -> bool {
 
 /// Pkl's error for reading `name` from an object that has no such member:
 /// the object `obj_expr` evaluated to, described by `source`.
+/// `module_names` maps module identities to the names the modules declare.
 pub(super) fn missing_property_message(
     source: &Option<Arc<ObjectSource>>,
     obj_expr: &Expr,
     name: &str,
     scope: &Scope,
+    module_names: &HashMap<String, String>,
 ) -> String {
     if let Expr::Ident(root) = obj_expr
         && let Some(identity) = scope.module_identity(root)
     {
         return format!(
             "Cannot find property `{name}` in module `{}`.",
-            module_name_of(identity)
+            module_name_of(identity, module_names)
         );
     }
     let type_name = match source.as_deref() {
@@ -513,7 +515,7 @@ pub(super) fn missing_property_message(
             .as_deref()
             .and_then(|identity| identity.strip_suffix(class.as_str())?.strip_suffix('.'))
         {
-            Some(module) => format!("{}#{class}", module_name_of(module)),
+            Some(module) => format!("{}#{class}", module_name_of(module, module_names)),
             None => class.clone(),
         },
         _ => "Dynamic".to_string(),
@@ -521,11 +523,53 @@ pub(super) fn missing_property_message(
     format!("Cannot find property `{name}` in object of type `{type_name}`.")
 }
 
-/// The name Pkl gives the module at `uri` that declares no name: its file
-/// name without the extension.
-fn module_name_of(uri: &str) -> &str {
+/// The name of the module with identity `uri`: the one it declares, or else
+/// its file name without the extension.
+fn module_name_of<'a>(uri: &'a str, module_names: &'a HashMap<String, String>) -> &'a str {
+    if let Some(name) = module_names.get(uri) {
+        return name;
+    }
     let file = uri.rsplit(['/', '\\']).next().unwrap_or(uri);
     file.strip_suffix(".pkl").unwrap_or(file)
+}
+
+/// Which body the entry at `index` of a (possibly merged) object body was
+/// written in: entries of one amendment share their captured scope.
+pub(super) fn entry_layer(
+    entry_scopes: Option<&[Option<Arc<CapturedScope>>]>,
+    index: usize,
+) -> usize {
+    entry_scopes
+        .and_then(|scopes| scopes.get(index)?.as_ref())
+        .map_or(0, |scope| Arc::as_ptr(scope) as usize)
+}
+
+/// Record the members a generator produced in body `layer`. A body may
+/// define each member only once, so a member its generators already
+/// produced is an error. `body` is the generator's body, which tells
+/// properties from entries for the message.
+pub(super) fn record_generated_members(
+    seen: &mut HashSet<(usize, Arc<str>)>,
+    layer: usize,
+    members: &ObjectMap,
+    body: &[Entry],
+) -> Result<()> {
+    for name in members.keys() {
+        if !seen.insert((layer, name.clone())) {
+            let is_property = body
+                .iter()
+                .any(|entry| matches!(entry, Entry::Property(prop) if *prop.name == **name));
+            let name = if is_property {
+                name.to_string()
+            } else {
+                format!("{:?}", &**name)
+            };
+            return Err(Error::Eval(format!(
+                "Duplicate definition of member `{name}`."
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn require_str_arg<'a>(args: &'a [Value], idx: usize, method: &str) -> Result<&'a str> {

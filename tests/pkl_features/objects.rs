@@ -106,6 +106,111 @@ x = module.catch(() -> throw("boom"))
 }
 
 #[test]
+fn modules_amending_pkl_test_inherit_catch() {
+    let json = eval(
+        r#"
+amends "pkl:test"
+local x = module.catch(() -> throw("boom"))
+local y = catch(() -> throw("bare"))
+examples { [x] = new Listing {}; [y] = new Listing {} }
+"#,
+    );
+    assert_eq!(
+        json,
+        serde_json::json!({ "examples": { "boom": [], "bare": [] } })
+    );
+}
+
+#[tokio::test]
+async fn modules_amending_a_pkl_test_module_inherit_catch() {
+    let temp = TestTempDir::new("pklr_test_amend_pkl_test_base");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("base.pkl"),
+        "open module base\nextends \"pkl:test\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+amends "base.pkl"
+local x = module.catch(() -> throw("boom"))
+local y = catch(() -> throw("bare"))
+examples { [x] = new Listing {}; [y] = new Listing {} }
+"#,
+    )
+    .unwrap();
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        val,
+        serde_json::json!({ "examples": { "boom": [], "bare": [] } })
+    );
+}
+
+#[test]
+fn generated_mapping_keys_cannot_repeat_in_one_body() {
+    let json = eval(
+        r#"
+import "pkl:test"
+local m = new Mapping { ["a"] = 0 }
+forLoop = test.catch(() -> new Mapping { for (i in List(1, 2)) { ["a"] = i } })
+direct = test.catch(() -> new Mapping { ["a"] = 1; when (true) { ["a"] = 2 } })
+twoLoops = test.catch(() -> new Mapping { for (i in List(1)) { ["a"] = i } for (i in List(1)) { ["a"] = i } })
+amendedTwice = test.catch(() -> (m) { for (i in List(1, 2)) { ["a"] = i } })
+amendsParent = (m) { for (i in List(1)) { ["a"] = i } }
+nextLayer = new Mapping { ["a"] = 1 } { ["a"] = 2 }
+differentTypes = test.catchOrNull(() -> new Mapping<Any, Int> { [1] = 10; ["1"] = 20 })
+"#,
+    );
+    let duplicate = "Duplicate definition of member `\"a\"`.";
+    for key in ["forLoop", "direct", "twoLoops", "amendedTwice"] {
+        assert_eq!(json[key], duplicate, "{key}");
+    }
+    assert_eq!(json["amendsParent"]["a"], 1);
+    assert_eq!(json["nextLayer"]["a"], 2);
+    assert!(json["differentTypes"].is_null());
+}
+
+#[tokio::test]
+async fn missing_property_messages_use_declared_module_names() {
+    let temp = TestTempDir::new("pklr_test_declared_module_name");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("settings.pkl"),
+        "module company.Settings\nclass Bird { name = \"x\" }\nbird = new Bird {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "pkl:test"
+import "settings.pkl"
+typed = test.catch(() -> settings.bird.age)
+"#,
+    )
+    .unwrap();
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        val["typed"],
+        "Cannot find property `age` in object of type `company.Settings#Bird`."
+    );
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"settings.pkl\"\nx = settings.nope\n",
+    )
+    .unwrap();
+    let err = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("Cannot find property `nope` in module `company.Settings`."));
+}
+
+#[test]
 fn listing_index_amendments_must_name_a_parent_element() {
     let json = eval(
         r#"
