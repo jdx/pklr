@@ -2359,8 +2359,8 @@ async fn narrowed_import_ignores_checked_value_names_in_is_expressions() {
         "length = 1\nresult = null is Listing<Int>?(length == 1)\n",
     )
     .unwrap();
-    // `N` can't be resolved during analysis, so `length` stays a module read;
-    // a number's check doesn't bind it.
+    // `N` resolves to `Int`, and a number's check doesn't bind `length`, so
+    // it stays a module read.
     std::fs::write(
         dir.join("alias.pkl"),
         "length = 1\ntypealias N = Int\nresult = 1 is N(this == length)\n",
@@ -2379,5 +2379,53 @@ async fn narrowed_import_ignores_checked_value_names_in_is_expressions() {
     assert_eq!(val["classed"], true);
     assert_eq!(val["aliased"], true);
     assert_eq!(val["generic"], true);
+    assert_eq!(val["nullable"], true);
+}
+
+#[tokio::test]
+async fn narrowed_import_resolves_local_aliases_in_constraint_bases() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_alias_constraint_base");
+    let dir = temp.path();
+    // `S` is `String`, so `length` in the constraint is the string's own.
+    std::fs::write(
+        dir.join("string.pkl"),
+        "length = throw(\"unused\")\ntypealias S = String\nresult = \"b\" is S(length == 1)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("chain.pkl"),
+        "length = throw(\"unused\")\nisEmpty = throw(\"unused\")\ntypealias T = S\ntypealias S = NonEmpty\ntypealias NonEmpty = String(!isEmpty)\nresult = \"b\" is T(length == 1)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("listing.pkl"),
+        "length = throw(\"unused\")\ntypealias L = Listing<Int>\nresult = List(1) is L(length == 1)\n",
+    )
+    .unwrap();
+    // An alias of a number or nullable type binds no `length`, so it stays a
+    // module read.
+    std::fs::write(
+        dir.join("number.pkl"),
+        "length = 1\ntypealias M = N\ntypealias N = Int\nresult = 1 is M(this == length)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("nullable.pkl"),
+        "length = 1\ntypealias L = Listing<Int>?\nresult = null is L(length == 1)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"string.pkl\" as Str\nimport \"chain.pkl\" as Chain\nimport \"listing.pkl\" as Lst\nimport \"number.pkl\" as Num\nimport \"nullable.pkl\" as Nullable\nstring = Str.result\nchain = Chain.result\nlisting = Lst.result\nnumber = Num.result\nnullable = Nullable.result\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["string"], true);
+    assert_eq!(val["chain"], true);
+    assert_eq!(val["listing"], true);
+    assert_eq!(val["number"], true);
     assert_eq!(val["nullable"], true);
 }
