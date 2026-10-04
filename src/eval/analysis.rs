@@ -832,10 +832,13 @@ fn collect_unshadowed_type_names(ty: &crate::parser::TypeExpr, names: &mut HashS
 /// Insert every binding a type or class name could resolve through. A name
 /// may be a plain or dotted identifier, a quoted identifier that contains
 /// any characters (`` `Step?` ``), or a serialized type such as a default
-/// (`*Step`) or a generic (`*Container<String>`). Keep the name as written
-/// and also each identifier in it; over-capturing is safe.
+/// (`*Step`, ``*`Foo-Bar` ``) or a generic (`*Container<String>`). Keep the
+/// name as written, without its default and nullable markers, and also each
+/// identifier in it; over-capturing is safe.
 fn insert_name_roots(names: &mut HashSet<String>, name: &str) {
-    names.insert(name.split('.').next().unwrap_or(name).to_string());
+    for name in [name, name.trim_start_matches('*').trim_end_matches('?')] {
+        names.insert(name.split('.').next().unwrap_or(name).to_string());
+    }
     for token in name.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$' || c == '.')) {
         if let Some(root) = token.split('.').next()
             && !root.is_empty()
