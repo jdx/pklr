@@ -1,0 +1,5 @@
+local o = new Dynamic {
+  bad = throw("unused")
+  ok = 1
+}
+res = o.ok

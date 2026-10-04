@@ -1,0 +1,2 @@
+class C { a = 1; b = a }
+r = new C { a = 2 }

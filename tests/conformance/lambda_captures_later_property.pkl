@@ -1,0 +1,3 @@
+local f = (n) -> n + offset
+r = f.apply(1)
+offset = 41

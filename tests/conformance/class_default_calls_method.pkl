@@ -1,0 +1,7 @@
+const min = 1
+open class Parent { min = 2 }
+class Child extends Parent {
+  function getMin() = min
+  a = getMin()
+}
+res = new Child {}

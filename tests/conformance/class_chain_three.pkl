@@ -1,0 +1,6 @@
+const base = 100
+open class A { x = 1 }
+open class B extends A { y = x + base }
+class C extends B { z = y + x }
+r = new C {}
+r2 = new C { x = 10 }

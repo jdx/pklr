@@ -1,0 +1,9 @@
+const k = 1
+open class P { k = 2; v = 3 }
+class C extends P {
+  function f() = k
+  function g() = v
+}
+r = new C {}
+f = r.f()
+g = r.g()

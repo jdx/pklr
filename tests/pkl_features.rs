@@ -68,6 +68,8 @@ impl Drop for TestTempDir {
 
 #[path = "pkl_features/advanced.rs"]
 mod advanced;
+#[path = "pkl_features/conformance.rs"]
+mod conformance;
 #[path = "pkl_features/imports.rs"]
 mod imports;
 #[path = "pkl_features/objects.rs"]

@@ -1,0 +1,10 @@
+const min = 1
+open class Parent { min = 2 }
+class Child extends Parent {
+  a = min
+  function getMin() = min
+  b = getMin()
+  obj { c = min; d = outer.min }
+}
+res = new Child {}
+resM = res.getMin()

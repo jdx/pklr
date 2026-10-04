@@ -1,0 +1,3 @@
+items = new Listing { first; second }
+first = 1
+second = first + 1

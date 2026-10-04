@@ -1,0 +1,6 @@
+class C {
+  x = 1
+  function twice() = x * 2
+}
+r = new C {}
+t = r.twice()

@@ -1,0 +1,3 @@
+res = double(n)
+function double(x) = x * 2
+n = 21

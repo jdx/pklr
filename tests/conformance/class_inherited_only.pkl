@@ -1,0 +1,4 @@
+open class P { a = 5 }
+class C extends P { b = a }
+r = new C {}
+r2 = new C { a = 7 }

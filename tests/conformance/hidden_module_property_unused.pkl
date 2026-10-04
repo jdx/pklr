@@ -1,0 +1,2 @@
+hidden bad = throw("unused")
+ok = 1

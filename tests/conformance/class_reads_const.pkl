@@ -1,0 +1,7 @@
+const min = 1
+class Bar {
+  a: Int = min
+}
+result {
+  bar = new Bar {}
+}
