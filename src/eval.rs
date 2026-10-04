@@ -3902,6 +3902,13 @@ impl Evaluator {
             Expr::Lambda(params, body) => {
                 let mut body = (**body).clone();
                 capture_method_result_types(&mut body, scope);
+                let mut names = HashSet::new();
+                collect_unshadowed_names(&body, &mut names);
+                // A body that names a type captures the whole scope (below),
+                // so resolving its aliases leaves `names` as it is.
+                if names.contains(NAMES_A_TYPE) && scope.has_type_aliases() {
+                    capture_type_aliases(&mut body, scope);
+                }
                 let mut refs = HashSet::new();
                 let shadows = params.iter().cloned().collect::<HashSet<_>>();
                 collect_expr_refs(&body, &mut refs, &shadows);
@@ -3912,8 +3919,6 @@ impl Evaluator {
                 // object built in the body sees its enclosing bindings through
                 // `outer`, so a body that mentions `outer` keeps everything, as
                 // does a body that names a type (see `NAMES_A_TYPE`).
-                let mut names = HashSet::new();
-                collect_unshadowed_names(&body, &mut names);
                 let captured =
                     Arc::new(if names.contains("outer") || names.contains(NAMES_A_TYPE) {
                         scope.flatten()

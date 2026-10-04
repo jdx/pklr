@@ -63,6 +63,226 @@ pub(super) fn capture_method_result_types(expr: &mut Expr, scope: &Scope) {
     }
 }
 
+/// Replace the type aliases a lambda body names with the types they stand for
+/// in the scope that defines the lambda. Value::Lambda captures values only,
+/// so an alias declared in an enclosing body or module would otherwise be
+/// unknown when the lambda is called, and `x is Alias` would check against a
+/// class or built-in of the same name instead. Names declared again by a
+/// `typealias` or `class` in a body inside the lambda keep their inner meaning.
+pub(super) fn capture_type_aliases(expr: &mut Expr, scope: &Scope) {
+    resolve_expr_aliases(expr, scope, &HashSet::new());
+}
+
+fn resolve_expr_aliases(expr: &mut Expr, scope: &Scope, shadowed: &HashSet<String>) {
+    match expr {
+        Expr::Is(value, ty) | Expr::As(value, ty) => {
+            resolve_expr_aliases(value, scope, shadowed);
+            resolve_type_aliases(ty, scope, shadowed, &mut Vec::new());
+        }
+        Expr::InferredNew(ty, entries) => {
+            resolve_type_aliases(ty, scope, shadowed, &mut Vec::new());
+            resolve_body_aliases(entries, scope, shadowed);
+        }
+        Expr::New(_, entries, _) | Expr::ObjectBody(entries) => {
+            resolve_body_aliases(entries, scope, shadowed)
+        }
+        Expr::Field(value, _)
+        | Expr::NullSafeField(value, _)
+        | Expr::Unop(_, value)
+        | Expr::Lambda(_, value)
+        | Expr::Throw(value)
+        | Expr::Trace(value)
+        | Expr::Read(value)
+        | Expr::ReadOrNull(value) => resolve_expr_aliases(value, scope, shadowed),
+        Expr::Index(left, right) | Expr::Binop(_, left, right) | Expr::Let(_, left, right) => {
+            resolve_expr_aliases(left, scope, shadowed);
+            resolve_expr_aliases(right, scope, shadowed);
+        }
+        Expr::Call(callee, args) => {
+            resolve_expr_aliases(callee, scope, shadowed);
+            for arg in args {
+                resolve_expr_aliases(arg, scope, shadowed);
+            }
+        }
+        Expr::If(cond, then_expr, else_expr) => {
+            resolve_expr_aliases(cond, scope, shadowed);
+            resolve_expr_aliases(then_expr, scope, shadowed);
+            resolve_expr_aliases(else_expr, scope, shadowed);
+        }
+        Expr::StringInterpolation(parts) => {
+            for part in parts {
+                if let StringInterpPart::Expr(expr) = part {
+                    resolve_expr_aliases(expr, scope, shadowed);
+                }
+            }
+        }
+        Expr::Null
+        | Expr::Bool(_)
+        | Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::String(_)
+        | Expr::Ident(_)
+        | Expr::Import(..)
+        | Expr::ImportGlob(..) => {}
+    }
+}
+
+fn resolve_body_aliases(
+    entries: &mut crate::parser::Body,
+    scope: &Scope,
+    shadowed: &HashSet<String>,
+) {
+    let declared = entries.iter().filter_map(|entry| match entry {
+        Entry::TypeAlias(name, _) | Entry::ClassDef(name, ..) => Some(name),
+        _ => None,
+    });
+    let mut inner_shadowed = None::<HashSet<String>>;
+    for name in declared {
+        if !shadowed.contains(name) {
+            inner_shadowed
+                .get_or_insert_with(|| shadowed.clone())
+                .insert(name.clone());
+        }
+    }
+    let shadowed = inner_shadowed.as_ref().unwrap_or(shadowed);
+    for entry in Arc::make_mut(entries) {
+        resolve_entry_aliases(entry, scope, shadowed);
+    }
+}
+
+fn resolve_entry_aliases(entry: &mut Entry, scope: &Scope, shadowed: &HashSet<String>) {
+    match entry {
+        Entry::Property(prop) => {
+            if let Some(ty) = &mut prop.type_ann {
+                resolve_type_aliases(ty, scope, shadowed, &mut Vec::new());
+            }
+            if let Some(value) = &mut prop.value {
+                resolve_expr_aliases(value, scope, shadowed);
+            }
+            if let Some(body) = &mut prop.body {
+                resolve_body_aliases(body, scope, shadowed);
+            }
+        }
+        Entry::DynProperty(key, value) => {
+            resolve_expr_aliases(key, scope, shadowed);
+            resolve_expr_aliases(value, scope, shadowed);
+        }
+        Entry::ForGenerator(generator) => {
+            resolve_expr_aliases(&mut generator.collection, scope, shadowed);
+            resolve_body_aliases(&mut generator.body, scope, shadowed);
+        }
+        Entry::WhenGenerator(generator) => {
+            resolve_expr_aliases(&mut generator.condition, scope, shadowed);
+            resolve_body_aliases(&mut generator.body, scope, shadowed);
+            if let Some(else_body) = &mut generator.else_body {
+                resolve_body_aliases(else_body, scope, shadowed);
+            }
+        }
+        Entry::Spread(expr) | Entry::Elem(expr) => resolve_expr_aliases(expr, scope, shadowed),
+        Entry::ClassDef(_, _, _, body) => resolve_body_aliases(body, scope, shadowed),
+        Entry::TypeAlias(_, ty) => resolve_type_aliases(ty, scope, shadowed, &mut Vec::new()),
+    }
+}
+
+/// The alias `name` stands for, fully resolved, unless it is shadowed or
+/// already being expanded (a cyclic alias is left for the evaluator to report).
+fn resolved_alias(
+    name: &str,
+    scope: &Scope,
+    shadowed: &HashSet<String>,
+    expanding: &mut Vec<String>,
+) -> Option<crate::parser::TypeExpr> {
+    if shadowed.contains(name) || expanding.iter().any(|n| n == name) {
+        return None;
+    }
+    let mut ty = scope.get_type_alias(name)?.clone();
+    expanding.push(name.to_string());
+    resolve_type_aliases(&mut ty, scope, shadowed, expanding);
+    expanding.pop();
+    Some(ty)
+}
+
+fn resolve_type_aliases(
+    ty: &mut crate::parser::TypeExpr,
+    scope: &Scope,
+    shadowed: &HashSet<String>,
+    expanding: &mut Vec<String>,
+) {
+    use crate::parser::TypeExpr;
+    match ty {
+        TypeExpr::Named(name) => {
+            let (default_marker, plain) = match name.strip_prefix('*') {
+                Some(plain) => ("*", plain),
+                None => ("", name.as_str()),
+            };
+            let Some(resolved) = resolved_alias(plain, scope, shadowed, expanding) else {
+                return;
+            };
+            *ty = match resolved {
+                TypeExpr::Named(target) => TypeExpr::Named(format!("{default_marker}{target}")),
+                // Only a plain name can carry the union default marker.
+                resolved if default_marker.is_empty() => resolved,
+                _ => return,
+            };
+        }
+        TypeExpr::Nullable(inner) => resolve_type_aliases(inner, scope, shadowed, expanding),
+        TypeExpr::Union(types) | TypeExpr::Generic(_, types) => {
+            for ty in types {
+                resolve_type_aliases(ty, scope, shadowed, expanding);
+            }
+        }
+        TypeExpr::Constrained(base, constraint) => {
+            resolve_expr_aliases(constraint, scope, shadowed);
+            let nullable = base.ends_with('?');
+            let (default_marker, plain) = match base.trim_end_matches('?').strip_prefix('*') {
+                Some(plain) => ("*", plain),
+                None => ("", base.trim_end_matches('?')),
+            };
+            let Some(resolved) = resolved_alias(plain, scope, shadowed, expanding) else {
+                return;
+            };
+            let (target, constraint_expr) = match resolved {
+                // `A(c)` with `A = B(c2)` checks `B`, then `c2`, then `c`, all
+                // against the same value. A nullable `A?` lets null skip `c2`,
+                // which a single conjunction cannot express.
+                TypeExpr::Constrained(target, inner) if !nullable || target.ends_with('?') => {
+                    let outer = std::mem::replace(constraint.as_mut(), Expr::Null);
+                    (target, Expr::Binop(BinOp::And, inner, Box::new(outer)))
+                }
+                TypeExpr::Constrained(..) => return,
+                resolved => match runtime_base_name(&resolved) {
+                    Some(target) => (target, std::mem::replace(constraint.as_mut(), Expr::Null)),
+                    None => return,
+                },
+            };
+            let suffix = if nullable && !target.ends_with('?') {
+                "?"
+            } else {
+                ""
+            };
+            *base = format!("{default_marker}{target}{suffix}");
+            **constraint = constraint_expr;
+        }
+    }
+}
+
+/// The name a constrained type stores for its base, for a type that has one.
+fn runtime_base_name(ty: &crate::parser::TypeExpr) -> Option<String> {
+    use crate::parser::TypeExpr;
+    match ty {
+        TypeExpr::Named(name) => Some(name.clone()),
+        TypeExpr::Nullable(inner) => Some(format!("{}?", runtime_base_name(inner)?)),
+        TypeExpr::Generic(name, args) => Some(format!(
+            "{name}<{}>",
+            args.iter()
+                .map(runtime_base_name)
+                .collect::<Option<Vec<_>>>()?
+                .join(", ")
+        )),
+        TypeExpr::Union(_) | TypeExpr::Constrained(..) => None,
+    }
+}
+
 /// Resolve an implicit method-result constructor without dropping generic
 /// arguments or the default alternative of a union.
 pub(super) fn inferred_new_type(

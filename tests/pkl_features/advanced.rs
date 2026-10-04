@@ -3318,3 +3318,104 @@ fn int_seq_step_argument_errors() {
     let err = eval_fails(r#"x = IntSeq(1, 5).step("2")"#);
     assert!(err.contains("expects an Int"), "{err}");
 }
+
+#[test]
+fn lambda_sees_type_aliases_of_enclosing_body() {
+    let json = eval(
+        r#"
+length = 1
+result {
+  typealias String = Int
+  f = (x) -> x is String
+  g = (x) -> x is String(this == length)
+  h = (x) -> x as String
+  a = f.apply(1)
+  b = g.apply(1)
+  c = h.apply(1)
+  d = 1 is String
+}
+"#,
+    );
+    assert_eq!(json["result"]["a"], true);
+    assert_eq!(json["result"]["b"], true);
+    assert_eq!(json["result"]["c"], 1);
+    assert_eq!(json["result"]["d"], true);
+}
+
+#[test]
+fn lambda_sees_module_type_aliases() {
+    let json = eval(
+        r#"
+typealias Small = Int(this < 10)
+f = (x) -> x is Small
+a = f.apply(1)
+b = f.apply(20)
+"#,
+    );
+    assert_eq!(json["a"], true);
+    assert_eq!(json["b"], false);
+}
+
+#[test]
+fn lambda_constraint_on_aliased_int_reads_enclosing_binding() {
+    // With `String = Int`, `length` in the constraint is not a member of the
+    // checked value, so it names the enclosing local, failures included.
+    let message = eval_fails(
+        r#"
+result {
+  typealias String = Int
+  local length = throw("length failed")
+  local g = (x) -> x is String(this == length)
+  value = g.apply(1)
+}
+"#,
+    );
+    assert!(message.contains("length failed"), "{message}");
+}
+
+#[test]
+fn lambda_resolves_alias_chains_and_constraints() {
+    let json = eval(
+        r#"
+typealias Small = Int(this < 10)
+typealias Tiny = Small
+result {
+  typealias Even = Tiny(this % 2 == 0)
+  local inner = (x) -> (y) -> y is Even
+  f = (x) -> x is Even
+  a = f.apply(4)
+  b = f.apply(5)
+  c = f.apply(12)
+  d = inner.apply(0).apply(4)
+  e = f.apply(null)
+}
+"#,
+    );
+    assert_eq!(json["result"]["a"], true);
+    assert_eq!(json["result"]["b"], false);
+    assert_eq!(json["result"]["c"], false);
+    assert_eq!(json["result"]["d"], true);
+    assert_eq!(json["result"]["e"], false);
+}
+
+#[test]
+fn lambda_keeps_alias_redeclared_in_nested_body() {
+    let json = eval(
+        r#"
+result {
+  typealias T = Int
+  f = (x) -> new Dynamic {
+    typealias T = String
+    inner = x is T
+  }.inner
+  g = (x) -> new Dynamic { outer = x is T }.outer
+  a = f.apply("s")
+  b = f.apply(1)
+  c = g.apply(1)
+}
+"#,
+    );
+    assert_eq!(json["result"]["a"], true);
+    assert_eq!(json["result"]["b"], false);
+    assert_eq!(json["result"]["c"], true);
+}
