@@ -462,6 +462,56 @@ impl PendingScope {
     }
 }
 
+/// `scope` without bindings its flattened values never show: `hidden` names,
+/// and `this` below the innermost level that binds it. Only the levels that
+/// hold one are copied. A pending capture would otherwise keep an enclosing
+/// object's `this` snapshot alive, so the enclosing object could no longer
+/// grow its property map (or its scope) in place and would copy it for every
+/// member after this one.
+fn without_unreachable_bindings(scope: &Scope, hidden: &[Name]) -> Scope {
+    let mut levels = Vec::new();
+    let mut level = Some(scope);
+    while let Some(scope) = level {
+        levels.push(scope);
+        level = scope.parent.as_deref();
+    }
+    let this_level = levels
+        .iter()
+        .position(|scope| scope.vars.contains_key("this") || scope.poisoned.contains_key("this"));
+    // The root level (a module's scope, or a lambda's captured bindings) is
+    // left alone: copying it would cost as much as flattening, and keeping it
+    // costs little, since a module grows its members far less often than an
+    // object body evaluates nested objects.
+    let root = levels.len() - 1;
+    let unreachable = |index: usize, name: &str| {
+        index != root
+            && (hidden.iter().any(|hidden| &**hidden == name)
+                || (name == "this" && this_level.is_some_and(|this_level| index > this_level)))
+    };
+    let Some(outermost) = levels
+        .iter()
+        .enumerate()
+        .rposition(|(index, scope)| scope.vars.keys().any(|name| unreachable(index, name)))
+    else {
+        return scope.clone();
+    };
+    // Rebuild the levels from the outermost one changed inward, so each
+    // inner level points at its rebuilt parent.
+    let mut parent = levels[outermost].parent.clone();
+    for index in (0..=outermost).rev() {
+        let mut level = levels[index].clone();
+        level.parent = parent;
+        if level.vars.keys().any(|name| unreachable(index, name)) {
+            Arc::make_mut(&mut level.vars).retain(|name, _| !unreachable(index, name));
+        }
+        if index == 0 {
+            return level;
+        }
+        parent = Some(Arc::new(level));
+    }
+    unreachable!("the loop returns at index 0")
+}
+
 impl SourceScope {
     /// Capture `scope`, leaving `hidden_values` out of its bindings and
     /// `hidden_identities` out of its module identities.
@@ -473,7 +523,7 @@ impl SourceScope {
         Self {
             parts: std::sync::OnceLock::new(),
             pending: std::sync::Mutex::new(Some(PendingScope {
-                scope: scope.clone(),
+                scope: without_unreachable_bindings(scope, &hidden_values),
                 hidden_values,
                 hidden_identities,
             })),
@@ -1074,6 +1124,25 @@ mod source_scope_tests {
             parts.module_identities.keys().collect::<Vec<_>>(),
             ["this", "kept"]
         );
+    }
+
+    #[test]
+    fn does_not_keep_shadowed_this_snapshots() {
+        let root = Scope::default();
+        let mut object = root.child();
+        let props = Arc::new(IndexMap::new());
+        object.set("this", Value::Object(Arc::clone(&props), None));
+        object.set("member", Value::Int(1));
+        let mut nested = object.child();
+        nested.set("this", Value::Int(0));
+        let captured = SourceScope::lazy(&nested, Vec::new(), Vec::new());
+        let flattened = nested.flatten();
+        drop(nested);
+        // The object releases its `this` snapshot before growing its property
+        // map, as `release_this_aliases` does. The capture must not keep it.
+        object.set("this", Value::Null);
+        assert_eq!(Arc::strong_count(&props), 1);
+        assert_eq!(captured.parts().values, flattened);
     }
 
     #[test]
