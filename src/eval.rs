@@ -4251,6 +4251,7 @@ impl Evaluator {
             && method == "step"
             && let Expr::Call(seq_func, seq_args) = obj_expr.as_ref()
             && matches!(seq_func.as_ref(), Expr::Ident(name) if name == "IntSeq")
+            && int_seq_is_builtin(scope)
         {
             let (start, end) = self.eval_int_seq_bounds(seq_args, scope, depth).await?;
             let [step_expr] = args else {
@@ -4347,7 +4348,7 @@ impl Evaluator {
                     }
                     return Ok(Value::List(items)); // deduplicated
                 }
-                "IntSeq" => {
+                "IntSeq" if int_seq_is_builtin(scope) => {
                     let (start, end) = self.eval_int_seq_bounds(args, scope, depth).await?;
                     return int_seq(start, end, 1);
                 }
@@ -5688,6 +5689,12 @@ fn seed_builtins(scope: &mut Scope) {
     ] {
         scope.set(name.to_string(), Value::String(name.to_string()));
     }
+}
+
+/// Whether `IntSeq` in `scope` is still the built-in, which `seed_builtins`
+/// binds to a marker string, rather than a user binding of that name.
+fn int_seq_is_builtin(scope: &Scope) -> bool {
+    matches!(scope.get("IntSeq"), Some(Value::String(name)) if name == "IntSeq")
 }
 
 /// Largest number of elements an `IntSeq` may produce. IntSeq is

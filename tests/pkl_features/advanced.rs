@@ -3273,3 +3273,48 @@ fn int_seq_errors() {
     let err = eval_fails("x = IntSeq(1)");
     assert!(err.contains("expects 2 arguments"), "{err}");
 }
+
+#[test]
+fn int_seq_user_binding_shadows_builtin() {
+    let json = eval(
+        r#"
+x = ((IntSeq) -> IntSeq(1, 2))((a, b) -> a + b)
+local IntSeq = (a, b) -> a * b
+y = IntSeq(3, 4)
+"#,
+    );
+    assert_eq!(json["x"], 3);
+    assert_eq!(json["y"], 12);
+}
+
+#[test]
+fn int_seq_boundaries() {
+    let json = eval(
+        r#"
+atCap = IntSeq(1, 1000000).length
+nearMax = IntSeq(9223372036854775806, 9223372036854775807).toList()
+downFromMax = IntSeq(9223372036854775807, 9223372036854775806).step(-1).toList()
+"#,
+    );
+    assert_eq!(json["atCap"], 1_000_000);
+    assert_eq!(
+        json["nearMax"],
+        serde_json::json!([9223372036854775806i64, 9223372036854775807i64])
+    );
+    assert_eq!(
+        json["downFromMax"],
+        serde_json::json!([9223372036854775807i64, 9223372036854775806i64])
+    );
+    let err = eval_fails("x = IntSeq(1, 1000001).length");
+    assert!(err.contains("supported maximum"), "{err}");
+}
+
+#[test]
+fn int_seq_step_argument_errors() {
+    let err = eval_fails("x = IntSeq(1, 5).step()");
+    assert!(err.contains("exactly one argument"), "{err}");
+    let err = eval_fails("x = IntSeq(1, 5).step(1, 2)");
+    assert!(err.contains("exactly one argument"), "{err}");
+    let err = eval_fails(r#"x = IntSeq(1, 5).step("2")"#);
+    assert!(err.contains("expects an Int"), "{err}");
+}
