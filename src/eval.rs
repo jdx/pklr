@@ -1863,6 +1863,10 @@ impl Evaluator {
                         base_obj = (*m).clone();
                     }
                 }
+            } else if uri == "pkl:test" {
+                if let Value::Object(members, _) = stdlib_module("test") {
+                    base_obj.extend(members.iter().map(|(k, v)| (k.clone(), v.clone())));
+                }
             } else if !uri.starts_with("pkl:")
                 && (!uri.contains("://") || uri.starts_with("file://"))
             {
@@ -1941,6 +1945,11 @@ impl Evaluator {
             // A relative extends inside a remote module resolves against that URL.
             let resolved_extends = resolve_remote_relative(path, extends_uri);
             let uri: &str = resolved_extends.as_deref().unwrap_or(extends_uri);
+            if uri == "pkl:test"
+                && let Value::Object(members, _) = stdlib_module("test")
+            {
+                base_obj.extend(members.iter().map(|(k, v)| (k.clone(), v.clone())));
+            }
             if !uri.contains("://") || uri.starts_with("file://") {
                 let extends_path = self.local_file_path(path, uri)?;
                 if self.path_exists_io(&extends_path)? {
@@ -4246,15 +4255,26 @@ impl Evaluator {
                 Entry::DynProperty(index, value) => {
                     let index = self.eval_expr(index, &listing_scope, depth + 1)?;
                     let Value::Int(index) = index else {
-                        return Err(Error::Eval(
-                            "listing index amendment requires an Int index".into(),
-                        ));
+                        return Err(Error::Eval(format!(
+                            "Expected key of type `Int`, but got type `{}`.",
+                            value_type_name(&index)
+                        )));
                     };
+                    // Only the parent's elements can be amended by index, not
+                    // ones this body adds.
+                    let parent_len = scope
+                        .receiver_list_base
+                        .map_or(items.len(), |len| len.min(items.len()));
                     let index = usize::try_from(index)
-                        .map_err(|_| Error::Eval("listing index cannot be negative".into()))?;
-                    let value = if index < items.len()
-                        && let Expr::ObjectBody(entries) = value
-                    {
+                        .ok()
+                        .filter(|index| *index < parent_len)
+                        .ok_or_else(|| {
+                            Error::Eval(format!(
+                                "Element index `{index}` is out of range `0`..`{}`.",
+                                parent_len as i64 - 1
+                            ))
+                        })?;
+                    items[index] = if let Expr::ObjectBody(entries) = value {
                         self.eval_value_amendment(
                             items[index].clone(),
                             entries,
@@ -4264,16 +4284,6 @@ impl Evaluator {
                     } else {
                         self.eval_expr(value, &listing_scope, depth + 1)?
                     };
-                    if index < items.len() {
-                        items[index] = value;
-                    } else if index == items.len() {
-                        items.push(value);
-                    } else {
-                        return Err(Error::Eval(format!(
-                            "listing index {index} is out of bounds for length {}",
-                            items.len()
-                        )));
-                    }
                 }
                 Entry::Spread(expr) => {
                     let value = self.eval_expr(expr, &listing_scope, depth + 1)?;
@@ -4709,7 +4719,9 @@ impl Evaluator {
                         let val = map.get(field.as_str()).cloned().ok_or_else(|| {
                             Error::Eval(
                                 missing_member_error(source, obj_expr, field, scope)
-                                    .unwrap_or_else(|| format!("field not found: {field}")),
+                                    .unwrap_or_else(|| {
+                                        missing_property_message(source, obj_expr, field, scope)
+                                    }),
                             )
                         })?;
                         self.warn_if_deprecated_access(source, field);
@@ -4830,7 +4842,7 @@ impl Evaluator {
             }
             Expr::Throw(msg_expr) => {
                 let msg = self.eval_expr(msg_expr, scope, depth + 1)?;
-                Err(Error::Eval(format!("throw: {}", value_to_display(&msg))))
+                Err(Error::Eval(value_to_display(&msg)))
             }
             Expr::Trace(expr) => {
                 let v = self.eval_expr(expr, scope, depth + 1)?;
@@ -4998,6 +5010,19 @@ impl Evaluator {
                         return Ok(regex_value(val));
                     }
                     return Err(Error::Eval("Regex() requires a pattern argument".into()));
+                }
+                TEST_CATCH | TEST_CATCH_OR_NULL => {
+                    let [fun] = args else {
+                        return Err(Error::Eval("catch() expects one argument".into()));
+                    };
+                    let fun = self.eval_expr(fun, scope, depth + 1)?;
+                    return match self.invoke_lambda(&fun, &[], depth) {
+                        Err(error) => Ok(Value::String(caught_error_message(error).into())),
+                        Ok(_) if name == TEST_CATCH => Err(Error::Eval(
+                            "Expected an exception, but none was thrown.".into(),
+                        )),
+                        Ok(_) => Ok(Value::Null),
+                    };
                 }
                 "Map" => {
                     // Map(k1, v1, k2, v2, ...)
@@ -5644,11 +5669,23 @@ impl Evaluator {
         let explicit_default_entries =
             find_default_body_entries(entries).or(inherited_default.entries);
 
+        // Keys this body defines. A body may amend its parent's entries, but
+        // may define each key only once.
+        let mut defined_keys = HashSet::default();
         for entry in entries {
             match entry {
                 Entry::DynProperty(key_expr, val_expr) => {
                     let key = self.eval_expr(key_expr, &entry_scope, depth + 1)?;
                     let key_str = value_to_key(&key)?;
+                    if !defined_keys.insert(key_str.clone()) {
+                        let key = match &key {
+                            Value::String(s) => format!("{s:?}"),
+                            key => value_to_display(key),
+                        };
+                        return Err(Error::Eval(format!(
+                            "Duplicate definition of member `{key}`."
+                        )));
+                    }
                     if let Some(Value::Object(existing_map, Some(existing_src))) = map.get(&key_str)
                         && let Expr::ObjectBody(body) = val_expr
                     {
@@ -6658,7 +6695,41 @@ fn stdlib_module(name: &str) -> Value {
     if name == "base" {
         map.insert("Regex".into(), Value::String("Regex".into()));
     }
+    if name == "test" {
+        for (method, builtin) in [("catch", TEST_CATCH), ("catchOrNull", TEST_CATCH_OR_NULL)] {
+            map.insert(method.into(), builtin_function(builtin, &["fun"]));
+        }
+    }
     Value::Object(Arc::new(map), None)
+}
+
+/// `pkl:test`'s `catch(fun)`: the error `fun()` throws, as a string.
+const TEST_CATCH: &str = "\0pklr:test.catch";
+/// `pkl:test`'s `catchOrNull(fun)`: like `catch`, but null when `fun()` succeeds.
+const TEST_CATCH_OR_NULL: &str = "\0pklr:test.catchOrNull";
+
+/// A function value that passes its arguments to the evaluator's `builtin`
+/// (see `eval_call`). Builtin names can't be written in Pkl, so the call
+/// can't be shadowed.
+fn builtin_function(builtin: &str, params: &[&str]) -> Value {
+    let args = params
+        .iter()
+        .map(|param| Expr::Ident(param.to_string()))
+        .collect();
+    Value::Lambda(
+        params.iter().map(|param| param.to_string()).collect(),
+        Arc::new(Expr::Call(Box::new(Expr::Ident(builtin.into())), args)),
+        Arc::default(),
+    )
+}
+
+/// The message `catch` returns for an error: Pkl's message, without
+/// pklr's "Eval error: " prefix.
+fn caught_error_message(error: Error) -> String {
+    match error {
+        Error::Eval(message) => message,
+        error => error.to_string(),
+    }
 }
 
 fn seed_builtins(scope: &mut Scope) {

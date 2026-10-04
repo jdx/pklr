@@ -483,7 +483,49 @@ pub(super) fn module_is_abstract(module: &Module) -> bool {
 }
 
 pub(super) fn is_unresolved_template_error(message: &str) -> bool {
-    message.contains("undefined variable") || message.contains("field not found")
+    message.contains("undefined variable")
+        || message.contains("field not found")
+        || message.starts_with("Cannot find property")
+}
+
+/// Pkl's error for reading `name` from an object that has no such member:
+/// the object `obj_expr` evaluated to, described by `source`.
+pub(super) fn missing_property_message(
+    source: &Option<Arc<ObjectSource>>,
+    obj_expr: &Expr,
+    name: &str,
+    scope: &Scope,
+) -> String {
+    if let Expr::Ident(root) = obj_expr
+        && let Some(identity) = scope.module_identity(root)
+    {
+        return format!(
+            "Cannot find property `{name}` in module `{}`.",
+            module_name_of(identity)
+        );
+    }
+    let type_name = match source.as_deref() {
+        Some(ObjectSource {
+            type_name: Some(class),
+            type_identity,
+            ..
+        }) => match type_identity
+            .as_deref()
+            .and_then(|identity| identity.strip_suffix(class.as_str())?.strip_suffix('.'))
+        {
+            Some(module) => format!("{}#{class}", module_name_of(module)),
+            None => class.clone(),
+        },
+        _ => "Dynamic".to_string(),
+    };
+    format!("Cannot find property `{name}` in object of type `{type_name}`.")
+}
+
+/// The name Pkl gives the module at `uri` that declares no name: its file
+/// name without the extension.
+fn module_name_of(uri: &str) -> &str {
+    let file = uri.rsplit(['/', '\\']).next().unwrap_or(uri);
+    file.strip_suffix(".pkl").unwrap_or(file)
 }
 
 pub(super) fn require_str_arg<'a>(args: &'a [Value], idx: usize, method: &str) -> Result<&'a str> {

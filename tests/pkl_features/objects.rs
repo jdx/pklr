@@ -53,6 +53,99 @@ fn throw_produces_error() {
 }
 
 // ============================================================
+// pkl:test
+// ============================================================
+
+#[test]
+fn test_catch_returns_error_message() {
+    let json = eval(
+        r#"
+import "pkl:test"
+class Bird { name = "Pigeon" }
+local bird = new Bird {}
+thrown = test.catch(() -> throw("boom"))
+dynamic = test.catch(() -> new Dynamic { x = 1 }.y)
+typed = test.catch(() -> bird.age)
+caught = test.catchOrNull(() -> throw("boom"))
+notThrown = test.catchOrNull(() -> 1) == null
+"#,
+    );
+    assert_eq!(json["thrown"], "boom");
+    assert_eq!(
+        json["dynamic"],
+        "Cannot find property `y` in object of type `Dynamic`."
+    );
+    assert_eq!(
+        json["typed"],
+        "Cannot find property `age` in object of type `test#Bird`."
+    );
+    assert_eq!(json["caught"], "boom");
+    assert_eq!(json["notThrown"], true);
+}
+
+#[test]
+fn test_catch_fails_without_an_error() {
+    let msg = eval_fails(
+        r#"
+import "pkl:test"
+x = test.catch(() -> 1)
+"#,
+    );
+    assert!(msg.contains("Expected an exception, but none was thrown."));
+}
+
+#[test]
+fn modules_extending_pkl_test_inherit_catch() {
+    let json = eval(
+        r#"
+extends "pkl:test"
+x = module.catch(() -> throw("boom"))
+"#,
+    );
+    assert_eq!(json, serde_json::json!({ "x": "boom" }));
+}
+
+#[test]
+fn listing_index_amendments_must_name_a_parent_element() {
+    let json = eval(
+        r#"
+import "pkl:test"
+local x = new Listing { "one" }
+amended = (x) { [0] = "uno" }
+past = test.catch(() -> (x) { [1] = "two" })
+added = test.catch(() -> (x) { "two"; [1] = "dos" })
+negative = test.catch(() -> (x) { [-1] = "two" })
+wrongType = test.catch(() -> (x) { ["0"] = "two" })
+"#,
+    );
+    assert_eq!(json["amended"], serde_json::json!(["uno"]));
+    assert_eq!(json["past"], "Element index `1` is out of range `0`..`0`.");
+    assert_eq!(json["added"], "Element index `1` is out of range `0`..`0`.");
+    assert_eq!(
+        json["negative"],
+        "Element index `-1` is out of range `0`..`0`."
+    );
+    assert_eq!(
+        json["wrongType"],
+        "Expected key of type `Int`, but got type `String`."
+    );
+}
+
+#[test]
+fn mapping_body_cannot_define_a_key_twice() {
+    let json = eval(
+        r#"
+import "pkl:test"
+local m = new Mapping { ["a"] = 1 }
+amended = (m) { ["a"] = 2 }
+duplicate = test.catch(() -> new Mapping { ["a"] = 1; ["" + "a"] = 2 })
+"#,
+    );
+    assert_eq!(json["amended"]["a"], 2);
+    assert_eq!(json["duplicate"], "Duplicate definition of member `\"a\"`.");
+}
+
+// ============================================================
 // Null-safe access (future)
 // ============================================================
 
