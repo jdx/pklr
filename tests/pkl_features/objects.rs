@@ -1650,6 +1650,113 @@ out = 1
 }
 
 #[test]
+fn local_constraint_uses_finished_member_over_outer_binding() {
+    // The object's own `limit` replaces the outer one, in both directions.
+    let json = eval(
+        r#"
+limit = 0
+obj { local checked: Int(this < limit) = 1; limit = 2; out = checked }
+"#,
+    );
+    assert_eq!(json["obj"]["out"], 1);
+    let message = eval_fails(
+        r#"
+limit = 10
+obj { local checked: Int(this < limit) = 3; limit = 2; out = checked }
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+}
+
+#[test]
+fn parameter_named_like_failed_local_is_not_a_read() {
+    let json = eval(
+        r#"
+local bad: Int(this < limit) = 3
+f = (bad) -> bad
+limit = 2
+out = f.apply(0)
+"#,
+    );
+    assert_eq!(json["out"], 0);
+}
+
+#[test]
+fn checking_an_unused_local_does_not_read_another() {
+    let json = eval(
+        r#"
+local bad: Int(this < limit) = 3
+local unused: Int(this == bad) = 3
+limit = 2
+out = 1
+"#,
+    );
+    assert_eq!(json["out"], 1);
+    // Reading `unused` runs its constraint, which reads the failed `bad`.
+    let message = eval_fails(
+        r#"
+local bad: Int(this < limit) = 3
+local unused: Int(this == bad) = 3
+limit = 2
+out = unused
+"#,
+    );
+    assert!(message.contains("property 'bad' expected"), "{message}");
+}
+
+#[test]
+fn deferred_local_read_before_member_is_bound_is_checked() {
+    let message = eval_fails(
+        r#"
+local x: Int(this < limit) = 3
+out = x
+limit = 2
+"#,
+    );
+    assert!(message.contains("property 'x' expected"), "{message}");
+    let json = eval(
+        r#"
+local x: Int(this < limit) = 1
+out = x
+limit = 2
+"#,
+    );
+    assert_eq!(json["out"], 1);
+}
+
+#[test]
+fn generator_constraint_uses_finished_member_over_outer_binding() {
+    let message = eval_fails(
+        r#"
+limit = 10
+obj { when (true) { checked: Int(this < limit) = 3 }; limit = 2 }
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+    let message = eval_fails(
+        r#"
+limit = 10
+obj { for (x in List(3)) { checked: Int(this < limit) = x }; limit = 2 }
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+    // Loop variables and generator-body locals still win over members.
+    let json = eval(
+        r#"
+obj {
+  x = 100
+  for (x in List(3)) { checked: Int(this == x) = 3 }
+}
+other {
+  for (x in List(3)) { local y = x; checked: Int(this == y) = 3 }
+}
+"#,
+    );
+    assert_eq!(json["obj"]["checked"], 3);
+    assert_eq!(json["other"]["checked"], 3);
+}
+
+#[test]
 fn amendment_generator_declared_property_is_checked() {
     let message = eval_fails(
         r#"
