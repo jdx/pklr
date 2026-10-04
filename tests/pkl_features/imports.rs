@@ -2509,6 +2509,8 @@ async fn narrowed_import_follows_module_reads_made_before_class_properties_are_b
         "a = 1\nmax = 3\nlocal function run(x) = x.f()\nclass D {\n  class Reader { function f() = a }\n  r = run(new Reader {})\n  a = 6\n  c = module.max\n}\n",
         // ...or a class nested in the nested class.
         "a = 1\nmax = 3\nclass D {\n  class Reader {\n    class Inner { function f() = a }\n    function go() = new Inner {}.f()\n  }\n  r = new Reader {}.go()\n  a = 6\n  c = module.max\n}\n",
+        // ...or a sibling of a nested class it builds.
+        "a = 1\nmax = 3\nclass D {\n  class Reader {\n    class Other { function f() = a }\n    class Middle { function go() = new Other {}.f() }\n    function go() = new Middle {}.go()\n  }\n  r = new Reader {}.go()\n  a = 6\n  c = module.max\n}\n",
     ];
     for (i, dep) in deps.iter().enumerate() {
         let name = format!("dep{i}.pkl");
@@ -2569,9 +2571,22 @@ async fn narrowed_import_skips_nested_methods_early_defaults_do_not_run_on_outer
         "a = throw(\"unused\")\nmax = 3\nopen class Base { a = 2 }\nclass D {\n  class Reader extends Base { function f() = a }\n  r = new Reader {}.f()\n  a = 6\n  c = module.max\n}\n",
     )
     .unwrap();
+    // The same for a class nested deeper that extends a class an enclosing
+    // nested class declares, and for one reading what the instance around it
+    // inherits.
+    std::fs::write(
+        dir.join("deep.pkl"),
+        "a = throw(\"unused\")\nmax = 3\nclass D {\n  class Reader {\n    open class Base { a = 2 }\n    class Middle {\n      class Inner extends Base { function f() = a }\n      function go() = new Inner {}.f()\n    }\n    function go() = new Middle {}.go()\n  }\n  r = new Reader {}.go()\n  a = 6\n  c = module.max\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("enclosing.pkl"),
+        "a = throw(\"unused\")\nmax = 3\nopen class Base { a = 2 }\nclass D {\n  class Reader extends Base {\n    class Inner { function f() = a }\n    function go() = new Inner {}.f()\n  }\n  r = new Reader {}.go()\n  a = 6\n  c = module.max\n}\n",
+    )
+    .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"built.pkl\" as B\nimport \"inherited.pkl\" as I\nbuilt = new B.D {}\ninherited = new I.D {}\n",
+        "import \"built.pkl\" as B\nimport \"inherited.pkl\" as I\nimport \"deep.pkl\" as P\nimport \"enclosing.pkl\" as E\nbuilt = new B.D {}\ninherited = new I.D {}\ndeep = new P.D {}\nenclosing = new E.D {}\n",
     )
     .unwrap();
 
@@ -2580,6 +2595,8 @@ async fn narrowed_import_skips_nested_methods_early_defaults_do_not_run_on_outer
         .unwrap();
     assert_eq!(val["built"]["c"], 3);
     assert_eq!(val["inherited"]["r"], 2);
+    assert_eq!(val["deep"]["r"], 2);
+    assert_eq!(val["enclosing"]["r"], 2);
 }
 
 #[tokio::test]

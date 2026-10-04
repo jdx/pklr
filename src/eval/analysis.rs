@@ -1309,10 +1309,8 @@ impl<'e> EagerReads<'e> {
             instance.entries(seed, 0);
         }
         let mut followed = HashSet::default();
-        // The nested classes the code followed so far uses, at any depth,
-        // each with the names its instances (and the instances around them)
-        // bind themselves.
-        let mut used: Vec<(&'e [Entry], HashSet<&'e str>)> = Vec::new();
+        // The nested classes the code followed so far uses, at any depth.
+        let mut used: Vec<NestedClass<'e>> = Vec::new();
         let mut used_keys: HashSet<*const Entry> = HashSet::default();
         let mut followed_nested: HashSet<*const Entry> = HashSet::default();
         loop {
@@ -1322,21 +1320,27 @@ impl<'e> EagerReads<'e> {
                     && refs.contains(name)
                     && used_keys.insert(std::ptr::from_ref(entry))
                 {
-                    let own = instance_names(&self.classes, parent.as_deref(), class_body);
-                    used.push((class_body, own));
+                    used.push(NestedClass {
+                        body: class_body,
+                        parent: parent.as_deref(),
+                        chain: vec![(body, None)],
+                    });
                 }
             }
             let mut index = 0;
             while index < used.len() {
-                let (class_body, shadow) = (used[index].0, used[index].1.clone());
+                let class = used[index].clone();
                 index += 1;
+                let scope = class.scope(&self.classes);
+                let shadow = class.shadow(&scope);
                 // Its methods called here, and the ones they call. Reading a
                 // property that only stores a method (see `stored`) calls it.
-                let stored = stored_methods(class_body, Self::is_method);
+                let stored = stored_methods(class.body, Self::is_method);
                 let mut called = fields.clone();
                 loop {
                     let calls_all = called.contains(DYNAMIC_SIBLING_REF);
-                    let next: Vec<&Entry> = class_body
+                    let next: Vec<&Entry> = class
+                        .body
                         .iter()
                         .filter(|entry| match entry {
                             Entry::Property(prop) if Self::is_method(entry) => {
@@ -1360,32 +1364,21 @@ impl<'e> EagerReads<'e> {
                         collect_field_names_entries(method, &mut called);
                         // Other classes' methods it calls run here too.
                         collect_field_names_entries(method, &mut fields);
-                        // The classes nested in this one that it uses: their
-                        // defaults run here, and their methods may.
-                        let mut scope = self.classes.clone();
-                        scope.extend(class_body.iter().filter_map(|entry| match entry {
-                            Entry::ClassDef(name, _, parent, inner) => {
-                                Some((name.as_str(), (parent.as_deref(), inner.as_slice())))
-                            }
-                            _ => None,
-                        }));
-                        for entry in class_body {
-                            if let Entry::ClassDef(name, _, parent, inner) = entry
-                                && roots.contains(name)
+                        // The nested classes it builds (its own, or ones an
+                        // enclosing class declares): their defaults run here,
+                        // and their methods may.
+                        for root in &roots {
+                            if let Some((entry, found)) = class.lookup(root)
                                 && used_keys.insert(std::ptr::from_ref(entry))
                             {
+                                let found_scope = found.scope(&self.classes);
+                                let enclosing = found.enclosing_names(&found_scope);
                                 refs.extend(
-                                    class_default_reads(inner, &scope)
+                                    class_default_reads(found.body, &found_scope)
                                         .into_iter()
-                                        .filter(|root| !shadow.contains(root.as_str())),
+                                        .filter(|root| !enclosing.contains(root.as_str())),
                                 );
-                                let mut inner_shadow = shadow.clone();
-                                inner_shadow.extend(instance_names(
-                                    &scope,
-                                    parent.as_deref(),
-                                    inner,
-                                ));
-                                used.push((inner, inner_shadow));
+                                used.push(found);
                             }
                         }
                         refs.extend(
@@ -1430,6 +1423,76 @@ impl<'e> EagerReads<'e> {
                 instance.entries(method, 0);
             }
         }
+    }
+}
+
+/// A class nested in a class body, at any depth, as `EagerReads` follows it.
+#[derive(Clone)]
+struct NestedClass<'e> {
+    body: &'e [Entry],
+    parent: Option<&'e str>,
+    /// The bodies enclosing it, outermost (the followed class's) first, each
+    /// with its class's parent. The last one declares it.
+    chain: Vec<(&'e [Entry], Option<&'e str>)>,
+}
+
+impl<'e> NestedClass<'e> {
+    /// The classes visible where it is declared, nearer ones winning.
+    fn scope(&self, classes: &ClassMap<'e>) -> ClassMap<'e> {
+        let mut scope = classes.clone();
+        for (body, _) in &self.chain {
+            scope.extend(body.iter().filter_map(|entry| match entry {
+                Entry::ClassDef(name, _, parent, inner) => {
+                    Some((name.as_str(), (parent.as_deref(), inner.as_slice())))
+                }
+                _ => None,
+            }));
+        }
+        scope
+    }
+
+    /// The names the instances of the nested classes around it bind
+    /// (declared or inherited), which its own code reads lexically. The
+    /// outermost body's are left to `EagerReads`.
+    fn enclosing_names(&self, scope: &ClassMap<'e>) -> HashSet<&'e str> {
+        let mut names = HashSet::default();
+        for (body, parent) in self.chain.iter().skip(1) {
+            names.extend(instance_names(scope, *parent, body));
+        }
+        names
+    }
+
+    /// The names its methods read from its own instance or lexically from
+    /// those around it.
+    fn shadow(&self, scope: &ClassMap<'e>) -> HashSet<&'e str> {
+        let mut names = self.enclosing_names(scope);
+        names.extend(instance_names(scope, self.parent, self.body));
+        names
+    }
+
+    /// The nested class `name` names from inside it: one it declares, or
+    /// else the nearest enclosing body's.
+    fn lookup(&self, name: &str) -> Option<(&'e Entry, NestedClass<'e>)> {
+        let mut chain = self.chain.clone();
+        chain.push((self.body, self.parent));
+        while let Some(&(body, _)) = chain.last() {
+            if let Some(entry) = body
+                .iter()
+                .find(|entry| matches!(entry, Entry::ClassDef(class, ..) if class == name))
+                && let Entry::ClassDef(_, _, parent, inner) = entry
+            {
+                return Some((
+                    entry,
+                    NestedClass {
+                        body: inner,
+                        parent: parent.as_deref(),
+                        chain,
+                    },
+                ));
+            }
+            chain.pop();
+        }
+        None
     }
 }
 
