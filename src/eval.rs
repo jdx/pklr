@@ -2957,8 +2957,8 @@ impl Evaluator {
         // Members generators produced, by the body (layer) they belong to.
         let mut generated_by_layer = has_generator.then(HashSet::default);
         // Keys `[key] = value` entries defined, by body (layer) and key type.
-        let mut defined_by_layer = (dynamic_keys > 1 || (dynamic_keys != 0 && has_generator))
-            .then(HashSet::default);
+        let mut defined_by_layer =
+            (dynamic_keys > 1 || (dynamic_keys != 0 && has_generator)).then(HashSet::default);
         for (entry_index, entry) in entries.iter().enumerate() {
             match entry {
                 Entry::Property(prop) => {
@@ -3048,11 +3048,12 @@ impl Evaluator {
                         let layer = entry_layer(entry_scopes, entry_index);
                         let key_type = value_type_name(&key);
                         if !defined_by_layer.insert((layer, key_type, key_str.clone()))
-                            || (key_type == "String" && generated_by_layer.as_ref().is_some_and(
-                                |generated_by_layer| {
-                                    generated_by_layer.contains(&(layer, key_str.clone()))
-                                },
-                            ))
+                            || (key_type == "String"
+                                && generated_by_layer
+                                    .as_ref()
+                                    .is_some_and(|generated_by_layer| {
+                                        generated_by_layer.contains(&(layer, key_str.clone()))
+                                    }))
                         {
                             let key = match &key {
                                 Value::String(s) => format!("{s:?}"),
