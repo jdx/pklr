@@ -36,10 +36,14 @@ pklr = { version = "2", default-features = false, features = ["async", "package-
 let json = pklr::eval_to_json_async(std::path::Path::new("config.pkl")).await?;
 ```
 
-Async evaluation and `analyze_imports_async` use Tokio filesystem operations;
-blocking-only work such as ZIP extraction and glob walking runs on Tokio's
-blocking pool. For direct construction, use `Evaluator::new_async()`; the
-unsuffixed `Evaluator::new()` always selects blocking capabilities.
+The evaluator itself is synchronous. On a multi-threaded Tokio runtime, async
+evaluation runs in place under `tokio::task::block_in_place`, reading files
+directly and blocking on HTTP fetches while the runtime's other workers drive
+them. Anywhere else (a `current_thread` runtime or another executor) it runs on
+a worker thread and sends HTTP fetches back to the calling task.
+`analyze_imports_async` uses Tokio filesystem operations. For direct
+construction, use `Evaluator::new_async()`; the unsuffixed `Evaluator::new()`
+always selects blocking capabilities.
 
 Use `EvaluatorBuilder::http_agent` with a custom `pklr::ureq::Agent` for
 synchronous HTTP configuration. The async `AsyncEvaluatorBuilder::http_client`
