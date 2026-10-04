@@ -42,7 +42,10 @@ jobs:
             echo "::error::unexpected base sha: $BASE_SHA"
             exit 1
           fi
-          git fetch origin refs/notes/tak:refs/notes/tak
+          if ! git fetch origin refs/notes/tak:refs/notes/tak; then
+            echo "::error::could not fetch benchmark notes"
+            exit 1
+          fi
           base=$(git rev-parse --verify --end-of-options "$BASE_SHA^{commit}")
           merge_base=$(git merge-base "$base" HEAD)
           runner="gha-${ImageOS}-${ImageVersion}-x64-rust$(rustc -V | cut -d' ' -f2)"
