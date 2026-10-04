@@ -2359,8 +2359,8 @@ async fn narrowed_import_ignores_checked_value_names_in_is_expressions() {
         "length = 1\nresult = null is Listing<Int>?(length == 1)\n",
     )
     .unwrap();
-    // `N` can't be resolved during analysis, so `length` stays a module read;
-    // a number's check doesn't bind it.
+    // `N` resolves to `Int`, and a number's check doesn't bind `length`, so
+    // it stays a module read.
     std::fs::write(
         dir.join("alias.pkl"),
         "length = 1\ntypealias N = Int\nresult = 1 is N(this == length)\n",
@@ -2380,4 +2380,161 @@ async fn narrowed_import_ignores_checked_value_names_in_is_expressions() {
     assert_eq!(val["aliased"], true);
     assert_eq!(val["generic"], true);
     assert_eq!(val["nullable"], true);
+}
+
+#[tokio::test]
+async fn narrowed_import_resolves_local_aliases_in_constraint_bases() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_alias_constraint_base");
+    let dir = temp.path();
+    // `S` is `String`, so `length` in the constraint is the string's own.
+    std::fs::write(
+        dir.join("string.pkl"),
+        "length = throw(\"unused\")\ntypealias S = String\nresult = \"b\" is S(length == 1)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("chain.pkl"),
+        "length = throw(\"unused\")\nisEmpty = throw(\"unused\")\ntypealias T = S\ntypealias S = NonEmpty\ntypealias NonEmpty = String(!isEmpty)\nresult = \"b\" is T(length == 1)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("listing.pkl"),
+        "length = throw(\"unused\")\ntypealias L = Listing<Int>\nresult = List(1) is L(length == 1)\n",
+    )
+    .unwrap();
+    // An alias of a number or nullable type binds no `length`, so it stays a
+    // module read.
+    std::fs::write(
+        dir.join("number.pkl"),
+        "length = 1\ntypealias M = N\ntypealias N = Int\nresult = 1 is M(this == length)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("nullable.pkl"),
+        "length = 1\ntypealias L = Listing<Int>?\nresult = null is L(length == 1)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"string.pkl\" as Str\nimport \"chain.pkl\" as Chain\nimport \"listing.pkl\" as Lst\nimport \"number.pkl\" as Num\nimport \"nullable.pkl\" as Nullable\nstring = Str.result\nchain = Chain.result\nlisting = Lst.result\nnumber = Num.result\nnullable = Nullable.result\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["string"], true);
+    assert_eq!(val["chain"], true);
+    assert_eq!(val["listing"], true);
+    assert_eq!(val["number"], true);
+    assert_eq!(val["nullable"], true);
+}
+
+#[tokio::test]
+async fn narrowed_import_respects_aliases_redeclared_in_nested_bodies() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_nested_alias");
+    let dir = temp.path();
+    // The nested `S` is `Int`, whose check binds no `length`, so the module's
+    // `length` is still needed even though the module-level `S` is a String.
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "length = 1\ntypealias S = String\nresult {\n  typealias S = Int\n  ok = 1 is S(this == length)\n}\n",
+    )
+    .unwrap();
+    // Redeclared as a String alias, the nested `S` binds the string's own
+    // `length`, so the module's unused `length` must not be evaluated.
+    std::fs::write(
+        dir.join("dep_string.pkl"),
+        "length = throw(\"unused\")\ntypealias S = String\nresult {\n  typealias S = String\n  ok = \"b\" is S(length == 1)\n}\n",
+    )
+    .unwrap();
+    // A module alias `T` built on `S` is checked inside a body that
+    // redeclares `S = Int`, so its constraint reads the module's `length`.
+    std::fs::write(
+        dir.join("dep_followed.pkl"),
+        "length = 1\ntypealias S = String\ntypealias T = S(length == 1)\nresult {\n  typealias S = Int\n  ok = 1 is T\n}\n",
+    )
+    .unwrap();
+    // A local evaluated before the nested alias still sees the module's
+    // `S = Int`, whose check binds no `length`.
+    std::fs::write(
+        dir.join("dep_order.pkl"),
+        "length = 1\ntypealias S = Int\nresult {\n  local checked = 1 is S(this == length)\n  typealias S = String\n  ok = checked\n}\n",
+    )
+    .unwrap();
+    // A module alias `T` built on `S` is checked inside a body that
+    // redeclares `S` identically, so `S` is still a String and binds the
+    // string's own `length`; the module's unused `length` must not be read.
+    std::fs::write(
+        dir.join("dep_followed_same.pkl"),
+        "length = throw(\"unused\")\ntypealias S = String\ntypealias T = S(length == 1)\nresult {\n  typealias S = String\n  ok = \"b\" is T\n}\n",
+    )
+    .unwrap();
+    // An identical nested `S = String` still means `Int` when the body also
+    // declares `String = Int`, so checks through `S` (followed via `T`, or
+    // directly) read the module's `length`.
+    std::fs::write(
+        dir.join("dep_followed_shadowed.pkl"),
+        "length = 1\ntypealias S = String\ntypealias T = S(length == 1)\nresult {\n  typealias String = Int\n  typealias S = String\n  ok = 1 is T\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep_shadowed.pkl"),
+        "length = 1\ntypealias S = String\nresult {\n  typealias String = Int\n  typealias S = String\n  ok = 1 is S(this == length)\n}\n",
+    )
+    .unwrap();
+    // A nested alias that no module alias refers to leaves `S` resolved, so
+    // the string's own `length` is used, directly or through `T`, and the
+    // module's unused `length` is not evaluated.
+    std::fs::write(
+        dir.join("dep_unrelated.pkl"),
+        "length = throw(\"unused\")\ntypealias S = String\nresult {\n  typealias U = Int\n  ok = \"b\" is S(length == 1)\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep_followed_unrelated.pkl"),
+        "length = throw(\"unused\")\ntypealias S = String\ntypealias T = S(length == 1)\nresult {\n  typealias U = Int\n  ok = \"b\" is T\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as Dep\nimport \"dep_string.pkl\" as DepString\nimport \"dep_order.pkl\" as DepOrder\nimport \"dep_followed.pkl\" as DepFollowed\nimport \"dep_followed_same.pkl\" as DepFollowedSame\nimport \"dep_followed_shadowed.pkl\" as DepFollowedShadowed\nimport \"dep_shadowed.pkl\" as DepShadowed\nimport \"dep_unrelated.pkl\" as DepUnrelated\nimport \"dep_followed_unrelated.pkl\" as DepFollowedUnrelated\nout = Dep.result.ok\noutString = DepString.result.ok\noutOrder = DepOrder.result.ok\noutFollowed = DepFollowed.result.ok\noutFollowedSame = DepFollowedSame.result.ok\noutFollowedShadowed = DepFollowedShadowed.result.ok\noutShadowed = DepShadowed.result.ok\noutUnrelated = DepUnrelated.result.ok\noutFollowedUnrelated = DepFollowedUnrelated.result.ok\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["out"], true);
+    assert_eq!(val["outString"], true);
+    assert_eq!(val["outOrder"], true);
+    assert_eq!(val["outFollowed"], true);
+    assert_eq!(val["outFollowedSame"], true);
+    assert_eq!(val["outFollowedShadowed"], true);
+    assert_eq!(val["outShadowed"], true);
+    assert_eq!(val["outUnrelated"], true);
+    assert_eq!(val["outFollowedUnrelated"], true);
+}
+
+#[tokio::test]
+async fn narrowed_import_resolves_aliases_in_followed_class_bodies() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_class_alias");
+    let dir = temp.path();
+    // Following `C` analyses its property's constraint with the module's
+    // aliases, so `S` is a String and `length` is the string's own.
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "length = throw(\"unused\")\ntypealias S = String\nclass C {\n  name: S(length == 1) = \"b\"\n}\nresult = new C {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as Dep\nout = Dep.result.name\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["out"], "b");
 }
