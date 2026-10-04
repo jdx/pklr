@@ -5089,6 +5089,7 @@ impl Evaluator {
                     };
                     let fun = self.eval_expr(fun, scope, depth + 1)?;
                     return match self.invoke_lambda(&fun, &[], depth) {
+                        Err(error) if is_evaluator_control_error(&error) => Err(error),
                         Err(error) => Ok(Value::String(caught_error_message(error).into())),
                         Ok(_) if name == TEST_CATCH => Err(Error::Eval(
                             "Expected an exception, but none was thrown.".into(),
@@ -6840,6 +6841,14 @@ fn builtin_function(builtin: &str, params: &[&str]) -> Value {
 
 /// The message `catch` returns for an error: Pkl's message, without
 /// pklr's "Eval error: " prefix.
+fn is_evaluator_control_error(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Eval(message)
+            if message == "evaluation cancelled" || message == "maximum recursion depth exceeded"
+    )
+}
+
 fn caught_error_message(error: Error) -> String {
     match error {
         Error::Eval(message) => message,
