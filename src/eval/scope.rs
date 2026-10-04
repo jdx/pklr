@@ -310,12 +310,16 @@ impl Scope {
     }
 
     pub(super) fn get(&self, name: &str) -> Option<&Value> {
-        if self.poisoned.contains_key(name) {
-            return None;
+        let mut scope = self;
+        loop {
+            if scope.poisoned.contains_key(name) {
+                return None;
+            }
+            if let Some(value) = scope.vars.get(name) {
+                return Some(value);
+            }
+            scope = scope.parent.as_deref()?;
         }
-        self.vars
-            .get(name)
-            .or_else(|| self.parent.as_ref().and_then(|p| p.get(name)))
     }
 
     pub(super) fn flatten(&self) -> ScopeMap {
@@ -684,16 +688,19 @@ pub(super) fn own_body_names(
     entry_scopes: Option<&[Option<Arc<CapturedScope>>]>,
     inherited: Option<&ObjectSource>,
 ) -> Option<HashSet<String>> {
-    let entry_scopes = entry_scopes?;
-    let own = |entries: &[Entry], scopes: &[Option<Arc<CapturedScope>>]| {
+    #[inline]
+    fn own<'e>(
+        entries: &'e [Entry],
+        scopes: &'e [Option<Arc<CapturedScope>>],
+    ) -> impl Iterator<Item = String> + 'e {
         entries
             .iter()
             .enumerate()
             .filter(|(index, _)| scopes.get(*index).is_none_or(Option::is_none))
             .filter_map(|(_, entry)| entry_member_name(entry).cloned())
-            .collect::<Vec<_>>()
-    };
-    let mut names: HashSet<String> = own(entries, entry_scopes).into_iter().collect();
+    }
+    let entry_scopes = entry_scopes?;
+    let mut names: HashSet<String> = own(entries, entry_scopes).collect();
     if let Some(source) = inherited {
         names.extend(own(&source.entries, &source.entry_scopes));
         // Members an earlier amendment replaced are no longer in `entries`.
