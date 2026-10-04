@@ -30,11 +30,11 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
           persist-credentials: false
-      # Reads only git objects from the base branch, never the pull request's
-      # files. A base without tak.toml has never been measured, so the pull
-      # request that adds tak there has nothing to compare against.
+      # A new runner class has no matching base history. Compare still runs
+      # and reports that state, but only a runner with a merge-base record
+      # makes an empty comparison fail the gate.
       - id: base
-        name: Check the base adopts tak
+        name: Check the base has this runner's measurements
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
@@ -42,10 +42,13 @@ jobs:
             echo "::error::unexpected base sha: $BASE_SHA"
             exit 1
           fi
+          git fetch origin refs/notes/tak:refs/notes/tak
           base=$(git rev-parse --verify --end-of-options "$BASE_SHA^{commit}")
           merge_base=$(git merge-base "$base" HEAD)
-          if git cat-file -e "$merge_base:tak.toml" 2>/dev/null; then
-            echo "fail-on-nothing-compared=false" >> "$GITHUB_OUTPUT"
+          runner="gha-${ImageOS}-${ImageVersion}-x64-rust$(rustc -V | cut -d' ' -f2)"
+          if git notes --ref=tak show "$merge_base" 2>/dev/null |
+            jq -e --arg runner "$runner" 'select(.runner == $runner)' >/dev/null; then
+            echo "fail-on-nothing-compared=true" >> "$GITHUB_OUTPUT"
           else
             echo "fail-on-nothing-compared=false" >> "$GITHUB_OUTPUT"
           fi
