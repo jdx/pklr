@@ -122,7 +122,8 @@ pub(super) fn collect_entry_import_field_uses(
             Entry::ClassDef(_, _, _, body) => {
                 collect_entry_import_field_uses(body, uses, &entry_shadows);
             }
-            Entry::TypeAlias(..) => {}
+            // A type alias's constraint runs when a value is checked against it.
+            Entry::TypeAlias(_, ty) => collect_type_import_field_uses(ty, uses, &entry_shadows),
         }
     }
 }

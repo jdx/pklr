@@ -2151,3 +2151,27 @@ async fn import_glob_field_read_named_like_a_module_sees_every_module() {
     assert_eq!(val["l"], "L");
     assert_eq!(val["count"], 2);
 }
+
+#[tokio::test]
+async fn import_glob_keeps_modules_read_by_type_alias_constraints() {
+    let temp = TestTempDir::new("pklr_test_glob_type_alias_constraint");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("parts")).unwrap();
+    std::fs::write(dir.join("parts/a.pkl"), "value = \"a\"\n").unwrap();
+    std::fs::write(dir.join("parts/b.pkl"), "value = \"b\"\n").unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"import* "parts/*.pkl" as Parts
+typealias IsB = String(this == Parts["parts/b.pkl"].value)
+fromA = Parts["parts/a.pkl"].value
+ok = "b" is IsB
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["fromA"], "a");
+    assert_eq!(val["ok"], true);
+}
