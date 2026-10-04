@@ -355,13 +355,24 @@ pub(super) fn expand_requested_fields(
     // Type aliases and classes evaluate their constraints and defaults when a
     // value is checked or built, so a property using one also depends on what
     // the definition reads.
-    let definitions: Definitions = entries
-        .iter()
-        .filter_map(|entry| match entry {
-            Entry::TypeAlias(name, _) | Entry::ClassDef(name, ..) => Some((name.as_str(), entry)),
-            _ => None,
-        })
-        .collect();
+    let definitions = Definitions {
+        types: entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::TypeAlias(name, _) | Entry::ClassDef(name, ..) => {
+                    Some((name.as_str(), entry))
+                }
+                _ => None,
+            })
+            .collect(),
+        values: entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Property(prop) => Some(prop.name.as_str()),
+                _ => None,
+            })
+            .collect(),
+    };
     let module_aliases: TypeAliases = entries
         .iter()
         .filter_map(|entry| match entry {
@@ -427,7 +438,7 @@ fn follow_definitions(
     let mut pending: Vec<String> = refs.iter().cloned().collect();
     let mut visited = HashSet::new();
     while let Some(name) = pending.pop() {
-        let Some(definition) = definitions.get(name.as_str()) else {
+        let Some(definition) = definitions.types.get(name.as_str()) else {
             continue;
         };
         if !visited.insert(name) {
@@ -527,8 +538,12 @@ const BINDING_BUILTIN_TYPES: &[&str] = &[
 /// nested body redeclares, which may no longer bind what the built-in does.
 type TypeAliases<'a> = HashMap<&'a str, Option<&'a crate::parser::TypeExpr>>;
 
-/// A module's own type aliases and classes by name.
-type Definitions<'a> = HashMap<&'a str, &'a Entry>;
+/// A module's own type aliases and classes by name, and the names of its
+/// properties, which live in a separate namespace and may share a type's name.
+struct Definitions<'a> {
+    types: HashMap<&'a str, &'a Entry>,
+    values: HashSet<&'a str>,
+}
 
 /// Adds to `out` the name of every type alias or class declared directly in
 /// `entries`, except a type alias that redeclares one of `aliases`
@@ -845,7 +860,8 @@ fn collect_entry_refs_in(
     // A definition's constraints resolve aliases where the check happens, so
     // when following `definitions` and this body changes the aliases, follow
     // the ones reached from here with this body's aliases, and leave only
-    // what they read to the caller.
+    // what they read to the caller (keeping a name that is also a module
+    // property, which this body may read as a value).
     if let (Some(narrowed), Some(definitions)) = (&narrowed, definitions) {
         let mut body_refs = HashSet::new();
         collect_entry_refs_unnarrowed(
@@ -856,7 +872,10 @@ fn collect_entry_refs_in(
             Some(definitions),
         );
         follow_definitions(definitions, &mut body_refs, Some(narrowed));
-        body_refs.retain(|name| !definitions.contains_key(name.as_str()));
+        body_refs.retain(|name| {
+            !definitions.types.contains_key(name.as_str())
+                || definitions.values.contains(name.as_str())
+        });
         refs.extend(body_refs);
         return;
     }

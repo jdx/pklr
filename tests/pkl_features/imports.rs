@@ -2585,9 +2585,16 @@ async fn narrowed_import_respects_builtins_redeclared_in_nested_bodies() {
         "length = throw(\"unused\")\ntypealias String = List\ntypealias T = String(length == 1)\nresult {\n  inner {\n    typealias List = Int\n    value = 1\n  }\n  ok = List(1) is T\n}\n",
     )
     .unwrap();
+    // Types and properties have separate namespaces, so a body that follows
+    // the type `Foo` itself still reads the module property `Foo`.
+    std::fs::write(
+        dir.join("dep_same_name.pkl"),
+        "typealias Foo = Int\nFoo = 5\nresult {\n  typealias String = Int\n  ok = Foo\n}\n",
+    )
+    .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"dep.pkl\" as Dep\nimport \"dep_direct.pkl\" as DepDirect\nimport \"dep_alias_sibling.pkl\" as DepAliasSibling\nimport \"dep_identical_shadowed.pkl\" as DepIdenticalShadowed\nimport \"dep_local.pkl\" as DepLocal\nimport \"dep_identical.pkl\" as DepIdentical\nimport \"dep_listing.pkl\" as DepListing\nimport \"dep_sibling.pkl\" as DepSibling\nimport \"dep_class.pkl\" as DepClass\nout = Dep.result.ok\noutDirect = DepDirect.result.ok\noutListing = DepListing.result.inner.ok\noutSibling = DepSibling.result.ok\noutClass = DepClass.result.ok\noutLocal = DepLocal.result.inner.ok\noutIdentical = DepIdentical.result.ok\noutIdenticalShadowed = DepIdenticalShadowed.result.ok\noutIdenticalShadowedDirect = DepIdenticalShadowed.result.okDirect\noutAliasSibling = DepAliasSibling.result.ok\n",
+        "import \"dep.pkl\" as Dep\nimport \"dep_direct.pkl\" as DepDirect\nimport \"dep_same_name.pkl\" as DepSameName\nimport \"dep_alias_sibling.pkl\" as DepAliasSibling\nimport \"dep_identical_shadowed.pkl\" as DepIdenticalShadowed\nimport \"dep_local.pkl\" as DepLocal\nimport \"dep_identical.pkl\" as DepIdentical\nimport \"dep_listing.pkl\" as DepListing\nimport \"dep_sibling.pkl\" as DepSibling\nimport \"dep_class.pkl\" as DepClass\nout = Dep.result.ok\noutDirect = DepDirect.result.ok\noutListing = DepListing.result.inner.ok\noutSibling = DepSibling.result.ok\noutClass = DepClass.result.ok\noutLocal = DepLocal.result.inner.ok\noutIdentical = DepIdentical.result.ok\noutIdenticalShadowed = DepIdenticalShadowed.result.ok\noutIdenticalShadowedDirect = DepIdenticalShadowed.result.okDirect\noutAliasSibling = DepAliasSibling.result.ok\noutSameName = DepSameName.result.ok\n",
     )
     .unwrap();
 
@@ -2604,6 +2611,7 @@ async fn narrowed_import_respects_builtins_redeclared_in_nested_bodies() {
     assert_eq!(val["outIdenticalShadowed"], true);
     assert_eq!(val["outIdenticalShadowedDirect"], true);
     assert_eq!(val["outAliasSibling"], true);
+    assert_eq!(val["outSameName"], 5);
 }
 
 #[tokio::test]
