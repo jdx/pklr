@@ -902,18 +902,52 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
             _ => None,
         })
         .collect();
+    let classes: HashMap<&str, (Option<&str>, &[Entry])> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::ClassDef(name, _, parent, body) => {
+                Some((name.as_str(), (parent.as_deref(), body.as_slice())))
+            }
+            _ => None,
+        })
+        .collect();
+    // The properties a class and its ancestors declared in this module
+    // define on the instance, which a bare name in the class body reads
+    // before the module's properties.
+    fn instance_properties<'a>(
+        classes: &HashMap<&'a str, (Option<&'a str>, &'a [Entry])>,
+        mut class: &'a str,
+    ) -> HashSet<&'a str> {
+        let mut names = HashSet::new();
+        let mut seen = HashSet::new();
+        while seen.insert(class)
+            && let Some((parent, body)) = classes.get(class)
+        {
+            names.extend(body.iter().filter_map(|entry| match entry {
+                Entry::Property(prop) => Some(prop.name.as_str()),
+                _ => None,
+            }));
+            let Some(parent) = parent else {
+                break;
+            };
+            class = parent;
+        }
+        names
+    }
     let members: Vec<(&String, bool, HashSet<String>)> = entries
         .iter()
         .filter_map(|entry| match entry {
             Entry::ClassDef(name, _, parent, body) => {
-                // The body's own properties shadow module properties of the
-                // same name, so a remaining bare root naming a module
-                // property reads it like `module.name`.
+                // A bare root naming a module property that the instance
+                // doesn't define reads it like `module.name`.
                 let mut refs = referenced_roots(body);
-                if refs
-                    .iter()
-                    .any(|root| module_properties.contains(root.as_str()))
-                {
+                let mut instance = None;
+                if refs.iter().any(|root| {
+                    module_properties.contains(root.as_str())
+                        && !instance
+                            .get_or_insert_with(|| instance_properties(&classes, name))
+                            .contains(root.as_str())
+                }) {
                     refs.insert("module".to_string());
                 }
                 // Inside a class body `this` is the instance, so only

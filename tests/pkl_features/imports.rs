@@ -2338,6 +2338,29 @@ async fn narrowed_import_follows_module_reads_in_class_defaults() {
 }
 
 #[tokio::test]
+async fn narrowed_import_ignores_class_properties_named_like_module_properties() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_class_property_shadow");
+    let dir = temp.path();
+    // `b = a` reads the instance's own `a`, not the unused module property
+    // `a`.
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "a = throw(\"unused\")\nclass D { a = 6; b = a }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as Dep\nd = new Dep.D {}\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val, serde_json::json!({"d": {"a": 6, "b": 6}}));
+}
+
+#[tokio::test]
 async fn narrowed_import_follows_module_reads_but_not_checked_value_members() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_constraint_names");
     let dir = temp.path();
