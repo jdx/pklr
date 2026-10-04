@@ -5341,3 +5341,36 @@ fn body_class_without_an_earlier_binding_is_visible_before_it() {
     let json = eval("obj { x: C = new C {}; class C { y = 1 } }");
     assert_eq!(json["obj"]["x"], serde_json::json!({"y": 1}));
 }
+
+#[test]
+fn captured_scope_keeps_types_from_before_a_later_body_alias() {
+    // `x`'s captured scope is from before the body's `typealias Int`, so an
+    // amendment re-checks `v` against the built-in `Int`.
+    let json = eval("obj { x { v: Int = 1 }; typealias Int = String }\ny = (obj.x) {}");
+    assert_eq!(json["y"]["v"], 1);
+    let json = eval("obj { x { v: Int = 1 }; typealias Int = String }\ny = (obj.x) { v = 2 }");
+    assert_eq!(json["y"]["v"], 2);
+    let err =
+        eval_fails("obj { x { v: Int = 1 }; typealias Int = String }\ny = (obj.x) { v = \"s\" }");
+    assert!(err.contains("property 'v' expected Int"), "{err}");
+    // Declared before `x`, the alias applies to it.
+    let json = eval("obj { typealias Int = String; x { v: Int = \"s\" } }\ny = (obj.x) {}");
+    assert_eq!(json["y"]["v"], "s");
+    let err = eval_fails("obj { typealias Int = String; x { v: Int = 1 } }\ny = (obj.x) {}");
+    assert!(err.contains("property 'v' expected Int"), "{err}");
+}
+
+#[test]
+fn captured_scope_keeps_classes_from_before_a_later_body_class() {
+    let json =
+        eval("class C { v = 1 }\nobj { x { c = new C {} }; class C { y = 1 } }\ny = (obj.x) {}");
+    assert_eq!(json["y"]["c"], serde_json::json!({"v": 1}));
+    let json = eval(
+        "class C { v = 1 }\nobj { x { c: C = new C {} }; class C { y = 1 } }\ny = (obj.x) { c = new C {} }",
+    );
+    assert_eq!(json["y"]["c"], serde_json::json!({"v": 1}));
+    let err = eval_fails(
+        "class C { v = 1 }\nclass D { w = 1 }\nobj { x { c: C = new C {} }; class C { y = 1 } }\ny = (obj.x) { c = new D {} }",
+    );
+    assert!(err.contains("property 'c' expected C"), "{err}");
+}

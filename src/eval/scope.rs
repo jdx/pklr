@@ -451,6 +451,11 @@ impl Scope {
             .as_ref()
             .map(|p| p.flatten_type_aliases())
             .unwrap_or_default();
+        // Names this scope resolves as no alias (see `type_alias_barrier`)
+        // stay hidden from a captured copy too.
+        if let Some(barrier) = &self.type_alias_barrier {
+            result.retain(|name, _| !barrier.contains(&**name));
+        }
         result.extend(
             self.type_aliases
                 .iter()
