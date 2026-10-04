@@ -3500,6 +3500,26 @@ fn failed_module_local_is_not_a_member_of_module() {
 }
 
 #[test]
+fn members_declared_before_the_class_they_use_are_refreshed() {
+    for (src, expected) in [
+        (
+            "function make() = new C {}\nclass C { v = module.expected }\nexpected = \"b\"\nresult = make()\n",
+            serde_json::json!({"v": "b"}),
+        ),
+        (
+            "local function make() = new C {}\nclass C { v = module.expected }\nexpected = \"b\"\nresult = make()\n",
+            serde_json::json!({"v": "b"}),
+        ),
+        (
+            "class D { c = new C {} }\nclass C { v = module.expected }\nexpected = \"b\"\nresult = new D {}\n",
+            serde_json::json!({"c": {"v": "b"}}),
+        ),
+    ] {
+        assert_eq!(eval(src)["result"], expected, "{src}");
+    }
+}
+
+#[test]
 fn failed_class_reports_error_through_module_and_this() {
     for src in [
         "class C { v = module.missing }\nresult = new module.C {}\n",

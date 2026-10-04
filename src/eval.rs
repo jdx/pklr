@@ -3255,11 +3255,24 @@ impl Evaluator {
         // scopes the classes captured, so each write copies it. A member that
         // reads a pending member as `module.C` gets the batch written first.
         let mut pending: Vec<(String, Option<Value>)> = Vec::new();
-        for entry in module.body.iter() {
-            if !pending.is_empty()
-                && entry_member_name(entry).is_some_and(|name| members.contains(name))
-                && member_reads_pending(entry, &pending)
-            {
+        // `members` is in dependency order (see `module_dependent_members`).
+        let member_entries: HashMap<&str, &Entry> = module
+            .body
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry,
+                    Entry::ClassDef(..) | Entry::TypeAlias(..) | Entry::Property(_)
+                )
+            })
+            .filter_map(|entry| Some((entry_member_name(entry)?.as_str(), entry)))
+            .filter(|(name, _)| members.contains(*name))
+            .collect();
+        for entry in members
+            .iter()
+            .filter_map(|name| member_entries.get(name.as_str()).copied())
+        {
+            if !pending.is_empty() && member_reads_pending(entry, &pending) {
                 flush_module_members(scope, module_props, &mut pending);
             }
             // Classes and module functions are also members of the module

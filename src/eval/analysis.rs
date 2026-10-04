@@ -952,11 +952,57 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
             break;
         }
     }
-    members
-        .into_iter()
+    // Refresh order: each member after the members it reads, so a function
+    // or class declared before a class it uses sees that class's new value.
+    // Ties and cycles keep declaration order; a dynamic `module[key]` read
+    // may reach any member, so it comes after the members without one.
+    let tracked: Vec<&(&String, bool, HashSet<String>)> = members
+        .iter()
         .filter(|(name, ..)| dependent.contains(name.as_str()))
-        .map(|(name, ..)| name.clone())
-        .collect()
+        .collect();
+    let index: HashMap<&str, usize> = tracked
+        .iter()
+        .enumerate()
+        .map(|(i, (name, ..))| (name.as_str(), i))
+        .collect();
+    let dynamic: Vec<bool> = tracked
+        .iter()
+        .map(|(_, _, refs)| refs.contains(DYNAMIC_SIBLING_REF))
+        .collect();
+    let deps: Vec<Vec<usize>> = tracked
+        .iter()
+        .enumerate()
+        .map(|(i, (_, _, refs))| {
+            let mut deps: Vec<usize> = if dynamic[i] {
+                (0..tracked.len()).filter(|&j| !dynamic[j]).collect()
+            } else {
+                refs.iter()
+                    .filter_map(|name| index.get(name.as_str()).copied())
+                    .collect()
+            };
+            deps.retain(|&j| j != i);
+            deps.sort_unstable();
+            deps
+        })
+        .collect();
+    // 0 = unvisited, 1 = in progress, 2 = done.
+    fn visit(i: usize, deps: &[Vec<usize>], state: &mut [u8], order: &mut Vec<usize>) {
+        if state[i] != 0 {
+            return;
+        }
+        state[i] = 1;
+        for &j in &deps[i] {
+            visit(j, deps, state, order);
+        }
+        state[i] = 2;
+        order.push(i);
+    }
+    let mut state = vec![0u8; tracked.len()];
+    let mut order = Vec::with_capacity(tracked.len());
+    for i in 0..tracked.len() {
+        visit(i, &deps, &mut state, &mut order);
+    }
+    order.into_iter().map(|i| tracked[i].0.clone()).collect()
 }
 
 /// The module members `entry` (a module-level class, alias, local or
