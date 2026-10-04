@@ -163,10 +163,13 @@ def check(rel, inputs, exe, timeout):
         return "error", first_line(rerr)
     try:
         a = normalize(json.loads(pout))
-        b = normalize(json.loads(rout))
     except json.JSONDecodeError:
         # The module sets its own output renderer, so pkl's output isn't JSON.
         return "skipped", "pkl output is not JSON"
+    try:
+        b = normalize(json.loads(rout))
+    except json.JSONDecodeError:
+        return "error", "pklr output is not JSON"
     if a == b:
         return "match", ""
     return "mismatch", ", ".join(diff_paths(a, b)[:5])
