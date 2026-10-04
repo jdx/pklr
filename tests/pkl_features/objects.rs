@@ -4005,3 +4005,17 @@ fn amended_module_checks_the_final_declared_property_value() {
     let json = pklr::EvaluatorBuilder::new().eval_to_json(&child).unwrap();
     assert_eq!(json["foo"], 5);
 }
+
+#[test]
+fn generator_body_amends_the_receiver_member() {
+    let json = eval(
+        r#"
+base { o { v = 1 } }
+property = (base) { when (true) { o { w = 2 } } }
+entryBase { ["k"] { v = 1 } }
+entry = (entryBase) { for (_ in List(1)) { ["k"] { w = 2 } } }
+"#,
+    );
+    assert_eq!(json["property"], serde_json::json!({"o": {"v": 1, "w": 2}}));
+    assert_eq!(json["entry"], serde_json::json!({"k": {"v": 1, "w": 2}}));
+}
