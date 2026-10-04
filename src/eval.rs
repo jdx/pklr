@@ -1586,13 +1586,15 @@ impl Evaluator {
                     keys.insert(value_to_key(&key)?, ());
                 }
                 Entry::Spread(expr) => {
-                    if let Value::Object(map, _) = self.eval_expr(expr, &scope, depth + 1)? {
+                    let value = self.eval_expr(expr, &scope, depth + 1)?;
+                    check_iterable(&value)?;
+                    if let Value::Object(map, _) = value {
                         keys.extend(map.keys().map(|key| (key.clone(), ())));
                     }
                 }
                 Entry::ForGenerator(generator) => {
                     let collection = self.eval_expr(&generator.collection, &scope, depth + 1)?;
-                    for (key, value) in collection_to_items(collection) {
+                    for (key, value) in collection_to_items(collection)? {
                         let mut iter = scope.child();
                         iter.set(&generator.val_var, value);
                         if let Some(name) = &generator.key_var {
@@ -1646,15 +1648,12 @@ impl Evaluator {
                 // reads super.length while counting would re-enter this walk.
                 Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {}
                 Entry::Spread(expr) => {
-                    *length += match self.eval_expr(expr, &scope, depth + 1)? {
-                        Value::List(items) => items.len(),
-                        Value::Object(items, _) => items.len(),
-                        _ => 1,
-                    };
+                    let value = self.eval_expr(expr, &scope, depth + 1)?;
+                    *length += listing_spread_values(value)?.len();
                 }
                 Entry::ForGenerator(generator) => {
                     let collection = self.eval_expr(&generator.collection, &scope, depth + 1)?;
-                    for (key, value) in collection_to_items(collection) {
+                    for (key, value) in collection_to_items(collection)? {
                         let mut iter = scope.child();
                         iter.set(&generator.val_var, value);
                         if let Some(name) = &generator.key_var {
@@ -3228,6 +3227,7 @@ impl Evaluator {
                         own_body_scope,
                     );
                     let val = self.eval_expr(expr, &active_scope, depth)?;
+                    check_iterable(&val)?;
                     if let Value::Object(m, _) = val {
                         drop(active_scope);
                         entry_owners.release_this(&this_aliases);
@@ -3250,7 +3250,7 @@ impl Evaluator {
                         own_body_scope,
                     );
                     let collection = self.eval_expr(&fgen.collection, &active_scope, depth)?;
-                    let items = collection_to_items(collection);
+                    let items = collection_to_items(collection)?;
                     for (k, v) in items {
                         let mut iter_scope = active_scope.child();
                         iter_scope.set(&fgen.val_var, v);
@@ -3924,6 +3924,9 @@ impl Evaluator {
                 depth,
             );
         }
+        // Every amendment of a class instance goes through here: `new C {}`,
+        // property bodies, and entries of typed Mappings and Listings.
+        check_no_elements(base_source, overlay_entries)?;
         let base_entries = &base_source.entries;
         let base_scope = base_source.scope();
         // Build merged entry list preserving base order.
@@ -4338,13 +4341,7 @@ impl Evaluator {
                     *position = (*position).max(index + 1);
                 }
                 Entry::Spread(expr) => {
-                    let values = match self.eval_expr(expr, &scope, depth + 1)? {
-                        Value::List(values) => values,
-                        Value::Object(values, _) => {
-                            values.values().cloned().collect::<Vec<_>>().into()
-                        }
-                        value => vec![value].into(),
-                    };
+                    let values = listing_spread_values(self.eval_expr(expr, &scope, depth + 1)?)?;
                     if target >= *position && target - *position < values.len() {
                         *value = Some(values[target - *position].clone());
                     }
@@ -4352,7 +4349,7 @@ impl Evaluator {
                 }
                 Entry::ForGenerator(generator) => {
                     let collection = self.eval_expr(&generator.collection, &scope, depth + 1)?;
-                    for (key, item) in collection_to_items(collection) {
+                    for (key, item) in collection_to_items(collection)? {
                         let mut iter_scope = scope.child();
                         let mut iter_locals = locals.clone();
                         // Bind generator variables after enclosing locals so
@@ -4477,15 +4474,14 @@ impl Evaluator {
                         )));
                     }
                 }
-                Entry::Spread(expr) => match self.eval_expr(expr, &listing_scope, depth + 1)? {
-                    Value::List(values) => items.extend(values.iter().cloned()),
-                    Value::Object(values, _) => items.extend(values.values().cloned()),
-                    value => items.push(value),
-                },
+                Entry::Spread(expr) => {
+                    let value = self.eval_expr(expr, &listing_scope, depth + 1)?;
+                    items.extend(listing_spread_values(value)?.iter().cloned());
+                }
                 Entry::ForGenerator(generator) => {
                     let collection =
                         self.eval_expr(&generator.collection, &listing_scope, depth + 1)?;
-                    for (key, value) in collection_to_items(collection) {
+                    for (key, value) in collection_to_items(collection)? {
                         let mut iter_scope = listing_scope.child();
                         iter_scope.set(&generator.val_var, value);
                         if let Some(key_var) = &generator.key_var {
@@ -4628,6 +4624,7 @@ impl Evaluator {
                         Ok(Value::List(ListValue::new(ListKind::Listing, items)))
                     }
                     Some("Mapping") => {
+                        check_member_kinds("Mapping", entries, false)?;
                         // If the Mapping has a value type param (e.g., Mapping<String, Step>),
                         // resolve it as a default template so entries inherit the class type.
                         let value_type_defaults = generic_params
@@ -4723,6 +4720,7 @@ impl Evaluator {
                         }
                         check_instantiable(scope, type_name.as_deref(), base.as_ref())?;
                         if let Some(Value::Object(ref base_map, Some(ref base_src))) = base {
+                            check_no_elements(base_src, entries)?;
                             // Enforce open modifier: non-open classes reject new properties
                             if !base_src.is_open {
                                 // Collect all declared property names from the base class
@@ -5565,6 +5563,60 @@ impl Evaluator {
                 source.type_identity.as_deref().unwrap_or_default()
             )));
         }
+        if let Value::Null
+        | Value::Int(_)
+        | Value::Float(_)
+        | Value::Bool(_)
+        | Value::String(_)
+        | Value::Lambda(..) = base
+        {
+            return Err(Error::Eval(format!(
+                "Cannot instantiate, or amend an instance of, external class `{}`.",
+                value_type_name(&base)
+            )));
+        }
+        if let Value::Object(base_map, Some(base_src)) = &base
+            && base_src.kind == ObjectKind::Mapping
+        {
+            check_no_elements(base_src, overlay_entries)?;
+            let needs_mapping_evaluation = body_has(overlay_entries, &|entry| {
+                matches!(entry, Entry::Spread(_))
+                    || matches!(entry, Entry::Property(prop) if prop.name == "default")
+            });
+            if !base_src.is_metadata_only() || !needs_mapping_evaluation {
+                // Unannotated mapping entries with bodies still use the general
+                // amendment path, which preserves Listing-shaped entry bodies.
+            } else {
+                let (_, mut amendment_scope) =
+                    mapping_amendment_scopes(base_src.scope(), base_src.scope_declared(), scope);
+                amendment_scope.set("super", base.clone());
+                let mut receiver_entries = base_map
+                    .keys()
+                    .map(|key| Entry::DynProperty(Expr::String(Arc::clone(key)), Expr::Null))
+                    .collect::<Vec<_>>();
+                receiver_entries.extend_from_slice(overlay_entries);
+                amendment_scope.receiver_entries = Some(Arc::new(receiver_entries));
+                let mut amended = ObjectMap::default();
+                amended.extend(
+                    base_map
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone())),
+                );
+                self.eval_mapping_entries_with_type_default(
+                    overlay_entries,
+                    &amendment_scope,
+                    depth,
+                    &mut amended,
+                    &[],
+                    &[],
+                    MappingInheritedDefault::default(),
+                )?;
+                let mut source = Arc::unwrap_or_clone(Arc::clone(base_src));
+                source.entries = overlay_entries.to_vec().into();
+                source.captured = SourceScope::lazy(scope, Vec::new(), Vec::new());
+                return Ok(Value::Object(Arc::new(amended), Some(Arc::new(source))));
+            }
+        }
         if let Value::List(existing) = base {
             let mut amended = existing;
             let mut amendment_scope = scope.child();
@@ -5582,7 +5634,14 @@ impl Evaluator {
         if let Value::Object(base_map, Some(base_src)) = &base
             && !base_src.is_metadata_only()
         {
-            if !base_src.mapping_value_types.is_empty() {
+            check_no_elements(base_src, overlay_entries)?;
+            let has_mapping_default = base_src
+                .entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::Property(prop) if prop.name == "default"));
+            if !base_src.mapping_value_types.is_empty()
+                || (base_src.kind == ObjectKind::Mapping && has_mapping_default)
+            {
                 let (inherited_scope, mut amendment_scope) =
                     mapping_amendment_scopes(base_src.scope(), base_src.scope_declared(), scope);
                 amendment_scope.set("super", base.clone());
@@ -5960,13 +6019,20 @@ impl Evaluator {
                         && (explicit_default.is_some() || !type_defaults.is_empty()) => {}
                 Entry::Spread(e) => {
                     let val = self.eval_expr(e, &entry_scope, depth + 1)?;
+                    check_iterable(&val)?;
+                    if let Value::List(_) = val {
+                        return Err(Error::Eval(
+                            "Cannot spread value of type `List` into object of type `Mapping`."
+                                .into(),
+                        ));
+                    }
                     if let Value::Object(m, _) = val {
                         map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
                     }
                 }
                 Entry::ForGenerator(fgen) => {
                     let collection = self.eval_expr(&fgen.collection, &entry_scope, depth + 1)?;
-                    for (k, v) in collection_to_items(collection) {
+                    for (k, v) in collection_to_items(collection)? {
                         let mut iter_scope = entry_scope.child();
                         iter_scope.set(&fgen.val_var, v);
                         if let Some(kv) = &fgen.key_var {
@@ -6499,6 +6565,15 @@ const EXTERNAL_CLASSES: &[&str] = &[
     "Bytes",
 ];
 
+/// Abstract standard library classes that aren't external.
+const ABSTRACT_STDLIB_CLASSES: &[&str] = &[
+    "Annotation",
+    "Typed",
+    "BaseValueRenderer",
+    "ValueRenderer",
+    "BytesRenderer",
+];
+
 /// Standard library classes that are neither `open` nor `abstract`.
 const CLOSED_STDLIB_CLASSES: &[&str] = &["Dynamic", "Listing", "Mapping"];
 
@@ -6608,6 +6683,9 @@ fn check_instantiable(scope: &Scope, type_name: Option<&str>, class: Option<&Val
         Some(Value::String(name)) if EXTERNAL_CLASSES.contains(&name.as_ref()) => Err(Error::Eval(
             format!("Cannot instantiate, or amend an instance of, external class `{name}`."),
         )),
+        None | Some(Value::String(_)) if ABSTRACT_STDLIB_CLASSES.contains(&resolved) => Err(
+            Error::Eval(format!("Cannot instantiate abstract class `{resolved}`.")),
+        ),
         _ => Ok(()),
     }
 }
@@ -6827,8 +6905,10 @@ fn int_seq(start: i64, end: i64, step: i64) -> Result<Value> {
     ))
 }
 
-fn collection_to_items(v: Value) -> Vec<(Value, Value)> {
-    match v {
+/// The key/value pairs a for-generator iterates over.
+fn collection_to_items(v: Value) -> Result<Vec<(Value, Value)>> {
+    check_iterable(&v)?;
+    Ok(match v {
         Value::List(items) => items
             .iter()
             .cloned()
@@ -6840,6 +6920,99 @@ fn collection_to_items(v: Value) -> Vec<(Value, Value)> {
             .map(|(k, v)| (Value::String(k.clone()), v.clone()))
             .collect(),
         _ => vec![],
+    })
+}
+
+/// A value's type as pkl names it in error messages: `module#Class` for a
+/// class instance.
+fn value_type_display(value: &Value) -> String {
+    match value {
+        Value::Object(_, Some(source)) if source.type_name.is_some() => qualified_class_name(
+            source.type_identity.as_deref(),
+            source.type_name.as_deref().unwrap_or_default(),
+        ),
+        Value::Object(..) => "Dynamic".to_string(),
+        value => value_type_name(value).to_string(),
+    }
+}
+
+/// The elements `...value` adds to a Listing. Only collections and Listings
+/// can be spread into one: objects have properties or entries instead.
+fn listing_spread_values(value: Value) -> Result<Arc<Vec<Value>>> {
+    check_iterable(&value)?;
+    match value {
+        Value::List(values) => Ok(Arc::new(values.to_vec())),
+        Value::Object(members, _) if members.is_empty() => Ok(Arc::default()),
+        Value::Object(_, source) => {
+            let members = if source.is_some_and(|s| s.kind == ObjectKind::Mapping) {
+                "entries"
+            } else {
+                "properties"
+            };
+            Err(Error::Eval(format!(
+                "Cannot spread object containing {members} into object of type `Listing`."
+            )))
+        }
+        _ => Ok(Arc::default()),
+    }
+}
+
+/// Reject elements in a body that amends or instantiates a class: only
+/// Listings and Dynamic objects can have elements.
+fn check_no_elements(source: &ObjectSource, entries: &[Entry]) -> Result<()> {
+    match &source.type_name {
+        Some(type_name) => check_member_kinds(
+            &qualified_class_name(source.type_identity.as_deref(), type_name),
+            entries,
+            true,
+        ),
+        None if source.kind == ObjectKind::Mapping => check_member_kinds("Mapping", entries, false),
+        None => Ok(()),
+    }
+}
+
+/// Whether a body (or a generator in it) has a member matching `is_kind`.
+fn body_has(entries: &[Entry], is_kind: &dyn Fn(&Entry) -> bool) -> bool {
+    entries.iter().any(|entry| match entry {
+        Entry::ForGenerator(generator) => body_has(&generator.body, is_kind),
+        Entry::WhenGenerator(generator) => {
+            body_has(&generator.body, is_kind)
+                || generator
+                    .else_body
+                    .as_deref()
+                    .is_some_and(|body| body_has(body, is_kind))
+        }
+        entry => is_kind(entry),
+    })
+}
+
+/// Reject elements in the body of an object of type `type_display`, and
+/// entries too when `typed` (a class instance has only properties).
+fn check_member_kinds(type_display: &str, entries: &[Entry], typed: bool) -> Result<()> {
+    if body_has(entries, &|entry| matches!(entry, Entry::Elem(_))) {
+        return Err(Error::Eval(format!(
+            "Object of type `{type_display}` cannot have an element."
+        )));
+    }
+    if typed && body_has(entries, &|entry| matches!(entry, Entry::DynProperty(..))) {
+        return Err(Error::Eval(format!(
+            "Object of type `{type_display}` cannot have an entry."
+        )));
+    }
+    Ok(())
+}
+
+/// Reject a value a generator or spread can't iterate over: anything but a
+/// collection, Listing, Mapping or Dynamic object. Instances of classes are
+/// typed objects and can't be iterated either.
+fn check_iterable(value: &Value) -> Result<()> {
+    match value {
+        Value::List(_) => Ok(()),
+        Value::Object(_, source) if source.as_ref().is_none_or(|s| s.type_name.is_none()) => Ok(()),
+        value => Err(Error::Eval(format!(
+            "Cannot iterate over value of type `{}`.",
+            value_type_display(value)
+        ))),
     }
 }
 

@@ -2728,7 +2728,7 @@ x = new Config {
 }
 
 #[test]
-fn non_open_class_rejects_dyn_property() {
+fn class_instance_rejects_entries() {
     let msg = eval_fails(
         r#"
 class Config {
@@ -2739,8 +2739,10 @@ x = new Config {
 }
 "#,
     );
-    assert!(msg.contains("non-open"));
-    assert!(msg.contains("host"));
+    assert!(
+        msg.contains("Object of type `test#Config` cannot have an entry."),
+        "{msg}"
+    );
 }
 
 #[test]
@@ -3641,67 +3643,6 @@ obj {
     assert_eq!(json["obj"]["ok"], true);
 }
 
-#[test]
-fn body_amendment_merges_member_from_when_generator() {
-    let json = eval(
-        r#"
-base { when (true) { o { v = 1 } } }
-x = (base) { o { w = 2 } }
-y = (x) { o { z = 3 } }
-"#,
-    );
-    assert_eq!(json["x"], serde_json::json!({"o": {"v": 1, "w": 2}}));
-    assert_eq!(
-        json["y"],
-        serde_json::json!({"o": {"v": 1, "w": 2, "z": 3}})
-    );
-}
-
-#[test]
-fn body_amendment_merges_member_from_when_else_generator() {
-    let json = eval(
-        r#"
-base { when (false) { o { v = 1 } } else { o { v = 2 } } }
-x = (base) { o { w = 3 } }
-"#,
-    );
-    assert_eq!(json["x"], serde_json::json!({"o": {"v": 2, "w": 3}}));
-}
-
-#[test]
-fn class_instance_amendment_merges_member_from_generator() {
-    let json = eval(
-        r#"
-class C { p: Dynamic = new { when (true) { o { v = 1 } } } }
-c = new C { p { o { w = 2 } } }
-nested = (c) { p { o { x = 3 } } }
-class E { p: Dynamic = new { when (false) { o { v = 1 } } else { o { v = 2 } } } }
-e = new E { p { o { w = 3 } } }
-"#,
-    );
-    assert_eq!(json["c"], serde_json::json!({"p": {"o": {"v": 1, "w": 2}}}));
-    assert_eq!(
-        json["nested"],
-        serde_json::json!({"p": {"o": {"v": 1, "w": 2, "x": 3}}})
-    );
-    assert_eq!(json["e"], serde_json::json!({"p": {"o": {"v": 2, "w": 3}}}));
-}
-
-#[test]
-fn entry_amendment_merges_entry_from_for_generator() {
-    let json = eval(
-        r#"
-base { for (k in List("a", "b")) { [k] { v = k } } }
-x = (base) { ["a"] { w = 1 } }
-class F { p: Dynamic = new { for (k in List("a", "b")) { [k] { v = k } } } }
-f = new F { p { ["a"] { w = 1 } } }
-"#,
-    );
-    let expected = serde_json::json!({"a": {"v": "a", "w": 1}, "b": {"v": "b"}});
-    assert_eq!(json["x"], expected);
-    assert_eq!(json["f"]["p"], expected);
-}
-
 // ============================================================
 // Class extension and instantiation rules
 // ============================================================
@@ -3807,4 +3748,225 @@ fn min_pkl_version_folds_constant_strings() {
         err.contains("Module `future` requires Pkl version 99.9.9 or higher"),
         "{err}"
     );
+}
+
+// ============================================================
+// Iteration and element rules
+// ============================================================
+
+#[test]
+fn generators_and_spreads_reject_non_iterable_values() {
+    for (src, message) in [
+        (
+            "foo {\n  for (n in 5) { n }\n}\n",
+            "Cannot iterate over value of type `Int`.",
+        ),
+        (
+            "foo = new Listing {\n  for (c in \"abc\") { c }\n}\n",
+            "Cannot iterate over value of type `String`.",
+        ),
+        (
+            "class Person\nfoo {\n  for (_ in new Person {}) { 42 }\n}\n",
+            "Cannot iterate over value of type `test#Person`.",
+        ),
+        (
+            "source = null\nres { ...source }\n",
+            "Cannot iterate over value of type `Null`.",
+        ),
+        (
+            "res = new Listing { ...1 }\n",
+            "Cannot iterate over value of type `Int`.",
+        ),
+        (
+            "class Person { name = \"Bob\" }\nres { ...new Person {} }\n",
+            "Cannot iterate over value of type `test#Person`.",
+        ),
+        (
+            "res = new Mapping { ...List(1, 2) }\n",
+            "Cannot spread value of type `List` into object of type `Mapping`.",
+        ),
+        (
+            "local d = new Dynamic { b = 2 }\nres = new Listing { ...d }\n",
+            "Cannot spread object containing properties into object of type `Listing`.",
+        ),
+        (
+            "local m = new Mapping { [\"a\"] = 1 }\nres = new Listing { ...m }\n",
+            "Cannot spread object containing entries into object of type `Listing`.",
+        ),
+    ] {
+        let err = eval_fails(src);
+        assert!(err.contains(message), "{src}: {err}");
+    }
+    // Collections, Listings, Mappings and Dynamic objects can be iterated.
+    let json = eval(
+        r#"
+local m = new Mapping { ["a"] = 1 }
+res = new Listing {
+  for (x in List(1)) { x }
+  for (x in new Listing { 2 }) { x }
+  for (_, v in m) { v }
+  ...List(2)
+}
+"#,
+    );
+    assert_eq!(json["res"], serde_json::json!([1, 2, 1, 2]));
+}
+
+#[test]
+fn typed_objects_cannot_have_elements() {
+    for src in [
+        "class Foo { names: Listing<String> }\nfoo = new Foo {\n  (names) { \"x\" }\n}\n",
+        "class Foo { names: Listing<String> }\nfoo = new Foo {}\nbar = (foo) {\n  when (true) { \"x\" }\n}\n",
+    ] {
+        let err = eval_fails(src);
+        assert!(
+            err.contains("Object of type `test#Foo` cannot have an element."),
+            "{src}: {err}"
+        );
+    }
+    // Amending a property that is a Listing can add elements.
+    let json =
+        eval("class Foo { names: Listing<String> }\nfoo = new Foo {\n  names { \"x\" }\n}\n");
+    assert_eq!(json["foo"]["names"], serde_json::json!(["x"]));
+}
+
+#[test]
+fn body_amendment_merges_member_from_when_generator() {
+    let json = eval(
+        r#"
+base { when (true) { o { v = 1 } } }
+x = (base) { o { w = 2 } }
+y = (x) { o { z = 3 } }
+"#,
+    );
+    assert_eq!(json["x"], serde_json::json!({"o": {"v": 1, "w": 2}}));
+    assert_eq!(
+        json["y"],
+        serde_json::json!({"o": {"v": 1, "w": 2, "z": 3}})
+    );
+}
+
+#[test]
+fn body_amendment_merges_member_from_when_else_generator() {
+    let json = eval(
+        r#"
+base { when (false) { o { v = 1 } } else { o { v = 2 } } }
+x = (base) { o { w = 3 } }
+"#,
+    );
+    assert_eq!(json["x"], serde_json::json!({"o": {"v": 2, "w": 3}}));
+}
+
+#[test]
+fn class_instance_amendment_merges_member_from_generator() {
+    let json = eval(
+        r#"
+class C { p: Dynamic = new { when (true) { o { v = 1 } } } }
+c = new C { p { o { w = 2 } } }
+nested = (c) { p { o { x = 3 } } }
+class E { p: Dynamic = new { when (false) { o { v = 1 } } else { o { v = 2 } } } }
+e = new E { p { o { w = 3 } } }
+"#,
+    );
+    assert_eq!(json["c"], serde_json::json!({"p": {"o": {"v": 1, "w": 2}}}));
+    assert_eq!(
+        json["nested"],
+        serde_json::json!({"p": {"o": {"v": 1, "w": 2, "x": 3}}})
+    );
+    assert_eq!(json["e"], serde_json::json!({"p": {"o": {"v": 2, "w": 3}}}));
+}
+
+#[test]
+fn entry_amendment_merges_entry_from_for_generator() {
+    let json = eval(
+        r#"
+base { for (k in List("a", "b")) { [k] { v = k } } }
+x = (base) { ["a"] { w = 1 } }
+class F { p: Dynamic = new { for (k in List("a", "b")) { [k] { v = k } } } }
+f = new F { p { ["a"] { w = 1 } } }
+"#,
+    );
+    let expected = serde_json::json!({"a": {"v": "a", "w": 1}, "b": {"v": "b"}});
+    assert_eq!(json["x"], expected);
+    assert_eq!(json["f"]["p"], expected);
+}
+
+#[test]
+fn amending_the_wrong_kind_of_parent_is_rejected() {
+    for (src, message) in [
+        (
+            "res = (5) { \"pigeon\" }\n",
+            "Cannot instantiate, or amend an instance of, external class `Int`.",
+        ),
+        (
+            "res = (\"s\") { [\"pigeon\"] = true }\n",
+            "Cannot instantiate, or amend an instance of, external class `String`.",
+        ),
+        (
+            "class Person {}\nres = new Person { \"pigeon\" }\n",
+            "Object of type `test#Person` cannot have an element.",
+        ),
+        (
+            "class Person {}\nres = new Person { [\"pigeon\"] = true }\n",
+            "Object of type `test#Person` cannot have an entry.",
+        ),
+        (
+            "res = new ValueRenderer { \"pigeon\" }\n",
+            "Cannot instantiate abstract class `ValueRenderer`.",
+        ),
+        (
+            "typealias R = ValueRenderer\nres = new R {}\n",
+            "Cannot instantiate abstract class `ValueRenderer`.",
+        ),
+        (
+            "res = new Mapping { \"pigeon\" }\n",
+            "Object of type `Mapping` cannot have an element.",
+        ),
+        (
+            "res = (new Mapping {}) { \"pigeon\" }\n",
+            "Object of type `Mapping` cannot have an element.",
+        ),
+        (
+            "res = (new Mapping {}) { ...List(1, 2) }\n",
+            "Cannot spread value of type `List` into object of type `Mapping`.",
+        ),
+        (
+            "res = (null) { pigeon = true }\n",
+            "Cannot instantiate, or amend an instance of, external class `Null`.",
+        ),
+        (
+            "local f = (x) -> x\nres = (f) { pigeon = true }\n",
+            "Cannot instantiate, or amend an instance of, external class `Function`.",
+        ),
+    ] {
+        let err = eval_fails(src);
+        assert!(err.contains(message), "{src}: {err}");
+    }
+}
+
+#[test]
+fn bare_mapping_amendment_preserves_default_for_later_amendments() {
+    let json = eval(
+        r#"
+local base = (new Mapping {}) { default { enabled = true } }
+result = (base) { ["example"] {} }
+"#,
+    );
+    assert_eq!(
+        json["result"],
+        serde_json::json!({"example": {"enabled": true}})
+    );
+}
+#[test]
+fn nested_amendments_of_class_instances_reject_elements() {
+    for src in [
+        "class Foo { a = 1 }\nm = new Mapping<String, Foo> { [\"a\"] { \"ignored\" } }\n",
+        "class Foo { a = 1 }\nclass Bar { f: Foo }\nb = new Bar { f { \"x\" } }\n",
+    ] {
+        let err = eval_fails(src);
+        assert!(
+            err.contains("Object of type `test#Foo` cannot have an element."),
+            "{src}: {err}"
+        );
+    }
 }
