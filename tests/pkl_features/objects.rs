@@ -1445,6 +1445,140 @@ out = bad
 }
 
 #[test]
+fn typed_local_in_untaken_branch_is_not_checked() {
+    let json = eval(
+        r#"
+local bad: Int = "x"
+out = if (false) bad else 1
+"#,
+    );
+    assert_eq!(json["out"], 1);
+    let json = eval(
+        r#"
+obj {
+  local bad: Int = "x"
+  out = if (false) bad else 1
+}
+"#,
+    );
+    assert_eq!(json["obj"]["out"], 1);
+    // Through another local, too.
+    let json = eval(
+        r#"
+local bad: Int = "x"
+local viaLocal = if (false) bad else 2
+out = viaLocal
+"#,
+    );
+    assert_eq!(json["out"], 2);
+}
+
+#[test]
+fn typed_local_in_taken_branch_is_checked() {
+    let message = eval_fails(
+        r#"
+local bad: Int = "x"
+out = if (true) bad else 1
+"#,
+    );
+    assert!(message.contains("property 'bad' expected Int"), "{message}");
+    let message = eval_fails(
+        r#"
+obj {
+  local bad: Int = "x"
+  out = if (true) bad else 1
+}
+"#,
+    );
+    assert!(message.contains("property 'bad' expected Int"), "{message}");
+    let message = eval_fails(
+        r#"
+local bad: Int = "x"
+local viaLocal = bad
+out = viaLocal
+"#,
+    );
+    assert!(message.contains("property 'bad' expected Int"), "{message}");
+}
+
+#[test]
+fn amendment_constraint_reads_amendment_locals_and_aliases() {
+    let json = eval(
+        r#"
+base {}
+obj = (base) { local limit = 2; checked: Int(this < limit) = 1 }
+"#,
+    );
+    assert_eq!(json["obj"]["checked"], 1);
+    let message = eval_fails(
+        r#"
+base {}
+obj = (base) { local limit = 2; checked: Int(this < limit) = 3 }
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+    let message = eval_fails(
+        r#"
+base {}
+obj = (base) {
+  typealias Small = Int(this < 2)
+  checked: Small = 3
+}
+"#,
+    );
+    assert!(
+        message.contains("property 'checked' expected Small"),
+        "{message}"
+    );
+}
+
+#[test]
+fn amendment_generator_declared_property_is_checked() {
+    let message = eval_fails(
+        r#"
+base {}
+obj = (base) {
+  for (x in List(1)) {
+    checked: Int = "x"
+  }
+}
+"#,
+    );
+    assert!(
+        message.contains("property 'checked' expected Int"),
+        "{message}"
+    );
+    let message = eval_fails(
+        r#"
+base {}
+obj = (base) {
+  when (true) {
+    checked: Int = "x"
+  }
+}
+"#,
+    );
+    assert!(
+        message.contains("property 'checked' expected Int"),
+        "{message}"
+    );
+    // The same declaration in a plain object body is rejected as well.
+    let message = eval_fails(
+        r#"
+obj {
+  for (x in List(1)) {
+    checked: Int = "x"
+  }
+}
+"#,
+    );
+    assert!(
+        message.contains("property 'checked' expected Int"),
+        "{message}"
+    );
+}
+
+#[test]
 fn type_defaults_cover_literals_unions_and_collections() {
     let json = eval(
         r#"
