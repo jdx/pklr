@@ -1762,7 +1762,7 @@ fn expr_mentions(expr: &Expr, name: &str) -> bool {
 /// Whether `expr` uses `this` other than as the base of a member read
 /// (`this.x`, `this[k]`): bound by a `let`, passed to a call, and so on, after
 /// which any of the instance's members may be read. A nested object body
-/// binds its own `this`, but any mention there counts too, conservatively.
+/// binds its own `this`, so nothing in it uses the outer one.
 fn this_escapes(expr: &Expr) -> bool {
     match expr {
         Expr::Field(base, _) | Expr::NullSafeField(base, _) if matches!(base.as_ref(), Expr::Ident(name) if name == "this") => {
@@ -1772,9 +1772,7 @@ fn this_escapes(expr: &Expr) -> bool {
             this_escapes(index)
         }
         Expr::Ident(ident) => ident == "this",
-        Expr::New(_, entries, _) | Expr::ObjectBody(entries) | Expr::InferredNew(_, entries) => {
-            entries_mention(entries, "this")
-        }
+        Expr::New(..) | Expr::ObjectBody(_) | Expr::InferredNew(..) => false,
         Expr::Field(base, _) | Expr::NullSafeField(base, _) => this_escapes(base),
         Expr::Index(base, index) | Expr::Binop(_, base, index) => {
             this_escapes(base) || this_escapes(index)
@@ -1810,13 +1808,8 @@ fn this_escapes(expr: &Expr) -> bool {
 /// instance.
 fn this_escapes_entries(entries: &[Entry]) -> bool {
     entries.iter().any(|entry| match entry {
-        Entry::Property(prop) => {
-            prop.value.as_ref().is_some_and(this_escapes)
-                || prop
-                    .body
-                    .as_ref()
-                    .is_some_and(|body| entries_mention(body, "this"))
-        }
+        // A property's object body binds its own `this`.
+        Entry::Property(prop) => prop.value.as_ref().is_some_and(this_escapes),
         Entry::DynProperty(key, value) => this_escapes(key) || this_escapes(value),
         Entry::Spread(expr) | Entry::Elem(expr) => this_escapes(expr),
         Entry::ForGenerator(fgen) => {

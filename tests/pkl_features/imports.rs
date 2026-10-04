@@ -2454,16 +2454,17 @@ async fn narrowed_import_follows_methods_called_by_class_defaults() {
 async fn narrowed_import_skips_methods_class_defaults_do_not_call() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_default_this_read");
     let dir = temp.path();
-    // `a` reads `this.x` but calls no method, so `getMin` only runs on the
-    // built instance, where `min` is the inherited property.
+    // `a` reads `this.x` but calls no method, and `this` in `obj` is `obj`,
+    // so `getMin` only runs on the built instance, where `min` is the
+    // inherited property.
     std::fs::write(
         dir.join("dep.pkl"),
-        "min = throw(\"unused\")\nopen class Parent { min = 2 }\nclass Child extends Parent {\n  x = 3\n  a = this.x\n  function getMin() = min\n}\n",
+        "min = throw(\"unused\")\nopen class Parent { min = 2 }\nclass Child extends Parent {\n  x = 3\n  a = this.x\n  obj { y = 4; b = this.y }\n  function getMin() = min\n}\n",
     )
     .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"dep.pkl\" as D\nchild = new D.Child {}\na = child.a\nmin = child.getMin()\n",
+        "import \"dep.pkl\" as D\nchild = new D.Child {}\na = child.a\nb = child.obj.b\nmin = child.getMin()\n",
     )
     .unwrap();
 
@@ -2471,6 +2472,7 @@ async fn narrowed_import_skips_methods_class_defaults_do_not_call() {
         .await
         .unwrap();
     assert_eq!(val["a"], 3);
+    assert_eq!(val["b"], 4);
     assert_eq!(val["min"], 2);
 }
 
