@@ -873,7 +873,8 @@ pub(super) fn is_module_sibling_ref(expr: &Expr, include_this: bool) -> bool {
 
 /// Names, in declaration order, of the module members in `entries` that must
 /// be evaluated again once the module's properties are available: classes
-/// whose bodies read `module`, and the members that reference such a member
+/// whose bodies read `module` or a module property by name (`a = min`), and
+/// the members that reference such a member
 /// (a subclass, a type alias naming it, a local, or a module function
 /// building an instance).
 pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<String> {
@@ -884,19 +885,37 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
         (root == "module" || (include_this && root == "this"))
             .then(|| rest.split('.').next().unwrap_or(rest))
     }
-    // Only a class that mentions `module` starts a dependency chain. Most
-    // modules have none, so check that without collecting any names.
+    // Only a class that reads the module's properties starts a dependency
+    // chain. Most modules have no classes, so check for one first.
     if !entries
         .iter()
-        .any(|entry| matches!(entry, Entry::ClassDef(..)) && entry_mentions(entry, "module"))
+        .any(|entry| matches!(entry, Entry::ClassDef(..)))
     {
         return indexmap::IndexSet::new();
     }
+    let module_properties: HashSet<&str> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::Property(prop) if !has_modifier(&prop.modifiers, Modifier::Local) => {
+                Some(prop.name.as_str())
+            }
+            _ => None,
+        })
+        .collect();
     let members: Vec<(&String, bool, HashSet<String>)> = entries
         .iter()
         .filter_map(|entry| match entry {
             Entry::ClassDef(name, _, parent, body) => {
+                // The body's own properties shadow module properties of the
+                // same name, so a remaining bare root naming a module
+                // property reads it like `module.name`.
                 let mut refs = referenced_roots(body);
+                if refs
+                    .iter()
+                    .any(|root| module_properties.contains(root.as_str()))
+                {
+                    refs.insert("module".to_string());
+                }
                 // Inside a class body `this` is the instance, so only
                 // `module.C` names a module member.
                 collect_sibling_field_refs_entries(body, &mut refs);

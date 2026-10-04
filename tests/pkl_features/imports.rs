@@ -2299,6 +2299,45 @@ async fn narrowed_import_follows_type_alias_constraints() {
 }
 
 #[tokio::test]
+async fn narrowed_import_follows_module_reads_in_class_defaults() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_class_default");
+    let dir = temp.path();
+    // `Bar`'s default reads the module property `min` without `module.`, so
+    // building `Bar` from a requested property still needs `min`.
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "min = 1\nclass Bar {\n  a: Int = min\n}\nresult {\n  bar = new Bar {}\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as D\nout = D.result\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("class.pkl"),
+        "import \"dep.pkl\" as D\nout = new D.Bar {}\n",
+    )
+    .unwrap();
+
+    let dep = pklr::eval_to_json_async(&dir.join("dep.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        dep,
+        serde_json::json!({"min": 1, "result": {"bar": {"a": 1}}})
+    );
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val, serde_json::json!({"out": {"bar": {"a": 1}}}));
+    let class = pklr::eval_to_json_async(&dir.join("class.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(class, serde_json::json!({"out": {"a": 1}}));
+}
+
+#[tokio::test]
 async fn narrowed_import_follows_module_reads_but_not_checked_value_members() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_constraint_names");
     let dir = temp.path();
