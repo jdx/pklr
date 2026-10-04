@@ -3275,10 +3275,13 @@ impl Evaluator {
         let mut todo = ordered.clone();
         // One pass normally suffices. If a cycle left a member that reads
         // another one ahead of it, and that one recovered in this pass, the
-        // reader is refreshed again, for at most one pass per member.
-        for _ in 0..ordered.len() {
+        // reader is refreshed again, for at most one pass per member. In those
+        // later passes every member that is re-bound counts as changed (a
+        // function re-bound to a lambda capturing a recovered class), so its
+        // readers are refreshed in turn.
+        for pass in 0..ordered.len() {
             let mut position: HashMap<&str, usize> = HashMap::new();
-            let mut recovered: Vec<(String, usize)> = Vec::new();
+            let mut changed: Vec<(String, usize)> = Vec::new();
             for entry in todo.iter().copied() {
                 if !pending.is_empty() && member_reads_pending(entry, &pending) {
                     flush_module_members(scope, module_props, &mut pending);
@@ -3368,15 +3371,15 @@ impl Evaluator {
                 }
                 let index = position.len();
                 position.insert(entry_name.as_str(), index);
-                if !was_bound && scope.get(entry_name).is_some() {
-                    recovered.push((entry_name.clone(), index));
+                if (pass > 0 || !was_bound) && scope.get(entry_name).is_some() {
+                    changed.push((entry_name.clone(), index));
                 }
             }
             flush_module_members(scope, module_props, &mut pending);
-            if recovered.is_empty() {
+            if changed.is_empty() {
                 break;
             }
-            // Members that read a member which recovered after they were
+            // Members that read a member which changed after they were
             // refreshed (or that weren't refreshed in this pass) are stale.
             let stale: Vec<&Entry> = ordered
                 .iter()
@@ -3386,12 +3389,12 @@ impl Evaluator {
                         return false;
                     };
                     let at = position.get(name.as_str()).copied();
-                    let missed: Vec<(String, Option<Value>)> = recovered
+                    let missed: Vec<(String, Option<Value>)> = changed
                         .iter()
-                        .filter(|(recovered, index)| {
-                            recovered != name && at.is_none_or(|at| at < *index)
+                        .filter(|(changed, index)| {
+                            changed != name && at.is_none_or(|at| at < *index)
                         })
-                        .map(|(recovered, _)| (recovered.clone(), None))
+                        .map(|(changed, _)| (changed.clone(), None))
                         .collect();
                     !missed.is_empty() && member_reads_pending(entry, &missed)
                 })

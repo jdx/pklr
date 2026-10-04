@@ -3547,6 +3547,12 @@ fn refresh_repeats_for_members_read_before_they_recovered() {
         "local k1 = \"D\"\nlocal k2 = \"expected\"\nclass C { v = module[k1].v }\nclass D { v = module[k2] }\nexpected = \"b\"\nresult = new C {}\n",
     );
     assert_eq!(val["result"], serde_json::json!({"v": "b"}));
+    // Functions re-bound in a repeated pass are changes too: `outerMake`
+    // must see the `make` re-bound to the recovered `C`.
+    let val = eval(
+        "local k1 = \"D\"\nlocal k2 = \"expected\"\nlocal function make() = new C {}\nlocal function outerMake() = make()\nclass C { v = module[k1].v }\nclass D { v = module[k2] }\nexpected = \"b\"\nresult = outerMake().v\n",
+    );
+    assert_eq!(val["result"], "b");
 }
 
 #[test]
