@@ -1636,7 +1636,7 @@ x = Builtins.toMap().toMapping()
 #[test]
 fn top_level_bare_elements_are_invalid() {
     let err = eval_fails("BROKEN SYNTAX");
-    assert!(err.contains("Invalid property definition"), "{err}");
+    assert!(err.contains("expected identifier"), "{err}");
 }
 
 #[test]

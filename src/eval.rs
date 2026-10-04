@@ -113,6 +113,9 @@ pub struct Evaluator {
     /// Used to deduplicate `@Deprecated` warnings so a deprecated property
     /// referenced inside a loop or template doesn't flood stderr.
     warned_deprecated: std::collections::HashSet<(String, Option<String>)>,
+    /// Names declared by `module a.b.C` headers, by module identity (see
+    /// `module_type_namespace`), for error messages.
+    module_names: HashMap<String, String>,
 }
 
 #[derive(Clone, Default)]
@@ -409,6 +412,7 @@ impl Evaluator {
             http_rewrites: Vec::new(),
             converters: Vec::new(),
             warned_deprecated: std::collections::HashSet::default(),
+            module_names: HashMap::default(),
         }
     }
 
@@ -540,6 +544,7 @@ impl Evaluator {
         self.scoped_imports_in_flight.clear();
         self.converters.clear();
         self.prefetch = prefetch::PrefetchState::new(self.cancel.clone());
+        self.module_names.clear();
     }
 
     /// Add HTTP URL rewrite rules. Each rule is a `"source_prefix=target_prefix"` string
@@ -1369,7 +1374,9 @@ impl Evaluator {
                     "length" => Value::Int(keys.len() as i64),
                     "keys" => Value::List(ListValue::new(
                         ListKind::Set,
-                        keys.into_keys().map(Value::String).collect::<Vec<_>>(),
+                        keys.into_keys()
+                            .map(|key| crate::value::mapping_storage_value(&key))
+                            .collect::<Vec<_>>(),
                     )),
                     "isEmpty" => Value::Bool(keys.is_empty()),
                     _ => Value::Bool(!keys.is_empty()),
@@ -1549,6 +1556,10 @@ impl Evaluator {
         }
         self.check_cancelled()?;
         self.prefetch_remote_imports(module, path);
+        if let Some(name) = &module.name {
+            let identity = self.module_type_namespace(path);
+            self.module_names.insert(identity, name.clone());
+        }
         if module
             .body
             .iter()
@@ -1863,6 +1874,8 @@ impl Evaluator {
                         base_obj = (*m).clone();
                     }
                 }
+            } else if uri == "pkl:test" {
+                inherit_stdlib_module("test", &mut base_obj, &mut scope);
             } else if !uri.starts_with("pkl:")
                 && (!uri.contains("://") || uri.starts_with("file://"))
             {
@@ -1932,8 +1945,9 @@ impl Evaluator {
                     }
                 }
             }
-            // Remove function values from base output (not data)
-            base_obj.retain(|_, v| !matches!(v, Value::Lambda(..)));
+            // Functions inherited from the base stay members, so `module.f`
+            // and `this.f` reach them. They are dropped when the module is
+            // rendered (see the end of this function).
         }
 
         // Process extends: load base module, inherit all members and scope
@@ -1941,6 +1955,9 @@ impl Evaluator {
             // A relative extends inside a remote module resolves against that URL.
             let resolved_extends = resolve_remote_relative(path, extends_uri);
             let uri: &str = resolved_extends.as_deref().unwrap_or(extends_uri);
+            if uri == "pkl:test" {
+                inherit_stdlib_module("test", &mut base_obj, &mut scope);
+            }
             if !uri.contains("://") || uri.starts_with("file://") {
                 let extends_path = self.local_file_path(path, uri)?;
                 if self.path_exists_io(&extends_path)? {
@@ -2926,6 +2943,28 @@ impl Evaluator {
         // Names of members produced by generators and not since rebound by a
         // property entry.
         let mut generated: HashSet<Arc<str>> = HashSet::default();
+        // A single direct dynamic member cannot conflict with anything. Avoid
+        // the hash lookup on that common shape; tracking is needed only once a
+        // second dynamic member or a generator can produce another name.
+        let mut direct_dynamic_members = 0;
+        let mut track_dynamic_members = false;
+        for entry in entries.iter() {
+            match entry {
+                Entry::DynProperty(..) => {
+                    direct_dynamic_members += 1;
+                    track_dynamic_members |= direct_dynamic_members > 1;
+                }
+                Entry::ForGenerator(..) | Entry::WhenGenerator(..) => {
+                    track_dynamic_members = true;
+                }
+                _ => {}
+            }
+        }
+        // The output map is keyed by its rendered member name, so duplicate
+        // bookkeeping must use that same identity. Sharing the set with
+        // generators makes direct-before-generator and generator-before-direct
+        // checks symmetric.
+        let mut defined_by_layer: Option<HashSet<(usize, Arc<str>)>> = None;
         for (entry_index, entry) in entries.iter().enumerate() {
             match entry {
                 Entry::Property(prop) => {
@@ -3008,6 +3047,22 @@ impl Evaluator {
                     );
                     let key = self.eval_expr(key_expr, &active_scope, depth)?;
                     let key_str = value_to_key(&key)?;
+                    // A body may define each key once. An object body still
+                    // amends an inherited value, but it is a definition in
+                    // this body and must participate in duplicate detection.
+                    if track_dynamic_members {
+                        let defined_by_layer = defined_by_layer.get_or_insert_default();
+                        let layer = entry_layer(entry_scopes, entry_index);
+                        if !defined_by_layer.insert((layer, key_str.clone())) {
+                            let key = match &key {
+                                Value::String(s) => format!("{s:?}"),
+                                key => value_to_display(key),
+                            };
+                            return Err(Error::Eval(format!(
+                                "Duplicate definition of member `{key}`."
+                            )));
+                        }
+                    }
                     // `["key"] { ... }` amends an entry inherited from the parent
                     // (for example when amending an untyped `Mapping`) rather than
                     // replacing it.
@@ -3156,6 +3211,14 @@ impl Evaluator {
                             }),
                         )?;
                         if let Value::Object(m, _) = body_val {
+                            if track_dynamic_members {
+                                record_generated_members(
+                                    defined_by_layer.get_or_insert_default(),
+                                    entry_layer(entry_scopes, entry_index),
+                                    &m,
+                                    &fgen.body,
+                                )?;
+                            }
                             entry_owners.release_this(&this_aliases);
                             props_extend(
                                 &mut child_scope,
@@ -3191,6 +3254,14 @@ impl Evaluator {
                             }),
                         )?;
                         if let Value::Object(m, _) = body_val {
+                            if track_dynamic_members {
+                                record_generated_members(
+                                    defined_by_layer.get_or_insert_default(),
+                                    entry_layer(entry_scopes, entry_index),
+                                    &m,
+                                    &wgen.body,
+                                )?;
+                            }
                             entry_owners.release_this(&this_aliases);
                             props_extend(
                                 &mut child_scope,
@@ -3215,6 +3286,14 @@ impl Evaluator {
                             }),
                         )?;
                         if let Value::Object(m, _) = else_val {
+                            if track_dynamic_members {
+                                record_generated_members(
+                                    defined_by_layer.get_or_insert_default(),
+                                    entry_layer(entry_scopes, entry_index),
+                                    &m,
+                                    else_body,
+                                )?;
+                            }
                             entry_owners.release_this(&this_aliases);
                             props_extend(
                                 &mut child_scope,
@@ -4246,15 +4325,26 @@ impl Evaluator {
                 Entry::DynProperty(index, value) => {
                     let index = self.eval_expr(index, &listing_scope, depth + 1)?;
                     let Value::Int(index) = index else {
-                        return Err(Error::Eval(
-                            "listing index amendment requires an Int index".into(),
-                        ));
+                        return Err(Error::Eval(format!(
+                            "Expected key of type `Int`, but got type `{}`.",
+                            value_type_name(&index)
+                        )));
                     };
+                    // Only the parent's elements can be amended by index, not
+                    // ones this body adds.
+                    let parent_len = scope
+                        .receiver_list_base
+                        .map_or(items.len(), |len| len.min(items.len()));
                     let index = usize::try_from(index)
-                        .map_err(|_| Error::Eval("listing index cannot be negative".into()))?;
-                    let value = if index < items.len()
-                        && let Expr::ObjectBody(entries) = value
-                    {
+                        .ok()
+                        .filter(|index| *index < parent_len)
+                        .ok_or_else(|| {
+                            Error::Eval(format!(
+                                "Element index `{index}` is out of range `0`..`{}`.",
+                                parent_len as i64 - 1
+                            ))
+                        })?;
+                    items[index] = if let Expr::ObjectBody(entries) = value {
                         self.eval_value_amendment(
                             items[index].clone(),
                             entries,
@@ -4264,16 +4354,6 @@ impl Evaluator {
                     } else {
                         self.eval_expr(value, &listing_scope, depth + 1)?
                     };
-                    if index < items.len() {
-                        items[index] = value;
-                    } else if index == items.len() {
-                        items.push(value);
-                    } else {
-                        return Err(Error::Eval(format!(
-                            "listing index {index} is out of bounds for length {}",
-                            items.len()
-                        )));
-                    }
                 }
                 Entry::Spread(expr) => {
                     let value = self.eval_expr(expr, &listing_scope, depth + 1)?;
@@ -4685,7 +4765,7 @@ impl Evaluator {
                         return Ok(Value::List(ListValue::new(
                             ListKind::Set,
                             map.keys()
-                                .map(|k| Value::String(k.clone()))
+                                .map(|key| crate::value::mapping_storage_value(key))
                                 .collect::<Vec<_>>(),
                         )));
                     }
@@ -4709,7 +4789,15 @@ impl Evaluator {
                         let val = map.get(field.as_str()).cloned().ok_or_else(|| {
                             Error::Eval(
                                 missing_member_error(source, obj_expr, field, scope)
-                                    .unwrap_or_else(|| format!("field not found: {field}")),
+                                    .unwrap_or_else(|| {
+                                        missing_property_message(
+                                            source,
+                                            obj_expr,
+                                            field,
+                                            scope,
+                                            &self.module_names,
+                                        )
+                                    }),
                             )
                         })?;
                         self.warn_if_deprecated_access(source, field);
@@ -4830,7 +4918,7 @@ impl Evaluator {
             }
             Expr::Throw(msg_expr) => {
                 let msg = self.eval_expr(msg_expr, scope, depth + 1)?;
-                Err(Error::Eval(format!("throw: {}", value_to_display(&msg))))
+                Err(Error::Eval(value_to_display(&msg)))
             }
             Expr::Trace(expr) => {
                 let v = self.eval_expr(expr, scope, depth + 1)?;
@@ -4998,6 +5086,20 @@ impl Evaluator {
                         return Ok(regex_value(val));
                     }
                     return Err(Error::Eval("Regex() requires a pattern argument".into()));
+                }
+                TEST_CATCH | TEST_CATCH_OR_NULL => {
+                    let [fun] = args else {
+                        return Err(Error::Eval("catch() expects one argument".into()));
+                    };
+                    let fun = self.eval_expr(fun, scope, depth + 1)?;
+                    return match self.invoke_lambda(&fun, &[], depth) {
+                        Err(error) if is_evaluator_control_error(&error) => Err(error),
+                        Err(error) => Ok(Value::String(caught_error_message(error).into())),
+                        Ok(_) if name == TEST_CATCH => Err(Error::Eval(
+                            "Expected an exception, but none was thrown.".into(),
+                        )),
+                        Ok(_) => Ok(Value::Null),
+                    };
                 }
                 "Map" => {
                     // Map(k1, v1, k2, v2, ...)
@@ -5588,6 +5690,34 @@ impl Evaluator {
         value_type_names: &[String],
         inherited_default: MappingInheritedDefault,
     ) -> Result<()> {
+        self.eval_mapping_body(
+            entries,
+            scope,
+            depth,
+            map,
+            type_defaults,
+            value_type_names,
+            inherited_default,
+            &mut HashSet::default(),
+        )
+    }
+
+    /// Evaluate the entries of one mapping body into `map`. `defined_keys`
+    /// holds the keys the body has defined so far, including those its
+    /// generators produced: a body may amend its parent's entries, but may
+    /// define each key only once.
+    #[allow(clippy::too_many_arguments)]
+    fn eval_mapping_body(
+        &mut self,
+        entries: &[crate::parser::Entry],
+        scope: &Scope,
+        depth: usize,
+        map: &mut ObjectMap,
+        type_defaults: &[(String, Value)],
+        value_type_names: &[String],
+        inherited_default: MappingInheritedDefault,
+        defined_keys: &mut HashSet<Arc<str>>,
+    ) -> Result<()> {
         let mut entry_scope = scope.child();
         let mut deferred_lambdas: Vec<(String, &crate::parser::Expr)> = Vec::new();
         for entry in entries {
@@ -5649,6 +5779,19 @@ impl Evaluator {
                 Entry::DynProperty(key_expr, val_expr) => {
                     let key = self.eval_expr(key_expr, &entry_scope, depth + 1)?;
                     let key_str = value_to_key(&key)?;
+                    // Mapping storage preserves Pkl key identity: `1`, `1.0`
+                    // and `"1"` are distinct mapping keys.
+                    // Object-body entries may amend an earlier value from this
+                    // body.
+                    if !defined_keys.insert(key_str.clone()) {
+                        let key = match &key {
+                            Value::String(s) => format!("{s:?}"),
+                            key => value_to_display(key),
+                        };
+                        return Err(Error::Eval(format!(
+                            "Duplicate definition of member `{key}`."
+                        )));
+                    }
                     if let Some(Value::Object(existing_map, Some(existing_src))) = map.get(&key_str)
                         && let Expr::ObjectBody(body) = val_expr
                     {
@@ -5839,7 +5982,7 @@ impl Evaluator {
                         if let Some(kv) = &fgen.key_var {
                             iter_scope.set(kv, k);
                         }
-                        self.eval_mapping_entries_with_type_default(
+                        self.eval_mapping_body(
                             &fgen.body,
                             &iter_scope,
                             depth + 1,
@@ -5850,6 +5993,7 @@ impl Evaluator {
                                 value: explicit_default.clone(),
                                 entries: explicit_default_entries.clone(),
                             },
+                            defined_keys,
                         )?;
                     }
                 }
@@ -5862,7 +6006,7 @@ impl Evaluator {
                         generator.else_body.as_deref().map(Vec::as_slice)
                     };
                     if let Some(selected) = selected {
-                        self.eval_mapping_entries_with_type_default(
+                        self.eval_mapping_body(
                             selected,
                             &entry_scope,
                             depth + 1,
@@ -5873,6 +6017,7 @@ impl Evaluator {
                                 value: explicit_default.clone(),
                                 entries: explicit_default_entries.clone(),
                             },
+                            defined_keys,
                         )?;
                     }
                 }
@@ -6653,12 +6798,65 @@ fn check_module_annotations(module: &Module, scope: &Scope) -> Result<()> {
     Ok(())
 }
 
+/// Make standard-library module members available through both the module
+/// object and bare names in a module that amends or extends it.
+fn inherit_stdlib_module(name: &str, base_obj: &mut ObjectMap, scope: &mut Scope) {
+    if let Value::Object(members, _) = stdlib_module(name) {
+        for (member, value) in members.iter() {
+            base_obj.insert(member.clone(), value.clone());
+            scope.set(member, value.clone());
+        }
+    }
+}
+
 fn stdlib_module(name: &str) -> Value {
     let mut map = ObjectMap::default();
     if name == "base" {
         map.insert("Regex".into(), Value::String("Regex".into()));
     }
+    if name == "test" {
+        for (method, builtin) in [("catch", TEST_CATCH), ("catchOrNull", TEST_CATCH_OR_NULL)] {
+            map.insert(method.into(), builtin_function(builtin, &["fun"]));
+        }
+    }
     Value::Object(Arc::new(map), None)
+}
+
+/// `pkl:test`'s `catch(fun)`: the error `fun()` throws, as a string.
+const TEST_CATCH: &str = "\0pklr:test.catch";
+/// `pkl:test`'s `catchOrNull(fun)`: like `catch`, but null when `fun()` succeeds.
+const TEST_CATCH_OR_NULL: &str = "\0pklr:test.catchOrNull";
+
+/// A function value that passes its arguments to the evaluator's `builtin`
+/// (see `eval_call`). Builtin names can't be written in Pkl, so the call
+/// can't be shadowed.
+fn builtin_function(builtin: &str, params: &[&str]) -> Value {
+    let args = params
+        .iter()
+        .map(|param| Expr::Ident(param.to_string()))
+        .collect();
+    Value::Lambda(
+        params.iter().map(|param| param.to_string()).collect(),
+        Arc::new(Expr::Call(Box::new(Expr::Ident(builtin.into())), args)),
+        Arc::default(),
+    )
+}
+
+/// The message `catch` returns for an error: Pkl's message, without
+/// pklr's "Eval error: " prefix.
+fn is_evaluator_control_error(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Eval(message)
+            if message == "evaluation cancelled" || message == "maximum recursion depth exceeded"
+    )
+}
+
+fn caught_error_message(error: Error) -> String {
+    match error {
+        Error::Eval(message) => message,
+        error => error.to_string(),
+    }
 }
 
 fn seed_builtins(scope: &mut Scope) {

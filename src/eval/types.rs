@@ -483,7 +483,93 @@ pub(super) fn module_is_abstract(module: &Module) -> bool {
 }
 
 pub(super) fn is_unresolved_template_error(message: &str) -> bool {
-    message.contains("undefined variable") || message.contains("field not found")
+    message.contains("undefined variable")
+        || message.contains("field not found")
+        || message.starts_with("Cannot find property")
+}
+
+/// Pkl's error for reading `name` from an object that has no such member:
+/// the object `obj_expr` evaluated to, described by `source`.
+/// `module_names` maps module identities to the names the modules declare.
+pub(super) fn missing_property_message(
+    source: &Option<Arc<ObjectSource>>,
+    obj_expr: &Expr,
+    name: &str,
+    scope: &Scope,
+    module_names: &HashMap<String, String>,
+) -> String {
+    if let Expr::Ident(root) = obj_expr
+        && let Some(identity) = scope.module_identity(root)
+    {
+        return format!(
+            "Cannot find property `{name}` in module `{}`.",
+            module_name_of(identity, module_names)
+        );
+    }
+    let type_name = match source.as_deref() {
+        Some(ObjectSource {
+            type_name: Some(class),
+            type_identity,
+            ..
+        }) => match type_identity
+            .as_deref()
+            .and_then(|identity| identity.strip_suffix(class.as_str())?.strip_suffix('.'))
+        {
+            Some(module) => format!("{}#{class}", module_name_of(module, module_names)),
+            None => class.clone(),
+        },
+        _ => "Dynamic".to_string(),
+    };
+    format!("Cannot find property `{name}` in object of type `{type_name}`.")
+}
+
+/// The name of the module with identity `uri`: the one it declares, or else
+/// its file name without the extension.
+fn module_name_of<'a>(uri: &'a str, module_names: &'a HashMap<String, String>) -> &'a str {
+    if let Some(name) = module_names.get(uri) {
+        return name;
+    }
+    let file = uri.rsplit(['/', '\\']).next().unwrap_or(uri);
+    file.strip_suffix(".pkl").unwrap_or(file)
+}
+
+/// Which body the entry at `index` of a (possibly merged) object body was
+/// written in: entries of one amendment share their captured scope.
+pub(super) fn entry_layer(
+    entry_scopes: Option<&[Option<Arc<CapturedScope>>]>,
+    index: usize,
+) -> usize {
+    entry_scopes
+        .and_then(|scopes| scopes.get(index)?.as_ref())
+        .map_or(0, |scope| Arc::as_ptr(scope) as usize)
+}
+
+/// Record the members a generator produced in body `layer`. A body may
+/// define each member only once, so a member its generators already
+/// produced is an error. `body` is the generator's body, which tells
+/// properties from entries for the message.
+pub(super) fn record_generated_members(
+    seen: &mut HashSet<(usize, Arc<str>)>,
+    layer: usize,
+    members: &ObjectMap,
+    body: &[Entry],
+) -> Result<()> {
+    for name in members.keys() {
+        if !seen.insert((layer, name.clone())) {
+            let is_property = body
+                .iter()
+                .any(|entry| matches!(entry, Entry::Property(prop) if *prop.name == **name));
+            let name = if is_property {
+                name.to_string()
+            } else {
+                format!("{:?}", crate::value::display_storage_key(name))
+            };
+            return Err(Error::Eval(format!(
+                "Duplicate definition of member `{name}`."
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn require_str_arg<'a>(args: &'a [Value], idx: usize, method: &str) -> Result<&'a str> {
@@ -514,11 +600,12 @@ pub(super) fn value_type_name(v: &Value) -> &'static str {
 }
 
 pub(super) fn value_to_key(v: &Value) -> Result<Arc<str>> {
+    if let Some(key) = crate::value::mapping_storage_key(v) {
+        return Ok(key);
+    }
     match v {
         Value::String(s) => Ok(Arc::clone(s)),
-        Value::Int(n) => Ok(n.to_string().into()),
-        Value::Bool(b) => Ok(b.to_string().into()),
-        Value::Float(f) => Ok(f.to_string().into()),
+        Value::Int(_) | Value::Bool(_) | Value::Float(_) => unreachable!(),
         Value::Object(_, _) | Value::List(_) | Value::Lambda(..) | Value::Null => {
             Ok(value_to_display(v).into())
         }

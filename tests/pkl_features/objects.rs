@@ -52,6 +52,266 @@ fn throw_produces_error() {
     assert!(msg.contains("boom"));
 }
 
+#[test]
+fn invalid_module_body_reports_a_parse_error() {
+    let msg = eval_fails("this is not valid pkl");
+    assert!(msg.contains("expected identifier"), "{msg}");
+    assert!(!msg.contains("Invalid property definition"), "{msg}");
+}
+
+// ============================================================
+// pkl:test
+// ============================================================
+
+#[test]
+fn test_catch_returns_error_message() {
+    let json = eval(
+        r#"
+import "pkl:test"
+class Bird { name = "Pigeon" }
+local bird = new Bird {}
+thrown = test.catch(() -> throw("boom"))
+dynamic = test.catch(() -> new Dynamic { x = 1 }.y)
+typed = test.catch(() -> bird.age)
+caught = test.catchOrNull(() -> throw("boom"))
+notThrown = test.catchOrNull(() -> 1) == null
+"#,
+    );
+    assert_eq!(json["thrown"], "boom");
+    assert_eq!(
+        json["dynamic"],
+        "Cannot find property `y` in object of type `Dynamic`."
+    );
+    assert_eq!(
+        json["typed"],
+        "Cannot find property `age` in object of type `test#Bird`."
+    );
+    assert_eq!(json["caught"], "boom");
+    assert_eq!(json["notThrown"], true);
+}
+
+#[test]
+fn test_catch_fails_without_an_error() {
+    let msg = eval_fails(
+        r#"
+import "pkl:test"
+x = test.catch(() -> 1)
+"#,
+    );
+    assert!(msg.contains("Expected an exception, but none was thrown."));
+}
+
+#[test]
+fn modules_extending_pkl_test_inherit_catch() {
+    let json = eval(
+        r#"
+extends "pkl:test"
+x = module.catch(() -> throw("boom"))
+"#,
+    );
+    assert_eq!(json, serde_json::json!({ "x": "boom" }));
+}
+
+#[test]
+fn modules_amending_pkl_test_inherit_catch() {
+    let json = eval(
+        r#"
+amends "pkl:test"
+local x = module.catch(() -> throw("boom"))
+local y = catch(() -> throw("bare"))
+examples { [x] = new Listing {}; [y] = new Listing {} }
+"#,
+    );
+    assert_eq!(
+        json,
+        serde_json::json!({ "examples": { "boom": [], "bare": [] } })
+    );
+}
+
+#[test]
+fn modules_amending_a_pkl_test_module_inherit_catch() {
+    let temp = TestTempDir::new("pklr_test_amend_pkl_test_base");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("base.pkl"),
+        "open module base\nextends \"pkl:test\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+amends "base.pkl"
+local x = module.catch(() -> throw("boom"))
+local y = catch(() -> throw("bare"))
+examples { [x] = new Listing {}; [y] = new Listing {} }
+"#,
+    )
+    .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
+    assert_eq!(
+        val,
+        serde_json::json!({ "examples": { "boom": [], "bare": [] } })
+    );
+}
+
+#[test]
+fn generated_mapping_keys_cannot_repeat_in_one_body() {
+    let json = eval(
+        r#"
+import "pkl:test"
+local m = new Mapping { ["a"] = 0 }
+forLoop = test.catch(() -> new Mapping { for (i in List(1, 2)) { ["a"] = i } })
+direct = test.catch(() -> new Mapping { ["a"] = 1; when (true) { ["a"] = 2 } })
+generatorAfterDirect = test.catch(() -> new Dynamic { ["a"] = 1; for (i in List(1)) { ["a"] = i } })
+twoLoops = test.catch(() -> new Mapping { for (i in List(1)) { ["a"] = i } for (i in List(1)) { ["a"] = i } })
+amendedTwice = test.catch(() -> (m) { for (i in List(1, 2)) { ["a"] = i } })
+amendsParent = (m) { for (i in List(1)) { ["a"] = i } }
+nextLayer = new Mapping { ["a"] = 1 } { ["a"] = 2 }
+differentTypes = test.catchOrNull(() -> new Mapping<Any, Int> { [1] = 10; ["1"] = 20 })
+local differentTypeKeys = new Mapping<Any, Int> { [1] = 10; ["1"] = 20 }
+numberKey = differentTypeKeys[1]
+stringKey = differentTypeKeys["1"]
+differentTypeKeyCount = differentTypeKeys.length
+typedKeys = differentTypeKeys.keys
+"#,
+    );
+    let duplicate = "Duplicate definition of member `\"a\"`.";
+    for key in [
+        "forLoop",
+        "direct",
+        "generatorAfterDirect",
+        "twoLoops",
+        "amendedTwice",
+    ] {
+        assert_eq!(json[key], duplicate, "{key}");
+    }
+    assert_eq!(json["amendsParent"]["a"], 1);
+    assert_eq!(json["nextLayer"]["a"], 2);
+    assert!(json["differentTypes"].is_null());
+    assert_eq!(json["numberKey"], 10);
+    assert_eq!(json["stringKey"], 20);
+    assert_eq!(json["differentTypeKeyCount"], 2);
+    assert_eq!(json["typedKeys"], serde_json::json!([1, "1"]));
+}
+
+#[test]
+fn amended_mapping_cannot_define_a_key_twice() {
+    let json = eval(
+        r#"
+import "pkl:test"
+local m = new Mapping { ["z"] = 0 }
+direct = test.catch(() -> (m) { ["k"] = 1; ["" + "k"] = 2 }.length)
+intAndFloat = test.catchOrNull(() -> new Mapping<Any, Int> { [1] = 10; [1.0] = 20 })
+"#,
+    );
+    assert_eq!(json["direct"], "Duplicate definition of member `\"k\"`.");
+    assert!(json["intAndFloat"].is_null());
+}
+
+#[test]
+fn amended_mapping_cannot_amend_a_key_twice_in_one_body() {
+    let msg = eval_fails(
+        r#"
+local m = new Mapping { ["nested"] = new Dynamic {} }
+x = (m) { ["nested"] { a = 1 }; ["nested"] { b = 2 } }
+"#,
+    );
+    assert!(
+        msg.contains("Duplicate definition of member `\"nested\"`."),
+        "{msg}"
+    );
+}
+
+#[test]
+fn declared_module_names_do_not_outlive_an_evaluation() {
+    let temp = TestTempDir::new("pklr_test_module_names_reset");
+    let dir = temp.path();
+    let settings = dir.join("settings.pkl");
+    let main = dir.join("main.pkl");
+    std::fs::write(&main, "import \"settings.pkl\"\nx = settings.nope\n").unwrap();
+    let mut ev = Evaluator::new();
+    std::fs::write(&settings, "module company.Settings\na = 1\n").unwrap();
+    let first = ev.eval_file(&main).unwrap_err().to_string();
+    assert!(first.contains("in module `company.Settings`"), "{first}");
+    std::fs::write(&settings, "a = 1\n").unwrap();
+    let second = ev.eval_file(&main).unwrap_err().to_string();
+    assert!(second.contains("in module `settings`"), "{second}");
+}
+
+#[test]
+fn missing_property_messages_use_declared_module_names() {
+    let temp = TestTempDir::new("pklr_test_declared_module_name");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("settings.pkl"),
+        "module company.Settings\nclass Bird { name = \"x\" }\nbird = new Bird {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "pkl:test"
+import "settings.pkl"
+typed = test.catch(() -> settings.bird.age)
+"#,
+    )
+    .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
+    assert_eq!(
+        val["typed"],
+        "Cannot find property `age` in object of type `company.Settings#Bird`."
+    );
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"settings.pkl\"\nx = settings.nope\n",
+    )
+    .unwrap();
+    let err = pklr::eval_to_json(&dir.join("main.pkl"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("Cannot find property `nope` in module `company.Settings`."));
+}
+
+#[test]
+fn listing_index_amendments_must_name_a_parent_element() {
+    let json = eval(
+        r#"
+import "pkl:test"
+local x = new Listing { "one" }
+amended = (x) { [0] = "uno" }
+past = test.catch(() -> (x) { [1] = "two" })
+added = test.catch(() -> (x) { "two"; [1] = "dos" })
+negative = test.catch(() -> (x) { [-1] = "two" })
+wrongType = test.catch(() -> (x) { ["0"] = "two" })
+"#,
+    );
+    assert_eq!(json["amended"], serde_json::json!(["uno"]));
+    assert_eq!(json["past"], "Element index `1` is out of range `0`..`0`.");
+    assert_eq!(json["added"], "Element index `1` is out of range `0`..`0`.");
+    assert_eq!(
+        json["negative"],
+        "Element index `-1` is out of range `0`..`0`."
+    );
+    assert_eq!(
+        json["wrongType"],
+        "Expected key of type `Int`, but got type `String`."
+    );
+}
+
+#[test]
+fn mapping_body_cannot_define_a_key_twice() {
+    let json = eval(
+        r#"
+import "pkl:test"
+local m = new Mapping { ["a"] = 1 }
+amended = (m) { ["a"] = 2 }
+duplicate = test.catch(() -> new Mapping { ["a"] = 1; ["" + "a"] = 2 })
+"#,
+    );
+    assert_eq!(json["amended"]["a"], 2);
+    assert_eq!(json["duplicate"], "Duplicate definition of member `\"a\"`.");
+}
+
 // ============================================================
 // Null-safe access (future)
 // ============================================================
