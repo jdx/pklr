@@ -63,6 +63,10 @@ pub struct Evaluator {
     /// `referenced_roots` of object bodies amended in this run, keyed by the
     /// body's address. Each entry holds its body so the address stays unique.
     body_roots_cache: HashMap<usize, (crate::parser::Body, Arc<HashSet<String>>)>,
+    /// `module_evaluation_plan` of module bodies evaluated in this run, keyed
+    /// like `body_roots_cache`. A module evaluated for different requested
+    /// fields is planned once.
+    plan_cache: HashMap<usize, (crate::parser::Body, Arc<EvaluationPlan>)>,
     /// Final scopes for modules evaluated in this run, used to preserve inherited locals.
     module_scopes: HashMap<PathBuf, ModuleScopeSnapshot>,
     /// Whether a module evaluated in this run has a failed property that
@@ -371,6 +375,7 @@ impl Default for Evaluator {
             narrowed_import_cache: HashMap::default(),
             parse_cache: HashMap::default(),
             body_roots_cache: HashMap::default(),
+            plan_cache: HashMap::default(),
             module_scopes: HashMap::default(),
             rendered_member_failed: false,
             env_reads: BTreeMap::new(),
@@ -630,6 +635,7 @@ impl Evaluator {
             narrowed_import_cache: HashMap::default(),
             parse_cache: HashMap::default(),
             body_roots_cache: HashMap::default(),
+            plan_cache: HashMap::default(),
             module_scopes: HashMap::default(),
             rendered_member_failed: false,
             env_reads: BTreeMap::new(),
@@ -709,6 +715,7 @@ impl Evaluator {
         self.narrowed_import_cache.clear();
         self.parse_cache.clear();
         self.body_roots_cache.clear();
+        self.plan_cache.clear();
         clear_names();
         self.module_scopes.clear();
         self.rendered_member_failed = false;
@@ -2260,7 +2267,18 @@ impl Evaluator {
         let mut evaluated: HashMap<&str, Value> = HashMap::default();
         let mut failed: HashMap<&str, String> = HashMap::default();
         let mut failed_indices: HashSet<usize> = HashSet::default();
-        let plan = module_evaluation_plan(&module.body);
+        let plan = Arc::clone(
+            &self
+                .plan_cache
+                .entry(Arc::as_ptr(&module.body) as usize)
+                .or_insert_with(|| {
+                    (
+                        Arc::clone(&module.body),
+                        Arc::new(module_evaluation_plan(&module.body)),
+                    )
+                })
+                .1,
+        );
         let mut todo = plan.order.clone();
         // A member can fail because it read another before that one could be
         // evaluated: through a dynamic `module[key]`, which the order can't
