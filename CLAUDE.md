@@ -18,9 +18,10 @@ cargo clippy --all-targets -- -D warnings      # Lint (warnings are errors)
 cargo fmt --check                              # Check formatting
 cargo fmt                                      # Auto-format
 scripts/conformance.py -v                      # Compare with the pkl CLI on Apple's snippet tests
+mise run perf                                  # Instruction-counted benchmarks (tak.toml; needs valgrind for counts)
 ```
 
-CI runs tests, clippy, and fmt check on all PRs.
+CI runs tests, clippy, and fmt check on all PRs. `perf-pr` compares the PR's instruction counts with its merge base on main (recorded by `perf`) and fails on a rise beyond `tak.toml`'s gate.
 
 ## Architecture
 

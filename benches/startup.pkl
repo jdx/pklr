@@ -1,0 +1,3 @@
+// The control for tak.toml's `startup` benchmark: as little evaluation as
+// possible, so it measures the fixed cost every evaluation pays.
+name = "pklr"

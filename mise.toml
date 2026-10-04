@@ -3,3 +3,22 @@ communique = { version = "latest", minimum_release_age = "0s" }
 cargo-binstall = "latest"
 cargo-msrv = "latest"
 pkl = "0.32.1"
+# Measures tak.toml's benchmarks. Bump deliberately, in a commit that changes
+# nothing else: a new tak can move the series without pklr changing.
+tak = "0.0.14"
+
+# Instruction-counted benchmarks (see tak.toml). Without valgrind tak reports
+# wall clock only and says so.
+[tasks.perf]
+run = [
+  "cargo build --release --example eval_json",
+  "tak run",
+]
+
+# Same measurement, appended to refs/notes/tak for this commit. Nothing leaves
+# the machine until `tak push`.
+[tasks."perf:record"]
+run = [
+  "cargo build --release --example eval_json",
+  "tak run --record",
+]

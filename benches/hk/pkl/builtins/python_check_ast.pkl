@@ -1,0 +1,31 @@
+import "../Builtins.pkl"
+import "../Config.pkl"
+import "./test/helpers.pkl"
+
+@Builtins.meta {
+  category = "Python"
+  description = "Validate Python syntax by parsing the AST"
+}
+python_check_ast = new Config.Step {
+  glob = "**/*.py"
+  check = "hk util python-check-ast {{files}}"
+  tests {
+    local const testMaker = new helpers.TestMaker { filename = "test.py" }
+    ["check bad file"] =
+      testMaker.checkFail(
+        """
+        def hello(:
+            print("Invalid"
+        """,
+        1,
+      )
+    ["check good file"] =
+      testMaker.checkPass(
+        """
+        def hello():
+            print("Hello, world!")
+        """,
+      )
+    ["check empty file"] = testMaker.checkPass("")
+  }
+}

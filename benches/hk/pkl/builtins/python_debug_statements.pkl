@@ -1,0 +1,46 @@
+import "../Builtins.pkl"
+import "../Config.pkl"
+import "./test/helpers.pkl"
+
+@Builtins.meta {
+  category = "Python"
+  description = "Detect debug statements in Python code"
+}
+python_debug_statements = new Config.Step {
+  glob = "**/*.py"
+  check = "hk util python-debug-statements {{files}}"
+  tests {
+    local const testMaker = new helpers.TestMaker { filename = "test.py" }
+    ["check pdb"] =
+      testMaker.checkFail(
+        """
+        import pdb
+        pdb.set_trace()
+        """,
+        1,
+      )
+    ["check breakpoint"] =
+      testMaker.checkFail(
+        """
+        def debug():
+            breakpoint()
+        """,
+        1,
+      )
+    ["check clean code"] =
+      testMaker.checkPass(
+        """
+        def hello():
+            print("Hello, world!")
+        """,
+      )
+    ["check commented debug"] =
+      testMaker.checkPass(
+        """
+        def hello():
+            # import pdb; pdb.set_trace()
+            print("Hello")
+        """,
+      )
+  }
+}

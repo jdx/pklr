@@ -1,0 +1,12 @@
+import "../Builtins.pkl"
+import "../Config.pkl"
+
+@Builtins.meta {
+  category = "PHP"
+  description = "PHP coding standards"
+}
+php_cs = new Config.Step {
+  glob = "**/*.php"
+  check = "phpcs {{ files }}"
+  fix = "phpcbf {{ files }}"
+}

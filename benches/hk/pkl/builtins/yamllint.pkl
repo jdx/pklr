@@ -1,0 +1,19 @@
+import "../Builtins.pkl"
+import "../Config.pkl"
+import "./test/helpers.pkl"
+
+@Builtins.meta {
+  category = "Data Formats"
+  description = "YAML linter"
+}
+yamllint = new Config.Step {
+  glob = List("**/*.yml", "**/*.yaml")
+  check = "yamllint --strict {{ files }}"
+  tests {
+    local const testMaker = new helpers.TestMaker { filename = "test.yaml" }
+    ["check good file"] = testMaker.checkPass("---\nx: 1\n")
+    ["check warning file"] = testMaker.checkFail("x: 1\n", 2)
+    ["check error file"] = testMaker.checkFail("---\nx: 1\nx: 2\n", 1)
+    ["check warning+error file"] = testMaker.checkFail("x: 1\nx: 2\n", 1)
+  }
+}

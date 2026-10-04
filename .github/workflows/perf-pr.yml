@@ -1,0 +1,62 @@
+name: perf-pr
+
+# Measures a pull request and compares it with the commit it branched from.
+# Fails when an instruction count rises beyond tak.toml's gate. Nothing here
+# writes to refs/notes/tak; perf-pr-report.yml posts the result.
+
+on:
+  pull_request:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # Read only. This job builds and runs the pull request's code.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The branch commit, not the synthetic merge commit.
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      # Reads only git objects from the base branch, never the pull request's
+      # files. A base without tak.toml has never been measured, so the pull
+      # request that adds tak there has nothing to compare against.
+      - id: base
+        name: Check the base adopts tak
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if ! [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::unexpected base sha: $BASE_SHA"
+            exit 1
+          fi
+          base=$(git rev-parse --verify --end-of-options "$BASE_SHA^{commit}")
+          merge_base=$(git merge-base "$base" HEAD)
+          if git cat-file -e "$merge_base:tak.toml" 2>/dev/null; then
+            echo "fail-on-nothing-compared=auto" >> "$GITHUB_OUTPUT"
+          else
+            echo "fail-on-nothing-compared=false" >> "$GITHUB_OUTPUT"
+          fi
+      # `run` executes after the action has removed every credential. Keep the
+      # runner class in step with perf.yml.
+      - uses: jdx/tak-action@9096b7637c553324121c8f2b14c2db2af7fc1e55 # v0.1.1
+        with:
+          mode: compare
+          version: 0.0.14 # keep in step with mise.toml
+          fail-on-nothing-compared: ${{ steps.base.outputs.fail-on-nothing-compared }}
+          run: |
+            export TAK_RUNNER="gha-${ImageOS}-${ImageVersion}-x64-rust$(rustc -V | cut -d' ' -f2)"
+            cargo build --release --example eval_json
+            tak run --record

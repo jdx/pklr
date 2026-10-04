@@ -1,0 +1,26 @@
+# Instruction-counted benchmarks, measured by tak (https://github.com/jdx/tak).
+#
+# Both run the `eval_json` example from a release build against committed
+# fixtures. Neither touches the network or the clock: each was run with the
+# proxy pointed at a dead port and produced byte-identical output.
+#
+# `startup` is the control. It evaluates a one-property module, so it measures
+# the fixed cost of any evaluation: process start, the stdlib, JSON output.
+# `hk` is that cost plus real work: hk's config, which amends its Config.pkl and
+# reads most of its ~120 builtins (benches/hk). When both move together the
+# change is in fixed cost; when only `hk` moves it is in evaluation.
+[bench.startup]
+cmd = ["./target/release/examples/eval_json", "benches/startup.pkl"]
+
+[bench.hk]
+cmd = ["./target/release/examples/eval_json", "benches/hk/hk.pkl"]
+
+[gate]
+pct = 1.0
+# The perf workflows record under a runner class that embeds the GitHub image
+# and Rust versions (TAK_RUNNER), because either can move instruction counts
+# without pklr changing. Each update starts a new series, and until main is
+# measured on it pull requests compare nothing. That warns instead of failing.
+# `tak compare` reads this from the base revision, so it applies to pull
+# requests once it is on main.
+allow_empty = true

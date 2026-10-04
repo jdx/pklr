@@ -1,0 +1,49 @@
+name: perf
+
+# Records tak.toml's benchmarks for every commit that lands on main, into the
+# git-notes ref `refs/notes/tak`. perf-pr.yml compares pull requests against
+# these measurements.
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions: {}
+
+# One writer at a time, and never cancel: a cancelled run is a hole in the
+# history.
+concurrency:
+  group: perf
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  record:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write # push refs/notes/tak
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # No rust-cache: a target/ restored from another image could label a
+      # binary built elsewhere with this runner class.
+      #
+      # The runner class embeds the runner image and Rust versions, because
+      # either can move instruction counts without pklr changing. Keep it in
+      # step with perf-pr.yml.
+      - uses: jdx/tak-action@9096b7637c553324121c8f2b14c2db2af7fc1e55 # v0.1.1
+        with:
+          mode: record
+          version: 0.0.14 # keep in step with mise.toml
+          run: |
+            export TAK_RUNNER="gha-${ImageOS}-${ImageVersion}-x64-rust$(rustc -V | cut -d' ' -f2)"
+            cargo build --release --example eval_json
+            tak run --record
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # A manual dispatch from another branch measures without pushing.
+          push: ${{ github.ref == 'refs/heads/main' }}

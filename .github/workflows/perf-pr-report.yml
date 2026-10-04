@@ -1,0 +1,31 @@
+name: perf-pr-report
+
+# Posts perf-pr's report as a sticky comment and a check run. Runs from the
+# default branch with a write token and executes nothing from the pull request.
+
+on: # zizmor: ignore[dangerous-triggers] checks out and runs nothing from the pull request
+  workflow_run:
+    workflows: [perf-pr]
+    types: [completed]
+
+permissions: {}
+
+# Reports for one branch post in the order their runs finished.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+jobs:
+  report:
+    # A cancelled run was superseded by a newer push, whose run reports.
+    if: github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion != 'cancelled'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read # download the report artifact from the perf-pr run
+      checks: write # a check run on the pull request's head commit
+      pull-requests: write # the sticky comment
+    steps:
+      - uses: jdx/tak-action@9096b7637c553324121c8f2b14c2db2af7fc1e55 # v0.1.1
+        with:
+          mode: comment

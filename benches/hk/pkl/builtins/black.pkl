@@ -1,0 +1,25 @@
+import "../Builtins.pkl"
+import "../Config.pkl"
+import "./test/helpers.pkl"
+
+@Builtins.meta {
+  category = "Python"
+  description = "Opinionated Python formatter"
+  project_indicators {
+    new { file = "pyproject.toml"; contains = "black" }
+  }
+}
+black = new Config.Step {
+  glob = List("**/*.py")
+  check_diff = "black --check --diff {{ files }}"
+  fix = "black {{ files }}"
+  tests {
+    local const testMaker = new helpers.TestMaker { filename = "test.py" }
+    local const before = "x=1"
+    local const after = "x = 1\n"
+    ["check bad file"] = testMaker.checkFail(before, 1)
+    ["check good file"] = testMaker.checkPass(after)
+    ["fix bad file"] = testMaker.fixPass(before, after)
+    ["fix good file"] = testMaker.fixPass(after, after)
+  }
+}
