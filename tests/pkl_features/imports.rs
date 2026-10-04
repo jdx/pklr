@@ -2636,3 +2636,67 @@ async fn narrowed_import_resolves_aliases_in_followed_class_bodies() {
         .unwrap();
     assert_eq!(val["out"], "b");
 }
+
+#[tokio::test]
+async fn narrowed_import_keeps_type_and_property_names_apart() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_type_property_names");
+    let dir = temp.path();
+    // Types and properties have separate namespaces: checking against the
+    // alias `Foo` doesn't read the unused property `Foo`.
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "typealias Foo = Int\nFoo = throw(\"unused\")\nresult {\n  ok = 1 is Foo\n}\n",
+    )
+    .unwrap();
+    // Reading `Foo` as a value reads the property.
+    std::fs::write(
+        dir.join("dep_value.pkl"),
+        "typealias Foo = Int\nFoo = 5\nresult {\n  ok = Foo\n}\n",
+    )
+    .unwrap();
+    // The alias is still followed, so what its constraint reads is kept, and
+    // annotations and `new` name the type too.
+    std::fs::write(
+        dir.join("dep_followed.pkl"),
+        "min = 1\ntypealias Foo = Int(this >= min)\nFoo = throw(\"unused\")\nclass Bar {\n  a: Int = 1\n}\nBar = throw(\"unused\")\nresult {\n  ok = 1 is Foo\n  typed: Foo = 2\n  bar = new Bar {}\n}\n",
+    )
+    .unwrap();
+    // A body that follows definitions itself (it redeclares a type) drops the
+    // type reference too.
+    std::fs::write(
+        dir.join("dep_narrowed.pkl"),
+        "min = 1\ntypealias Foo = Int(this >= min)\nFoo = throw(\"unused\")\nresult {\n  typealias String = Int\n  ok = 1 is Foo\n}\n",
+    )
+    .unwrap();
+    // Bindings shadow only their own namespace: a type declared in a body
+    // doesn't hide the module property it reads, and a local doesn't hide
+    // the module alias it checks against.
+    std::fs::write(
+        dir.join("dep_type_shadow.pkl"),
+        "Foo = 5\nresult {\n  typealias Foo = Int\n  ok = Foo\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep_local_shadow.pkl"),
+        "min = 1\ntypealias Foo = Int(this >= min)\nresult {\n  local Foo = 1\n  ok = 1 is Foo\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as Dep\nimport \"dep_value.pkl\" as DepValue\nimport \"dep_followed.pkl\" as DepFollowed\nimport \"dep_narrowed.pkl\" as DepNarrowed\nimport \"dep_type_shadow.pkl\" as DepTypeShadow\nimport \"dep_local_shadow.pkl\" as DepLocalShadow\nout = Dep.result.ok\noutValue = DepValue.result.ok\noutFollowed = DepFollowed.result\noutNarrowed = DepNarrowed.result.ok\noutTypeShadow = DepTypeShadow.result.ok\noutLocalShadow = DepLocalShadow.result.ok\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["out"], true);
+    assert_eq!(val["outValue"], 5);
+    assert_eq!(
+        val["outFollowed"],
+        serde_json::json!({ "ok": true, "typed": 2, "bar": { "a": 1 } })
+    );
+    assert_eq!(val["outNarrowed"], true);
+    assert_eq!(val["outTypeShadow"], 5);
+    assert_eq!(val["outLocalShadow"], true);
+}
