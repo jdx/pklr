@@ -197,10 +197,10 @@ fn declared_module_names_do_not_outlive_an_evaluation() {
     std::fs::write(&main, "import \"settings.pkl\"\nx = settings.nope\n").unwrap();
     let mut ev = Evaluator::new();
     std::fs::write(&settings, "module company.Settings\na = 1\n").unwrap();
-    let first = ev.eval_file_blocking(&main).unwrap_err().to_string();
+    let first = ev.eval_file(&main).unwrap_err().to_string();
     assert!(first.contains("in module `company.Settings`"), "{first}");
     std::fs::write(&settings, "a = 1\n").unwrap();
-    let second = ev.eval_file_blocking(&main).unwrap_err().to_string();
+    let second = ev.eval_file(&main).unwrap_err().to_string();
     assert!(second.contains("in module `settings`"), "{second}");
 }
 
