@@ -5374,3 +5374,64 @@ fn captured_scope_keeps_classes_from_before_a_later_body_class() {
     );
     assert!(err.contains("property 'c' expected C"), "{err}");
 }
+
+#[test]
+fn later_body_class_named_like_a_builtin_does_not_rebind_earlier_entries() {
+    // Before the body's `class Int`, `Int` is the built-in type.
+    let json = eval("obj { x: Int = 1; class Int { v = 1 } }");
+    assert_eq!(json["obj"]["x"], 1);
+    let err = eval_fails("obj { x: Int = \"s\"; class Int { v = 1 } }");
+    assert!(err.contains("property 'x' expected Int"), "{err}");
+    // After it, `Int` is the class.
+    let json = eval("obj { class Int { v = 1 }; x: Int = new Int {} }");
+    assert_eq!(json["obj"]["x"]["v"], 1);
+    let err = eval_fails("obj { class Int { v = 1 }; x: Int = 1 }");
+    assert!(err.contains("property 'x' expected Int"), "{err}");
+}
+
+#[test]
+fn module_function_in_a_constraint_is_late_bound() {
+    // `helper` reads `limit`, bound after the checked entries; the check
+    // calls the function as bound in the finished module.
+    let err =
+        eval_fails("function helper(x) = x < limit\nchecked: Int(helper(this)) = 3\nlimit = 2\n");
+    assert!(err.contains("property 'checked'"), "{err}");
+    let json = eval("function helper(x) = x < limit\nchecked: Int(helper(this)) = 1\nlimit = 2\n");
+    assert_eq!(json["checked"], 1);
+    let err = eval_fails(
+        "function helper(x) = x < limit\nlocal checked: Int(helper(this)) = 3\nlimit = 2\nres = checked\n",
+    );
+    assert!(err.contains("property 'checked'"), "{err}");
+    let json = eval(
+        "function helper(x) = x < limit\nlocal checked: Int(helper(this)) = 1\nlimit = 2\nres = checked\n",
+    );
+    assert_eq!(json["res"], 1);
+}
+
+#[test]
+fn class_generator_default_amended_by_an_instance_is_built_unchecked() {
+    let json = eval("class C { when (true) { o { v: Int = \"x\" } } }\nc = new C { o { v = 1 } }");
+    assert_eq!(json["c"]["o"]["v"], 1);
+    let json =
+        eval("class C { for (k in List(1)) { o { v: Int = \"x\" } } }\nc = new C { o { v = 1 } }");
+    assert_eq!(json["c"]["o"]["v"], 1);
+    let json = eval(
+        "class C { when (false) { o { v: Int = 1 } } else { o { v: Int = \"x\" } } }\nc = new C { o { v = 2 } }",
+    );
+    assert_eq!(json["c"]["o"]["v"], 2);
+    // Without an amendment of `o`, the default is checked.
+    let err = eval_fails("class C { when (true) { o { v: Int = \"x\" } } }\nc = new C {}");
+    assert!(err.contains("property 'v' expected Int"), "{err}");
+    let err = eval_fails("class C { when (true) { v: Int = \"x\" } }\nc = new C {}");
+    assert!(err.contains("property 'v' expected Int"), "{err}");
+    // The amendment's own declared types are checked.
+    let err = eval_fails(
+        "class C { when (true) { o { v: Int = \"x\" } } }\nc = new C { o { v: Int = \"y\" } }",
+    );
+    assert!(err.contains("property 'v' expected Int"), "{err}");
+    // pklr currently replaces a generator-produced member amended this way
+    // rather than merging it (Pkl merges), so the generator's `v` is not in
+    // the result and is not checked; this pins that until it is fixed.
+    let json = eval("class C { when (true) { o { v: Int = \"x\" } } }\nc = new C { o { w = 1 } }");
+    assert_eq!(json["c"]["o"], serde_json::json!({"w": 1}));
+}

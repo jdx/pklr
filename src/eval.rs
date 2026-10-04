@@ -522,22 +522,14 @@ pub(super) struct ShadowedName {
     alias: Option<crate::parser::TypeExpr>,
 }
 
-/// Record that the declaration at `index` rebinds `name` (as a type alias
-/// when `alias`), if the name already resolves in `scope`, the scope the
-/// declaration is evaluated in.
-fn record_shadowed(
-    shadowed: &mut Vec<ShadowedName>,
-    index: usize,
-    name: &str,
-    alias: bool,
-    scope: &Scope,
-) {
+/// Record that the declaration at `index` rebinds `name`, if the name
+/// already resolves in `scope`, the scope the declaration is evaluated in.
+fn record_shadowed(shadowed: &mut Vec<ShadowedName>, index: usize, name: &str, scope: &Scope) {
     let value = scope.get(name).cloned();
     let old_alias = scope.get_type_alias(name).cloned();
-    // A later class leaves a built-in type name alone unless it was bound;
-    // a later alias of a built-in name shadows the built-in.
-    let builtin = alias && is_builtin_type_name(name);
-    if value.is_some() || old_alias.is_some() || builtin {
+    // A built-in type name resolves too: a later alias or class of that name
+    // (`class Int {}`) shadows the built-in only after it.
+    if value.is_some() || old_alias.is_some() || is_builtin_type_name(name) {
         shadowed.push(ShadowedName {
             index,
             name: name.to_string(),
@@ -944,6 +936,30 @@ fn same_body_local_bindings(
             _ => None,
         })
         .collect()
+}
+
+/// The non-local properties `entries` write, including those their
+/// `for`/`when` bodies produce, each with whether it amends (a body without
+/// a value).
+fn generator_property_writes<'a>(entries: &'a [Entry], writes: &mut Vec<(&'a str, bool)>) {
+    for entry in entries {
+        match entry {
+            Entry::Property(prop) if !has_modifier(&prop.modifiers, Modifier::Local) => {
+                writes.push((
+                    prop.name.as_str(),
+                    prop.body.is_some() && prop.value.is_none(),
+                ));
+            }
+            Entry::ForGenerator(fgen) => generator_property_writes(&fgen.body, writes),
+            Entry::WhenGenerator(wgen) => {
+                generator_property_writes(&wgen.body, writes);
+                if let Some(else_body) = &wgen.else_body {
+                    generator_property_writes(else_body, writes);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// The names of a body's members, including properties its `for`/`when`
@@ -3546,10 +3562,7 @@ impl Evaluator {
             .body
             .iter()
             .filter_map(|entry| match entry {
-                Entry::Property(prop)
-                    if matches!(prop.value, Some(Expr::Lambda(..)))
-                        && has_modifier(&prop.modifiers, Modifier::Local) =>
-                {
+                Entry::Property(prop) if matches!(prop.value, Some(Expr::Lambda(..))) => {
                     Some(prop.name.as_str())
                 }
                 _ => None,
@@ -4169,7 +4182,7 @@ impl Evaluator {
                     }
                 }
                 Entry::ClassDef(name, class_mods, parent, body) => {
-                    record_shadowed(&mut shadowed, entry_index, name, false, &active_scope);
+                    record_shadowed(&mut shadowed, entry_index, name, &active_scope);
                     let defaults = self.eval_class_def(
                         name,
                         class_mods,
@@ -4185,7 +4198,7 @@ impl Evaluator {
                     }
                 }
                 Entry::TypeAlias(name, ty) => {
-                    record_shadowed(&mut shadowed, entry_index, name, true, &active_scope);
+                    record_shadowed(&mut shadowed, entry_index, name, &active_scope);
                     let mut resolved_scope = active_scope;
                     self.eval_type_alias(name, ty, &mut resolved_scope);
                     child_scope.set_type_alias(name.clone(), ty.clone());
@@ -4413,7 +4426,7 @@ impl Evaluator {
                     }
                 }
                 Entry::ForGenerator(fgen) => {
-                    let active_scope = restore_shadowed(
+                    let mut active_scope = restore_shadowed(
                         scope_for_object_entry(
                             entry_index,
                             &child_scope,
@@ -4424,6 +4437,11 @@ impl Evaluator {
                         &shadowed,
                         entry_index,
                     );
+                    // Objects it writes that a later entry amends are checked by
+                    // that amendment (see `TypeChecks::defers_nested`).
+                    if checks.defers_nested(entry_index) {
+                        active_scope.defining_class = true;
+                    }
                     let collection = self.eval_expr(&fgen.collection, &active_scope, depth)?;
                     let items = collection_to_items(collection);
                     let body_typed = generator_body_has_typed_entries(&fgen.body);
@@ -4464,7 +4482,7 @@ impl Evaluator {
                     }
                 }
                 Entry::WhenGenerator(wgen) => {
-                    let active_scope = restore_shadowed(
+                    let mut active_scope = restore_shadowed(
                         scope_for_object_entry(
                             entry_index,
                             &child_scope,
@@ -4475,6 +4493,11 @@ impl Evaluator {
                         &shadowed,
                         entry_index,
                     );
+                    // Objects it writes that a later entry amends are checked by
+                    // that amendment (see `TypeChecks::defers_nested`).
+                    if checks.defers_nested(entry_index) {
+                        active_scope.defining_class = true;
+                    }
                     let cond = self.eval_expr(&wgen.condition, &active_scope, depth)?;
                     if is_truthy(&cond) {
                         let body_val = self.eval_entries_pending(
@@ -5277,11 +5300,11 @@ impl Evaluator {
         })
     }
 
-    /// Bind again, in `scope`, the local functions (`local f = (x) -> ...`)
-    /// `entries` declare, so they capture the bindings `scope` holds rather
-    /// than those at their first binding: a deferred check reads a local
-    /// function's late-bound value, as a call from the finished body would.
-    /// A function whose binding failed is left as is.
+    /// Bind again, in `scope`, the functions `entries` declare (`local f =
+    /// (x) -> ...`, `function f(x) = ...`), so they capture the bindings
+    /// `scope` holds rather than those at their first binding: a deferred
+    /// check reads a function's late-bound value, as a call from the
+    /// finished body would. A function whose binding failed is left as is.
     fn rebind_local_functions(
         &mut self,
         entries: &[Entry],
@@ -5290,7 +5313,6 @@ impl Evaluator {
     ) -> Result<()> {
         for entry in entries {
             if let Entry::Property(prop) = entry
-                && has_modifier(&prop.modifiers, Modifier::Local)
                 && let Some(expr @ Expr::Lambda(..)) = &prop.value
                 && scope.get(&prop.name).is_some()
             {
@@ -5953,17 +5975,22 @@ impl Evaluator {
         // or an earlier amendment's chain): objects nested in them are built
         // unchecked, as that amendment checks them against the values it
         // leaves (here overriding a default `v: Int = "x"` of `o`).
+        // A `for`/`when` generator counts by the properties its bodies write.
         let mut amended_bases = FxHashSet::default();
         let mut amended_later: FxHashSet<&str> = FxHashSet::default();
+        let mut writes = Vec::new();
         for (index, entry) in merged.iter().enumerate().rev() {
-            let Entry::Property(prop) = entry else {
-                continue;
-            };
-            if !amended_later.is_empty() && amended_later.contains(prop.name.as_str()) {
+            writes.clear();
+            generator_property_writes(std::slice::from_ref(entry), &mut writes);
+            if !amended_later.is_empty()
+                && writes.iter().any(|(name, _)| amended_later.contains(name))
+            {
                 amended_bases.insert(index);
             }
-            if prop.body.is_some() && prop.value.is_none() {
-                amended_later.insert(prop.name.as_str());
+            for (name, amends) in &writes {
+                if *amends {
+                    amended_later.insert(name);
+                }
             }
         }
         let merged: Body = Arc::new(merged);
