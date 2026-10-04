@@ -2941,9 +2941,23 @@ impl Evaluator {
         // Names of members produced by generators and not since rebound by a
         // property entry.
         let mut generated: HashSet<Arc<str>> = HashSet::default();
-        // Allocate duplicate tracking only for bodies that actually use a
-        // generator or dynamic key. Ordinary object bodies dominate module
-        // evaluation and cannot exercise these checks.
+        // A single direct dynamic member cannot conflict with anything. Avoid
+        // the hash lookup on that common shape; tracking is needed only once a
+        // second dynamic member or a generator can produce another name.
+        let mut direct_dynamic_members = 0;
+        let mut track_dynamic_members = false;
+        for entry in entries.iter() {
+            match entry {
+                Entry::DynProperty(..) => {
+                    direct_dynamic_members += 1;
+                    track_dynamic_members |= direct_dynamic_members > 1;
+                }
+                Entry::ForGenerator(..) | Entry::WhenGenerator(..) => {
+                    track_dynamic_members = true;
+                }
+                _ => {}
+            }
+        }
         // The output map is keyed by its rendered member name, so duplicate
         // bookkeeping must use that same identity. Sharing the set with
         // generators makes direct-before-generator and generator-before-direct
@@ -3032,7 +3046,7 @@ impl Evaluator {
                     let key = self.eval_expr(key_expr, &active_scope, depth)?;
                     let key_str = value_to_key(&key)?;
                     // A body may define each key once (`["k"] { ... }` amends).
-                    if !matches!(val_expr, Expr::ObjectBody(_)) {
+                    if track_dynamic_members && !matches!(val_expr, Expr::ObjectBody(_)) {
                         let defined_by_layer = defined_by_layer.get_or_insert_default();
                         let layer = entry_layer(entry_scopes, entry_index);
                         if !defined_by_layer.insert((layer, key_str.clone())) {
@@ -3193,12 +3207,14 @@ impl Evaluator {
                             }),
                         )?;
                         if let Value::Object(m, _) = body_val {
-                            record_generated_members(
-                                defined_by_layer.get_or_insert_default(),
-                                entry_layer(entry_scopes, entry_index),
-                                &m,
-                                &fgen.body,
-                            )?;
+                            if track_dynamic_members {
+                                record_generated_members(
+                                    defined_by_layer.get_or_insert_default(),
+                                    entry_layer(entry_scopes, entry_index),
+                                    &m,
+                                    &fgen.body,
+                                )?;
+                            }
                             entry_owners.release_this(&this_aliases);
                             props_extend(
                                 &mut child_scope,
@@ -3234,12 +3250,14 @@ impl Evaluator {
                             }),
                         )?;
                         if let Value::Object(m, _) = body_val {
-                            record_generated_members(
-                                defined_by_layer.get_or_insert_default(),
-                                entry_layer(entry_scopes, entry_index),
-                                &m,
-                                &wgen.body,
-                            )?;
+                            if track_dynamic_members {
+                                record_generated_members(
+                                    defined_by_layer.get_or_insert_default(),
+                                    entry_layer(entry_scopes, entry_index),
+                                    &m,
+                                    &wgen.body,
+                                )?;
+                            }
                             entry_owners.release_this(&this_aliases);
                             props_extend(
                                 &mut child_scope,
@@ -3264,12 +3282,14 @@ impl Evaluator {
                             }),
                         )?;
                         if let Value::Object(m, _) = else_val {
-                            record_generated_members(
-                                defined_by_layer.get_or_insert_default(),
-                                entry_layer(entry_scopes, entry_index),
-                                &m,
-                                else_body,
-                            )?;
+                            if track_dynamic_members {
+                                record_generated_members(
+                                    defined_by_layer.get_or_insert_default(),
+                                    entry_layer(entry_scopes, entry_index),
+                                    &m,
+                                    else_body,
+                                )?;
+                            }
                             entry_owners.release_this(&this_aliases);
                             props_extend(
                                 &mut child_scope,
