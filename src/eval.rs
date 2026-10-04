@@ -2298,6 +2298,8 @@ impl Evaluator {
             }
         }
 
+        check_module_annotations(module, &scope)?;
+
         // Export class definitions so they're accessible via dotted paths
         // (e.g., `import "helpers.pkl"` → `helpers.ClassName`).
         // Track class names to exclude from serialized output.
@@ -6624,6 +6626,140 @@ fn module_display_name(module: &Module, path: &Path) -> String {
             .map(|stem| stem.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string())
     })
+}
+
+/// Standard library types that are not annotation classes.
+const STDLIB_NON_ANNOTATION_TYPES: &[&str] = &[
+    "Any",
+    "Null",
+    "Boolean",
+    "Number",
+    "Int",
+    "Float",
+    "String",
+    "Duration",
+    "DataSize",
+    "Regex",
+    "Object",
+    "Dynamic",
+    "Typed",
+    "Listing",
+    "Mapping",
+    "List",
+    "Set",
+    "Map",
+    "Pair",
+    "IntSeq",
+    "Function",
+    "Bytes",
+    "Collection",
+    "Module",
+    "Class",
+    "TypeAlias",
+];
+
+/// Check that each annotation on a module property names an annotation
+/// class: a subclass of `Annotation`, not another class or a value.
+fn check_module_annotations(module: &Module, scope: &Scope) -> Result<()> {
+    let annotated = module
+        .body
+        .iter()
+        .any(|entry| matches!(entry, Entry::Property(prop) if !prop.annotations.is_empty()));
+    if !annotated {
+        return Ok(());
+    }
+    let classes: HashMap<&str, Option<&str>> = module
+        .body
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::ClassDef(name, _, parent, _) => Some((name.as_str(), parent.as_deref())),
+            _ => None,
+        })
+        .collect();
+    let properties: HashSet<&str> = module
+        .body
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::Property(prop) => Some(prop.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    let resolve_alias = |name: &str| -> Option<String> {
+        let mut current = name.to_string();
+        let mut seen = HashSet::default();
+        while let Some(ty) = scope.get_type_alias(&current) {
+            match ty {
+                crate::parser::TypeExpr::Named(target)
+                    if !target.starts_with('*') && seen.insert(current.clone()) =>
+                {
+                    current = target.clone();
+                }
+                _ => return None,
+            }
+        }
+        Some(current)
+    };
+    let is_annotation_class = |name: &str| {
+        let mut current = name.to_string();
+        for _ in 0..=classes.len() {
+            match classes.get(current.as_str()) {
+                Some(Some(parent)) => match resolve_alias(parent) {
+                    Some(parent) => current = parent,
+                    None => return false,
+                },
+                Some(None) => return false,
+                None => return !STDLIB_NON_ANNOTATION_TYPES.contains(&current.as_str()),
+            }
+        }
+        false
+    };
+    for entry in module.body.iter() {
+        let Entry::Property(prop) = entry else {
+            continue;
+        };
+        for annotation in &prop.annotations {
+            if annotation.name.contains('.') {
+                continue;
+            }
+            let Some(resolved) = resolve_alias(&annotation.name) else {
+                return Err(Error::Eval("Expected an annotation class.".into()));
+            };
+            let name = resolved.as_str();
+            if classes.contains_key(name) {
+                if !is_annotation_class(name) {
+                    return Err(Error::Eval("Expected an annotation class.".into()));
+                }
+                continue;
+            }
+            if scope.get_type_alias(name).is_some() {
+                continue;
+            }
+            if name == annotation.name && properties.contains(name) {
+                return Err(Error::Eval(format!(
+                    "Expected `{name}` to be a type, but it is not."
+                )));
+            }
+            match scope.get(name) {
+                Some(Value::String(marker)) if &**marker == name => {
+                    if name != "Annotation" && STDLIB_NON_ANNOTATION_TYPES.contains(&name) {
+                        return Err(Error::Eval("Expected an annotation class.".into()));
+                    }
+                }
+                Some(Value::Object(_, Some(source)))
+                    if source.type_name.as_deref() == Some(name) => {}
+                Some(_) => {
+                    return Err(Error::Eval(format!(
+                        "Expected `{name}` to be a type, but it is not."
+                    )));
+                }
+                None if STDLIB_NON_ANNOTATION_TYPES.contains(&name) => {
+                    return Err(Error::Eval("Expected an annotation class.".into()));
+                }
+                None => {}
+            }
+        }
+    }
+    Ok(())
 }
 
 fn stdlib_module(name: &str) -> Value {

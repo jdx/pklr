@@ -84,6 +84,11 @@ struct Parser<'a> {
     last_line: usize,
     /// Members of the body being parsed, for static checks.
     body: BodyScope,
+    /// Annotations at the start of a module without a module declaration,
+    /// which belong to its first member.
+    leading_annotations: Vec<Annotation>,
+    /// While parsing a type alias's type: the type names it uses.
+    type_refs: Option<Vec<String>>,
 }
 
 impl<'a> Parser<'a> {
@@ -95,6 +100,8 @@ impl<'a> Parser<'a> {
             pos: 0,
             last_line: 1,
             body: BodyScope::new(BodyKind::Object, None),
+            leading_annotations: Vec::new(),
+            type_refs: None,
         }
     }
 
@@ -177,6 +184,21 @@ impl<'a> Parser<'a> {
 
         // Parse module-level annotations (e.g. @ModuleInfo)
         let mut annotations = self.parse_annotations()?;
+        // Without a module declaration (`module`, `amends` or `extends`)
+        // they annotate the first member instead.
+        let declares_module = (self.peek_is_modifier()
+            && self.peek_past_modifiers_is(TokenKind::KwModule))
+            || matches!(
+                self.peek(),
+                TokenKind::KwModule
+                    | TokenKind::KwAmends
+                    | TokenKind::KwExtends
+                    | TokenKind::KwImport
+                    | TokenKind::KwImportStar
+            );
+        if !declares_module {
+            self.leading_annotations = std::mem::take(&mut annotations);
+        }
 
         // Parse header: module declaration, amends, imports
         let module_modifiers_offset = self.peek_tok().offset;
@@ -290,7 +312,12 @@ impl<'a> Parser<'a> {
                 self.advance();
                 continue;
             }
-            let entry_annotations = self.parse_annotations()?;
+            let mut entry_annotations = self.parse_annotations()?;
+            if !self.leading_annotations.is_empty() {
+                let mut leading = std::mem::take(&mut self.leading_annotations);
+                leading.append(&mut entry_annotations);
+                entry_annotations = leading;
+            }
             let member_offset = self.peek_tok().offset;
             // Parse class definitions (with optional modifiers); skip typealias/function declarations
             let class_modifiers =
@@ -338,16 +365,7 @@ impl<'a> Parser<'a> {
                 continue;
             }
             if matches!(self.peek(), TokenKind::KwTypeAlias) {
-                self.advance(); // consume 'typealias'
-                let name = self.expect_ident()?;
-                self.check_type_alias(member_offset, &[], &name)?;
-                if matches!(self.peek(), TokenKind::Lt) {
-                    self.check_type_parameters(self.pos)?;
-                    self.skip_generic_params()?;
-                }
-                self.expect(&TokenKind::Equals)?;
-                let ty = self.parse_type()?;
-                entries.push(Entry::TypeAlias(name, ty));
+                entries.push(self.parse_type_alias(member_offset, &[])?);
                 continue;
             }
             if matches!(self.peek(), TokenKind::KwFunction) {
@@ -364,19 +382,7 @@ impl<'a> Parser<'a> {
                         entries.push(entry);
                     }
                 } else {
-                    // typealias — skip as before
-                    if let Some(TokenKind::Ident(name)) =
-                        self.tokens.get(self.pos + 1).map(|tok| &tok.kind)
-                    {
-                        self.check_type_alias(member_offset, &mods, name)?;
-                    }
-                    if matches!(
-                        self.tokens.get(self.pos + 2).map(|tok| &tok.kind),
-                        Some(TokenKind::Lt)
-                    ) {
-                        self.check_type_parameters(self.pos + 2)?;
-                    }
-                    self.skip_declaration();
+                    entries.push(self.parse_type_alias(member_offset, &mods)?);
                 }
                 continue;
             }
@@ -404,6 +410,36 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(entries)
+    }
+
+    /// Parse `typealias Name<Params> = Type`, with the `typealias` keyword
+    /// next, checking it like pkl does.
+    fn parse_type_alias(&mut self, offset: usize, modifiers: &[Modifier]) -> Result<Entry> {
+        self.advance(); // consume 'typealias'
+        let name = self.expect_ident()?;
+        self.check_type_alias(offset, modifiers, &name)?;
+        let mut params = Vec::new();
+        if matches!(self.peek(), TokenKind::Lt) {
+            params = self
+                .type_parameter_names(self.pos)
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect();
+            self.check_type_parameters(self.pos)?;
+            self.skip_generic_params()?;
+        }
+        self.expect(&TokenKind::Equals)?;
+        // Record the type names the aliased type uses, for the cycle check.
+        let saved_refs = self.type_refs.replace(Vec::new());
+        let ty = self.parse_type();
+        let refs = std::mem::replace(&mut self.type_refs, saved_refs).unwrap_or_default();
+        let ty = ty?;
+        // pkl resolves a local alias only when something uses it, so only
+        // non-local aliases are checked for cycles up front.
+        if !modifiers.contains(&Modifier::Local) {
+            self.body.record_type_alias(offset, &name, refs, &params);
+        }
+        Ok(Entry::TypeAlias(name, ty))
     }
 
     /// Collect top-level generic type parameter names: `<Type, Type<Nested>, ...>`
@@ -893,12 +929,14 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type(&mut self) -> Result<TypeExpr> {
+        let offset = self.peek_tok().offset;
         let (first, first_is_default) = self.parse_type_member()?;
         let mut variants = vec![(first, first_is_default)];
         while matches!(self.peek(), TokenKind::Pipe) {
             self.advance();
             variants.push(self.parse_type_member()?);
         }
+        self.check_union_defaults(offset, &variants)?;
         if variants.len() == 1 {
             let (ty, is_default) = variants.pop().unwrap();
             Ok(if is_default {
@@ -957,6 +995,9 @@ impl<'a> Parser<'a> {
                     name.push('.');
                     name.push_str(&part);
                 }
+                if let Some(refs) = &mut self.type_refs {
+                    refs.push(name.clone());
+                }
                 if matches!(self.peek(), TokenKind::Lt) {
                     self.advance();
                     let mut args = vec![self.parse_type()?];
@@ -989,6 +1030,20 @@ impl<'a> Parser<'a> {
             return Ok(base);
         }
         self.advance();
+        // Types named inside a constraint expression aren't part of the type.
+        let saved_refs = self.type_refs.take();
+        let constraint = self.parse_constraint_exprs();
+        self.type_refs = saved_refs;
+        let constraint = constraint?;
+        Ok(TypeExpr::Constrained(
+            type_expr_runtime_name(&base),
+            Box::new(constraint),
+        ))
+    }
+
+    /// The comma-separated constraints of `Type(c1, c2)`, conjoined, up to
+    /// and including the closing parenthesis.
+    fn parse_constraint_exprs(&mut self) -> Result<Expr> {
         let mut constraint = self.parse_expr()?;
         while matches!(self.peek(), TokenKind::Comma) {
             self.advance();
@@ -996,10 +1051,7 @@ impl<'a> Parser<'a> {
             constraint = Expr::Binop(BinOp::And, Box::new(constraint), Box::new(next));
         }
         self.expect(&TokenKind::RParen)?;
-        Ok(TypeExpr::Constrained(
-            type_expr_runtime_name(&base),
-            Box::new(constraint),
-        ))
+        Ok(constraint)
     }
 
     fn parse_expr(&mut self) -> Result<Expr> {
@@ -1285,11 +1337,21 @@ impl<'a> Parser<'a> {
                         None => self.expect_ident()?,
                     };
                     // Handle dotted type names: new Config.Step { ... }
+                    let name_offset = self.peek_tok().offset;
                     while matches!(self.peek(), TokenKind::Dot) {
                         self.advance();
                         let part = self.expect_ident()?;
                         name.push('.');
                         name.push_str(&part);
+                    }
+                    // A type name is a type, or a module import and a type in it.
+                    if qualifier.is_none() && name.matches('.').count() > 1 {
+                        return Err(Error::parse(
+                            self.name,
+                            self.source,
+                            name_offset,
+                            format!("Invalid type name `{name}`."),
+                        ));
                     }
                     Some(name)
                 } else {
