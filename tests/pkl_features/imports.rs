@@ -2499,6 +2499,8 @@ async fn narrowed_import_follows_module_reads_made_before_class_properties_are_b
         // A nested class's method, called by a default declared before the
         // property.
         "a = 1\nmax = 3\nclass D {\n  class Reader { function f() = a }\n  r = new Reader {}.f()\n  a = 6\n  c = module.max\n}\n",
+        // ...or through another of its methods.
+        "a = 1\nmax = 3\nclass D {\n  class Reader {\n    function g() = a\n    function f() = g()\n  }\n  r = new Reader {}.f()\n  a = 6\n  c = module.max\n}\n",
     ];
     for (i, dep) in deps.iter().enumerate() {
         let name = format!("dep{i}.pkl");
@@ -2540,6 +2542,35 @@ async fn narrowed_import_skips_nested_class_reads_after_class_properties_are_bou
     assert_eq!(val["d"]["b"]["x"], 1);
     assert_eq!(val["d"]["r"], 6);
     assert_eq!(val["d"]["c"], 3);
+}
+
+#[tokio::test]
+async fn narrowed_import_skips_nested_methods_early_defaults_do_not_run_on_outer_names() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_nested_method_reads");
+    let dir = temp.path();
+    // Building a `Reader` before `D`'s `a` is bound doesn't call `f`.
+    std::fs::write(
+        dir.join("built.pkl"),
+        "a = throw(\"unused\")\nmax = 3\nclass D {\n  class Reader { function f() = a }\n  r = new Reader {}\n  a = 6\n  c = module.max\n}\n",
+    )
+    .unwrap();
+    // `f` reads the `a` a `Reader` inherits from `Base`.
+    std::fs::write(
+        dir.join("inherited.pkl"),
+        "a = throw(\"unused\")\nmax = 3\nopen class Base { a = 2 }\nclass D {\n  class Reader extends Base { function f() = a }\n  r = new Reader {}.f()\n  a = 6\n  c = module.max\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"built.pkl\" as B\nimport \"inherited.pkl\" as I\nbuilt = new B.D {}\ninherited = new I.D {}\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["built"]["c"], 3);
+    assert_eq!(val["inherited"]["r"], 2);
 }
 
 #[tokio::test]

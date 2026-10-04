@@ -1076,11 +1076,37 @@ pub(super) fn is_module_sibling_ref(expr: &Expr, include_this: bool) -> bool {
     matches!(expr, Expr::Ident(name) if name == "module" || (include_this && name == "this"))
 }
 
+/// Classes by name, with each one's parent and body.
+type ClassMap<'e> = HashMap<&'e str, (Option<&'e str>, &'e [Entry])>;
+
+/// The non-local properties a class whose parent is `parent` inherits from
+/// the ancestors in `classes`.
+fn ancestor_properties<'e>(classes: &ClassMap<'e>, parent: Option<&'e str>) -> HashSet<&'e str> {
+    let mut names = HashSet::default();
+    let mut seen = HashSet::default();
+    // `extends module.Parent` names the same class as `extends Parent`.
+    let unqualified = |name: &'e str| name.strip_prefix("module.").unwrap_or(name);
+    let mut next = parent.map(unqualified);
+    while let Some(class) = next
+        && seen.insert(class)
+        && let Some((parent, body)) = classes.get(class)
+    {
+        names.extend(body.iter().filter_map(|entry| match entry {
+            Entry::Property(prop) if !has_modifier(&prop.modifiers, Modifier::Local) => {
+                Some(prop.name.as_str())
+            }
+            _ => None,
+        }));
+        next = parent.map(unqualified);
+    }
+    names
+}
+
 /// A module's non-local properties and its classes, for deciding which bare
 /// roots in a class body read the module's properties.
 struct ModuleClasses<'a> {
     properties: HashSet<&'a str>,
-    classes: HashMap<&'a str, (Option<&'a str>, &'a [Entry])>,
+    classes: ClassMap<'a>,
 }
 
 impl<'a> ModuleClasses<'a> {
@@ -1140,7 +1166,8 @@ impl<'a> ModuleClasses<'a> {
                     |entry| matches!(entry, Entry::Property(prop) if prop.name == **root),
                 );
                 if let Some(declared) = declared {
-                    return eager_class_refs(body, Some(declared)).contains(root.as_str());
+                    return eager_class_refs(body, Some(declared), &self.classes)
+                        .contains(root.as_str());
                 }
                 if !inherited
                     .get_or_insert_with(|| self.inherited_properties(class))
@@ -1149,7 +1176,7 @@ impl<'a> ModuleClasses<'a> {
                     return true;
                 }
                 default_refs
-                    .get_or_insert_with(|| eager_class_refs(body, None))
+                    .get_or_insert_with(|| eager_class_refs(body, None, &self.classes))
                     .contains(root.as_str())
             })
             .collect()
@@ -1158,31 +1185,8 @@ impl<'a> ModuleClasses<'a> {
     /// The non-local properties `class` inherits from ancestors declared in
     /// this module.
     fn inherited_properties(&self, class: &str) -> HashSet<&'a str> {
-        let mut names = HashSet::default();
-        let mut seen = HashSet::default();
-        // `extends module.Parent` names the same class as `extends Parent`.
-        let unqualified = |name: &'a str| name.strip_prefix("module.").unwrap_or(name);
-        let mut next = self
-            .classes
-            .get_key_value(class)
-            .and_then(|(class, (parent, _))| {
-                seen.insert(*class);
-                *parent
-            })
-            .map(unqualified);
-        while let Some(class) = next
-            && seen.insert(class)
-            && let Some((parent, body)) = self.classes.get(class)
-        {
-            names.extend(body.iter().filter_map(|entry| match entry {
-                Entry::Property(prop) if !has_modifier(&prop.modifiers, Modifier::Local) => {
-                    Some(prop.name.as_str())
-                }
-                _ => None,
-            }));
-            next = parent.map(unqualified);
-        }
-        names
+        let parent = self.classes.get(class).and_then(|(parent, _)| *parent);
+        ancestor_properties(&self.classes, parent)
     }
 }
 
@@ -1199,7 +1203,13 @@ impl<'a> ModuleClasses<'a> {
 /// its name from: the defaults at or before it, the locals and nested
 /// classes (evaluated before any property), and the local methods any default
 /// runs (which capture the scope the locals see).
-fn eager_class_refs(body: &[Entry], upto: Option<usize>) -> HashSet<String> {
+///
+/// `scope` holds the classes the body's nested classes may extend.
+fn eager_class_refs<'e>(
+    body: &'e [Entry],
+    upto: Option<usize>,
+    scope: &ClassMap<'e>,
+) -> HashSet<String> {
     fn is_method(entry: &Entry) -> bool {
         matches!(entry, Entry::Property(prop) if matches!(prop.value, Some(Expr::Lambda(..))))
     }
@@ -1233,24 +1243,33 @@ fn eager_class_refs(body: &[Entry], upto: Option<usize>) -> HashSet<String> {
             _ => None,
         })
         .collect();
+    let mut classes = scope.clone();
+    classes.extend(body.iter().filter_map(|entry| match entry {
+        Entry::ClassDef(name, _, parent, class_body) => {
+            Some((name.as_str(), (parent.as_deref(), class_body.as_slice())))
+        }
+        _ => None,
+    }));
     let is_default = |entry: &Entry| {
         !is_method(entry)
             && !matches!(entry, Entry::Property(prop) if stored.contains_key(prop.name.as_str()))
     };
     // What `seeds` read, with the methods they run (transitively). A nested
     // class reads only what its own defaults do (see `class_default_reads`),
-    // and once they use it, what its methods read from outside it (they may
-    // run on an instance built here).
+    // and once they use it, what the methods they call on it (by name, as
+    // any object's member) read from outside it.
     let reads = |seeds: Vec<Entry>| {
-        let (classes, seeds): (Vec<Entry>, Vec<Entry>) = seeds
+        let (nested, seeds): (Vec<Entry>, Vec<Entry>) = seeds
             .into_iter()
             .partition(|entry| matches!(entry, Entry::ClassDef(..)));
         let mut refs = referenced_roots(&seeds);
-        for class in &classes {
-            if let Entry::ClassDef(_, _, _, body) = class {
-                refs.extend(class_default_reads(body));
+        for class in &nested {
+            if let Entry::ClassDef(_, _, _, class_body) = class {
+                refs.extend(class_default_reads(class_body, &classes));
             }
         }
+        let mut fields = HashSet::default();
+        collect_field_names_entries(&seeds, &mut fields);
         let mut instance = InstanceReads {
             members: HashSet::default(),
             escapes: false,
@@ -1258,31 +1277,53 @@ fn eager_class_refs(body: &[Entry], upto: Option<usize>) -> HashSet<String> {
         instance.entries(&seeds, 0);
         let mut followed = HashSet::default();
         let mut used_classes = HashSet::default();
+        let mut followed_nested = HashSet::default();
         loop {
-            let used: Vec<&[Entry]> = body
-                .iter()
-                .filter_map(|entry| match entry {
-                    Entry::ClassDef(name, _, _, class_body)
-                        if refs.contains(name) && used_classes.insert(name.as_str()) =>
-                    {
-                        Some(class_body.as_slice())
-                    }
+            let mut nested_reads = false;
+            for entry in body {
+                let Entry::ClassDef(name, _, parent, class_body) = entry else {
+                    continue;
+                };
+                if !refs.contains(name) && !used_classes.contains(name.as_str()) {
+                    continue;
+                }
+                used_classes.insert(name.as_str());
+                // The names an instance of the class has itself.
+                let mut own: HashSet<&str> = ancestor_properties(&classes, parent.as_deref());
+                own.extend(class_body.iter().filter_map(|entry| match entry {
+                    Entry::Property(prop) => Some(prop.name.as_str()),
                     _ => None,
-                })
-                .collect();
-            for class_body in &used {
-                let own: HashSet<&str> = class_body
-                    .iter()
-                    .filter_map(|entry| match entry {
-                        Entry::Property(prop) => Some(prop.name.as_str()),
-                        _ => None,
-                    })
-                    .collect();
-                refs.extend(
-                    referenced_roots(class_body)
-                        .into_iter()
-                        .filter(|root| !own.contains(root.as_str())),
-                );
+                }));
+                // Its methods called here, and the ones they call.
+                let mut called = fields.clone();
+                loop {
+                    let calls_all = called.contains(DYNAMIC_SIBLING_REF);
+                    let next: Vec<&Entry> = class_body
+                        .iter()
+                        .filter(|entry| match entry {
+                            Entry::Property(prop) if is_method(entry) => {
+                                (calls_all || called.contains(&prop.name))
+                                    && followed_nested.insert((name.as_str(), prop.name.as_str()))
+                            }
+                            _ => false,
+                        })
+                        .collect();
+                    if next.is_empty() {
+                        break;
+                    }
+                    for method in next {
+                        let method = std::slice::from_ref(method);
+                        let roots = referenced_roots(method);
+                        called.extend(roots.iter().cloned());
+                        collect_field_names_entries(method, &mut called);
+                        refs.extend(
+                            roots
+                                .into_iter()
+                                .filter(|root| !own.contains(root.as_str())),
+                        );
+                        nested_reads = true;
+                    }
+                }
             }
             let calls_all = instance.escapes;
             let read = |name: &str| refs.contains(name) || instance.members.contains(name);
@@ -1306,12 +1347,13 @@ fn eager_class_refs(body: &[Entry], upto: Option<usize>) -> HashSet<String> {
                     _ => false,
                 })
                 .collect();
-            if next.is_empty() && used.is_empty() {
+            if next.is_empty() && !nested_reads {
                 return (refs, followed);
             }
             for method in next {
                 let method = std::slice::from_ref(method);
                 refs.extend(referenced_roots(method));
+                collect_field_names_entries(method, &mut fields);
                 instance.entries(method, 0);
             }
         }
@@ -1341,14 +1383,114 @@ fn eager_class_refs(body: &[Entry], upto: Option<usize>) -> HashSet<String> {
 /// they are evaluated (see `eager_class_refs`): those it doesn't bind itself
 /// by then. A name inherited from its parent is kept, as is one any default
 /// reads before the body's own property of that name is bound.
-fn class_default_reads(body: &[Entry]) -> HashSet<String> {
-    let mut refs = eager_class_refs(body, None);
+fn class_default_reads<'e>(body: &'e [Entry], scope: &ClassMap<'e>) -> HashSet<String> {
+    let mut refs = eager_class_refs(body, None, scope);
     refs.retain(|root| {
         body.iter()
             .rposition(|entry| matches!(entry, Entry::Property(prop) if prop.name == *root))
-            .is_none_or(|declared| eager_class_refs(body, Some(declared)).contains(root))
+            .is_none_or(|declared| eager_class_refs(body, Some(declared), scope).contains(root))
     });
     refs
+}
+
+/// Adds to `out` every member name `entries` read from any object (`x.name`,
+/// `x?.name`, `x["name"]`), or `DYNAMIC_SIBLING_REF` for a computed key.
+fn collect_field_names_entries(entries: &[Entry], out: &mut HashSet<String>) {
+    for entry in entries {
+        match entry {
+            Entry::Property(prop) => {
+                if let Some(value) = &prop.value {
+                    collect_field_names_expr(value, out);
+                }
+                if let Some(body) = &prop.body {
+                    collect_field_names_entries(body, out);
+                }
+            }
+            Entry::DynProperty(key, value) => {
+                collect_field_names_expr(key, out);
+                collect_field_names_expr(value, out);
+            }
+            Entry::ForGenerator(fgen) => {
+                collect_field_names_expr(&fgen.collection, out);
+                collect_field_names_entries(&fgen.body, out);
+            }
+            Entry::WhenGenerator(wgen) => {
+                collect_field_names_expr(&wgen.condition, out);
+                collect_field_names_entries(&wgen.body, out);
+                if let Some(else_body) = &wgen.else_body {
+                    collect_field_names_entries(else_body, out);
+                }
+            }
+            Entry::Spread(expr) | Entry::Elem(expr) => collect_field_names_expr(expr, out),
+            Entry::ClassDef(..) | Entry::TypeAlias(..) => {}
+        }
+    }
+}
+
+fn collect_field_names_expr(expr: &Expr, out: &mut HashSet<String>) {
+    match expr {
+        Expr::Field(base, name) | Expr::NullSafeField(base, name) => {
+            out.insert(name.clone());
+            collect_field_names_expr(base, out);
+        }
+        Expr::Index(base, index) => {
+            match index.as_ref() {
+                Expr::String(key) => {
+                    out.insert(key.clone());
+                }
+                _ => {
+                    out.insert(DYNAMIC_SIBLING_REF.to_string());
+                }
+            }
+            collect_field_names_expr(base, out);
+            collect_field_names_expr(index, out);
+        }
+        Expr::New(_, entries, _) | Expr::ObjectBody(entries) | Expr::InferredNew(_, entries) => {
+            collect_field_names_entries(entries, out)
+        }
+        Expr::Binop(_, left, right) => {
+            collect_field_names_expr(left, out);
+            collect_field_names_expr(right, out);
+        }
+        Expr::Call(callee, args) => {
+            collect_field_names_expr(callee, out);
+            for arg in args {
+                collect_field_names_expr(arg, out);
+            }
+        }
+        Expr::If(cond, then_expr, else_expr) => {
+            collect_field_names_expr(cond, out);
+            collect_field_names_expr(then_expr, out);
+            collect_field_names_expr(else_expr, out);
+        }
+        Expr::Let(_, value, body) => {
+            collect_field_names_expr(value, out);
+            collect_field_names_expr(body, out);
+        }
+        Expr::Is(value, _)
+        | Expr::As(value, _)
+        | Expr::Lambda(_, value)
+        | Expr::Unop(_, value)
+        | Expr::Throw(value)
+        | Expr::Trace(value)
+        | Expr::Read(value)
+        | Expr::ReadOrNull(value) => collect_field_names_expr(value, out),
+        Expr::StringInterpolation(parts) => {
+            for part in parts {
+                if let StringInterpPart::Expr(expr) = part {
+                    collect_field_names_expr(expr, out);
+                }
+            }
+        }
+        Expr::Ident(_)
+        | Expr::Null
+        | Expr::Bool(_)
+        | Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::String(_)
+        | Expr::Import(..)
+        | Expr::ImportGlob(..) => {}
+    }
 }
 
 /// Names, in declaration order, of the module members in `entries` that must
