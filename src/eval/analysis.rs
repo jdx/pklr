@@ -1309,24 +1309,27 @@ impl<'e> EagerReads<'e> {
             instance.entries(seed, 0);
         }
         let mut followed = HashSet::default();
-        let mut used_classes = HashSet::default();
-        let mut followed_nested = HashSet::default();
+        // The nested classes the code followed so far uses, at any depth,
+        // each with the names its instances (and the instances around them)
+        // bind themselves.
+        let mut used: Vec<(&'e [Entry], HashSet<&'e str>)> = Vec::new();
+        let mut used_keys: HashSet<*const Entry> = HashSet::default();
+        let mut followed_nested: HashSet<*const Entry> = HashSet::default();
         loop {
             let mut nested_reads = false;
             for entry in body {
-                let Entry::ClassDef(name, _, parent, class_body) = entry else {
-                    continue;
-                };
-                if !refs.contains(name) && !used_classes.contains(name.as_str()) {
-                    continue;
+                if let Entry::ClassDef(name, _, parent, class_body) = entry
+                    && refs.contains(name)
+                    && used_keys.insert(std::ptr::from_ref(entry))
+                {
+                    let own = instance_names(&self.classes, parent.as_deref(), class_body);
+                    used.push((class_body, own));
                 }
-                used_classes.insert(name.as_str());
-                // The names an instance of the class has itself.
-                let mut own: HashSet<&str> = ancestor_properties(&self.classes, parent.as_deref());
-                own.extend(class_body.iter().filter_map(|entry| match entry {
-                    Entry::Property(prop) => Some(prop.name.as_str()),
-                    _ => None,
-                }));
+            }
+            let mut index = 0;
+            while index < used.len() {
+                let (class_body, shadow) = (used[index].0, used[index].1.clone());
+                index += 1;
                 // Its methods called here, and the ones they call. Reading a
                 // property that only stores a method (see `stored`) calls it.
                 let stored = stored_methods(class_body, Self::is_method);
@@ -1342,7 +1345,7 @@ impl<'e> EagerReads<'e> {
                                     || stored.iter().any(|(property, method)| {
                                         *method == prop.name && called.contains(*property)
                                     }))
-                                    && followed_nested.insert((name.as_str(), prop.name.as_str()))
+                                    && followed_nested.insert(std::ptr::from_ref(*entry))
                             }
                             _ => false,
                         })
@@ -1357,10 +1360,38 @@ impl<'e> EagerReads<'e> {
                         collect_field_names_entries(method, &mut called);
                         // Other classes' methods it calls run here too.
                         collect_field_names_entries(method, &mut fields);
+                        // The classes nested in this one that it uses: their
+                        // defaults run here, and their methods may.
+                        let mut scope = self.classes.clone();
+                        scope.extend(class_body.iter().filter_map(|entry| match entry {
+                            Entry::ClassDef(name, _, parent, inner) => {
+                                Some((name.as_str(), (parent.as_deref(), inner.as_slice())))
+                            }
+                            _ => None,
+                        }));
+                        for entry in class_body {
+                            if let Entry::ClassDef(name, _, parent, inner) = entry
+                                && roots.contains(name)
+                                && used_keys.insert(std::ptr::from_ref(entry))
+                            {
+                                refs.extend(
+                                    class_default_reads(inner, &scope)
+                                        .into_iter()
+                                        .filter(|root| !shadow.contains(root.as_str())),
+                                );
+                                let mut inner_shadow = shadow.clone();
+                                inner_shadow.extend(instance_names(
+                                    &scope,
+                                    parent.as_deref(),
+                                    inner,
+                                ));
+                                used.push((inner, inner_shadow));
+                            }
+                        }
                         refs.extend(
                             roots
                                 .into_iter()
-                                .filter(|root| !own.contains(root.as_str())),
+                                .filter(|root| !shadow.contains(root.as_str())),
                         );
                         nested_reads = true;
                     }
@@ -1400,6 +1431,21 @@ impl<'e> EagerReads<'e> {
             }
         }
     }
+}
+
+/// The names an instance of a class with this `parent` and `body` has
+/// itself: its properties and those it inherits from `classes`.
+fn instance_names<'e>(
+    classes: &ClassMap<'e>,
+    parent: Option<&'e str>,
+    body: &'e [Entry],
+) -> HashSet<&'e str> {
+    let mut names = ancestor_properties(classes, parent);
+    names.extend(body.iter().filter_map(|entry| match entry {
+        Entry::Property(prop) => Some(prop.name.as_str()),
+        _ => None,
+    }));
+    names
 }
 
 /// `referenced_roots` for entries of one body that aren't contiguous: a
@@ -1466,7 +1512,8 @@ fn class_default_reads<'e>(body: &'e [Entry], scope: &ClassMap<'e>) -> HashSet<S
 
 /// Adds to `out` every member name `entries` read from any object (`x.name`,
 /// `x?.name`, `x["name"]`), or `DYNAMIC_SIBLING_REF` for a computed key or a
-/// value passed to a call (which may read any of its members).
+/// value passed to a call that may be an object (which may read any of its
+/// members).
 fn collect_field_names_entries(entries: &[Entry], out: &mut HashSet<String>) {
     for entry in entries {
         match entry {
@@ -1499,6 +1546,21 @@ fn collect_field_names_entries(entries: &[Entry], out: &mut HashSet<String>) {
     }
 }
 
+/// Whether `expr` may evaluate to an object: anything but literals and
+/// operators on them.
+fn may_be_object(expr: &Expr) -> bool {
+    match expr {
+        Expr::Null | Expr::Bool(_) | Expr::Int(_) | Expr::Float(_) | Expr::String(_) => false,
+        Expr::Binop(_, left, right) => may_be_object(left) || may_be_object(right),
+        Expr::Unop(_, value) => may_be_object(value),
+        Expr::StringInterpolation(parts) => parts.iter().any(|part| match part {
+            StringInterpPart::Expr(expr) => may_be_object(expr),
+            StringInterpPart::Literal(_) => false,
+        }),
+        _ => true,
+    }
+}
+
 fn collect_field_names_expr(expr: &Expr, out: &mut HashSet<String>) {
     match expr {
         Expr::Field(base, name) | Expr::NullSafeField(base, name) => {
@@ -1525,14 +1587,9 @@ fn collect_field_names_expr(expr: &Expr, out: &mut HashSet<String>) {
             collect_field_names_expr(right, out);
         }
         Expr::Call(callee, args) => {
-            // A value passed to a call may have any of its members read
+            // An object passed to a call may have any of its members read
             // there.
-            if args.iter().any(|arg| {
-                !matches!(
-                    arg,
-                    Expr::Null | Expr::Bool(_) | Expr::Int(_) | Expr::Float(_) | Expr::String(_)
-                )
-            }) {
+            if args.iter().any(may_be_object) {
                 out.insert(DYNAMIC_SIBLING_REF.to_string());
             }
             collect_field_names_expr(callee, out);
