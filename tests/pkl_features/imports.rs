@@ -2297,6 +2297,41 @@ async fn module_imported_by_class_body_checks_declared_types() {
 }
 
 #[tokio::test]
+async fn imported_module_checks_types_after_refreshing_module_members() {
+    // In an imported module, members that read `module` are refreshed once
+    // the module is complete; declared types are checked on those values.
+    let temp = TestTempDir::new("pklr_test_import_refresh_type_checks");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("bad.pkl"),
+        "class C { v = module.limit }\nlocal bad: String = new C {}.v\nlimit = 2\nout = bad\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("good.pkl"),
+        "class C { v = module.limit }\nlocal ok: Int = new C {}.v\nlimit = 2\nout = ok\n",
+    )
+    .unwrap();
+    // The whole module is used, so the import is not narrowed to `out`.
+    std::fs::write(dir.join("main_bad.pkl"), "import \"bad.pkl\"\nall = bad\n").unwrap();
+    std::fs::write(
+        dir.join("main_good.pkl"),
+        "import \"good.pkl\"\nall = good\n",
+    )
+    .unwrap();
+
+    let err = pklr::eval_to_json_async(&dir.join("main_bad.pkl"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("property 'bad' expected String"), "{err}");
+    let val = pklr::eval_to_json_async(&dir.join("main_good.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["all"]["out"], 2);
+}
+
+#[tokio::test]
 async fn narrowed_import_follows_type_alias_constraints() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_type_alias");
     let dir = temp.path();
@@ -2557,4 +2592,84 @@ async fn narrowed_import_resolves_aliases_in_followed_class_bodies() {
         .await
         .unwrap();
     assert_eq!(val["out"], "b");
+}
+
+#[tokio::test]
+async fn module_in_imported_class_body_means_the_class_module() {
+    let temp = TestTempDir::new("pklr_test_module_in_imported_class");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("dep2.pkl"),
+        "expected = \"b\"\nclass C { v = module.expected }\nresult = new C {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep2.pkl\"\nexpected = \"main\"\nr = dep2.result.v\nfresh = new dep2.C {}\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("dep2.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["result"]["v"], "b");
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["r"], "b");
+    assert_eq!(val["fresh"]["v"], "b");
+}
+
+#[tokio::test]
+async fn imported_class_reading_missing_module_property_reports_error() {
+    let temp = TestTempDir::new("pklr_test_imported_poisoned_class");
+    let dir = temp.path();
+    std::fs::write(dir.join("dep.pkl"), "class C { v = module.missing }\n").unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\"\nresult = new dep.C {}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("read.pkl"), "import \"dep.pkl\"\nresult = dep.C\n").unwrap();
+
+    // The module defining the class still evaluates; the class is unused.
+    let val = pklr::eval_to_json_async(&dir.join("dep.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val, serde_json::json!({}));
+    // The failed class's error metadata must not stop amending the module
+    // object from keeping its evaluated members.
+    std::fs::write(
+        dir.join("depx.pkl"),
+        "x = 1\nclass C { v = module.missing }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("amend.pkl"),
+        "import \"depx.pkl\" as dep\nresult = (dep) { y = 2 }\nr2 = dep { y = 3 }\n",
+    )
+    .unwrap();
+    let val = pklr::eval_to_json_async(&dir.join("amend.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["result"], serde_json::json!({"x": 1, "y": 2}));
+    assert_eq!(val["r2"], serde_json::json!({"x": 1, "y": 3}));
+    // Null-safe and index reads report the saved error too.
+    std::fs::write(
+        dir.join("nullsafe.pkl"),
+        "import \"dep.pkl\"\nresult = dep?.C\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("index.pkl"),
+        "import \"dep.pkl\"\nresult = dep[\"C\"]\n",
+    )
+    .unwrap();
+    for importer in ["main.pkl", "read.pkl", "nullsafe.pkl", "index.pkl"] {
+        let err = pklr::eval_to_json_async(&dir.join(importer))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("missing"), "{importer}: {err}");
+    }
 }
