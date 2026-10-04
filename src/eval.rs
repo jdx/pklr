@@ -5903,8 +5903,9 @@ impl Evaluator {
             return Ok(value);
         }
         let converters = self.converters.clone();
+        let mut memo = ConverterMemo::default();
         Ok(self
-            .apply_converters_recursive(&value, &converters, Vec::new())?
+            .apply_converters_recursive(&value, &converters, Vec::new(), &mut memo)?
             .unwrap_or(value))
     }
 
@@ -5916,6 +5917,42 @@ impl Evaluator {
         value: &Value,
         converters: &[(String, Value)],
         blocked_root_converters: Vec<String>,
+        memo: &mut ConverterMemo,
+    ) -> Result<Option<Value>> {
+        // A shared object or list (one mapping referenced from several places,
+        // like the same steps under every hook) converts the same way each
+        // time, so it is converted once.
+        let key = match value {
+            Value::Object(map, src) if blocked_root_converters.is_empty() => Some((
+                Arc::as_ptr(map) as usize,
+                src.as_ref().map_or(0, |src| Arc::as_ptr(src) as usize),
+            )),
+            Value::List(items) if blocked_root_converters.is_empty() => {
+                Some((Arc::as_ptr(items) as usize, 0))
+            }
+            _ => None,
+        };
+        if let Some(key) = key
+            && let Some((_, converted)) = memo.get(&key)
+        {
+            return Ok(converted.clone());
+        }
+        let converted =
+            self.apply_converters_uncached(value, converters, blocked_root_converters, memo)?;
+        if let Some(key) = key {
+            // The original is kept so its address is not reused by another
+            // value while the memo is alive.
+            memo.insert(key, (value.clone(), converted.clone()));
+        }
+        Ok(converted)
+    }
+
+    fn apply_converters_uncached(
+        &mut self,
+        value: &Value,
+        converters: &[(String, Value)],
+        blocked_root_converters: Vec<String>,
+        memo: &mut ConverterMemo,
     ) -> Result<Option<Value>> {
         match value {
             Value::Object(map, src) => {
@@ -5945,8 +5982,9 @@ impl Evaluator {
                                 let result = self.eval_expr(body, &call_scope, 0)?;
                                 let mut blocked = blocked_root_converters;
                                 blocked.push(conv_name.clone());
-                                let converted =
-                                    self.apply_converters_recursive(&result, converters, blocked)?;
+                                let converted = self.apply_converters_recursive(
+                                    &result, converters, blocked, memo,
+                                )?;
                                 return Ok(Some(converted.unwrap_or(result)));
                             }
                         }
@@ -5956,7 +5994,8 @@ impl Evaluator {
                 // No converter matched — recurse into children
                 let mut new_map: Option<ObjectMap> = None;
                 for (index, (k, v)) in map.iter().enumerate() {
-                    let converted = self.apply_converters_recursive(v, converters, Vec::new())?;
+                    let converted =
+                        self.apply_converters_recursive(v, converters, Vec::new(), memo)?;
                     match (&mut new_map, converted) {
                         (Some(new_map), converted) => {
                             new_map.insert(k.clone(), converted.unwrap_or_else(|| v.clone()));
@@ -5979,7 +6018,7 @@ impl Evaluator {
                 let mut new_items: Option<Vec<Value>> = None;
                 for (index, item) in items.iter().enumerate() {
                     let converted =
-                        self.apply_converters_recursive(item, converters, Vec::new())?;
+                        self.apply_converters_recursive(item, converters, Vec::new(), memo)?;
                     match (&mut new_items, converted) {
                         (Some(new_items), converted) => {
                             new_items.push(converted.unwrap_or_else(|| item.clone()));
@@ -5999,6 +6038,10 @@ impl Evaluator {
         }
     }
 }
+
+/// Converted values by the address of the object or list they came from (see
+/// `apply_converters_recursive`), each kept with its original.
+type ConverterMemo = HashMap<(usize, usize), (Value, Option<Value>)>;
 
 #[cfg(test)]
 mod requested_field_tests {
