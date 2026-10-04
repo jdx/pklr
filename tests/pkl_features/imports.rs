@@ -2842,3 +2842,136 @@ async fn narrowed_import_follows_locals_with_module_aliases() {
         .unwrap();
     assert_eq!(val["out"], true);
 }
+
+#[tokio::test]
+async fn narrowed_import_keeps_type_and_property_names_apart() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_type_property_names");
+    let dir = temp.path();
+    // Types and properties have separate namespaces: checking against the
+    // alias `Foo` doesn't read the unused property `Foo`.
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "typealias Foo = Int\nFoo = throw(\"unused\")\nresult {\n  ok = 1 is Foo\n}\n",
+    )
+    .unwrap();
+    // Reading `Foo` as a value reads the property.
+    std::fs::write(
+        dir.join("dep_value.pkl"),
+        "typealias Foo = Int\nFoo = 5\nresult {\n  ok = Foo\n}\n",
+    )
+    .unwrap();
+    // The alias is still followed, so what its constraint reads is kept, and
+    // annotations and `new` name the type too.
+    std::fs::write(
+        dir.join("dep_followed.pkl"),
+        "min = 1\ntypealias Foo = Int(this >= min)\nFoo = throw(\"unused\")\nclass Bar {\n  a: Int = 1\n}\nBar = throw(\"unused\")\nresult {\n  ok = 1 is Foo\n  typed: Foo = 2\n  bar = new Bar {}\n}\n",
+    )
+    .unwrap();
+    // A body that follows definitions itself (it redeclares a type) drops the
+    // type reference too.
+    std::fs::write(
+        dir.join("dep_narrowed.pkl"),
+        "min = 1\ntypealias Foo = Int(this >= min)\nFoo = throw(\"unused\")\nresult {\n  typealias String = Int\n  ok = 1 is Foo\n}\n",
+    )
+    .unwrap();
+    // Bindings shadow only their own namespace: a type declared in a body
+    // doesn't hide the module property it reads, and a local doesn't hide
+    // the module alias it checks against.
+    std::fs::write(
+        dir.join("dep_type_shadow.pkl"),
+        "Foo = 5\nresult {\n  typealias Foo = Int\n  ok = Foo\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep_local_shadow.pkl"),
+        "min = 1\ntypealias Foo = Int(this >= min)\nresult {\n  local Foo = 1\n  ok = 1 is Foo\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as Dep\nimport \"dep_value.pkl\" as DepValue\nimport \"dep_followed.pkl\" as DepFollowed\nimport \"dep_narrowed.pkl\" as DepNarrowed\nimport \"dep_type_shadow.pkl\" as DepTypeShadow\nimport \"dep_local_shadow.pkl\" as DepLocalShadow\nout = Dep.result.ok\noutValue = DepValue.result.ok\noutFollowed = DepFollowed.result\noutNarrowed = DepNarrowed.result.ok\noutTypeShadow = DepTypeShadow.result.ok\noutLocalShadow = DepLocalShadow.result.ok\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["out"], true);
+    assert_eq!(val["outValue"], 5);
+    assert_eq!(
+        val["outFollowed"],
+        serde_json::json!({ "ok": true, "typed": 2, "bar": { "a": 1 } })
+    );
+    assert_eq!(val["outNarrowed"], true);
+    assert_eq!(val["outTypeShadow"], 5);
+    assert_eq!(val["outLocalShadow"], true);
+}
+
+#[tokio::test]
+async fn narrowed_import_reads_qualified_type_roots_and_nested_classes() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_qualified_roots");
+    let dir = temp.path();
+    std::fs::write(dir.join("types.pkl"), "class Item {\n  a: Int = 1\n}\n").unwrap();
+    // The root of `Dep.Item` is a property holding a module, so building one
+    // reads the property.
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "Dep = import(\"types.pkl\")\nresult = new Dep.Item {}\n",
+    )
+    .unwrap();
+    // A class declared in a body is bound as a value too, so reading it there
+    // doesn't read the module property of its name.
+    std::fs::write(
+        dir.join("dep_class.pkl"),
+        "C = throw(\"unused\")\nresult {\n  class C {\n    a: Int = 1\n  }\n  ok = C\n  inst = new C {}\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as Dep\nimport \"dep_class.pkl\" as DepClass\nout = Dep.result\noutClass = DepClass.result.inst\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["out"], serde_json::json!({ "a": 1 }));
+    assert_eq!(val["outClass"], serde_json::json!({ "a": 1 }));
+}
+
+#[tokio::test]
+async fn narrowed_import_reads_values_named_as_types() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_values_named_as_types");
+    let dir = temp.path();
+    // A type name that isn't one of the module's types can name a property
+    // or local holding a class, which building or checking one reads.
+    std::fs::write(
+        dir.join("dep_property.pkl"),
+        "Foo = Item\nclass Item {\n  a: Int = 1\n}\nresult: Foo = new Foo {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep_local.pkl"),
+        "class C {\n  v = module.expected\n}\nlocal x = module.C\nexpected = \"b\"\nresult = new x {}\n",
+    )
+    .unwrap();
+    // A local in the body binds the name, so the module property it shadows
+    // isn't read.
+    std::fs::write(
+        dir.join("dep_shadowed.pkl"),
+        "class Item {\n  a: Int = 1\n}\nFoo = throw(\"unused\")\nresult {\n  local Foo = Item\n  x = new Foo {}\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep_property.pkl\" as DepProperty\nimport \"dep_local.pkl\" as DepLocal\nimport \"dep_shadowed.pkl\" as DepShadowed\noutProperty = DepProperty.result\noutLocal = DepLocal.result\noutShadowed = DepShadowed.result.x\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["outProperty"], serde_json::json!({ "a": 1 }));
+    assert_eq!(val["outLocal"], serde_json::json!({ "v": "b" }));
+    assert_eq!(val["outShadowed"], serde_json::json!({ "a": 1 }));
+}
