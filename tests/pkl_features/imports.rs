@@ -2767,6 +2767,83 @@ async fn imported_class_reading_missing_module_property_reports_error() {
 }
 
 #[tokio::test]
+async fn narrowed_import_follows_module_reads_in_class_bodies() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_class_module_reads");
+    let dir = temp.path();
+    // The requested field reaches `C` only through a local; `C`'s body reads
+    // `limit` through `module`, so the narrowed import must evaluate `limit`.
+    std::fs::write(
+        dir.join("direct.pkl"),
+        "class C { v = module.limit }\nlocal ok = new C {}.v\nlimit = 2\nout = ok\n",
+    )
+    .unwrap();
+    // At module level `this` is the module, so `this.C` names the class.
+    std::fs::write(
+        dir.join("this_read.pkl"),
+        "class C { v = module.limit }\nlocal ok = new this.C {}.v\nlimit = 3\nout = ok\n",
+    )
+    .unwrap();
+    // A dynamic `module[key]` read can reach any property.
+    std::fs::write(
+        dir.join("dynamic.pkl"),
+        "class C { key = \"limit\"; v = module[key] }\nlocal ok = new C {}.v\nlimit = 4\nout = ok\n",
+    )
+    .unwrap();
+    // A local function reads the module property when it is called.
+    std::fs::write(
+        dir.join("lambda.pkl"),
+        "local f = () -> limit\nlimit = 5\nout = f()\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"direct.pkl\"\nimport \"this_read.pkl\"\nimport \"dynamic.pkl\"\nimport \"lambda.pkl\"\ndirect = direct.out\nthisRead = this_read.out\ndynamic = dynamic.out\nlambda = lambda.out\n",
+    )
+    .unwrap();
+
+    for (file, expected) in [
+        ("direct.pkl", 2),
+        ("this_read.pkl", 3),
+        ("dynamic.pkl", 4),
+        ("lambda.pkl", 5),
+    ] {
+        let val = pklr::eval_to_json_async(&dir.join(file)).await.unwrap();
+        assert_eq!(val["out"], expected, "{file}");
+    }
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["direct"], 2);
+    assert_eq!(val["thisRead"], 3);
+    assert_eq!(val["dynamic"], 4);
+    assert_eq!(val["lambda"], 5);
+}
+
+#[tokio::test]
+async fn narrowed_import_follows_locals_with_module_aliases() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_local_aliases");
+    let dir = temp.path();
+    // `ok` is evaluated at module level, where `S` is a String whose check
+    // binds the string's own `length`, even though the body reading it
+    // redeclares `S`; the module's unused `length` must not be evaluated.
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "length = throw(\"unused\")\ntypealias S = String\nlocal ok = \"b\" is S(length == 1)\nresult {\n  typealias S = Int\n  v = ok\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\"\nout = dep.result.v\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["out"], true);
+}
+
+#[tokio::test]
 async fn narrowed_import_keeps_type_and_property_names_apart() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_type_property_names");
     let dir = temp.path();
