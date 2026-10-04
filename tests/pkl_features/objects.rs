@@ -1964,6 +1964,59 @@ obj { checked: Int(this < limit) = 1; when (true) { limit = 2 } }
 }
 
 #[test]
+fn deferred_local_keeps_alias_resolved_where_bound() {
+    // `x` was declared as the module's `Small`; the object's later `Small`
+    // does not change that, while `limit` is still read from the object.
+    let json = eval(
+        r#"
+typealias Small = Int(this < limit)
+limit = 5
+obj {
+  local x: Small = 3
+  typealias Small = Int(this < 2)
+  limit = 5
+  out = x
+}
+"#,
+    );
+    assert_eq!(json["obj"]["out"], 3);
+    let message = eval_fails(
+        r#"
+typealias Small = Int(this < limit)
+limit = 5
+obj {
+  local x: Small = 3
+  typealias Small = Int(this < 2)
+  limit = 2
+  out = x
+}
+"#,
+    );
+    assert!(message.contains("property 'x' expected Small"), "{message}");
+}
+
+#[test]
+fn object_property_constraint_reading_later_enclosing_member_is_unchecked() {
+    // `limit` is a member of the module bound after `obj`, so the check
+    // cannot be decided when `obj` is complete and is left unchecked.
+    let json = eval(
+        r#"
+obj { checked: Int(this < limit) = 1 }
+limit = 2
+"#,
+    );
+    assert_eq!(json["obj"]["checked"], 1);
+    // A violation that can be decided still fails.
+    let message = eval_fails(
+        r#"
+obj { checked: Int(this < 2) = 3 }
+limit = 2
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+}
+
+#[test]
 fn amendment_keeps_inherited_typed_local_lazy() {
     let json = eval(
         r#"

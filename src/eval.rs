@@ -3,6 +3,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use indexmap::IndexMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Path, PathBuf};
 
 use crate::capabilities::EvalCapabilities;
@@ -88,9 +89,6 @@ pub struct Evaluator {
     /// Used to deduplicate `@Deprecated` warnings so a deprecated property
     /// referenced inside a loop or template doesn't flood stderr.
     warned_deprecated: std::collections::HashSet<(String, Option<String>)>,
-    /// Typed properties produced by `for`/`when` bodies, waiting to be
-    /// checked once the enclosing object is complete.
-    generator_type_checks: Vec<PendingTypeCheck>,
     /// Number of poison-and-retry passes in progress (see `BodyOutcome`).
     /// Output with side effects, such as `trace`, is not repeated in them.
     retry_passes: usize,
@@ -100,18 +98,93 @@ pub struct Evaluator {
 /// iteration scope it was evaluated in, with the finished enclosing object's
 /// members layered over it, except names the iteration declares itself.
 struct PendingTypeCheck {
-    prop: Property,
+    /// The property's name and declared type.
+    name: String,
+    ty: crate::parser::TypeExpr,
     value: Value,
     /// The iteration scope, and the names in it whose binding is poisoned.
-    scope: CapturedScope,
-    poisoned: IndexMap<String, String>,
+    /// Saved only when the type has a constraint or names a type the
+    /// iteration declares; any other type resolves in the generator entry's
+    /// scope.
+    scope: Option<(CapturedScope, IndexMap<String, String>)>,
+    /// Whether the type has a constraint, which may read the object's
+    /// members: those are then resolved lexically first, then on the
+    /// finished object.
+    constrained: bool,
     /// Loop variables and the locals, classes and type aliases of the
     /// generator bodies around the property: these win over object members.
-    iteration_names: HashSet<String>,
+    iteration_names: FxHashSet<String>,
     /// The enclosing object's generator entry that produced it, set once
     /// that entry finishes.
     entry_index: Option<usize>,
 }
+
+/// What the deferred type checks of a finished object body read.
+struct FinishedBody<'a> {
+    entries: &'a [Entry],
+    child_scope: &'a Scope,
+    entry_scopes: Option<&'a [Option<Arc<CapturedScope>>]>,
+    entry_owners: &'a EntryOwners,
+    own_body_scope: Option<(&'a Scope, &'a HashSet<String>)>,
+    local_bindings: &'a FxHashMap<usize, std::result::Result<Value, String>>,
+    all_props: &'a IndexMap<String, Value>,
+}
+
+impl FinishedBody<'_> {
+    fn entry_scope(&self, entry_index: usize) -> Scope {
+        scope_for_object_entry(
+            entry_index,
+            self.child_scope,
+            self.entry_scopes,
+            self.entry_owners,
+            self.own_body_scope,
+        )
+    }
+
+    fn owner(&self, entry_index: usize) -> Option<*const CapturedScope> {
+        self.entry_scopes
+            .and_then(|scopes| scopes.get(entry_index))
+            .and_then(Option::as_ref)
+            .map(Arc::as_ptr)
+    }
+
+    fn hides_member(&self, entry_index: usize, name: &str) -> bool {
+        self.entry_owners
+            .hides_member(entry_index, self.entry_scopes, self.own_body_scope, name)
+    }
+
+    /// The locals of the body that wrote the entry at `entry_index`, with
+    /// their bindings.
+    fn own_bindings(
+        &self,
+        entry_index: usize,
+    ) -> Vec<(String, std::result::Result<Value, String>)> {
+        same_body_local_bindings(
+            self.entries,
+            entry_index,
+            &|index| self.owner(index),
+            self.local_bindings,
+        )
+    }
+
+    /// The scope a deferred check of the entry at `entry_index` runs in: its
+    /// entry scope, with the finished members it does not resolve lexically.
+    fn check_scope(&self, entry_index: usize) -> Scope {
+        let mut scope = self.entry_scope(entry_index).child();
+        layer_finished_members(
+            &mut scope,
+            self.all_props,
+            |name| self.hides_member(entry_index, name),
+            &self.own_bindings(entry_index),
+        );
+        scope
+    }
+}
+
+/// A typed local of an object body whose check waits for the finished body:
+/// the local, its entry index, and the type aliases its type resolved to
+/// where it was bound.
+type DeferredLocal<'a> = (&'a Property, usize, Vec<(String, crate::parser::TypeExpr)>);
 
 /// The result of checking a typed local.
 enum LocalCheck {
@@ -143,12 +216,12 @@ enum TypeChecks {
     /// None: a class body, whose defaults an instance checks when built.
     Nothing,
     /// The entries at these indices: the ones an amendment wrote itself.
-    Entries(Rc<HashSet<usize>>),
+    Entries(Rc<FxHashSet<usize>>),
     /// Every entry of a `for`/`when` body, handed to the enclosing object to
     /// check once that object is complete. Carries the names the iterations
     /// around it declare (loop variables, enclosing generator bodies'
     /// declarations).
-    Generator(Rc<HashSet<String>>),
+    Generator(Rc<FxHashSet<String>>),
 }
 
 impl TypeChecks {
@@ -163,16 +236,31 @@ impl TypeChecks {
     /// Checks for the body of the generator at `entry_index`. `names` are
     /// what this iteration declares around that body: its loop variables,
     /// plus, inside a generator body, that body's own declarations.
-    fn for_generator(&self, entry_index: usize, names: Vec<String>) -> TypeChecks {
-        if !self.includes(entry_index) {
+    ///
+    /// `body_typed` says whether the generator's body (or a generator nested
+    /// in it) has a typed entry; without one there is nothing to check, and
+    /// no per-iteration bookkeeping is built.
+    fn for_generator(
+        &self,
+        entry_index: usize,
+        body_typed: bool,
+        names: impl FnOnce() -> Vec<String>,
+    ) -> TypeChecks {
+        if !body_typed || !self.includes(entry_index) {
             return TypeChecks::Nothing;
         }
-        let mut all = match self {
-            TypeChecks::Generator(outer) => (**outer).clone(),
-            _ => HashSet::new(),
-        };
-        all.extend(names);
-        TypeChecks::Generator(Rc::new(all))
+        let names = names();
+        match self {
+            TypeChecks::Generator(outer) if names.is_empty() => {
+                TypeChecks::Generator(Rc::clone(outer))
+            }
+            TypeChecks::Generator(outer) => {
+                let mut all = (**outer).clone();
+                all.extend(names);
+                TypeChecks::Generator(Rc::new(all))
+            }
+            _ => TypeChecks::Generator(Rc::new(names.into_iter().collect())),
+        }
     }
 
     fn is_generator(&self) -> bool {
@@ -209,8 +297,8 @@ fn layer_finished_members(
     members: &IndexMap<String, Value>,
     lexical: impl Fn(&str) -> bool,
     own_bindings: &[(String, std::result::Result<Value, String>)],
-) -> HashSet<String> {
-    let mut layered = HashSet::new();
+) -> FxHashSet<String> {
+    let mut layered = FxHashSet::default();
     for (name, value) in members.iter() {
         if own_bindings.iter().any(|(own, _)| own == name) || lexical(name) {
             continue;
@@ -228,8 +316,185 @@ fn layer_finished_members(
     layered
 }
 
+/// What checking a value against `ty` in `scope` depends on: the type aliases
+/// it reaches (following alias chains), with their definitions there, and the
+/// names it can read, from its constraints and those of the aliases, plus the
+/// type names themselves (a class is a value in scope).
+fn type_check_dependencies(
+    ty: &crate::parser::TypeExpr,
+    scope: &Scope,
+) -> (Vec<(String, crate::parser::TypeExpr)>, FxHashSet<String>) {
+    fn visit_name(
+        name: &str,
+        scope: &Scope,
+        aliases: &mut Vec<(String, crate::parser::TypeExpr)>,
+        names: &mut FxHashSet<String>,
+    ) {
+        let name = name
+            .trim_start_matches('*')
+            .trim_end_matches('?')
+            .split('<')
+            .next()
+            .unwrap_or(name);
+        names.insert(name.to_string());
+        if let Some(root) = name.split('.').next() {
+            names.insert(root.to_string());
+        }
+        if aliases.iter().any(|(seen, _)| seen == name) {
+            return;
+        }
+        if let Some(alias) = scope.get_type_alias(name) {
+            aliases.push((name.to_string(), alias.clone()));
+            visit(alias, scope, aliases, names);
+        }
+    }
+    fn visit(
+        ty: &crate::parser::TypeExpr,
+        scope: &Scope,
+        aliases: &mut Vec<(String, crate::parser::TypeExpr)>,
+        names: &mut FxHashSet<String>,
+    ) {
+        use crate::parser::TypeExpr;
+        match ty {
+            TypeExpr::Named(name) => visit_name(name, scope, aliases, names),
+            TypeExpr::Constrained(base, constraint) => {
+                let mut refs = HashSet::new();
+                collect_expr_refs(constraint, &mut refs, &HashSet::new());
+                names.extend(refs);
+                visit_name(base, scope, aliases, names);
+            }
+            TypeExpr::Nullable(inner) => visit(inner, scope, aliases, names),
+            TypeExpr::Union(variants) => {
+                for variant in variants {
+                    visit(variant, scope, aliases, names);
+                }
+            }
+            TypeExpr::Generic(name, args) => {
+                visit_name(name, scope, aliases, names);
+                for arg in args {
+                    visit(arg, scope, aliases, names);
+                }
+            }
+        }
+    }
+    let mut aliases = Vec::new();
+    let mut names = FxHashSet::default();
+    visit(ty, scope, &mut aliases, &mut names);
+    (aliases, names)
+}
+
+/// The type aliases a typed local's declared type resolves to where it is
+/// bound. Its deferred check keeps these, so an alias of the same name
+/// declared later in the body does not change what the local was declared
+/// as.
+fn bound_aliases(prop: &Property, scope: &Scope) -> Vec<(String, crate::parser::TypeExpr)> {
+    prop.type_ann
+        .as_ref()
+        .map(|ty| type_check_dependencies(ty, scope).0)
+        .unwrap_or_default()
+}
+
+/// The part of `scope` a deferred check against `ty` needs, saved for later:
+/// the bindings of the names it can read (with failed ones), and the type
+/// aliases it reaches as `scope` resolves them. Much cheaper than capturing
+/// the whole scope.
+fn capture_for_type_check(
+    ty: &crate::parser::TypeExpr,
+    scope: &Scope,
+) -> (CapturedScope, IndexMap<String, String>) {
+    let (aliases, names) = type_check_dependencies(ty, scope);
+    let values = scope.flatten_names(names.iter().map(String::as_str));
+    let poisoned = names
+        .iter()
+        .filter(|name| scope.get(name).is_none())
+        .filter_map(|name| {
+            scope
+                .poison_of(name)
+                .map(|message| (name.clone(), message.clone()))
+        })
+        .collect();
+    let captured = CapturedScope {
+        values,
+        declared: NameSet::default(),
+        body_members: HashSet::new(),
+        module_identities: IndexMap::new(),
+        type_aliases: aliases.into_iter().collect(),
+        type_namespace: scope.type_namespace.clone(),
+    };
+    (captured, poisoned)
+}
+
+/// Whether a generator body, or a generator nested in it, has a typed entry.
+fn generator_body_has_typed_entries(entries: &[Entry]) -> bool {
+    entries.iter().any(|entry| match entry {
+        Entry::Property(prop) => prop.type_ann.is_some(),
+        Entry::ForGenerator(fgen) => generator_body_has_typed_entries(&fgen.body),
+        Entry::WhenGenerator(wgen) => {
+            generator_body_has_typed_entries(&wgen.body)
+                || wgen
+                    .else_body
+                    .as_ref()
+                    .is_some_and(|body| generator_body_has_typed_entries(body))
+        }
+        _ => false,
+    })
+}
+
+/// Whether a deferred check of a generator-produced property of type `ty`
+/// needs the iteration scope it was produced in: the type, its aliases or
+/// their constraints (when `constrained`) read a name the iteration declares
+/// (`iteration_names`). Any other type resolves the same from the enclosing
+/// object's generator entry.
+fn type_needs_iteration_scope(
+    ty: &crate::parser::TypeExpr,
+    scope: &Scope,
+    iteration_names: &FxHashSet<String>,
+    constrained: bool,
+) -> bool {
+    if iteration_names.is_empty() {
+        return false;
+    }
+    if !constrained {
+        // Without a constraint, only the type names themselves are read.
+        let mut names = FxHashSet::default();
+        type_expr_names(ty, &mut names);
+        return names.iter().any(|name| iteration_names.contains(name));
+    }
+    let (_, names) = type_check_dependencies(ty, scope);
+    names.iter().any(|name| iteration_names.contains(name))
+}
+
+/// Whether `ty`, or a type alias it names (following alias chains), has a
+/// constraint, which may read names.
+fn type_has_constraint(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
+    fn visit(ty: &crate::parser::TypeExpr, scope: &Scope, resolving: &mut Vec<String>) -> bool {
+        use crate::parser::TypeExpr;
+        match ty {
+            TypeExpr::Constrained(..) => true,
+            TypeExpr::Named(name) => {
+                let name = name.trim_start_matches('*').trim_end_matches('?');
+                let Some(alias) = scope.get_type_alias(name) else {
+                    return false;
+                };
+                if resolving.iter().any(|seen| seen == name) {
+                    return false;
+                }
+                resolving.push(name.to_string());
+                let found = visit(alias, scope, resolving);
+                resolving.pop();
+                found
+            }
+            TypeExpr::Nullable(inner) => visit(inner, scope, resolving),
+            TypeExpr::Union(variants) | TypeExpr::Generic(_, variants) => variants
+                .iter()
+                .any(|variant| visit(variant, scope, resolving)),
+        }
+    }
+    visit(ty, scope, &mut Vec::new())
+}
+
 /// The type names `ty` mentions (without `*`, `?` or type arguments).
-fn type_expr_names(ty: &crate::parser::TypeExpr, names: &mut HashSet<String>) {
+fn type_expr_names(ty: &crate::parser::TypeExpr, names: &mut FxHashSet<String>) {
     use crate::parser::TypeExpr;
     let base = |name: &str| {
         name.trim_start_matches('*')
@@ -270,7 +535,7 @@ fn names_later_alias(
     entries: &[Entry],
     entry_index: usize,
 ) -> bool {
-    let mut names = HashSet::new();
+    let mut names = FxHashSet::default();
     type_expr_names(ty, &mut names);
     names.iter().any(|name| {
         // Built-in types, aliases in scope and classes already resolve.
@@ -288,7 +553,7 @@ fn same_body_local_bindings(
     entries: &[Entry],
     entry_index: usize,
     owner: &impl Fn(usize) -> Option<*const CapturedScope>,
-    local_bindings: &HashMap<usize, std::result::Result<Value, String>>,
+    local_bindings: &FxHashMap<usize, std::result::Result<Value, String>>,
 ) -> Vec<(String, std::result::Result<Value, String>)> {
     let entry_owner = owner(entry_index);
     entries
@@ -308,8 +573,8 @@ fn same_body_local_bindings(
 
 /// The names of a body's members, including properties its `for`/`when`
 /// generators produce.
-fn body_member_names(entries: &[Entry]) -> HashSet<String> {
-    fn generated(entries: &[Entry], names: &mut HashSet<String>) {
+fn body_member_names(entries: &[Entry]) -> FxHashSet<String> {
+    fn generated(entries: &[Entry], names: &mut FxHashSet<String>) {
         for entry in entries {
             match entry {
                 Entry::ForGenerator(fgen) => collect(&fgen.body, names),
@@ -323,7 +588,7 @@ fn body_member_names(entries: &[Entry]) -> HashSet<String> {
             }
         }
     }
-    fn collect(entries: &[Entry], names: &mut HashSet<String>) {
+    fn collect(entries: &[Entry], names: &mut FxHashSet<String>) {
         for entry in entries {
             if let Entry::Property(prop) = entry
                 && !has_modifier(&prop.modifiers, Modifier::Local)
@@ -337,7 +602,7 @@ fn body_member_names(entries: &[Entry]) -> HashSet<String> {
         .iter()
         .filter_map(entry_member_name)
         .cloned()
-        .collect::<HashSet<_>>();
+        .collect::<FxHashSet<_>>();
     generated(entries, &mut names);
     names
 }
@@ -350,12 +615,12 @@ fn body_member_names(entries: &[Entry]) -> HashSet<String> {
 fn constraint_reads_members(
     ty: &crate::parser::TypeExpr,
     scope: &Scope,
-    members: &HashSet<String>,
+    members: &FxHashSet<String>,
 ) -> bool {
     fn visit(
         ty: &crate::parser::TypeExpr,
         scope: &Scope,
-        members: &HashSet<String>,
+        members: &FxHashSet<String>,
         resolving: &mut Vec<String>,
     ) -> bool {
         use crate::parser::TypeExpr;
@@ -588,7 +853,6 @@ impl Default for Evaluator {
             http_rewrites: Vec::new(),
             converters: Vec::new(),
             warned_deprecated: std::collections::HashSet::new(),
-            generator_type_checks: Vec::new(),
             retry_passes: 0,
         }
     }
@@ -844,7 +1108,6 @@ impl Evaluator {
             http_rewrites: Vec::new(),
             converters: Vec::new(),
             warned_deprecated: std::collections::HashSet::new(),
-            generator_type_checks: Vec::new(),
             retry_passes: 0,
         }
     }
@@ -1893,7 +2156,7 @@ impl Evaluator {
         // Typed locals that failed their check against the finished module
         // are poisoned in another pass, so only an actual read fails. Each
         // pass poisons at least one more local, so this terminates.
-        let mut poisoned_locals = HashMap::new();
+        let mut poisoned_locals = FxHashMap::default();
         loop {
             let retrying = !poisoned_locals.is_empty();
             if retrying {
@@ -1903,8 +2166,8 @@ impl Evaluator {
                 module,
                 path,
                 depth,
-                inherited_scope.clone(),
-                requested_fields.clone(),
+                inherited_scope.as_ref(),
+                requested_fields.as_ref(),
                 &poisoned_locals,
             );
             if retrying {
@@ -1922,9 +2185,9 @@ impl Evaluator {
         module: &Module,
         path: &Path,
         depth: usize,
-        inherited_scope: Option<Scope>,
-        requested_fields: Option<HashSet<String>>,
-        poisoned_locals: &HashMap<String, String>,
+        inherited_scope: Option<&Scope>,
+        requested_fields: Option<&HashSet<String>>,
+        poisoned_locals: &FxHashMap<String, String>,
     ) -> Result<BodyOutcome<Value>> {
         if depth > self.max_depth {
             return Err(Error::Eval(format!(
@@ -1959,9 +2222,8 @@ impl Evaluator {
                 scope.set_module_identity(key, identity);
             }
         }
-        let requested_output_fields = requested_fields
-            .as_ref()
-            .map(|fields| expand_requested_fields(&module.body, fields));
+        let requested_output_fields =
+            requested_fields.map(|fields| expand_requested_fields(&module.body, fields));
         let analysis_entries =
             analysis_entries_for_requested_fields(&module.body, requested_output_fields.as_ref());
         let mut referenced_imports = referenced_roots(&analysis_entries);
@@ -2443,26 +2705,16 @@ impl Evaluator {
         scope.set("this".into(), inherited_snapshot.clone());
         scope.set("module".into(), inherited_snapshot);
 
-        // Type aliases are declarative: register them all up front so typed
-        // locals can be checked against any of them when they are bound.
-        for entry in module.body.iter() {
-            if let Entry::TypeAlias(name, ty) = entry {
-                scope.set_type_alias(name.clone(), ty.clone());
-            }
-        }
-        // Typed locals whose constraint reads a module member are checked
-        // once the module is complete.
-        let mut module_members = body_member_names(&module.body);
-        module_members.extend(
-            late_inherited_properties
-                .iter()
-                .map(|prop| prop.name.clone()),
-        );
+        // Typed locals whose check waits for the module to be complete: their
+        // constraint reads a module member, or their type is an alias declared
+        // later (type aliases are registered in declaration order).
+        // Built only when the module has a typed local.
+        let mut module_members: Option<FxHashSet<String>> = None;
         let mut deferred_locals = Vec::new();
 
         // First pass: collect locals, class definitions, and type aliases in
         // declaration order so they can reference each other
-        for entry in module.body.iter() {
+        for (entry_index, entry) in module.body.iter().enumerate() {
             match entry {
                 Entry::Property(prop)
                     if has_modifier(&prop.modifiers, Modifier::Local) && prop.value.is_some() =>
@@ -2474,7 +2726,22 @@ impl Evaluator {
                     }
                     match self.eval_expr(prop.value.as_ref().unwrap(), &scope, depth) {
                         Ok(val) => match &prop.type_ann {
-                            Some(ty) if constraint_reads_members(ty, &scope, &module_members) => {
+                            Some(ty)
+                                if names_later_alias(ty, &scope, &module.body, entry_index)
+                                    || constraint_reads_members(
+                                        ty,
+                                        &scope,
+                                        module_members.get_or_insert_with(|| {
+                                            let mut members = body_member_names(&module.body);
+                                            members.extend(
+                                                late_inherited_properties
+                                                    .iter()
+                                                    .map(|prop| prop.name.clone()),
+                                            );
+                                            members
+                                        }),
+                                    ) =>
+                            {
                                 deferred_locals.push(prop);
                                 scope.declare(prop.name.clone(), val);
                             }
@@ -3053,12 +3320,39 @@ impl Evaluator {
         inherited_source: Option<&ObjectSource>,
         checks: TypeChecks,
     ) -> Result<Value> {
+        // An object body checks what its `for`/`when` bodies hand up itself,
+        // so nothing is left in this list when it returns.
+        let mut pending = Vec::new();
+        self.eval_entries_pending(
+            entries,
+            scope,
+            depth,
+            entry_scopes,
+            inherited_source,
+            checks,
+            &mut pending,
+        )
+    }
+
+    /// Evaluate a body, adding the checks a `for`/`when` body hands up to
+    /// its enclosing object to `pending`.
+    #[allow(clippy::too_many_arguments)]
+    fn eval_entries_pending(
+        &mut self,
+        entries: &Body,
+        scope: &Scope,
+        depth: usize,
+        entry_scopes: Option<&[Option<Arc<CapturedScope>>]>,
+        inherited_source: Option<&ObjectSource>,
+        checks: TypeChecks,
+        pending: &mut Vec<PendingTypeCheck>,
+    ) -> Result<Value> {
         // Typed locals that failed their check against the finished body are
         // poisoned in another pass, so only an actual read fails. Each pass
         // poisons at least one more local, so this terminates.
-        let mut poisoned_locals = HashMap::new();
+        let mut poisoned_locals = FxHashMap::default();
         loop {
-            let generator_mark = self.generator_type_checks.len();
+            let generator_mark = pending.len();
             let retrying = !poisoned_locals.is_empty();
             if retrying {
                 self.retry_passes += 1;
@@ -3071,6 +3365,7 @@ impl Evaluator {
                 inherited_source,
                 checks.clone(),
                 &poisoned_locals,
+                pending,
             );
             if retrying {
                 self.retry_passes -= 1;
@@ -3078,13 +3373,13 @@ impl Evaluator {
             match result {
                 Ok(BodyOutcome::Done(value)) => return Ok(value),
                 Ok(BodyOutcome::PoisonAndRetry(failures)) => {
-                    self.generator_type_checks.truncate(generator_mark);
+                    pending.truncate(generator_mark);
                     poisoned_locals.extend(failures);
                 }
                 Err(error) => {
                     // A caller may recover from the error (a failed local is
                     // poisoned); it must not inherit this body's pending checks.
-                    self.generator_type_checks.truncate(generator_mark);
+                    pending.truncate(generator_mark);
                     return Err(error);
                 }
             }
@@ -3100,40 +3395,42 @@ impl Evaluator {
         entry_scopes: Option<&[Option<Arc<CapturedScope>>]>,
         inherited_source: Option<&ObjectSource>,
         checks: TypeChecks,
-        poisoned_locals: &HashMap<String, String>,
+        poisoned_locals: &FxHashMap<String, String>,
+        pending: &mut Vec<PendingTypeCheck>,
     ) -> Result<BodyOutcome<Value>> {
-        let generator_mark = self.generator_type_checks.len();
+        let generator_mark = pending.len();
         // Typed locals whose constraint reads a member of this body, with
         // their entry index: checked once the body is complete.
-        let mut deferred_locals: Vec<(&Property, usize)> = Vec::new();
+        let mut deferred_locals: Vec<DeferredLocal> = Vec::new();
+        // Whether this body has anything to type-check: a typed entry, or a
+        // generator whose body may hold one. Bodies without (most of them)
+        // skip the bookkeeping below.
+        let tracks_types = entries.iter().any(|entry| match entry {
+            Entry::Property(prop) => prop.type_ann.is_some(),
+            Entry::ForGenerator(_) | Entry::WhenGenerator(_) => true,
+            _ => false,
+        });
         // Each local's binding (value or error) by entry index. The body's
         // scope can later rebind the name to a member of the same name, but
         // deferred checks resolve a body's own locals lexically.
-        let mut local_bindings: HashMap<usize, std::result::Result<Value, String>> = HashMap::new();
-        // Entries written in the same body share a captured scope (or none).
-        let entry_owner = |index: usize| {
-            entry_scopes
-                .and_then(|scopes| scopes.get(index))
-                .and_then(Option::as_ref)
-                .map(Arc::as_ptr)
-        };
-        let body_members = body_member_names(entries);
-        // What this body declares for itself rather than as object members:
-        // inside a generator body these belong to the iteration.
-        let declared_names = entries
-            .iter()
-            .filter_map(|entry| match entry {
-                Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {
-                    Some(prop.name.clone())
-                }
-                Entry::ClassDef(name, ..) | Entry::TypeAlias(name, _) => Some(name.clone()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        // A nested generator's iteration also owns this generator body's
-        // declarations; an object's own declarations are its members.
-        let generator_names = if checks.is_generator() {
-            declared_names.clone()
+        let mut local_bindings: FxHashMap<usize, std::result::Result<Value, String>> =
+            FxHashMap::default();
+        // The body's member names, built when a check first needs them.
+        let mut body_members: Option<FxHashSet<String>> = None;
+        // What a generator body declares for itself rather than as object
+        // members belongs to the iteration, and so does a nested generator's.
+        // An object's own declarations are its members.
+        let generator_names = if checks.is_generator() && tracks_types {
+            entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {
+                        Some(prop.name.clone())
+                    }
+                    Entry::ClassDef(name, ..) | Entry::TypeAlias(name, _) => Some(name.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
         } else {
             Vec::new()
         };
@@ -3266,51 +3563,31 @@ impl Evaluator {
                     // the reader of, and each instance re-evaluates and
                     // checks the class's locals.
                     let checked = prop.type_ann.is_some() && !matches!(checks, TypeChecks::Nothing);
-                    let evaluated = if let Some(message) =
-                        poisoned_locals.get(&prop.name).filter(|_| checked)
-                    {
-                        // Failed its check in an earlier pass.
-                        type_failed = true;
-                        Err(message.clone())
+                    let evaluated = if checked {
+                        let (evaluated, failed) = self.bind_typed_local(
+                            prop,
+                            entries,
+                            entry_index,
+                            &active_scope,
+                            depth,
+                            poisoned_locals,
+                            &mut body_members,
+                            &mut deferred_locals,
+                        )?;
+                        type_failed = failed;
+                        evaluated
                     } else {
                         match self.eval_expr(expr, &active_scope, depth) {
-                            Ok(val) if !checked => Ok(val),
-                            Ok(val)
-                                if prop.type_ann.as_ref().is_some_and(|ty| {
-                                    constraint_reads_members(ty, &active_scope, &body_members)
-                                        || names_later_alias(
-                                            ty,
-                                            &active_scope,
-                                            entries,
-                                            entry_index,
-                                        )
-                                }) =>
-                            {
-                                deferred_locals.push((prop, entry_index));
-                                Ok(val)
-                            }
-                            Ok(val) => {
-                                match self.typed_local_failure(prop, &val, &active_scope, depth)? {
-                                    LocalCheck::Failed(message) => {
-                                        // Re-binding it after the properties
-                                        // (below) would drop the poison.
-                                        type_failed = true;
-                                        Err(message)
-                                    }
-                                    LocalCheck::Passed => Ok(val),
-                                    LocalCheck::Unresolved => {
-                                        deferred_locals.push((prop, entry_index));
-                                        Ok(val)
-                                    }
-                                }
-                            }
+                            Ok(val) => Ok(val),
                             Err(Error::Eval(message)) => Err(message),
                             Err(error) => return Err(error),
                         }
                     };
                     // Release the entry scope before binding, as for properties.
                     drop(active_scope);
-                    local_bindings.insert(entry_index, evaluated.clone());
+                    if tracks_types {
+                        local_bindings.insert(entry_index, evaluated.clone());
+                    }
                     match evaluated {
                         Ok(val) => {
                             if binds_declared(&prop.name) {
@@ -3572,22 +3849,27 @@ impl Evaluator {
                     );
                     let collection = self.eval_expr(&fgen.collection, &active_scope, depth)?;
                     let items = collection_to_items(collection);
+                    let body_typed = generator_body_has_typed_entries(&fgen.body);
                     for (k, v) in items {
                         let mut iter_scope = active_scope.child();
-                        let mut iteration_names = generator_names.clone();
-                        iteration_names.push(fgen.val_var.clone());
                         iter_scope.set(fgen.val_var.clone(), v);
                         if let Some(key_var) = &fgen.key_var {
-                            iteration_names.push(key_var.clone());
                             iter_scope.set(key_var.clone(), k);
                         }
-                        let body_val = self.eval_entries_with_lexical_scopes(
+                        let body_checks = checks.for_generator(entry_index, body_typed, || {
+                            let mut names = generator_names.clone();
+                            names.push(fgen.val_var.clone());
+                            names.extend(fgen.key_var.iter().cloned());
+                            names
+                        });
+                        let body_val = self.eval_entries_pending(
                             &fgen.body,
                             &iter_scope,
                             depth,
                             None,
                             None,
-                            checks.for_generator(entry_index, iteration_names),
+                            body_checks,
+                            pending,
                         )?;
                         if let Value::Object(m, _) = body_val {
                             entry_owners.release_this(&this_aliases);
@@ -3612,13 +3894,18 @@ impl Evaluator {
                     );
                     let cond = self.eval_expr(&wgen.condition, &active_scope, depth)?;
                     if is_truthy(&cond) {
-                        let body_val = self.eval_entries_with_lexical_scopes(
+                        let body_val = self.eval_entries_pending(
                             &wgen.body,
                             &active_scope,
                             depth,
                             None,
                             None,
-                            checks.for_generator(entry_index, generator_names.clone()),
+                            checks.for_generator(
+                                entry_index,
+                                generator_body_has_typed_entries(&wgen.body),
+                                || generator_names.clone(),
+                            ),
+                            pending,
                         )?;
                         if let Value::Object(m, _) = body_val {
                             entry_owners.release_this(&this_aliases);
@@ -3632,13 +3919,18 @@ impl Evaluator {
                             refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                         }
                     } else if let Some(else_body) = &wgen.else_body {
-                        let else_val = self.eval_entries_with_lexical_scopes(
+                        let else_val = self.eval_entries_pending(
                             else_body,
                             &active_scope,
                             depth,
                             None,
                             None,
-                            checks.for_generator(entry_index, generator_names.clone()),
+                            checks.for_generator(
+                                entry_index,
+                                generator_body_has_typed_entries(else_body),
+                                || generator_names.clone(),
+                            ),
+                            pending,
                         )?;
                         if let Value::Object(m, _) = else_val {
                             entry_owners.release_this(&this_aliases);
@@ -3659,43 +3951,28 @@ impl Evaluator {
             // Checks a generator entry handed up resolve names the way that
             // entry does.
             if !checks.is_generator() {
-                for pending in &mut self.generator_type_checks[generator_mark..] {
-                    pending.entry_index.get_or_insert(entry_index);
+                for check in &mut pending[generator_mark..] {
+                    check.entry_index.get_or_insert(entry_index);
                 }
             }
         }
         // Check typed locals whose constraint reads members of this body
         // against the finished body. One that fails is poisoned in another
         // pass, so only an actual read fails.
-        let mut failed_locals = Vec::new();
-        for (prop, entry_index) in deferred_locals {
-            let Some(Ok(value)) = local_bindings.get(&entry_index).cloned() else {
-                continue;
-            };
-            let mut check_scope = scope_for_object_entry(
-                entry_index,
-                &child_scope,
+        if !deferred_locals.is_empty() {
+            let body = FinishedBody {
+                entries,
+                child_scope: &child_scope,
                 entry_scopes,
-                &entry_owners,
+                entry_owners: &entry_owners,
                 own_body_scope,
-            )
-            .child();
-            let own_bindings =
-                same_body_local_bindings(entries, entry_index, &entry_owner, &local_bindings);
-            layer_finished_members(
-                &mut check_scope,
-                &all_props,
-                |name| entry_owners.hides_member(entry_index, entry_scopes, own_body_scope, name),
-                &own_bindings,
-            );
-            if let LocalCheck::Failed(message) =
-                self.typed_local_failure(prop, &value, &check_scope, depth)?
-            {
-                failed_locals.push((prop.name.clone(), message));
+                local_bindings: &local_bindings,
+                all_props: &all_props,
+            };
+            let failed_locals = self.settle_deferred_locals(&body, deferred_locals, depth)?;
+            if !failed_locals.is_empty() {
+                return Ok(BodyOutcome::PoisonAndRetry(failed_locals));
             }
-        }
-        if !failed_locals.is_empty() {
-            return Ok(BodyOutcome::PoisonAndRetry(failed_locals));
         }
         // Evaluate deferred local lambdas (function definitions) AFTER all
         // properties so they capture overridden values (late binding).
@@ -3715,136 +3992,27 @@ impl Evaluator {
         // Check declared types once every member is bound, so a constraint
         // can read members declared after the property it checks. Each entry
         // is checked in the scope it was evaluated in, so an amendment's
-        // constraints see the amendment's own locals and type aliases.
-        // Typed locals were checked when bound (above).
-        //
-        // A `for`/`when` body hands its checks to the enclosing object, which
-        // runs them once complete, so constraints can read its later members.
-        // They keep the iteration scope, and the names the iteration declares
-        // itself (loop variables, generator-body locals, classes and type
-        // aliases) keep winning over the object's members.
-        let iteration_names = match &checks {
-            TypeChecks::Generator(outer_names) => {
-                let mut names = (**outer_names).clone();
-                names.extend(declared_names.iter().cloned());
-                Some(names)
-            }
-            _ => None,
-        };
-        for (entry_index, entry) in entries.iter().enumerate() {
-            let Entry::Property(prop) = entry else {
-                continue;
-            };
-            if prop.value.is_none()
-                || prop.type_ann.is_none()
-                || has_modifier(&prop.modifiers, Modifier::Local)
-                || !checks.includes(entry_index)
-            {
-                continue;
-            }
-            let Some(value) = all_props.get(&prop.name).cloned() else {
-                continue;
-            };
-            let active_scope = scope_for_object_entry(
-                entry_index,
-                &child_scope,
+        // constraints see the amendment's own locals and type aliases. A body
+        // without a typed entry or generator has nothing to check.
+        if tracks_types {
+            let body = FinishedBody {
+                entries,
+                child_scope: &child_scope,
                 entry_scopes,
-                &entry_owners,
+                entry_owners: &entry_owners,
                 own_body_scope,
-            );
-            if let Some(names) = &iteration_names {
-                self.generator_type_checks.push(PendingTypeCheck {
-                    prop: prop.clone(),
-                    value,
-                    scope: capture_scope(&active_scope),
-                    poisoned: active_scope.flatten_poisoned(),
-                    iteration_names: names.clone(),
-                    entry_index: None,
-                });
-                continue;
-            }
-            // A constraint reading members resolves them as Pkl does:
-            // lexically first, otherwise the finished object's member, which
-            // may be one a generator produced (not bound by name in the
-            // body's scope) or replaced.
-            let reads_members = prop
-                .type_ann
-                .as_ref()
-                .is_some_and(|ty| constraint_reads_members(ty, &active_scope, &body_members));
-            let mut check_scope = active_scope.child();
-            if reads_members {
-                let own_bindings =
-                    same_body_local_bindings(entries, entry_index, &entry_owner, &local_bindings);
-                layer_finished_members(
-                    &mut check_scope,
-                    &all_props,
-                    |name| {
-                        entry_owners.hides_member(entry_index, entry_scopes, own_body_scope, name)
-                    },
-                    &own_bindings,
-                );
-            }
-            self.check_declared_property_type(prop, &value, &check_scope, depth)?;
-        }
-        // Check what this object's `for`/`when` bodies produced, unless this
-        // is itself such a body, whose enclosing object does that. Each check
-        // runs in its iteration scope with this object's finished members
-        // layered over it, so they replace outer bindings of the same name,
-        // except names the iteration declares itself. Failed bindings of the
-        // iteration stay failed.
-        if !checks.is_generator() {
-            let pending = self.generator_type_checks.split_off(generator_mark);
-            for check in pending {
-                // The iteration's own declarations are lexical and already
-                // bound in its saved scope; the locals of the body holding
-                // the generator are lexical too. Other members resolve as
-                // the generator entry resolves them.
-                let own_bindings = check
-                    .entry_index
-                    .map(|entry_index| {
-                        same_body_local_bindings(
-                            entries,
-                            entry_index,
-                            &entry_owner,
-                            &local_bindings,
-                        )
-                    })
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter(|(name, _)| !check.iteration_names.contains(name))
-                    .collect::<Vec<_>>();
-                let mut check_scope = restore_scope(&check.scope).child();
-                let layered = layer_finished_members(
-                    &mut check_scope,
-                    &all_props,
-                    |name| {
-                        check.iteration_names.contains(name)
-                            || check.entry_index.is_some_and(|entry_index| {
-                                entry_owners.hides_member(
-                                    entry_index,
-                                    entry_scopes,
-                                    own_body_scope,
-                                    name,
-                                )
-                            })
-                    },
-                    &own_bindings,
-                );
-                // Failed bindings of the saved scope stay failed.
-                for (name, message) in check.poisoned {
-                    if !layered.contains(&name) {
-                        check_scope.poison(name, message);
-                    }
-                }
-                // Check the member's final value: a later entry (such as an
-                // instance's override of a class default) may have replaced
-                // the value the generator produced.
-                let value = all_props
-                    .get(&check.prop.name)
-                    .cloned()
-                    .unwrap_or(check.value);
-                self.check_declared_property_type(&check.prop, &value, &check_scope, depth)?;
-            }
+                local_bindings: &local_bindings,
+                all_props: &all_props,
+            };
+            self.check_finished_body(
+                &body,
+                &checks,
+                pending,
+                generator_mark,
+                &generator_names,
+                &mut body_members,
+                depth,
+            )?;
         }
         let mut source_scope = child_scope.flatten();
         for name in &unused_this_aliases {
@@ -4129,6 +4297,44 @@ impl Evaluator {
         }
     }
 
+    /// `check_declared_property_type` for a property of an object body,
+    /// checked when the object is complete. A constraint that reads a name
+    /// still unbound then (a member of an enclosing body bound later) cannot
+    /// be decided by this eager evaluator and is left unchecked, as for typed
+    /// locals; a violation, or any other error, still fails.
+    fn check_object_property_type(
+        &mut self,
+        prop: &Property,
+        value: &Value,
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<()> {
+        if prop.value.is_none() {
+            return Ok(());
+        }
+        let Some(ty) = &prop.type_ann else {
+            return Ok(());
+        };
+        self.check_object_member_type(&prop.name, ty, value, scope, depth)
+    }
+
+    /// `check_object_property_type` for a member with declared type `ty`.
+    fn check_object_member_type(
+        &mut self,
+        name: &str,
+        ty: &crate::parser::TypeExpr,
+        value: &Value,
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<()> {
+        match self.type_mismatch(name, ty, value, scope, depth) {
+            Ok(Some(message)) => Err(Error::Eval(message)),
+            Ok(None) => Ok(()),
+            Err(Error::Eval(message)) if message.starts_with("undefined variable: ") => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     /// The error message when `value` does not match the type `prop`
     /// declares, or `None` when it matches or nothing is checked. An error
     /// evaluating a constraint is returned as is.
@@ -4145,13 +4351,27 @@ impl Evaluator {
         let Some(type_ann) = &prop.type_ann else {
             return Ok(None);
         };
-        if type_is_runtime_checkable(type_ann, scope)
-            && !self.eval_type_check(value, type_ann, scope, depth + 1)?
+        self.type_mismatch(&prop.name, type_ann, value, scope, depth)
+    }
+
+    /// The error message when the value of member `name` does not match its
+    /// declared type `ty`, or `None` when it matches or the type is not
+    /// checked at runtime.
+    fn type_mismatch(
+        &mut self,
+        name: &str,
+        ty: &crate::parser::TypeExpr,
+        value: &Value,
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<Option<String>> {
+        if type_is_runtime_checkable(ty, scope)
+            && !self.eval_type_check(value, ty, scope, depth + 1)?
         {
             return Ok(Some(format!(
                 "property '{}' expected {}, got {}",
-                prop.name,
-                display_type_expr(type_ann),
+                name,
+                display_type_expr(ty),
                 value_type_name(value)
             )));
         }
@@ -4164,6 +4384,227 @@ impl Evaluator {
     /// fails, through functions and constraints alike, and an unread local
     /// never does.
     ///
+    /// Evaluate a typed local of an object body and check it, returning its
+    /// binding (a value, or the error a read fails with) and whether it
+    /// failed its type check. A check that needs the finished body (its
+    /// constraint reads a member, or its type is an alias declared later) is
+    /// added to `deferred_locals` instead. Kept out of `eval_body_entries`,
+    /// whose hot loop most bodies run without a typed local.
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn bind_typed_local<'a>(
+        &mut self,
+        prop: &'a Property,
+        entries: &[Entry],
+        entry_index: usize,
+        scope: &Scope,
+        depth: usize,
+        poisoned_locals: &FxHashMap<String, String>,
+        body_members: &mut Option<FxHashSet<String>>,
+        deferred_locals: &mut Vec<DeferredLocal<'a>>,
+    ) -> Result<(std::result::Result<Value, String>, bool)> {
+        if let Some(message) = poisoned_locals.get(&prop.name) {
+            // Failed its check in an earlier pass.
+            return Ok((Err(message.clone()), true));
+        }
+        let Some(expr) = &prop.value else {
+            return Ok((Ok(Value::Null), false));
+        };
+        let val = match self.eval_expr(expr, scope, depth) {
+            Ok(val) => val,
+            Err(Error::Eval(message)) => return Ok((Err(message), false)),
+            Err(error) => return Err(error),
+        };
+        let Some(ty) = &prop.type_ann else {
+            return Ok((Ok(val), false));
+        };
+        let members = body_members.get_or_insert_with(|| body_member_names(entries));
+        if constraint_reads_members(ty, scope, members)
+            || names_later_alias(ty, scope, entries, entry_index)
+        {
+            deferred_locals.push((prop, entry_index, bound_aliases(prop, scope)));
+            return Ok((Ok(val), false));
+        }
+        Ok(match self.typed_local_failure(prop, &val, scope, depth)? {
+            // Re-binding it after the properties would drop the poison, so
+            // the caller is told it failed.
+            LocalCheck::Failed(message) => (Err(message), true),
+            LocalCheck::Passed => (Ok(val), false),
+            LocalCheck::Unresolved => {
+                deferred_locals.push((prop, entry_index, bound_aliases(prop, scope)));
+                (Ok(val), false)
+            }
+        })
+    }
+
+    /// Check the typed locals whose check waited for the finished body.
+    /// Returns those that fail (name, error), to poison in another pass.
+    #[inline(never)]
+    fn settle_deferred_locals(
+        &mut self,
+        body: &FinishedBody,
+        deferred_locals: Vec<DeferredLocal>,
+        depth: usize,
+    ) -> Result<Vec<(String, String)>> {
+        let mut failed_locals = Vec::new();
+        for (prop, entry_index, aliases) in deferred_locals {
+            let Some(Ok(value)) = body.local_bindings.get(&entry_index).cloned() else {
+                continue;
+            };
+            let mut check_scope = body.check_scope(entry_index);
+            // The local keeps the aliases it was declared with; only member
+            // values come from the finished body.
+            for (name, ty) in aliases {
+                check_scope.set_type_alias(name, ty);
+            }
+            if let LocalCheck::Failed(message) =
+                self.typed_local_failure(prop, &value, &check_scope, depth)?
+            {
+                failed_locals.push((prop.name.clone(), message));
+            }
+        }
+        Ok(failed_locals)
+    }
+
+    /// Check the declared types of a finished object body's properties, and
+    /// of those its `for`/`when` bodies handed up (`pending` from
+    /// `generator_mark` on). In a `for`/`when` body itself (`checks` is
+    /// `Generator`), its checks are handed up to the enclosing object instead.
+    ///
+    /// A constraint resolves the names it reads as Pkl does: lexically first,
+    /// otherwise on the finished object, whose member may be one a generator
+    /// produced (not bound by name in the body's scope) or replaced.
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn check_finished_body(
+        &mut self,
+        body: &FinishedBody,
+        checks: &TypeChecks,
+        pending: &mut Vec<PendingTypeCheck>,
+        generator_mark: usize,
+        generator_names: &[String],
+        body_members: &mut Option<FxHashSet<String>>,
+        depth: usize,
+    ) -> Result<()> {
+        // Built when a generator body first has a check to hand up.
+        let mut iteration_names: Option<FxHashSet<String>> = None;
+        for (entry_index, entry) in body.entries.iter().enumerate() {
+            let Entry::Property(prop) = entry else {
+                continue;
+            };
+            // Typed locals were checked when bound.
+            let Some(ty) = &prop.type_ann else {
+                continue;
+            };
+            if prop.value.is_none()
+                || has_modifier(&prop.modifiers, Modifier::Local)
+                || !checks.includes(entry_index)
+            {
+                continue;
+            }
+            let Some(value) = body.all_props.get(&prop.name).cloned() else {
+                continue;
+            };
+            let active_scope = body.entry_scope(entry_index);
+            if let TypeChecks::Generator(outer_names) = checks {
+                let names = iteration_names.get_or_insert_with(|| {
+                    let mut names = (**outer_names).clone();
+                    names.extend(generator_names.iter().cloned());
+                    names
+                });
+                // Only a type that reads a name the iteration declares (a
+                // loop variable, or a generator body's local, class or type
+                // alias) needs the iteration scope; any other type resolves
+                // the same from the enclosing object's entry.
+                let constrained = type_has_constraint(ty, &active_scope);
+                let saved_scope = type_needs_iteration_scope(ty, &active_scope, names, constrained)
+                    .then(|| capture_for_type_check(ty, &active_scope));
+                let iteration_names = if saved_scope.is_some() {
+                    names.clone()
+                } else {
+                    FxHashSet::default()
+                };
+                pending.push(PendingTypeCheck {
+                    name: prop.name.clone(),
+                    ty: ty.clone(),
+                    value,
+                    scope: saved_scope,
+                    constrained,
+                    iteration_names,
+                    entry_index: None,
+                });
+                continue;
+            }
+            let members = body_members.get_or_insert_with(|| body_member_names(body.entries));
+            if constraint_reads_members(ty, &active_scope, members) {
+                drop(active_scope);
+                let check_scope = body.check_scope(entry_index);
+                self.check_object_property_type(prop, &value, &check_scope, depth)?;
+            } else {
+                self.check_object_property_type(prop, &value, &active_scope, depth)?;
+            }
+        }
+        if checks.is_generator() {
+            return Ok(());
+        }
+        // Check what this object's `for`/`when` bodies produced, in their
+        // iteration scope with this object's finished members layered over
+        // it, except names the iteration declares itself. Failed bindings of
+        // the iteration stay failed.
+        for check in pending.split_off(generator_mark) {
+            // Final value: a later entry (such as an instance's override of a
+            // class default) may have replaced the generator's.
+            let value = body
+                .all_props
+                .get(&check.name)
+                .cloned()
+                .unwrap_or_else(|| check.value.clone());
+            let Some((saved_scope, saved_poisoned)) = &check.scope else {
+                // The type reads nothing the iteration declares, so it
+                // resolves the same from the generator entry, with the
+                // finished members layered as for a direct property when it
+                // has a constraint.
+                let check_scope = match check.entry_index {
+                    Some(entry_index) if check.constrained => body.check_scope(entry_index),
+                    Some(entry_index) => body.entry_scope(entry_index),
+                    None => body.child_scope.clone(),
+                };
+                self.check_object_member_type(&check.name, &check.ty, &value, &check_scope, depth)?;
+                continue;
+            };
+            // The iteration's own declarations are lexical and already bound
+            // in its saved scope; the locals of the body holding the generator
+            // are lexical too. Other members resolve as the generator entry
+            // resolves them.
+            let own_bindings = check
+                .entry_index
+                .map(|entry_index| body.own_bindings(entry_index))
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|(name, _)| !check.iteration_names.contains(name))
+                .collect::<Vec<_>>();
+            let mut check_scope = restore_scope(saved_scope).child();
+            let layered = layer_finished_members(
+                &mut check_scope,
+                body.all_props,
+                |name| {
+                    check.iteration_names.contains(name)
+                        || check
+                            .entry_index
+                            .is_some_and(|entry_index| body.hides_member(entry_index, name))
+                },
+                &own_bindings,
+            );
+            for (name, message) in saved_poisoned {
+                if !layered.contains(name) {
+                    check_scope.poison(name.clone(), message.clone());
+                }
+            }
+            self.check_object_member_type(&check.name, &check.ty, &value, &check_scope, depth)?;
+        }
+        Ok(())
+    }
+
     /// A constraint that reads a poisoned binding fails with that binding's
     /// error. One that reads a name not bound yet is `Unresolved`.
     fn typed_local_failure(
@@ -4333,7 +4774,7 @@ impl Evaluator {
         // its generators, whose bodies may declare some). The base's entries
         // were checked where they were written, or are class defaults, which
         // the post-build check below covers.
-        let mut overlay_checked = HashSet::new();
+        let mut overlay_checked = FxHashSet::default();
         for (entry_index, entry) in base_entries.iter().enumerate() {
             let inherited_entry_scope = base_source
                 .entry_scopes

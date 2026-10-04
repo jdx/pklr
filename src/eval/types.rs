@@ -410,16 +410,9 @@ fn type_is_runtime_checkable_inner(
     match ty {
         TypeExpr::Named(name) => {
             let runtime_name = name.strip_prefix('*').unwrap_or(name);
-            if let Some(alias) = scope.get_type_alias(runtime_name) {
-                if resolving.iter().any(|seen| seen == runtime_name) {
-                    return false;
-                }
-                resolving.push(runtime_name.to_string());
-                let checkable = type_is_runtime_checkable_inner(alias, scope, resolving);
-                resolving.pop();
-                return checkable;
-            }
-            string_literal_type_value(name).is_some()
+            // Built-in types (by far the most common) are decided without
+            // walking the scope chain for an alias.
+            if string_literal_type_value(name).is_some()
                 || matches!(
                     runtime_name,
                     "Null"
@@ -439,7 +432,19 @@ fn type_is_runtime_checkable_inner(
                         | "Function"
                         | "Any"
                 )
-                || resolve_dotted(scope, runtime_name).is_some()
+            {
+                return true;
+            }
+            if let Some(alias) = scope.get_type_alias(runtime_name) {
+                if resolving.iter().any(|seen| seen == runtime_name) {
+                    return false;
+                }
+                resolving.push(runtime_name.to_string());
+                let checkable = type_is_runtime_checkable_inner(alias, scope, resolving);
+                resolving.pop();
+                return checkable;
+            }
+            resolve_dotted(scope, runtime_name).is_some()
         }
         TypeExpr::Nullable(inner) => type_is_runtime_checkable_inner(inner, scope, resolving),
         TypeExpr::Union(variants) => variants

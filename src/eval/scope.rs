@@ -305,26 +305,6 @@ impl Scope {
         self.parent.as_ref()?.flattened(name)
     }
 
-    /// Names whose innermost binding is poisoned, with the error a read
-    /// fails with. `flatten` leaves these out of its values only when no
-    /// outer frame binds the name, so a restored scope needs them reapplied.
-    pub(super) fn flatten_poisoned(&self) -> IndexMap<String, String> {
-        let mut result = self
-            .parent
-            .as_ref()
-            .map(|p| p.flatten_poisoned())
-            .unwrap_or_default();
-        for name in self.vars.keys() {
-            result.shift_remove(&**name);
-        }
-        result.extend(
-            self.poisoned
-                .iter()
-                .map(|(k, message)| (k.to_string(), message.clone())),
-        );
-        result
-    }
-
     pub(super) fn flatten_type_aliases(&self) -> IndexMap<String, crate::parser::TypeExpr> {
         let mut result = self
             .parent
