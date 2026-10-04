@@ -2103,6 +2103,14 @@ impl Evaluator {
                     }
                     Entry::ClassDef(name, class_mods, parent, body) => {
                         class_names.insert(name.clone());
+                        // Reject invalid inheritance eagerly using the same
+                        // structural validation as `eval_class_def`. Other
+                        // evaluation errors can depend on members declared
+                        // later in the module and remain retryable.
+                        if let Some(parent_name) = parent.as_deref() {
+                            let parent_val = resolve_dotted(&scope, parent_name);
+                            check_supertype(&scope, name, parent_name, parent_val.as_ref())?;
+                        }
                         match self.eval_class_def(
                             name,
                             class_mods,
@@ -2125,18 +2133,6 @@ impl Evaluator {
                                 scope.set("module", snapshot);
                             }
                             Err(Error::Eval(message)) => {
-                                // These are declaration errors, not deferred
-                                // reads through a still-incomplete module.
-                                // Preserve current-main's eager rejection of
-                                // invalid inheritance while allowing class
-                                // bodies that depend on later members to retry.
-                                if message.contains("Cannot extend non-open class")
-                                    || message.contains("cannot extend itself")
-                                    || message.contains("Cannot extend external class")
-                                    || message.contains("is not a valid supertype")
-                                {
-                                    return Err(Error::Eval(message));
-                                }
                                 scope.set_member_poison(name, Some(message.clone()));
                                 scope.declare_poisoned(name.clone(), message.clone());
                                 failed.insert(name, message);
