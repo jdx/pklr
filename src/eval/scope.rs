@@ -572,11 +572,15 @@ fn update_object_bindings(
                 Rc::make_mut(&mut scope.declared).insert(name.clone());
             }
         } else if !scope.vars.contains_key(&**name) && lexical.is_declared(name) {
+            // `lexical` is fixed for this cache entry and `owned` for its key,
+            // so a hidden name stays hidden for the life of the cache.
             hidden.insert(name.clone());
             continue;
         }
         Rc::make_mut(&mut scope.vars).insert(name.clone(), value.clone());
     }
+    // Rebuilt whenever either side has poisoned names, so names no longer
+    // poisoned on the object are dropped from the scope.
     if !object.poisoned.is_empty() || !scope.poisoned.is_empty() {
         let mut poisoned = FxIndexMap::default();
         for (name, message) in object.poisoned.iter() {
