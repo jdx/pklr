@@ -491,11 +491,43 @@ fn bound_aliases(prop: &Property, scope: &Scope) -> Vec<(String, crate::parser::
 /// the bindings of the names it can read (with failed ones), and the type
 /// aliases it reaches as `scope` resolves them. Much cheaper than capturing
 /// the whole scope.
+///
+/// A name bound to a function (`local helper = (x) -> x < y`) also needs
+/// what the function's body reads, transitively: the check may bind the
+/// function again in the saved scope (`rebind_local_functions`), where only
+/// saved names resolve.
 fn capture_for_type_check(
     ty: &crate::parser::TypeExpr,
     scope: &Scope,
 ) -> (CapturedScope, IndexMap<String, String>) {
-    let (aliases, names) = type_check_dependencies(ty, scope);
+    let (mut aliases, mut names) = type_check_dependencies(ty, scope);
+    let mut pending = names.iter().cloned().collect::<Vec<_>>();
+    while let Some(name) = pending.pop() {
+        let Some(Value::Lambda(params, body, _)) = scope.get(&name) else {
+            continue;
+        };
+        let mut reads = HashSet::new();
+        collect_expr_refs(body, &mut reads, &params.iter().cloned().collect());
+        for read in reads {
+            if names.contains(&read) {
+                continue;
+            }
+            // A type the body names (`x is Small`) brings its own closure.
+            if scope.get_type_alias(&read).is_some() {
+                let (more_aliases, more_names) =
+                    type_check_dependencies(&crate::parser::TypeExpr::Named(read.clone()), scope);
+                aliases.extend(more_aliases);
+                for more in more_names {
+                    if names.insert(more.clone()) {
+                        pending.push(more);
+                    }
+                }
+            }
+            if names.insert(read.clone()) {
+                pending.push(read);
+            }
+        }
+    }
     let values = scope.flatten_names(names.iter().map(String::as_str));
     let poisoned = names
         .iter()
@@ -5141,7 +5173,20 @@ impl Evaluator {
         // the iteration stay failed. A typed local of such a body that fails
         // is returned, to poison in another pass.
         let mut failed_locals = Vec::new();
-        for check in pending.split_off(generator_mark) {
+        let checks = pending.split_off(generator_mark);
+        // A property that a later iteration (or generator) wrote again is
+        // superseded: its value is not the object's, so only the last write's
+        // check applies, in that write's scope.
+        let mut written_later: FxHashSet<&str> = FxHashSet::default();
+        let superseded = checks
+            .iter()
+            .rev()
+            .map(|check| check.local.is_none() && !written_later.insert(check.name.as_str()))
+            .collect::<Vec<_>>();
+        for (check, superseded) in checks.into_iter().zip(superseded.into_iter().rev()) {
+            if superseded {
+                continue;
+            }
             // Final value: a later entry (such as an instance's override of a
             // class default) may have replaced the generator's. A local's
             // value is its own.
@@ -5198,38 +5243,31 @@ impl Evaluator {
             if let Some(entries) = &check.body {
                 self.rebind_local_functions(entries, &mut check_scope, depth)?;
             }
-            match check.local {
-                Some(key) => {
-                    let failure = match self.type_mismatch(
-                        &check.name,
-                        &check.ty,
-                        &value,
-                        &check_scope,
-                        depth,
-                    ) {
-                        Ok(failure) => failure,
-                        // A name still unbound cannot be decided.
-                        Err(Error::Eval(message))
-                            if message.starts_with("undefined variable: ") =>
-                        {
-                            None
-                        }
-                        // A constraint reading a failed binding fails.
-                        Err(Error::Eval(message)) => Some(message),
-                        Err(error) => return Err(error),
-                    };
-                    if let Some(message) = failure {
-                        failed_locals.push((key, message));
+            let failure =
+                match self.type_mismatch(&check.name, &check.ty, &value, &check_scope, depth) {
+                    Ok(failure) => failure,
+                    // Only a name unbound in the finished body, too, cannot
+                    // be decided. One the iteration or the body binds but
+                    // the saved scope lacks must not let the value pass.
+                    Err(Error::Eval(message))
+                        if message
+                            .strip_prefix("undefined variable: ")
+                            .is_some_and(|name| {
+                                !check.iteration_names.contains(name)
+                                    && body.child_scope.get(name).is_none()
+                                    && !body.all_props.contains_key(name)
+                            }) =>
+                    {
+                        None
                     }
-                }
-                None => {
-                    self.check_object_member_type(
-                        &check.name,
-                        &check.ty,
-                        &value,
-                        &check_scope,
-                        depth,
-                    )?;
+                    // A constraint reading a failed binding fails.
+                    Err(Error::Eval(message)) => Some(message),
+                    Err(error) => return Err(error),
+                };
+            if let Some(message) = failure {
+                match check.local {
+                    Some(key) => failed_locals.push((key, message)),
+                    None => return Err(Error::Eval(message)),
                 }
             }
         }

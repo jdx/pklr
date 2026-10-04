@@ -5112,3 +5112,64 @@ fn generator_property_constrained_generic_alias_reads_later_member() {
         assert_eq!(json["obj"]["p"], serde_json::json!([1]), "{alias}");
     }
 }
+
+#[test]
+fn generator_check_saves_what_a_local_function_reads() {
+    // The saved iteration scope must hold `y`, which `helper` reads, or the
+    // re-bound helper cannot evaluate and the value would pass unchecked.
+    let err = eval_fails(
+        "obj { when (true) { local y = 2; local helper = (x) -> x < y; checked: Int(helper(this)) = 3 } }",
+    );
+    assert!(err.contains("property 'checked'"), "{err}");
+    let json = eval(
+        "obj { when (true) { local y = 5; local helper = (x) -> x < y; checked: Int(helper(this)) = 3 } }",
+    );
+    assert_eq!(json["obj"]["checked"], 3);
+}
+
+#[test]
+fn generator_typed_local_check_saves_what_a_local_function_reads() {
+    let err = eval_fails(
+        "obj { when (true) { local y = 2; local helper = (x) -> x < y; local checked: Int(helper(this)) = 3; out = checked } }",
+    );
+    assert!(err.contains("checked"), "{err}");
+    let json = eval(
+        "obj { when (true) { local y = 5; local helper = (x) -> x < y; local checked: Int(helper(this)) = 3; out = checked } }",
+    );
+    assert_eq!(json["obj"]["out"], 3);
+}
+
+#[test]
+fn generator_check_saves_what_local_functions_read_transitively() {
+    let err = eval_fails(
+        "obj { when (true) { local z = 2; local h2 = (x) -> x < z; local helper = (x) -> h2(x); checked: Int(helper(this)) = 3 } }",
+    );
+    assert!(err.contains("property 'checked'"), "{err}");
+    let json = eval(
+        "obj { when (true) { local z = 5; local h2 = (x) -> x < z; local helper = (x) -> h2(x); checked: Int(helper(this)) = 3 } }",
+    );
+    assert_eq!(json["obj"]["checked"], 3);
+    // A loop variable the function reads.
+    let err = eval_fails(
+        "obj { for (i in List(1)) { local helper = (x) -> x < i; checked: Int(helper(this)) = 3 } }",
+    );
+    assert!(err.contains("property 'checked'"), "{err}");
+    let json = eval(
+        "obj { for (i in List(5)) { local helper = (x) -> x < i; checked: Int(helper(this)) = 3 } }",
+    );
+    assert_eq!(json["obj"]["checked"], 3);
+}
+
+#[test]
+fn generator_property_rewritten_by_later_iteration_is_checked_once() {
+    // The last iteration's write is the object's value, checked in that
+    // iteration's scope; the superseded write is not checked against it.
+    let json = eval("obj { for (x in List(1, 2)) { checked: Int(this == x) = x } }");
+    assert_eq!(json["obj"]["checked"], 2);
+    let err = eval_fails("obj { for (x in List(1, 2)) { checked: Int(this == x) = 3 } }");
+    assert!(err.contains("property 'checked'"), "{err}");
+    let err = eval_fails("obj { for (x in List(1, 2)) { checked: Int(this < 2) = x } }");
+    assert!(err.contains("property 'checked'"), "{err}");
+    let json = eval("obj { for (x in List(2, 1)) { checked: Int(this < 2) = x } }");
+    assert_eq!(json["obj"]["checked"], 1);
+}
