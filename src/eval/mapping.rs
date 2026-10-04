@@ -385,6 +385,7 @@ pub(super) fn mapping_source() -> ObjectSource {
         captured: SourceScope::default(),
         body_members: HashSet::default(),
         is_open: true,
+        is_abstract: false,
         type_name: None,
         type_identity: None,
         parent_type_names: Vec::new(),
