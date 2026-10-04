@@ -3718,6 +3718,9 @@ class F { a = 1; b = 3 }
 class H2 { f: F }
 h2 = new H2 { f = new { b = 10 } }
 h4 = (h2) { f = new { a = 7 } }
+class H3 { f: F? }
+h5 = new H3 { f = new { b = 10 } }
+h6 = new H3 {}
 "#,
     );
     assert_eq!(
@@ -3725,6 +3728,8 @@ h4 = (h2) { f = new { a = 7 } }
         serde_json::json!({
             "h2": {"f": {"a": 1, "b": 10}},
             "h4": {"f": {"a": 7, "b": 3}},
+            "h5": {"f": {"a": 1, "b": 10}},
+            "h6": {"f": null},
         })
     );
 }
@@ -3741,4 +3746,35 @@ c7 = (c6) { l = new { 5 } }
     );
     assert_eq!(json["c6"]["l"], serde_json::json!([4]));
     assert_eq!(json["c7"]["l"], serde_json::json!([1, 5]));
+}
+
+#[tokio::test]
+async fn untyped_new_in_amendment_resolves_property_type_where_declared() {
+    let temp = TestTempDir::new("pklr_test_untyped_new_imported_type");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Lib.pkl"),
+        "class F { a = 1; b = 3 }\nclass H { f: F }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "Lib.pkl"
+class F { a = 99 }
+h = new Lib.H { f = new { b = 10 } }
+h2 = (h) { f = new { a = 7 } }
+"#,
+    )
+    .unwrap();
+    let json = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "h": {"f": {"a": 1, "b": 10}},
+            "h2": {"f": {"a": 7, "b": 3}},
+        })
+    );
 }

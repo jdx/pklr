@@ -3926,13 +3926,22 @@ impl Evaluator {
                     && let Some(&first_index) = first_base_property_index.get(prop.name.as_str())
                     && let Entry::Property(declared) = &base_entries[first_index]
                     && (is_class_instance || declared.type_ann.is_some())
+                    && (declared.value.is_some()
+                        || declared.body.is_some()
+                        || declared.type_ann.is_some())
                 {
-                    let has_default = declared.value.is_some() || declared.body.is_some();
                     if entry_index == first_index {
-                        // The declared default, in its own lexical scope. A
-                        // declaration without one is kept too, so the next
-                        // amendment still sees that the property has none.
-                        merged.push(entry.clone());
+                        // The declared default, in its own lexical scope.
+                        // Without one, the parent is the declared type's
+                        // default, resolved where the property was declared.
+                        if declared.value.is_some() || declared.body.is_some() {
+                            merged.push(entry.clone());
+                        } else if let Some(type_ann) = &declared.type_ann {
+                            let mut default = (**declared).clone();
+                            default.value =
+                                Some(Expr::InferredNew(type_ann.clone(), Body::default()));
+                            merged.push(Entry::Property(Arc::new(default)));
+                        }
                         merged_entry_scopes.push(inherited_entry_scope.clone());
                     }
                     // Later entries for this property come from earlier
@@ -3944,13 +3953,8 @@ impl Evaluator {
                     if overlay_prop.type_ann.is_none() {
                         overlay_prop.type_ann = declared.type_ann.clone();
                     }
-                    if has_default {
-                        overlay_prop.value = None;
-                        overlay_prop.body = Some(body.clone());
-                    } else if let Some(type_ann) = &overlay_prop.type_ann {
-                        overlay_prop.value =
-                            Some(Expr::InferredNew(type_ann.clone(), body.clone()));
-                    }
+                    overlay_prop.value = None;
+                    overlay_prop.body = Some(body.clone());
                     if has_modifier(&declared.modifiers, Modifier::Hidden)
                         && !has_modifier(&overlay_prop.modifiers, Modifier::Hidden)
                     {
