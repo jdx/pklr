@@ -125,6 +125,9 @@ struct PendingTypeCheck {
     /// its local functions are bound again over the check scope, so a
     /// constraint calling one sees the enclosing object's finished members.
     body: Option<Body>,
+    /// The declaring property's AST address: every iteration of one
+    /// generator writes through the same declaration.
+    declaration: usize,
 }
 
 /// What the deferred type checks of a finished object body read.
@@ -5072,6 +5075,7 @@ impl Evaluator {
                     entry_index: None,
                     local: Some(local_key(prop, &iteration)),
                     body: Some(Arc::clone(body.entries)),
+                    declaration: prop as *const Property as usize,
                 });
                 continue;
             }
@@ -5152,6 +5156,7 @@ impl Evaluator {
                     entry_index: None,
                     local: None,
                     body: body_entries,
+                    declaration: prop as *const Property as usize,
                 });
                 continue;
             }
@@ -5174,14 +5179,16 @@ impl Evaluator {
         // is returned, to poison in another pass.
         let mut failed_locals = Vec::new();
         let checks = pending.split_off(generator_mark);
-        // A property that a later iteration (or generator) wrote again is
-        // superseded: its value is not the object's, so only the last write's
-        // check applies, in that write's scope.
-        let mut written_later: FxHashSet<&str> = FxHashSet::default();
+        // A property a later iteration of the same generator declaration
+        // wrote again is superseded: its value is not the object's, so only
+        // the last write's check applies, in that write's scope. Distinct
+        // declarations (an inherited generator's and an amendment's) each
+        // check the final value against their own declared type.
+        let mut written_later: FxHashSet<usize> = FxHashSet::default();
         let superseded = checks
             .iter()
             .rev()
-            .map(|check| check.local.is_none() && !written_later.insert(check.name.as_str()))
+            .map(|check| check.local.is_none() && !written_later.insert(check.declaration))
             .collect::<Vec<_>>();
         for (check, superseded) in checks.into_iter().zip(superseded.into_iter().rev()) {
             if superseded {

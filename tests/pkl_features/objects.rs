@@ -5173,3 +5173,33 @@ fn generator_property_rewritten_by_later_iteration_is_checked_once() {
     let json = eval("obj { for (x in List(2, 1)) { checked: Int(this < 2) = x } }");
     assert_eq!(json["obj"]["checked"], 1);
 }
+
+#[test]
+fn inherited_and_amending_generators_each_check_their_declared_type() {
+    // The amendment's generator writes `v` again, but the class's generator
+    // declared it `Int`: the final value is checked against both types.
+    let err = eval_fails(
+        r#"
+class C { when (true) { v: Int = 1 } }
+c = new C { when (true) { v: Any = "x" } }
+"#,
+    );
+    assert!(err.contains("property 'v' expected Int"), "{err}");
+    let json = eval(
+        r#"
+class C { when (true) { v: Int = 1 } }
+c = new C { when (true) { v: Any = 2 } }
+"#,
+    );
+    assert_eq!(json["c"]["v"], 2);
+    let json = eval(
+        r#"
+class C { when (true) { v: Any = 1 } }
+c = new C { when (true) { v: Any = "x" } }
+"#,
+    );
+    assert_eq!(json["c"]["v"], "x");
+    // Repeated iterations of one declaration still check only the last.
+    let json = eval("obj { for (x in List(1, 2)) { checked: Int(this == x) = x } }");
+    assert_eq!(json["obj"]["checked"], 2);
+}
