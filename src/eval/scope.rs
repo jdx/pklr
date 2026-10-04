@@ -777,6 +777,11 @@ struct ObjectBindings {
     scope: Scope,
     /// Object members hidden because the lexical scope declares the name.
     hidden: FxHashSet<Name>,
+    /// For each member of the object already seen, by its index in the
+    /// object's bindings: its name, and where it is bound in `scope` (`None`
+    /// when it is skipped). An object only gains members or rebinds them in
+    /// place, so later updates compare by index instead of by name.
+    seen: Vec<(Name, Option<usize>)>,
 }
 
 impl EntryOwners {
@@ -794,6 +799,7 @@ impl EntryOwners {
         let cached = cache.entry(key).or_insert_with(|| ObjectBindings {
             scope: lexical.child(),
             hidden: FxHashSet::default(),
+            seen: Vec::new(),
         });
         update_object_bindings(cached, lexical, object, owned);
         cached.scope.clone()
@@ -927,23 +933,54 @@ fn update_object_bindings(
     object: &Scope,
     owned: &HashSet<String>,
 ) {
-    let ObjectBindings { scope, hidden } = bindings;
+    let ObjectBindings {
+        scope,
+        hidden,
+        seen,
+    } = bindings;
     scope.receiver_entries = object.receiver_entries.clone();
     scope.receiver_list_base = object.receiver_list_base;
+    // A member removed from the object (or moved) invalidates the positions.
+    if seen.len() > object.vars.len()
+        || seen
+            .iter()
+            .zip(object.vars.keys())
+            .any(|((seen, _), name)| !Arc::ptr_eq(seen, name) && seen != name)
+    {
+        seen.clear();
+    }
     // The scope's own bindings come only from the object, so they can be
     // written directly instead of going through `declare`/`set`, which also
     // clear stale poison and module identities for each name.
-    for (name, value) in object.vars.iter() {
+    for (index, (name, value)) in object.vars.iter().enumerate() {
+        if let Some((_, position)) = seen.get(index) {
+            // Already seen: skipped names stay skipped (see below), and a
+            // bound one only needs rebinding if its value changed.
+            let Some(position) = *position else {
+                continue;
+            };
+            let (_, bound) = scope.vars.get_index(position).expect("bound when seen");
+            if !same_value(bound, value) {
+                if owned.contains(&**name) && !scope.declared.contains(&**name) {
+                    Arc::make_mut(&mut scope.declared).insert(name.clone());
+                }
+                let (_, bound) = Arc::make_mut(&mut scope.vars)
+                    .get_index_mut(position)
+                    .expect("bound when seen");
+                *bound = value.clone();
+            }
+            continue;
+        }
         // `super` belongs to the body that declared the entry. A later
         // amendment must not replace an inherited entry's parent binding.
         if &**name == "super" || hidden.contains(&**name) {
+            seen.push((name.clone(), None));
             continue;
         }
-        if scope
-            .vars
-            .get(&**name)
-            .is_some_and(|bound| same_value(bound, value))
+        if let Some((position, _, bound)) = scope.vars.get_full(&**name)
+            && same_value(bound, value)
         {
+            seen.push((name.clone(), Some(position)));
             continue;
         }
         if owned.contains(&**name) {
@@ -954,9 +991,11 @@ fn update_object_bindings(
             // `lexical` is fixed for this cache entry and `owned` for its key,
             // so a hidden name stays hidden for the life of the cache.
             hidden.insert(name.clone());
+            seen.push((name.clone(), None));
             continue;
         }
-        Arc::make_mut(&mut scope.vars).insert(name.clone(), value.clone());
+        let (position, _) = Arc::make_mut(&mut scope.vars).insert_full(name.clone(), value.clone());
+        seen.push((name.clone(), Some(position)));
     }
     // Rebuilt whenever either side has poisoned names, so names no longer
     // poisoned on the object are dropped from the scope.

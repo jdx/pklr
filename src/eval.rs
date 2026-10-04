@@ -63,6 +63,10 @@ pub struct Evaluator {
     /// `referenced_roots` of object bodies amended in this run, keyed by the
     /// body's address. Each entry holds its body so the address stays unique.
     body_roots_cache: HashMap<usize, (crate::parser::Body, Arc<HashSet<String>>)>,
+    /// `module_dependent_members` of module bodies evaluated in this run,
+    /// keyed like `body_roots_cache`. A module imported with several field
+    /// sets is evaluated once per set, and the analysis is the same each time.
+    module_members_cache: HashMap<usize, (crate::parser::Body, Arc<indexmap::IndexSet<String>>)>,
     /// Final scopes for modules evaluated in this run, used to preserve inherited locals.
     module_scopes: HashMap<PathBuf, ModuleScopeSnapshot>,
     /// Environment variables read during evaluation (name → observed value).
@@ -288,6 +292,7 @@ impl Default for Evaluator {
             narrowed_import_cache: HashMap::default(),
             parse_cache: HashMap::default(),
             body_roots_cache: HashMap::default(),
+            module_members_cache: HashMap::default(),
             module_scopes: HashMap::default(),
             env_reads: BTreeMap::new(),
             scoped_imports_in_flight: HashSet::default(),
@@ -546,6 +551,7 @@ impl Evaluator {
             narrowed_import_cache: HashMap::default(),
             parse_cache: HashMap::default(),
             body_roots_cache: HashMap::default(),
+            module_members_cache: HashMap::default(),
             module_scopes: HashMap::default(),
             env_reads: BTreeMap::new(),
             scoped_imports_in_flight: HashSet::default(),
@@ -624,6 +630,7 @@ impl Evaluator {
         self.narrowed_import_cache.clear();
         self.parse_cache.clear();
         self.body_roots_cache.clear();
+        self.module_members_cache.clear();
         clear_names();
         self.module_scopes.clear();
         self.scoped_imports_in_flight.clear();
@@ -2167,7 +2174,7 @@ impl Evaluator {
         // evaluated them. Such classes, and the classes and locals built on
         // them, are evaluated again before a property that can read them,
         // when the `module` snapshot has changed since they last were.
-        let module_members = module_dependent_members(&module.body);
+        let module_members = self.module_dependent_members(&module.body);
         let mut module_members_stale = !module_members.is_empty();
 
         // First pass: collect locals, class definitions, and type aliases in
@@ -2528,7 +2535,7 @@ impl Evaluator {
                     depth,
                 )?;
             }
-            for name in &module_members {
+            for name in module_members.iter() {
                 if class_names.contains(name) {
                     if let Some(value) = scope.get(name) {
                         out.insert(name.as_str().into(), value.clone());
@@ -2805,7 +2812,7 @@ impl Evaluator {
             if aliases.is_empty() {
                 aliases
             } else {
-                let refs = referenced_roots(entries);
+                let refs = self.body_referenced_roots(entries);
                 if refs.contains("outer") {
                     Vec::new()
                 } else {
@@ -3771,6 +3778,21 @@ impl Evaluator {
         self.body_roots_cache
             .insert(key, (Arc::clone(body), Arc::clone(&roots)));
         roots
+    }
+
+    /// `module_dependent_members` of a module body, computed once per body.
+    fn module_dependent_members(
+        &mut self,
+        body: &crate::parser::Body,
+    ) -> Arc<indexmap::IndexSet<String>> {
+        let key = Arc::as_ptr(body) as usize;
+        if let Some((_, members)) = self.module_members_cache.get(&key) {
+            return Arc::clone(members);
+        }
+        let members = Arc::new(module_dependent_members(body));
+        self.module_members_cache
+            .insert(key, (Arc::clone(body), Arc::clone(&members)));
+        members
     }
 
     fn eval_amended_object(
