@@ -19,7 +19,6 @@ use crate::value::{
 };
 
 mod analysis;
-mod bridge;
 mod glob;
 mod mapping;
 mod package;
@@ -79,14 +78,8 @@ pub struct Evaluator {
     scoped_imports_in_flight: HashSet<PathBuf>,
     /// Host-provided IO for files, environment, HTTP, packages, and globs.
     capabilities: Box<dyn EvalCapabilities>,
-    /// Set while the evaluator runs on a worker thread for the async API;
-    /// capability calls then go to the async caller.
-    bridge: Option<bridge::Bridge>,
-    /// The capabilities' blocking counterpart, used for calls other than HTTP
-    /// fetches while evaluating for an async caller.
-    local_capabilities: Option<Box<dyn EvalCapabilities>>,
     /// Extracted package zip directories (zip URL → temp dir path)
-    #[cfg(feature = "package-zip-core")]
+    #[cfg(feature = "package-zip")]
     package_dirs: HashMap<String, PathBuf>,
     /// Directory used to persist downloaded package content across evaluators.
     package_cache_dir: Option<PathBuf>,
@@ -286,262 +279,71 @@ fn regex_value(pattern: Value) -> Value {
 #[cfg(feature = "native-io")]
 impl Default for Evaluator {
     fn default() -> Self {
-        Self {
-            base_path: PathBuf::from("."),
-            max_depth: 32,
-            http_cache: HashMap::default(),
-            import_cache: HashMap::default(),
-            imports_in_flight: HashSet::default(),
-            placeholder_reads: 0,
-            narrowed_import_cache: HashMap::default(),
-            parse_cache: HashMap::default(),
-            body_roots_cache: HashMap::default(),
-            module_members_cache: HashMap::default(),
-            resource_cache: HashMap::default(),
-            module_scopes: HashMap::default(),
-            env_reads: BTreeMap::new(),
-            scoped_imports_in_flight: HashSet::default(),
-            #[cfg(feature = "blocking")]
-            capabilities: Box::new(crate::capabilities::BlockingCapabilities::new()),
-            #[cfg(not(feature = "blocking"))]
-            capabilities: Box::new(crate::capabilities::NativeCapabilities::new()),
-            bridge: None,
-            local_capabilities: None,
-            #[cfg(feature = "package-zip-core")]
-            package_dirs: HashMap::default(),
-            package_cache_dir: None,
-            package_http_roots: HashSet::default(),
-            offline: false,
-            http_rewrites: Vec::new(),
-            converters: Vec::new(),
-            warned_deprecated: std::collections::HashSet::default(),
-        }
+        Self::new()
     }
 }
 
-/// Synchronous access to the host capabilities. Each call blocks on the
-/// capability's future, or, while the evaluator runs on a worker thread for
-/// the async API, waits for the async caller to serve it.
+/// Access to the host capabilities.
 impl Evaluator {
-    /// Run a capability call other than an HTTP fetch, using the
-    /// capabilities' blocking counterpart while one is installed.
-    fn io<T, F>(&mut self, call: F) -> Result<T>
-    where
-        T: Send + 'static,
-        F: for<'c> FnOnce(
-                &'c mut dyn EvalCapabilities,
-            ) -> crate::capabilities::BoxFuture<'c, Result<T>>
-            + Send
-            + 'static,
-    {
-        match self.local_capabilities.as_deref_mut() {
-            Some(local) => pollster::block_on(call(local)),
-            None => self.http_io(call),
-        }
-    }
-
-    /// Run a capability call with the host capabilities themselves.
-    fn http_io<T, F>(&mut self, call: F) -> Result<T>
-    where
-        T: Send + 'static,
-        F: for<'c> FnOnce(
-                &'c mut dyn EvalCapabilities,
-            ) -> crate::capabilities::BoxFuture<'c, Result<T>>
-            + Send
-            + 'static,
-    {
-        match &self.bridge {
-            Some(bridge) => bridge.call(call),
-            None => pollster::block_on(call(&mut *self.capabilities)),
-        }
-    }
-
     fn read_to_string_io(&mut self, path: &Path) -> Result<String> {
-        let path = path.to_path_buf();
-        self.io(move |c| Box::pin(async move { c.read_to_string(&path).await }))
+        self.capabilities.read_to_string(path)
     }
 
     fn path_exists_io(&mut self, path: &Path) -> Result<bool> {
-        let path = path.to_path_buf();
-        self.io(move |c| Box::pin(async move { c.path_exists(&path).await }))
+        self.capabilities.path_exists(path)
     }
 
     fn canonicalize_io(&mut self, path: &Path) -> Result<PathBuf> {
-        let path = path.to_path_buf();
-        self.io(move |c| Box::pin(async move { c.canonicalize(&path).await }))
+        self.capabilities.canonicalize(path)
     }
 
     fn read_bytes_io(&mut self, path: &Path) -> Result<Vec<u8>> {
-        let path = path.to_path_buf();
-        self.io(move |c| Box::pin(async move { c.read_bytes(&path).await }))
+        self.capabilities.read_bytes(path)
     }
 
     fn create_dir_all_io(&mut self, path: &Path) -> Result<()> {
-        let path = path.to_path_buf();
-        self.io(move |c| Box::pin(async move { c.create_dir_all(&path).await }))
+        self.capabilities.create_dir_all(path)
     }
 
     fn write_atomic_io(&mut self, path: &Path, bytes: &[u8]) -> Result<()> {
-        let path = path.to_path_buf();
-        let bytes = bytes.to_vec();
-        self.io(move |c| Box::pin(async move { c.write_atomic(&path, &bytes).await }))
+        self.capabilities.write_atomic(path, bytes)
     }
 
     fn remove_file_io(&mut self, path: &Path) -> Result<()> {
-        let path = path.to_path_buf();
-        self.io(move |c| Box::pin(async move { c.remove_file(&path).await }))
+        self.capabilities.remove_file(path)
     }
 
-    #[cfg(feature = "package-zip-core")]
+    #[cfg(feature = "package-zip")]
     fn extract_zip_io(&mut self, bytes: Vec<u8>, destination: &Path) -> Result<()> {
-        let destination = destination.to_path_buf();
-        self.io(move |c| Box::pin(async move { c.extract_zip(bytes, &destination).await }))
+        self.capabilities.extract_zip(bytes, destination)
     }
 
     fn read_env_io(&mut self, name: &str) -> Result<Option<String>> {
-        let name = name.to_string();
-        self.io(move |c| Box::pin(async move { c.read_env(&name).await }))
+        self.capabilities.read_env(name)
     }
 
     fn fetch_text_io(&mut self, url: &str) -> Result<String> {
-        let url = url.to_string();
-        self.http_io(move |c| Box::pin(async move { c.fetch_text(&url).await }))
+        self.capabilities.fetch_text(url)
     }
 
     fn fetch_bytes_io(&mut self, url: &str) -> Result<Vec<u8>> {
-        let url = url.to_string();
-        self.http_io(move |c| Box::pin(async move { c.fetch_bytes(&url).await }))
+        self.capabilities.fetch_bytes(url)
     }
 
-    #[cfg(feature = "package-zip-core")]
+    #[cfg(feature = "package-zip")]
     fn temp_dir_io(&mut self, prefix: &str) -> Result<PathBuf> {
-        let prefix = prefix.to_string();
-        self.io(move |c| Box::pin(async move { c.temp_dir(&prefix).await }))
+        self.capabilities.temp_dir(prefix)
     }
 
     fn glob_io(&mut self, base: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
-        let base = base.to_path_buf();
-        let pattern = pattern.to_string();
-        self.io(move |c| Box::pin(async move { c.glob(&base, &pattern).await }))
-    }
-
-    /// Run the synchronous `work` for an async caller.
-    ///
-    /// On a multi-threaded tokio runtime, with capabilities that have a
-    /// blocking counterpart, it runs in place under `block_in_place`, with HTTP
-    /// fetches blocking on the host capabilities while the runtime's other
-    /// workers drive them. Anywhere else it runs on a worker thread (see
-    /// [`Evaluator::run_on_worker`]).
-    async fn run_async<A, R>(&mut self, arg: A, work: fn(&mut Evaluator, A) -> R) -> R
-    where
-        A: Send + 'static,
-        R: Send + 'static,
-    {
-        // Only capabilities with a blocking counterpart run in place: their
-        // remaining calls are HTTP fetches the runtime drives by itself, while
-        // other capabilities may wait on tasks that blocking here would stall
-        // (for example a sibling in the caller's `join!`).
-        #[cfg(feature = "async")]
-        if let Ok(handle) = tokio::runtime::Handle::try_current()
-            && handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
-            && let Some(local) = self.capabilities.blocking_capabilities()
-        {
-            self.local_capabilities = Some(local);
-            let result = tokio::task::block_in_place(|| work(self, arg));
-            self.local_capabilities = None;
-            return result;
-        }
-        self.run_on_worker(arg, work).await
-    }
-
-    /// Run `work` on a worker thread with HTTP fetches, and any capability
-    /// calls without a blocking counterpart, served by this task, so async
-    /// capabilities run on the caller's executor.
-    ///
-    /// If the returned future is dropped before it finishes, the worker stops
-    /// at its next expression, and the evaluator keeps its capabilities,
-    /// configuration and extracted package directories. It loses its other
-    /// caches; copying them up front would cost every call for the sake of a
-    /// rare cancellation.
-    async fn run_on_worker<A, R>(&mut self, arg: A, work: fn(&mut Evaluator, A) -> R) -> R
-    where
-        A: Send + 'static,
-        R: Send + 'static,
-    {
-        struct Restore<'a> {
-            evaluator: &'a mut Evaluator,
-            capabilities: Option<Box<dyn EvalCapabilities>>,
-        }
-        impl Drop for Restore<'_> {
-            fn drop(&mut self) {
-                if let Some(capabilities) = self.capabilities.take() {
-                    self.evaluator.capabilities = capabilities;
-                }
-            }
-        }
-
-        let local_capabilities = self.capabilities.blocking_capabilities();
-        let capabilities = std::mem::replace(&mut self.capabilities, Box::new(bridge::Detached));
-        let placeholder = self.detached_copy();
-        let evaluator = std::mem::replace(self, placeholder);
-        let mut restore = Restore {
-            evaluator: self,
-            capabilities: Some(capabilities),
-        };
-        let capabilities = restore
-            .capabilities
-            .as_deref_mut()
-            .expect("capabilities present");
-        let (evaluator, result) =
-            bridge::run(evaluator, capabilities, move |mut evaluator, bridge| {
-                evaluator.bridge = Some(bridge);
-                evaluator.local_capabilities = local_capabilities;
-                let result = work(&mut evaluator, arg);
-                evaluator.bridge = None;
-                evaluator.local_capabilities = None;
-                (evaluator, result)
-            })
-            .await;
-        *restore.evaluator = evaluator;
-        result
-    }
-
-    /// Fail if the async caller this evaluation runs for has gone away.
-    #[inline]
-    fn check_cancelled(&self) -> Result<()> {
-        match &self.bridge {
-            Some(bridge) if bridge.is_cancelled() => Err(bridge::cancelled()),
-            _ => Ok(()),
-        }
-    }
-
-    /// An evaluator with this one's configuration and no capabilities.
-    fn detached_copy(&self) -> Evaluator {
-        let mut copy = Evaluator::with_capabilities(bridge::Detached);
-        copy.base_path = self.base_path.clone();
-        copy.max_depth = self.max_depth;
-        copy.package_cache_dir = self.package_cache_dir.clone();
-        copy.package_http_roots = self.package_http_roots.clone();
-        copy.offline = self.offline;
-        copy.http_rewrites = self.http_rewrites.clone();
-        #[cfg(feature = "package-zip-core")]
-        {
-            copy.package_dirs = self.package_dirs.clone();
-        }
-        copy
+        self.capabilities.glob(base, pattern)
     }
 }
 
 impl Evaluator {
-    /// Construct an evaluator with synchronous host capabilities.
-    #[cfg(feature = "blocking")]
+    /// Construct an evaluator with the native host capabilities.
+    #[cfg(feature = "native-io")]
     pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Construct an evaluator with asynchronous host capabilities.
-    #[cfg(feature = "async")]
-    pub fn new_async() -> Self {
         Self::with_capabilities(crate::capabilities::NativeCapabilities::new())
     }
 
@@ -562,9 +364,7 @@ impl Evaluator {
             env_reads: BTreeMap::new(),
             scoped_imports_in_flight: HashSet::default(),
             capabilities: Box::new(capabilities),
-            bridge: None,
-            local_capabilities: None,
-            #[cfg(feature = "package-zip-core")]
+            #[cfg(feature = "package-zip")]
             package_dirs: HashMap::default(),
             package_cache_dir: None,
             package_http_roots: HashSet::default(),
@@ -580,7 +380,7 @@ impl Evaluator {
     }
 
     fn resolve_local_path(&self, current_path: &Path, uri: &str) -> PathBuf {
-        #[cfg(feature = "package-zip-core")]
+        #[cfg(feature = "package-zip")]
         if let Some(from_root) = uri.strip_prefix(".../")
             && let Some(root) = self
                 .package_dirs
@@ -642,14 +442,6 @@ impl Evaluator {
         self.module_scopes.clear();
         self.scoped_imports_in_flight.clear();
         self.converters.clear();
-    }
-
-    /// Set a custom HTTP client for fetching remote imports and packages.
-    /// Use this to configure proxy settings, CA certificates, timeouts, etc.
-    /// Returns an error when the installed capabilities use another HTTP backend.
-    #[cfg(feature = "http")]
-    pub fn set_http_client(&mut self, client: reqwest::Client) -> Result<()> {
-        self.capabilities.set_http_client(client)
     }
 
     /// Add HTTP URL rewrite rules. Each rule is a `"source_prefix=target_prefix"` string
@@ -826,14 +618,14 @@ impl Evaluator {
                     return Ok(Some((source, url.clone())));
                 }
                 PackageSource::Zip(zip_url, entry) => {
-                    #[cfg(feature = "package-zip-core")]
+                    #[cfg(feature = "package-zip")]
                     {
                         let pkg_dir = self.extract_package_zip(zip_url)?;
                         let local_path = pkg_dir.join(entry);
                         let source = self.read_to_string_io(&local_path)?;
                         return Ok(Some((source, local_path.display().to_string())));
                     }
-                    #[cfg(not(feature = "package-zip-core"))]
+                    #[cfg(not(feature = "package-zip"))]
                     {
                         let _ = entry;
                         return Err(Error::Unsupported(format!(
@@ -982,26 +774,6 @@ impl Evaluator {
     /// downloads. A valid cache entry already present wins, so preloading never
     /// overrides content fetched from the network. Does nothing when no package
     /// cache directory is configured.
-    pub async fn preload_package_async(
-        &mut self,
-        url: &str,
-        extension: &str,
-        bytes: &[u8],
-    ) -> Result<()> {
-        if self.package_cache_dir.is_none() {
-            return Ok(());
-        }
-        let arg = (url.to_string(), extension.to_string(), bytes.to_vec());
-        self.run_async(arg, |evaluator, (url, extension, bytes)| {
-            evaluator.preload_package(&url, &extension, &bytes)
-        })
-        .await
-    }
-
-    /// Seed the persistent package cache with `bytes` for `url`, blocking on
-    /// host IO.
-    ///
-    /// See [`Evaluator::preload_package_async`].
     pub fn preload_package(&mut self, url: &str, extension: &str, bytes: &[u8]) -> Result<()> {
         if self.package_cache_dir.is_none() {
             return Ok(());
@@ -1026,7 +798,7 @@ impl Evaluator {
 
     /// Download a package zip and extract it to a temp directory.
     /// Returns the path to the extracted directory. Caches by zip URL.
-    #[cfg(feature = "package-zip-core")]
+    #[cfg(feature = "package-zip")]
     fn extract_package_zip(&mut self, zip_url: &str) -> Result<PathBuf> {
         // Check if already extracted
         if let Some(dir) = self.package_dirs.get(zip_url) {
@@ -1040,25 +812,13 @@ impl Evaluator {
         Ok(dir)
     }
 
-    #[cfg(all(test, feature = "package-zip-core"))]
+    #[cfg(all(test, feature = "package-zip"))]
     fn package_dir_for_zip(&self, zip_url: &str) -> Option<&PathBuf> {
         self.package_dirs.get(zip_url)
     }
 
     /// Evaluate `source` as the module at `path`.
-    ///
-    /// Evaluation runs on a worker thread while this task serves its host IO,
-    /// so async capabilities run on the caller's runtime.
-    pub async fn eval_source(&mut self, source: &str, path: &Path) -> Result<Value> {
-        let arg = (source.to_string(), path.to_path_buf());
-        self.run_async(arg, |evaluator, (source, path)| {
-            evaluator.eval_source_blocking(&source, &path)
-        })
-        .await
-    }
-
-    /// Evaluate `source` as the module at `path`, blocking on host IO.
-    pub fn eval_source_blocking(&mut self, source: &str, path: &Path) -> Result<Value> {
+    pub fn eval_source(&mut self, source: &str, path: &Path) -> Result<Value> {
         self.begin_evaluation();
         self.eval_source_inner(source, path)
     }
@@ -1091,32 +851,15 @@ impl Evaluator {
         self.eval_module(&module, path, 0)
     }
 
-    /// Evaluate a local pkl file by path (public entry point).
-    pub async fn eval_file_pub(&mut self, path: &Path) -> Result<Value> {
-        self.run_async(path.to_path_buf(), |evaluator, path| {
-            evaluator.eval_file_blocking(&path)
-        })
-        .await
-    }
-
-    /// Evaluate a local pkl file and apply its output converters in one
-    /// worker run.
-    #[cfg(feature = "async")]
-    pub(crate) async fn eval_file_converted(&mut self, path: &Path) -> Result<Value> {
-        self.run_async(path.to_path_buf(), |evaluator, path| {
-            evaluator.eval_file_converted_blocking(&path)
-        })
-        .await
-    }
-
+    /// Evaluate a local pkl file and apply its output converters.
     #[cfg(feature = "native-io")]
-    pub(crate) fn eval_file_converted_blocking(&mut self, path: &Path) -> Result<Value> {
-        let value = self.eval_file_blocking(path)?;
-        self.apply_converters_blocking(value)
+    pub(crate) fn eval_file_converted(&mut self, path: &Path) -> Result<Value> {
+        let value = self.eval_file(path)?;
+        self.apply_converters(value)
     }
 
-    /// Evaluate a local pkl file by path, blocking on host IO.
-    pub fn eval_file_blocking(&mut self, path: &Path) -> Result<Value> {
+    /// Evaluate a local pkl file by path.
+    pub fn eval_file(&mut self, path: &Path) -> Result<Value> {
         self.begin_evaluation();
         let source = self.read_to_string_io(path)?;
         self.eval_source_inner(&source, path)
@@ -1124,7 +867,7 @@ impl Evaluator {
 
     /// Read, lex, parse, and evaluate a local file (with caching).
     /// Inserts a placeholder before evaluation to break circular imports.
-    fn eval_file(&mut self, path: &Path, depth: usize) -> Result<Value> {
+    fn eval_import_file(&mut self, path: &Path, depth: usize) -> Result<Value> {
         let canonical = self.canonicalize_io(path)?;
         if let Some(cached) = self.cached_import(&canonical) {
             return Ok(cached);
@@ -1149,7 +892,7 @@ impl Evaluator {
         requested_fields: Option<HashSet<String>>,
     ) -> Result<Value> {
         if requested_fields.is_none() {
-            return self.eval_file(path, depth);
+            return self.eval_import_file(path, depth);
         }
         let canonical = self.canonicalize_io(path)?;
         if let Some(cached) = self.cached_import(&canonical) {
@@ -1213,7 +956,7 @@ impl Evaluator {
         inherited_scope: Option<Scope>,
     ) -> Result<Value> {
         if inherited_scope.is_none() {
-            return self.eval_file(path, depth);
+            return self.eval_import_file(path, depth);
         }
         let canonical = self.canonicalize_io(path)?;
         if !self.scoped_imports_in_flight.insert(canonical.clone()) {
@@ -1846,7 +1589,7 @@ impl Evaluator {
                 let requested = requested_fields_for_import(&import_field_uses, &alias);
                 // For zip packages, extract to temp dir and eval as local file
                 if let PackageSource::Zip(zip_url, _) = &pkg {
-                    #[cfg(feature = "package-zip-core")]
+                    #[cfg(feature = "package-zip")]
                     {
                         let pkg_dir = self.extract_package_zip(zip_url)?;
                         let local_path = pkg_dir.join(file_path);
@@ -1860,7 +1603,7 @@ impl Evaluator {
                         scope.set_module_identity(alias, identity);
                         continue;
                     }
-                    #[cfg(not(feature = "package-zip-core"))]
+                    #[cfg(not(feature = "package-zip"))]
                     {
                         return Err(Error::Unsupported(format!(
                             "package zip imports require pklr's 'package-zip' feature: {zip_url}"
@@ -1980,7 +1723,7 @@ impl Evaluator {
             } else if uri.starts_with("package://") {
                 let pkg = resolve_package_uri(uri)?;
                 if let PackageSource::Zip(zip_url, entry) = &pkg {
-                    #[cfg(feature = "package-zip-core")]
+                    #[cfg(feature = "package-zip")]
                     {
                         let pkg_dir = self.extract_package_zip(zip_url)?;
                         let local_path = pkg_dir.join(entry);
@@ -2003,7 +1746,7 @@ impl Evaluator {
                             base_obj = (*m).clone();
                         }
                     }
-                    #[cfg(not(feature = "package-zip-core"))]
+                    #[cfg(not(feature = "package-zip"))]
                     {
                         let _ = entry;
                         return Err(Error::Unsupported(format!(
@@ -4524,7 +4267,6 @@ impl Evaluator {
         if depth > self.max_depth {
             return Err(Error::Eval("maximum recursion depth exceeded".into()));
         }
-        self.check_cancelled()?;
         match expr {
             Expr::Null => Ok(Value::Null),
             Expr::Bool(b) => Ok(Value::Bool(*b)),
@@ -6153,18 +5895,7 @@ impl Evaluator {
 
     /// Apply `output.renderer.converters` to a value tree.
     /// Walks recursively, replacing typed objects with their converter output.
-    pub async fn apply_converters(&mut self, value: Value) -> Result<Value> {
-        if self.converters.is_empty() {
-            return Ok(value);
-        }
-        self.run_async(value, |evaluator, value| {
-            evaluator.apply_converters_blocking(value)
-        })
-        .await
-    }
-
-    /// Apply `output.renderer.converters` to a value tree, blocking on host IO.
-    pub fn apply_converters_blocking(&mut self, value: Value) -> Result<Value> {
+    pub fn apply_converters(&mut self, value: Value) -> Result<Value> {
         if self.converters.is_empty() {
             return Ok(value);
         }
@@ -6369,7 +6100,7 @@ mod requested_field_tests {
         )
         .unwrap();
 
-        let value = Evaluator::default().eval_file_blocking(&main_path).unwrap();
+        let value = Evaluator::default().eval_file(&main_path).unwrap();
         let Value::Object(fields, _) = value else {
             panic!("expected module object");
         };
@@ -7030,10 +6761,10 @@ mod auto_trait_tests {
 
 #[cfg(test)]
 mod package_uri_tests {
-    #[cfg(all(feature = "native-io", feature = "package-zip-core"))]
+    #[cfg(all(feature = "native-io", feature = "package-zip"))]
     use std::path::PathBuf;
 
-    #[cfg(all(feature = "native-io", feature = "package-zip-core"))]
+    #[cfg(all(feature = "native-io", feature = "package-zip"))]
     use super::Evaluator;
     use super::{PackageSource, resolve_package_uri};
 
@@ -7068,7 +6799,7 @@ mod package_uri_tests {
     }
 
     #[test]
-    #[cfg(feature = "package-zip-core")]
+    #[cfg(feature = "package-zip")]
     fn package_archive_validation_reads_entry_payloads() {
         use std::io::Write;
 
@@ -7100,10 +6831,10 @@ mod package_uri_tests {
     }
 
     #[test]
-    #[cfg(all(feature = "blocking", feature = "native-io"))]
-    fn blocking_preload_does_not_require_a_tokio_runtime() {
+    #[cfg(feature = "native-io")]
+    fn preload_writes_the_package_cache() {
         let cache_dir = std::env::temp_dir().join(format!(
-            "pklr-blocking-preload-{}-{:?}",
+            "pklr-preload-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));
@@ -7124,7 +6855,7 @@ mod package_uri_tests {
     }
 
     #[test]
-    #[cfg(all(feature = "native-io", feature = "package-zip-core"))]
+    #[cfg(all(feature = "native-io", feature = "package-zip"))]
     fn package_dir_lookup_uses_source_zip_url() {
         let mut evaluator = Evaluator::default();
         evaluator.set_http_rewrites(&["https://example.com/=https://mirror.local/".to_string()]);
@@ -7159,7 +6890,7 @@ mod package_uri_tests {
     }
 }
 
-#[cfg(all(test, feature = "blocking"))]
+#[cfg(all(test, feature = "native-io"))]
 mod super_deprecation_tests {
     #[test]
     fn super_property_access_warns_once() {
@@ -7172,7 +6903,7 @@ local base = new {
 result = (base) { old = super.old + super.old }
 "#;
         let value = evaluator
-            .eval_source_blocking(source, std::path::Path::new("super.pkl"))
+            .eval_source(source, std::path::Path::new("super.pkl"))
             .unwrap();
         assert_eq!(value.to_json()["result"]["old"], 2);
         assert_eq!(evaluator.warned_deprecated.len(), 1);

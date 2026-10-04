@@ -6,37 +6,28 @@
 use pklr::eval::Evaluator;
 
 fn eval(src: &str) -> serde_json::Value {
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        let mut ev = Evaluator::new_async();
-        let path = std::path::Path::new("test.pkl");
-        let val = ev.eval_source(src, path).await.unwrap();
-        val.to_json()
-    })
+    let mut ev = Evaluator::new();
+    let path = std::path::Path::new("test.pkl");
+    let val = ev.eval_source(src, path).unwrap();
+    val.to_json()
 }
 
 /// Like eval(), but also applies output.renderer.converters (full pipeline).
 fn eval_with_converters(src: &str) -> serde_json::Value {
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        let mut ev = Evaluator::new_async();
-        let path = std::path::Path::new("test.pkl");
-        let val = ev.eval_source(src, path).await.unwrap();
-        let val = ev.apply_converters(val).await.unwrap();
-        val.to_json()
-    })
+    let mut ev = Evaluator::new();
+    let path = std::path::Path::new("test.pkl");
+    let val = ev.eval_source(src, path).unwrap();
+    let val = ev.apply_converters(val).unwrap();
+    val.to_json()
 }
 
 fn eval_fails(src: &str) -> String {
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        let mut ev = Evaluator::new_async();
-        let path = std::path::Path::new("test.pkl");
-        match ev.eval_source(src, path).await {
-            Err(e) => e.to_string(),
-            Ok(v) => panic!("expected error, got: {:?}", v.to_json()),
-        }
-    })
+    let mut ev = Evaluator::new();
+    let path = std::path::Path::new("test.pkl");
+    match ev.eval_source(src, path) {
+        Err(e) => e.to_string(),
+        Ok(v) => panic!("expected error, got: {:?}", v.to_json()),
+    }
 }
 
 struct TestTempDir {

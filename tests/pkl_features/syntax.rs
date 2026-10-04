@@ -1278,9 +1278,9 @@ null_safe = "false"?.toBoolean()
 // Import resolution (future)
 // ============================================================
 
-#[tokio::test]
-async fn import_local_file() {
-    let mut ev = pklr::eval::Evaluator::new_async();
+#[test]
+fn import_local_file() {
+    let mut ev = pklr::eval::Evaluator::new();
     // Set base path so relative imports resolve correctly
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     ev.set_base_path(&base);
@@ -1289,7 +1289,7 @@ import "helper.pkl"
 x = helper.value
 "#;
     let path = base.join("test_import.pkl");
-    let val = ev.eval_source(src, &path).await.unwrap();
+    let val = ev.eval_source(src, &path).unwrap();
     let json = val.to_json();
     assert_eq!(json["x"], 42);
 }
@@ -1298,9 +1298,9 @@ x = helper.value
 // Amends resolution
 // ============================================================
 
-#[tokio::test]
-async fn amends_local_file() {
-    let mut ev = pklr::eval::Evaluator::new_async();
+#[test]
+fn amends_local_file() {
+    let mut ev = pklr::eval::Evaluator::new();
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     ev.set_base_path(&base);
     let src = r#"
@@ -1308,7 +1308,7 @@ amends "base.pkl"
 name = "override"
 "#;
     let path = base.join("test_amends.pkl");
-    let val = ev.eval_source(src, &path).await.unwrap();
+    let val = ev.eval_source(src, &path).unwrap();
     let json = val.to_json();
     // name is overridden
     assert_eq!(json["name"], "override");
@@ -1317,9 +1317,9 @@ name = "override"
     assert_eq!(json["enabled"], true);
 }
 
-#[tokio::test]
-async fn amends_strips_inherited_class_definitions() {
-    let mut ev = pklr::eval::Evaluator::new_async();
+#[test]
+fn amends_strips_inherited_class_definitions() {
+    let mut ev = pklr::eval::Evaluator::new();
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     ev.set_base_path(&base);
     let src = r#"
@@ -1327,7 +1327,7 @@ amends "base_with_class.pkl"
 name = "override"
 "#;
     let path = base.join("test_amends_class.pkl");
-    let val = ev.eval_source(src, &path).await.unwrap();
+    let val = ev.eval_source(src, &path).unwrap();
     let json = val.to_json();
     assert_eq!(json["name"], "override");
     assert!(
@@ -1336,9 +1336,9 @@ name = "override"
     );
 }
 
-#[tokio::test]
-async fn extends_strips_inherited_class_definitions() {
-    let mut ev = pklr::eval::Evaluator::new_async();
+#[test]
+fn extends_strips_inherited_class_definitions() {
+    let mut ev = pklr::eval::Evaluator::new();
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     ev.set_base_path(&base);
     let src = r#"
@@ -1346,7 +1346,7 @@ extends "base_with_class.pkl"
 name = "child"
 "#;
     let path = base.join("test_extends_class.pkl");
-    let val = ev.eval_source(src, &path).await.unwrap();
+    let val = ev.eval_source(src, &path).unwrap();
     let json = val.to_json();
     assert_eq!(json["name"], "child");
     assert!(
@@ -1359,21 +1359,21 @@ name = "child"
 // Circular imports
 // ============================================================
 
-#[tokio::test]
-async fn circular_import_does_not_loop() {
-    let mut ev = pklr::eval::Evaluator::new_async();
+#[test]
+fn circular_import_does_not_loop() {
+    let mut ev = pklr::eval::Evaluator::new();
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     ev.set_base_path(&base);
     let path = base.join("circular_a.pkl");
-    let val = ev.eval_file_pub(&path).await.unwrap();
+    let val = ev.eval_file(&path).unwrap();
     let json = val.to_json();
     assert_eq!(json["a_value"], "from_a");
     // b_ref resolves to from_b via circular_b.pkl
     assert_eq!(json["b_ref"], "from_b");
 }
 
-#[tokio::test]
-async fn partial_imports_keep_circular_placeholder() {
+#[test]
+fn partial_imports_keep_circular_placeholder() {
     let temp = TestTempDir::new("pklr_test_partial_import_cycle");
     let dir = temp.path();
     std::fs::write(
@@ -1403,9 +1403,7 @@ result = a.a_value
     )
     .unwrap();
 
-    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
-        .await
-        .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["result"], "from_a");
 }
 

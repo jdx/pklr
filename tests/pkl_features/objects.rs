@@ -986,9 +986,9 @@ x = name
     );
 }
 
-#[tokio::test]
-async fn const_cannot_override_in_amends() {
-    let mut ev = pklr::eval::Evaluator::new_async();
+#[test]
+fn const_cannot_override_in_amends() {
+    let mut ev = pklr::eval::Evaluator::new();
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     ev.set_base_path(&base);
     // Create a base file with const property
@@ -999,7 +999,7 @@ amends "const_base.pkl"
 const version = 2
 "#;
     let path = base.join("test_const_override.pkl");
-    let result = ev.eval_source(src, &path).await;
+    let result = ev.eval_source(src, &path);
     std::fs::remove_file(base.join("const_base.pkl")).ok();
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("const"));
@@ -1446,10 +1446,7 @@ fn inherited_late_binding_recomputes_dependency_chains() {
     .unwrap();
     let child = temp.path().join("Child.pkl");
     std::fs::write(&child, "extends \"Base.pkl\"\nc = 2\ne = d + 1\n").unwrap();
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    let json = runtime
-        .block_on(pklr::AsyncEvaluatorBuilder::new().eval_to_json(&child))
-        .unwrap();
+    let json = pklr::EvaluatorBuilder::new().eval_to_json(&child).unwrap();
     assert_eq!(json["a"], 2);
     assert_eq!(json["m"], 2);
     assert_eq!(json["b"], 2);
@@ -1471,10 +1468,7 @@ fn child_locals_recompute_after_inherited_properties_are_overridden() {
         "extends \"Base.pkl\"\nlocal derived = source + 1\nresult = derived\nsource = 2\n",
     )
     .unwrap();
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    let json = runtime
-        .block_on(pklr::AsyncEvaluatorBuilder::new().eval_to_json(&child))
-        .unwrap();
+    let json = pklr::EvaluatorBuilder::new().eval_to_json(&child).unwrap();
     assert_eq!(json["source"], 2);
     assert_eq!(json["result"], 3);
     assert!(json.get("derived").is_none());
@@ -1490,10 +1484,7 @@ fn inherited_late_binding_preserves_parent_locals() {
     .unwrap();
     let child = temp.path().join("Child.pkl");
     std::fs::write(&child, "extends \"Base.pkl\"\nsource = 2\n").unwrap();
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    let json = runtime
-        .block_on(pklr::AsyncEvaluatorBuilder::new().eval_to_json(&child))
-        .unwrap();
+    let json = pklr::EvaluatorBuilder::new().eval_to_json(&child).unwrap();
     assert_eq!(json["source"], 2);
     assert_eq!(json["derived"], 3);
     assert!(json.get("offset").is_none());
@@ -1518,10 +1509,7 @@ fn inherited_late_binding_reaches_grandparent_declarations() {
         "extends \"Parent.pkl\"\nsource = 2\nresult = derived\n",
     )
     .unwrap();
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    let json = runtime
-        .block_on(pklr::AsyncEvaluatorBuilder::new().eval_to_json(&child))
-        .unwrap();
+    let json = pklr::EvaluatorBuilder::new().eval_to_json(&child).unwrap();
     assert_eq!(json["source"], 2);
     assert_eq!(json["derived"], 3);
     assert_eq!(json["result"], 3);
@@ -1541,10 +1529,7 @@ fn computed_sibling_access_recomputes_after_child_override() {
         "extends \"Base.pkl\"\nlocal keyName = \"source\"\nresult = this[keyName]\nsource = 2\n",
     )
     .unwrap();
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    let json = runtime
-        .block_on(pklr::AsyncEvaluatorBuilder::new().eval_to_json(&child))
-        .unwrap();
+    let json = pklr::EvaluatorBuilder::new().eval_to_json(&child).unwrap();
     assert_eq!(json["result"], 2);
 }
 
@@ -1562,10 +1547,7 @@ fn aliased_module_snapshot_recomputes_after_child_override() {
         "extends \"Base.pkl\"\nlocal snapshot = this\nresult = snapshot.source\nsource = 2\n",
     )
     .unwrap();
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    let json = runtime
-        .block_on(pklr::AsyncEvaluatorBuilder::new().eval_to_json(&child))
-        .unwrap();
+    let json = pklr::EvaluatorBuilder::new().eval_to_json(&child).unwrap();
     assert_eq!(json["result"], 2);
 }
 
@@ -1579,10 +1561,7 @@ fn amended_scope_only_defaults_stay_out_of_output() {
     .unwrap();
     let child = temp.path().join("Child.pkl");
     std::fs::write(&child, "amends \"Base.pkl\"\n").unwrap();
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    let json = runtime
-        .block_on(pklr::AsyncEvaluatorBuilder::new().eval_to_json(&child))
-        .unwrap();
+    let json = pklr::EvaluatorBuilder::new().eval_to_json(&child).unwrap();
     assert!(json.get("implicit").is_none());
     assert_eq!(json["visible"], 0);
 }
@@ -1597,9 +1576,8 @@ fn inherited_late_binding_propagates_errors() {
     .unwrap();
     let child = temp.path().join("Child.pkl");
     std::fs::write(&child, "extends \"Base.pkl\"\ndenominator = 0\n").unwrap();
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    let error = runtime
-        .block_on(pklr::AsyncEvaluatorBuilder::new().eval_to_json(&child))
+    let error = pklr::EvaluatorBuilder::new()
+        .eval_to_json(&child)
         .unwrap_err()
         .to_string();
     assert!(error.contains("division by zero"));
@@ -1628,9 +1606,8 @@ fn used_unresolved_abstract_member_still_errors() {
     .unwrap();
     let child = temp.path().join("Child.pkl");
     std::fs::write(&child, "extends \"Base.pkl\"\nresult = dependent\n").unwrap();
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    let error = runtime
-        .block_on(pklr::AsyncEvaluatorBuilder::new().eval_to_json(&child))
+    let error = pklr::EvaluatorBuilder::new()
+        .eval_to_json(&child)
         .unwrap_err()
         .to_string();
     assert!(error.contains("abstract property") || error.contains("undefined variable"));
@@ -1646,9 +1623,8 @@ fn concrete_module_must_implement_inherited_abstract_property() {
     .unwrap();
     let child = temp.path().join("Child.pkl");
     std::fs::write(&child, "extends \"Base.pkl\"\n").unwrap();
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    let error = runtime
-        .block_on(pklr::AsyncEvaluatorBuilder::new().eval_to_json(&child))
+    let error = pklr::EvaluatorBuilder::new()
+        .eval_to_json(&child)
         .unwrap_err()
         .to_string();
     assert!(error.contains("abstract property 'required'"));
@@ -1658,9 +1634,7 @@ fn concrete_module_must_implement_inherited_abstract_property() {
         "extends \"Base.pkl\"\nrequired = List(\"implemented\")\n",
     )
     .unwrap();
-    let json = runtime
-        .block_on(pklr::AsyncEvaluatorBuilder::new().eval_to_json(&child))
-        .unwrap();
+    let json = pklr::EvaluatorBuilder::new().eval_to_json(&child).unwrap();
     assert_eq!(json["required"], serde_json::json!(["implemented"]));
 }
 
@@ -1879,8 +1853,8 @@ result = new Left {} as Right
     assert!(msg.contains("cannot cast Object to Right"), "{msg}");
 }
 
-#[tokio::test]
-async fn is_operator_distinguishes_qualified_classes_with_the_same_name() {
+#[test]
+fn is_operator_distinguishes_qualified_classes_with_the_same_name() {
     let dir = TestTempDir::new("pklr_is_qualified_classes");
     std::fs::write(
         dir.path.join("left.pkl"),
@@ -1905,13 +1879,13 @@ different = item is right.Item
     )
     .unwrap();
 
-    let json = pklr::eval_to_json_async(&main).await.unwrap();
+    let json = pklr::eval_to_json(&main).unwrap();
     assert_eq!(json["same"], true);
     assert_eq!(json["different"], false);
 }
 
-#[tokio::test]
-async fn is_operator_distinguishes_local_and_imported_classes_with_the_same_name() {
+#[test]
+fn is_operator_distinguishes_local_and_imported_classes_with_the_same_name() {
     let dir = TestTempDir::new("pklr_is_local_and_imported_classes");
     std::fs::write(
         dir.path.join("imported.pkl"),
@@ -1945,7 +1919,7 @@ valueIsLocal = importedValue is Item
     )
     .unwrap();
 
-    let json = pklr::eval_to_json_async(&main).await.unwrap();
+    let json = pklr::eval_to_json(&main).unwrap();
     assert_eq!(json["localIsImported"], false);
     assert_eq!(json["directIsImported"], true);
     assert_eq!(json["valueIsImported"], true);
@@ -1954,8 +1928,8 @@ valueIsLocal = importedValue is Item
     assert_eq!(json["valueIsLocal"], false);
 }
 
-#[tokio::test]
-async fn imported_class_identity_survives_reexports_and_captured_imports() {
+#[test]
+fn imported_class_identity_survives_reexports_and_captured_imports() {
     let dir = TestTempDir::new("pklr_imported_class_identity");
     std::fs::write(
         dir.path.join("types.pkl"),
@@ -1990,15 +1964,15 @@ capturedImportMatches = wrapper.accepts(types.instance)
     )
     .unwrap();
 
-    let json = pklr::eval_to_json_async(&main).await.unwrap();
+    let json = pklr::eval_to_json(&main).unwrap();
     assert_eq!(json["reexportedMatches"], true);
     assert_eq!(json["amendedMatches"], true);
     assert_eq!(json["functionResultMatches"], true);
     assert_eq!(json["capturedImportMatches"], true);
 }
 
-#[tokio::test]
-async fn imported_helper_preserves_nested_class_identity_in_returned_instance() {
+#[test]
+fn imported_helper_preserves_nested_class_identity_in_returned_instance() {
     let dir = TestTempDir::new("pklr_imported_helper_nested_class_identity");
     std::fs::write(
         dir.path.join("Config.pkl"),
@@ -2044,13 +2018,13 @@ result = new helpers.Container {
     )
     .unwrap();
 
-    let json = pklr::eval_to_json_async(&main).await.unwrap();
+    let json = pklr::eval_to_json(&main).unwrap();
     assert_eq!(json["marker"], 1);
     assert_eq!(json["result"]["test"]["expect"]["code"], 1);
 }
 
-#[tokio::test]
-async fn ordinary_scope_objects_are_not_merged_as_partial_modules() {
+#[test]
+fn ordinary_scope_objects_are_not_merged_as_partial_modules() {
     let dir = TestTempDir::new("pklr_ordinary_scope_objects");
     std::fs::write(dir.path.join("types.pkl"), "class Item {}\n").unwrap();
     std::fs::write(
@@ -2085,13 +2059,13 @@ result = (base.holder) {}
     )
     .unwrap();
 
-    let json = pklr::eval_to_json_async(&main).await.unwrap();
+    let json = pklr::eval_to_json(&main).unwrap();
     assert_eq!(json["result"]["selected"], "base");
     assert_eq!(json["result"]["hasStale"], true);
 }
 
-#[tokio::test]
-async fn partial_views_of_wrapper_with_distinct_reexports_are_merged() {
+#[test]
+fn partial_views_of_wrapper_with_distinct_reexports_are_merged() {
     let dir = TestTempDir::new("pklr_partial_wrapper_reexports");
     std::fs::write(
         dir.path.join("left.pkl"),
@@ -2137,13 +2111,13 @@ result = (helper.holder) {
     )
     .unwrap();
 
-    let json = pklr::eval_to_json_async(&main).await.unwrap();
+    let json = pklr::eval_to_json(&main).unwrap();
     assert_eq!(json["result"]["left"], "left");
     assert_eq!(json["result"]["right"], "right");
 }
 
-#[tokio::test]
-async fn partial_views_of_distinct_wrappers_are_not_merged() {
+#[test]
+fn partial_views_of_distinct_wrappers_are_not_merged() {
     let dir = TestTempDir::new("pklr_distinct_partial_wrappers");
     std::fs::write(
         dir.path.join("types.pkl"),
@@ -2192,7 +2166,7 @@ result = (helper.holder) {}
     )
     .unwrap();
 
-    let json = pklr::eval_to_json_async(&main).await.unwrap();
+    let json = pklr::eval_to_json(&main).unwrap();
     assert_eq!(json["selected"], true);
     assert_eq!(json["result"]["hasBase"], true);
     assert_eq!(json["result"]["hasCurrent"], false);
@@ -2524,9 +2498,9 @@ x = new Child {}
 // Module extends
 // ============================================================
 
-#[tokio::test]
-async fn module_extends_inherits_properties() {
-    let mut ev = pklr::eval::Evaluator::new_async();
+#[test]
+fn module_extends_inherits_properties() {
+    let mut ev = pklr::eval::Evaluator::new();
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     ev.set_base_path(&base);
     let src = r#"
@@ -2535,7 +2509,7 @@ default_name = "extended"
 extra = "new property"
 "#;
     let path = base.join("test_extends.pkl");
-    let val = ev.eval_source(src, &path).await.unwrap();
+    let val = ev.eval_source(src, &path).unwrap();
     let json = val.to_json();
     // default_name overridden
     assert_eq!(json["default_name"], "extended");
@@ -2545,9 +2519,9 @@ extra = "new property"
     assert_eq!(json["extra"], "new property");
 }
 
-#[tokio::test]
-async fn module_extends_inherits_classes() {
-    let mut ev = pklr::eval::Evaluator::new_async();
+#[test]
+fn module_extends_inherits_classes() {
+    let mut ev = pklr::eval::Evaluator::new();
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     ev.set_base_path(&base);
     let src = r#"
@@ -2557,14 +2531,14 @@ x = new Config {
 }
 "#;
     let path = base.join("test_extends_classes.pkl");
-    let val = ev.eval_source(src, &path).await.unwrap();
+    let val = ev.eval_source(src, &path).unwrap();
     let json = val.to_json();
     assert_eq!(json["x"]["debug"], true);
     assert_eq!(json["x"]["port"], 8080);
 }
 
-#[tokio::test]
-async fn inherited_class_identity_uses_canonical_module_path() {
+#[test]
+fn inherited_class_identity_uses_canonical_module_path() {
     let dir = TestTempDir::new("pklr_canonical_class_identity");
     std::fs::write(dir.path.join("base.pkl"), "class Item {}\n").unwrap();
     std::fs::write(
@@ -2583,7 +2557,7 @@ same = wrapper.instance is base.Item
     )
     .unwrap();
 
-    let json = pklr::eval_to_json_async(&main).await.unwrap();
+    let json = pklr::eval_to_json(&main).unwrap();
     assert_eq!(json["same"], true);
 }
 
@@ -2613,23 +2587,23 @@ x = read?("env:DEFINITELY_NOT_SET_12345")
     assert!(json["x"].is_null());
 }
 
-#[tokio::test]
-async fn read_local_file() {
-    let mut ev = pklr::eval::Evaluator::new_async();
+#[test]
+fn read_local_file() {
+    let mut ev = pklr::eval::Evaluator::new();
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     ev.set_base_path(&base);
     let src = r#"
 x = read("readme.txt")
 "#;
     let path = base.join("test_read.pkl");
-    let val = ev.eval_source(src, &path).await.unwrap();
+    let val = ev.eval_source(src, &path).unwrap();
     let json = val.to_json();
     assert_eq!(json["x"], "Hello from pklr!\n");
 }
 
-#[tokio::test]
-async fn read_file_uri() {
-    let mut ev = pklr::eval::Evaluator::new_async();
+#[test]
+fn read_file_uri() {
+    let mut ev = pklr::eval::Evaluator::new();
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     ev.set_base_path(&base);
     let file_path = base.join("readme.txt");
@@ -2640,7 +2614,7 @@ x = read("file://{}")
         file_path.display()
     );
     let path = base.join("test_read_file.pkl");
-    let val = ev.eval_source(&src, &path).await.unwrap();
+    let val = ev.eval_source(&src, &path).unwrap();
     let json = val.to_json();
     assert_eq!(json["x"], "Hello from pklr!\n");
 }
@@ -3043,8 +3017,8 @@ glob = Regex(#"^.*\.json$"#)
     assert_eq!(json["glob"]["pattern"], r"^.*\.json$");
 }
 
-#[tokio::test]
-async fn imported_regex_constructor_emits_type_tag() {
+#[test]
+fn imported_regex_constructor_emits_type_tag() {
     let temp = TestTempDir::new("pklr_test_imported_regex_type_tag");
     let dir = temp.path();
     std::fs::write(
@@ -3064,19 +3038,18 @@ glob = Types.Regex(#"^.*\.yaml$"#)
     )
     .unwrap();
 
-    let mut ev = Evaluator::new_async();
+    let mut ev = Evaluator::new();
     let path = dir.join("test.pkl");
     let val = ev
         .eval_source(&std::fs::read_to_string(&path).unwrap(), &path)
-        .await
         .unwrap();
     let json = val.to_json();
     assert_eq!(json["glob"]["_type"], "regex");
     assert_eq!(json["glob"]["pattern"], r"^.*\.yaml$");
 }
 
-#[tokio::test]
-async fn hk_step_regex_glob_emits_type_tag() {
+#[test]
+fn hk_step_regex_glob_emits_type_tag() {
     let temp = TestTempDir::new("pklr_test_hk_step_regex_glob");
     let dir = temp.path();
     std::fs::write(
@@ -3113,11 +3086,10 @@ hooks {
     )
     .unwrap();
 
-    let mut ev = Evaluator::new_async();
+    let mut ev = Evaluator::new();
     let path = dir.join("hk.pkl");
     let val = ev
         .eval_source(&std::fs::read_to_string(&path).unwrap(), &path)
-        .await
         .unwrap();
     let json = val.to_json();
     let glob = &json["hooks"]["check"]["steps"]["regex-test"]["glob"];
@@ -3143,8 +3115,8 @@ glob = Regex(#"""
     );
 }
 
-#[tokio::test]
-async fn eval_amends_perf() {
+#[test]
+fn eval_amends_perf() {
     // Minimal amends test to check performance
     let temp = TestTempDir::new("pklr_test_perf");
     let dir = temp.path();
@@ -3183,7 +3155,7 @@ hooks = new {
     .unwrap();
     let path = dir.join("test.pkl");
     let start = std::time::Instant::now();
-    let val = pklr::eval_to_json_async(&path).await.unwrap();
+    let val = pklr::eval_to_json(&path).unwrap();
     let elapsed = start.elapsed();
     eprintln!("eval_amends_perf: {:?}", elapsed);
     assert!(
@@ -3194,8 +3166,8 @@ hooks = new {
     assert!(val["hooks"]["pre-commit"]["fix"] == true);
 }
 
-#[tokio::test]
-async fn class_function_nested_in_new() {
+#[test]
+fn class_function_nested_in_new() {
     // Matches the hk builtin pattern: testMaker.checkFail() inside new Config.Step { tests { ... } }
     let temp = TestTempDir::new("pklr_test_nested");
     let dir = temp.path();
@@ -3224,12 +3196,12 @@ x {
     )
     .unwrap();
     let path = dir.join("main.pkl");
-    let val = pklr::eval_to_json_async(&path).await.unwrap();
+    let val = pklr::eval_to_json(&path).unwrap();
     assert_eq!(val["x"]["tests"]["check bad file"], "check:src/main.rs");
 }
 
-#[tokio::test]
-async fn class_function_cross_module() {
+#[test]
+fn class_function_cross_module() {
     let temp = TestTempDir::new("pklr_test_cross_module");
     let dir = temp.path();
     std::fs::write(
@@ -3253,7 +3225,7 @@ result = testMaker.checkFail("bad", 1)
     )
     .unwrap();
     let path = dir.join("main.pkl");
-    let val = pklr::eval_to_json_async(&path).await.unwrap();
+    let val = pklr::eval_to_json(&path).unwrap();
     assert_eq!(val["result"], "check:main.rs");
 }
 
