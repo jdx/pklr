@@ -940,58 +940,30 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
         names
     }
     // The names a class body reads while its defaults are evaluated: those
-    // of its non-method entries, and of the methods they call (by name, as
-    // `this.name`, or any of them through a dynamic `this[...]` or a `this`
-    // used as a value). Other method bodies only run on a built instance.
+    // of its non-method entries, and of the methods they call (by name, as a
+    // member of the instance, or any of them once the instance escapes; see
+    // `InstanceReads`). Other method bodies only run on a built instance.
     fn eager_class_refs(body: &[Entry]) -> HashSet<String> {
         fn is_method(entry: &Entry) -> bool {
             matches!(entry, Entry::Property(prop) if matches!(prop.value, Some(Expr::Lambda(..))))
         }
-        // The members `entries` read as `this.name`, where `this` is the
-        // instance (not a nested object body's own `this`).
-        fn instance_member_refs(entries: &[Entry], refs: &mut HashSet<String>) {
-            for entry in entries {
-                match entry {
-                    Entry::Property(prop) => {
-                        if let Some(value) = &prop.value {
-                            collect_sibling_field_refs_expr(value, refs, true);
-                        }
-                    }
-                    Entry::DynProperty(key, value) => {
-                        collect_sibling_field_refs_expr(key, refs, true);
-                        collect_sibling_field_refs_expr(value, refs, true);
-                    }
-                    Entry::Spread(expr) | Entry::Elem(expr) => {
-                        collect_sibling_field_refs_expr(expr, refs, true);
-                    }
-                    Entry::ForGenerator(fgen) => {
-                        collect_sibling_field_refs_expr(&fgen.collection, refs, true);
-                        instance_member_refs(&fgen.body, refs);
-                    }
-                    Entry::WhenGenerator(wgen) => {
-                        collect_sibling_field_refs_expr(&wgen.condition, refs, true);
-                        instance_member_refs(&wgen.body, refs);
-                        if let Some(else_body) = &wgen.else_body {
-                            instance_member_refs(else_body, refs);
-                        }
-                    }
-                    Entry::ClassDef(..) | Entry::TypeAlias(..) => {}
-                }
-            }
-        }
         let defaults: Vec<Entry> = body.iter().filter(|e| !is_method(e)).cloned().collect();
         let mut refs = referenced_roots(&defaults);
-        let mut members = HashSet::new();
-        instance_member_refs(&defaults, &mut members);
-        let mut escapes = this_escapes_entries(&defaults);
+        let mut instance = InstanceReads {
+            members: HashSet::new(),
+            escapes: false,
+        };
+        instance.entries(&defaults, 0);
         let mut followed = HashSet::new();
         loop {
-            let calls_all = escapes || members.contains(DYNAMIC_SIBLING_REF);
+            let calls_all = instance.escapes;
             let next: Vec<&Entry> = body
                 .iter()
                 .filter(|entry| match entry {
                     Entry::Property(prop) if is_method(entry) => {
-                        (calls_all || refs.contains(&prop.name) || members.contains(&prop.name))
+                        (calls_all
+                            || refs.contains(&prop.name)
+                            || instance.members.contains(&prop.name))
                             && followed.insert(prop.name.as_str())
                     }
                     _ => false,
@@ -1003,8 +975,7 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
             for method in next {
                 let method = std::slice::from_ref(method);
                 refs.extend(referenced_roots(method));
-                instance_member_refs(method, &mut members);
-                escapes |= this_escapes_entries(method);
+                instance.entries(method, 0);
             }
         }
     }
@@ -1759,81 +1730,129 @@ fn expr_mentions(expr: &Expr, name: &str) -> bool {
     }
 }
 
-/// Whether `expr` uses `this` other than as the base of a member read
-/// (`this.x`, `this[k]`): bound by a `let`, passed to a call, and so on, after
-/// which any of the instance's members may be read. A nested object body
-/// binds its own `this`, so only its `outer` can reach the instance.
-fn this_escapes(expr: &Expr) -> bool {
-    match expr {
-        Expr::Field(base, _) | Expr::NullSafeField(base, _) if matches!(base.as_ref(), Expr::Ident(name) if name == "this") => {
-            false
-        }
-        Expr::Index(base, index) if matches!(base.as_ref(), Expr::Ident(name) if name == "this") => {
-            this_escapes(index)
-        }
-        Expr::Ident(ident) => ident == "this",
-        Expr::New(_, entries, _) | Expr::ObjectBody(entries) | Expr::InferredNew(_, entries) => {
-            entries_mention(entries, "outer")
-        }
-        Expr::Field(base, _) | Expr::NullSafeField(base, _) => this_escapes(base),
-        Expr::Index(base, index) | Expr::Binop(_, base, index) => {
-            this_escapes(base) || this_escapes(index)
-        }
-        Expr::Call(callee, args) => this_escapes(callee) || args.iter().any(this_escapes),
-        Expr::If(cond, then_expr, else_expr) => {
-            this_escapes(cond) || this_escapes(then_expr) || this_escapes(else_expr)
-        }
-        Expr::Let(_, value, body) => this_escapes(value) || this_escapes(body),
-        // A type's constraints bind `this` to the checked value.
-        Expr::Is(value, _) | Expr::As(value, _) => this_escapes(value),
-        Expr::Lambda(_, value)
-        | Expr::Unop(_, value)
-        | Expr::Throw(value)
-        | Expr::Trace(value)
-        | Expr::Read(value)
-        | Expr::ReadOrNull(value) => this_escapes(value),
-        Expr::StringInterpolation(parts) => parts.iter().any(|part| match part {
-            StringInterpPart::Expr(expr) => this_escapes(expr),
-            StringInterpPart::Literal(_) => false,
-        }),
-        Expr::Null
-        | Expr::Bool(_)
-        | Expr::Int(_)
-        | Expr::Float(_)
-        | Expr::String(_)
-        | Expr::Import(..)
-        | Expr::ImportGlob(..) => false,
-    }
+/// How a class body's expressions reach the class instance: `this` in the
+/// body itself (and in its methods), `outer` one object body down. Names
+/// read as `ref.name` or `ref["name"]` go to `members`; any other use of the
+/// reference (bound by a `let`, passed to a call, indexed by a computed key)
+/// sets `escapes`, after which any member may be read.
+struct InstanceReads {
+    members: HashSet<String>,
+    escapes: bool,
 }
 
-/// `this_escapes` for the entries of a class body, where `this` is the
-/// instance.
-fn this_escapes_entries(entries: &[Entry]) -> bool {
-    entries.iter().any(|entry| match entry {
-        // A property's object body binds its own `this`, but its `outer`
-        // can be the instance.
-        Entry::Property(prop) => {
-            prop.value.as_ref().is_some_and(this_escapes)
-                || prop
-                    .body
-                    .as_ref()
-                    .is_some_and(|body| entries_mention(body, "outer"))
+impl InstanceReads {
+    /// The keyword naming the instance `depth` object bodies below the class
+    /// body, if any.
+    fn reference(depth: usize) -> Option<&'static str> {
+        match depth {
+            0 => Some("this"),
+            1 => Some("outer"),
+            _ => None,
         }
-        Entry::DynProperty(key, value) => this_escapes(key) || this_escapes(value),
-        Entry::Spread(expr) | Entry::Elem(expr) => this_escapes(expr),
-        Entry::ForGenerator(fgen) => {
-            this_escapes(&fgen.collection) || this_escapes_entries(&fgen.body)
+    }
+
+    fn entries(&mut self, entries: &[Entry], depth: usize) {
+        if Self::reference(depth).is_none() {
+            return;
         }
-        Entry::WhenGenerator(wgen) => {
-            this_escapes(&wgen.condition)
-                || this_escapes_entries(&wgen.body)
-                || wgen
-                    .else_body
-                    .as_ref()
-                    .is_some_and(|body| this_escapes_entries(body))
+        for entry in entries {
+            match entry {
+                Entry::Property(prop) => {
+                    if let Some(value) = &prop.value {
+                        self.expr(value, depth);
+                    }
+                    // A property's object body is one level further down.
+                    if let Some(body) = &prop.body {
+                        self.entries(body, depth + 1);
+                    }
+                }
+                Entry::DynProperty(key, value) => {
+                    self.expr(key, depth);
+                    self.expr(value, depth);
+                }
+                Entry::Spread(expr) | Entry::Elem(expr) => self.expr(expr, depth),
+                Entry::ForGenerator(fgen) => {
+                    self.expr(&fgen.collection, depth);
+                    self.entries(&fgen.body, depth);
+                }
+                Entry::WhenGenerator(wgen) => {
+                    self.expr(&wgen.condition, depth);
+                    self.entries(&wgen.body, depth);
+                    if let Some(else_body) = &wgen.else_body {
+                        self.entries(else_body, depth);
+                    }
+                }
+                Entry::ClassDef(..) | Entry::TypeAlias(..) => {}
+            }
         }
-        Entry::ClassDef(..) | Entry::TypeAlias(..) => false,
-    })
+    }
+
+    fn expr(&mut self, expr: &Expr, depth: usize) {
+        let Some(reference) = Self::reference(depth) else {
+            return;
+        };
+        let is_reference = |expr: &Expr| matches!(expr, Expr::Ident(name) if name == reference);
+        match expr {
+            Expr::Field(base, field) | Expr::NullSafeField(base, field) if is_reference(base) => {
+                self.members.insert(field.clone());
+            }
+            Expr::Index(base, index) if is_reference(base) => match index.as_ref() {
+                Expr::String(key) => {
+                    self.members.insert(key.clone());
+                }
+                index => {
+                    self.escapes = true;
+                    self.expr(index, depth);
+                }
+            },
+            Expr::Ident(name) => self.escapes |= name == reference,
+            Expr::New(_, entries, _)
+            | Expr::ObjectBody(entries)
+            | Expr::InferredNew(_, entries) => self.entries(entries, depth + 1),
+            Expr::Field(base, _) | Expr::NullSafeField(base, _) => self.expr(base, depth),
+            Expr::Index(left, right) | Expr::Binop(_, left, right) => {
+                self.expr(left, depth);
+                self.expr(right, depth);
+            }
+            Expr::Call(callee, args) => {
+                self.expr(callee, depth);
+                for arg in args {
+                    self.expr(arg, depth);
+                }
+            }
+            Expr::If(cond, then_expr, else_expr) => {
+                self.expr(cond, depth);
+                self.expr(then_expr, depth);
+                self.expr(else_expr, depth);
+            }
+            Expr::Let(_, value, body) => {
+                self.expr(value, depth);
+                self.expr(body, depth);
+            }
+            // A type's constraints bind `this` to the checked value.
+            Expr::Is(value, _) | Expr::As(value, _) => self.expr(value, depth),
+            Expr::Lambda(_, value)
+            | Expr::Unop(_, value)
+            | Expr::Throw(value)
+            | Expr::Trace(value)
+            | Expr::Read(value)
+            | Expr::ReadOrNull(value) => self.expr(value, depth),
+            Expr::StringInterpolation(parts) => {
+                for part in parts {
+                    if let StringInterpPart::Expr(expr) = part {
+                        self.expr(expr, depth);
+                    }
+                }
+            }
+            Expr::Null
+            | Expr::Bool(_)
+            | Expr::Int(_)
+            | Expr::Float(_)
+            | Expr::String(_)
+            | Expr::Import(..)
+            | Expr::ImportGlob(..) => {}
+        }
+    }
 }
 
 pub(super) fn type_mentions(ty: &crate::parser::TypeExpr, name: &str) -> bool {
