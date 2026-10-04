@@ -4481,7 +4481,10 @@ impl Evaluator {
                         StringInterpPart::Literal(s) => result.push_str(s),
                         StringInterpPart::Expr(e) => {
                             let val = self.eval_expr(e, scope, depth + 1)?;
-                            result.push_str(&self.value_to_string(&val, depth + 1)?);
+                            match &val {
+                                Value::String(s) => result.push_str(s),
+                                _ => result.push_str(&self.value_to_string(&val, depth + 1)?),
+                            }
                         }
                     }
                 }
@@ -4813,7 +4816,11 @@ impl Evaluator {
                     return Ok(value);
                 }
                 let obj = self.eval_field_base(obj_expr, field, scope, depth)?;
-                if let Some(result) = self.stdlib_property(&obj, field) {
+                // Objects resolve their own members below; built-in values
+                // answer from the standard library.
+                if !matches!(obj, Value::Object(..))
+                    && let Some(result) = self.stdlib_property(&obj, field)
+                {
                     return result;
                 }
                 // Built-in properties

@@ -189,6 +189,7 @@ impl Evaluator {
 
     /// The built-in property `name` of `value`, or `None` if `value`'s type
     /// declares no such property.
+    #[inline(never)]
     pub(super) fn stdlib_property(&mut self, value: &Value, name: &str) -> Option<Result<Value>> {
         match value {
             Value::String(s) => string::property(s, name),
@@ -203,6 +204,7 @@ impl Evaluator {
 
     /// Call the built-in method `name` of `value`, or return `None` if
     /// `value`'s type declares no such method.
+    #[inline(never)]
     pub(super) fn stdlib_method(
         &mut self,
         value: &Value,

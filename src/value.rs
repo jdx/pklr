@@ -592,8 +592,44 @@ impl Value {
     /// Convert to JSON, failing like `pkl eval -f json` does on values JSON
     /// cannot represent.
     pub fn try_to_json(&self) -> Result<serde_json::Value, crate::Error> {
+        let mut unrenderable = None;
+        let json = self.json_checked(&mut unrenderable);
+        match unrenderable {
+            None => Ok(json),
+            Some(value) => Err(value.json_render_error()),
+        }
+    }
+
+    /// [`Value::to_json`], noting in `unrenderable` the first value inside
+    /// that JSON cannot represent.
+    fn json_checked<'a>(&'a self, unrenderable: &mut Option<&'a Value>) -> serde_json::Value {
         match self {
-            Value::Float(f) if !f.is_finite() => Err(crate::Error::Eval(format!(
+            Value::Float(f) if !f.is_finite() => {
+                unrenderable.get_or_insert(self);
+                serde_json::Value::Null
+            }
+            Value::Regex(_) | Value::Duration(_) | Value::DataSize(_) => {
+                unrenderable.get_or_insert(self);
+                serde_json::Value::Null
+            }
+            Value::Object(map, _) => {
+                let mut obj = serde_json::Map::new();
+                for (k, v) in map.iter() {
+                    obj.insert(display_storage_key(k).to_string(), v.json_checked(unrenderable));
+                }
+                serde_json::Value::Object(obj)
+            }
+            Value::List(items) => serde_json::Value::Array(
+                items.iter().map(|v| v.json_checked(unrenderable)).collect(),
+            ),
+            _ => self.to_json(),
+        }
+    }
+
+    /// pkl's error for rendering this value as JSON.
+    fn json_render_error(&self) -> crate::Error {
+        if let Value::Float(f) = self {
+            return crate::Error::Eval(format!(
                 "Cannot render value `{}` as JSON.",
                 if f.is_nan() {
                     "NaN"
@@ -602,29 +638,13 @@ impl Value {
                 } else {
                     "-∞"
                 }
-            ))),
-            Value::Regex(_) | Value::Duration(_) | Value::DataSize(_) => {
-                Err(crate::Error::Eval(format!(
-                    "Cannot render value of type `{}` as JSON.\nValue: {}",
-                    self.type_name(),
-                    crate::eval::render_value(self)
-                )))
-            }
-            Value::Object(map, _) => {
-                let mut obj = serde_json::Map::new();
-                for (k, v) in map.iter() {
-                    obj.insert(display_storage_key(k).to_string(), v.try_to_json()?);
-                }
-                Ok(serde_json::Value::Object(obj))
-            }
-            Value::List(items) => Ok(serde_json::Value::Array(
-                items
-                    .iter()
-                    .map(Value::try_to_json)
-                    .collect::<Result<_, _>>()?,
-            )),
-            _ => Ok(self.to_json()),
+            ));
         }
+        crate::Error::Eval(format!(
+            "Cannot render value of type `{}` as JSON.\nValue: {}",
+            self.type_name(),
+            crate::eval::render_value(self)
+        ))
     }
 
     /// Convert to JSON. Values JSON cannot represent become a tagged object
