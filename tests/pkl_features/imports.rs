@@ -2591,9 +2591,15 @@ async fn narrowed_import_skips_nested_methods_early_defaults_do_not_run_on_outer
         "a = throw(\"unused\")\nmax = 3\nopen class Base { a = 2 }\nclass D {\n  open class Base { b = 3 }\n  class Reader extends module.Base { function f() = a }\n  r = new Reader {}.f()\n  a = 6\n  c = module.max\n}\n",
     )
     .unwrap();
+    // Inherited through empty classes.
+    std::fs::write(
+        dir.join("chain.pkl"),
+        "a = throw(\"unused\")\nmax = 3\nclass D {\n  open class Base { a = 2 }\n  open class Empty1 extends Base {}\n  open class Empty2 extends Empty1 {}\n  class Reader extends Empty2 { function f() = a }\n  r = new Reader {}.f()\n  a = 6\n  c = module.max\n}\n",
+    )
+    .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"built.pkl\" as B\nimport \"inherited.pkl\" as I\nimport \"deep.pkl\" as P\nimport \"enclosing.pkl\" as E\nimport \"qualified.pkl\" as Q\nbuilt = new B.D {}\ninherited = new I.D {}\ndeep = new P.D {}\nenclosing = new E.D {}\nqualified = new Q.D {}\n",
+        "import \"built.pkl\" as B\nimport \"inherited.pkl\" as I\nimport \"deep.pkl\" as P\nimport \"enclosing.pkl\" as E\nimport \"qualified.pkl\" as Q\nimport \"chain.pkl\" as C\nbuilt = new B.D {}\ninherited = new I.D {}\ndeep = new P.D {}\nenclosing = new E.D {}\nqualified = new Q.D {}\nchain = new C.D {}\n",
     )
     .unwrap();
 
@@ -2605,6 +2611,7 @@ async fn narrowed_import_skips_nested_methods_early_defaults_do_not_run_on_outer
     assert_eq!(val["deep"]["r"], 2);
     assert_eq!(val["enclosing"]["r"], 2);
     assert_eq!(val["qualified"]["r"], 2);
+    assert_eq!(val["chain"]["r"], 2);
 }
 
 #[tokio::test]

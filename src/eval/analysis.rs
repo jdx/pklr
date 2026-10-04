@@ -1120,26 +1120,22 @@ fn ancestor_properties<'e>(classes: &ClassMap<'e>, parent: Option<&'e str>) -> H
     let mut seen = HashSet::default();
     let mut next = parent.map(|parent| (parent, false));
     while let Some((name, in_module)) = next {
-        let (in_module, name) = match name.strip_prefix("module.") {
+        let (qualified, name) = match name.strip_prefix("module.") {
             Some(name) => (true, name),
             None => (in_module, name),
         };
-        let info = if in_module {
-            classes.module.get(name)
-        } else {
-            classes.get(name)
+        // A nested class hides the module's of its name, except from
+        // `module.Name` and from module classes' own parents.
+        let (in_module, info) = match classes.nested.get(name).filter(|_| !qualified) {
+            Some(info) => (false, Some(info)),
+            None => (true, classes.module.get(name)),
         };
         let Some((parent, body)) = info else {
             break;
         };
-        if !seen.insert(std::ptr::from_ref(*body)) {
+        if !seen.insert((in_module, name)) {
             break;
         }
-        let in_module = in_module
-            || classes
-                .module
-                .get(name)
-                .is_some_and(|(_, module_body)| std::ptr::eq(*module_body, *body));
         names.extend(body.iter().filter_map(|entry| match entry {
             Entry::Property(prop) if !has_modifier(&prop.modifiers, Modifier::Local) => {
                 Some(prop.name.as_str())
