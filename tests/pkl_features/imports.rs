@@ -2540,6 +2540,14 @@ async fn narrowed_import_respects_builtins_redeclared_in_nested_bodies() {
         "length = 1\nresult {\n  inner {\n    typealias Listing = Int\n    ok = 1 is Listing<Int>(this == length)\n  }\n}\n",
     )
     .unwrap();
+    // A class's member types are checked where the object is built, so a
+    // class instantiated in that body checks `Int` and reads the module's
+    // `length`, directly or through `T`.
+    std::fs::write(
+        dir.join("dep_class.pkl"),
+        "length = 1\ntypealias T = String(length == 1)\nclass C {\n  a: String(length == 1) = 1\n  b: T = 1\n}\nresult {\n  typealias String = Int\n  ok = new C {}\n}\n",
+    )
+    .unwrap();
     // A redeclaration in a sibling body doesn't apply to `ok`, whose check
     // through `T` binds the string's own `length`, so the module's unused
     // `length` must not be evaluated.
@@ -2550,7 +2558,7 @@ async fn narrowed_import_respects_builtins_redeclared_in_nested_bodies() {
     .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"dep.pkl\" as Dep\nimport \"dep_direct.pkl\" as DepDirect\nimport \"dep_listing.pkl\" as DepListing\nimport \"dep_sibling.pkl\" as DepSibling\nout = Dep.result.ok\noutDirect = DepDirect.result.ok\noutListing = DepListing.result.inner.ok\noutSibling = DepSibling.result.ok\n",
+        "import \"dep.pkl\" as Dep\nimport \"dep_direct.pkl\" as DepDirect\nimport \"dep_listing.pkl\" as DepListing\nimport \"dep_sibling.pkl\" as DepSibling\nimport \"dep_class.pkl\" as DepClass\nout = Dep.result.ok\noutDirect = DepDirect.result.ok\noutListing = DepListing.result.inner.ok\noutSibling = DepSibling.result.ok\noutClass = DepClass.result.ok\n",
     )
     .unwrap();
 
@@ -2561,6 +2569,7 @@ async fn narrowed_import_respects_builtins_redeclared_in_nested_bodies() {
     assert_eq!(val["outDirect"], true);
     assert_eq!(val["outListing"], true);
     assert_eq!(val["outSibling"], true);
+    assert_eq!(val["outClass"], serde_json::json!({ "a": 1, "b": 1 }));
 }
 
 #[tokio::test]
