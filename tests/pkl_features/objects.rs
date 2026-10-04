@@ -3768,3 +3768,25 @@ fn abstract_and_external_classes_cannot_be_instantiated() {
         assert!(err.contains(message), "{src}: {err}");
     }
 }
+
+#[test]
+fn instantiation_checks_follow_type_aliases() {
+    let err = eval_fails("typealias R = Regex\nres = new R {}\n");
+    assert!(
+        err.contains("Cannot instantiate, or amend an instance of, external class `Regex`."),
+        "{err}"
+    );
+    let json =
+        eval("class Foo { x = 1 }\ntypealias A = Foo\nlocal f = () -> new A {}\nr = f.apply()\n");
+    assert_eq!(json["r"], serde_json::json!({"x": 1}));
+}
+
+#[test]
+fn min_pkl_version_folds_constant_strings() {
+    let err =
+        eval_fails("@ModuleInfo { minPklVersion = \"99.\" + \"9.9\" }\nmodule future\nx = 1\n");
+    assert!(
+        err.contains("Module `future` requires Pkl version 99.9.9 or higher"),
+        "{err}"
+    );
+}

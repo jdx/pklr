@@ -1962,6 +1962,7 @@ impl Evaluator {
             let uri: &str = resolved_amends.as_deref().unwrap_or(amends_uri);
             if uri.starts_with("https://") || uri.starts_with("http://") {
                 // HTTP amends
+                self.check_not_self(module, path, Path::new(uri), "amend")?;
                 let source = self.fetch_source(uri)?;
                 let tokens = lexer::lex_named(&source, uri)?;
                 let base_module = parser::parse_named(&tokens, &source, uri)?;
@@ -1984,6 +1985,7 @@ impl Evaluator {
                     {
                         let pkg_dir = self.extract_package_zip(zip_url)?;
                         let local_path = pkg_dir.join(entry);
+                        self.check_not_self(module, path, &local_path, "amend")?;
                         let source = self.read_to_string_io(&local_path)?;
                         let name = local_path.display().to_string();
                         let tokens = lexer::lex_named(&source, &name)?;
@@ -2010,6 +2012,7 @@ impl Evaluator {
                         )));
                     }
                 } else if let PackageSource::Direct { url, root } = &pkg {
+                    self.check_not_self(module, path, Path::new(url.as_str()), "amend")?;
                     let source = self.fetch_direct_package_source(url, root)?;
                     let tokens = lexer::lex_named(&source, url)?;
                     let base_module = parser::parse_named(&tokens, &source, url)?;
@@ -6542,6 +6545,16 @@ fn check_instantiable(scope: &Scope, type_name: Option<&str>, class: Option<&Val
     let Some(type_name) = type_name else {
         return Ok(());
     };
+    // The class a type alias names (`typealias R = Regex`).
+    let mut resolved = type_name;
+    for _ in 0..8 {
+        match scope.get_type_alias(resolved) {
+            Some(crate::parser::TypeExpr::Named(target)) if !target.starts_with('*') => {
+                resolved = target;
+            }
+            _ => break,
+        }
+    }
     match class {
         Some(Value::Object(_, Some(source))) if source.is_abstract => Err(Error::Eval(format!(
             "Cannot instantiate abstract class `{}`.",
@@ -6559,8 +6572,8 @@ fn check_instantiable(scope: &Scope, type_name: Option<&str>, class: Option<&Val
             )))
         }
         // Built-ins are bound to a marker string of their own name.
-        None | Some(Value::String(_)) if EXTERNAL_CLASSES.contains(&type_name) => Err(Error::Eval(
-            format!("Cannot instantiate, or amend an instance of, external class `{type_name}`."),
+        None | Some(Value::String(_)) if EXTERNAL_CLASSES.contains(&resolved) => Err(Error::Eval(
+            format!("Cannot instantiate, or amend an instance of, external class `{resolved}`."),
         )),
         _ => Ok(()),
     }
