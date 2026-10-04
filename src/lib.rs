@@ -8,10 +8,10 @@ pub mod parser;
 #[cfg(feature = "eval-core")]
 pub mod value;
 
-#[cfg(feature = "eval-core")]
-pub use capabilities::EvalCapabilities;
 #[cfg(feature = "native-io")]
 pub use capabilities::NativeCapabilities;
+#[cfg(feature = "eval-core")]
+pub use capabilities::{EvalCapabilities, FetchBudget};
 pub use error::{Error, Result};
 #[cfg(feature = "eval-core")]
 pub use eval::Evaluator;

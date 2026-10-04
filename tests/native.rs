@@ -344,13 +344,21 @@ impl EvalCapabilities for NoPrefetch {
         self.0.fetch_bytes(url)
     }
 
-    fn fetch_text_many(&mut self, urls: &[String]) -> Vec<pklr::Result<String>> {
+    fn fetch_text_many(
+        &mut self,
+        urls: &[String],
+        _budget: &pklr::FetchBudget,
+    ) -> Vec<pklr::Result<String>> {
         urls.iter()
             .map(|url| Err(pklr::Error::Unsupported(url.clone())))
             .collect()
     }
 
-    fn fetch_bytes_many(&mut self, urls: &[String]) -> Vec<pklr::Result<Vec<u8>>> {
+    fn fetch_bytes_many(
+        &mut self,
+        urls: &[String],
+        _budget: &pklr::FetchBudget,
+    ) -> Vec<pklr::Result<Vec<u8>>> {
         urls.iter()
             .map(|url| Err(pklr::Error::Unsupported(url.clone())))
             .collect()
@@ -501,7 +509,8 @@ fn native_batch_fetch_returns_results_in_order() {
         .map(|path| format!("{}/{path}", server.base))
         .collect();
 
-    let results = pklr::NativeCapabilities::new().fetch_text_many(&urls);
+    let results =
+        pklr::NativeCapabilities::new().fetch_text_many(&urls, &pklr::FetchBudget::unlimited());
 
     assert_eq!(results.len(), 3);
     assert_eq!(results[0].as_ref().unwrap(), "first");
@@ -672,7 +681,8 @@ fn native_batch_fetch_is_bounded() {
         .map(|index| format!("{}/{index}.pkl", server.base))
         .collect();
 
-    let results = pklr::NativeCapabilities::new().fetch_text_many(&urls);
+    let results =
+        pklr::NativeCapabilities::new().fetch_text_many(&urls, &pklr::FetchBudget::unlimited());
 
     assert!(results.iter().all(|result| result.is_ok()));
     assert!(server.peak_in_flight() <= 8, "{}", server.peak_in_flight());
@@ -718,14 +728,22 @@ impl EvalCapabilities for Recording {
         self.native.fetch_bytes(url)
     }
 
-    fn fetch_text_many(&mut self, urls: &[String]) -> Vec<pklr::Result<String>> {
+    fn fetch_text_many(
+        &mut self,
+        urls: &[String],
+        budget: &pklr::FetchBudget,
+    ) -> Vec<pklr::Result<String>> {
         self.text_batches.lock().unwrap().push(urls.to_vec());
-        self.native.fetch_text_many(urls)
+        self.native.fetch_text_many(urls, budget)
     }
 
-    fn fetch_bytes_many(&mut self, urls: &[String]) -> Vec<pklr::Result<Vec<u8>>> {
+    fn fetch_bytes_many(
+        &mut self,
+        urls: &[String],
+        budget: &pklr::FetchBudget,
+    ) -> Vec<pklr::Result<Vec<u8>>> {
         self.bytes_batches.lock().unwrap().push(urls.to_vec());
-        self.native.fetch_bytes_many(urls)
+        self.native.fetch_bytes_many(urls, budget)
     }
 
     fn temp_dir(&mut self, prefix: &str) -> pklr::Result<PathBuf> {
@@ -969,4 +987,108 @@ fn glob_imports_in_fetched_modules_are_not_prefetched() {
 
     assert_eq!(json["result"], 1);
     assert_eq!(server.requests(), 1);
+}
+
+/// Native capabilities that add up the response bytes batch fetches return.
+#[derive(Default)]
+struct CountingBatches {
+    native: pklr::NativeCapabilities,
+    held: Arc<Mutex<usize>>,
+}
+
+impl EvalCapabilities for CountingBatches {
+    fn read_to_string(&mut self, path: &Path) -> pklr::Result<String> {
+        self.native.read_to_string(path)
+    }
+
+    fn path_exists(&mut self, path: &Path) -> pklr::Result<bool> {
+        self.native.path_exists(path)
+    }
+
+    fn canonicalize(&mut self, path: &Path) -> pklr::Result<PathBuf> {
+        self.native.canonicalize(path)
+    }
+
+    fn read_env(&mut self, name: &str) -> pklr::Result<Option<String>> {
+        self.native.read_env(name)
+    }
+
+    fn fetch_text(&mut self, url: &str) -> pklr::Result<String> {
+        self.native.fetch_text(url)
+    }
+
+    fn fetch_bytes(&mut self, url: &str) -> pklr::Result<Vec<u8>> {
+        self.native.fetch_bytes(url)
+    }
+
+    fn fetch_text_many(
+        &mut self,
+        urls: &[String],
+        budget: &pklr::FetchBudget,
+    ) -> Vec<pklr::Result<String>> {
+        let results = self.native.fetch_text_many(urls, budget);
+        *self.held.lock().unwrap() += results
+            .iter()
+            .filter_map(|result| result.as_ref().ok())
+            .map(String::len)
+            .sum::<usize>();
+        results
+    }
+
+    fn temp_dir(&mut self, prefix: &str) -> pklr::Result<PathBuf> {
+        self.native.temp_dir(prefix)
+    }
+
+    fn glob(&mut self, base: &Path, pattern: &str) -> pklr::Result<Vec<PathBuf>> {
+        self.native.glob(base, pattern)
+    }
+}
+
+#[test]
+fn prefetching_large_unused_imports_stays_within_the_byte_budget() {
+    const BUDGET: usize = 64 * 1024 * 1024;
+    const RESPONSE: usize = 4 * 1024 * 1024;
+    const DEPS: usize = 40;
+    let big = format!("// {}\nvalue = 1\n", "x".repeat(RESPONSE));
+    let mut main = String::new();
+    for index in 0..DEPS {
+        main.push_str(&format!("import \"Big{index}.pkl\"\n"));
+    }
+    main.push_str("import \"Used.pkl\"\nresult = Used.value\n");
+    let server = common::DelayedServer::start_with(
+        move |path| match path {
+            "/Main.pkl" => Some(main.clone()),
+            "/Used.pkl" => Some("value = 42\n".to_string()),
+            _ => Some(big.clone()),
+        },
+        std::time::Duration::ZERO,
+    );
+    let source = format!(
+        "import \"{}/Main.pkl\"\nresult = Main.result\n",
+        server.base
+    );
+
+    let capabilities = CountingBatches::default();
+    let held = capabilities.held.clone();
+
+    let json = Evaluator::with_capabilities(capabilities)
+        .eval_source(&source, Path::new("entry.pkl"))
+        .unwrap()
+        .to_json();
+
+    // The import that evaluation uses still evaluates once prefetching has
+    // spent its budget.
+    assert_eq!(json["result"], 42);
+    // Downloading every import would take DEPS * RESPONSE (160 MiB). The
+    // bodies prefetching keeps stay within the budget.
+    let held = *held.lock().unwrap();
+    assert!(
+        held <= BUDGET,
+        "prefetch kept {held} bytes; budget {BUDGET}"
+    );
+    // On the wire, each of the at most eight requests in flight when the
+    // budget ran out may have sent up to one response into socket buffers.
+    let served = server.bytes_served();
+    let bound = BUDGET + 8 * (RESPONSE + 1024) + 64 * 1024;
+    assert!(served <= bound, "served {served} bytes; bound {bound}");
 }

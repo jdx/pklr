@@ -17,13 +17,14 @@
 //! [`EvalCapabilities::fetch_bytes_many`]: crate::EvalCapabilities::fetch_bytes_many
 
 use super::*;
+use crate::capabilities::FetchBudget;
 
 /// The most levels of remote imports one prefetch follows.
 const MAX_LEVELS: usize = 8;
 /// The most requests prefetching makes in one evaluation.
 const MAX_REQUESTS: usize = 256;
 /// The most response bytes prefetching downloads in one evaluation.
-const MAX_BYTES: usize = 64 * 1024 * 1024;
+const MAX_BYTES: u64 = 64 * 1024 * 1024;
 
 /// What prefetching has done so far in one evaluation. Prefetching follows
 /// every remote import, used or not, so it runs on a budget: once that is
@@ -34,8 +35,9 @@ pub(super) struct PrefetchState {
     attempted: HashSet<String>,
     /// Requests left in the budget.
     requests: usize,
-    /// Response bytes left in the budget.
-    bytes: usize,
+    /// Response bytes left in the budget, charged by the capabilities as
+    /// they download.
+    bytes: FetchBudget,
 }
 
 impl Default for PrefetchState {
@@ -43,20 +45,36 @@ impl Default for PrefetchState {
         Self {
             attempted: HashSet::default(),
             requests: MAX_REQUESTS,
-            bytes: MAX_BYTES,
+            bytes: FetchBudget::new(MAX_BYTES),
         }
     }
 }
 
 impl PrefetchState {
     fn exhausted(&self) -> bool {
-        self.requests == 0 || self.bytes == 0
+        self.requests == 0 || self.bytes.is_spent()
     }
+}
 
-    /// Charge `bytes` of response body to the budget.
-    fn spend_bytes(&mut self, bytes: usize) {
-        self.bytes = self.bytes.saturating_sub(bytes);
-    }
+/// The remote imports of each module prefetching loaded, with the path
+/// evaluation gives that module, to queue for the next level.
+type Scanned = Vec<(Vec<String>, String)>;
+
+/// Record the non-glob import URIs of `source` (loaded from `path`) for the
+/// next level, scanning its tokens for the same import forms
+/// `module_import_uris` reads from a parsed module, without parsing a module
+/// evaluation may never use. A module that does not lex is skipped;
+/// evaluation reports its error if it is used.
+fn scan(scanned: &mut Scanned, source: &str, path: String) {
+    let Ok(tokens) = lexer::lex_named(source, &path) else {
+        return;
+    };
+    let imports = parser::collect_imports_with_kind(&tokens)
+        .into_iter()
+        // Glob imports are expanded at evaluation time.
+        .filter_map(|(uri, is_glob)| (!is_glob).then_some(uri))
+        .collect();
+    scanned.push((imports, path));
 }
 
 /// The URIs of the modules `module` imports, amends or extends, other than
@@ -133,10 +151,21 @@ impl Evaluator {
         if self.offline || self.prefetch.exhausted() {
             return;
         }
+        // Only a remote module's relative imports and absolute remote URIs
+        // can name remote modules; skip resolving anything else.
+        let base_is_remote = path
+            .to_str()
+            .is_some_and(|base| base.starts_with("http://") || base.starts_with("https://"));
         let mut roots = HashSet::default();
         let mut level = Vec::new();
         for uri in module_import_uris(module) {
-            self.prefetch_target(uri, path, &mut roots, &mut level);
+            if base_is_remote
+                || uri.starts_with("https://")
+                || uri.starts_with("http://")
+                || uri.starts_with("package://")
+            {
+                self.prefetch_target(uri, path, &mut roots, &mut level);
+            }
         }
         if !level.is_empty() {
             self.prefetch_levels(level, roots);
@@ -210,7 +239,7 @@ impl Evaluator {
             }
             // Sources fetched (or found in the package cache) at this level,
             // with the path evaluation gives them, to scan for the next level.
-            let mut sources: Vec<(String, String)> = Vec::new();
+            let mut sources = Scanned::new();
             for download in &mut downloads {
                 for target in &download.targets {
                     self.prefetch.attempted.insert(target.attempt_key());
@@ -230,12 +259,18 @@ impl Evaluator {
             if !text.is_empty() {
                 let urls: Vec<String> = text.iter().map(|d| d.fetch_url.clone()).collect();
                 self.prefetch.requests -= urls.len();
-                let results = self.capabilities.fetch_text_many(&urls);
+                let results = self
+                    .capabilities
+                    .fetch_text_many(&urls, &self.prefetch.bytes);
                 for (download, result) in text.into_iter().zip(results) {
                     if let Ok(body) = result {
-                        self.prefetch.spend_bytes(body.len());
-                        for target in download.targets {
+                        let mut targets = download.targets;
+                        let last = targets.pop();
+                        for target in targets {
                             self.store_text(target, body.clone(), &mut sources);
+                        }
+                        if let Some(target) = last {
+                            self.store_text(target, body, &mut sources);
                         }
                     }
                 }
@@ -244,10 +279,11 @@ impl Evaluator {
             if !bytes.is_empty() {
                 let urls: Vec<String> = bytes.iter().map(|d| d.fetch_url.clone()).collect();
                 self.prefetch.requests -= urls.len();
-                let results = self.capabilities.fetch_bytes_many(&urls);
+                let results = self
+                    .capabilities
+                    .fetch_bytes_many(&urls, &self.prefetch.bytes);
                 for (download, result) in bytes.into_iter().zip(results) {
                     if let Ok(fetched) = result {
-                        self.prefetch.spend_bytes(fetched.len());
                         for target in download.targets {
                             self.store_bytes(target, &fetched, &mut sources);
                         }
@@ -258,21 +294,10 @@ impl Evaluator {
             if self.prefetch.exhausted() {
                 break;
             }
-            // Scan the fetched modules' tokens for the same import forms
-            // `module_import_uris` reads from a parsed module, without
-            // parsing modules evaluation may never use. A module that does
-            // not lex is skipped; evaluation reports its error if it is used.
             let mut next = Vec::new();
-            for (source, source_path) in &sources {
-                let Ok(tokens) = lexer::lex_named(source, source_path) else {
-                    continue;
-                };
-                for (uri, is_glob) in parser::collect_imports_with_kind(&tokens) {
-                    // Glob imports are expanded at evaluation time.
-                    if is_glob {
-                        continue;
-                    }
-                    self.prefetch_target(&uri, Path::new(source_path), &mut roots, &mut next);
+            for (imports, source_path) in &sources {
+                for uri in imports {
+                    self.prefetch_target(uri, Path::new(source_path), &mut roots, &mut next);
                 }
             }
             level = next;
@@ -326,17 +351,13 @@ impl Evaluator {
 
     /// Load `target` from the persistent package cache. Returns whether it
     /// was a cached package, which then needs no request.
-    fn load_cached_package(
-        &mut self,
-        target: &Prefetch,
-        sources: &mut Vec<(String, String)>,
-    ) -> bool {
+    fn load_cached_package(&mut self, target: &Prefetch, sources: &mut Scanned) -> bool {
         match target {
             Prefetch::Http { .. } => false,
             Prefetch::PackageFile { url } => match self.cached_package(url, "pkl") {
                 Some(cached) => {
-                    if let Ok(source) = String::from_utf8(cached) {
-                        sources.push((source, url.clone()));
+                    if let Ok(source) = std::str::from_utf8(&cached) {
+                        scan(sources, source, url.clone());
                     }
                     true
                 }
@@ -357,16 +378,17 @@ impl Evaluator {
     }
 
     /// Cache a plain HTTP module's text, as `fetch_source` would.
-    fn store_text(&mut self, target: Prefetch, body: String, sources: &mut Vec<(String, String)>) {
+    fn store_text(&mut self, target: Prefetch, body: String, sources: &mut Scanned) {
         if let Prefetch::Http { url, fetch_url } = target {
-            self.http_cache.insert(fetch_url, body.clone());
-            sources.push((body, url));
+            // Scan first so the body can move into the cache uncopied.
+            scan(sources, &body, url);
+            self.http_cache.insert(fetch_url, body);
         }
     }
 
     /// Do `target`'s cache work with downloaded `bytes`, as evaluation would
     /// after fetching it.
-    fn store_bytes(&mut self, target: Prefetch, bytes: &[u8], sources: &mut Vec<(String, String)>) {
+    fn store_bytes(&mut self, target: Prefetch, bytes: &[u8], sources: &mut Scanned) {
         match target {
             Prefetch::Http { .. } => {
                 // `fetch_text` rejects bodies that are not UTF-8; leave those
@@ -381,8 +403,8 @@ impl Evaluator {
                 }
                 let _ = self.write_package_cache(&url, "pkl", bytes);
                 if let Ok(source) = std::str::from_utf8(bytes) {
-                    self.http_cache.insert(url.clone(), source.to_string());
-                    sources.push((source.to_string(), url));
+                    scan(sources, source, url.clone());
+                    self.http_cache.insert(url, source.to_string());
                 }
             }
             #[cfg(feature = "package-zip")]
@@ -412,16 +434,11 @@ impl Evaluator {
     }
 
     #[cfg(feature = "package-zip")]
-    fn push_package_entries(
-        &mut self,
-        dir: &Path,
-        entries: &[String],
-        sources: &mut Vec<(String, String)>,
-    ) {
+    fn push_package_entries(&mut self, dir: &Path, entries: &[String], sources: &mut Scanned) {
         for entry in entries {
             let path = dir.join(entry);
             if let Ok(source) = self.read_to_string_io(&path) {
-                sources.push((source, path.display().to_string()));
+                scan(sources, &source, path.display().to_string());
             }
         }
     }

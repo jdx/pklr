@@ -15,7 +15,6 @@
 //! [`Evaluator::with_capabilities`]: crate::Evaluator::with_capabilities
 
 use std::path::{Path, PathBuf};
-#[cfg(feature = "native-io")]
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "http")]
 use std::time::Duration;
@@ -72,20 +71,117 @@ pub trait EvalCapabilities: Send + Sync {
     /// [`fetch_text`](Self::fetch_text); implementations can override it to
     /// fetch concurrently. A failed result is not cached: the evaluator
     /// fetches that URL again with `fetch_text` if evaluation needs it.
-    fn fetch_text_many(&mut self, urls: &[String]) -> Vec<Result<String>> {
-        urls.iter().map(|url| self.fetch_text(url)).collect()
+    ///
+    /// Response bodies must be charged to `budget`. Once it is spent, no new
+    /// request may start; return an error for the remaining URLs instead.
+    /// The default checks it between requests, so it overshoots by at most
+    /// one response; a concurrent implementation should also refuse a body
+    /// that does not fit in what is left (see [`FetchBudget::try_take`]).
+    fn fetch_text_many(&mut self, urls: &[String], budget: &FetchBudget) -> Vec<Result<String>> {
+        urls.iter()
+            .map(|url| {
+                if budget.is_spent() {
+                    return Err(budget_spent(url));
+                }
+                let result = self.fetch_text(url);
+                if let Ok(body) = &result {
+                    budget.charge(body.len() as u64);
+                }
+                result
+            })
+            .collect()
     }
 
     /// Fetch several URLs as bytes, returning one result per URL in order.
     ///
     /// See [`fetch_text_many`](Self::fetch_text_many).
-    fn fetch_bytes_many(&mut self, urls: &[String]) -> Vec<Result<Vec<u8>>> {
-        urls.iter().map(|url| self.fetch_bytes(url)).collect()
+    fn fetch_bytes_many(&mut self, urls: &[String], budget: &FetchBudget) -> Vec<Result<Vec<u8>>> {
+        urls.iter()
+            .map(|url| {
+                if budget.is_spent() {
+                    return Err(budget_spent(url));
+                }
+                let result = self.fetch_bytes(url);
+                if let Ok(body) = &result {
+                    budget.charge(body.len() as u64);
+                }
+                result
+            })
+            .collect()
     }
 
     fn temp_dir(&mut self, prefix: &str) -> Result<PathBuf>;
 
     fn glob(&mut self, base: &Path, pattern: &str) -> Result<Vec<PathBuf>>;
+}
+
+/// A byte budget shared by the requests of a batch fetch
+/// ([`EvalCapabilities::fetch_text_many`] and
+/// [`EvalCapabilities::fetch_bytes_many`]). It is safe to use from several
+/// threads at once.
+#[derive(Debug)]
+pub struct FetchBudget {
+    remaining: AtomicU64,
+}
+
+impl FetchBudget {
+    /// A budget of `bytes` response bytes.
+    pub fn new(bytes: u64) -> Self {
+        Self {
+            remaining: AtomicU64::new(bytes),
+        }
+    }
+
+    /// A budget that is never spent.
+    pub fn unlimited() -> Self {
+        Self::new(u64::MAX)
+    }
+
+    /// The bytes left.
+    pub fn remaining(&self) -> u64 {
+        self.remaining.load(Ordering::Acquire)
+    }
+
+    /// Whether no bytes are left, so no new request should start.
+    pub fn is_spent(&self) -> bool {
+        self.remaining() == 0
+    }
+
+    /// Take `bytes` if that many are left, returning whether it did. Nothing
+    /// is taken when they do not fit.
+    pub fn try_take(&self, bytes: u64) -> bool {
+        self.update(|left| left.checked_sub(bytes)).is_some()
+    }
+
+    /// Charge `bytes` already downloaded, leaving the budget spent if they
+    /// do not fit.
+    pub fn charge(&self, bytes: u64) {
+        self.update(|left| Some(left.saturating_sub(bytes)));
+    }
+
+    /// Atomically replace the remaining bytes with `next(remaining)`, unless
+    /// it returns `None`. Returns the new value.
+    fn update(&self, next: impl Fn(u64) -> Option<u64>) -> Option<u64> {
+        let mut left = self.remaining.load(Ordering::Acquire);
+        loop {
+            let new = next(left)?;
+            match self.remaining.compare_exchange_weak(
+                left,
+                new,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(new),
+                Err(actual) => left = actual,
+            }
+        }
+    }
+}
+
+/// The error for a URL a batch fetch skipped or dropped because its budget
+/// was spent.
+fn budget_spent(url: &str) -> crate::Error {
+    crate::Error::Eval(format!("fetch budget spent before {url}"))
 }
 
 /// The native host IO: the standard library for files and environment
@@ -196,11 +292,13 @@ impl EvalCapabilities for NativeCapabilities {
         match &self.http {
             HttpBackend::Ureq(agent) => ureq_fetch_text(agent, url),
             #[cfg(feature = "async")]
-            HttpBackend::Reqwest(client) => {
-                reqwest_backend::fetch_text_many(client, std::slice::from_ref(&url.to_string()))
-                    .pop()
-                    .expect("one result per URL")
-            }
+            HttpBackend::Reqwest(client) => reqwest_backend::fetch_text_many(
+                client,
+                std::slice::from_ref(&url.to_string()),
+                &FetchBudget::unlimited(),
+            )
+            .pop()
+            .expect("one result per URL"),
         }
         #[cfg(not(feature = "http"))]
         Err(crate::Error::Unsupported(format!(
@@ -213,11 +311,13 @@ impl EvalCapabilities for NativeCapabilities {
         match &self.http {
             HttpBackend::Ureq(agent) => ureq_fetch_bytes(agent, url),
             #[cfg(feature = "async")]
-            HttpBackend::Reqwest(client) => {
-                reqwest_backend::fetch_bytes_many(client, std::slice::from_ref(&url.to_string()))
-                    .pop()
-                    .expect("one result per URL")
-            }
+            HttpBackend::Reqwest(client) => reqwest_backend::fetch_bytes_many(
+                client,
+                std::slice::from_ref(&url.to_string()),
+                &FetchBudget::unlimited(),
+            )
+            .pop()
+            .expect("one result per URL"),
         }
         #[cfg(not(feature = "http"))]
         Err(crate::Error::Unsupported(format!(
@@ -226,20 +326,27 @@ impl EvalCapabilities for NativeCapabilities {
     }
 
     #[cfg(feature = "http")]
-    fn fetch_text_many(&mut self, urls: &[String]) -> Vec<Result<String>> {
+    fn fetch_text_many(&mut self, urls: &[String], budget: &FetchBudget) -> Vec<Result<String>> {
         match &self.http {
-            HttpBackend::Ureq(agent) => fetch_parallel(urls, |url| ureq_fetch_text(agent, url)),
+            HttpBackend::Ureq(agent) => fetch_parallel(urls, budget, |url| {
+                let body = ureq_fetch_within(agent, url, budget)?;
+                String::from_utf8(body).map_err(|error| {
+                    crate::Error::Eval(format!("HTTP read failed for {url}: {error}"))
+                })
+            }),
             #[cfg(feature = "async")]
-            HttpBackend::Reqwest(client) => reqwest_backend::fetch_text_many(client, urls),
+            HttpBackend::Reqwest(client) => reqwest_backend::fetch_text_many(client, urls, budget),
         }
     }
 
     #[cfg(feature = "http")]
-    fn fetch_bytes_many(&mut self, urls: &[String]) -> Vec<Result<Vec<u8>>> {
+    fn fetch_bytes_many(&mut self, urls: &[String], budget: &FetchBudget) -> Vec<Result<Vec<u8>>> {
         match &self.http {
-            HttpBackend::Ureq(agent) => fetch_parallel(urls, |url| ureq_fetch_bytes(agent, url)),
+            HttpBackend::Ureq(agent) => {
+                fetch_parallel(urls, budget, |url| ureq_fetch_within(agent, url, budget))
+            }
             #[cfg(feature = "async")]
-            HttpBackend::Reqwest(client) => reqwest_backend::fetch_bytes_many(client, urls),
+            HttpBackend::Reqwest(client) => reqwest_backend::fetch_bytes_many(client, urls, budget),
         }
     }
 
@@ -254,11 +361,21 @@ impl EvalCapabilities for NativeCapabilities {
 
 /// Run `fetch` for every URL, at most [`MAX_CONCURRENT_FETCHES`] at a time,
 /// returning the results in URL order.
+///
+/// No request starts once `budget` is spent; `fetch` charges the bodies it
+/// reads to it.
 #[cfg(feature = "http")]
 fn fetch_parallel<T: Send>(
     urls: &[String],
+    budget: &FetchBudget,
     fetch: impl Fn(&str) -> Result<T> + Sync,
 ) -> Vec<Result<T>> {
+    let fetch = |url: &str| {
+        if budget.is_spent() {
+            return Err(budget_spent(url));
+        }
+        fetch(url)
+    };
     if urls.len() <= 1 {
         return urls.iter().map(|url| fetch(url)).collect();
     }
@@ -327,6 +444,43 @@ fn ureq_fetch_bytes(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>> {
         .map_err(|error| crate::Error::Eval(format!("HTTP read failed for {url}: {error}")))
 }
 
+/// Read `url`'s body, taking each chunk from `budget` as it arrives and
+/// giving up (dropping the connection) as soon as a chunk does not fit. The
+/// bytes read across concurrent fetches therefore stay within the budget
+/// plus at most one chunk per fetch.
+#[cfg(feature = "http")]
+fn ureq_fetch_within(agent: &ureq::Agent, url: &str, budget: &FetchBudget) -> Result<Vec<u8>> {
+    use std::io::Read;
+
+    let mut response = agent
+        .get(url)
+        .call()
+        .map_err(|error| http_error(url, error))?;
+    let mut reader = response
+        .body_mut()
+        .with_config()
+        .limit(HTTP_BODY_LIMIT)
+        .reader();
+    let mut body = Vec::new();
+    let mut chunk = vec![0; FETCH_CHUNK];
+    loop {
+        let read = reader
+            .read(&mut chunk)
+            .map_err(|error| crate::Error::Eval(format!("HTTP read failed for {url}: {error}")))?;
+        if read == 0 {
+            return Ok(body);
+        }
+        if !budget.try_take(read as u64) {
+            return Err(budget_spent(url));
+        }
+        body.extend_from_slice(&chunk[..read]);
+    }
+}
+
+/// The most bytes a budgeted fetch reads before charging them.
+#[cfg(feature = "http")]
+const FETCH_CHUNK: usize = 64 * 1024;
+
 #[cfg(feature = "http")]
 fn http_error(url: &str, error: ureq::Error) -> crate::Error {
     if matches!(error, ureq::Error::StatusCode(404)) {
@@ -340,53 +494,65 @@ fn http_error(url: &str, error: ureq::Error) -> crate::Error {
 #[cfg(feature = "async")]
 mod reqwest_backend {
     use std::future::Future;
-    use std::sync::OnceLock;
+    use std::sync::{Arc, OnceLock};
 
+    use super::{FetchBudget, HTTP_BODY_LIMIT, budget_spent};
     use crate::Result;
 
     pub(super) fn fetch_text_many(
         client: &reqwest::Client,
         urls: &[String],
+        budget: &FetchBudget,
     ) -> Vec<Result<String>> {
-        fetch_many(
-            client,
-            urls,
-            |response| async move { response.text().await },
-        )
+        fetch_many(client, urls, budget, |body, url| {
+            String::from_utf8(body)
+                .map_err(|error| crate::Error::Eval(format!("HTTP read failed for {url}: {error}")))
+        })
     }
 
     pub(super) fn fetch_bytes_many(
         client: &reqwest::Client,
         urls: &[String],
+        budget: &FetchBudget,
     ) -> Vec<Result<Vec<u8>>> {
-        fetch_many(client, urls, |response| async move {
-            response.bytes().await.map(|bytes| bytes.to_vec())
-        })
+        fetch_many(client, urls, budget, |body, _| Ok(body))
     }
 
     /// Fetch every URL, at most [`MAX_CONCURRENT_FETCHES`](super::MAX_CONCURRENT_FETCHES)
-    /// at a time, and read each body with `read`. Results are in URL order.
-    fn fetch_many<T, F, Fut>(client: &reqwest::Client, urls: &[String], read: F) -> Vec<Result<T>>
+    /// at a time, and turn each body into a result with `convert`. Results
+    /// are in URL order. Bodies are charged to `budget` as they are read.
+    fn fetch_many<T>(
+        client: &reqwest::Client,
+        urls: &[String],
+        budget: &FetchBudget,
+        convert: fn(Vec<u8>, &str) -> Result<T>,
+    ) -> Vec<Result<T>>
     where
         T: Send + 'static,
-        F: Fn(reqwest::Response) -> Fut + Copy + Send + 'static,
-        Fut: Future<Output = reqwest::Result<T>> + Send,
     {
         let client = client.clone();
         let urls = urls.to_vec();
-        block_on(async move {
-            let permits =
-                std::sync::Arc::new(tokio::sync::Semaphore::new(super::MAX_CONCURRENT_FETCHES));
+        // The tasks need a budget they can own; settle with the caller's
+        // when they are done.
+        let start = budget.remaining();
+        let shared = Arc::new(FetchBudget::new(start));
+        let task_budget = shared.clone();
+        let results = block_on(async move {
+            let permits = Arc::new(tokio::sync::Semaphore::new(super::MAX_CONCURRENT_FETCHES));
             let mut tasks = tokio::task::JoinSet::new();
             for (index, url) in urls.into_iter().enumerate() {
                 let client = client.clone();
                 let permits = permits.clone();
+                let budget = task_budget.clone();
                 tasks.spawn(async move {
                     let _permit = permits
                         .acquire_owned()
                         .await
                         .expect("semaphore is never closed");
-                    (index, fetch(&client, &url, read).await)
+                    let result = fetch(&client, &url, &budget)
+                        .await
+                        .and_then(|body| convert(body, &url));
+                    (index, result)
                 });
             }
             let mut results: Vec<Option<Result<T>>> =
@@ -402,15 +568,18 @@ mod reqwest_backend {
                 .into_iter()
                 .map(|result| result.expect("every URL is fetched"))
                 .collect()
-        })
+        });
+        budget.charge(start - shared.remaining());
+        results
     }
 
-    async fn fetch<T, F, Fut>(client: &reqwest::Client, url: &str, read: F) -> Result<T>
-    where
-        F: Fn(reqwest::Response) -> Fut,
-        Fut: Future<Output = reqwest::Result<T>>,
-    {
-        let response = client
+    /// Fetch `url`'s body. No request starts once `budget` is spent, and a
+    /// body is dropped as soon as a chunk of it does not fit.
+    async fn fetch(client: &reqwest::Client, url: &str, budget: &FetchBudget) -> Result<Vec<u8>> {
+        if budget.is_spent() {
+            return Err(budget_spent(url));
+        }
+        let mut response = client
             .get(url)
             .send()
             .await
@@ -423,9 +592,25 @@ mod reqwest_backend {
                     crate::Error::Eval(format!("HTTP error for {url}: {error}"))
                 }
             })?;
-        read(response)
+        // Take each chunk from the budget as it arrives, and give up as
+        // soon as one does not fit.
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
             .await
-            .map_err(|error| crate::Error::Eval(format!("HTTP read failed for {url}: {error}")))
+            .map_err(|error| crate::Error::Eval(format!("HTTP read failed for {url}: {error}")))?
+        {
+            if (body.len() + chunk.len()) as u64 > HTTP_BODY_LIMIT {
+                return Err(crate::Error::Eval(format!(
+                    "HTTP read failed for {url}: body is too large"
+                )));
+            }
+            if !budget.try_take(chunk.len() as u64) {
+                return Err(budget_spent(url));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
     }
 
     /// Run `future` to completion from synchronous code.

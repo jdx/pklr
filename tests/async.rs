@@ -46,7 +46,7 @@ fn reqwest_batch_fetch_runs_concurrently_on_a_multi_thread_runtime() {
             let mut capabilities =
                 pklr::NativeCapabilities::with_reqwest_client(pklr::reqwest::Client::new());
             let started = std::time::Instant::now();
-            let results = capabilities.fetch_text_many(&urls);
+            let results = capabilities.fetch_text_many(&urls, &pklr::FetchBudget::unlimited());
             (results, started.elapsed())
         })
         .await
@@ -170,7 +170,7 @@ fn reqwest_batch_fetch_is_bounded() {
     let results = multi_thread_runtime().block_on(async move {
         tokio::spawn(async move {
             pklr::NativeCapabilities::with_reqwest_client(pklr::reqwest::Client::new())
-                .fetch_text_many(&urls)
+                .fetch_text_many(&urls, &pklr::FetchBudget::unlimited())
         })
         .await
         .unwrap()

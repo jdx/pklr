@@ -12,6 +12,7 @@ use std::time::Duration;
 pub struct DelayedServer {
     pub base: String,
     requests: Arc<AtomicUsize>,
+    bytes_served: Arc<AtomicUsize>,
     peak_in_flight: Arc<AtomicUsize>,
 }
 
@@ -46,6 +47,8 @@ impl DelayedServer {
         let base = format!("http://{}", listener.local_addr().unwrap());
         let requests = Arc::new(AtomicUsize::new(0));
         let counter = requests.clone();
+        let bytes_served = Arc::new(AtomicUsize::new(0));
+        let served = bytes_served.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else {
@@ -53,6 +56,7 @@ impl DelayedServer {
                 };
                 let routes = routes.clone();
                 let counter = counter.clone();
+                let served = served.clone();
                 let in_flight = in_flight.clone();
                 let peak = peak.clone();
                 std::thread::spawn(move || {
@@ -92,7 +96,14 @@ impl DelayedServer {
                         None => b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                             .to_vec(),
                     };
-                    let _ = stream.write_all(&response);
+                    // Write in chunks, counting what the client accepted
+                    // before it hung up.
+                    for chunk in response.chunks(16 * 1024) {
+                        if stream.write_all(chunk).is_err() {
+                            break;
+                        }
+                        served.fetch_add(chunk.len(), Ordering::SeqCst);
+                    }
                     let _ = stream.flush();
                 });
             }
@@ -100,6 +111,7 @@ impl DelayedServer {
         Self {
             base,
             requests,
+            bytes_served,
             peak_in_flight,
         }
     }
@@ -108,6 +120,12 @@ impl DelayedServer {
     #[allow(dead_code)]
     pub fn peak_in_flight(&self) -> usize {
         self.peak_in_flight.load(Ordering::SeqCst)
+    }
+
+    /// The response bytes (headers included) written to clients so far.
+    #[allow(dead_code)]
+    pub fn bytes_served(&self) -> usize {
+        self.bytes_served.load(Ordering::SeqCst)
     }
 
     /// The number of requests served so far.

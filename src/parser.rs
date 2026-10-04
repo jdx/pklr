@@ -126,16 +126,23 @@ impl<'a> Parser<'a> {
 
     /// Run `parse` one nesting level deeper, failing past
     /// [`MAX_NESTING_DEPTH`].
+    #[inline(always)]
     fn nested<T>(&mut self, parse: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         if self.depth >= MAX_NESTING_DEPTH {
-            return Err(self.parse_error(format!(
-                "expressions nest more than {MAX_NESTING_DEPTH} levels deep"
-            )));
+            return Err(self.nesting_error());
         }
         self.depth += 1;
         let result = parse(self);
         self.depth -= 1;
         result
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn nesting_error(&self) -> Error {
+        self.parse_error(format!(
+            "expressions nest more than {MAX_NESTING_DEPTH} levels deep"
+        ))
     }
 
     fn parse_error(&self, message: impl Into<String>) -> Error {
