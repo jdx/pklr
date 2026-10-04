@@ -67,6 +67,9 @@ pub struct Evaluator {
     /// keyed like `body_roots_cache`. A module imported with several field
     /// sets is evaluated once per set, and the analysis is the same each time.
     module_members_cache: HashMap<usize, (crate::parser::Body, Arc<indexmap::IndexSet<String>>)>,
+    /// Resources read in this run, by URI. As in Pkl, reading a resource again
+    /// returns the first result, so reads are deterministic.
+    resource_cache: HashMap<String, Value>,
     /// Final scopes for modules evaluated in this run, used to preserve inherited locals.
     module_scopes: HashMap<PathBuf, ModuleScopeSnapshot>,
     /// Environment variables read during evaluation (name → observed value).
@@ -293,6 +296,7 @@ impl Default for Evaluator {
             parse_cache: HashMap::default(),
             body_roots_cache: HashMap::default(),
             module_members_cache: HashMap::default(),
+            resource_cache: HashMap::default(),
             module_scopes: HashMap::default(),
             env_reads: BTreeMap::new(),
             scoped_imports_in_flight: HashSet::default(),
@@ -552,6 +556,7 @@ impl Evaluator {
             parse_cache: HashMap::default(),
             body_roots_cache: HashMap::default(),
             module_members_cache: HashMap::default(),
+            resource_cache: HashMap::default(),
             module_scopes: HashMap::default(),
             env_reads: BTreeMap::new(),
             scoped_imports_in_flight: HashSet::default(),
@@ -631,6 +636,7 @@ impl Evaluator {
         self.parse_cache.clear();
         self.body_roots_cache.clear();
         self.module_members_cache.clear();
+        self.resource_cache.clear();
         clear_names();
         self.module_scopes.clear();
         self.scoped_imports_in_flight.clear();
@@ -704,8 +710,18 @@ impl Evaluator {
         }
     }
 
-    /// Read a resource by URI scheme.
+    /// Read a resource by URI, reusing an earlier read of the same URI.
     fn read_resource(&mut self, uri: &str) -> Result<Value> {
+        if let Some(value) = self.resource_cache.get(uri) {
+            return Ok(value.clone());
+        }
+        let value = self.read_resource_uncached(uri)?;
+        self.resource_cache.insert(uri.to_string(), value.clone());
+        Ok(value)
+    }
+
+    /// Read a resource by URI scheme.
+    fn read_resource_uncached(&mut self, uri: &str) -> Result<Value> {
         if let Some(path) = uri.strip_prefix("file://") {
             // file:// — read local file
             let content = self.read_to_string_io(Path::new(path))?;
