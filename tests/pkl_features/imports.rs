@@ -2690,6 +2690,153 @@ async fn narrowed_import_respects_aliases_redeclared_in_nested_bodies() {
 }
 
 #[tokio::test]
+async fn narrowed_import_respects_builtins_redeclared_in_nested_bodies() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_nested_builtin");
+    let dir = temp.path();
+    // The module alias `T` is checked inside a body that redeclares `String`
+    // as `Int`, whose check binds no `length`, so the module's `length` is
+    // still needed.
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "length = 1\ntypealias T = String(length == 1)\nresult {\n  typealias String = Int\n  ok = 1 is T\n}\n",
+    )
+    .unwrap();
+    // The same holds for a check on the redeclared name directly.
+    std::fs::write(
+        dir.join("dep_direct.pkl"),
+        "length = 1\nresult {\n  typealias String = Int\n  ok = 1 is String(length == 1)\n}\n",
+    )
+    .unwrap();
+    // Collections redeclared deeper inside the body, including as generics.
+    std::fs::write(
+        dir.join("dep_listing.pkl"),
+        "length = 1\nresult {\n  inner {\n    typealias Listing = Int\n    ok = 1 is Listing<Int>(this == length)\n  }\n}\n",
+    )
+    .unwrap();
+    // A class's member types are checked where the object is built, so a
+    // class instantiated in that body checks `Int` and reads the module's
+    // `length`, directly or through `T`.
+    std::fs::write(
+        dir.join("dep_class.pkl"),
+        "length = 1\ntypealias T = String(length == 1)\nclass C {\n  a: String(length == 1) = 1\n  b: T = 1\n}\nresult {\n  typealias String = Int\n  ok = new C {}\n}\n",
+    )
+    .unwrap();
+    // A redeclaration in a sibling body doesn't apply to `ok`, whose check
+    // through `T` binds the string's own `length`, so the module's unused
+    // `length` must not be evaluated.
+    std::fs::write(
+        dir.join("dep_sibling.pkl"),
+        "length = throw(\"unused\")\ntypealias T = String(length == 1)\nresult {\n  inner {\n    typealias String = Int\n    value = 1\n  }\n  ok = \"b\" is T\n}\n",
+    )
+    .unwrap();
+    // A local bound around the redeclaring body still shadows the module's
+    // unused `x`.
+    std::fs::write(
+        dir.join("dep_local.pkl"),
+        "x = throw(\"unused\")\nresult {\n  local x = 1\n  inner {\n    typealias String = Int\n    ok = x\n  }\n}\n",
+    )
+    .unwrap();
+    // An identical redeclaration of the module's `String` reads the same, so
+    // `T` still checks a List, which binds its own `length`.
+    std::fs::write(
+        dir.join("dep_identical.pkl"),
+        "length = throw(\"unused\")\ntypealias String = List\ntypealias T = String(length == 1)\nresult {\n  typealias String = List\n  ok = List(1) is T\n}\n",
+    )
+    .unwrap();
+    // An identical `String = List` still changes meaning when the body also
+    // redeclares `List`, so checks on `String` (through `T`, or directly)
+    // read the module's `length`.
+    std::fs::write(
+        dir.join("dep_identical_shadowed.pkl"),
+        "length = 1\ntypealias String = List\ntypealias T = String(length == 1)\nresult {\n  typealias List = Int\n  typealias String = List\n  ok = 1 is T\n  okDirect = 1 is String(this == length)\n}\n",
+    )
+    .unwrap();
+    // Redeclaring `List` in a sibling body doesn't change what `String`
+    // means for `ok`, which checks a List with its own `length`.
+    std::fs::write(
+        dir.join("dep_alias_sibling.pkl"),
+        "length = throw(\"unused\")\ntypealias String = List\ntypealias T = String(length == 1)\nresult {\n  inner {\n    typealias List = Int\n    value = 1\n  }\n  ok = List(1) is T\n}\n",
+    )
+    .unwrap();
+    // Types and properties have separate namespaces, so a body that follows
+    // the type `Foo` itself still reads the module property `Foo`.
+    std::fs::write(
+        dir.join("dep_same_name.pkl"),
+        "typealias Foo = Int\nFoo = 5\nresult {\n  typealias String = Int\n  ok = Foo\n}\n",
+    )
+    .unwrap();
+    // Redeclared as a collection, `String` still binds the value's own
+    // `length`, directly or through `T`, so the module's unused `length` must
+    // not be evaluated.
+    std::fs::write(
+        dir.join("dep_collection.pkl"),
+        "length = throw(\"unused\")\ntypealias T = String(length == 1)\nresult {\n  typealias String = Listing<Int>\n  ok = List(1) is String(length == 1)\n  okFollowed = List(1) is T\n}\n",
+    )
+    .unwrap();
+    // A deeper body that redeclares `List` changes what the outer
+    // `String = List` means there, so its check reads the module's `length`.
+    std::fs::write(
+        dir.join("dep_deeper.pkl"),
+        "length = 1\nresult {\n  typealias String = List\n  inner {\n    typealias List = Int\n    ok = 1 is String(length == 1)\n  }\n}\n",
+    )
+    .unwrap();
+    // A base module's alias can redefine a built-in this module checks
+    // against, directly or through a nested redeclaration.
+    std::fs::write(dir.join("base.pkl"), "typealias List = Int\n").unwrap();
+    std::fs::write(
+        dir.join("dep_inherited.pkl"),
+        "extends \"base.pkl\"\nlength = 1\nresult {\n  ok = 1 is List(length == 1)\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep_inherited_nested.pkl"),
+        "amends \"base.pkl\"\nlength = 1\nresult {\n  typealias String = List\n  ok = 1 is String(length == 1)\n}\n",
+    )
+    .unwrap();
+    // Only the built-ins a base actually redefines count: `String` checks
+    // under an empty base, or one redefining only `List`, still bind the
+    // string's own `length`, so the module's unused `length` isn't read.
+    std::fs::write(dir.join("base_empty.pkl"), "").unwrap();
+    std::fs::write(
+        dir.join("dep_inherited_empty.pkl"),
+        "amends \"base_empty.pkl\"\nlength = throw(\"unused\")\nresult {\n  ok = \"b\" is String(length == 1)\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep_inherited_other.pkl"),
+        "extends \"base.pkl\"\nlength = throw(\"unused\")\nresult {\n  ok = \"b\" is String(length == 1)\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as Dep\nimport \"dep_direct.pkl\" as DepDirect\nimport \"dep_inherited_empty.pkl\" as DepInheritedEmpty\nimport \"dep_inherited_other.pkl\" as DepInheritedOther\nimport \"dep_deeper.pkl\" as DepDeeper\nimport \"dep_inherited.pkl\" as DepInherited\nimport \"dep_inherited_nested.pkl\" as DepInheritedNested\nimport \"dep_collection.pkl\" as DepCollection\nimport \"dep_same_name.pkl\" as DepSameName\nimport \"dep_alias_sibling.pkl\" as DepAliasSibling\nimport \"dep_identical_shadowed.pkl\" as DepIdenticalShadowed\nimport \"dep_local.pkl\" as DepLocal\nimport \"dep_identical.pkl\" as DepIdentical\nimport \"dep_listing.pkl\" as DepListing\nimport \"dep_sibling.pkl\" as DepSibling\nimport \"dep_class.pkl\" as DepClass\nout = Dep.result.ok\noutDirect = DepDirect.result.ok\noutListing = DepListing.result.inner.ok\noutSibling = DepSibling.result.ok\noutClass = DepClass.result.ok\noutLocal = DepLocal.result.inner.ok\noutIdentical = DepIdentical.result.ok\noutIdenticalShadowed = DepIdenticalShadowed.result.ok\noutIdenticalShadowedDirect = DepIdenticalShadowed.result.okDirect\noutAliasSibling = DepAliasSibling.result.ok\noutSameName = DepSameName.result.ok\noutCollection = DepCollection.result.ok\noutCollectionFollowed = DepCollection.result.okFollowed\noutDeeper = DepDeeper.result.inner.ok\noutInherited = DepInherited.result.ok\noutInheritedNested = DepInheritedNested.result.ok\noutInheritedEmpty = DepInheritedEmpty.result.ok\noutInheritedOther = DepInheritedOther.result.ok\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["out"], true);
+    assert_eq!(val["outDirect"], true);
+    assert_eq!(val["outListing"], true);
+    assert_eq!(val["outSibling"], true);
+    assert_eq!(val["outClass"], serde_json::json!({ "a": 1, "b": 1 }));
+    assert_eq!(val["outLocal"], 1);
+    assert_eq!(val["outIdentical"], true);
+    assert_eq!(val["outIdenticalShadowed"], true);
+    assert_eq!(val["outIdenticalShadowedDirect"], true);
+    assert_eq!(val["outAliasSibling"], true);
+    assert_eq!(val["outSameName"], 5);
+    assert_eq!(val["outCollection"], true);
+    assert_eq!(val["outCollectionFollowed"], true);
+    assert_eq!(val["outDeeper"], true);
+    assert_eq!(val["outInherited"], true);
+    assert_eq!(val["outInheritedNested"], true);
+    assert_eq!(val["outInheritedEmpty"], true);
+    assert_eq!(val["outInheritedOther"], true);
+}
+
+#[tokio::test]
 async fn narrowed_import_resolves_aliases_in_followed_class_bodies() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_class_alias");
     let dir = temp.path();
@@ -2790,4 +2937,81 @@ async fn imported_class_reading_missing_module_property_reports_error() {
             .to_string();
         assert!(err.contains("missing"), "{importer}: {err}");
     }
+}
+
+#[tokio::test]
+async fn narrowed_import_follows_module_reads_in_class_bodies() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_class_module_reads");
+    let dir = temp.path();
+    // The requested field reaches `C` only through a local; `C`'s body reads
+    // `limit` through `module`, so the narrowed import must evaluate `limit`.
+    std::fs::write(
+        dir.join("direct.pkl"),
+        "class C { v = module.limit }\nlocal ok = new C {}.v\nlimit = 2\nout = ok\n",
+    )
+    .unwrap();
+    // At module level `this` is the module, so `this.C` names the class.
+    std::fs::write(
+        dir.join("this_read.pkl"),
+        "class C { v = module.limit }\nlocal ok = new this.C {}.v\nlimit = 3\nout = ok\n",
+    )
+    .unwrap();
+    // A dynamic `module[key]` read can reach any property.
+    std::fs::write(
+        dir.join("dynamic.pkl"),
+        "class C { key = \"limit\"; v = module[key] }\nlocal ok = new C {}.v\nlimit = 4\nout = ok\n",
+    )
+    .unwrap();
+    // A local function reads the module property when it is called.
+    std::fs::write(
+        dir.join("lambda.pkl"),
+        "local f = () -> limit\nlimit = 5\nout = f()\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"direct.pkl\"\nimport \"this_read.pkl\"\nimport \"dynamic.pkl\"\nimport \"lambda.pkl\"\ndirect = direct.out\nthisRead = this_read.out\ndynamic = dynamic.out\nlambda = lambda.out\n",
+    )
+    .unwrap();
+
+    for (file, expected) in [
+        ("direct.pkl", 2),
+        ("this_read.pkl", 3),
+        ("dynamic.pkl", 4),
+        ("lambda.pkl", 5),
+    ] {
+        let val = pklr::eval_to_json_async(&dir.join(file)).await.unwrap();
+        assert_eq!(val["out"], expected, "{file}");
+    }
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["direct"], 2);
+    assert_eq!(val["thisRead"], 3);
+    assert_eq!(val["dynamic"], 4);
+    assert_eq!(val["lambda"], 5);
+}
+
+#[tokio::test]
+async fn narrowed_import_follows_locals_with_module_aliases() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_local_aliases");
+    let dir = temp.path();
+    // `ok` is evaluated at module level, where `S` is a String whose check
+    // binds the string's own `length`, even though the body reading it
+    // redeclares `S`; the module's unused `length` must not be evaluated.
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "length = throw(\"unused\")\ntypealias S = String\nlocal ok = \"b\" is S(length == 1)\nresult {\n  typealias S = Int\n  v = ok\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\"\nout = dep.result.v\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["out"], true);
 }
