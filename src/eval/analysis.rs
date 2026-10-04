@@ -1070,3 +1070,119 @@ pub(super) const NAMES_A_TYPE: &str = "\0type";
 fn mark_type_use(names: &mut HashSet<String>) {
     names.insert(NAMES_A_TYPE.to_string());
 }
+
+/// Whether `name` appears as an identifier anywhere in `entries`, including
+/// nested bodies, lambdas and type constraints, ignoring shadowing. Cheaper
+/// than collecting every name when only one matters.
+pub(super) fn entries_mention(entries: &[Entry], name: &str) -> bool {
+    entries.iter().any(|entry| entry_mentions(entry, name))
+}
+
+fn entry_mentions(entry: &Entry, name: &str) -> bool {
+    match entry {
+        Entry::Property(prop) => {
+            prop.type_ann
+                .as_ref()
+                .is_some_and(|ty| type_mentions(ty, name))
+                || prop
+                    .value
+                    .as_ref()
+                    .is_some_and(|expr| expr_mentions(expr, name))
+                || prop
+                    .body
+                    .as_ref()
+                    .is_some_and(|body| entries_mention(body, name))
+        }
+        Entry::DynProperty(key, value) => expr_mentions(key, name) || expr_mentions(value, name),
+        Entry::ForGenerator(fgen) => {
+            expr_mentions(&fgen.collection, name) || entries_mention(&fgen.body, name)
+        }
+        Entry::WhenGenerator(wgen) => {
+            expr_mentions(&wgen.condition, name)
+                || entries_mention(&wgen.body, name)
+                || wgen
+                    .else_body
+                    .as_ref()
+                    .is_some_and(|body| entries_mention(body, name))
+        }
+        Entry::Spread(expr) | Entry::Elem(expr) => expr_mentions(expr, name),
+        Entry::ClassDef(_, _, parent, body) => {
+            parent
+                .as_deref()
+                .is_some_and(|parent| type_name_mentions(parent, name))
+                || entries_mention(body, name)
+        }
+        Entry::TypeAlias(_, ty) => type_mentions(ty, name),
+    }
+}
+
+/// Whether a type name as written (`outer.Step`, `*Foo<Bar>?`, a quoted name)
+/// contains `name` as an identifier, so a type resolved through that binding
+/// counts as a mention.
+fn type_name_mentions(type_name: &str, name: &str) -> bool {
+    type_name
+        .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$'))
+        .any(|token| token == name)
+}
+
+fn expr_mentions(expr: &Expr, name: &str) -> bool {
+    match expr {
+        Expr::Ident(ident) => ident == name,
+        Expr::New(type_name, entries, generic_params) => {
+            type_name
+                .iter()
+                .chain(generic_params)
+                .any(|type_name| type_name_mentions(type_name, name))
+                || entries_mention(entries, name)
+        }
+        Expr::ObjectBody(entries) => entries_mention(entries, name),
+        Expr::InferredNew(ty, entries) => type_mentions(ty, name) || entries_mention(entries, name),
+        Expr::Field(base, _) | Expr::NullSafeField(base, _) => expr_mentions(base, name),
+        Expr::Index(base, index) | Expr::Binop(_, base, index) => {
+            expr_mentions(base, name) || expr_mentions(index, name)
+        }
+        Expr::Call(callee, args) => {
+            expr_mentions(callee, name) || args.iter().any(|arg| expr_mentions(arg, name))
+        }
+        Expr::If(cond, then_expr, else_expr) => {
+            expr_mentions(cond, name)
+                || expr_mentions(then_expr, name)
+                || expr_mentions(else_expr, name)
+        }
+        Expr::Let(_, value, body) => expr_mentions(value, name) || expr_mentions(body, name),
+        Expr::Is(value, ty) | Expr::As(value, ty) => {
+            expr_mentions(value, name) || type_mentions(ty, name)
+        }
+        Expr::Lambda(_, value)
+        | Expr::Unop(_, value)
+        | Expr::Throw(value)
+        | Expr::Trace(value)
+        | Expr::Read(value)
+        | Expr::ReadOrNull(value) => expr_mentions(value, name),
+        Expr::StringInterpolation(parts) => parts.iter().any(|part| match part {
+            StringInterpPart::Expr(expr) => expr_mentions(expr, name),
+            StringInterpPart::Literal(_) => false,
+        }),
+        Expr::Null
+        | Expr::Bool(_)
+        | Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::String(_)
+        | Expr::Import(..)
+        | Expr::ImportGlob(..) => false,
+    }
+}
+
+pub(super) fn type_mentions(ty: &crate::parser::TypeExpr, name: &str) -> bool {
+    match ty {
+        crate::parser::TypeExpr::Constrained(base, constraint) => {
+            type_name_mentions(base, name) || expr_mentions(constraint, name)
+        }
+        crate::parser::TypeExpr::Nullable(inner) => type_mentions(inner, name),
+        crate::parser::TypeExpr::Union(types) => types.iter().any(|ty| type_mentions(ty, name)),
+        crate::parser::TypeExpr::Generic(base, types) => {
+            type_name_mentions(base, name) || types.iter().any(|ty| type_mentions(ty, name))
+        }
+        crate::parser::TypeExpr::Named(type_name) => type_name_mentions(type_name, name),
+    }
+}

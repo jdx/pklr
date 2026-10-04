@@ -19,11 +19,29 @@ pub(super) fn refresh_this_aliases(
 pub(super) fn release_this_aliases(scope: &mut Scope, aliases: &[String]) {
     for name in std::iter::once("this").chain(aliases.iter().map(String::as_str)) {
         if scope.vars.contains_key(name)
-            && let Some(slot) = Rc::make_mut(&mut scope.vars).get_mut(name)
+            && let Some(slot) = Arc::make_mut(&mut scope.vars).get_mut(name)
         {
             *slot = Value::Null;
         }
     }
+}
+
+/// Insert a module property, first releasing the module scope's `this` and
+/// `module` snapshots of the property map so it grows in place.
+pub(super) fn module_props_insert(
+    scope: &mut Scope,
+    properties: &mut Arc<IndexMap<String, Value>>,
+    key: String,
+    value: Value,
+) {
+    for name in ["this", "module"] {
+        if scope.vars.contains_key(name)
+            && let Some(slot) = Arc::make_mut(&mut scope.vars).get_mut(name)
+        {
+            *slot = Value::Null;
+        }
+    }
+    Arc::make_mut(properties).insert(key, value);
 }
 
 pub(super) fn props_insert(
