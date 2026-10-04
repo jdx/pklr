@@ -57,3 +57,7 @@ required-features = ["blocking"]
 
 [profile.dev]
 debug = 1
+
+[[example]]
+name = "eval_json"
+required-features = ["native-io"]

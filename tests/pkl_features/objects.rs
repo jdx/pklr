@@ -3622,3 +3622,64 @@ obj {
     );
     assert_eq!(json["obj"]["ok"], true);
 }
+
+#[test]
+fn body_amendment_merges_member_from_when_generator() {
+    let json = eval(
+        r#"
+base { when (true) { o { v = 1 } } }
+x = (base) { o { w = 2 } }
+y = (x) { o { z = 3 } }
+"#,
+    );
+    assert_eq!(json["x"], serde_json::json!({"o": {"v": 1, "w": 2}}));
+    assert_eq!(
+        json["y"],
+        serde_json::json!({"o": {"v": 1, "w": 2, "z": 3}})
+    );
+}
+
+#[test]
+fn body_amendment_merges_member_from_when_else_generator() {
+    let json = eval(
+        r#"
+base { when (false) { o { v = 1 } } else { o { v = 2 } } }
+x = (base) { o { w = 3 } }
+"#,
+    );
+    assert_eq!(json["x"], serde_json::json!({"o": {"v": 2, "w": 3}}));
+}
+
+#[test]
+fn class_instance_amendment_merges_member_from_generator() {
+    let json = eval(
+        r#"
+class C { p: Dynamic = new { when (true) { o { v = 1 } } } }
+c = new C { p { o { w = 2 } } }
+nested = (c) { p { o { x = 3 } } }
+class E { p: Dynamic = new { when (false) { o { v = 1 } } else { o { v = 2 } } } }
+e = new E { p { o { w = 3 } } }
+"#,
+    );
+    assert_eq!(json["c"], serde_json::json!({"p": {"o": {"v": 1, "w": 2}}}));
+    assert_eq!(
+        json["nested"],
+        serde_json::json!({"p": {"o": {"v": 1, "w": 2, "x": 3}}})
+    );
+    assert_eq!(json["e"], serde_json::json!({"p": {"o": {"v": 2, "w": 3}}}));
+}
+
+#[test]
+fn entry_amendment_merges_entry_from_for_generator() {
+    let json = eval(
+        r#"
+base { for (k in List("a", "b")) { [k] { v = k } } }
+x = (base) { ["a"] { w = 1 } }
+class F { p: Dynamic = new { for (k in List("a", "b")) { [k] { v = k } } } }
+f = new F { p { ["a"] { w = 1 } } }
+"#,
+    );
+    let expected = serde_json::json!({"a": {"v": "a", "w": 1}, "b": {"v": "b"}});
+    assert_eq!(json["x"], expected);
+    assert_eq!(json["f"]["p"], expected);
+}

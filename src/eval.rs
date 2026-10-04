@@ -2986,6 +2986,9 @@ impl Evaluator {
         }
 
         let mut map: ObjectMap = ObjectMap::default();
+        // Names of members produced by generators and not since rebound by a
+        // property entry.
+        let mut generated: HashSet<Arc<str>> = HashSet::default();
         for (entry_index, entry) in entries.iter().enumerate() {
             match entry {
                 Entry::Property(prop) => {
@@ -3004,18 +3007,28 @@ impl Evaluator {
                         continue; // abstract without value — skip (must be overridden)
                     }
                     refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
-                    let active_scope = scope_for_object_entry(
+                    let mut active_scope = scope_for_object_entry(
                         entry_index,
                         &child_scope,
                         entry_scopes,
                         &entry_owners,
                         own_body_scope,
                     );
+                    // `o { ... }` amends a member an earlier generator produced,
+                    // which is in the object but not bound in scope.
+                    if prop.value.is_none()
+                        && prop.body.is_some()
+                        && generated.contains(prop.name.as_str())
+                        && let Some(existing) = all_props.get(prop.name.as_str())
+                    {
+                        active_scope.set(&prop.name, existing.clone());
+                    }
                     let value = self.eval_property(prop, &active_scope, depth)?;
                     // Release the entry scope first: it may share the object
                     // scope's bindings, which binding the value would then copy.
                     drop(active_scope);
                     if let Some(v) = value {
+                        generated.remove(prop.name.as_str());
                         if binds_declared(&prop.name) {
                             child_scope.declare(&prop.name, v.clone());
                         } else {
@@ -3192,6 +3205,7 @@ impl Evaluator {
                                 &mut all_props,
                                 m.iter().map(|(k, v)| (k.clone(), v.clone())),
                             );
+                            generated.extend(m.keys().cloned());
                             map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
                             refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                         }
@@ -3222,6 +3236,7 @@ impl Evaluator {
                                 &mut all_props,
                                 m.iter().map(|(k, v)| (k.clone(), v.clone())),
                             );
+                            generated.extend(m.keys().cloned());
                             map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
                             refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                         }
@@ -3241,6 +3256,7 @@ impl Evaluator {
                                 &mut all_props,
                                 m.iter().map(|(k, v)| (k.clone(), v.clone())),
                             );
+                            generated.extend(m.keys().cloned());
                             map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
                             refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                         }

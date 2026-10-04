@@ -62,10 +62,25 @@ def checkout(version, repo):
 
 
 def build():
-    subprocess.run(
-        ["cargo", "build", "-q", "--release", "--example", "eval_json"], cwd=ROOT, check=True
+    # Ask cargo where it put the binary, so CARGO_TARGET_DIR and the like work.
+    # With --message-format=json, compiler diagnostics arrive on stdout as JSON;
+    # stderr (cargo's own errors) is passed through.
+    p = subprocess.run(
+        ["cargo", "build", "-q", "--release", "--example", "eval_json",
+         "--message-format=json-diagnostic-rendered-ansi"],
+        cwd=ROOT, stdout=subprocess.PIPE, text=True,
     )
-    return ROOT / "target" / "release" / "examples" / "eval_json"
+    messages = [json.loads(line) for line in p.stdout.splitlines() if line.startswith("{")]
+    if p.returncode != 0:
+        for msg in messages:
+            if msg.get("reason") == "compiler-message":
+                print(msg["message"]["rendered"], end="", file=sys.stderr)
+        sys.exit(f"cargo build failed (exit {p.returncode})")
+    for msg in messages:
+        if (msg.get("reason") == "compiler-artifact"
+                and msg["target"]["name"] == "eval_json" and msg.get("executable")):
+            return Path(msg["executable"])
+    sys.exit("cargo did not report the eval_json executable")
 
 
 def run(cmd, timeout):
@@ -79,6 +94,10 @@ def run(cmd, timeout):
 
 
 def normalize(v):
+    """Make JSON values comparable with ==: integral floats equal their ints,
+    but booleans stay distinct from 0 and 1 (Python treats True == 1)."""
+    if isinstance(v, bool):
+        return ("bool", v)
     if isinstance(v, float) and v.is_integer():
         return int(v)
     if isinstance(v, dict):
@@ -129,6 +148,8 @@ def diff_paths(a, b, path=""):
 def check(rel, inputs, exe, timeout):
     path = str(inputs / rel)
     prc, pout, perr = run(["pkl", "eval", "-f", "json", path], timeout)
+    if prc is None:
+        return "skipped", "pkl timed out"
     if prc != 0 and SKIP_ERRORS.search(perr):
         return "skipped", pkl_message(perr)
     rrc, rout, rerr = run([str(exe), path], timeout)
@@ -142,10 +163,13 @@ def check(rel, inputs, exe, timeout):
         return "error", first_line(rerr)
     try:
         a = normalize(json.loads(pout))
-        b = normalize(json.loads(rout))
     except json.JSONDecodeError:
         # The module sets its own output renderer, so pkl's output isn't JSON.
         return "skipped", "pkl output is not JSON"
+    try:
+        b = normalize(json.loads(rout))
+    except json.JSONDecodeError:
+        return "error", "pklr output is not JSON"
     if a == b:
         return "match", ""
     return "mismatch", ", ".join(diff_paths(a, b)[:5])
@@ -162,12 +186,19 @@ def main():
     ap.add_argument("--compare", help="report changes against results saved with --save")
     args = ap.parse_args()
 
+    # Read the baseline first: --save may point at the same file.
+    base = json.loads(Path(args.compare).read_text()) if args.compare else None
+
     version = pkl_version()
     inputs = checkout(version, args.repo) / SNIPPETS
+    if not inputs.is_dir():
+        sys.exit(f"no snippet tests at {inputs}")
     exe = build()
     files = sorted(str(p.relative_to(inputs)) for p in inputs.rglob("*.pkl"))
     if args.filters:
         files = [f for f in files if any(x in f for x in args.filters)]
+    if not files:
+        sys.exit("no snippet tests selected")
 
     with concurrent.futures.ThreadPoolExecutor(args.jobs) as pool:
         results = dict(zip(files, pool.map(lambda f: check(f, inputs, exe, args.timeout), files)))
@@ -188,8 +219,7 @@ def main():
 
     if args.save:
         Path(args.save).write_text(json.dumps({f: s for f, (s, _) in results.items()}, indent=1))
-    if args.compare:
-        base = json.loads(Path(args.compare).read_text())
+    if base is not None:
         good = {"match", "expected-err"}
         fixed = [f for f, (s, _) in results.items() if s in good and base.get(f) not in good]
         broke = [f for f, (s, _) in results.items() if s not in good and base.get(f) in good]
