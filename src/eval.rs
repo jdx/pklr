@@ -3069,10 +3069,17 @@ impl Evaluator {
                         &entry_owners,
                         own_body_scope,
                     );
-                    let key = self.eval_expr(key_expr, &active_scope, depth)?;
-                    let key_str = self
-                        .class_key_of(key_expr, &active_scope)
-                        .unwrap_or(value_to_key(&key)?);
+                    let class_key = self.class_key_of(key_expr, &active_scope);
+                    let key = class_key
+                        .is_none()
+                        .then(|| self.eval_expr(key_expr, &active_scope, depth))
+                        .transpose()?;
+                    let key_str = match class_key {
+                        Some(key) => key,
+                        None => value_to_key(
+                            key.as_ref().expect("non-class mapping keys are evaluated"),
+                        )?,
+                    };
                     // A body may define each key once. An object body still
                     // amends an inherited value, but it is a definition in
                     // this body and must participate in duplicate detection.
@@ -3080,9 +3087,10 @@ impl Evaluator {
                         let defined_by_layer = defined_by_layer.get_or_insert_default();
                         let layer = entry_layer(entry_scopes, entry_index);
                         if !defined_by_layer.insert((layer, key_str.clone())) {
-                            let key = match &key {
-                                Value::String(s) => format!("{s:?}"),
-                                key => value_to_display(key),
+                            let key = match key.as_ref() {
+                                None => key_str.to_string(),
+                                Some(Value::String(s)) => format!("{s:?}"),
+                                Some(key) => value_to_display(key),
                             };
                             return Err(Error::Eval(format!(
                                 "Duplicate definition of member `{key}`."
@@ -5816,18 +5824,26 @@ impl Evaluator {
         for entry in entries {
             match entry {
                 Entry::DynProperty(key_expr, val_expr) => {
-                    let key = self.eval_expr(key_expr, &entry_scope, depth + 1)?;
-                    let key_str = self
-                        .class_key_of(key_expr, &entry_scope)
-                        .unwrap_or(value_to_key(&key)?);
+                    let class_key = self.class_key_of(key_expr, &entry_scope);
+                    let key = class_key
+                        .is_none()
+                        .then(|| self.eval_expr(key_expr, &entry_scope, depth + 1))
+                        .transpose()?;
+                    let key_str = match class_key {
+                        Some(key) => key,
+                        None => value_to_key(
+                            key.as_ref().expect("non-class mapping keys are evaluated"),
+                        )?,
+                    };
                     // Mapping storage preserves Pkl key identity: `1`, `1.0`
                     // and `"1"` are distinct mapping keys.
                     // Object-body entries may amend an earlier value from this
                     // body.
                     if !defined_keys.insert(key_str.clone()) {
-                        let key = match &key {
-                            Value::String(s) => format!("{s:?}"),
-                            key => value_to_display(key),
+                        let key = match key.as_ref() {
+                            None => key_str.to_string(),
+                            Some(Value::String(s)) => format!("{s:?}"),
+                            Some(key) => value_to_display(key),
                         };
                         return Err(Error::Eval(format!(
                             "Duplicate definition of member `{key}`."
