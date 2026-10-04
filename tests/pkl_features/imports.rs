@@ -2491,6 +2491,9 @@ async fn narrowed_import_follows_module_reads_made_before_class_properties_are_b
         "a = \"mod\"\nmax = 3\nclass D {\n  a = a\n  c = module.max\n}\n",
         // A method called by a default declared before the property.
         "a = 1\nmax = 3\nclass D {\n  function f() = a\n  b = f()\n  a = 6\n  c = module.max\n}\n",
+        // A local method, which captures the scope the locals see, even when
+        // a default after the property runs it.
+        "a = 1\nmax = 3\nclass D {\n  local f = () -> a\n  a = 6\n  b = f.apply()\n  c = module.max\n}\n",
     ];
     for (i, dep) in deps.iter().enumerate() {
         let name = format!("dep{i}.pkl");
@@ -2506,6 +2509,31 @@ async fn narrowed_import_follows_module_reads_made_before_class_properties_are_b
             .unwrap();
         assert_eq!(val["d"], direct["d"], "{dep}");
     }
+}
+
+#[tokio::test]
+async fn narrowed_import_skips_local_methods_class_defaults_do_not_run() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_local_method");
+    let dir = temp.path();
+    // The local method `f` only runs from `g` on the built instance, where
+    // `min` is the inherited property, so the unused module `min` is not
+    // needed.
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "min = throw(\"unused\")\nmax = 3\nopen class Parent { min = 2 }\nclass Child extends Parent {\n  local f = () -> min\n  function g() = f.apply()\n  c = max\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as Dep\nchild = new Dep.Child {}\ng = child.g()\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["g"], 2);
+    assert_eq!(val["child"]["c"], 3);
 }
 
 #[tokio::test]

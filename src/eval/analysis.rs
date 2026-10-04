@@ -1187,21 +1187,23 @@ impl<'a> ModuleClasses<'a> {
 }
 
 /// The names a class body reads while its defaults are evaluated: those of
-/// its locals and other non-method entries (only those at or before index
-/// `upto`, plus the locals, when given), and of the methods they run. A
-/// method runs when they read it (calling it by name, as `this.name`, or any
-/// of them through a dynamic `this[...]`), except that a property whose value
-/// is just the method (`callback = getMin`) only stores it: the method then
-/// runs when they read that property. Other method bodies only run on a
-/// built instance.
+/// its non-method entries, and of the methods they run. A method (a property
+/// or local whose value is a lambda) runs when they read it (calling it by
+/// name, as `this.name`, or any of them through a dynamic `this[...]`),
+/// except that a property whose value is just the method
+/// (`callback = getMin`) only stores it: the method then runs when they read
+/// that property. Other method bodies only run on a built instance.
+///
+/// With `upto`, only the entries a class property at that index doesn't hide
+/// its name from: the defaults at or before it, the locals (evaluated before
+/// any property), and the local methods any default runs (which capture the
+/// scope the locals see).
 fn eager_class_refs(body: &[Entry], upto: Option<usize>) -> HashSet<String> {
     fn is_method(entry: &Entry) -> bool {
-        matches!(
-            entry,
-            Entry::Property(prop)
-                if !has_modifier(&prop.modifiers, Modifier::Local)
-                    && matches!(prop.value, Some(Expr::Lambda(..)))
-        )
+        matches!(entry, Entry::Property(prop) if matches!(prop.value, Some(Expr::Lambda(..))))
+    }
+    fn is_local(entry: &Entry) -> bool {
+        matches!(entry, Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local))
     }
     // The members `entries` read as `this.name`, where `this` is the
     // instance (not a nested object body's own `this`).
@@ -1262,53 +1264,65 @@ fn eager_class_refs(body: &[Entry], upto: Option<usize>) -> HashSet<String> {
             _ => None,
         })
         .collect();
-    let defaults: Vec<Entry> = body
+    let is_default = |entry: &Entry| {
+        !is_method(entry)
+            && !matches!(entry, Entry::Property(prop) if stored.contains_key(prop.name.as_str()))
+    };
+    // What `seeds` read, with the methods they run (transitively).
+    let reads = |seeds: Vec<Entry>| {
+        let mut refs = referenced_roots(&seeds);
+        let mut members = HashSet::new();
+        instance_member_refs(&seeds, &mut members);
+        let mut followed = HashSet::new();
+        loop {
+            let calls_all = members.contains(DYNAMIC_SIBLING_REF);
+            let read = |name: &str| refs.contains(name) || members.contains(name);
+            let mut runs: HashSet<&str> = methods
+                .iter()
+                .copied()
+                .filter(|method| calls_all || read(method))
+                .collect();
+            runs.extend(
+                stored
+                    .iter()
+                    .filter(|(property, _)| read(property))
+                    .map(|(_, method)| *method),
+            );
+            let next: Vec<&Entry> = body
+                .iter()
+                .filter(|entry| match entry {
+                    Entry::Property(prop) if is_method(entry) => {
+                        runs.contains(prop.name.as_str()) && followed.insert(prop.name.as_str())
+                    }
+                    _ => false,
+                })
+                .collect();
+            if next.is_empty() {
+                return (refs, followed);
+            }
+            for method in next {
+                let method = std::slice::from_ref(method);
+                refs.extend(referenced_roots(method));
+                instance_member_refs(method, &mut members);
+            }
+        }
+    };
+    let (refs, runs) = reads(body.iter().filter(|e| is_default(e)).cloned().collect());
+    let Some(upto) = upto else {
+        return refs;
+    };
+    let seeds = body
         .iter()
         .enumerate()
-        .filter(|(index, entry)| {
-            !is_method(entry)
-                && !matches!(entry, Entry::Property(prop) if stored.contains_key(prop.name.as_str()))
-                && (upto.is_none_or(|upto| *index <= upto)
-                    || matches!(entry, Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local)))
+        .filter(|(index, entry)| match entry {
+            Entry::Property(prop) if is_method(entry) => {
+                is_local(entry) && runs.contains(prop.name.as_str())
+            }
+            _ => is_default(entry) && (*index <= upto || is_local(entry)),
         })
         .map(|(_, entry)| entry.clone())
         .collect();
-    let mut refs = referenced_roots(&defaults);
-    let mut members = HashSet::new();
-    instance_member_refs(&defaults, &mut members);
-    let mut followed = HashSet::new();
-    loop {
-        let calls_all = members.contains(DYNAMIC_SIBLING_REF);
-        let read = |name: &str| refs.contains(name) || members.contains(name);
-        let mut runs: HashSet<&str> = methods
-            .iter()
-            .copied()
-            .filter(|method| calls_all || read(method))
-            .collect();
-        runs.extend(
-            stored
-                .iter()
-                .filter(|(property, _)| read(property))
-                .map(|(_, method)| *method),
-        );
-        let next: Vec<&Entry> = body
-            .iter()
-            .filter(|entry| match entry {
-                Entry::Property(prop) if is_method(entry) => {
-                    runs.contains(prop.name.as_str()) && followed.insert(prop.name.as_str())
-                }
-                _ => false,
-            })
-            .collect();
-        if next.is_empty() {
-            return refs;
-        }
-        for method in next {
-            let method = std::slice::from_ref(method);
-            refs.extend(referenced_roots(method));
-            instance_member_refs(method, &mut members);
-        }
-    }
+    reads(seeds).0
 }
 
 /// Names, in declaration order, of the module members in `entries` that must
