@@ -2583,15 +2583,17 @@ async fn narrowed_import_follows_methods_called_by_class_defaults() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_default_method_call");
     let dir = temp.path();
     // `a` calls `getMin` while `Child`'s defaults are first evaluated, before
-    // `Parent`'s `min` is merged in, so the class must still be refreshed.
+    // `Parent`'s `min` is merged in, so the class must still be refreshed,
+    // also when the method is called through an alias of `this` or through
+    // a nested object's `outer` (or `outer.outer` from deeper down).
     std::fs::write(
         dir.join("dep.pkl"),
-        "min = 1\nopen class Parent { min = 2 }\nclass Child extends Parent {\n  function getMin() = min\n  a = getMin()\n}\nclass ThisChild extends Parent {\n  function getMin() = min\n  a = this.getMin()\n}\nchild = new Child {}\nthisChild = new ThisChild {}\n",
+        "min = 1\nopen class Parent { min = 2 }\nclass Child extends Parent {\n  function getMin() = min\n  a = getMin()\n}\nclass ThisChild extends Parent {\n  function getMin() = min\n  a = this.getMin()\n}\nclass AliasChild extends Parent {\n  function getMin() = min\n  a = let (self = this) self.getMin()\n}\nclass OuterChild extends Parent {\n  function getMin() = min\n  obj { a = outer.getMin() }\n  deep { inner { a = outer.outer.getMin() } }\n}\nchild = new Child {}\nthisChild = new ThisChild {}\naliasChild = new AliasChild {}\nouterChild = new OuterChild {}\n",
     )
     .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"dep.pkl\" as D\nchild = D.child\nthisChild = D.thisChild\n",
+        "import \"dep.pkl\" as D\nchild = D.child\nthisChild = D.thisChild\naliasChild = D.aliasChild\nouterChild = D.outerChild\n",
     )
     .unwrap();
 
@@ -2600,27 +2602,35 @@ async fn narrowed_import_follows_methods_called_by_class_defaults() {
         .unwrap();
     assert_eq!(dep["child"]["a"], 2);
     assert_eq!(dep["thisChild"]["a"], 2);
+    assert_eq!(dep["aliasChild"]["a"], 2);
+    assert_eq!(dep["outerChild"]["obj"]["a"], 2);
+    assert_eq!(dep["outerChild"]["deep"]["inner"]["a"], 2);
     let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
         .await
         .unwrap();
     assert_eq!(val["child"]["a"], 2);
     assert_eq!(val["thisChild"]["a"], 2);
+    assert_eq!(val["aliasChild"]["a"], 2);
+    assert_eq!(val["outerChild"]["obj"]["a"], 2);
+    assert_eq!(val["outerChild"]["deep"]["inner"]["a"], 2);
 }
 
 #[tokio::test]
 async fn narrowed_import_skips_methods_class_defaults_do_not_call() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_default_this_read");
     let dir = temp.path();
-    // `a` reads `this.x` but calls no method, so `getMin` only runs on the
-    // built instance, where `min` is the inherited property.
+    // `a` reads `this.x` and `obj` reads `outer.x` but neither calls a
+    // method, and `this` in `obj` (or `outer` deeper down) is not the
+    // instance, so `getMin` only runs on the built instance, where `min` is
+    // the inherited property.
     std::fs::write(
         dir.join("dep.pkl"),
-        "min = throw(\"unused\")\nopen class Parent { min = 2 }\nclass Child extends Parent {\n  x = 3\n  a = this.x\n  function getMin() = min\n}\n",
+        "min = throw(\"unused\")\nopen class Parent { min = 2 }\nclass Child extends Parent {\n  x = 3\n  a = this.x\n  obj { y = 4; b = this.y; c = outer.x; inner { d = outer.y; e = (outer) } }\n  function getMin() = min\n}\n",
     )
     .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"dep.pkl\" as D\nchild = new D.Child {}\na = child.a\nmin = child.getMin()\n",
+        "import \"dep.pkl\" as D\nchild = new D.Child {}\na = child.a\nb = child.obj.b\nc = child.obj.c\nmin = child.getMin()\n",
     )
     .unwrap();
 
@@ -2628,6 +2638,8 @@ async fn narrowed_import_skips_methods_class_defaults_do_not_call() {
         .await
         .unwrap();
     assert_eq!(val["a"], 3);
+    assert_eq!(val["b"], 4);
+    assert_eq!(val["c"], 3);
     assert_eq!(val["min"], 2);
 }
 
