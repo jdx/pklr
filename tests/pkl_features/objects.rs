@@ -164,7 +164,13 @@ differentTypes = test.catchOrNull(() -> new Mapping<Any, Int> { [1] = 10; ["1"] 
 "#,
     );
     let duplicate = "Duplicate definition of member `\"a\"`.";
-    for key in ["forLoop", "direct", "generatorAfterDirect", "twoLoops", "amendedTwice"] {
+    for key in [
+        "forLoop",
+        "direct",
+        "generatorAfterDirect",
+        "twoLoops",
+        "amendedTwice",
+    ] {
         assert_eq!(json[key], duplicate, "{key}");
     }
     assert_eq!(json["amendsParent"]["a"], 1);
