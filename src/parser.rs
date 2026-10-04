@@ -503,7 +503,7 @@ impl<'a> Parser<'a> {
 
     /// Parse `function name(params...): ReturnType = body` into a Property with Lambda value.
     /// Returns None if the function body can't be parsed (falls back to skip).
-    fn try_parse_function_def(&mut self, modifiers: Vec<Modifier>) -> Result<Option<Entry>> {
+    fn try_parse_function_def(&mut self, mut modifiers: Vec<Modifier>) -> Result<Option<Entry>> {
         let saved_pos = self.pos;
         let saved_last_line = self.last_line;
         self.advance(); // consume `function`
@@ -557,6 +557,7 @@ impl<'a> Parser<'a> {
         if let Some(return_type) = return_type {
             infer_method_return_new(&mut body, &return_type);
         }
+        modifiers.push(Modifier::Function);
         Ok(Some(Entry::Property(Property {
             name,
             type_ann: None,

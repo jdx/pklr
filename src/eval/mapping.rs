@@ -340,7 +340,7 @@ pub(super) fn apply_mapping_type_annotation(
             parent_type_names: Vec::new(),
             parent_type_identities: Vec::new(),
             entry_scopes: Vec::new(),
-            evaluated_properties: Vec::new(),
+            evaluated_properties: Arc::default(),
             mapping_value_types: Vec::new(),
             deprecated: IndexMap::new(),
             poisoned_members: None,

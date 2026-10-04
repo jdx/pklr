@@ -9,17 +9,7 @@ use std::path::{Path, PathBuf};
 
 /// Cases where pklr does not yet match Pkl. A listed case that starts
 /// matching fails the test, so the entry is removed when the fix lands.
-const KNOWN_DIVERGENT: &[&str] = &[
-    "class_chain_three",
-    "class_default_calls_method",
-    "class_inherited_only",
-    "class_lexical_beats_inherited",
-    "class_method_const_vs_inherited",
-    "class_methods_not_rendered",
-    "class_outer_in_subclass",
-    "object_forward_member",
-    "unused_failing_property_in_object",
-];
+const KNOWN_DIVERGENT: &[&str] = &[];
 
 fn cases() -> Vec<PathBuf> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/conformance");

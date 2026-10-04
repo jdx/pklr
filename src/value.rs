@@ -62,10 +62,11 @@ pub struct ObjectSource {
     /// Lexical scopes for entries introduced by earlier amendments. `None`
     /// entries use this object's definition-site `scope`.
     pub(crate) entry_scopes: Vec<Option<Arc<CapturedScope>>>,
-    /// Property names that produced values when this object was evaluated.
-    /// Kept separate from `scope`, which can contain unrelated same-named
-    /// lexical bindings.
-    pub(crate) evaluated_properties: Vec<String>,
+    /// The values of the properties evaluated for this object, hidden ones
+    /// included. Kept separate from `scope`, the object's lexical scope, which
+    /// can bind the same names to other values (a module property that an
+    /// inherited member of a subclass must not replace).
+    pub(crate) evaluated_properties: Arc<ObjectMap>,
     /// Possible value type names for mapping entries, e.g. `Step | Group` from
     /// `Mapping<String, Step | Group>`. Used when amending mappings so bare
     /// entries inherit the right class template.
@@ -111,6 +112,18 @@ impl ObjectSource {
     /// Parent class names, nearest first.
     pub fn parent_type_names(&self) -> &[String] {
         &self.parent_type_names
+    }
+
+    /// Whether `name` is a method of this object, declared with `function`.
+    pub(crate) fn declares_method(&self, name: &str) -> bool {
+        self.entries.iter().any(|entry| {
+            matches!(
+                entry,
+                crate::parser::Entry::Property(prop)
+                    if prop.name == name
+                        && prop.modifiers.contains(&crate::parser::Modifier::Function)
+            )
+        })
     }
 
     /// The bindings visible where the object was defined.
@@ -181,9 +194,17 @@ impl Value {
             Value::Int(n) => json!(n),
             Value::Float(f) => json!(f),
             Value::String(s) => serde_json::Value::String(s.to_string()),
-            Value::Object(map, _) => {
+            Value::Object(map, source) => {
                 let mut obj = serde_json::Map::new();
                 for (k, v) in map.iter() {
+                    // Methods are not data, so like Pkl, leave them out.
+                    if matches!(v, Value::Lambda(..))
+                        && source
+                            .as_ref()
+                            .is_some_and(|source| source.declares_method(k))
+                    {
+                        continue;
+                    }
                     obj.insert(k.to_string(), v.to_json());
                 }
                 serde_json::Value::Object(obj)

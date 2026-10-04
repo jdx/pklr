@@ -115,6 +115,70 @@ struct ModuleScopeSnapshot {
     late_properties: Vec<Property>,
 }
 
+/// Key in a function's captured bindings listing the captured names that
+/// were members of the object the function was defined in (see
+/// `record_captured_object_members`). It is not a valid identifier, so no
+/// code can name it.
+const CAPTURED_OBJECT_MEMBERS: &str = "\0pklr:object-members";
+
+/// Record which of the bindings a function captures from `scope` are members
+/// of the object being evaluated there, as opposed to names lexically
+/// declared around it. Calls resolve those members against the instance they
+/// run on (see `bind_instance_members`).
+fn record_captured_object_members(captured: &mut ScopeMap, scope: &Scope) {
+    let Some(members) = scope.object_member_bindings() else {
+        return;
+    };
+    let names: Vec<Value> = captured
+        .keys()
+        .filter(|name| members.contains_key(&***name))
+        .filter(|name| !matches!(&***name, "this" | "super" | "outer"))
+        .map(|name| Value::String(Arc::clone(name)))
+        .collect();
+    if !names.is_empty() {
+        captured.insert(
+            name_of(CAPTURED_OBJECT_MEMBERS),
+            Value::List(Arc::new(names)),
+        );
+    }
+}
+
+/// Bind the members of `instance` that a call of a function with `captured`
+/// bindings reads through the instance: the object members it captured,
+/// which take the instance's current values, and members it captured no
+/// binding for, reached through implicit `this`. A name it captured from the
+/// lexical scope around its definition is left alone: Pkl resolves lexical
+/// names before the members an object inherits.
+fn bind_instance_members(call_scope: &mut Scope, captured: &ScopeMap, instance: &ObjectMap) {
+    let members = match captured.get(CAPTURED_OBJECT_MEMBERS) {
+        Some(Value::List(names)) => names.as_slice(),
+        _ => &[],
+    };
+    for (name, value) in instance.iter() {
+        if !captured.contains_key(&**name)
+            || members
+                .iter()
+                .any(|member| matches!(member, Value::String(member) if **member == **name))
+        {
+            call_scope.set(name, value.clone());
+        }
+    }
+}
+
+/// The error of the first member of `value`, an object, that failed to
+/// evaluate, rendered or not.
+fn first_member_failure(value: &Value) -> Option<&str> {
+    match value {
+        Value::Object(_, Some(source)) => source
+            .poisoned_members
+            .as_ref()?
+            .values()
+            .next()
+            .map(|member| member.message.as_str()),
+        _ => None,
+    }
+}
+
 /// The error of the first failed member rendering `value` would output: a
 /// failed property of a module object it contains.
 fn rendered_member_failure(value: &Value) -> Option<&str> {
@@ -2201,7 +2265,11 @@ impl Evaluator {
         // A member can fail because it read another before that one could be
         // evaluated: through a dynamic `module[key]`, which the order can't
         // account for. Members that failed are evaluated again, along with
-        // the members that read them, until a pass changes nothing.
+        // the members that read them, until a pass changes nothing. So are
+        // members whose value holds a failed member (a class whose default
+        // failed), though their value is kept: it is the member's value if
+        // evaluating it again doesn't help.
+        let mut holding_failures: HashSet<&str> = HashSet::default();
         let mut previous_failures: Option<HashMap<&str, String>> = None;
         for _ in 0..=plan.order.len() {
             for index in todo {
@@ -2209,6 +2277,7 @@ impl Evaluator {
                 if let Some(name) = module_member_name(entry) {
                     failed.remove(name);
                     failed_indices.remove(&index);
+                    holding_failures.remove(name);
                 }
                 match entry {
                     Entry::Property(prop)
@@ -2235,6 +2304,11 @@ impl Evaluator {
                             depth,
                         ) {
                             Ok(defaults) => {
+                                if let Some(message) = first_member_failure(&defaults) {
+                                    failed.insert(name, message.to_string());
+                                    failed_indices.insert(index);
+                                    holding_failures.insert(name);
+                                }
                                 scope.set_member_poison(name, None);
                                 scope.declare(name, defaults.clone());
                                 module_props_insert(
@@ -2356,6 +2430,13 @@ impl Evaluator {
                             let snapshot = Value::Object(Arc::clone(&all_props), None);
                             scope.set("this", snapshot.clone());
                             scope.set("module", snapshot);
+                            if self.rendered_member_failed
+                                && let Some(message) = rendered_member_failure(&v)
+                            {
+                                failed.insert(&prop.name, message.to_string());
+                                failed_indices.insert(index);
+                                holding_failures.insert(&prop.name);
+                            }
                             evaluated.insert(&prop.name, v);
                         }
                     }
@@ -2367,6 +2448,10 @@ impl Evaluator {
             }
             previous_failures = Some(failed.clone());
             todo = plan.affected_by(&failed_indices);
+        }
+        // Members that only hold failed members keep their values.
+        for name in holding_failures {
+            failed.remove(name);
         }
 
         // Assemble the module object in declaration order: inherited members,
@@ -2597,7 +2682,7 @@ impl Evaluator {
                 parent_type_names: Vec::new(),
                 parent_type_identities: Vec::new(),
                 entry_scopes: Vec::new(),
-                evaluated_properties: Vec::new(),
+                evaluated_properties: Arc::default(),
                 mapping_value_types: Vec::new(),
                 deprecated,
                 poisoned_members: (!poisoned_members.is_empty())
@@ -2806,8 +2891,7 @@ impl Evaluator {
             for entry in source.entries.iter() {
                 if let Entry::Property(prop) = entry
                     && !has_modifier(&prop.modifiers, Modifier::Local)
-                    && source.evaluated_properties.contains(&prop.name)
-                    && let Some(value) = source.scope().get(prop.name.as_str())
+                    && let Some(value) = source.evaluated_properties.get(prop.name.as_str())
                 {
                     child_scope.set(&prop.name, value.clone());
                 }
@@ -2841,6 +2925,14 @@ impl Evaluator {
             // entries but absent from the parent scope, so that `outer.optionalProp`
             // resolves to Null rather than failing with "field not found".
             let mut outer_map = scope.flatten();
+            // `outer` is the enclosing object, so its members win over names
+            // lexically visible around it (which may hide inherited members).
+            if let Some(Value::Object(members, _)) = outer_map.get("this") {
+                let members = Arc::clone(members);
+                for (name, value) in members.iter() {
+                    outer_map.insert(name_of(name), value.clone());
+                }
+            }
             // `this` inside the body is rebound to the new object, so the parent's
             // `this` snapshot is unreachable through `outer`. Leaving it out keeps
             // nested objects from holding a reference to the parent's property map,
@@ -2980,84 +3072,194 @@ impl Evaluator {
         }
 
         let mut map: ObjectMap = ObjectMap::default();
-        for (entry_index, entry) in entries.iter().enumerate() {
-            match entry {
-                Entry::Property(prop) => {
-                    let mods = &prop.modifiers;
-                    if has_modifier(mods, Modifier::Local) {
-                        continue;
-                    }
-                    // Skip the `default` property — it's a template, not an output entry
-                    if prop.name == "default" && default_template.is_some() {
-                        continue;
-                    }
-                    if has_modifier(mods, Modifier::Abstract)
-                        && prop.value.is_none()
-                        && prop.body.is_none()
-                    {
-                        continue; // abstract without value — skip (must be overridden)
-                    }
-                    refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
-                    let active_scope = scope_for_object_entry(
-                        entry_index,
-                        &child_scope,
-                        entry_scopes,
-                        &entry_owners,
-                        own_body_scope,
-                    );
-                    let value = self.eval_property(prop, &active_scope, depth)?;
-                    // Release the entry scope first: it may share the object
-                    // scope's bindings, which binding the value would then copy.
-                    drop(active_scope);
-                    if let Some(v) = value {
-                        if binds_declared(&prop.name) {
-                            child_scope.declare(&prop.name, v.clone());
-                        } else {
-                            child_scope.set(&prop.name, v.clone());
+        // The entry that added each key of `map`, in insertion order.
+        let mut key_entries: Vec<usize> = Vec::new();
+        // A property that fails may have read a member declared after it,
+        // which Pkl allows (members are evaluated lazily). Failed properties
+        // are evaluated again once the other entries are, until a pass makes
+        // no progress; the ones that still fail are poisoned members of the
+        // object, whose errors surface where they are read or rendered.
+        let mut pass: Vec<usize> = (0..entries.len()).collect();
+        let mut retrying = false;
+        let mut retried = false;
+        let mut fallbacks: HashMap<usize, Value> = HashMap::default();
+        let failed = loop {
+            let mut failed: Vec<(usize, String)> = Vec::new();
+            // Properties set aside in this pass. A later entry for the same
+            // property (a body amendment of it) waits for it.
+            let mut set_aside: HashMap<&str, String> = HashMap::default();
+            for &entry_index in &pass {
+                let entry = &entries[entry_index];
+                if retrying && !matches!(entry, Entry::Property(_)) {
+                    continue;
+                }
+                let map_len = map.len();
+                match entry {
+                    Entry::Property(prop) => {
+                        let mods = &prop.modifiers;
+                        if has_modifier(mods, Modifier::Local) {
+                            continue;
                         }
-                        entry_owners.release_this(&this_aliases);
-                        props_insert(
-                            &mut child_scope,
-                            &this_aliases,
-                            &mut all_props,
-                            prop.name.clone(),
-                            v.clone(),
-                        );
-                        if !has_modifier(mods, Modifier::Hidden) {
-                            map.insert(prop.name.as_str().into(), v);
+                        // Skip the `default` property — it's a template, not an output entry
+                        if prop.name == "default" && default_template.is_some() {
+                            continue;
+                        }
+                        if has_modifier(mods, Modifier::Abstract)
+                            && prop.value.is_none()
+                            && prop.body.is_none()
+                        {
+                            continue; // abstract without value — skip (must be overridden)
+                        }
+                        if let Some(message) = set_aside.get(prop.name.as_str()) {
+                            failed.push((entry_index, message.clone()));
+                            continue;
                         }
                         refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
-                    }
-                }
-                Entry::DynProperty(key_expr, val_expr) => {
-                    let active_scope = scope_for_object_entry(
-                        entry_index,
-                        &child_scope,
-                        entry_scopes,
-                        &entry_owners,
-                        own_body_scope,
-                    );
-                    let key = self.eval_expr(key_expr, &active_scope, depth)?;
-                    let key_str = value_to_key(&key)?;
-                    // `["key"] { ... }` amends an entry inherited from the parent
-                    // (for example when amending an untyped `Mapping`) rather than
-                    // replacing it.
-                    if let Expr::ObjectBody(body) = val_expr
-                        && let Some(existing @ (Value::Object(..) | Value::List(_))) =
-                            map.get(&key_str).cloned()
-                    {
-                        // A listing amendment only takes elements, so a property
-                        // would otherwise be dropped silently. Reject it as Pkl does.
-                        if matches!(existing, Value::List(_))
-                            && let Some(name) = find_listing_body_property(body)
-                        {
-                            return Err(Error::Eval(format!(
-                                "cannot amend listing entry '{key_str}' with property '{name}': \
-                                 object of type Listing cannot have a property (other than default)"
-                            )));
+                        let active_scope = scope_for_object_entry(
+                            entry_index,
+                            &child_scope,
+                            entry_scopes,
+                            &entry_owners,
+                            own_body_scope,
+                        );
+                        let value = match self.eval_property(prop, &active_scope, depth) {
+                            // A value holding a failed member may also have read a member
+                            // not evaluated yet. It is evaluated again with the failed
+                            // properties, and kept if that doesn't help.
+                            Ok(Some(value))
+                                if self.rendered_member_failed
+                                    && rendered_member_failure(&value).is_some() =>
+                            {
+                                let message = rendered_member_failure(&value)
+                                    .unwrap_or_default()
+                                    .to_string();
+                                set_aside.insert(&prop.name, message.clone());
+                                failed.push((entry_index, message));
+                                fallbacks.insert(entry_index, value);
+                                continue;
+                            }
+                            Ok(value) => value,
+                            Err(Error::Eval(message)) => {
+                                set_aside.insert(&prop.name, message.clone());
+                                failed.push((entry_index, message));
+                                continue;
+                            }
+                            Err(error) => return Err(error),
+                        };
+                        // Release the entry scope first: it may share the object
+                        // scope's bindings, which binding the value would then copy.
+                        drop(active_scope);
+                        if let Some(v) = value {
+                            if binds_declared(&prop.name) {
+                                child_scope.declare(&prop.name, v.clone());
+                            } else {
+                                child_scope.set(&prop.name, v.clone());
+                            }
+                            entry_owners.release_this(&this_aliases);
+                            props_insert(
+                                &mut child_scope,
+                                &this_aliases,
+                                &mut all_props,
+                                prop.name.clone(),
+                                v.clone(),
+                            );
+                            if !has_modifier(mods, Modifier::Hidden) {
+                                map.insert(prop.name.as_str().into(), v);
+                            }
+                            refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                         }
-                        let val =
-                            self.eval_value_amendment(existing, body, &active_scope, depth)?;
+                    }
+                    Entry::DynProperty(key_expr, val_expr) => {
+                        let active_scope = scope_for_object_entry(
+                            entry_index,
+                            &child_scope,
+                            entry_scopes,
+                            &entry_owners,
+                            own_body_scope,
+                        );
+                        let key = self.eval_expr(key_expr, &active_scope, depth)?;
+                        let key_str = value_to_key(&key)?;
+                        // `["key"] { ... }` amends an entry inherited from the parent
+                        // (for example when amending an untyped `Mapping`) rather than
+                        // replacing it.
+                        if let Expr::ObjectBody(body) = val_expr
+                            && let Some(existing @ (Value::Object(..) | Value::List(_))) =
+                                map.get(&key_str).cloned()
+                        {
+                            // A listing amendment only takes elements, so a property
+                            // would otherwise be dropped silently. Reject it as Pkl does.
+                            if matches!(existing, Value::List(_))
+                                && let Some(name) = find_listing_body_property(body)
+                            {
+                                return Err(Error::Eval(format!(
+                                    "cannot amend listing entry '{key_str}' with property '{name}': \
+                                 object of type Listing cannot have a property (other than default)"
+                                )));
+                            }
+                            let val =
+                                self.eval_value_amendment(existing, body, &active_scope, depth)?;
+                            drop(active_scope);
+                            entry_owners.release_this(&this_aliases);
+                            props_insert(
+                                &mut child_scope,
+                                &this_aliases,
+                                &mut all_props,
+                                key_str.clone(),
+                                val.clone(),
+                            );
+                            map.insert(key_str, val);
+                            refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
+                            continue;
+                        }
+                        let val = if let Some(Value::Object(template_map, Some(src))) =
+                            &default_template
+                            && let Expr::ObjectBody(body) = val_expr
+                        {
+                            // Default template has ObjectSource — use eval_amended_object
+                            // so nested property amendments work properly.
+                            let mut result = self.eval_amended_object(
+                                template_map,
+                                src,
+                                body,
+                                &active_scope,
+                                depth,
+                            )?;
+                            // Propagate the template's type_name so converters can match.
+                            if let Some(ref tn) = src.type_name
+                                && let Value::Object(_, ref mut result_src) = result
+                            {
+                                let new_src = match result_src.take() {
+                                    Some(s) => {
+                                        let mut ns = Arc::unwrap_or_clone(s);
+                                        ns.type_name = Some(tn.clone());
+                                        ns
+                                    }
+                                    None => ObjectSource {
+                                        entries: vec![].into(),
+                                        captured: SourceScope::default(),
+                                        body_members: HashSet::default(),
+                                        is_open: true,
+                                        type_name: Some(tn.clone()),
+                                        type_identity: src.type_identity.clone(),
+                                        parent_type_names: src.parent_type_names.clone(),
+                                        parent_type_identities: src.parent_type_identities.clone(),
+                                        entry_scopes: Vec::new(),
+                                        evaluated_properties: Arc::default(),
+                                        mapping_value_types: Vec::new(),
+                                        deprecated: merge_deprecated(&src.deprecated, body),
+                                        poisoned_members: None,
+                                    },
+                                };
+                                *result_src = Some(std::sync::Arc::new(new_src));
+                            }
+                            result
+                        } else {
+                            let mut val = self.eval_expr(val_expr, &active_scope, depth)?;
+                            if let Some(ref tpl) = default_template {
+                                val = merge_values(tpl.clone(), val);
+                            }
+                            val
+                        };
                         drop(active_scope);
                         entry_owners.release_this(&this_aliases);
                         props_insert(
@@ -3069,180 +3271,186 @@ impl Evaluator {
                         );
                         map.insert(key_str, val);
                         refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
-                        continue;
                     }
-                    let val = if let Some(Value::Object(template_map, Some(src))) =
-                        &default_template
-                        && let Expr::ObjectBody(body) = val_expr
-                    {
-                        // Default template has ObjectSource — use eval_amended_object
-                        // so nested property amendments work properly.
-                        let mut result = self.eval_amended_object(
-                            template_map,
-                            src,
-                            body,
-                            &active_scope,
-                            depth,
-                        )?;
-                        // Propagate the template's type_name so converters can match.
-                        if let Some(ref tn) = src.type_name
-                            && let Value::Object(_, ref mut result_src) = result
-                        {
-                            let new_src = match result_src.take() {
-                                Some(s) => {
-                                    let mut ns = Arc::unwrap_or_clone(s);
-                                    ns.type_name = Some(tn.clone());
-                                    ns
-                                }
-                                None => ObjectSource {
-                                    entries: vec![].into(),
-                                    captured: SourceScope::default(),
-                                    body_members: HashSet::default(),
-                                    is_open: true,
-                                    type_name: Some(tn.clone()),
-                                    type_identity: src.type_identity.clone(),
-                                    parent_type_names: src.parent_type_names.clone(),
-                                    parent_type_identities: src.parent_type_identities.clone(),
-                                    entry_scopes: Vec::new(),
-                                    evaluated_properties: Vec::new(),
-                                    mapping_value_types: Vec::new(),
-                                    deprecated: merge_deprecated(&src.deprecated, body),
-                                    poisoned_members: None,
-                                },
-                            };
-                            *result_src = Some(std::sync::Arc::new(new_src));
+                    Entry::Spread(expr) => {
+                        let active_scope = scope_for_object_entry(
+                            entry_index,
+                            &child_scope,
+                            entry_scopes,
+                            &entry_owners,
+                            own_body_scope,
+                        );
+                        let val = self.eval_expr(expr, &active_scope, depth)?;
+                        if let Value::Object(m, _) = val {
+                            drop(active_scope);
+                            entry_owners.release_this(&this_aliases);
+                            props_extend(
+                                &mut child_scope,
+                                &this_aliases,
+                                &mut all_props,
+                                m.iter().map(|(k, v)| (k.clone(), v.clone())),
+                            );
+                            map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                            refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                         }
-                        result
-                    } else {
-                        let mut val = self.eval_expr(val_expr, &active_scope, depth)?;
-                        if let Some(ref tpl) = default_template {
-                            val = merge_values(tpl.clone(), val);
+                    }
+                    Entry::ForGenerator(fgen) => {
+                        let active_scope = scope_for_object_entry(
+                            entry_index,
+                            &child_scope,
+                            entry_scopes,
+                            &entry_owners,
+                            own_body_scope,
+                        );
+                        let collection = self.eval_expr(&fgen.collection, &active_scope, depth)?;
+                        let items = collection_to_items(collection);
+                        for (k, v) in items {
+                            let mut iter_scope = active_scope.child();
+                            iter_scope.set(&fgen.val_var, v);
+                            if let Some(key_var) = &fgen.key_var {
+                                iter_scope.set(key_var, k);
+                            }
+                            let body_val = self.eval_entries_with_lexical_scopes(
+                                &fgen.body,
+                                &iter_scope,
+                                depth,
+                                None,
+                                None,
+                            )?;
+                            if let Value::Object(m, _) = body_val {
+                                entry_owners.release_this(&this_aliases);
+                                props_extend(
+                                    &mut child_scope,
+                                    &this_aliases,
+                                    &mut all_props,
+                                    m.iter().map(|(k, v)| (k.clone(), v.clone())),
+                                );
+                                map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                                refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
+                            }
                         }
-                        val
+                    }
+                    Entry::WhenGenerator(wgen) => {
+                        let active_scope = scope_for_object_entry(
+                            entry_index,
+                            &child_scope,
+                            entry_scopes,
+                            &entry_owners,
+                            own_body_scope,
+                        );
+                        let cond = self.eval_expr(&wgen.condition, &active_scope, depth)?;
+                        if is_truthy(&cond) {
+                            let body_val = self.eval_entries_with_lexical_scopes(
+                                &wgen.body,
+                                &active_scope,
+                                depth,
+                                None,
+                                None,
+                            )?;
+                            if let Value::Object(m, _) = body_val {
+                                entry_owners.release_this(&this_aliases);
+                                props_extend(
+                                    &mut child_scope,
+                                    &this_aliases,
+                                    &mut all_props,
+                                    m.iter().map(|(k, v)| (k.clone(), v.clone())),
+                                );
+                                map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                                refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
+                            }
+                        } else if let Some(else_body) = &wgen.else_body {
+                            let else_val = self.eval_entries_with_lexical_scopes(
+                                else_body,
+                                &active_scope,
+                                depth,
+                                None,
+                                None,
+                            )?;
+                            if let Value::Object(m, _) = else_val {
+                                entry_owners.release_this(&this_aliases);
+                                props_extend(
+                                    &mut child_scope,
+                                    &this_aliases,
+                                    &mut all_props,
+                                    m.iter().map(|(k, v)| (k.clone(), v.clone())),
+                                );
+                                map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                                refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
+                            }
+                        }
+                    }
+                    Entry::Elem(_) => {} // bare elements only valid in Listing bodies
+                    Entry::ClassDef(..) | Entry::TypeAlias(..) => {} // handled in scope setup
+                }
+                key_entries.resize(map.len().max(map_len), entry_index);
+            }
+            if failed.is_empty() || (retrying && failed.len() == pass.len()) {
+                // Keep the values that only hold failed members; their
+                // errors surface where those members are read or rendered.
+                let mut remaining = Vec::new();
+                for (entry_index, message) in failed {
+                    let (Some(value), Entry::Property(prop)) =
+                        (fallbacks.remove(&entry_index), &entries[entry_index])
+                    else {
+                        remaining.push((entry_index, message));
+                        continue;
                     };
-                    drop(active_scope);
+                    if binds_declared(&prop.name) {
+                        child_scope.declare(&prop.name, value.clone());
+                    } else {
+                        child_scope.set(&prop.name, value.clone());
+                    }
                     entry_owners.release_this(&this_aliases);
                     props_insert(
                         &mut child_scope,
                         &this_aliases,
                         &mut all_props,
-                        key_str.clone(),
-                        val.clone(),
+                        prop.name.clone(),
+                        value.clone(),
                     );
-                    map.insert(key_str, val);
-                    refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
-                }
-                Entry::Spread(expr) => {
-                    let active_scope = scope_for_object_entry(
-                        entry_index,
-                        &child_scope,
-                        entry_scopes,
-                        &entry_owners,
-                        own_body_scope,
-                    );
-                    let val = self.eval_expr(expr, &active_scope, depth)?;
-                    if let Value::Object(m, _) = val {
-                        drop(active_scope);
-                        entry_owners.release_this(&this_aliases);
-                        props_extend(
-                            &mut child_scope,
-                            &this_aliases,
-                            &mut all_props,
-                            m.iter().map(|(k, v)| (k.clone(), v.clone())),
-                        );
-                        map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
-                        refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
+                    if !has_modifier(&prop.modifiers, Modifier::Hidden) {
+                        let map_len = map.len();
+                        map.insert(prop.name.as_str().into(), value);
+                        key_entries.resize(map.len().max(map_len), entry_index);
                     }
+                    retried = true;
                 }
-                Entry::ForGenerator(fgen) => {
-                    let active_scope = scope_for_object_entry(
-                        entry_index,
-                        &child_scope,
-                        entry_scopes,
-                        &entry_owners,
-                        own_body_scope,
-                    );
-                    let collection = self.eval_expr(&fgen.collection, &active_scope, depth)?;
-                    let items = collection_to_items(collection);
-                    for (k, v) in items {
-                        let mut iter_scope = active_scope.child();
-                        iter_scope.set(&fgen.val_var, v);
-                        if let Some(key_var) = &fgen.key_var {
-                            iter_scope.set(key_var, k);
-                        }
-                        let body_val = self.eval_entries_with_lexical_scopes(
-                            &fgen.body,
-                            &iter_scope,
-                            depth,
-                            None,
-                            None,
-                        )?;
-                        if let Value::Object(m, _) = body_val {
-                            entry_owners.release_this(&this_aliases);
-                            props_extend(
-                                &mut child_scope,
-                                &this_aliases,
-                                &mut all_props,
-                                m.iter().map(|(k, v)| (k.clone(), v.clone())),
-                            );
-                            map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
-                            refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
-                        }
-                    }
-                }
-                Entry::WhenGenerator(wgen) => {
-                    let active_scope = scope_for_object_entry(
-                        entry_index,
-                        &child_scope,
-                        entry_scopes,
-                        &entry_owners,
-                        own_body_scope,
-                    );
-                    let cond = self.eval_expr(&wgen.condition, &active_scope, depth)?;
-                    if is_truthy(&cond) {
-                        let body_val = self.eval_entries_with_lexical_scopes(
-                            &wgen.body,
-                            &active_scope,
-                            depth,
-                            None,
-                            None,
-                        )?;
-                        if let Value::Object(m, _) = body_val {
-                            entry_owners.release_this(&this_aliases);
-                            props_extend(
-                                &mut child_scope,
-                                &this_aliases,
-                                &mut all_props,
-                                m.iter().map(|(k, v)| (k.clone(), v.clone())),
-                            );
-                            map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
-                            refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
-                        }
-                    } else if let Some(else_body) = &wgen.else_body {
-                        let else_val = self.eval_entries_with_lexical_scopes(
-                            else_body,
-                            &active_scope,
-                            depth,
-                            None,
-                            None,
-                        )?;
-                        if let Value::Object(m, _) = else_val {
-                            entry_owners.release_this(&this_aliases);
-                            props_extend(
-                                &mut child_scope,
-                                &this_aliases,
-                                &mut all_props,
-                                m.iter().map(|(k, v)| (k.clone(), v.clone())),
-                            );
-                            map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
-                            refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
-                        }
-                    }
-                }
-                Entry::Elem(_) => {} // bare elements only valid in Listing bodies
-                Entry::ClassDef(..) | Entry::TypeAlias(..) => {} // handled in scope setup
+                break remaining;
             }
+            retried = true;
+            retrying = true;
+            pass = failed.iter().map(|(index, _)| *index).collect();
+        };
+        // Properties evaluated on a retry were added to the map late; put the
+        // keys back in the order of the entries that added them.
+        if retried && key_entries.windows(2).any(|pair| pair[0] > pair[1]) {
+            let mut keyed: Vec<(usize, Arc<str>, Value)> = key_entries
+                .iter()
+                .copied()
+                .zip(std::mem::take(&mut map))
+                .map(|(entry, (key, value))| (entry, key, value))
+                .collect();
+            keyed.sort_by_key(|(entry, ..)| *entry);
+            map = keyed
+                .into_iter()
+                .map(|(_, key, value)| (key, value))
+                .collect();
         }
+        let poisoned_members = (!failed.is_empty()).then(|| {
+            Arc::new(
+                failed
+                    .into_iter()
+                    .filter_map(|(index, message)| {
+                        let Entry::Property(prop) = &entries[index] else {
+                            return None;
+                        };
+                        let rendered = !has_modifier(&prop.modifiers, Modifier::Hidden);
+                        self.rendered_member_failed |= rendered;
+                        Some((prop.name.clone(), PoisonedMember { message, rendered }))
+                    })
+                    .collect::<IndexMap<_, _>>(),
+            )
+        });
         // Evaluate deferred local lambdas (function definitions) AFTER all
         // properties so they capture overridden values (late binding).
         refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
@@ -3283,10 +3491,10 @@ impl Evaluator {
             parent_type_names: Vec::new(),
             parent_type_identities: Vec::new(),
             entry_scopes: entry_scopes.map(<[_]>::to_vec).unwrap_or_default(),
-            evaluated_properties: all_props.keys().map(|k| k.to_string()).collect(),
+            evaluated_properties: Arc::clone(&all_props),
             mapping_value_types: Vec::new(),
             deprecated: collect_deprecated(entries),
-            poisoned_members: None,
+            poisoned_members,
         };
         Ok(Value::Object(Arc::new(map), Some(Arc::new(source))))
     }
@@ -3337,103 +3545,26 @@ impl Evaluator {
             child_scope.set("super", pv.clone());
         }
 
-        let child_defaults = self.eval_entries(body, &child_scope, depth + 1)?;
-        if let Some(Value::Object(parent_map, parent_src)) = parent_val {
-            // Merge: parent defaults first, child overrides on top
-            let mut merged: ObjectMap = (*parent_map).clone();
-            if let Value::Object(child_map, child_src) = child_defaults {
-                for (k, v) in child_map.iter() {
-                    merged.insert(k.clone(), v.clone());
-                }
-                // Preserve the child's ObjectSource for late binding,
-                // but prepend parent entries so inherited props are available
-                let source = if let Some(child_arc) = child_src {
-                    let mut src = (*child_arc).clone();
-                    // Collect child property names (including dynamic string-key entries)
-                    let child_names: std::collections::HashSet<String> = body
-                        .iter()
-                        .filter_map(|e| match e {
-                            Entry::Property(p) => Some(p.name.clone()),
-                            Entry::DynProperty(Expr::String(s), _) => Some(s.clone()),
-                            _ => None,
-                        })
-                        .collect();
-                    if let Some(psrc) = parent_src {
-                        let mut combined_entries = Vec::new();
-                        let mut combined_entry_scopes = Vec::new();
-                        let mut combined_evaluated_properties = Vec::new();
-                        let mut inherited_property_values = IndexMap::new();
-                        // One snapshot for every entry of the parent's body, so
-                        // they resolve each other as members of the same body.
-                        let parent_scope = Arc::new({
-                            let mut captured = capture_object_source_scope(&psrc);
-                            captured.body_members.extend(
-                                psrc.entries
-                                    .iter()
-                                    .enumerate()
-                                    .filter(|(index, _)| {
-                                        psrc.entry_scopes.get(*index).is_none_or(Option::is_none)
-                                    })
-                                    .filter_map(|(_, entry)| entry_member_name(entry).cloned()),
-                            );
-                            captured
-                        });
-                        for (entry_index, pe) in psrc.entries.iter().enumerate() {
-                            if let Entry::Property(p) = pe
-                                && !child_names.contains(&p.name)
-                            {
-                                combined_entries.push(pe.clone());
-                                combined_entry_scopes.push(
-                                    psrc.entry_scopes
-                                        .get(entry_index)
-                                        .and_then(Clone::clone)
-                                        .or_else(|| Some(Arc::clone(&parent_scope))),
-                                );
-                                if psrc.evaluated_properties.contains(&p.name) {
-                                    combined_evaluated_properties.push(p.name.clone());
-                                    if let Some(value) = psrc.scope().get(p.name.as_str()) {
-                                        inherited_property_values
-                                            .insert(p.name.clone(), value.clone());
-                                    }
-                                }
-                            }
-                        }
-                        let child_entries = std::mem::take(&mut src.entries);
-                        let child_entry_scopes = std::mem::take(&mut src.entry_scopes);
-                        for (entry_index, entry) in
-                            Arc::unwrap_or_clone(child_entries).into_iter().enumerate()
-                        {
-                            combined_entries.push(entry);
-                            combined_entry_scopes
-                                .push(child_entry_scopes.get(entry_index).cloned().unwrap_or(None));
-                        }
-                        combined_evaluated_properties.extend(src.evaluated_properties);
-                        // Keep the ObjectSource invariant used by amendment
-                        // seeding: every evaluated property name resolves to
-                        // that property's value in `scope`, even when a child
-                        // module has a same-named lexical binding.
-                        for name in inherited_property_values.keys() {
-                            src.captured.parts_mut().declared.remove(name.as_str());
-                        }
-                        src.captured.parts_mut().values.extend(
-                            inherited_property_values
-                                .into_iter()
-                                .map(|(k, v)| (Arc::from(k), v)),
-                        );
-                        src.entries = combined_entries.into();
-                        src.entry_scopes = combined_entry_scopes;
-                        src.evaluated_properties = combined_evaluated_properties;
+        // A subclass body is evaluated as an amendment of the parent's
+        // defaults: each entry resolves names in the body it was written in
+        // first, then through the instance's other (inherited) members.
+        match parent_val {
+            Some(Value::Object(parent_map, Some(parent_src))) => {
+                self.eval_amended_object(&parent_map, &parent_src, body, &child_scope, depth)
+            }
+            Some(Value::Object(parent_map, None)) => {
+                let child_defaults = self.eval_entries(body, &child_scope, depth + 1)?;
+                let mut merged: ObjectMap = (*parent_map).clone();
+                let source = match child_defaults {
+                    Value::Object(child_map, source) => {
+                        merged.extend(child_map.iter().map(|(k, v)| (k.clone(), v.clone())));
+                        source
                     }
-                    Some(Arc::new(src))
-                } else {
-                    None
+                    _ => None,
                 };
                 Ok(Value::Object(Arc::new(merged), source))
-            } else {
-                Ok(Value::Object(Arc::new(merged), None))
             }
-        } else {
-            Ok(child_defaults)
+            _ => self.eval_entries(body, &child_scope, depth + 1),
         }
         .map(|val| {
             // Set is_open flag and class_name on the result's ObjectSource
@@ -3471,6 +3602,13 @@ impl Evaluator {
                 let mut map = map;
                 Arc::make_mut(&mut map).retain(|key, _| !schema_member_names.contains(&**key));
                 let mut new_src = Arc::unwrap_or_clone(src);
+                // A class is not data: a default that failed matters only when
+                // an instance is built (which evaluates it again) or it is read.
+                if let Some(poisoned) = &mut new_src.poisoned_members {
+                    for member in Arc::make_mut(poisoned).values_mut() {
+                        member.rendered = false;
+                    }
+                }
                 new_src.is_open = is_open;
                 new_src.type_name = Some(class_name.to_string());
                 new_src.type_identity = Some(scope.runtime_type_identity(class_name));
@@ -3649,11 +3787,9 @@ impl Evaluator {
         // Hidden properties are absent from the rendered map but still
         // accessible through super. Mapping keys, in contrast, need the map:
         // they need not have a binding in the lexical scope.
-        for name in &base_source.evaluated_properties {
-            if !parent_members.contains_key(name.as_str())
-                && let Some(value) = base_source.scope().get(name.as_str())
-            {
-                parent_members.insert(name.as_str().into(), value.clone());
+        for (name, value) in base_source.evaluated_properties.iter() {
+            if !parent_members.contains_key(name) {
+                parent_members.insert(name.clone(), value.clone());
             }
         }
         amendment_scope.values.insert(
@@ -4247,17 +4383,18 @@ impl Evaluator {
                 // object built in the body sees its enclosing bindings through
                 // `outer`, so a body that mentions `outer` keeps everything, as
                 // does a body that names a type (see `NAMES_A_TYPE`).
-                let captured =
-                    Arc::new(if names.contains("outer") || names.contains(NAMES_A_TYPE) {
-                        scope.flatten()
-                    } else {
-                        scope.flatten_names(
-                            names
-                                .iter()
-                                .map(String::as_str)
-                                .chain(["this", "module", "super"]),
-                        )
-                    });
+                let mut captured = if names.contains("outer") || names.contains(NAMES_A_TYPE) {
+                    scope.flatten()
+                } else {
+                    scope.flatten_names(
+                        names
+                            .iter()
+                            .map(String::as_str)
+                            .chain(["this", "module", "super"]),
+                    )
+                };
+                record_captured_object_members(&mut captured, scope);
+                let captured = Arc::new(captured);
                 let captured_body = refs
                     .iter()
                     .filter(|name| scope.get(name).is_none())
@@ -4339,6 +4476,7 @@ impl Evaluator {
                             .cloned()
                             .collect();
                         let deprecated = collect_deprecated(&src_entries);
+                        let map = Arc::new(map);
                         let source = ObjectSource {
                             entries: src_entries.into(),
                             captured: SourceScope::lazy(
@@ -4353,12 +4491,12 @@ impl Evaluator {
                             parent_type_names: Vec::new(),
                             parent_type_identities: Vec::new(),
                             entry_scopes: Vec::new(),
-                            evaluated_properties: map.keys().map(|k| k.to_string()).collect(),
+                            evaluated_properties: Arc::clone(&map),
                             mapping_value_types: generic_params.iter().skip(1).cloned().collect(),
                             deprecated,
                             poisoned_members: None,
                         };
-                        Ok(Value::Object(Arc::new(map), Some(Arc::new(source))))
+                        Ok(Value::Object(map, Some(Arc::new(source))))
                     }
                     Some("Dynamic") => self.eval_entries(entries, scope, depth + 1),
                     _ => {
@@ -4455,7 +4593,7 @@ impl Evaluator {
                                             .parent_type_identities
                                             .clone(),
                                         entry_scopes: Vec::new(),
-                                        evaluated_properties: Vec::new(),
+                                        evaluated_properties: Arc::default(),
                                         mapping_value_types: Vec::new(),
                                         deprecated: merge_deprecated(&base_src.deprecated, entries),
                                         poisoned_members: None,
@@ -4492,7 +4630,7 @@ impl Evaluator {
                                 parent_type_names: Vec::new(),
                                 parent_type_identities: Vec::new(),
                                 entry_scopes: Vec::new(),
-                                evaluated_properties: Vec::new(),
+                                evaluated_properties: Arc::default(),
                                 mapping_value_types: Vec::new(),
                                 deprecated,
                                 poisoned_members: None,
@@ -4877,12 +5015,8 @@ impl Evaluator {
         // Lambda call
         if let Value::Lambda(params, body, captured) = func_val {
             let mut call_scope = Scope::for_call(&captured);
-            // If we're inside a method call context (scope has `this` as an Object),
-            // layer the instance's properties so local functions see overridden values
             if let Some(Value::Object(this_map, _)) = scope.get("this") {
-                for (k, v) in this_map.iter() {
-                    call_scope.set(k, v.clone());
-                }
+                bind_instance_members(&mut call_scope, &captured, this_map);
             }
             // Bind arguments to parameters
             let mut evaled_args = Vec::new();
@@ -4946,11 +5080,7 @@ impl Evaluator {
             && let Some(Value::Lambda(params, body, captured)) = map.get(method)
         {
             let mut call_scope = Scope::for_call(captured);
-            // Layer in all instance properties, including lambdas, so local
-            // functions called by this method see overrides.
-            for (k, v) in map.iter() {
-                call_scope.set(k, v.clone());
-            }
+            bind_instance_members(&mut call_scope, captured, map);
             call_scope.set("this", obj.clone());
             for (i, param) in params.iter().enumerate() {
                 if let Some(arg) = evaled_args.get(i) {
@@ -5567,7 +5697,7 @@ impl Evaluator {
                                         parent_type_names: src.parent_type_names.clone(),
                                         parent_type_identities: src.parent_type_identities.clone(),
                                         entry_scopes: Vec::new(),
-                                        evaluated_properties: Vec::new(),
+                                        evaluated_properties: Arc::default(),
                                         mapping_value_types: Vec::new(),
                                         deprecated: merge_deprecated(&src.deprecated, body),
                                         poisoned_members: None,

@@ -55,6 +55,10 @@ pub(super) struct Scope {
     pub(super) type_namespace: Option<String>,
     pub(super) receiver_entries: Option<Arc<Vec<Entry>>>,
     pub(super) receiver_list_base: Option<usize>,
+    /// Whether this level holds the members of an object being evaluated,
+    /// as an entry scope built over the object (see `scope_for_object_entry`).
+    /// Its parents are the entry's lexical scope.
+    pub(super) object_members: bool,
     pub(super) parent: Option<Arc<Scope>>,
 }
 
@@ -111,6 +115,7 @@ impl Default for Scope {
             type_namespace: None,
             receiver_entries: None,
             receiver_list_base: None,
+            object_members: false,
             parent: None,
         }
     }
@@ -136,6 +141,19 @@ impl Scope {
             parent: Some(Arc::new(self.clone())),
             ..Self::default()
         }
+    }
+
+    /// The members of the innermost object being evaluated that are visible
+    /// from this scope (see `Scope::object_members`).
+    pub(super) fn object_member_bindings(&self) -> Option<&FxIndexMap<Name, Value>> {
+        let mut level = Some(self);
+        while let Some(scope) = level {
+            if scope.object_members {
+                return Some(&scope.vars);
+            }
+            level = scope.parent.as_deref();
+        }
+        None
     }
 
     pub(super) fn runtime_type_identity(&self, name: &str) -> String {
@@ -780,7 +798,10 @@ impl EntryOwners {
     ) -> Scope {
         let mut cache = self.bindings.borrow_mut();
         let cached = cache.entry(key).or_insert_with(|| ObjectBindings {
-            scope: lexical.child(),
+            scope: Scope {
+                object_members: true,
+                ..lexical.child()
+            },
             hidden: FxHashSet::default(),
         });
         update_object_bindings(cached, lexical, object, owned);

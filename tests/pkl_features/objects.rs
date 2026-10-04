@@ -3477,9 +3477,10 @@ fn functions_reading_module_dynamically_are_refreshed() {
 }
 
 #[test]
-fn failed_class_reports_error_through_every_member_read() {
+fn class_default_failure_surfaces_through_instances_from_every_member_read() {
     for read in ["module[\"C\"]", "this[\"C\"]", "module?.C", "this?.C"] {
-        let src = format!("class C {{ v = module.missing }}\nresult = {read}\n");
+        let src =
+            format!("class C {{ v = module.missing }}\nlocal c = {read}\nresult = new c {{}}\n");
         let err = eval_fails(&src);
         assert!(err.contains("missing"), "{read}: {err}");
     }
