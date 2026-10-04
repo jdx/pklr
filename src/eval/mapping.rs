@@ -305,7 +305,7 @@ pub(super) fn apply_mapping_type_annotation(
         .as_ref()
         .map(|src| (**src).clone())
         .unwrap_or_else(|| ObjectSource {
-            entries: Vec::new(),
+            entries: Vec::new().into(),
             scope: ScopeMap::default(),
             scope_declared: NameSet::default(),
             body_members: HashSet::new(),
@@ -472,14 +472,14 @@ pub(super) fn find_listing_body_property(entries: &[Entry]) -> Option<&str> {
                 generator
                     .else_body
                     .as_deref()
-                    .and_then(find_listing_body_property)
+                    .and_then(|body| find_listing_body_property(body))
             })
         }
         _ => None,
     })
 }
 
-pub(super) fn find_default_body_entries(entries: &[Entry]) -> Option<Vec<Entry>> {
+pub(super) fn find_default_body_entries(entries: &[Entry]) -> Option<crate::parser::Body> {
     entries.iter().find_map(|entry| {
         if let Entry::Property(prop) = entry
             && prop.name == "default"
