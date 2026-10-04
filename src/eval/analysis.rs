@@ -51,17 +51,15 @@ pub(super) fn glob_index_keys(
     uses: &HashMap<String, ImportUse>,
     alias: &str,
 ) -> Option<HashSet<String>> {
-    if uses.contains_key(&field_reads_key(alias)) {
+    if uses.contains_key(&other_uses_key(alias)) {
         return None;
     }
-    let keys = requested_fields_for_import(uses, &index_reads_key(alias))?;
-    // Every recorded use of the alias must be one of these index reads.
-    (requested_fields_for_import(uses, alias)? == keys).then_some(keys)
+    requested_fields_for_import(uses, &index_reads_key(alias))
 }
 
-/// Where `Alias.field` reads are recorded alongside `Alias`'s own uses.
-fn field_reads_key(alias: &str) -> String {
-    format!("{alias}\0.")
+/// Marks that `Alias` is used other than as `Alias["key"]`.
+fn other_uses_key(alias: &str) -> String {
+    format!("{alias}\0*")
 }
 
 /// Where `Alias["key"]` reads are recorded alongside `Alias`'s own uses.
@@ -138,19 +136,21 @@ pub(super) fn collect_expr_import_field_uses(
         Expr::Field(base, field) | Expr::NullSafeField(base, field) => {
             if let Expr::Ident(name) = base.as_ref() {
                 record_field_import_use(uses, shadows, name, field);
-                record_field_import_use(uses, shadows, &field_reads_key(name), field);
             } else {
                 collect_expr_import_field_uses(base, uses, shadows);
             }
         }
-        // `Alias["key"]` reads one member, like `Alias.key`. For a glob import
-        // the key names one matched module.
+        // `Alias["key"]` names one matched module of a glob import, which
+        // `glob_index_keys` narrows to. An ordinary import read this way is
+        // still evaluated whole.
         Expr::Index(base, index)
             if matches!(base.as_ref(), Expr::Ident(_))
                 && matches!(index.as_ref(), Expr::String(_)) =>
         {
-            if let (Expr::Ident(name), Expr::String(key)) = (base.as_ref(), index.as_ref()) {
-                record_field_import_use(uses, shadows, name, key);
+            if let (Expr::Ident(name), Expr::String(key)) = (base.as_ref(), index.as_ref())
+                && !shadows.contains(name)
+            {
+                uses.insert(name.clone(), ImportUse::Whole);
                 record_field_import_use(uses, shadows, &index_reads_key(name), key);
             }
         }
@@ -307,6 +307,7 @@ pub(super) fn record_field_import_use(
     if shadows.contains(name) {
         return;
     }
+    mark_other_use(uses, name);
     match uses.entry(name.to_string()) {
         std::collections::hash_map::Entry::Occupied(mut entry) => {
             if let ImportUse::Fields(fields) = entry.get_mut() {
@@ -325,7 +326,16 @@ pub(super) fn record_whole_import_use(
     name: &str,
 ) {
     if !shadows.contains(name) {
+        mark_other_use(uses, name);
         uses.insert(name.to_string(), ImportUse::Whole);
+    }
+}
+
+/// Record that `name` is used other than through a literal index, unless
+/// `name` is itself one of the internal per-alias keys.
+fn mark_other_use(uses: &mut HashMap<String, ImportUse>, name: &str) {
+    if !name.contains('\0') {
+        uses.insert(other_uses_key(name), ImportUse::Whole);
     }
 }
 

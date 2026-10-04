@@ -2224,3 +2224,24 @@ ok = "b" is IsB
     assert_eq!(val["fromA"], "a");
     assert_eq!(val["ok"], true);
 }
+
+#[tokio::test]
+async fn indexed_ordinary_import_is_evaluated_whole() {
+    let temp = TestTempDir::new("pklr_test_indexed_ordinary_import");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "expected = \"b\"\ntypealias IsB = String(this == expected)\nresult = \"b\" is IsB\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as Dep\nout = Dep[\"result\"]\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["out"], true);
+}
