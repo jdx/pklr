@@ -182,6 +182,15 @@ impl Evaluator {
         let base_is_remote = path
             .to_str()
             .is_some_and(|base| base.starts_with("http://") || base.starts_with("https://"));
+        if !base_is_remote
+            && !module_import_uris(module).any(|uri| {
+                uri.starts_with("https://")
+                    || uri.starts_with("http://")
+                    || uri.starts_with("package://")
+            })
+        {
+            return;
+        }
         let roots = Roots::default();
         let mut level = Vec::new();
         for uri in module_import_uris(module) {
