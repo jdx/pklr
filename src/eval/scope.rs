@@ -278,15 +278,6 @@ impl Scope {
         identities
     }
 
-    /// Replace a binding declared in the body that owns this scope with a
-    /// poisoned one, dropping any value it held.
-    pub(super) fn redeclare_poisoned(&mut self, name: String, message: String) {
-        if self.vars.contains_key(name.as_str()) {
-            Arc::make_mut(&mut self.vars).shift_remove(name.as_str());
-        }
-        self.declare_poisoned(name, message);
-    }
-
     /// Key recording the error of a module member (a class, type alias or
     /// module function, never a local) that failed to evaluate. It contains a
     /// dot, so it never collides with a binding.
@@ -612,11 +603,11 @@ pub(super) fn missing_member_error(
     name: &str,
     scope: &Scope,
 ) -> Option<String> {
-    if let Some(message) = source
+    if let Some(member) = source
         .as_ref()
         .and_then(|source| source.poisoned_members.as_ref()?.get(name))
     {
-        return Some(message.clone());
+        return Some(member.message.clone());
     }
     match obj_expr {
         Expr::Ident(root) if root == "module" || root == "this" => {
@@ -654,11 +645,11 @@ pub(super) fn poisoned_member(scope: &Scope, name: &str) -> Option<String> {
         match map.get(part) {
             Some(member) => value = member,
             None => {
-                if let Some(message) = source
+                if let Some(member) = source
                     .as_ref()
                     .and_then(|source| source.poisoned_members.as_ref()?.get(part))
                 {
-                    return Some(message.clone());
+                    return Some(member.message.clone());
                 }
                 return (index == 0 && names_current_module)
                     .then(|| scope.poison_of(&Scope::member_poison_key(part)).cloned())

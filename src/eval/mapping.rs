@@ -44,41 +44,6 @@ pub(super) fn module_props_insert(
     Arc::make_mut(properties).insert(key.into(), value);
 }
 
-/// Write refreshed module members (`None`: the member failed and is
-/// removed) to the module's property map in one copy, releasing the scope's
-/// `this`/`module` snapshots first like `module_props_insert`, then rebind
-/// both to the updated map.
-pub(super) fn flush_module_members(
-    scope: &mut Scope,
-    properties: &mut Arc<ObjectMap>,
-    pending: &mut Vec<(String, Option<Value>)>,
-) {
-    if pending.is_empty() {
-        return;
-    }
-    for name in ["this", "module"] {
-        if scope.vars.contains_key(name)
-            && let Some(slot) = Arc::make_mut(&mut scope.vars).get_mut(name)
-        {
-            *slot = Value::Null;
-        }
-    }
-    let map = Arc::make_mut(properties);
-    for (name, value) in pending.drain(..) {
-        match value {
-            Some(value) => {
-                map.insert(name.into(), value);
-            }
-            None => {
-                map.shift_remove(name.as_str());
-            }
-        }
-    }
-    let snapshot = Value::Object(Arc::clone(properties), None);
-    scope.set("this", snapshot.clone());
-    scope.set("module", snapshot);
-}
-
 pub(super) fn props_insert(
     scope: &mut Scope,
     aliases: &[String],
