@@ -589,7 +589,7 @@ fn equality_ignores_methods() {
     // like a class's methods they are not members.
     let json = eval(
         r#"
-dynamic = new Dynamic { x = 1; function f() = 1 } == new Dynamic { x = 1 }
+dynamic = new Dynamic { x = 1; local function f() = 1 } == new Dynamic { x = 1 }
 open class P { x = 1 }
 typed = new P { function g() = 2 } == new P {}
 "#,
