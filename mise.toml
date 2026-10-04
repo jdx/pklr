@@ -2,3 +2,4 @@
 communique = { version = "latest", minimum_release_age = "0s" }
 cargo-binstall = "latest"
 cargo-msrv = "latest"
+pkl = "0.32.1"
