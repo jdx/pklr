@@ -3289,3 +3289,17 @@ obj {
     assert_eq!(json["obj"]["inner"]["s"]["v"], 1);
     assert_eq!(json["obj"]["ok"], true);
 }
+
+#[test]
+fn outer_is_bound_for_type_alias_constraints_checked_in_body() {
+    let json = eval(
+        r#"
+limit = 5
+typealias Checked = Int(this < outer.limit)
+obj {
+  ok = 3 is Checked
+}
+"#,
+    );
+    assert_eq!(json["obj"]["ok"], true);
+}

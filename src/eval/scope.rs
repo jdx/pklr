@@ -239,6 +239,17 @@ impl Scope {
         Rc::make_mut(&mut self.type_aliases).insert(name.into(), ty);
     }
 
+    /// Whether a type alias visible from this scope mentions `name`. A type
+    /// alias's constraint runs in the scope of the value being checked, so it
+    /// can read bindings such as `outer` from wherever the check happens.
+    pub(super) fn type_aliases_mention(&self, name: &str) -> bool {
+        self.type_aliases.values().any(|ty| type_mentions(ty, name))
+            || self
+                .parent
+                .as_ref()
+                .is_some_and(|parent| parent.type_aliases_mention(name))
+    }
+
     pub(super) fn get_type_alias(&self, name: &str) -> Option<&crate::parser::TypeExpr> {
         self.type_aliases
             .get(name)

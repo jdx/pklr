@@ -2364,7 +2364,7 @@ impl Evaluator {
         };
         // `outer` is only reachable by name, so a body that never mentions it
         // (the common case) skips flattening the enclosing scope for it.
-        if entries_mention(entries, "outer") {
+        if entries_mention(entries, "outer") || scope.type_aliases_mention("outer") {
             // Set `outer` to a snapshot of the parent scope's variables as an object.
             // Also insert Null for any nullable-no-default properties declared in these
             // entries but absent from the parent scope, so that `outer.optionalProp`

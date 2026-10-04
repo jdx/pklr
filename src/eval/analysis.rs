@@ -1068,7 +1068,7 @@ fn expr_mentions(expr: &Expr, name: &str) -> bool {
     }
 }
 
-fn type_mentions(ty: &crate::parser::TypeExpr, name: &str) -> bool {
+pub(super) fn type_mentions(ty: &crate::parser::TypeExpr, name: &str) -> bool {
     match ty {
         crate::parser::TypeExpr::Constrained(base, constraint) => {
             type_name_mentions(base, name) || expr_mentions(constraint, name)
