@@ -2315,16 +2315,6 @@ impl Evaluator {
                 }
             }
         }
-        // Set `outer` to a snapshot of the parent scope's variables as an object.
-        // Also insert Null for any nullable-no-default properties declared in these
-        // entries but absent from the parent scope, so that `outer.optionalProp`
-        // resolves to Null rather than failing with "field not found".
-        let mut outer_map = scope.flatten();
-        // `this` inside the body is rebound to the new object, so the parent's
-        // `this` snapshot is unreachable through `outer`. Leaving it out keeps
-        // nested objects from holding a reference to the parent's property map,
-        // which would otherwise force a full copy on every parent insert.
-        outer_map.shift_remove("this");
         // Locals of an enclosing object that alias its `this` (`local self =
         // this`) hold the same snapshot. Drop the ones this body never names so
         // they are not captured by the object built here; `outer` keeps them
@@ -2345,30 +2335,44 @@ impl Evaluator {
                 }
             }
         };
-        for name in &unused_this_aliases {
-            outer_map.shift_remove(name.as_str());
-        }
-        for entry in entries.iter() {
-            if let Entry::Property(prop) = entry
-                && prop.value.is_none()
-                && prop.body.is_none()
-                && !has_modifier(&prop.modifiers, Modifier::Local)
-                && !outer_map.contains_key(prop.name.as_str())
-                && matches!(prop.type_ann, Some(crate::parser::TypeExpr::Nullable(_)))
-            {
-                outer_map.insert(prop.name.as_str().into(), Value::Null);
+        // `outer` is only reachable by name, so a body that never mentions it
+        // (the common case) skips flattening the enclosing scope for it.
+        if entries_mention(entries, "outer") {
+            // Set `outer` to a snapshot of the parent scope's variables as an object.
+            // Also insert Null for any nullable-no-default properties declared in these
+            // entries but absent from the parent scope, so that `outer.optionalProp`
+            // resolves to Null rather than failing with "field not found".
+            let mut outer_map = scope.flatten();
+            // `this` inside the body is rebound to the new object, so the parent's
+            // `this` snapshot is unreachable through `outer`. Leaving it out keeps
+            // nested objects from holding a reference to the parent's property map,
+            // which would otherwise force a full copy on every parent insert.
+            outer_map.shift_remove("this");
+            for name in &unused_this_aliases {
+                outer_map.shift_remove(name.as_str());
             }
+            for entry in entries.iter() {
+                if let Entry::Property(prop) = entry
+                    && prop.value.is_none()
+                    && prop.body.is_none()
+                    && !has_modifier(&prop.modifiers, Modifier::Local)
+                    && !outer_map.contains_key(prop.name.as_str())
+                    && matches!(prop.type_ann, Some(crate::parser::TypeExpr::Nullable(_)))
+                {
+                    outer_map.insert(prop.name.as_str().into(), Value::Null);
+                }
+            }
+            let outer_obj = Value::Object(
+                Arc::new(
+                    outer_map
+                        .into_iter()
+                        .map(|(k, v)| (k.to_string(), v))
+                        .collect(),
+                ),
+                None,
+            );
+            child_scope.set("outer".into(), outer_obj);
         }
-        let outer_obj = Value::Object(
-            Arc::new(
-                outer_map
-                    .into_iter()
-                    .map(|(k, v)| (k.to_string(), v))
-                    .collect(),
-            ),
-            None,
-        );
-        child_scope.set("outer".into(), outer_obj);
         // Class-as-a-function definitions commonly use `local self = this` so
         // output properties can close over the amended instance. Bind `this`
         // before locals are evaluated, then keep direct aliases synchronized as
