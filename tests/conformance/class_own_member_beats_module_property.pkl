@@ -1,0 +1,3 @@
+const min = 1
+class C { a = min; min = 2 }
+r = new C { min = 3 }

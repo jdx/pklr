@@ -764,7 +764,7 @@ default_branch = myval
 fn eval_new_mapping() {
     let src = r#"
 amends "pkl/Config.pkl"
-local steps = new Mapping {
+local linters = new Mapping {
     ["cargo-fmt"] {
         glob = "**/*.rs"
         check = "cargo fmt --check"
@@ -773,7 +773,7 @@ local steps = new Mapping {
 }
 hooks {
     ["pre-commit"] {
-        steps = steps
+        steps = linters
     }
 }
 "#;

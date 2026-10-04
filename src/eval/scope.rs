@@ -360,6 +360,24 @@ impl Scope {
             .or_else(|| self.parent.as_ref().and_then(|p| p.get_type_alias(name)))
     }
 
+    /// The binding of `name` as a type: like `get`, but a level where the
+    /// name is poisoned is passed over, since types and values are separate
+    /// namespaces. An object assigning a property named like a class
+    /// (`Script = new Script {}`) marks the property pending (see
+    /// `eval_entries_with_lexical_scopes`), which must not hide the class.
+    pub(super) fn get_type(&self, name: &str) -> Option<&Value> {
+        let mut level = Some(self);
+        while let Some(scope) = level {
+            if !scope.poisoned.contains_key(name)
+                && let Some(value) = scope.vars.get(name)
+            {
+                return Some(value);
+            }
+            level = scope.parent.as_deref();
+        }
+        None
+    }
+
     pub(super) fn get(&self, name: &str) -> Option<&Value> {
         if self.poisoned.contains_key(name) {
             return None;
