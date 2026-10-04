@@ -1238,7 +1238,9 @@ fn eager_class_refs(body: &[Entry], upto: Option<usize>) -> HashSet<String> {
             && !matches!(entry, Entry::Property(prop) if stored.contains_key(prop.name.as_str()))
     };
     // What `seeds` read, with the methods they run (transitively). A nested
-    // class reads only what its own defaults do (see `class_default_reads`).
+    // class reads only what its own defaults do (see `class_default_reads`),
+    // and once they use it, what its methods read from outside it (they may
+    // run on an instance built here).
     let reads = |seeds: Vec<Entry>| {
         let (classes, seeds): (Vec<Entry>, Vec<Entry>) = seeds
             .into_iter()
@@ -1255,7 +1257,33 @@ fn eager_class_refs(body: &[Entry], upto: Option<usize>) -> HashSet<String> {
         };
         instance.entries(&seeds, 0);
         let mut followed = HashSet::default();
+        let mut used_classes = HashSet::default();
         loop {
+            let used: Vec<&[Entry]> = body
+                .iter()
+                .filter_map(|entry| match entry {
+                    Entry::ClassDef(name, _, _, class_body)
+                        if refs.contains(name) && used_classes.insert(name.as_str()) =>
+                    {
+                        Some(class_body.as_slice())
+                    }
+                    _ => None,
+                })
+                .collect();
+            for class_body in &used {
+                let own: HashSet<&str> = class_body
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        Entry::Property(prop) => Some(prop.name.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                refs.extend(
+                    referenced_roots(class_body)
+                        .into_iter()
+                        .filter(|root| !own.contains(root.as_str())),
+                );
+            }
             let calls_all = instance.escapes;
             let read = |name: &str| refs.contains(name) || instance.members.contains(name);
             let mut runs: HashSet<&str> = methods
@@ -1278,7 +1306,7 @@ fn eager_class_refs(body: &[Entry], upto: Option<usize>) -> HashSet<String> {
                     _ => false,
                 })
                 .collect();
-            if next.is_empty() {
+            if next.is_empty() && used.is_empty() {
                 return (refs, followed);
             }
             for method in next {
