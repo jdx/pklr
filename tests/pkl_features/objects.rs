@@ -3700,6 +3700,8 @@ f = new F { p { ["a"] { w = 1 } } }
     let expected = serde_json::json!({"a": {"v": "a", "w": 1}, "b": {"v": "b"}});
     assert_eq!(json["x"], expected);
     assert_eq!(json["f"]["p"], expected);
+}
+
 // ============================================================
 // Class extension and instantiation rules
 // ============================================================
