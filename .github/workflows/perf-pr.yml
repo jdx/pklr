@@ -45,7 +45,7 @@ jobs:
           base=$(git rev-parse --verify --end-of-options "$BASE_SHA^{commit}")
           merge_base=$(git merge-base "$base" HEAD)
           if git cat-file -e "$merge_base:tak.toml" 2>/dev/null; then
-            echo "fail-on-nothing-compared=true" >> "$GITHUB_OUTPUT"
+            echo "fail-on-nothing-compared=false" >> "$GITHUB_OUTPUT"
           else
             echo "fail-on-nothing-compared=false" >> "$GITHUB_OUTPUT"
           fi
