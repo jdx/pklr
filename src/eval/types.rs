@@ -395,6 +395,32 @@ pub(super) fn value_is_class_type(val: &Value, name: &str, scope: &Scope) -> Opt
     )
 }
 
+/// Whether `name` (optionally `*`-prefixed) is a built-in type checked at
+/// runtime, or a string-literal type. An alias of the same name in scope
+/// takes precedence over it.
+pub(super) fn is_builtin_type_name(name: &str) -> bool {
+    string_literal_type_value(name).is_some()
+        || matches!(
+            name.strip_prefix('*').unwrap_or(name),
+            "Null"
+                | "Boolean"
+                | "Bool"
+                | "Int"
+                | "Float"
+                | "Number"
+                | "String"
+                | "List"
+                | "Listing"
+                | "Set"
+                | "Map"
+                | "Mapping"
+                | "Object"
+                | "Dynamic"
+                | "Function"
+                | "Any"
+        )
+}
+
 pub(super) fn type_is_runtime_checkable(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
     type_is_runtime_checkable_inner(ty, scope, &mut Vec::new())
 }
@@ -421,27 +447,7 @@ fn type_is_runtime_checkable_inner(
                 resolving.pop();
                 return checkable;
             }
-            if string_literal_type_value(name).is_some()
-                || matches!(
-                    runtime_name,
-                    "Null"
-                        | "Boolean"
-                        | "Bool"
-                        | "Int"
-                        | "Float"
-                        | "Number"
-                        | "String"
-                        | "List"
-                        | "Listing"
-                        | "Set"
-                        | "Map"
-                        | "Mapping"
-                        | "Object"
-                        | "Dynamic"
-                        | "Function"
-                        | "Any"
-                )
-            {
+            if is_builtin_type_name(name) {
                 return true;
             }
             resolve_dotted(scope, runtime_name).is_some()

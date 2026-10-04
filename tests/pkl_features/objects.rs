@@ -2097,6 +2097,44 @@ obj { when (true) { typealias Small = Int(this < 2); checked: Int(this is Small)
 }
 
 #[test]
+fn later_alias_does_not_capture_builtin_type_of_typed_local() {
+    // `Int` is the built-in where the local is bound; a later alias of the
+    // same name does not change that.
+    let message = eval_fails(
+        r#"
+local bad: Int = "x"
+typealias Int = String
+out = bad
+"#,
+    );
+    assert!(message.contains("property 'bad' expected Int"), "{message}");
+    let message = eval_fails(
+        r#"
+obj { local bad: Int = "x"; typealias Int = String; out = bad }
+"#,
+    );
+    assert!(message.contains("property 'bad' expected Int"), "{message}");
+    // A later alias of a name that resolves to nothing yet still applies.
+    let message = eval_fails(
+        r#"
+local bad: Later = "x"
+typealias Later = Int
+out = bad
+"#,
+    );
+    assert!(
+        message.contains("property 'bad' expected Later"),
+        "{message}"
+    );
+    let json = eval(
+        r#"
+obj { local ok: Later = 1; typealias Later = Int; out = ok }
+"#,
+    );
+    assert_eq!(json["obj"]["out"], 1);
+}
+
+#[test]
 fn alias_shadowing_builtin_name_is_resolved_first() {
     // `String` here is an alias of `Function1`, which is not checked.
     let json = eval(

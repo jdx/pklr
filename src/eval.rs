@@ -592,19 +592,26 @@ fn names_later_alias(
     {
         return false;
     }
-    // Follow alias chains, through aliases in scope and, for a name not in
-    // scope yet, the later declaration: `typealias A = B` then a local of
-    // type `A`, then `typealias B = Int`, reaches the later `B`.
-    let (_, names) = type_closure(ty, &|name| {
-        scope.get_type_alias(name).or_else(|| later(name)).cloned()
-    });
-    names.iter().any(|name| {
-        // Aliases in scope and classes already resolve; a name declared
-        // later that does not means the later alias.
+    // A name that resolves to something where the local is bound (an alias
+    // in scope, a class or other bound value, or a built-in type) keeps that
+    // meaning; only a name that resolves to nothing yet means its later
+    // declaration.
+    let unresolved = |name: &str| {
         scope.get_type_alias(name).is_none()
+            && !is_builtin_type_name(name)
             && resolve_dotted(scope, name).is_none()
-            && later(name).is_some()
-    })
+    };
+    // Follow alias chains, through aliases in scope and, for an unresolved
+    // name, the later declaration: `typealias A = B` then a local of type
+    // `A`, then `typealias B = Int`, reaches the later `B`.
+    let (_, names) = type_closure(ty, &|name| match scope.get_type_alias(name) {
+        Some(alias) => Some(alias.clone()),
+        None if unresolved(name) => later(name).cloned(),
+        None => None,
+    });
+    names
+        .iter()
+        .any(|name| unresolved(name) && later(name).is_some())
 }
 
 /// The bindings of the locals written in the same body as the entry at
