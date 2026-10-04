@@ -2448,9 +2448,16 @@ async fn narrowed_import_respects_aliases_redeclared_in_nested_bodies() {
         "length = throw(\"unused\")\ntypealias S = String\nresult {\n  typealias S = String\n  ok = \"b\" is S(length == 1)\n}\n",
     )
     .unwrap();
+    // A local evaluated before the nested alias still sees the module's
+    // `S = Int`, whose check binds no `length`.
+    std::fs::write(
+        dir.join("dep_order.pkl"),
+        "length = 1\ntypealias S = Int\nresult {\n  local checked = 1 is S(this == length)\n  typealias S = String\n  ok = checked\n}\n",
+    )
+    .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"dep.pkl\" as Dep\nimport \"dep_string.pkl\" as DepString\nout = Dep.result.ok\noutString = DepString.result.ok\n",
+        "import \"dep.pkl\" as Dep\nimport \"dep_string.pkl\" as DepString\nimport \"dep_order.pkl\" as DepOrder\nout = Dep.result.ok\noutString = DepString.result.ok\noutOrder = DepOrder.result.ok\n",
     )
     .unwrap();
 
@@ -2459,4 +2466,5 @@ async fn narrowed_import_respects_aliases_redeclared_in_nested_bodies() {
         .unwrap();
     assert_eq!(val["out"], true);
     assert_eq!(val["outString"], true);
+    assert_eq!(val["outOrder"], true);
 }
