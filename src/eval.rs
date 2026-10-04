@@ -4531,6 +4531,34 @@ impl Evaluator {
         }
     }
 
+    /// Evaluate the `(start, end)` arguments of an `IntSeq(start, end)` call.
+    async fn eval_int_seq_bounds(
+        &mut self,
+        args: &[Expr],
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<(i64, i64)> {
+        let [start_expr, end_expr] = args else {
+            return Err(Error::Eval(format!(
+                "IntSeq() expects 2 arguments (start, end), got {}",
+                args.len()
+            )));
+        };
+        let mut bounds = [0i64; 2];
+        for (slot, expr) in bounds.iter_mut().zip([start_expr, end_expr]) {
+            match self.eval_expr(expr, scope, depth + 1).await? {
+                Value::Int(n) => *slot = n,
+                other => {
+                    return Err(Error::Eval(format!(
+                        "IntSeq() expects Int arguments, got {}",
+                        value_type_name(&other)
+                    )));
+                }
+            }
+        }
+        Ok((bounds[0], bounds[1]))
+    }
+
     #[async_recursion(?Send)]
     async fn eval_call(
         &mut self,
@@ -4539,6 +4567,31 @@ impl Evaluator {
         scope: &Scope,
         depth: usize,
     ) -> Result<Value> {
+        // `IntSeq(start, end).step(n)`: IntSeq evaluates to a plain list, so
+        // the step is applied while the range bounds are still known.
+        if let Expr::Field(obj_expr, method) = func_expr
+            && method == "step"
+            && let Expr::Call(seq_func, seq_args) = obj_expr.as_ref()
+            && matches!(seq_func.as_ref(), Expr::Ident(name) if name == "IntSeq")
+            && int_seq_is_builtin(scope)
+        {
+            let (start, end) = self.eval_int_seq_bounds(seq_args, scope, depth).await?;
+            let [step_expr] = args else {
+                return Err(Error::Eval(
+                    "IntSeq.step() expects exactly one argument".into(),
+                ));
+            };
+            let step = match self.eval_expr(step_expr, scope, depth + 1).await? {
+                Value::Int(n) => n,
+                other => {
+                    return Err(Error::Eval(format!(
+                        "IntSeq.step() expects an Int, got {}",
+                        value_type_name(&other)
+                    )));
+                }
+            };
+            return int_seq(start, end, step);
+        }
         // Handle method calls: obj.method(args)
         if let Expr::Field(obj_expr, method) = func_expr {
             let obj = self.eval_expr(obj_expr, scope, depth + 1).await?;
@@ -4616,6 +4669,10 @@ impl Evaluator {
                         }
                     }
                     return Ok(Value::List(items)); // deduplicated
+                }
+                "IntSeq" if int_seq_is_builtin(scope) => {
+                    let (start, end) = self.eval_int_seq_bounds(args, scope, depth).await?;
+                    return int_seq(start, end, 1);
                 }
                 "Regex" => {
                     if let Some(arg) = args.first() {
@@ -5869,6 +5926,41 @@ fn seed_builtins(scope: &mut Scope) {
     ] {
         scope.set(name.to_string(), Value::String(name.to_string()));
     }
+}
+
+/// Whether `IntSeq` in `scope` is still the built-in, which `seed_builtins`
+/// binds to a marker string, rather than a user binding of that name.
+fn int_seq_is_builtin(scope: &Scope) -> bool {
+    matches!(scope.get("IntSeq"), Some(Value::String(name)) if name == "IntSeq")
+}
+
+/// Largest number of elements an `IntSeq` may produce. IntSeq is
+/// materialized as a list, so an unbounded range would exhaust memory.
+const MAX_INT_SEQ_LEN: i128 = 1_000_000;
+
+/// Materialize `IntSeq(start, end).step(step)` as a list of ints. The range is
+/// inclusive of `end` when a step lands on it, and empty when `step` points
+/// away from `end` (e.g. `IntSeq(5, 1)` with the default step of 1).
+fn int_seq(start: i64, end: i64, step: i64) -> Result<Value> {
+    if step == 0 {
+        return Err(Error::Eval("IntSeq step must not be 0".into()));
+    }
+    let (start_w, end_w, step_w) = (start as i128, end as i128, step as i128);
+    let len = if (step > 0 && start <= end) || (step < 0 && start >= end) {
+        (end_w - start_w) / step_w + 1
+    } else {
+        0
+    };
+    if len > MAX_INT_SEQ_LEN {
+        return Err(Error::Eval(format!(
+            "IntSeq({start}, {end}) with step {step} has {len} elements, more than the supported maximum of {MAX_INT_SEQ_LEN}"
+        )));
+    }
+    Ok(Value::List(
+        (0..len)
+            .map(|i| Value::Int((start_w + i * step_w) as i64))
+            .collect(),
+    ))
 }
 
 fn collection_to_items(v: Value) -> Vec<(Value, Value)> {
