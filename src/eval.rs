@@ -2182,9 +2182,16 @@ impl Evaluator {
                     }
                 }
             } else if uri.starts_with("https://") || uri.starts_with("http://") {
+                self.check_not_self(module, path, Path::new(uri), "extend")?;
                 let source = self.fetch_source(uri)?;
                 let tokens = lexer::lex_named(&source, uri)?;
                 let ext_module = parser::parse_named(&tokens, &source, uri)?;
+                if ext_module.amends.is_some() {
+                    return Err(Error::Eval(format!(
+                        "Module `{}` cannot be extended or used as type because it amends another module.",
+                        self.amended_module_name(&ext_module, Path::new(uri))
+                    )));
+                }
                 let ext_val = self.eval_module_with_scope(
                     &ext_module,
                     Path::new(uri),
@@ -6562,7 +6569,8 @@ fn check_instantiable(scope: &Scope, type_name: Option<&str>, class: Option<&Val
     };
     // The class a type alias names (`typealias R = Regex`).
     let mut resolved = type_name;
-    for _ in 0..8 {
+    let mut seen = HashSet::default();
+    while seen.insert(resolved) {
         match scope.get_type_alias(resolved) {
             Some(crate::parser::TypeExpr::Named(target)) if !target.starts_with('*') => {
                 resolved = target;
@@ -6582,8 +6590,10 @@ fn check_instantiable(scope: &Scope, type_name: Option<&str>, class: Option<&Val
                 && source.type_name.as_deref() != Some(type_name)
                 && scope.get_type_alias(type_name).is_none()
                 && scope.get(&type_alias_marker(type_name)).is_none()
-                && source.poisoned_members.is_none()
-                && source.deprecated.is_empty() =>
+                // Module metadata is carried on a source without entries,
+                // whereas an ordinary object has its declaration body here.
+                && !(source.entries.is_empty()
+                    && (source.poisoned_members.is_some() || !source.deprecated.is_empty())) =>
         {
             Err(Error::Eval(format!(
                 "Expected `{type_name}` to be a type, but it is not."

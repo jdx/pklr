@@ -3765,6 +3765,10 @@ fn abstract_and_external_classes_cannot_be_instantiated() {
             "class Foo\nlocal Foo2 = Foo\nres = new Foo2 {}\n",
             "Expected `Foo2` to be a type, but it is not.",
         ),
+        (
+            "local Foo = new Dynamic {\n  @Deprecated { message = \"old\" }\n  value = 1\n}\nres = new Foo {}\n",
+            "Expected `Foo` to be a type, but it is not.",
+        ),
     ] {
         let err = eval_fails(src);
         assert!(err.contains(message), "{src}: {err}");
@@ -3786,6 +3790,13 @@ fn instantiation_checks_follow_type_aliases() {
         "class Foo { x = 1 }\ntypealias A = Foo\nlocal f = (Foo) -> new A {}\nr = f.apply(5)\n",
     );
     assert_eq!(json["r"], serde_json::json!({"x": 1}));
+    let err = eval_fails(
+        "typealias A1 = A2\ntypealias A2 = A3\ntypealias A3 = A4\ntypealias A4 = A5\ntypealias A5 = A6\ntypealias A6 = A7\ntypealias A7 = A8\ntypealias A8 = A9\ntypealias A9 = Regex\nres = new A1 {}\n",
+    );
+    assert!(
+        err.contains("Cannot instantiate, or amend an instance of, external class `Regex`."),
+        "{err}"
+    );
 }
 
 #[test]
