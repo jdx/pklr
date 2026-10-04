@@ -427,9 +427,9 @@ impl Evaluator {
         self.offline = offline;
     }
 
-    /// Stop a module evaluation with an "evaluation cancelled" error once
-    /// `flag` is set, for example from another thread after a timeout. The
-    /// evaluator checks it before module loads, reads and fetches, and starts
+    /// Stop evaluating, with an "evaluation cancelled" error, once `flag` is
+    /// set, for example from another thread after a timeout. The evaluator
+    /// checks it before each expression, module read and fetch, and starts
     /// no further prefetch requests once it is set.
     pub fn set_cancel_flag(&mut self, flag: Arc<std::sync::atomic::AtomicBool>) {
         self.cancel = Some(flag);
@@ -4300,6 +4300,7 @@ impl Evaluator {
         if depth > self.max_depth {
             return Err(Error::Eval("maximum recursion depth exceeded".into()));
         }
+        self.check_cancelled()?;
         match expr {
             Expr::Null => Ok(Value::Null),
             Expr::Bool(b) => Ok(Value::Bool(*b)),
