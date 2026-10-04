@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use async_recursion::async_recursion;
 use indexmap::IndexMap;
 use std::path::{Path, PathBuf};
 
@@ -15,6 +14,7 @@ use crate::parser::{
 use crate::value::{CapturedScope, NameSet, ObjectSource, ScopeMap, Value};
 
 mod analysis;
+mod bridge;
 mod glob;
 mod mapping;
 mod package;
@@ -63,6 +63,12 @@ pub struct Evaluator {
     scoped_imports_in_flight: HashSet<PathBuf>,
     /// Host-provided IO for files, environment, HTTP, packages, and globs.
     capabilities: Box<dyn EvalCapabilities>,
+    /// Set while the evaluator runs on a worker thread for the async API;
+    /// capability calls then go to the async caller.
+    bridge: Option<bridge::Bridge>,
+    /// The capabilities' blocking counterpart, used for calls other than HTTP
+    /// fetches while evaluating for an async caller.
+    local_capabilities: Option<Box<dyn EvalCapabilities>>,
     /// Extracted package zip directories (zip URL → temp dir path)
     #[cfg(feature = "package-zip-core")]
     package_dirs: HashMap<String, PathBuf>,
@@ -572,6 +578,8 @@ impl Default for Evaluator {
             capabilities: Box::new(crate::capabilities::BlockingCapabilities::new()),
             #[cfg(not(feature = "blocking"))]
             capabilities: Box::new(crate::capabilities::NativeCapabilities::new()),
+            bridge: None,
+            local_capabilities: None,
             #[cfg(feature = "package-zip-core")]
             package_dirs: HashMap::new(),
             package_cache_dir: None,
@@ -583,6 +591,219 @@ impl Default for Evaluator {
             generator_type_checks: Vec::new(),
             retry_passes: 0,
         }
+    }
+}
+
+/// Synchronous access to the host capabilities. Each call blocks on the
+/// capability's future, or, while the evaluator runs on a worker thread for
+/// the async API, waits for the async caller to serve it.
+impl Evaluator {
+    /// Run a capability call other than an HTTP fetch, using the
+    /// capabilities' blocking counterpart while one is installed.
+    fn io<T, F>(&mut self, call: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: for<'c> FnOnce(
+                &'c mut dyn EvalCapabilities,
+            ) -> crate::capabilities::BoxFuture<'c, Result<T>>
+            + Send
+            + 'static,
+    {
+        match self.local_capabilities.as_deref_mut() {
+            Some(local) => pollster::block_on(call(local)),
+            None => self.http_io(call),
+        }
+    }
+
+    /// Run a capability call with the host capabilities themselves.
+    fn http_io<T, F>(&mut self, call: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: for<'c> FnOnce(
+                &'c mut dyn EvalCapabilities,
+            ) -> crate::capabilities::BoxFuture<'c, Result<T>>
+            + Send
+            + 'static,
+    {
+        match &self.bridge {
+            Some(bridge) => bridge.call(call),
+            None => pollster::block_on(call(&mut *self.capabilities)),
+        }
+    }
+
+    fn read_to_string_io(&mut self, path: &Path) -> Result<String> {
+        let path = path.to_path_buf();
+        self.io(move |c| Box::pin(async move { c.read_to_string(&path).await }))
+    }
+
+    fn path_exists_io(&mut self, path: &Path) -> Result<bool> {
+        let path = path.to_path_buf();
+        self.io(move |c| Box::pin(async move { c.path_exists(&path).await }))
+    }
+
+    fn canonicalize_io(&mut self, path: &Path) -> Result<PathBuf> {
+        let path = path.to_path_buf();
+        self.io(move |c| Box::pin(async move { c.canonicalize(&path).await }))
+    }
+
+    fn read_bytes_io(&mut self, path: &Path) -> Result<Vec<u8>> {
+        let path = path.to_path_buf();
+        self.io(move |c| Box::pin(async move { c.read_bytes(&path).await }))
+    }
+
+    fn create_dir_all_io(&mut self, path: &Path) -> Result<()> {
+        let path = path.to_path_buf();
+        self.io(move |c| Box::pin(async move { c.create_dir_all(&path).await }))
+    }
+
+    fn write_atomic_io(&mut self, path: &Path, bytes: &[u8]) -> Result<()> {
+        let path = path.to_path_buf();
+        let bytes = bytes.to_vec();
+        self.io(move |c| Box::pin(async move { c.write_atomic(&path, &bytes).await }))
+    }
+
+    fn remove_file_io(&mut self, path: &Path) -> Result<()> {
+        let path = path.to_path_buf();
+        self.io(move |c| Box::pin(async move { c.remove_file(&path).await }))
+    }
+
+    #[cfg(feature = "package-zip-core")]
+    fn extract_zip_io(&mut self, bytes: Vec<u8>, destination: &Path) -> Result<()> {
+        let destination = destination.to_path_buf();
+        self.io(move |c| Box::pin(async move { c.extract_zip(bytes, &destination).await }))
+    }
+
+    fn read_env_io(&mut self, name: &str) -> Result<Option<String>> {
+        let name = name.to_string();
+        self.io(move |c| Box::pin(async move { c.read_env(&name).await }))
+    }
+
+    fn fetch_text_io(&mut self, url: &str) -> Result<String> {
+        let url = url.to_string();
+        self.http_io(move |c| Box::pin(async move { c.fetch_text(&url).await }))
+    }
+
+    fn fetch_bytes_io(&mut self, url: &str) -> Result<Vec<u8>> {
+        let url = url.to_string();
+        self.http_io(move |c| Box::pin(async move { c.fetch_bytes(&url).await }))
+    }
+
+    #[cfg(feature = "package-zip-core")]
+    fn temp_dir_io(&mut self, prefix: &str) -> Result<PathBuf> {
+        let prefix = prefix.to_string();
+        self.io(move |c| Box::pin(async move { c.temp_dir(&prefix).await }))
+    }
+
+    fn glob_io(&mut self, base: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
+        let base = base.to_path_buf();
+        let pattern = pattern.to_string();
+        self.io(move |c| Box::pin(async move { c.glob(&base, &pattern).await }))
+    }
+
+    /// Run the synchronous `work` for an async caller.
+    ///
+    /// On a multi-threaded tokio runtime, with capabilities that have a
+    /// blocking counterpart, it runs in place under `block_in_place`, with HTTP
+    /// fetches blocking on the host capabilities while the runtime's other
+    /// workers drive them. Anywhere else it runs on a worker thread (see
+    /// [`Evaluator::run_on_worker`]).
+    async fn run_async<A, R>(&mut self, arg: A, work: fn(&mut Evaluator, A) -> R) -> R
+    where
+        A: Send + 'static,
+        R: Send + 'static,
+    {
+        // Only capabilities with a blocking counterpart run in place: their
+        // remaining calls are HTTP fetches the runtime drives by itself, while
+        // other capabilities may wait on tasks that blocking here would stall
+        // (for example a sibling in the caller's `join!`).
+        #[cfg(feature = "async")]
+        if let Ok(handle) = tokio::runtime::Handle::try_current()
+            && handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+            && let Some(local) = self.capabilities.blocking_capabilities()
+        {
+            self.local_capabilities = Some(local);
+            let result = tokio::task::block_in_place(|| work(self, arg));
+            self.local_capabilities = None;
+            return result;
+        }
+        self.run_on_worker(arg, work).await
+    }
+
+    /// Run `work` on a worker thread with HTTP fetches, and any capability
+    /// calls without a blocking counterpart, served by this task, so async
+    /// capabilities run on the caller's executor.
+    ///
+    /// If the returned future is dropped before it finishes, the worker stops
+    /// at its next expression, and the evaluator keeps its capabilities,
+    /// configuration and extracted package directories. It loses its other
+    /// caches; copying them up front would cost every call for the sake of a
+    /// rare cancellation.
+    async fn run_on_worker<A, R>(&mut self, arg: A, work: fn(&mut Evaluator, A) -> R) -> R
+    where
+        A: Send + 'static,
+        R: Send + 'static,
+    {
+        struct Restore<'a> {
+            evaluator: &'a mut Evaluator,
+            capabilities: Option<Box<dyn EvalCapabilities>>,
+        }
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                if let Some(capabilities) = self.capabilities.take() {
+                    self.evaluator.capabilities = capabilities;
+                }
+            }
+        }
+
+        let local_capabilities = self.capabilities.blocking_capabilities();
+        let capabilities = std::mem::replace(&mut self.capabilities, Box::new(bridge::Detached));
+        let placeholder = self.detached_copy();
+        let evaluator = std::mem::replace(self, placeholder);
+        let mut restore = Restore {
+            evaluator: self,
+            capabilities: Some(capabilities),
+        };
+        let capabilities = restore
+            .capabilities
+            .as_deref_mut()
+            .expect("capabilities present");
+        let (evaluator, result) =
+            bridge::run(evaluator, capabilities, move |mut evaluator, bridge| {
+                evaluator.bridge = Some(bridge);
+                evaluator.local_capabilities = local_capabilities;
+                let result = work(&mut evaluator, arg);
+                evaluator.bridge = None;
+                evaluator.local_capabilities = None;
+                (evaluator, result)
+            })
+            .await;
+        *restore.evaluator = evaluator;
+        result
+    }
+
+    /// Fail if the async caller this evaluation runs for has gone away.
+    #[inline]
+    fn check_cancelled(&self) -> Result<()> {
+        match &self.bridge {
+            Some(bridge) if bridge.is_cancelled() => Err(bridge::cancelled()),
+            _ => Ok(()),
+        }
+    }
+
+    /// An evaluator with this one's configuration and no capabilities.
+    fn detached_copy(&self) -> Evaluator {
+        let mut copy = Evaluator::with_capabilities(bridge::Detached);
+        copy.base_path = self.base_path.clone();
+        copy.max_depth = self.max_depth;
+        copy.package_cache_dir = self.package_cache_dir.clone();
+        copy.package_http_roots = self.package_http_roots.clone();
+        copy.offline = self.offline;
+        copy.http_rewrites = self.http_rewrites.clone();
+        #[cfg(feature = "package-zip-core")]
+        {
+            copy.package_dirs = self.package_dirs.clone();
+        }
+        copy
     }
 }
 
@@ -613,6 +834,8 @@ impl Evaluator {
             env_reads: BTreeMap::new(),
             scoped_imports_in_flight: HashSet::new(),
             capabilities: Box::new(capabilities),
+            bridge: None,
+            local_capabilities: None,
             #[cfg(feature = "package-zip-core")]
             package_dirs: HashMap::new(),
             package_cache_dir: None,
@@ -646,13 +869,11 @@ impl Evaluator {
         current_path.parent().unwrap_or(Path::new(".")).join(uri)
     }
 
-    async fn module_type_namespace(&mut self, path: &Path) -> String {
+    fn module_type_namespace(&mut self, path: &Path) -> String {
         if path.to_string_lossy().contains("://") {
             return path.display().to_string();
         }
-        self.capabilities
-            .canonicalize(path)
-            .await
+        self.canonicalize_io(path)
             .unwrap_or_else(|_| path.to_path_buf())
             .display()
             .to_string()
@@ -761,14 +982,14 @@ impl Evaluator {
     }
 
     /// Read a resource by URI scheme.
-    async fn read_resource(&mut self, uri: &str) -> Result<Value> {
+    fn read_resource(&mut self, uri: &str) -> Result<Value> {
         if let Some(path) = uri.strip_prefix("file://") {
             // file:// — read local file
-            let content = self.capabilities.read_to_string(Path::new(path)).await?;
+            let content = self.read_to_string_io(Path::new(path))?;
             Ok(Value::String(content))
         } else if let Some(var_name) = uri.strip_prefix("env:") {
             // env: — read environment variable
-            let value = self.capabilities.read_env(var_name).await?;
+            let value = self.read_env_io(var_name)?;
             self.env_reads.insert(var_name.to_string(), value.clone());
             let Some(val) = value else {
                 return Err(Error::Eval(format!(
@@ -783,23 +1004,23 @@ impl Evaluator {
             )))
         } else if uri.starts_with("https://") || uri.starts_with("http://") {
             // HTTP/HTTPS
-            let content = self.fetch_source(uri).await?;
+            let content = self.fetch_source(uri)?;
             Ok(Value::String(content))
         } else {
             // Bare path — treat as file relative to base_path
             let file_path = self.base_path.join(uri);
-            let content = self.capabilities.read_to_string(&file_path).await?;
+            let content = self.read_to_string_io(&file_path)?;
             Ok(Value::String(content))
         }
     }
 
-    async fn fetch_source(&mut self, url: &str) -> Result<String> {
+    fn fetch_source(&mut self, url: &str) -> Result<String> {
         if self
             .package_http_roots
             .iter()
             .any(|root| url.starts_with(root))
         {
-            return self.fetch_package_source(url).await;
+            return self.fetch_package_source(url);
         }
         let rewritten = self.rewrite_url(url);
         let fetch_url = rewritten.as_ref();
@@ -811,13 +1032,12 @@ impl Evaluator {
                 "offline mode prevented HTTP fetch for {url}"
             )));
         }
-        let body = self.capabilities.fetch_text(fetch_url).await?;
+        let body = self.fetch_text_io(fetch_url)?;
         self.http_cache.insert(fetch_url.to_string(), body.clone());
         Ok(body)
     }
 
-    #[async_recursion(?Send)]
-    async fn inherited_reference_roots(
+    fn inherited_reference_roots(
         &mut self,
         module: &Module,
         path: &Path,
@@ -831,48 +1051,41 @@ impl Evaluator {
             .into_iter()
             .flatten()
         {
-            if let Some((source, source_path)) = self.load_module_source(uri, path).await?
+            if let Some((source, source_path)) = self.load_module_source(uri, path)?
                 && let Ok(tokens) = lexer::lex_named(&source, &source_path)
                 && let Ok(base_module) = parser::parse_named(&tokens, &source, &source_path)
             {
                 refs.extend(referenced_roots(&base_module.body));
-                refs.extend(
-                    self.inherited_reference_roots(
-                        &base_module,
-                        Path::new(&source_path),
-                        depth + 1,
-                    )
-                    .await?,
-                );
+                refs.extend(self.inherited_reference_roots(
+                    &base_module,
+                    Path::new(&source_path),
+                    depth + 1,
+                )?);
             }
         }
         Ok(refs)
     }
 
-    async fn load_module_source(
-        &mut self,
-        uri: &str,
-        path: &Path,
-    ) -> Result<Option<(String, String)>> {
+    fn load_module_source(&mut self, uri: &str, path: &Path) -> Result<Option<(String, String)>> {
         let resolved = resolve_remote_relative(path, uri);
         let uri = resolved.as_deref().unwrap_or(uri);
         if uri.starts_with("https://") || uri.starts_with("http://") {
-            let source = self.fetch_source(uri).await?;
+            let source = self.fetch_source(uri)?;
             return Ok(Some((source, uri.to_string())));
         }
         if uri.starts_with("package://") {
             let pkg = resolve_package_uri(uri)?;
             match &pkg {
                 PackageSource::Direct { url, root } => {
-                    let source = self.fetch_direct_package_source(url, root).await?;
+                    let source = self.fetch_direct_package_source(url, root)?;
                     return Ok(Some((source, url.clone())));
                 }
                 PackageSource::Zip(zip_url, entry) => {
                     #[cfg(feature = "package-zip-core")]
                     {
-                        let pkg_dir = self.extract_package_zip(zip_url).await?;
+                        let pkg_dir = self.extract_package_zip(zip_url)?;
                         let local_path = pkg_dir.join(entry);
-                        let source = self.capabilities.read_to_string(&local_path).await?;
+                        let source = self.read_to_string_io(&local_path)?;
                         return Ok(Some((source, local_path.display().to_string())));
                     }
                     #[cfg(not(feature = "package-zip-core"))]
@@ -893,35 +1106,35 @@ impl Evaluator {
         } else {
             self.resolve_local_path(path, uri)
         };
-        if !self.capabilities.path_exists(&import_path).await? {
+        if !self.path_exists_io(&import_path)? {
             return Ok(None);
         }
-        let source = self.capabilities.read_to_string(&import_path).await?;
+        let source = self.read_to_string_io(&import_path)?;
         Ok(Some((source, import_path.display().to_string())))
     }
 
-    async fn fetch_package_source(&mut self, url: &str) -> Result<String> {
+    fn fetch_package_source(&mut self, url: &str) -> Result<String> {
         if let Some(cached) = self.http_cache.get(url) {
             return Ok(cached.clone());
         }
-        let bytes = self.fetch_package_bytes(url, "pkl").await?;
+        let bytes = self.fetch_package_bytes(url, "pkl")?;
         let source = String::from_utf8(bytes)
             .map_err(|error| Error::Eval(format!("package source is not UTF-8: {url}: {error}")))?;
         self.http_cache.insert(url.to_string(), source.clone());
         Ok(source)
     }
 
-    async fn fetch_direct_package_source(&mut self, url: &str, root: &str) -> Result<String> {
+    fn fetch_direct_package_source(&mut self, url: &str, root: &str) -> Result<String> {
         self.package_http_roots.insert(root.to_string());
-        self.fetch_package_source(url).await
+        self.fetch_package_source(url)
     }
 
-    async fn fetch_package_bytes(&mut self, url: &str, extension: &str) -> Result<Vec<u8>> {
-        match self.read_package_cache(url, extension).await {
+    fn fetch_package_bytes(&mut self, url: &str, extension: &str) -> Result<Vec<u8>> {
+        match self.read_package_cache(url, extension) {
             Ok(Some(bytes)) => match validate_package_bytes(url, extension, &bytes) {
                 Ok(()) => return Ok(bytes),
                 Err(error) if self.offline => return Err(error),
-                Err(_) => self.remove_package_cache(url, extension).await,
+                Err(_) => self.remove_package_cache(url, extension),
             },
             Ok(None) => {}
             Err(error) if self.offline => return Err(error),
@@ -941,19 +1154,19 @@ impl Evaluator {
             )));
         }
         let fetch_url = self.rewrite_url(url).into_owned();
-        let bytes = self.capabilities.fetch_bytes(&fetch_url).await?;
+        let bytes = self.fetch_bytes_io(&fetch_url)?;
         validate_package_bytes(url, extension, &bytes)?;
         // Best-effort: the bytes are already in hand.
-        let _ = self.write_package_cache(url, extension, &bytes).await;
+        let _ = self.write_package_cache(url, extension, &bytes);
         Ok(bytes)
     }
 
-    async fn read_package_cache(&mut self, url: &str, extension: &str) -> Result<Option<Vec<u8>>> {
+    fn read_package_cache(&mut self, url: &str, extension: &str) -> Result<Option<Vec<u8>>> {
         let Some(cache_dir) = &self.package_cache_dir else {
             return Ok(None);
         };
         let (data_path, url_path) = package_cache_paths(cache_dir, url, extension);
-        let cached_url = match self.capabilities.read_to_string(&url_path).await {
+        let cached_url = match self.read_to_string_io(&url_path) {
             Ok(cached_url) => cached_url,
             Err(Error::Io(_, error)) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(None);
@@ -963,7 +1176,7 @@ impl Evaluator {
         if cached_url != url {
             return Ok(None);
         }
-        match self.capabilities.read_bytes(&data_path).await {
+        match self.read_bytes_io(&data_path) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(Error::Io(_, error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error),
@@ -971,12 +1184,7 @@ impl Evaluator {
     }
 
     /// Cache `bytes` for `url`. The fetch path ignores the error; preloading does not.
-    async fn write_package_cache(
-        &mut self,
-        url: &str,
-        extension: &str,
-        bytes: &[u8],
-    ) -> Result<()> {
+    fn write_package_cache(&mut self, url: &str, extension: &str, bytes: &[u8]) -> Result<()> {
         let Some(cache_dir) = &self.package_cache_dir else {
             return Ok(());
         };
@@ -984,11 +1192,9 @@ impl Evaluator {
         let Some(parent) = data_path.parent() else {
             return Ok(());
         };
-        self.capabilities.create_dir_all(parent).await?;
-        self.capabilities.write_atomic(&data_path, bytes).await?;
-        self.capabilities
-            .write_atomic(&url_path, url.as_bytes())
-            .await
+        self.create_dir_all_io(parent)?;
+        self.write_atomic_io(&data_path, bytes)?;
+        self.write_atomic_io(&url_path, url.as_bytes())
     }
 
     /// Seed the persistent package cache with `bytes` for `url`.
@@ -1006,43 +1212,51 @@ impl Evaluator {
         if self.package_cache_dir.is_none() {
             return Ok(());
         }
-        if let Ok(Some(cached)) = self.read_package_cache(url, extension).await
+        let arg = (url.to_string(), extension.to_string(), bytes.to_vec());
+        self.run_async(arg, |evaluator, (url, extension, bytes)| {
+            evaluator.preload_package(&url, &extension, &bytes)
+        })
+        .await
+    }
+
+    /// Seed the persistent package cache with `bytes` for `url`, blocking on
+    /// host IO.
+    ///
+    /// See [`Evaluator::preload_package_async`].
+    pub fn preload_package(&mut self, url: &str, extension: &str, bytes: &[u8]) -> Result<()> {
+        if self.package_cache_dir.is_none() {
+            return Ok(());
+        }
+        if let Ok(Some(cached)) = self.read_package_cache(url, extension)
             && validate_package_bytes(url, extension, &cached).is_ok()
         {
             return Ok(());
         }
         validate_package_bytes(url, extension, bytes)?;
-        self.write_package_cache(url, extension, bytes).await
+        self.write_package_cache(url, extension, bytes)
     }
 
-    #[cfg(feature = "blocking")]
-    pub fn preload_package(&mut self, url: &str, extension: &str, bytes: &[u8]) -> Result<()> {
-        pollster::block_on(self.preload_package_async(url, extension, bytes))
-    }
-
-    async fn remove_package_cache(&mut self, url: &str, extension: &str) {
+    fn remove_package_cache(&mut self, url: &str, extension: &str) {
         let Some(cache_dir) = &self.package_cache_dir else {
             return;
         };
         let (data_path, url_path) = package_cache_paths(cache_dir, url, extension);
-        let _ = self.capabilities.remove_file(&data_path).await;
-        let _ = self.capabilities.remove_file(&url_path).await;
+        let _ = self.remove_file_io(&data_path);
+        let _ = self.remove_file_io(&url_path);
     }
 
     /// Download a package zip and extract it to a temp directory.
     /// Returns the path to the extracted directory. Caches by zip URL.
     #[cfg(feature = "package-zip-core")]
-    async fn extract_package_zip(&mut self, zip_url: &str) -> Result<PathBuf> {
+    fn extract_package_zip(&mut self, zip_url: &str) -> Result<PathBuf> {
         // Check if already extracted
         if let Some(dir) = self.package_dirs.get(zip_url) {
             return Ok(dir.clone());
         }
-        let bytes = self.fetch_package_bytes(zip_url, "zip").await?;
-        let dir = self
-            .capabilities
-            .temp_dir(&format!("pklr-pkg-{}", self.package_dirs.len()))
-            .await?;
-        self.capabilities.extract_zip(bytes, &dir).await?;
+        let bytes = self.fetch_package_bytes(zip_url, "zip")?;
+        let prefix = format!("pklr-pkg-{}", self.package_dirs.len());
+        let dir = self.temp_dir_io(&prefix)?;
+        self.extract_zip_io(bytes, &dir)?;
         self.package_dirs.insert(zip_url.to_string(), dir.clone());
         Ok(dir)
     }
@@ -1052,16 +1266,29 @@ impl Evaluator {
         self.package_dirs.get(zip_url)
     }
 
+    /// Evaluate `source` as the module at `path`.
+    ///
+    /// Evaluation runs on a worker thread while this task serves its host IO,
+    /// so async capabilities run on the caller's runtime.
     pub async fn eval_source(&mut self, source: &str, path: &Path) -> Result<Value> {
-        self.begin_evaluation();
-        self.eval_source_inner(source, path).await
+        let arg = (source.to_string(), path.to_path_buf());
+        self.run_async(arg, |evaluator, (source, path)| {
+            evaluator.eval_source_blocking(&source, &path)
+        })
+        .await
     }
 
-    async fn eval_source_inner(&mut self, source: &str, path: &Path) -> Result<Value> {
+    /// Evaluate `source` as the module at `path`, blocking on host IO.
+    pub fn eval_source_blocking(&mut self, source: &str, path: &Path) -> Result<Value> {
+        self.begin_evaluation();
+        self.eval_source_inner(source, path)
+    }
+
+    fn eval_source_inner(&mut self, source: &str, path: &Path) -> Result<Value> {
         // Seed import cache for the entry file so circular back-references work.
         // Mark it in flight too, so a narrowed import that reads this
         // placeholder is not cached.
-        let canonical = self.capabilities.canonicalize(path).await.ok();
+        let canonical = self.canonicalize_io(path).ok();
         if let Some(canonical) = &canonical {
             self.import_cache.insert(
                 canonical.clone(),
@@ -1069,7 +1296,7 @@ impl Evaluator {
             );
             self.imports_in_flight.insert(canonical.clone());
         }
-        let result = self.eval_entry_module(source, path).await;
+        let result = self.eval_entry_module(source, path);
         if let Some(canonical) = canonical {
             self.imports_in_flight.remove(&canonical);
             // Update cache with real value
@@ -1080,24 +1307,48 @@ impl Evaluator {
         result
     }
 
-    async fn eval_entry_module(&mut self, source: &str, path: &Path) -> Result<Value> {
+    fn eval_entry_module(&mut self, source: &str, path: &Path) -> Result<Value> {
         let name = path.display().to_string();
         let tokens = lexer::lex_named(source, &name)?;
         let module = parser::parse_named(&tokens, source, &name)?;
-        self.eval_module(&module, path, 0).await
+        self.eval_module(&module, path, 0)
     }
 
     /// Evaluate a local pkl file by path (public entry point).
     pub async fn eval_file_pub(&mut self, path: &Path) -> Result<Value> {
+        self.run_async(path.to_path_buf(), |evaluator, path| {
+            evaluator.eval_file_blocking(&path)
+        })
+        .await
+    }
+
+    /// Evaluate a local pkl file and apply its output converters in one
+    /// worker run.
+    #[cfg(feature = "async")]
+    pub(crate) async fn eval_file_converted(&mut self, path: &Path) -> Result<Value> {
+        self.run_async(path.to_path_buf(), |evaluator, path| {
+            evaluator.eval_file_converted_blocking(&path)
+        })
+        .await
+    }
+
+    #[cfg(feature = "native-io")]
+    pub(crate) fn eval_file_converted_blocking(&mut self, path: &Path) -> Result<Value> {
+        let value = self.eval_file_blocking(path)?;
+        self.apply_converters_blocking(value)
+    }
+
+    /// Evaluate a local pkl file by path, blocking on host IO.
+    pub fn eval_file_blocking(&mut self, path: &Path) -> Result<Value> {
         self.begin_evaluation();
-        let source = self.capabilities.read_to_string(path).await?;
-        self.eval_source_inner(&source, path).await
+        let source = self.read_to_string_io(path)?;
+        self.eval_source_inner(&source, path)
     }
 
     /// Read, lex, parse, and evaluate a local file (with caching).
     /// Inserts a placeholder before evaluation to break circular imports.
-    async fn eval_file(&mut self, path: &Path, depth: usize) -> Result<Value> {
-        let canonical = self.capabilities.canonicalize(path).await?;
+    fn eval_file(&mut self, path: &Path, depth: usize) -> Result<Value> {
+        let canonical = self.canonicalize_io(path)?;
         if let Some(cached) = self.cached_import(&canonical) {
             return Ok(cached);
         }
@@ -1107,7 +1358,7 @@ impl Evaluator {
             Value::Object(Arc::new(IndexMap::new()), None),
         );
         self.imports_in_flight.insert(canonical.clone());
-        let result = self.eval_file_inner(path, &canonical, depth).await;
+        let result = self.eval_file_inner(path, &canonical, depth);
         self.imports_in_flight.remove(&canonical);
         if result.is_err() {
             // Remove stale placeholder on failure so retries can re-evaluate
@@ -1116,16 +1367,16 @@ impl Evaluator {
         result
     }
 
-    async fn eval_file_with_requested_fields(
+    fn eval_file_with_requested_fields(
         &mut self,
         path: &Path,
         depth: usize,
         requested_fields: Option<HashSet<String>>,
     ) -> Result<Value> {
         if requested_fields.is_none() {
-            return self.eval_file(path, depth).await;
+            return self.eval_file(path, depth);
         }
-        let canonical = self.capabilities.canonicalize(path).await?;
+        let canonical = self.canonicalize_io(path)?;
         if let Some(cached) = self.cached_import(&canonical) {
             return Ok(cached);
         }
@@ -1141,9 +1392,7 @@ impl Evaluator {
         );
         self.imports_in_flight.insert(canonical.clone());
         let placeholder_reads = self.placeholder_reads;
-        let result = self
-            .eval_file_requested_fields_inner(path, depth, requested_fields)
-            .await;
+        let result = self.eval_file_requested_fields_inner(path, depth, requested_fields);
         self.imports_in_flight.remove(&canonical);
         self.import_cache.remove(&canonical);
         // A module evaluated while one of its imports was still in flight may
@@ -1167,69 +1416,59 @@ impl Evaluator {
         Some(cached)
     }
 
-    async fn eval_file_requested_fields_inner(
+    fn eval_file_requested_fields_inner(
         &mut self,
         path: &Path,
         depth: usize,
         requested_fields: Option<HashSet<String>>,
     ) -> Result<Value> {
-        let module = self.parse_file(path).await?;
+        let module = self.parse_file(path)?;
         self.eval_module_with_scope(&module, path, depth, None, requested_fields)
-            .await
     }
 
-    async fn eval_file_inner(
-        &mut self,
-        path: &Path,
-        canonical: &Path,
-        depth: usize,
-    ) -> Result<Value> {
-        let val = self.eval_file_inner_with_scope(path, depth, None).await?;
+    fn eval_file_inner(&mut self, path: &Path, canonical: &Path, depth: usize) -> Result<Value> {
+        let val = self.eval_file_inner_with_scope(path, depth, None)?;
         self.import_cache
             .insert(canonical.to_path_buf(), val.clone());
         Ok(val)
     }
 
-    async fn eval_file_with_scope(
+    fn eval_file_with_scope(
         &mut self,
         path: &Path,
         depth: usize,
         inherited_scope: Option<Scope>,
     ) -> Result<Value> {
         if inherited_scope.is_none() {
-            return self.eval_file(path, depth).await;
+            return self.eval_file(path, depth);
         }
-        let canonical = self.capabilities.canonicalize(path).await?;
+        let canonical = self.canonicalize_io(path)?;
         if !self.scoped_imports_in_flight.insert(canonical.clone()) {
             self.placeholder_reads += 1;
             return Ok(Value::Object(Arc::new(IndexMap::new()), None));
         }
-        let result = self
-            .eval_file_inner_with_scope(path, depth, inherited_scope)
-            .await;
+        let result = self.eval_file_inner_with_scope(path, depth, inherited_scope);
         self.scoped_imports_in_flight.remove(&canonical);
         result
     }
 
-    async fn eval_file_inner_with_scope(
+    fn eval_file_inner_with_scope(
         &mut self,
         path: &Path,
         depth: usize,
         inherited_scope: Option<Scope>,
     ) -> Result<Value> {
-        let module = self.parse_file(path).await?;
-        let val = self
-            .eval_module_with_scope(&module, path, depth, inherited_scope, None)
-            .await?;
+        let module = self.parse_file(path)?;
+        let val = self.eval_module_with_scope(&module, path, depth, inherited_scope, None)?;
         Ok(val)
     }
 
-    async fn parse_file(&mut self, path: &Path) -> Result<Arc<Module>> {
-        let canonical = self.capabilities.canonicalize(path).await.ok();
+    fn parse_file(&mut self, path: &Path) -> Result<Arc<Module>> {
+        let canonical = self.canonicalize_io(path).ok();
         if let Some(module) = canonical.as_ref().and_then(|c| self.parse_cache.get(c)) {
             return Ok(Arc::clone(module));
         }
-        let source = self.capabilities.read_to_string(path).await?;
+        let source = self.read_to_string_io(path)?;
         let name = path.display().to_string();
         let tokens = lexer::lex_named(&source, &name)?;
         let module = Arc::new(parser::parse_named(&tokens, &source, &name)?);
@@ -1239,9 +1478,8 @@ impl Evaluator {
         Ok(module)
     }
 
-    async fn eval_module(&mut self, module: &Module, path: &Path, depth: usize) -> Result<Value> {
+    fn eval_module(&mut self, module: &Module, path: &Path, depth: usize) -> Result<Value> {
         self.eval_module_with_scope(module, path, depth, None, None)
-            .await
     }
 
     fn layer_evaluated_module_scope(&self, path: &Path, scope: &mut Scope) {
@@ -1272,13 +1510,12 @@ impl Evaluator {
     /// Keys are the matched paths relative to `path`'s directory, matching pkl.
     /// The enclosing module is skipped: pklr evaluates matched modules eagerly,
     /// so including it would recurse until the import depth limit.
-    #[async_recursion(?Send)]
     ///
     /// `requested` is the set of keys the importing code reads, when it only
     /// reads the mapping as `Alias["key"]`. Then only those modules are
     /// evaluated. A requested name that is not a matched key (such as `keys`
     /// or `length`) needs the whole mapping, so every module is evaluated.
-    async fn eval_glob_import(
+    fn eval_glob_import(
         &mut self,
         uri: &str,
         path: &Path,
@@ -1292,7 +1529,7 @@ impl Evaluator {
         // Match `expand_glob`, which walks `.` for a bare entry path, so the
         // matched paths share this prefix and the keys come out relative.
         let base_dir = module_dir(path.parent().unwrap_or(Path::new(".")));
-        let matched = self.capabilities.glob(base_dir, uri).await?;
+        let matched = self.glob_io(base_dir, uri)?;
         let matched = matched
             .into_iter()
             .map(|matched_path| {
@@ -1310,12 +1547,10 @@ impl Evaluator {
             if requested.is_some_and(|requested| !requested.contains(&rel_key)) {
                 continue;
             }
-            if self.same_local_path(&matched_path, path).await? {
+            if self.same_local_path(&matched_path, path)? {
                 continue;
             }
-            let val = self
-                .eval_file_with_requested_fields(&matched_path, depth + 1, None)
-                .await?;
+            let val = self.eval_file_with_requested_fields(&matched_path, depth + 1, None)?;
             mapping.insert(rel_key, val);
         }
         Ok(Value::Object(Arc::new(mapping), None))
@@ -1327,8 +1562,7 @@ impl Evaluator {
     /// `requested` narrows evaluation to the module properties the expression
     /// actually reads, matching how an import alias used as `Alias.field` is
     /// narrowed. `None` evaluates the whole module.
-    #[async_recursion(?Send)]
-    async fn eval_import_expr(
+    fn eval_import_expr(
         &mut self,
         uri: &str,
         path: &Path,
@@ -1348,32 +1582,26 @@ impl Evaluator {
             } else {
                 self.resolve_local_path(path, uri)
             };
-            if !self.capabilities.path_exists(&import_path).await? {
+            if !self.path_exists_io(&import_path)? {
                 return Err(Error::ImportNotFound(import_path.display().to_string()));
             }
-            return self
-                .eval_file_with_requested_fields(&import_path, depth + 1, requested)
-                .await;
+            return self.eval_file_with_requested_fields(&import_path, depth + 1, requested);
         }
 
-        let Some((source, name)) = self.load_module_source(uri, path).await? else {
+        let Some((source, name)) = self.load_module_source(uri, path)? else {
             return Err(Error::ImportNotFound(uri.to_string()));
         };
         // Package zips extract to a local file, so evaluate those through the
         // shared import cache like any other local import.
         if !name.contains("://") {
-            return self
-                .eval_file_with_requested_fields(Path::new(&name), depth + 1, requested)
-                .await;
+            return self.eval_file_with_requested_fields(Path::new(&name), depth + 1, requested);
         }
         let tokens = lexer::lex_named(&source, &name)?;
         let imported = parser::parse_named(&tokens, &source, &name)?;
         self.eval_module_with_scope(&imported, Path::new(&name), depth + 1, None, requested)
-            .await
     }
 
-    #[async_recursion(?Send)]
-    async fn eval_super_member(
+    fn eval_super_member(
         &mut self,
         field: &str,
         scope: &Scope,
@@ -1386,8 +1614,7 @@ impl Evaluator {
         if let Some(Value::List(items)) = scope.get("super") {
             let mut length = scope.receiver_list_base.unwrap_or(items.len());
             if let Some(entries) = &scope.receiver_entries {
-                self.eval_listing_length(entries, scope, depth + 1, &mut length)
-                    .await?;
+                self.eval_listing_length(entries, scope, depth + 1, &mut length)?;
             }
             return match field {
                 "length" => Ok(Value::Int(length as i64)),
@@ -1409,8 +1636,7 @@ impl Evaluator {
                             &mut position,
                             &mut value,
                             &[],
-                        )
-                        .await?;
+                        )?;
                     }
                     value.ok_or_else(|| {
                         Error::Eval(format!("listing index {target} is out of bounds"))
@@ -1466,14 +1692,13 @@ impl Evaluator {
                     let has_parent_member = matches!(active.get("super"),
                         Some(Value::Object(parent, _)) if parent.contains_key(field));
                     let inherited = if has_parent_member {
-                        self.eval_super_member(field, &active, depth + 1, true)
-                            .await?
+                        self.eval_super_member(field, &active, depth + 1, true)?
                     } else {
                         Value::Null
                     };
                     active.set(field.to_string(), inherited);
                 }
-                if let Some(value) = self.eval_property(prop, &active, depth + 1).await? {
+                if let Some(value) = self.eval_property(prop, &active, depth + 1)? {
                     return Ok(value);
                 }
             }
@@ -1487,8 +1712,7 @@ impl Evaluator {
             {
                 let mut keys = IndexMap::new();
                 if let Some(entries) = &scope.receiver_entries {
-                    self.eval_receiver_keys(entries, scope, depth + 1, &mut keys)
-                        .await?;
+                    self.eval_receiver_keys(entries, scope, depth + 1, &mut keys)?;
                 } else {
                     keys.extend(map.keys().map(|key| (key.clone(), ())));
                 }
@@ -1518,8 +1742,7 @@ impl Evaluator {
 
     /// Enumerate receiver members without evaluating their values. Mapping
     /// metadata such as super.length includes entries after the current one.
-    #[async_recursion(?Send)]
-    async fn eval_receiver_keys(
+    fn eval_receiver_keys(
         &mut self,
         entries: &[Entry],
         scope: &Scope,
@@ -1542,40 +1765,34 @@ impl Evaluator {
                     keys.insert(prop.name.clone(), ());
                 }
                 Entry::DynProperty(key, _) => {
-                    let key = self.eval_expr(key, &scope, depth + 1).await?;
+                    let key = self.eval_expr(key, &scope, depth + 1)?;
                     keys.insert(value_to_key(&key)?, ());
                 }
                 Entry::Spread(expr) => {
-                    if let Value::Object(map, _) = self.eval_expr(expr, &scope, depth + 1).await? {
+                    if let Value::Object(map, _) = self.eval_expr(expr, &scope, depth + 1)? {
                         keys.extend(map.keys().map(|key| (key.clone(), ())));
                     }
                 }
                 Entry::ForGenerator(generator) => {
-                    let collection = self
-                        .eval_expr(&generator.collection, &scope, depth + 1)
-                        .await?;
+                    let collection = self.eval_expr(&generator.collection, &scope, depth + 1)?;
                     for (key, value) in collection_to_items(collection) {
                         let mut iter = scope.child();
                         iter.set(generator.val_var.clone(), value);
                         if let Some(name) = &generator.key_var {
                             iter.set(name.clone(), key);
                         }
-                        self.eval_receiver_keys(&generator.body, &iter, depth + 1, keys)
-                            .await?;
+                        self.eval_receiver_keys(&generator.body, &iter, depth + 1, keys)?;
                     }
                 }
                 Entry::WhenGenerator(generator) => {
-                    let condition = self
-                        .eval_expr(&generator.condition, &scope, depth + 1)
-                        .await?;
+                    let condition = self.eval_expr(&generator.condition, &scope, depth + 1)?;
                     let selected = if is_truthy(&condition) {
                         Some(generator.body.as_slice())
                     } else {
                         generator.else_body.as_deref().map(Vec::as_slice)
                     };
                     if let Some(body) = selected {
-                        self.eval_receiver_keys(body, &scope, depth + 1, keys)
-                            .await?;
+                        self.eval_receiver_keys(body, &scope, depth + 1, keys)?;
                     }
                 }
                 _ => {}
@@ -1586,8 +1803,7 @@ impl Evaluator {
 
     /// Count listing members without evaluating element values, so metadata
     /// can be read by an element itself without recursing into that element.
-    #[async_recursion(?Send)]
-    async fn eval_listing_length(
+    fn eval_listing_length(
         &mut self,
         entries: &[Entry],
         scope: &Scope,
@@ -1602,7 +1818,7 @@ impl Evaluator {
             match entry {
                 Entry::Elem(_) => *length += 1,
                 Entry::DynProperty(index, _) => {
-                    let index = self.eval_expr(index, &scope, depth + 1).await?;
+                    let index = self.eval_expr(index, &scope, depth + 1)?;
                     if let Value::Int(index) = index
                         && usize::try_from(index).ok() == Some(*length)
                     {
@@ -1613,38 +1829,32 @@ impl Evaluator {
                 // reads super.length while counting would re-enter this walk.
                 Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {}
                 Entry::Spread(expr) => {
-                    *length += match self.eval_expr(expr, &scope, depth + 1).await? {
+                    *length += match self.eval_expr(expr, &scope, depth + 1)? {
                         Value::List(items) => items.len(),
                         Value::Object(items, _) => items.len(),
                         _ => 1,
                     };
                 }
                 Entry::ForGenerator(generator) => {
-                    let collection = self
-                        .eval_expr(&generator.collection, &scope, depth + 1)
-                        .await?;
+                    let collection = self.eval_expr(&generator.collection, &scope, depth + 1)?;
                     for (key, value) in collection_to_items(collection) {
                         let mut iter = scope.child();
                         iter.set(generator.val_var.clone(), value);
                         if let Some(name) = &generator.key_var {
                             iter.set(name.clone(), key);
                         }
-                        self.eval_listing_length(&generator.body, &iter, depth + 1, length)
-                            .await?;
+                        self.eval_listing_length(&generator.body, &iter, depth + 1, length)?;
                     }
                 }
                 Entry::WhenGenerator(generator) => {
-                    let condition = self
-                        .eval_expr(&generator.condition, &scope, depth + 1)
-                        .await?;
+                    let condition = self.eval_expr(&generator.condition, &scope, depth + 1)?;
                     let selected = if is_truthy(&condition) {
                         Some(generator.body.as_slice())
                     } else {
                         generator.else_body.as_deref().map(Vec::as_slice)
                     };
                     if let Some(body) = selected {
-                        self.eval_listing_length(body, &scope, depth + 1, length)
-                            .await?;
+                        self.eval_listing_length(body, &scope, depth + 1, length)?;
                     }
                 }
                 _ => {}
@@ -1658,8 +1868,7 @@ impl Evaluator {
     /// An `import("uri")` base is narrowed to the single field being read, so
     /// `import("mod.pkl").field` leaves the module's other properties
     /// unevaluated just as `import "mod.pkl" as Mod` + `Mod.field` does.
-    #[async_recursion(?Send)]
-    async fn eval_field_base(
+    fn eval_field_base(
         &mut self,
         obj_expr: &Expr,
         field: &str,
@@ -1668,15 +1877,12 @@ impl Evaluator {
     ) -> Result<Value> {
         if let Expr::Import(uri, module_path) = obj_expr {
             let requested = HashSet::from([field.to_string()]);
-            return self
-                .eval_import_expr(uri, Path::new(module_path), depth, Some(requested))
-                .await;
+            return self.eval_import_expr(uri, Path::new(module_path), depth, Some(requested));
         }
-        self.eval_expr(obj_expr, scope, depth + 1).await
+        self.eval_expr(obj_expr, scope, depth + 1)
     }
 
-    #[async_recursion(?Send)]
-    async fn eval_module_with_scope(
+    fn eval_module_with_scope(
         &mut self,
         module: &Module,
         path: &Path,
@@ -1693,16 +1899,14 @@ impl Evaluator {
             if retrying {
                 self.retry_passes += 1;
             }
-            let outcome = self
-                .eval_module_pass(
-                    module,
-                    path,
-                    depth,
-                    inherited_scope.clone(),
-                    requested_fields.clone(),
-                    &poisoned_locals,
-                )
-                .await;
+            let outcome = self.eval_module_pass(
+                module,
+                path,
+                depth,
+                inherited_scope.clone(),
+                requested_fields.clone(),
+                &poisoned_locals,
+            );
             if retrying {
                 self.retry_passes -= 1;
             }
@@ -1713,7 +1917,7 @@ impl Evaluator {
         }
     }
 
-    async fn eval_module_pass(
+    fn eval_module_pass(
         &mut self,
         module: &Module,
         path: &Path,
@@ -1735,7 +1939,7 @@ impl Evaluator {
         {
             return Err(Error::Eval("Invalid property definition".into()));
         }
-        let type_namespace = self.module_type_namespace(path).await;
+        let type_namespace = self.module_type_namespace(path);
         let mut scope = Scope {
             type_namespace: Some(type_namespace),
             ..Scope::default()
@@ -1761,10 +1965,7 @@ impl Evaluator {
         let analysis_entries =
             analysis_entries_for_requested_fields(&module.body, requested_output_fields.as_ref());
         let mut referenced_imports = referenced_roots(&analysis_entries);
-        referenced_imports.extend(
-            self.inherited_reference_roots(module, path, depth + 1)
-                .await?,
-        );
+        referenced_imports.extend(self.inherited_reference_roots(module, path, depth + 1)?);
         let import_field_uses = import_field_uses(&analysis_entries);
 
         let inherited_local_paths: Vec<_> = module
@@ -1800,9 +2001,7 @@ impl Evaluator {
                     } else {
                         None
                     };
-                let mapping = self
-                    .eval_glob_import(uri, path, depth, requested.as_ref())
-                    .await?;
+                let mapping = self.eval_glob_import(uri, path, depth, requested.as_ref())?;
                 scope.declare(alias, mapping);
                 continue;
             }
@@ -1821,7 +2020,7 @@ impl Evaluator {
                     continue;
                 }
                 let requested = requested_fields_for_import(&import_field_uses, &alias);
-                let source = self.fetch_source(uri).await?;
+                let source = self.fetch_source(uri)?;
                 let imported_val = {
                     let tokens = lexer::lex_named(&source, uri)?;
                     let imp_module = parser::parse_named(&tokens, &source, uri)?;
@@ -1831,8 +2030,7 @@ impl Evaluator {
                         depth + 1,
                         None,
                         requested,
-                    )
-                    .await?
+                    )?
                 };
                 scope.declare(alias.clone(), imported_val);
                 scope.set_module_identity(alias, canonical_remote_module_identity(uri));
@@ -1860,12 +2058,14 @@ impl Evaluator {
                 if let PackageSource::Zip(zip_url, _) = &pkg {
                     #[cfg(feature = "package-zip-core")]
                     {
-                        let pkg_dir = self.extract_package_zip(zip_url).await?;
+                        let pkg_dir = self.extract_package_zip(zip_url)?;
                         let local_path = pkg_dir.join(file_path);
-                        let imported_val = self
-                            .eval_file_with_requested_fields(&local_path, depth + 1, requested)
-                            .await?;
-                        let identity = self.module_type_namespace(&local_path).await;
+                        let imported_val = self.eval_file_with_requested_fields(
+                            &local_path,
+                            depth + 1,
+                            requested,
+                        )?;
+                        let identity = self.module_type_namespace(&local_path);
                         scope.declare(alias.clone(), imported_val);
                         scope.set_module_identity(alias, identity);
                         continue;
@@ -1885,7 +2085,7 @@ impl Evaluator {
                     PackageSource::Direct { root, .. } => root,
                     PackageSource::Zip(..) => unreachable!(),
                 };
-                let source = self.fetch_direct_package_source(&url, root).await?;
+                let source = self.fetch_direct_package_source(&url, root)?;
                 let imported_val = {
                     let tokens = lexer::lex_named(&source, &url)?;
                     let imp_module = parser::parse_named(&tokens, &source, &url)?;
@@ -1895,8 +2095,7 @@ impl Evaluator {
                         depth + 1,
                         None,
                         requested,
-                    )
-                    .await?
+                    )?
                 };
                 scope.declare(alias.clone(), imported_val);
                 scope.set_module_identity(alias, url);
@@ -1939,12 +2138,12 @@ impl Evaluator {
                 // reported only if the imported binding is actually referenced.
                 continue;
             }
-            if !self.capabilities.path_exists(&import_path).await? {
+            if !self.path_exists_io(&import_path)? {
                 return Err(Error::ImportNotFound(import_path.display().to_string()));
             }
             let mut inherited_path = None;
             for candidate in &inherited_local_paths {
-                if self.same_local_path(candidate, &import_path).await? {
+                if self.same_local_path(candidate, &import_path)? {
                     inherited_path = Some(candidate);
                     break;
                 }
@@ -1955,10 +2154,9 @@ impl Evaluator {
             }
             {
                 let requested = requested_fields_for_import(&import_field_uses, &alias);
-                let imported_val = self
-                    .eval_file_with_requested_fields(&import_path, depth + 1, requested)
-                    .await?;
-                let identity = self.module_type_namespace(&import_path).await;
+                let imported_val =
+                    self.eval_file_with_requested_fields(&import_path, depth + 1, requested)?;
+                let identity = self.module_type_namespace(&import_path);
                 scope.declare(alias.clone(), imported_val);
                 scope.set_module_identity(alias, identity);
             }
@@ -1973,18 +2171,16 @@ impl Evaluator {
             let uri: &str = resolved_amends.as_deref().unwrap_or(amends_uri);
             if uri.starts_with("https://") || uri.starts_with("http://") {
                 // HTTP amends
-                let source = self.fetch_source(uri).await?;
+                let source = self.fetch_source(uri)?;
                 let tokens = lexer::lex_named(&source, uri)?;
                 let base_module = parser::parse_named(&tokens, &source, uri)?;
-                let base_val = self
-                    .eval_module_with_scope(
-                        &base_module,
-                        Path::new(uri),
-                        depth + 1,
-                        Some(scope.clone()),
-                        None,
-                    )
-                    .await?;
+                let base_val = self.eval_module_with_scope(
+                    &base_module,
+                    Path::new(uri),
+                    depth + 1,
+                    Some(scope.clone()),
+                    None,
+                )?;
                 self.layer_evaluated_module_scope(Path::new(uri), &mut scope);
                 late_inherited_properties.extend(self.inherited_late_properties(Path::new(uri)));
                 if let Value::Object(m, _) = base_val {
@@ -1995,21 +2191,19 @@ impl Evaluator {
                 if let PackageSource::Zip(zip_url, entry) = &pkg {
                     #[cfg(feature = "package-zip-core")]
                     {
-                        let pkg_dir = self.extract_package_zip(zip_url).await?;
+                        let pkg_dir = self.extract_package_zip(zip_url)?;
                         let local_path = pkg_dir.join(entry);
-                        let source = self.capabilities.read_to_string(&local_path).await?;
+                        let source = self.read_to_string_io(&local_path)?;
                         let name = local_path.display().to_string();
                         let tokens = lexer::lex_named(&source, &name)?;
                         let base_module = parser::parse_named(&tokens, &source, &name)?;
-                        let base_val = self
-                            .eval_module_with_scope(
-                                &base_module,
-                                &local_path,
-                                depth + 1,
-                                Some(scope.clone()),
-                                None,
-                            )
-                            .await?;
+                        let base_val = self.eval_module_with_scope(
+                            &base_module,
+                            &local_path,
+                            depth + 1,
+                            Some(scope.clone()),
+                            None,
+                        )?;
                         self.layer_evaluated_module_scope(&local_path, &mut scope);
                         late_inherited_properties
                             .extend(self.inherited_late_properties(&local_path));
@@ -2025,18 +2219,16 @@ impl Evaluator {
                         )));
                     }
                 } else if let PackageSource::Direct { url, root } = &pkg {
-                    let source = self.fetch_direct_package_source(url, root).await?;
+                    let source = self.fetch_direct_package_source(url, root)?;
                     let tokens = lexer::lex_named(&source, url)?;
                     let base_module = parser::parse_named(&tokens, &source, url)?;
-                    let base_val = self
-                        .eval_module_with_scope(
-                            &base_module,
-                            Path::new(url.as_str()),
-                            depth + 1,
-                            Some(scope.clone()),
-                            None,
-                        )
-                        .await?;
+                    let base_val = self.eval_module_with_scope(
+                        &base_module,
+                        Path::new(url.as_str()),
+                        depth + 1,
+                        Some(scope.clone()),
+                        None,
+                    )?;
                     self.layer_evaluated_module_scope(Path::new(url.as_str()), &mut scope);
                     late_inherited_properties
                         .extend(self.inherited_late_properties(Path::new(url.as_str())));
@@ -2052,10 +2244,9 @@ impl Evaluator {
                 } else {
                     self.resolve_local_path(path, uri)
                 };
-                if self.capabilities.path_exists(&amends_path).await? {
-                    let base_val = self
-                        .eval_file_with_scope(&amends_path, depth + 1, Some(scope.clone()))
-                        .await?;
+                if self.path_exists_io(&amends_path)? {
+                    let base_val =
+                        self.eval_file_with_scope(&amends_path, depth + 1, Some(scope.clone()))?;
                     self.layer_evaluated_module_scope(&amends_path, &mut scope);
                     late_inherited_properties.extend(self.inherited_late_properties(&amends_path));
                     if let Value::Object(m, _) = &base_val {
@@ -2064,8 +2255,7 @@ impl Evaluator {
                             &amends_path,
                             &base_val,
                             &mut scope,
-                        )
-                        .await?;
+                        )?;
                         base_obj = (**m).clone();
                     }
                 }
@@ -2082,26 +2272,24 @@ impl Evaluator {
         if let Some(amends_uri) = &module.amends {
             let resolved_amends = resolve_remote_relative(path, amends_uri);
             let uri: &str = resolved_amends.as_deref().unwrap_or(amends_uri);
-            let base_source = self.load_module_source(uri, path).await?;
+            let base_source = self.load_module_source(uri, path)?;
             if let Some((src, source_path)) = base_source
                 && let Ok(tokens) = lexer::lex_named(&src, &source_path)
                 && let Ok(base_module) = parser::parse_named(&tokens, &src, &source_path)
             {
                 let mut base_scope = scope.clone();
                 base_scope.type_namespace =
-                    Some(self.module_type_namespace(Path::new(&source_path)).await);
+                    Some(self.module_type_namespace(Path::new(&source_path)));
                 for entry in base_module.body.iter() {
                     if let Entry::ClassDef(name, class_mods, parent, body) = entry {
-                        let defaults = self
-                            .eval_class_def(
-                                name,
-                                class_mods,
-                                parent.as_deref(),
-                                body,
-                                &base_scope,
-                                depth,
-                            )
-                            .await?;
+                        let defaults = self.eval_class_def(
+                            name,
+                            class_mods,
+                            parent.as_deref(),
+                            body,
+                            &base_scope,
+                            depth,
+                        )?;
                         scope.set(name.clone(), defaults);
                         // Remove inherited class definitions from base output —
                         // they were included at depth > 0 for dotted access but
@@ -2114,7 +2302,7 @@ impl Evaluator {
                         && prop.name == "output"
                         && depth == 0
                     {
-                        self.extract_converters_from_ast(prop, &scope, depth).await;
+                        self.extract_converters_from_ast(prop, &scope, depth);
                     }
                     if let Entry::Property(prop) = entry
                         && !has_modifier(&prop.modifiers, Modifier::Local)
@@ -2139,14 +2327,13 @@ impl Evaluator {
                 } else {
                     self.resolve_local_path(path, uri)
                 };
-                if self.capabilities.path_exists(&extends_path).await? {
-                    let ext_val = self
-                        .eval_file_with_scope(&extends_path, depth + 1, Some(scope.clone()))
-                        .await?;
+                if self.path_exists_io(&extends_path)? {
+                    let ext_val =
+                        self.eval_file_with_scope(&extends_path, depth + 1, Some(scope.clone()))?;
                     self.layer_evaluated_module_scope(&extends_path, &mut scope);
                     late_inherited_properties.extend(self.inherited_late_properties(&extends_path));
                     let name = extends_path.display().to_string();
-                    let source = self.capabilities.read_to_string(&extends_path).await?;
+                    let source = self.read_to_string_io(&extends_path)?;
                     let tokens = lexer::lex_named(&source, &name)?;
                     let ext_module = parser::parse_named(&tokens, &source, &name)?;
                     if let Value::Object(m, _) = &ext_val {
@@ -2155,28 +2342,24 @@ impl Evaluator {
                             &extends_path,
                             &ext_val,
                             &mut scope,
-                        )
-                        .await?;
+                        )?;
                         base_obj = (**m).clone();
                     }
                     let mut base_scope = scope.clone();
-                    base_scope.type_namespace =
-                        Some(self.module_type_namespace(&extends_path).await);
+                    base_scope.type_namespace = Some(self.module_type_namespace(&extends_path));
                     // Also evaluate the base module's scope (classes, locals) into our scope
                     // by re-processing its body entries
                     for entry in ext_module.body.iter() {
                         match entry {
                             Entry::ClassDef(cls_name, cls_mods, parent, body) => {
-                                let defaults = self
-                                    .eval_class_def(
-                                        cls_name,
-                                        cls_mods,
-                                        parent.as_deref(),
-                                        body,
-                                        &base_scope,
-                                        depth,
-                                    )
-                                    .await?;
+                                let defaults = self.eval_class_def(
+                                    cls_name,
+                                    cls_mods,
+                                    parent.as_deref(),
+                                    body,
+                                    &base_scope,
+                                    depth,
+                                )?;
                                 scope.set(cls_name.clone(), defaults);
                                 base_obj.shift_remove(cls_name);
                             }
@@ -2184,16 +2367,14 @@ impl Evaluator {
                                 self.eval_type_alias(name, ty, &mut scope);
                             }
                             Entry::Property(prop) if prop.name == "output" && depth == 0 => {
-                                self.extract_converters_from_ast(prop, &scope, depth).await;
+                                self.extract_converters_from_ast(prop, &scope, depth);
                             }
                             Entry::Property(prop)
                                 if !has_modifier(&prop.modifiers, Modifier::Local)
                                     && prop.name != "output" =>
                             {
                                 late_inherited_properties.push(prop.clone());
-                                if let Ok(Some(value)) =
-                                    self.eval_property(prop, &scope, depth).await
-                                {
+                                if let Ok(Some(value)) = self.eval_property(prop, &scope, depth) {
                                     scope.set(prop.name.clone(), value);
                                 }
                             }
@@ -2202,38 +2383,34 @@ impl Evaluator {
                     }
                 }
             } else if uri.starts_with("https://") || uri.starts_with("http://") {
-                let source = self.fetch_source(uri).await?;
+                let source = self.fetch_source(uri)?;
                 let tokens = lexer::lex_named(&source, uri)?;
                 let ext_module = parser::parse_named(&tokens, &source, uri)?;
-                let ext_val = self
-                    .eval_module_with_scope(
-                        &ext_module,
-                        Path::new(uri),
-                        depth + 1,
-                        Some(scope.clone()),
-                        None,
-                    )
-                    .await?;
+                let ext_val = self.eval_module_with_scope(
+                    &ext_module,
+                    Path::new(uri),
+                    depth + 1,
+                    Some(scope.clone()),
+                    None,
+                )?;
                 self.layer_evaluated_module_scope(Path::new(uri), &mut scope);
                 late_inherited_properties.extend(self.inherited_late_properties(Path::new(uri)));
                 if let Value::Object(m, _) = ext_val {
                     base_obj = (*m).clone();
                 }
                 let mut base_scope = scope.clone();
-                base_scope.type_namespace = Some(self.module_type_namespace(Path::new(uri)).await);
+                base_scope.type_namespace = Some(self.module_type_namespace(Path::new(uri)));
                 // Inject class definitions from HTTP base into scope
                 for entry in ext_module.body.iter() {
                     if let Entry::ClassDef(cls_name, cls_mods, parent, body) = entry {
-                        let defaults = self
-                            .eval_class_def(
-                                cls_name,
-                                cls_mods,
-                                parent.as_deref(),
-                                body,
-                                &base_scope,
-                                depth,
-                            )
-                            .await?;
+                        let defaults = self.eval_class_def(
+                            cls_name,
+                            cls_mods,
+                            parent.as_deref(),
+                            body,
+                            &base_scope,
+                            depth,
+                        )?;
                         scope.set(cls_name.clone(), defaults);
                         base_obj.shift_remove(cls_name);
                     }
@@ -2242,7 +2419,7 @@ impl Evaluator {
                         && prop.name != "output"
                     {
                         late_inherited_properties.push(prop.clone());
-                        if let Ok(Some(value)) = self.eval_property(prop, &scope, depth).await {
+                        if let Ok(Some(value)) = self.eval_property(prop, &scope, depth) {
                             scope.set(prop.name.clone(), value);
                         }
                     }
@@ -2295,27 +2472,22 @@ impl Evaluator {
                         scope.declare_poisoned(prop.name.clone(), message.clone());
                         continue;
                     }
-                    match self
-                        .eval_expr(prop.value.as_ref().unwrap(), &scope, depth)
-                        .await
-                    {
+                    match self.eval_expr(prop.value.as_ref().unwrap(), &scope, depth) {
                         Ok(val) => match &prop.type_ann {
                             Some(ty) if constraint_reads_members(ty, &scope, &module_members) => {
                                 deferred_locals.push(prop);
                                 scope.declare(prop.name.clone(), val);
                             }
-                            Some(_) => {
-                                match self.typed_local_failure(prop, &val, &scope, depth).await? {
-                                    LocalCheck::Failed(message) => {
-                                        scope.declare_poisoned(prop.name.clone(), message)
-                                    }
-                                    LocalCheck::Passed => scope.declare(prop.name.clone(), val),
-                                    LocalCheck::Unresolved => {
-                                        deferred_locals.push(prop);
-                                        scope.declare(prop.name.clone(), val);
-                                    }
+                            Some(_) => match self.typed_local_failure(prop, &val, &scope, depth)? {
+                                LocalCheck::Failed(message) => {
+                                    scope.declare_poisoned(prop.name.clone(), message)
                                 }
-                            }
+                                LocalCheck::Passed => scope.declare(prop.name.clone(), val),
+                                LocalCheck::Unresolved => {
+                                    deferred_locals.push(prop);
+                                    scope.declare(prop.name.clone(), val);
+                                }
+                            },
                             None => scope.declare(prop.name.clone(), val),
                         },
                         Err(Error::Eval(message)) => {
@@ -2325,9 +2497,14 @@ impl Evaluator {
                     }
                 }
                 Entry::ClassDef(name, class_mods, parent, body) => {
-                    let defaults = self
-                        .eval_class_def(name, class_mods, parent.as_deref(), body, &scope, depth)
-                        .await?;
+                    let defaults = self.eval_class_def(
+                        name,
+                        class_mods,
+                        parent.as_deref(),
+                        body,
+                        &scope,
+                        depth,
+                    )?;
                     scope.declare(name.clone(), defaults);
                 }
                 Entry::TypeAlias(name, ty) => {
@@ -2378,7 +2555,7 @@ impl Evaluator {
                 if prop.name == "output" {
                     if depth == 0 {
                         self.converters.clear();
-                        self.extract_converters_from_ast(prop, &scope, depth).await;
+                        self.extract_converters_from_ast(prop, &scope, depth);
                     }
                     continue;
                 }
@@ -2411,7 +2588,7 @@ impl Evaluator {
                     }
                     continue;
                 }
-                let val = match self.eval_property(prop, &scope, depth).await {
+                let val = match self.eval_property(prop, &scope, depth) {
                     Ok(value) => value,
                     // Module properties are late-bound. Keep an unresolved
                     // template expression deferred until a consumer actually
@@ -2535,7 +2712,7 @@ impl Evaluator {
                 if child_property_names.contains(prop.name.as_str()) {
                     continue;
                 }
-                match self.eval_property(prop, &scope, depth).await {
+                match self.eval_property(prop, &scope, depth) {
                     Ok(Some(value)) => {
                         scope.set(prop.name.clone(), value.clone());
                         module_props_insert(
@@ -2565,7 +2742,7 @@ impl Evaluator {
                 }
             }
             for prop in &late_child_properties {
-                match self.eval_property(prop, &scope, depth).await {
+                match self.eval_property(prop, &scope, depth) {
                     Ok(Some(value)) => {
                         scope.set(prop.name.clone(), value.clone());
                         if has_modifier(&prop.modifiers, Modifier::Local) {
@@ -2606,9 +2783,8 @@ impl Evaluator {
             let Some(value) = scope.get(&prop.name).cloned() else {
                 continue;
             };
-            if let LocalCheck::Failed(message) = self
-                .typed_local_failure(prop, &value, &scope, depth)
-                .await?
+            if let LocalCheck::Failed(message) =
+                self.typed_local_failure(prop, &value, &scope, depth)?
             {
                 failed_locals.push((prop.name.clone(), message));
             }
@@ -2633,8 +2809,7 @@ impl Evaluator {
             let Some(value) = all_props.get(&prop.name).cloned() else {
                 continue;
             };
-            self.check_declared_property_type(prop, &value, &scope, depth)
-                .await?;
+            self.check_declared_property_type(prop, &value, &scope, depth)?;
         }
 
         if depth == 0 {
@@ -2712,15 +2887,14 @@ impl Evaluator {
         Ok(BodyOutcome::Done(Value::Object(Arc::new(out), source)))
     }
 
-    #[async_recursion(?Send)]
-    async fn eval_property(
+    fn eval_property(
         &mut self,
         prop: &Property,
         scope: &Scope,
         depth: usize,
     ) -> Result<Option<Value>> {
         if let Some(expr) = &prop.value {
-            let mut value = self.eval_expr(expr, scope, depth).await?;
+            let mut value = self.eval_expr(expr, scope, depth)?;
             apply_mapping_type_annotation(&mut value, prop.type_ann.as_ref());
             return Ok(Some(value));
         }
@@ -2755,8 +2929,7 @@ impl Evaluator {
                 amendment_scope.set("super".into(), Value::List(items.clone()));
                 amendment_scope.receiver_entries = Some(body.clone());
                 amendment_scope.receiver_list_base = Some(items.len());
-                self.eval_listing_entries(body, &amendment_scope, depth, &mut items)
-                    .await?;
+                self.eval_listing_entries(body, &amendment_scope, depth, &mut items)?;
                 return Ok(Some(Value::List(items)));
             }
             // `foo { ... }` — object body amendment.
@@ -2788,9 +2961,8 @@ impl Evaluator {
                                 .map(|value| (name.clone(), value))
                         })
                         .collect::<Vec<_>>();
-                    let inherited_default = self
-                        .find_default_template(&src.entries, &inherited_scope, depth)
-                        .await?;
+                    let inherited_default =
+                        self.find_default_template(&src.entries, &inherited_scope, depth)?;
                     let mut amended = IndexMap::new();
                     self.eval_mapping_entries_with_type_default(
                         &src.entries,
@@ -2800,8 +2972,7 @@ impl Evaluator {
                         &value_type_defaults,
                         &src.mapping_value_types,
                         MappingInheritedDefault::default(),
-                    )
-                    .await?;
+                    )?;
                     amended.extend(existing_map.iter().map(|(k, v)| (k.clone(), v.clone())));
                     self.eval_mapping_entries_with_type_default(
                         body,
@@ -2814,24 +2985,26 @@ impl Evaluator {
                             value: inherited_default,
                             entries: find_default_body_entries(&src.entries),
                         },
-                    )
-                    .await?;
+                    )?;
                     return Ok(Some(Value::Object(
                         Arc::new(amended),
                         Some(Arc::clone(src)),
                     )));
                 }
-                return Ok(Some(
-                    self.eval_amended_object(existing_map, src, body, scope, depth)
-                        .await?,
-                ));
+                return Ok(Some(self.eval_amended_object(
+                    existing_map,
+                    src,
+                    body,
+                    scope,
+                    depth,
+                )?));
             }
             let mut body_scope = scope.child();
             body_scope.set(
                 "super".into(),
                 Value::Object(Arc::new(IndexMap::new()), None),
             );
-            let val = self.eval_entries(body, &body_scope, depth).await?;
+            let val = self.eval_entries(body, &body_scope, depth)?;
             return Ok(Some(val));
         }
         if let Some(ty) = &prop.type_ann {
@@ -2852,14 +3025,13 @@ impl Evaluator {
         Ok(None)
     }
 
-    async fn eval_entries(&mut self, entries: &Body, scope: &Scope, depth: usize) -> Result<Value> {
+    fn eval_entries(&mut self, entries: &Body, scope: &Scope, depth: usize) -> Result<Value> {
         self.eval_entries_checked(entries, scope, depth, TypeChecks::All)
-            .await
     }
 
     /// Evaluate an object body. The entries `checks` selects have their
     /// declared types checked once the whole body is evaluated.
-    async fn eval_entries_checked(
+    fn eval_entries_checked(
         &mut self,
         entries: &Body,
         scope: &Scope,
@@ -2870,11 +3042,9 @@ impl Evaluator {
         receiver_scope.receiver_entries = Some(entries.clone());
         receiver_scope.receiver_list_base = None;
         self.eval_entries_with_lexical_scopes(entries, &receiver_scope, depth, None, None, checks)
-            .await
     }
 
-    #[async_recursion(?Send)]
-    async fn eval_entries_with_lexical_scopes(
+    fn eval_entries_with_lexical_scopes(
         &mut self,
         entries: &Body,
         scope: &Scope,
@@ -2893,17 +3063,15 @@ impl Evaluator {
             if retrying {
                 self.retry_passes += 1;
             }
-            let result = self
-                .eval_body_entries(
-                    entries,
-                    scope,
-                    depth,
-                    entry_scopes,
-                    inherited_source,
-                    checks.clone(),
-                    &poisoned_locals,
-                )
-                .await;
+            let result = self.eval_body_entries(
+                entries,
+                scope,
+                depth,
+                entry_scopes,
+                inherited_source,
+                checks.clone(),
+                &poisoned_locals,
+            );
             if retrying {
                 self.retry_passes -= 1;
             }
@@ -2924,7 +3092,7 @@ impl Evaluator {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn eval_body_entries(
+    fn eval_body_entries(
         &mut self,
         entries: &Body,
         scope: &Scope,
@@ -3105,7 +3273,7 @@ impl Evaluator {
                         type_failed = true;
                         Err(message.clone())
                     } else {
-                        match self.eval_expr(expr, &active_scope, depth).await {
+                        match self.eval_expr(expr, &active_scope, depth) {
                             Ok(val) if !checked => Ok(val),
                             Ok(val)
                                 if prop.type_ann.as_ref().is_some_and(|ty| {
@@ -3121,26 +3289,27 @@ impl Evaluator {
                                 deferred_locals.push((prop, entry_index));
                                 Ok(val)
                             }
-                            Ok(val) => match self
-                                .typed_local_failure(prop, &val, &active_scope, depth)
-                                .await?
-                            {
-                                LocalCheck::Failed(message) => {
-                                    // Re-binding it after the properties
-                                    // (below) would drop the poison.
-                                    type_failed = true;
-                                    Err(message)
+                            Ok(val) => {
+                                match self.typed_local_failure(prop, &val, &active_scope, depth)? {
+                                    LocalCheck::Failed(message) => {
+                                        // Re-binding it after the properties
+                                        // (below) would drop the poison.
+                                        type_failed = true;
+                                        Err(message)
+                                    }
+                                    LocalCheck::Passed => Ok(val),
+                                    LocalCheck::Unresolved => {
+                                        deferred_locals.push((prop, entry_index));
+                                        Ok(val)
+                                    }
                                 }
-                                LocalCheck::Passed => Ok(val),
-                                LocalCheck::Unresolved => {
-                                    deferred_locals.push((prop, entry_index));
-                                    Ok(val)
-                                }
-                            },
+                            }
                             Err(Error::Eval(message)) => Err(message),
                             Err(error) => return Err(error),
                         }
                     };
+                    // Release the entry scope before binding, as for properties.
+                    drop(active_scope);
                     local_bindings.insert(entry_index, evaluated.clone());
                     match evaluated {
                         Ok(val) => {
@@ -3169,16 +3338,14 @@ impl Evaluator {
                     }
                 }
                 Entry::ClassDef(name, class_mods, parent, body) => {
-                    let defaults = self
-                        .eval_class_def(
-                            name,
-                            class_mods,
-                            parent.as_deref(),
-                            body,
-                            &active_scope,
-                            depth,
-                        )
-                        .await?;
+                    let defaults = self.eval_class_def(
+                        name,
+                        class_mods,
+                        parent.as_deref(),
+                        body,
+                        &active_scope,
+                        depth,
+                    )?;
                     if binds_declared(name) {
                         child_scope.declare(name.clone(), defaults);
                     } else {
@@ -3215,7 +3382,7 @@ impl Evaluator {
             if let Some(template) = &default_template {
                 active_scope.set("default".into(), template.clone());
             }
-            default_template = self.eval_property(prop, &active_scope, depth).await?;
+            default_template = self.eval_property(prop, &active_scope, depth)?;
         }
 
         let mut map: IndexMap<String, Value> = IndexMap::new();
@@ -3244,13 +3411,16 @@ impl Evaluator {
                         &entry_owners,
                         own_body_scope,
                     );
-                    if let Some(v) = self.eval_property(prop, &active_scope, depth).await? {
+                    let value = self.eval_property(prop, &active_scope, depth)?;
+                    // Release the entry scope first: it may share the object
+                    // scope's bindings, which binding the value would then copy.
+                    drop(active_scope);
+                    if let Some(v) = value {
                         if binds_declared(&prop.name) {
                             child_scope.declare(prop.name.clone(), v.clone());
                         } else {
                             child_scope.set(prop.name.clone(), v.clone());
                         }
-                        drop(active_scope);
                         entry_owners.release_this(&this_aliases);
                         props_insert(
                             &mut child_scope,
@@ -3273,7 +3443,7 @@ impl Evaluator {
                         &entry_owners,
                         own_body_scope,
                     );
-                    let key = self.eval_expr(key_expr, &active_scope, depth).await?;
+                    let key = self.eval_expr(key_expr, &active_scope, depth)?;
                     let key_str = value_to_key(&key)?;
                     // `["key"] { ... }` amends an entry inherited from the parent
                     // (for example when amending an untyped `Mapping`) rather than
@@ -3292,9 +3462,8 @@ impl Evaluator {
                                  object of type Listing cannot have a property (other than default)"
                             )));
                         }
-                        let val = self
-                            .eval_value_amendment(existing, body, &active_scope, depth)
-                            .await?;
+                        let val =
+                            self.eval_value_amendment(existing, body, &active_scope, depth)?;
                         drop(active_scope);
                         entry_owners.release_this(&this_aliases);
                         props_insert(
@@ -3314,9 +3483,13 @@ impl Evaluator {
                     {
                         // Default template has ObjectSource — use eval_amended_object
                         // so nested property amendments work properly.
-                        let mut result = self
-                            .eval_amended_object(template_map, src, body, &active_scope, depth)
-                            .await?;
+                        let mut result = self.eval_amended_object(
+                            template_map,
+                            src,
+                            body,
+                            &active_scope,
+                            depth,
+                        )?;
                         // Propagate the template's type_name so converters can match.
                         if let Some(ref tn) = src.type_name
                             && let Value::Object(_, ref mut result_src) = result
@@ -3349,7 +3522,7 @@ impl Evaluator {
                         }
                         result
                     } else {
-                        let mut val = self.eval_expr(val_expr, &active_scope, depth).await?;
+                        let mut val = self.eval_expr(val_expr, &active_scope, depth)?;
                         if let Some(ref tpl) = default_template {
                             val = merge_values(tpl.clone(), val);
                         }
@@ -3375,7 +3548,7 @@ impl Evaluator {
                         &entry_owners,
                         own_body_scope,
                     );
-                    let val = self.eval_expr(expr, &active_scope, depth).await?;
+                    let val = self.eval_expr(expr, &active_scope, depth)?;
                     if let Value::Object(m, _) = val {
                         drop(active_scope);
                         entry_owners.release_this(&this_aliases);
@@ -3397,9 +3570,7 @@ impl Evaluator {
                         &entry_owners,
                         own_body_scope,
                     );
-                    let collection = self
-                        .eval_expr(&fgen.collection, &active_scope, depth)
-                        .await?;
+                    let collection = self.eval_expr(&fgen.collection, &active_scope, depth)?;
                     let items = collection_to_items(collection);
                     for (k, v) in items {
                         let mut iter_scope = active_scope.child();
@@ -3410,16 +3581,14 @@ impl Evaluator {
                             iteration_names.push(key_var.clone());
                             iter_scope.set(key_var.clone(), k);
                         }
-                        let body_val = self
-                            .eval_entries_with_lexical_scopes(
-                                &fgen.body,
-                                &iter_scope,
-                                depth,
-                                None,
-                                None,
-                                checks.for_generator(entry_index, iteration_names),
-                            )
-                            .await?;
+                        let body_val = self.eval_entries_with_lexical_scopes(
+                            &fgen.body,
+                            &iter_scope,
+                            depth,
+                            None,
+                            None,
+                            checks.for_generator(entry_index, iteration_names),
+                        )?;
                         if let Value::Object(m, _) = body_val {
                             entry_owners.release_this(&this_aliases);
                             props_extend(
@@ -3441,20 +3610,16 @@ impl Evaluator {
                         &entry_owners,
                         own_body_scope,
                     );
-                    let cond = self
-                        .eval_expr(&wgen.condition, &active_scope, depth)
-                        .await?;
+                    let cond = self.eval_expr(&wgen.condition, &active_scope, depth)?;
                     if is_truthy(&cond) {
-                        let body_val = self
-                            .eval_entries_with_lexical_scopes(
-                                &wgen.body,
-                                &active_scope,
-                                depth,
-                                None,
-                                None,
-                                checks.for_generator(entry_index, generator_names.clone()),
-                            )
-                            .await?;
+                        let body_val = self.eval_entries_with_lexical_scopes(
+                            &wgen.body,
+                            &active_scope,
+                            depth,
+                            None,
+                            None,
+                            checks.for_generator(entry_index, generator_names.clone()),
+                        )?;
                         if let Value::Object(m, _) = body_val {
                             entry_owners.release_this(&this_aliases);
                             props_extend(
@@ -3467,16 +3632,14 @@ impl Evaluator {
                             refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                         }
                     } else if let Some(else_body) = &wgen.else_body {
-                        let else_val = self
-                            .eval_entries_with_lexical_scopes(
-                                else_body,
-                                &active_scope,
-                                depth,
-                                None,
-                                None,
-                                checks.for_generator(entry_index, generator_names.clone()),
-                            )
-                            .await?;
+                        let else_val = self.eval_entries_with_lexical_scopes(
+                            else_body,
+                            &active_scope,
+                            depth,
+                            None,
+                            None,
+                            checks.for_generator(entry_index, generator_names.clone()),
+                        )?;
                         if let Value::Object(m, _) = else_val {
                             entry_owners.release_this(&this_aliases);
                             props_extend(
@@ -3525,9 +3688,8 @@ impl Evaluator {
                 |name| entry_owners.hides_member(entry_index, entry_scopes, own_body_scope, name),
                 &own_bindings,
             );
-            if let LocalCheck::Failed(message) = self
-                .typed_local_failure(prop, &value, &check_scope, depth)
-                .await?
+            if let LocalCheck::Failed(message) =
+                self.typed_local_failure(prop, &value, &check_scope, depth)?
             {
                 failed_locals.push((prop.name.clone(), message));
             }
@@ -3546,7 +3708,8 @@ impl Evaluator {
                 &entry_owners,
                 own_body_scope,
             );
-            let val = self.eval_expr(expr, &active_scope, depth).await?;
+            let val = self.eval_expr(expr, &active_scope, depth)?;
+            drop(active_scope);
             child_scope.set(name, val);
         }
         // Check declared types once every member is bound, so a constraint
@@ -3621,8 +3784,7 @@ impl Evaluator {
                     &own_bindings,
                 );
             }
-            self.check_declared_property_type(prop, &value, &check_scope, depth)
-                .await?;
+            self.check_declared_property_type(prop, &value, &check_scope, depth)?;
         }
         // Check what this object's `for`/`when` bodies produced, unless this
         // is itself such a body, whose enclosing object does that. Each check
@@ -3681,8 +3843,7 @@ impl Evaluator {
                     .get(&check.prop.name)
                     .cloned()
                     .unwrap_or(check.value);
-                self.check_declared_property_type(&check.prop, &value, &check_scope, depth)
-                    .await?;
+                self.check_declared_property_type(&check.prop, &value, &check_scope, depth)?;
             }
         }
         let mut source_scope = child_scope.flatten();
@@ -3728,8 +3889,7 @@ impl Evaluator {
     /// If `parent_name` is provided, the parent class is looked up in scope,
     /// its defaults are used as a base, and `super` is bound to the parent
     /// value so the child class body can reference it.
-    #[async_recursion(?Send)]
-    async fn eval_class_def(
+    fn eval_class_def(
         &mut self,
         class_name: &str,
         class_mods: &[Modifier],
@@ -3765,9 +3925,8 @@ impl Evaluator {
 
         // Class property defaults are checked against their declared types
         // when an instance is built, not when the class is defined.
-        let child_defaults = self
-            .eval_entries_checked(body, &child_scope, depth + 1, TypeChecks::Nothing)
-            .await?;
+        let child_defaults =
+            self.eval_entries_checked(body, &child_scope, depth + 1, TypeChecks::Nothing)?;
         if let Some(Value::Object(parent_map, parent_src)) = parent_val {
             // Merge: parent defaults first, child overrides on top
             let mut merged: IndexMap<String, Value> = (*parent_map).clone();
@@ -3957,17 +4116,14 @@ impl Evaluator {
     /// type defaults carry no value of their own to check. `scope` should be
     /// the finished scope of the declaring module or object, so constraints
     /// can read members declared after the property.
-    async fn check_declared_property_type(
+    fn check_declared_property_type(
         &mut self,
         prop: &Property,
         value: &Value,
         scope: &Scope,
         depth: usize,
     ) -> Result<()> {
-        match self
-            .declared_type_mismatch(prop, value, scope, depth)
-            .await?
-        {
+        match self.declared_type_mismatch(prop, value, scope, depth)? {
             Some(message) => Err(Error::Eval(message)),
             None => Ok(()),
         }
@@ -3976,7 +4132,7 @@ impl Evaluator {
     /// The error message when `value` does not match the type `prop`
     /// declares, or `None` when it matches or nothing is checked. An error
     /// evaluating a constraint is returned as is.
-    async fn declared_type_mismatch(
+    fn declared_type_mismatch(
         &mut self,
         prop: &Property,
         value: &Value,
@@ -3990,9 +4146,7 @@ impl Evaluator {
             return Ok(None);
         };
         if type_is_runtime_checkable(type_ann, scope)
-            && !self
-                .eval_type_check(value, type_ann, scope, depth + 1)
-                .await?
+            && !self.eval_type_check(value, type_ann, scope, depth + 1)?
         {
             return Ok(Some(format!(
                 "property '{}' expected {}, got {}",
@@ -4012,14 +4166,14 @@ impl Evaluator {
     ///
     /// A constraint that reads a poisoned binding fails with that binding's
     /// error. One that reads a name not bound yet is `Unresolved`.
-    async fn typed_local_failure(
+    fn typed_local_failure(
         &mut self,
         prop: &Property,
         value: &Value,
         scope: &Scope,
         depth: usize,
     ) -> Result<LocalCheck> {
-        match self.declared_type_mismatch(prop, value, scope, depth).await {
+        match self.declared_type_mismatch(prop, value, scope, depth) {
             Ok(None) => Ok(LocalCheck::Passed),
             Ok(Some(message)) => Ok(LocalCheck::Failed(message)),
             Err(Error::Eval(message)) if message.starts_with("undefined variable: ") => {
@@ -4031,8 +4185,7 @@ impl Evaluator {
     }
 
     /// Check if a value matches a type expression, including constraint evaluation.
-    #[async_recursion(?Send)]
-    async fn eval_type_check(
+    fn eval_type_check(
         &mut self,
         val: &Value,
         ty: &crate::parser::TypeExpr,
@@ -4048,7 +4201,7 @@ impl Evaluator {
                 // Check if name is a type alias; if so, resolve to the aliased type
                 if let Some(resolved) = scope.get_type_alias(name) {
                     let resolved = resolved.clone();
-                    return self.eval_type_check(val, &resolved, scope, depth + 1).await;
+                    return self.eval_type_check(val, &resolved, scope, depth + 1);
                 }
                 if let Some(matches) = value_is_class_type(val, name, scope) {
                     return Ok(matches);
@@ -4063,8 +4216,7 @@ impl Evaluator {
                     true
                 } else if let Some(resolved) = scope.get_type_alias(class_name) {
                     let resolved = resolved.clone();
-                    self.eval_type_check(val, &resolved, scope, depth + 1)
-                        .await?
+                    self.eval_type_check(val, &resolved, scope, depth + 1)?
                 } else {
                     value_is_class_type(val, class_name, scope)
                         .unwrap_or_else(|| value_is_named_type(val, base))
@@ -4092,20 +4244,18 @@ impl Evaluator {
                     }
                     _ => {}
                 }
-                let result = self
-                    .eval_expr(constraint, &constraint_scope, depth + 1)
-                    .await?;
+                let result = self.eval_expr(constraint, &constraint_scope, depth + 1)?;
                 Ok(is_truthy(&result))
             }
             TypeExpr::Nullable(inner) => {
                 if is_null_value(val) {
                     return Ok(true);
                 }
-                self.eval_type_check(val, inner, scope, depth).await
+                self.eval_type_check(val, inner, scope, depth)
             }
             TypeExpr::Union(variants) => {
                 for v in variants {
-                    if self.eval_type_check(val, v, scope, depth).await? {
+                    if self.eval_type_check(val, v, scope, depth)? {
                         return Ok(true);
                     }
                 }
@@ -4121,8 +4271,7 @@ impl Evaluator {
     /// Merges the base object's original entries with the overlay entries,
     /// then re-evaluates everything so that dependent properties pick up
     /// overridden values.
-    #[async_recursion(?Send)]
-    async fn eval_amended_object(
+    fn eval_amended_object(
         &mut self,
         base_map: &Arc<IndexMap<String, Value>>,
         base_source: &Arc<ObjectSource>,
@@ -4344,19 +4493,17 @@ impl Evaluator {
         // and evaluates properties in order with each added to scope)
         let merged: Body = Arc::new(merged);
         eval_scope.receiver_entries = Some(merged.clone());
-        let mut result = self
-            .eval_entries_with_lexical_scopes(
-                &merged,
-                &eval_scope,
-                depth + 1,
-                Some(&merged_entry_scopes),
-                Some(base_source),
-                // Entries the amendment wrote are checked in their own scope
-                // once the body is done; the base's declared properties are
-                // checked below.
-                TypeChecks::Entries(Rc::new(overlay_checked)),
-            )
-            .await?;
+        let mut result = self.eval_entries_with_lexical_scopes(
+            &merged,
+            &eval_scope,
+            depth + 1,
+            Some(&merged_entry_scopes),
+            Some(base_source),
+            // Entries the amendment wrote are checked in their own scope once
+            // the body is done; the base's declared properties are checked
+            // below.
+            TypeChecks::Entries(Rc::new(overlay_checked)),
+        )?;
         if let Value::Object(map, Some(source)) = result {
             let mut source = Arc::unwrap_or_clone(source);
             source.entry_scopes = merged_entry_scopes;
@@ -4398,9 +4545,7 @@ impl Evaluator {
                     continue;
                 };
                 if type_is_runtime_checkable(type_ann, &eval_scope)
-                    && !self
-                        .eval_type_check(value, type_ann, &eval_scope, depth + 1)
-                        .await?
+                    && !self.eval_type_check(value, type_ann, &eval_scope, depth + 1)?
                 {
                     return Err(Error::Eval(format!(
                         "property '{}' expected {}, got {}",
@@ -4427,8 +4572,7 @@ impl Evaluator {
         }
     }
 
-    #[async_recursion(?Send)]
-    async fn eval_object_body_over_template(
+    fn eval_object_body_over_template(
         &mut self,
         template_map: &Arc<IndexMap<String, Value>>,
         template_src: &Arc<ObjectSource>,
@@ -4476,14 +4620,12 @@ impl Evaluator {
             source.body_members.insert(key.clone());
         }
         self.eval_amended_object(template_map, &Arc::new(source), body, scope, depth)
-            .await
     }
 
     /// Read one member of the amended receiver without forcing unrelated
     /// elements (which may themselves reference super.first or super.last).
-    #[async_recursion(?Send)]
     #[allow(clippy::too_many_arguments)]
-    async fn eval_listing_member(
+    fn eval_listing_member(
         &mut self,
         entries: &[Entry],
         scope: &Scope,
@@ -4507,15 +4649,16 @@ impl Evaluator {
                 }
                 Entry::Elem(expr) => {
                     if *position == target {
-                        *value = Some(
-                            self.eval_expr(&with_listing_locals(expr, &locals), &scope, depth + 1)
-                                .await?,
-                        );
+                        *value = Some(self.eval_expr(
+                            &with_listing_locals(expr, &locals),
+                            &scope,
+                            depth + 1,
+                        )?);
                     }
                     *position += 1;
                 }
                 Entry::DynProperty(index, expr) => {
-                    let index = self.eval_expr(index, &scope, depth + 1).await?;
+                    let index = self.eval_expr(index, &scope, depth + 1)?;
                     let Value::Int(index) = index else {
                         return Err(Error::Eval(
                             "listing index amendment requires an Int index".into(),
@@ -4538,22 +4681,20 @@ impl Evaluator {
                                     &with_listing_locals(&amendment, &locals),
                                     &amendment_scope,
                                     depth + 1,
-                                )
-                                .await?
+                                )?
                             } else {
                                 self.eval_expr(
                                     &with_listing_locals(expr, &locals),
                                     &scope,
                                     depth + 1,
-                                )
-                                .await?
+                                )?
                             },
                         );
                     }
                     *position = (*position).max(index + 1);
                 }
                 Entry::Spread(expr) => {
-                    let values = match self.eval_expr(expr, &scope, depth + 1).await? {
+                    let values = match self.eval_expr(expr, &scope, depth + 1)? {
                         Value::List(values) => values,
                         Value::Object(values, _) => values.values().cloned().collect(),
                         value => vec![value],
@@ -4564,9 +4705,7 @@ impl Evaluator {
                     *position += values.len();
                 }
                 Entry::ForGenerator(generator) => {
-                    let collection = self
-                        .eval_expr(&generator.collection, &scope, depth + 1)
-                        .await?;
+                    let collection = self.eval_expr(&generator.collection, &scope, depth + 1)?;
                     for (key, item) in collection_to_items(collection) {
                         let mut iter_scope = scope.child();
                         let mut iter_locals = locals.clone();
@@ -4590,14 +4729,11 @@ impl Evaluator {
                             position,
                             value,
                             &iter_locals,
-                        )
-                        .await?;
+                        )?;
                     }
                 }
                 Entry::WhenGenerator(generator) => {
-                    let condition = self
-                        .eval_expr(&generator.condition, &scope, depth + 1)
-                        .await?;
+                    let condition = self.eval_expr(&generator.condition, &scope, depth + 1)?;
                     let selected = if is_truthy(&condition) {
                         Some(generator.body.as_slice())
                     } else {
@@ -4612,8 +4748,7 @@ impl Evaluator {
                             position,
                             value,
                             &locals,
-                        )
-                        .await?;
+                        )?;
                     }
                 }
                 _ => {}
@@ -4622,8 +4757,7 @@ impl Evaluator {
         Ok(())
     }
 
-    #[async_recursion(?Send)]
-    async fn eval_listing_entries(
+    fn eval_listing_entries(
         &mut self,
         entries: &[Entry],
         scope: &Scope,
@@ -4635,21 +4769,18 @@ impl Evaluator {
             match entry {
                 Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {
                     if let Some(expr) = &prop.value {
-                        let value = self.eval_expr(expr, &listing_scope, depth + 1).await?;
+                        let value = self.eval_expr(expr, &listing_scope, depth + 1)?;
                         listing_scope.declare(prop.name.clone(), value);
                     }
                 }
-                Entry::Elem(expr) => {
-                    items.push(self.eval_expr(expr, &listing_scope, depth + 1).await?)
-                }
+                Entry::Elem(expr) => items.push(self.eval_expr(expr, &listing_scope, depth + 1)?),
                 Entry::Property(prop) if prop.value.is_some() => {
-                    let value = self
-                        .eval_expr(prop.value.as_ref().unwrap(), &listing_scope, depth + 1)
-                        .await?;
+                    let value =
+                        self.eval_expr(prop.value.as_ref().unwrap(), &listing_scope, depth + 1)?;
                     listing_scope.set(prop.name.clone(), value);
                 }
                 Entry::DynProperty(index, value) => {
-                    let index = self.eval_expr(index, &listing_scope, depth + 1).await?;
+                    let index = self.eval_expr(index, &listing_scope, depth + 1)?;
                     let Value::Int(index) = index else {
                         return Err(Error::Eval(
                             "listing index amendment requires an Int index".into(),
@@ -4665,10 +4796,9 @@ impl Evaluator {
                             entries,
                             &listing_scope,
                             depth + 1,
-                        )
-                        .await?
+                        )?
                     } else {
-                        self.eval_expr(value, &listing_scope, depth + 1).await?
+                        self.eval_expr(value, &listing_scope, depth + 1)?
                     };
                     if index < items.len() {
                         items[index] = value;
@@ -4681,38 +4811,33 @@ impl Evaluator {
                         )));
                     }
                 }
-                Entry::Spread(expr) => match self.eval_expr(expr, &listing_scope, depth + 1).await?
-                {
+                Entry::Spread(expr) => match self.eval_expr(expr, &listing_scope, depth + 1)? {
                     Value::List(values) => items.extend(values),
                     Value::Object(values, _) => items.extend(values.values().cloned()),
                     value => items.push(value),
                 },
                 Entry::ForGenerator(generator) => {
-                    let collection = self
-                        .eval_expr(&generator.collection, &listing_scope, depth + 1)
-                        .await?;
+                    let collection =
+                        self.eval_expr(&generator.collection, &listing_scope, depth + 1)?;
                     for (key, value) in collection_to_items(collection) {
                         let mut iter_scope = listing_scope.child();
                         iter_scope.set(generator.val_var.clone(), value);
                         if let Some(key_var) = &generator.key_var {
                             iter_scope.set(key_var.clone(), key);
                         }
-                        self.eval_listing_entries(&generator.body, &iter_scope, depth + 1, items)
-                            .await?;
+                        self.eval_listing_entries(&generator.body, &iter_scope, depth + 1, items)?;
                     }
                 }
                 Entry::WhenGenerator(generator) => {
-                    let condition = self
-                        .eval_expr(&generator.condition, &listing_scope, depth + 1)
-                        .await?;
+                    let condition =
+                        self.eval_expr(&generator.condition, &listing_scope, depth + 1)?;
                     let selected = if is_truthy(&condition) {
                         Some(generator.body.as_slice())
                     } else {
                         generator.else_body.as_deref().map(Vec::as_slice)
                     };
                     if let Some(selected) = selected {
-                        self.eval_listing_entries(selected, &listing_scope, depth + 1, items)
-                            .await?;
+                        self.eval_listing_entries(selected, &listing_scope, depth + 1, items)?;
                     }
                 }
                 _ => {}
@@ -4724,20 +4849,20 @@ impl Evaluator {
     /// Evaluate `expr`. Literals and plain name lookups, which are most of the
     /// expressions evaluated, are answered here without allocating the boxed
     /// future that a recursive evaluation needs.
-    async fn eval_expr(&mut self, expr: &Expr, scope: &Scope, depth: usize) -> Result<Value> {
+    fn eval_expr(&mut self, expr: &Expr, scope: &Scope, depth: usize) -> Result<Value> {
         if depth <= self.max_depth
             && let Some(result) = eval_simple_expr(expr, scope, depth, self.max_depth)
         {
             return result;
         }
-        self.eval_expr_boxed(expr, scope, depth).await
+        self.eval_expr_boxed(expr, scope, depth)
     }
 
-    #[async_recursion(?Send)]
-    async fn eval_expr_boxed(&mut self, expr: &Expr, scope: &Scope, depth: usize) -> Result<Value> {
+    fn eval_expr_boxed(&mut self, expr: &Expr, scope: &Scope, depth: usize) -> Result<Value> {
         if depth > self.max_depth {
             return Err(Error::Eval("maximum recursion depth exceeded".into()));
         }
+        self.check_cancelled()?;
         match expr {
             Expr::Null => Ok(Value::Null),
             Expr::Bool(b) => Ok(Value::Bool(*b)),
@@ -4750,7 +4875,7 @@ impl Evaluator {
                     match part {
                         StringInterpPart::Literal(s) => result.push_str(s),
                         StringInterpPart::Expr(e) => {
-                            let val = self.eval_expr(e, scope, depth + 1).await?;
+                            let val = self.eval_expr(e, scope, depth + 1)?;
                             result.push_str(&value_to_display(&val));
                         }
                     }
@@ -4810,7 +4935,6 @@ impl Evaluator {
                     scope,
                     depth + 1,
                 )
-                .await
             }
             Expr::New(type_name, entries, generic_params) => {
                 let mut constructor_scope = scope.child();
@@ -4827,8 +4951,7 @@ impl Evaluator {
                         listing_scope.set("super".into(), Value::List(Vec::new()));
                         listing_scope.receiver_list_base = Some(0);
                         let mut items = Vec::new();
-                        self.eval_listing_entries(entries, &listing_scope, depth + 1, &mut items)
-                            .await?;
+                        self.eval_listing_entries(entries, &listing_scope, depth + 1, &mut items)?;
                         Ok(Value::List(items))
                     }
                     Some("Mapping") | Some("Map") => {
@@ -4850,8 +4973,7 @@ impl Evaluator {
                             &value_type_defaults,
                             generic_params.get(1..).unwrap_or(&[]),
                             MappingInheritedDefault::default(),
-                        )
-                        .await?;
+                        )?;
                         // Build ObjectSource with a synthetic `default` entry so that
                         // body amendments (`steps { ["x"] { ... } }`) merge new entries
                         // with the value type class, preserving type_name for converters.
@@ -4904,7 +5026,7 @@ impl Evaluator {
                         };
                         Ok(Value::Object(Arc::new(map), Some(Arc::new(source))))
                     }
-                    Some("Dynamic") => self.eval_entries(entries, scope, depth + 1).await,
+                    Some("Dynamic") => self.eval_entries(entries, scope, depth + 1),
                     _ => {
                         // Check if type name matches a class in scope (supports dotted names)
                         let base = type_name.as_ref().and_then(|name| {
@@ -4961,8 +5083,7 @@ impl Evaluator {
                             let is_open = base_src.is_open;
                             // Late binding: re-evaluate merged base + overlay entries
                             let mut result = self
-                                .eval_amended_object(base_map, base_src, entries, scope, depth)
-                                .await?;
+                                .eval_amended_object(base_map, base_src, entries, scope, depth)?;
                             // Preserve the base class's is_open flag and tag the
                             // type_name so output.renderer.converters can match it.
                             if let Value::Object(_, ref mut src_slot) = result {
@@ -5003,7 +5124,7 @@ impl Evaluator {
                             Ok(result)
                         } else if let Some(Value::Object(base_map, base_src)) = base {
                             // Fallback: eager merge
-                            let overlay = self.eval_entries(entries, scope, depth + 1).await?;
+                            let overlay = self.eval_entries(entries, scope, depth + 1)?;
                             let mut merged: IndexMap<String, Value> = (*base_map).clone();
                             let mut deprecated = base_src
                                 .as_ref()
@@ -5038,7 +5159,7 @@ impl Evaluator {
                             };
                             Ok(Value::Object(Arc::new(merged), Some(Arc::new(src))))
                         } else {
-                            self.eval_entries(entries, scope, depth + 1).await
+                            self.eval_entries(entries, scope, depth + 1)
                         }
                     }
                 }
@@ -5049,19 +5170,17 @@ impl Evaluator {
                     "super".into(),
                     Value::Object(Arc::new(IndexMap::new()), None),
                 );
-                self.eval_entries(entries, &body_scope, depth + 1).await
+                self.eval_entries(entries, &body_scope, depth + 1)
             }
             Expr::Field(obj_expr, field) => {
                 if matches!(obj_expr.as_ref(), Expr::Ident(name) if name == "super") {
-                    let value = self
-                        .eval_super_member(field, scope, depth + 1, true)
-                        .await?;
+                    let value = self.eval_super_member(field, scope, depth + 1, true)?;
                     if let Some(Value::Object(_, source)) = scope.get("super") {
                         self.warn_if_deprecated_access(source, field);
                     }
                     return Ok(value);
                 }
-                let obj = self.eval_field_base(obj_expr, field, scope, depth).await?;
+                let obj = self.eval_field_base(obj_expr, field, scope, depth)?;
                 // Built-in properties
                 match (&obj, field.as_str()) {
                     (Value::List(items), "length") => return Ok(Value::Int(items.len() as i64)),
@@ -5118,7 +5237,7 @@ impl Evaluator {
                 }
             }
             Expr::NullSafeField(obj_expr, field) => {
-                let obj = self.eval_field_base(obj_expr, field, scope, depth).await?;
+                let obj = self.eval_field_base(obj_expr, field, scope, depth)?;
                 match &obj {
                     Value::Null => Ok(Value::Null),
                     Value::Object(map, source) => {
@@ -5136,7 +5255,7 @@ impl Evaluator {
             }
             Expr::Index(obj_expr, key_expr) => {
                 if matches!(obj_expr.as_ref(), Expr::Ident(name) if name == "super") {
-                    let key = self.eval_expr(key_expr, scope, depth + 1).await?;
+                    let key = self.eval_expr(key_expr, scope, depth + 1)?;
                     if let Some(Value::List(items)) = scope.get("super") {
                         return match key {
                             Value::Int(index) => usize::try_from(index)
@@ -5149,12 +5268,10 @@ impl Evaluator {
                             _ => Err(Error::Eval("listing index must be an Int".into())),
                         };
                     }
-                    return self
-                        .eval_super_member(&value_to_key(&key)?, scope, depth + 1, false)
-                        .await;
+                    return self.eval_super_member(&value_to_key(&key)?, scope, depth + 1, false);
                 }
-                let obj = self.eval_expr(obj_expr, scope, depth + 1).await?;
-                let key = self.eval_expr(key_expr, scope, depth + 1).await?;
+                let obj = self.eval_expr(obj_expr, scope, depth + 1)?;
+                let key = self.eval_expr(key_expr, scope, depth + 1)?;
                 let key_str = value_to_key(&key)?;
                 match obj {
                     Value::Object(map, _) => map
@@ -5164,24 +5281,24 @@ impl Evaluator {
                     _ => Err(Error::Eval("cannot index non-object".into())),
                 }
             }
-            Expr::Call(func_expr, args) => self.eval_call(func_expr, args, scope, depth).await,
+            Expr::Call(func_expr, args) => self.eval_call(func_expr, args, scope, depth),
             Expr::If(cond, then_expr, else_expr) => {
-                let c = self.eval_expr(cond, scope, depth + 1).await?;
+                let c = self.eval_expr(cond, scope, depth + 1)?;
                 if is_truthy(&c) {
-                    self.eval_expr(then_expr, scope, depth + 1).await
+                    self.eval_expr(then_expr, scope, depth + 1)
                 } else {
-                    self.eval_expr(else_expr, scope, depth + 1).await
+                    self.eval_expr(else_expr, scope, depth + 1)
                 }
             }
             Expr::Let(name, val_expr, body_expr) => {
-                let val = self.eval_expr(val_expr, scope, depth + 1).await?;
+                let val = self.eval_expr(val_expr, scope, depth + 1)?;
                 let mut child = scope.child();
                 child.set(name.clone(), val);
-                self.eval_expr(body_expr, &child, depth + 1).await
+                self.eval_expr(body_expr, &child, depth + 1)
             }
-            Expr::Binop(op, left, right) => self.eval_binop(*op, left, right, scope, depth).await,
+            Expr::Binop(op, left, right) => self.eval_binop(*op, left, right, scope, depth),
             Expr::Unop(op, operand) => {
-                let v = self.eval_expr(operand, scope, depth + 1).await?;
+                let v = self.eval_expr(operand, scope, depth + 1)?;
                 match op {
                     UnOp::Neg => match v {
                         Value::Int(n) => Ok(Value::Int(-n)),
@@ -5201,13 +5318,13 @@ impl Evaluator {
                 }
             }
             Expr::Is(expr, ty) => {
-                let val = self.eval_expr(expr, scope, depth + 1).await?;
-                let matches = self.eval_type_check(&val, ty, scope, depth).await?;
+                let val = self.eval_expr(expr, scope, depth + 1)?;
+                let matches = self.eval_type_check(&val, ty, scope, depth)?;
                 Ok(Value::Bool(matches))
             }
             Expr::As(expr, ty) => {
-                let val = self.eval_expr(expr, scope, depth + 1).await?;
-                let matches = self.eval_type_check(&val, ty, scope, depth).await?;
+                let val = self.eval_expr(expr, scope, depth + 1)?;
+                let matches = self.eval_type_check(&val, ty, scope, depth)?;
                 if matches {
                     Ok(val)
                 } else {
@@ -5219,11 +5336,11 @@ impl Evaluator {
                 }
             }
             Expr::Throw(msg_expr) => {
-                let msg = self.eval_expr(msg_expr, scope, depth + 1).await?;
+                let msg = self.eval_expr(msg_expr, scope, depth + 1)?;
                 Err(Error::Eval(format!("throw: {}", value_to_display(&msg))))
             }
             Expr::Trace(expr) => {
-                let v = self.eval_expr(expr, scope, depth + 1).await?;
+                let v = self.eval_expr(expr, scope, depth + 1)?;
                 // A retry pass re-evaluates a body whose first pass already
                 // ran to completion and printed its traces.
                 if self.retry_passes == 0 {
@@ -5232,25 +5349,23 @@ impl Evaluator {
                 Ok(v)
             }
             Expr::Read(uri_expr) => {
-                let uri = self.eval_expr(uri_expr, scope, depth + 1).await?;
+                let uri = self.eval_expr(uri_expr, scope, depth + 1)?;
                 let uri_str = value_to_display(&uri);
-                self.read_resource(&uri_str).await
+                self.read_resource(&uri_str)
             }
             Expr::Import(uri, module_path) => {
                 self.eval_import_expr(uri, Path::new(module_path), depth, None)
-                    .await
             }
             Expr::ImportGlob(pattern, module_path) => {
                 let module_path = Path::new(module_path);
                 let resolved = resolve_remote_relative(module_path, pattern);
                 let pattern: &str = resolved.as_deref().unwrap_or(pattern);
                 self.eval_glob_import(pattern, module_path, depth, None)
-                    .await
             }
             Expr::ReadOrNull(uri_expr) => {
-                let uri = self.eval_expr(uri_expr, scope, depth + 1).await?;
+                let uri = self.eval_expr(uri_expr, scope, depth + 1)?;
                 let uri_str = value_to_display(&uri);
-                match self.read_resource(&uri_str).await {
+                match self.read_resource(&uri_str) {
                     Ok(v) => Ok(v),
                     Err(_) => Ok(Value::Null),
                 }
@@ -5259,7 +5374,7 @@ impl Evaluator {
     }
 
     /// Evaluate the `(start, end)` arguments of an `IntSeq(start, end)` call.
-    async fn eval_int_seq_bounds(
+    fn eval_int_seq_bounds(
         &mut self,
         args: &[Expr],
         scope: &Scope,
@@ -5273,7 +5388,7 @@ impl Evaluator {
         };
         let mut bounds = [0i64; 2];
         for (slot, expr) in bounds.iter_mut().zip([start_expr, end_expr]) {
-            match self.eval_expr(expr, scope, depth + 1).await? {
+            match self.eval_expr(expr, scope, depth + 1)? {
                 Value::Int(n) => *slot = n,
                 other => {
                     return Err(Error::Eval(format!(
@@ -5286,8 +5401,7 @@ impl Evaluator {
         Ok((bounds[0], bounds[1]))
     }
 
-    #[async_recursion(?Send)]
-    async fn eval_call(
+    fn eval_call(
         &mut self,
         func_expr: &Expr,
         args: &[Expr],
@@ -5302,13 +5416,13 @@ impl Evaluator {
             && matches!(seq_func.as_ref(), Expr::Ident(name) if name == "IntSeq")
             && int_seq_is_builtin(scope)
         {
-            let (start, end) = self.eval_int_seq_bounds(seq_args, scope, depth).await?;
+            let (start, end) = self.eval_int_seq_bounds(seq_args, scope, depth)?;
             let [step_expr] = args else {
                 return Err(Error::Eval(
                     "IntSeq.step() expects exactly one argument".into(),
                 ));
             };
-            let step = match self.eval_expr(step_expr, scope, depth + 1).await? {
+            let step = match self.eval_expr(step_expr, scope, depth + 1)? {
                 Value::Int(n) => n,
                 other => {
                     return Err(Error::Eval(format!(
@@ -5321,21 +5435,15 @@ impl Evaluator {
         }
         // Handle method calls: obj.method(args)
         if let Expr::Field(obj_expr, method) = func_expr {
-            let obj = self.eval_expr(obj_expr, scope, depth + 1).await?;
+            let obj = self.eval_expr(obj_expr, scope, depth + 1)?;
             let mut evaled_args = Vec::new();
             for a in args {
-                evaled_args.push(self.eval_expr(a, scope, depth + 1).await?);
+                evaled_args.push(self.eval_expr(a, scope, depth + 1)?);
             }
-            if let Some(result) = self
-                .eval_method_call(&obj, method, &evaled_args, depth)
-                .await?
-            {
+            if let Some(result) = self.eval_method_call(&obj, method, &evaled_args, depth)? {
                 return Ok(result);
             }
-            if let Some(result) = self
-                .eval_object_method_call(&obj, method, &evaled_args, depth)
-                .await?
-            {
+            if let Some(result) = self.eval_object_method_call(&obj, method, &evaled_args, depth)? {
                 return Ok(result);
             }
             if let Some(result) = self.eval_object_field_call(&obj, method, &evaled_args)? {
@@ -5348,24 +5456,18 @@ impl Evaluator {
         }
         // Handle null-safe method calls: obj?.method(args)
         if let Expr::NullSafeField(obj_expr, method) = func_expr {
-            let obj = self.eval_expr(obj_expr, scope, depth + 1).await?;
+            let obj = self.eval_expr(obj_expr, scope, depth + 1)?;
             if is_null_value(&obj) {
                 return Ok(Value::Null);
             }
             let mut evaled_args = Vec::new();
             for a in args {
-                evaled_args.push(self.eval_expr(a, scope, depth + 1).await?);
+                evaled_args.push(self.eval_expr(a, scope, depth + 1)?);
             }
-            if let Some(result) = self
-                .eval_method_call(&obj, method, &evaled_args, depth)
-                .await?
-            {
+            if let Some(result) = self.eval_method_call(&obj, method, &evaled_args, depth)? {
                 return Ok(result);
             }
-            if let Some(result) = self
-                .eval_object_method_call(&obj, method, &evaled_args, depth)
-                .await?
-            {
+            if let Some(result) = self.eval_object_method_call(&obj, method, &evaled_args, depth)? {
                 return Ok(result);
             }
             if let Some(result) = self.eval_object_field_call(&obj, method, &evaled_args)? {
@@ -5383,14 +5485,14 @@ impl Evaluator {
                 "List" | "Listing" => {
                     let mut items = Vec::new();
                     for a in args {
-                        items.push(self.eval_expr(a, scope, depth + 1).await?);
+                        items.push(self.eval_expr(a, scope, depth + 1)?);
                     }
                     return Ok(Value::List(items));
                 }
                 "Set" => {
                     let mut items = Vec::new();
                     for a in args {
-                        let val = self.eval_expr(a, scope, depth + 1).await?;
+                        let val = self.eval_expr(a, scope, depth + 1)?;
                         if !items.contains(&val) {
                             items.push(val);
                         }
@@ -5398,12 +5500,12 @@ impl Evaluator {
                     return Ok(Value::List(items)); // deduplicated
                 }
                 "IntSeq" if int_seq_is_builtin(scope) => {
-                    let (start, end) = self.eval_int_seq_bounds(args, scope, depth).await?;
+                    let (start, end) = self.eval_int_seq_bounds(args, scope, depth)?;
                     return int_seq(start, end, 1);
                 }
                 "Regex" => {
                     if let Some(arg) = args.first() {
-                        let val = self.eval_expr(arg, scope, depth + 1).await?;
+                        let val = self.eval_expr(arg, scope, depth + 1)?;
                         return Ok(regex_value(val));
                     }
                     return Err(Error::Eval("Regex() requires a pattern argument".into()));
@@ -5413,7 +5515,7 @@ impl Evaluator {
                     let mut map = IndexMap::new();
                     let mut evaled = Vec::new();
                     for a in args {
-                        evaled.push(self.eval_expr(a, scope, depth + 1).await?);
+                        evaled.push(self.eval_expr(a, scope, depth + 1)?);
                     }
                     for pair in evaled.chunks(2) {
                         if let [k, v] = pair {
@@ -5427,7 +5529,7 @@ impl Evaluator {
         }
 
         // Evaluate the function expression
-        let func_val = self.eval_expr(func_expr, scope, depth + 1).await?;
+        let func_val = self.eval_expr(func_expr, scope, depth + 1)?;
 
         // Lambda call
         if let Value::Lambda(params, body, captured) = func_val {
@@ -5442,12 +5544,12 @@ impl Evaluator {
             // Bind arguments to parameters
             let mut evaled_args = Vec::new();
             for a in args {
-                evaled_args.push(self.eval_expr(a, scope, depth + 1).await?);
+                evaled_args.push(self.eval_expr(a, scope, depth + 1)?);
             }
             for (param, arg) in params.iter().zip(evaled_args) {
                 call_scope.declare(param.clone(), arg);
             }
-            return self.eval_expr(&body, &call_scope, depth + 1).await;
+            return self.eval_expr(&body, &call_scope, depth + 1);
         }
 
         // Built-in type constructors resolved from scope (e.g. base.Regex)
@@ -5455,7 +5557,7 @@ impl Evaluator {
             && name == "Regex"
             && let Some(arg) = args.first()
         {
-            let val = self.eval_expr(arg, scope, depth + 1).await?;
+            let val = self.eval_expr(arg, scope, depth + 1)?;
             return Ok(regex_value(val));
         }
 
@@ -5490,8 +5592,7 @@ impl Evaluator {
         Ok(None)
     }
 
-    #[async_recursion(?Send)]
-    async fn eval_object_method_call(
+    fn eval_object_method_call(
         &mut self,
         obj: &Value,
         method: &str,
@@ -5513,13 +5614,12 @@ impl Evaluator {
                     call_scope.declare(param.clone(), arg.clone());
                 }
             }
-            return Ok(Some(self.eval_expr(body, &call_scope, depth + 1).await?));
+            return Ok(Some(self.eval_expr(body, &call_scope, depth + 1)?));
         }
         Ok(None)
     }
 
-    #[async_recursion(?Send)]
-    async fn eval_method_call(
+    fn eval_method_call(
         &mut self,
         obj: &Value,
         method: &str,
@@ -5596,10 +5696,7 @@ impl Evaluator {
                     .ok_or_else(|| Error::Eval("map requires a function argument".into()))?;
                 let mut result = Vec::new();
                 for item in items {
-                    result.push(
-                        self.invoke_lambda(lambda, std::slice::from_ref(item), depth)
-                            .await?,
-                    );
+                    result.push(self.invoke_lambda(lambda, std::slice::from_ref(item), depth)?);
                 }
                 Ok(Some(Value::List(result)))
             }
@@ -5609,9 +5706,7 @@ impl Evaluator {
                     .ok_or_else(|| Error::Eval("flatMap requires a function argument".into()))?;
                 let mut result = Vec::new();
                 for item in items {
-                    let val = self
-                        .invoke_lambda(lambda, std::slice::from_ref(item), depth)
-                        .await?;
+                    let val = self.invoke_lambda(lambda, std::slice::from_ref(item), depth)?;
                     if let Value::List(inner) = val {
                         result.extend(inner);
                     } else {
@@ -5626,9 +5721,7 @@ impl Evaluator {
                     .ok_or_else(|| Error::Eval("filter requires a function argument".into()))?;
                 let mut result = Vec::new();
                 for item in items {
-                    let cond = self
-                        .invoke_lambda(lambda, std::slice::from_ref(item), depth)
-                        .await?;
+                    let cond = self.invoke_lambda(lambda, std::slice::from_ref(item), depth)?;
                     if is_truthy(&cond) {
                         result.push(item.clone());
                     }
@@ -5652,9 +5745,7 @@ impl Evaluator {
                     .ok_or_else(|| Error::Eval("fold requires a function argument".into()))?;
                 let mut acc = init;
                 for item in items {
-                    acc = self
-                        .invoke_lambda(lambda, &[acc, item.clone()], depth)
-                        .await?;
+                    acc = self.invoke_lambda(lambda, &[acc, item.clone()], depth)?;
                 }
                 Ok(Some(acc))
             }
@@ -5663,11 +5754,7 @@ impl Evaluator {
                     .first()
                     .ok_or_else(|| Error::Eval("any requires a function argument".into()))?;
                 for item in items {
-                    if is_truthy(
-                        &self
-                            .invoke_lambda(lambda, std::slice::from_ref(item), depth)
-                            .await?,
-                    ) {
+                    if is_truthy(&self.invoke_lambda(lambda, std::slice::from_ref(item), depth)?) {
                         return Ok(Some(Value::Bool(true)));
                     }
                 }
@@ -5678,11 +5765,7 @@ impl Evaluator {
                     .first()
                     .ok_or_else(|| Error::Eval("every requires a function argument".into()))?;
                 for item in items {
-                    if !is_truthy(
-                        &self
-                            .invoke_lambda(lambda, std::slice::from_ref(item), depth)
-                            .await?,
-                    ) {
+                    if !is_truthy(&self.invoke_lambda(lambda, std::slice::from_ref(item), depth)?) {
                         return Ok(Some(Value::Bool(false)));
                     }
                 }
@@ -5713,9 +5796,8 @@ impl Evaluator {
                     .ok_or_else(|| Error::Eval("mapValues requires a function".into()))?;
                 let mut result = IndexMap::new();
                 for (k, v) in map.iter() {
-                    let new_v = self
-                        .invoke_lambda(lambda, &[Value::String(k.clone()), v.clone()], depth)
-                        .await?;
+                    let new_v =
+                        self.invoke_lambda(lambda, &[Value::String(k.clone()), v.clone()], depth)?;
                     result.insert(k.clone(), new_v);
                 }
                 Ok(Some(Value::Object(Arc::new(result), None)))
@@ -5726,9 +5808,8 @@ impl Evaluator {
                     .ok_or_else(|| Error::Eval("filter requires a function".into()))?;
                 let mut result = IndexMap::new();
                 for (k, v) in map.iter() {
-                    let keep = self
-                        .invoke_lambda(lambda, &[Value::String(k.clone()), v.clone()], depth)
-                        .await?;
+                    let keep =
+                        self.invoke_lambda(lambda, &[Value::String(k.clone()), v.clone()], depth)?;
                     if is_truthy(&keep) {
                         result.insert(k.clone(), v.clone());
                     }
@@ -5749,33 +5830,26 @@ impl Evaluator {
                 for (param, arg) in params.iter().zip(args.iter()) {
                     call_scope.declare(param.clone(), arg.clone());
                 }
-                Ok(Some(self.eval_expr(body, &call_scope, depth + 1).await?))
+                Ok(Some(self.eval_expr(body, &call_scope, depth + 1)?))
             }
 
             _ => Ok(None), // not a known method
         }
     }
 
-    #[async_recursion(?Send)]
-    async fn invoke_lambda(
-        &mut self,
-        lambda: &Value,
-        args: &[Value],
-        depth: usize,
-    ) -> Result<Value> {
+    fn invoke_lambda(&mut self, lambda: &Value, args: &[Value], depth: usize) -> Result<Value> {
         if let Value::Lambda(params, body, captured) = lambda {
             let mut scope = Scope::for_call(captured);
             for (param, arg) in params.iter().zip(args.iter()) {
                 scope.declare(param.clone(), arg.clone());
             }
-            self.eval_expr(body, &scope, depth + 1).await
+            self.eval_expr(body, &scope, depth + 1)
         } else {
             Err(Error::Eval("expected a function".into()))
         }
     }
 
-    #[async_recursion(?Send)]
-    async fn eval_value_amendment(
+    fn eval_value_amendment(
         &mut self,
         base: Value,
         overlay_entries: &Body,
@@ -5788,8 +5862,7 @@ impl Evaluator {
             amendment_scope.set("super".into(), Value::List(amended.clone()));
             amendment_scope.receiver_entries = Some(overlay_entries.clone());
             amendment_scope.receiver_list_base = Some(amended.len());
-            self.eval_listing_entries(overlay_entries, &amendment_scope, depth + 1, &mut amended)
-                .await?;
+            self.eval_listing_entries(overlay_entries, &amendment_scope, depth + 1, &mut amended)?;
             return Ok(Value::List(amended));
         }
         if let Value::Object(base_map, Some(base_src)) = &base {
@@ -5810,9 +5883,8 @@ impl Evaluator {
                         resolve_dotted(&inherited_scope, name).map(|value| (name.clone(), value))
                     })
                     .collect::<Vec<_>>();
-                let inherited_default = self
-                    .find_default_template(&base_src.entries, &inherited_scope, depth)
-                    .await?;
+                let inherited_default =
+                    self.find_default_template(&base_src.entries, &inherited_scope, depth)?;
                 let mut amended = IndexMap::new();
                 self.eval_mapping_entries_with_type_default(
                     &base_src.entries,
@@ -5822,8 +5894,7 @@ impl Evaluator {
                     &value_type_defaults,
                     &base_src.mapping_value_types,
                     MappingInheritedDefault::default(),
-                )
-                .await?;
+                )?;
                 if let Value::Object(existing_map, _) = &base {
                     amended.extend(existing_map.iter().map(|(k, v)| (k.clone(), v.clone())));
                 }
@@ -5838,13 +5909,10 @@ impl Evaluator {
                         value: inherited_default,
                         entries: find_default_body_entries(&base_src.entries),
                     },
-                )
-                .await?;
+                )?;
                 return Ok(Value::Object(Arc::new(amended), Some(Arc::clone(base_src))));
             }
-            return self
-                .eval_amended_object(base_map, base_src, overlay_entries, scope, depth)
-                .await;
+            return self.eval_amended_object(base_map, base_src, overlay_entries, scope, depth);
         }
         let mut amendment_scope = scope.child();
         if let Value::Object(existing, _) = &base {
@@ -5852,14 +5920,11 @@ impl Evaluator {
                 amendment_scope.set(name.clone(), value.clone());
             }
         }
-        let overlay = self
-            .eval_entries(overlay_entries, &amendment_scope, depth + 1)
-            .await?;
+        let overlay = self.eval_entries(overlay_entries, &amendment_scope, depth + 1)?;
         Ok(merge_values(base, overlay))
     }
 
-    #[async_recursion(?Send)]
-    async fn eval_binop(
+    fn eval_binop(
         &mut self,
         op: BinOp,
         left: &Expr,
@@ -5871,10 +5936,8 @@ impl Evaluator {
         if let BinOp::Add = op
             && let Expr::ObjectBody(overlay_entries) = right
         {
-            let base = self.eval_expr(left, scope, depth + 1).await?;
-            return self
-                .eval_value_amendment(base, overlay_entries, scope, depth)
-                .await;
+            let base = self.eval_expr(left, scope, depth + 1)?;
+            return self.eval_value_amendment(base, overlay_entries, scope, depth);
         }
 
         // Logical `&&` and `||` short-circuit: the right operand must not be
@@ -5882,7 +5945,7 @@ impl Evaluator {
         // `x is Foo && x.fooField` must not touch `fooField` when `x` is not a
         // `Foo`).
         if matches!(op, BinOp::And | BinOp::Or) {
-            let left_truthy = is_truthy(&self.eval_expr(left, scope, depth + 1).await?);
+            let left_truthy = is_truthy(&self.eval_expr(left, scope, depth + 1)?);
             let short_circuit = match op {
                 BinOp::And => !left_truthy,
                 _ => left_truthy,
@@ -5890,12 +5953,12 @@ impl Evaluator {
             if short_circuit {
                 return Ok(Value::Bool(left_truthy));
             }
-            let right_truthy = is_truthy(&self.eval_expr(right, scope, depth + 1).await?);
+            let right_truthy = is_truthy(&self.eval_expr(right, scope, depth + 1)?);
             return Ok(Value::Bool(right_truthy));
         }
 
-        let l = self.eval_expr(left, scope, depth + 1).await?;
-        let r = self.eval_expr(right, scope, depth + 1).await?;
+        let l = self.eval_expr(left, scope, depth + 1)?;
+        let r = self.eval_expr(right, scope, depth + 1)?;
         match op {
             BinOp::Pipe => {
                 // x |> f  is equivalent to  f(x)
@@ -5909,7 +5972,7 @@ impl Evaluator {
                         }
                         let mut call_scope = Scope::for_call(&captured);
                         call_scope.declare(params[0].clone(), l);
-                        self.eval_expr(&body, &call_scope, depth + 1).await
+                        self.eval_expr(&body, &call_scope, depth + 1)
                     }
                     _ => Err(Error::Eval(
                         "pipe operator requires a function on the right side".into(),
@@ -5921,8 +5984,7 @@ impl Evaluator {
     }
 
     /// Find and evaluate a `default { ... }` property in an entry list.
-    #[async_recursion(?Send)]
-    async fn find_default_template(
+    fn find_default_template(
         &mut self,
         entries: &[Entry],
         scope: &Scope,
@@ -5933,15 +5995,14 @@ impl Evaluator {
                 && prop.name == "default"
                 && !has_modifier(&prop.modifiers, Modifier::Local)
             {
-                return self.eval_property(prop, scope, depth).await;
+                return self.eval_property(prop, scope, depth);
             }
         }
         Ok(None)
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[async_recursion(?Send)]
-    async fn eval_mapping_entries_with_type_default(
+    fn eval_mapping_entries_with_type_default(
         &mut self,
         entries: &[crate::parser::Entry],
         scope: &Scope,
@@ -5962,7 +6023,7 @@ impl Evaluator {
                     // Bind every local in declaration order so later locals and
                     // entries can reference it (e.g. a non-lambda local that
                     // calls a lambda local defined just above it).
-                    let val = self.eval_expr(expr, &entry_scope, depth).await?;
+                    let val = self.eval_expr(expr, &entry_scope, depth)?;
                     entry_scope.declare(prop.name.clone(), val);
                     if matches!(expr, crate::parser::Expr::Lambda(..)) {
                         // Lambda evaluation only captures the current scope; it
@@ -5975,22 +6036,19 @@ impl Evaluator {
                 Entry::Property(prop)
                     if has_modifier(&prop.modifiers, Modifier::Local) && prop.body.is_some() =>
                 {
-                    let val = self
-                        .eval_entries(prop.body.as_ref().unwrap(), &entry_scope, depth)
-                        .await?;
+                    let val =
+                        self.eval_entries(prop.body.as_ref().unwrap(), &entry_scope, depth)?;
                     entry_scope.declare(prop.name.clone(), val);
                 }
                 Entry::ClassDef(name, class_mods, parent, body) => {
-                    let defaults = self
-                        .eval_class_def(
-                            name,
-                            class_mods,
-                            parent.as_deref(),
-                            body,
-                            &entry_scope,
-                            depth,
-                        )
-                        .await?;
+                    let defaults = self.eval_class_def(
+                        name,
+                        class_mods,
+                        parent.as_deref(),
+                        body,
+                        &entry_scope,
+                        depth,
+                    )?;
                     entry_scope.set(name.clone(), defaults);
                 }
                 Entry::TypeAlias(name, ty) => {
@@ -6000,13 +6058,12 @@ impl Evaluator {
             }
         }
         for (name, expr) in deferred_lambdas {
-            let val = self.eval_expr(expr, &entry_scope, depth).await?;
+            let val = self.eval_expr(expr, &entry_scope, depth)?;
             entry_scope.set(name, val);
         }
 
         let explicit_default = self
-            .find_default_template(entries, &entry_scope, depth)
-            .await?
+            .find_default_template(entries, &entry_scope, depth)?
             .or(inherited_default.value);
         let explicit_default_entries =
             find_default_body_entries(entries).or(inherited_default.entries);
@@ -6014,20 +6071,18 @@ impl Evaluator {
         for entry in entries {
             match entry {
                 Entry::DynProperty(key_expr, val_expr) => {
-                    let key = self.eval_expr(key_expr, &entry_scope, depth + 1).await?;
+                    let key = self.eval_expr(key_expr, &entry_scope, depth + 1)?;
                     let key_str = value_to_key(&key)?;
                     if let Some(Value::Object(existing_map, Some(existing_src))) = map.get(&key_str)
                         && let Expr::ObjectBody(body) = val_expr
                     {
-                        let val = self
-                            .eval_amended_object(
-                                existing_map,
-                                existing_src,
-                                body,
-                                &entry_scope,
-                                depth,
-                            )
-                            .await?;
+                        let val = self.eval_amended_object(
+                            existing_map,
+                            existing_src,
+                            body,
+                            &entry_scope,
+                            depth,
+                        )?;
                         map.insert(key_str, val);
                         continue;
                     }
@@ -6084,8 +6139,7 @@ impl Evaluator {
                                         &overlay_entries,
                                         &entry_scope,
                                         depth,
-                                    )
-                                    .await?
+                                    )?
                                 } else if !is_typed_new
                                     && let Some(Value::Object(explicit_map, Some(explicit_src))) =
                                         explicit_default.as_ref()
@@ -6120,8 +6174,7 @@ impl Evaluator {
                                         body,
                                         &entry_scope,
                                         depth,
-                                    )
-                                    .await?
+                                    )?
                                 } else if let Some(Value::Object(explicit_map, _)) =
                                     explicit_default.as_ref()
                                     && type_default.is_some()
@@ -6133,8 +6186,7 @@ impl Evaluator {
                                         body,
                                         &entry_scope,
                                         depth,
-                                    )
-                                    .await?
+                                    )?
                                 } else {
                                     self.eval_amended_object(
                                         template_map,
@@ -6142,8 +6194,7 @@ impl Evaluator {
                                         body,
                                         &entry_scope,
                                         depth,
-                                    )
-                                    .await?
+                                    )?
                                 };
                             let type_name = src.type_name.as_deref().or(*default_type_name);
                             if let Some(tn) = type_name
@@ -6177,7 +6228,7 @@ impl Evaluator {
                             }
                             result
                         } else {
-                            let val = self.eval_expr(val_expr, &entry_scope, depth + 1).await?;
+                            let val = self.eval_expr(val_expr, &entry_scope, depth + 1)?;
                             apply_mapping_entry_template(
                                 default_template.map(|(_, template)| template),
                                 val,
@@ -6192,15 +6243,13 @@ impl Evaluator {
                     if prop.name == "default"
                         && (explicit_default.is_some() || !type_defaults.is_empty()) => {}
                 Entry::Spread(e) => {
-                    let val = self.eval_expr(e, &entry_scope, depth + 1).await?;
+                    let val = self.eval_expr(e, &entry_scope, depth + 1)?;
                     if let Value::Object(m, _) = val {
                         map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
                     }
                 }
                 Entry::ForGenerator(fgen) => {
-                    let collection = self
-                        .eval_expr(&fgen.collection, &entry_scope, depth + 1)
-                        .await?;
+                    let collection = self.eval_expr(&fgen.collection, &entry_scope, depth + 1)?;
                     for (k, v) in collection_to_items(collection) {
                         let mut iter_scope = entry_scope.child();
                         iter_scope.set(fgen.val_var.clone(), v);
@@ -6218,14 +6267,12 @@ impl Evaluator {
                                 value: explicit_default.clone(),
                                 entries: explicit_default_entries.clone(),
                             },
-                        )
-                        .await?;
+                        )?;
                     }
                 }
                 Entry::WhenGenerator(generator) => {
-                    let condition = self
-                        .eval_expr(&generator.condition, &entry_scope, depth + 1)
-                        .await?;
+                    let condition =
+                        self.eval_expr(&generator.condition, &entry_scope, depth + 1)?;
                     let selected = if is_truthy(&condition) {
                         Some(generator.body.as_slice())
                     } else {
@@ -6243,8 +6290,7 @@ impl Evaluator {
                                 value: explicit_default.clone(),
                                 entries: explicit_default_entries.clone(),
                             },
-                        )
-                        .await?;
+                        )?;
                     }
                 }
                 _ => {}
@@ -6257,12 +6303,7 @@ impl Evaluator {
     /// Looks for the structure: `output { renderer { converters { [Type] = (x) -> ... } } }`.
     /// Converter keys are type identifiers (e.g., `[Regex]`), which we preserve as
     /// strings for matching against `ObjectSource.type_name`.
-    async fn extract_converters_from_ast(
-        &mut self,
-        output_prop: &Property,
-        scope: &Scope,
-        depth: usize,
-    ) {
+    fn extract_converters_from_ast(&mut self, output_prop: &Property, scope: &Scope, depth: usize) {
         let Some(output_body) = &output_prop.body else {
             return;
         };
@@ -6271,7 +6312,7 @@ impl Evaluator {
             if let Entry::Property(prop) = entry
                 && has_modifier(&prop.modifiers, Modifier::Local)
                 && let Some(expr) = &prop.value
-                && let Ok(value) = self.eval_expr(expr, &converter_scope, depth).await
+                && let Ok(value) = self.eval_expr(expr, &converter_scope, depth)
             {
                 converter_scope.set(prop.name.clone(), value);
             }
@@ -6292,7 +6333,7 @@ impl Evaluator {
             if let Entry::Property(prop) = entry
                 && has_modifier(&prop.modifiers, Modifier::Local)
                 && let Some(expr) = &prop.value
-                && let Ok(value) = self.eval_expr(expr, &converter_scope, depth).await
+                && let Ok(value) = self.eval_expr(expr, &converter_scope, depth)
             {
                 converter_scope.set(prop.name.clone(), value);
             }
@@ -6319,7 +6360,7 @@ impl Evaluator {
                     _ => continue,
                 };
                 // Evaluate the lambda value
-                if let Ok(lambda) = self.eval_expr(val_expr, &converter_scope, depth).await
+                if let Ok(lambda) = self.eval_expr(val_expr, &converter_scope, depth)
                     && matches!(lambda, Value::Lambda(..))
                 {
                     self.converters.push((class_name, lambda));
@@ -6334,13 +6375,22 @@ impl Evaluator {
         if self.converters.is_empty() {
             return Ok(value);
         }
-        let converters = self.converters.clone();
-        self.apply_converters_recursive(value, &converters, Vec::new())
-            .await
+        self.run_async(value, |evaluator, value| {
+            evaluator.apply_converters_blocking(value)
+        })
+        .await
     }
 
-    #[async_recursion(?Send)]
-    async fn apply_converters_recursive(
+    /// Apply `output.renderer.converters` to a value tree, blocking on host IO.
+    pub fn apply_converters_blocking(&mut self, value: Value) -> Result<Value> {
+        if self.converters.is_empty() {
+            return Ok(value);
+        }
+        let converters = self.converters.clone();
+        self.apply_converters_recursive(value, &converters, Vec::new())
+    }
+
+    fn apply_converters_recursive(
         &mut self,
         value: Value,
         converters: &[(String, Value)],
@@ -6374,12 +6424,11 @@ impl Evaluator {
                                         Value::Object(map.clone(), src.clone()),
                                     );
                                 }
-                                let result = self.eval_expr(body, &call_scope, 0).await?;
+                                let result = self.eval_expr(body, &call_scope, 0)?;
                                 let mut blocked = blocked_root_converters;
                                 blocked.push(conv_name.clone());
                                 return self
-                                    .apply_converters_recursive(result, converters, blocked)
-                                    .await;
+                                    .apply_converters_recursive(result, converters, blocked);
                             }
                         }
                     }
@@ -6390,8 +6439,7 @@ impl Evaluator {
                 for (k, v) in map.iter() {
                     new_map.insert(
                         k.clone(),
-                        self.apply_converters_recursive(v.clone(), converters, Vec::new())
-                            .await?,
+                        self.apply_converters_recursive(v.clone(), converters, Vec::new())?,
                     );
                 }
                 Ok(Value::Object(Arc::new(new_map), src.clone()))
@@ -6399,10 +6447,11 @@ impl Evaluator {
             Value::List(items) => {
                 let mut new_items = Vec::with_capacity(items.len());
                 for item in items {
-                    new_items.push(
-                        self.apply_converters_recursive(item, converters, Vec::new())
-                            .await?,
-                    );
+                    new_items.push(self.apply_converters_recursive(
+                        item,
+                        converters,
+                        Vec::new(),
+                    )?);
                 }
                 Ok(Value::List(new_items))
             }
@@ -6418,8 +6467,8 @@ mod requested_field_tests {
     use super::Evaluator;
     use crate::{Value, lexer, parser};
 
-    #[tokio::test]
-    async fn inherited_late_properties_respect_requested_fields() {
+    #[test]
+    fn inherited_late_properties_respect_requested_fields() {
         let test_dir = std::env::temp_dir().join(format!(
             "pklr-requested-fields-{}-{:?}",
             std::process::id(),
@@ -6445,7 +6494,6 @@ mod requested_field_tests {
                 None,
                 Some(HashSet::from(["wanted".to_string()])),
             )
-            .await
             .unwrap();
         let Value::Object(fields, _) = value else {
             panic!("expected an object");
@@ -6456,8 +6504,8 @@ mod requested_field_tests {
         std::fs::remove_dir_all(test_dir).unwrap();
     }
 
-    #[tokio::test]
-    async fn mapping_source_captures_import_identities() {
+    #[test]
+    fn mapping_source_captures_import_identities() {
         let test_dir = std::env::temp_dir().join(format!(
             "pklr-mapping-source-imports-{}-{:?}",
             std::process::id(),
@@ -6472,10 +6520,7 @@ mod requested_field_tests {
         )
         .unwrap();
 
-        let value = Evaluator::default()
-            .eval_file_pub(&main_path)
-            .await
-            .unwrap();
+        let value = Evaluator::default().eval_file_blocking(&main_path).unwrap();
         let Value::Object(fields, _) = value else {
             panic!("expected module object");
         };
@@ -6597,24 +6642,20 @@ mod remote_relative_tests {
 }
 
 impl Evaluator {
-    async fn same_local_path(&mut self, left: &Path, right: &Path) -> Result<bool> {
+    fn same_local_path(&mut self, left: &Path, right: &Path) -> Result<bool> {
         if left == right {
             return Ok(true);
         }
         let left_key = self
-            .capabilities
-            .canonicalize(left)
-            .await
+            .canonicalize_io(left)
             .unwrap_or_else(|_| left.to_path_buf());
         let right_key = self
-            .capabilities
-            .canonicalize(right)
-            .await
+            .canonicalize_io(right)
             .unwrap_or_else(|_| right.to_path_buf());
         Ok(left_key == right_key)
     }
 
-    async fn bind_deferred_inherited_imports(
+    fn bind_deferred_inherited_imports(
         &mut self,
         deferred: &[(String, PathBuf)],
         inherited_path: &Path,
@@ -6622,9 +6663,9 @@ impl Evaluator {
         scope: &mut Scope,
     ) -> Result<()> {
         for (alias, alias_path) in deferred {
-            if self.same_local_path(alias_path, inherited_path).await? {
+            if self.same_local_path(alias_path, inherited_path)? {
                 scope.declare(alias.clone(), inherited_val.clone());
-                let identity = self.module_type_namespace(alias_path).await;
+                let identity = self.module_type_namespace(alias_path);
                 scope.set_module_identity(alias.clone(), identity);
             }
         }
@@ -6859,9 +6900,9 @@ local base = new {
 }
 result = (base) { old = super.old + super.old }
 "#;
-        let value =
-            pollster::block_on(evaluator.eval_source(source, std::path::Path::new("super.pkl")))
-                .unwrap();
+        let value = evaluator
+            .eval_source_blocking(source, std::path::Path::new("super.pkl"))
+            .unwrap();
         assert_eq!(value.to_json()["result"]["old"], 2);
         assert_eq!(evaluator.warned_deprecated.len(), 1);
         assert!(
