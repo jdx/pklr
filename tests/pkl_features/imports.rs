@@ -2818,3 +2818,27 @@ async fn narrowed_import_follows_module_reads_in_class_bodies() {
     assert_eq!(val["dynamic"], 4);
     assert_eq!(val["lambda"], 5);
 }
+
+#[tokio::test]
+async fn narrowed_import_follows_locals_with_module_aliases() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_local_aliases");
+    let dir = temp.path();
+    // `ok` is evaluated at module level, where `S` is a String whose check
+    // binds the string's own `length`, even though the body reading it
+    // redeclares `S`; the module's unused `length` must not be evaluated.
+    std::fs::write(
+        dir.join("dep.pkl"),
+        "length = throw(\"unused\")\ntypealias S = String\nlocal ok = \"b\" is S(length == 1)\nresult {\n  typealias S = Int\n  v = ok\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\"\nout = dep.result.v\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["out"], true);
+}
