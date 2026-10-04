@@ -5076,3 +5076,39 @@ fn type_alias_shadowing_a_generic_collection_is_resolved() {
     let json = eval("typealias Listing = String\nx: Listing<Int> = \"a\"");
     assert_eq!(json["x"], "a");
 }
+
+#[test]
+fn typed_local_constrained_generic_alias_reads_later_member() {
+    // The alias's constraint reads `limit`, which the body sets after the
+    // local: the local is checked against the finished body.
+    for alias in [
+        "typealias Small<T> = List<T>(length < limit)",
+        "typealias Small<T> = List<T>(this.every((x) -> x < limit))",
+    ] {
+        let err = eval_fails(&format!(
+            "{alias}\nlimit = 10\nobj {{\n  local checked: Small<Int> = List(1, 2, 3)\n  limit = 2\n  out = checked\n}}\n"
+        ));
+        assert!(err.contains("checked"), "{alias}: {err}");
+        let json = eval(&format!(
+            "{alias}\nlimit = 0\nobj {{\n  local checked: Small<Int> = List(1)\n  limit = 2\n  out = checked\n}}\n"
+        ));
+        assert_eq!(json["obj"]["out"], serde_json::json!([1]), "{alias}");
+    }
+}
+
+#[test]
+fn generator_property_constrained_generic_alias_reads_later_member() {
+    for alias in [
+        "typealias Small<T> = List<T>(length < limit)",
+        "typealias Small<T> = List<T>(this.every((x) -> x < limit))",
+    ] {
+        let err = eval_fails(&format!(
+            "{alias}\nlimit = 10\nobj {{\n  when (true) {{\n    p: Small<Int> = List(1, 2, 3)\n  }}\n  limit = 2\n}}\n"
+        ));
+        assert!(err.contains("property 'p'"), "{alias}: {err}");
+        let json = eval(&format!(
+            "{alias}\nlimit = 0\nobj {{\n  when (true) {{\n    p: Small<Int> = List(1)\n  }}\n  limit = 2\n}}\n"
+        ));
+        assert_eq!(json["obj"]["p"], serde_json::json!([1]), "{alias}");
+    }
+}

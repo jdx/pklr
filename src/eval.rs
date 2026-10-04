@@ -552,19 +552,31 @@ fn type_needs_iteration_scope(
     })
 }
 
-/// Whether any name in the closure `type_closure` computes for `ty` (with
-/// aliases from `resolve`) satisfies `found`. Stops at the first match and
-/// allocates only to follow aliases and constraints, so the common case of a
-/// plain type name is cheap.
-fn type_reaches<'a>(
+/// What `type_walk` reaches in a type's closure.
+enum Reached<'n> {
+    /// A type name (a dotted one also by its root).
+    Type(&'n str),
+    /// A constraint, before what it reads.
+    Constraint,
+    /// A name a constraint reads (a dotted one also by its root).
+    Read(&'n str),
+}
+
+/// Whether anything in the closure `type_closure` computes for `ty` (with
+/// aliases from `resolve`) satisfies `found`. Type names, generic ones
+/// included, and the types constraints name follow alias chains. Stops at
+/// the first match and allocates only to follow aliases and constraints, so
+/// the common case of a plain type name is cheap.
+fn type_walk<'a>(
     ty: &'a crate::parser::TypeExpr,
     resolve: &dyn Fn(&str) -> Option<&'a crate::parser::TypeExpr>,
-    found: &dyn Fn(&str) -> bool,
+    found: &dyn Fn(Reached<'_>) -> bool,
 ) -> bool {
     fn name<'a>(
         name: &str,
+        read: bool,
         resolve: &dyn Fn(&str) -> Option<&'a crate::parser::TypeExpr>,
-        found: &dyn Fn(&str) -> bool,
+        found: &dyn Fn(Reached<'_>) -> bool,
         followed: &mut Vec<String>,
     ) -> bool {
         let name = name
@@ -573,7 +585,19 @@ fn type_reaches<'a>(
             .split('<')
             .next()
             .unwrap_or(name);
-        if found(name) || name.split('.').next().is_some_and(found) {
+        let reached = |name| {
+            if read {
+                Reached::Read(name)
+            } else {
+                Reached::Type(name)
+            }
+        };
+        if found(reached(name))
+            || name
+                .split('.')
+                .next()
+                .is_some_and(|root| found(reached(root)))
+        {
             return true;
         }
         let Some(alias) = resolve(name) else {
@@ -588,24 +612,28 @@ fn type_reaches<'a>(
     fn visit<'a>(
         ty: &'a crate::parser::TypeExpr,
         resolve: &dyn Fn(&str) -> Option<&'a crate::parser::TypeExpr>,
-        found: &dyn Fn(&str) -> bool,
+        found: &dyn Fn(Reached<'_>) -> bool,
         followed: &mut Vec<String>,
     ) -> bool {
         use crate::parser::TypeExpr;
         match ty {
-            TypeExpr::Named(type_name) => name(type_name, resolve, found, followed),
+            TypeExpr::Named(type_name) => name(type_name, false, resolve, found, followed),
             TypeExpr::Constrained(base, constraint) => {
+                if found(Reached::Constraint) {
+                    return true;
+                }
                 let mut refs = HashSet::new();
                 collect_expr_refs(constraint, &mut refs, &HashSet::new());
-                refs.iter().any(|read| name(read, resolve, found, followed))
-                    || name(base, resolve, found, followed)
+                refs.iter()
+                    .any(|read| name(read, true, resolve, found, followed))
+                    || name(base, false, resolve, found, followed)
             }
             TypeExpr::Nullable(inner) => visit(inner, resolve, found, followed),
             TypeExpr::Union(variants) => variants
                 .iter()
                 .any(|variant| visit(variant, resolve, found, followed)),
             TypeExpr::Generic(type_name, args) => {
-                name(type_name, resolve, found, followed)
+                name(type_name, false, resolve, found, followed)
                     || args.iter().any(|arg| visit(arg, resolve, found, followed))
             }
         }
@@ -613,33 +641,35 @@ fn type_reaches<'a>(
     visit(ty, resolve, found, &mut Vec::new())
 }
 
-/// Whether `ty`, or a type alias it names (following alias chains), has a
-/// constraint, which may read names.
-fn type_has_constraint(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
-    fn visit(ty: &crate::parser::TypeExpr, scope: &Scope, resolving: &mut Vec<String>) -> bool {
-        use crate::parser::TypeExpr;
-        match ty {
-            TypeExpr::Constrained(..) => true,
-            TypeExpr::Named(name) => {
-                let name = name.trim_start_matches('*').trim_end_matches('?');
-                let Some(alias) = scope.get_type_alias(name) else {
-                    return false;
-                };
-                if resolving.iter().any(|seen| seen == name) {
-                    return false;
-                }
-                resolving.push(name.to_string());
-                let found = visit(alias, scope, resolving);
-                resolving.pop();
-                found
-            }
-            TypeExpr::Nullable(inner) => visit(inner, scope, resolving),
-            TypeExpr::Union(variants) | TypeExpr::Generic(_, variants) => variants
-                .iter()
-                .any(|variant| visit(variant, scope, resolving)),
-        }
+/// Whether any name in the closure `type_closure` computes for `ty` (with
+/// aliases from `resolve`) satisfies `found`.
+fn type_reaches<'a>(
+    ty: &'a crate::parser::TypeExpr,
+    resolve: &dyn Fn(&str) -> Option<&'a crate::parser::TypeExpr>,
+    found: &dyn Fn(&str) -> bool,
+) -> bool {
+    type_walk(ty, resolve, &|reached| match reached {
+        Reached::Type(name) | Reached::Read(name) => found(name),
+        Reached::Constraint => false,
+    })
+}
+
+/// The aliases `scope` resolves, for `type_walk`. A built-in type name needs
+/// no lookup unless an alias in scope may shadow one.
+fn scope_alias<'a>(scope: &'a Scope, name: &str) -> Option<&'a crate::parser::TypeExpr> {
+    if !scope.shadows_builtin_type && is_builtin_type_name(name) {
+        return None;
     }
-    visit(ty, scope, &mut Vec::new())
+    scope.get_type_alias(name)
+}
+
+/// Whether `ty`, or a type alias it names (following alias chains, generic
+/// names and types named in constraints included), has a constraint, which
+/// may read names.
+fn type_has_constraint(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
+    type_walk(ty, &|name| scope_alias(scope, name), &|reached| {
+        matches!(reached, Reached::Constraint)
+    })
 }
 
 /// Whether `ty` reaches a type name that is not resolvable at the entry at
@@ -759,56 +789,26 @@ fn body_member_names(entries: &[Entry]) -> FxHashSet<String> {
 }
 
 /// Whether a constraint of `ty`, or of a type alias it names (following alias
-/// chains), can read a member of the body declaring a typed local: a name in
-/// `members`, or anything through `module`, `outer` or `super`. Such a local
-/// is checked against the finished body, since a member may not be bound yet
-/// when the local is, or may replace an outer binding of the same name.
+/// chains, generic names and types named in constraints included), can read
+/// a member of the body declaring a typed local: a name in `members`, or
+/// anything through `module`, `outer` or `super`. Such a local is checked
+/// against the finished body, since a member may not be bound yet when the
+/// local is, or may replace an outer binding of the same name.
 fn constraint_reads_members(
     ty: &crate::parser::TypeExpr,
     scope: &Scope,
     members: &FxHashSet<String>,
 ) -> bool {
-    fn visit(
-        ty: &crate::parser::TypeExpr,
-        scope: &Scope,
-        members: &FxHashSet<String>,
-        resolving: &mut Vec<String>,
-    ) -> bool {
-        use crate::parser::TypeExpr;
-        let alias_reads = |name: &str, resolving: &mut Vec<String>| {
-            let name = name
-                .trim_start_matches('*')
-                .trim_end_matches('?')
-                .split('<')
-                .next()
-                .unwrap_or(name);
-            let Some(alias) = scope.get_type_alias(name) else {
-                return false;
-            };
-            if resolving.iter().any(|seen| seen == name) {
-                return false;
+    type_walk(
+        ty,
+        &|name| scope_alias(scope, name),
+        &|reached| match reached {
+            Reached::Read(name) => {
+                members.contains(name) || matches!(name, "module" | "outer" | "super")
             }
-            resolving.push(name.to_string());
-            let reads = visit(alias, scope, members, resolving);
-            resolving.pop();
-            reads
-        };
-        match ty {
-            TypeExpr::Named(name) => alias_reads(name, resolving),
-            TypeExpr::Nullable(inner) => visit(inner, scope, members, resolving),
-            TypeExpr::Union(variants) | TypeExpr::Generic(_, variants) => variants
-                .iter()
-                .any(|variant| visit(variant, scope, members, resolving)),
-            TypeExpr::Constrained(base, constraint) => {
-                let mut refs = HashSet::new();
-                collect_expr_refs(constraint, &mut refs, &HashSet::new());
-                refs.iter().any(|name| {
-                    members.contains(name) || matches!(name.as_str(), "module" | "outer" | "super")
-                }) || alias_reads(base, resolving)
-            }
-        }
-    }
-    visit(ty, scope, members, &mut Vec::new())
+            _ => false,
+        },
+    )
 }
 
 /// The value of a literal or a plain name, or `None` for any expression that
