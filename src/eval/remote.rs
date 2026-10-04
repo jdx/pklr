@@ -76,7 +76,12 @@ pub(crate) fn resolve_triple_dot(
     root: Option<&Path>,
     mut exists: impl FnMut(&Path) -> Result<bool>,
 ) -> Result<Option<PathBuf>> {
-    let current = std::path::absolute(current_path).unwrap_or_else(|_| current_path.to_path_buf());
+    // Keep resolution in the evaluator's path namespace. In particular, do
+    // not call `std::path::absolute`: capability-backed evaluators can use
+    // relative virtual paths, and `absolute` would reinterpret them relative
+    // to the host process. Normalize lexical dot segments so the ancestor
+    // walk follows the module's actual path rather than a `.` or `..` alias.
+    let current = normalize_lexical_path(current_path);
     let file_name;
     let path = if path.is_empty() {
         file_name = current
@@ -102,10 +107,26 @@ pub(crate) fn resolve_triple_dot(
         candidates.push(root);
     }
     for dir in candidates {
-        let candidate = dir.join(path);
+        let candidate = normalize_lexical_path(&dir.join(path));
         if candidate != current && exists(&candidate)? {
             return Ok(Some(candidate));
         }
     }
     Ok(None)
+}
+
+fn normalize_lexical_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !normalized.pop() && !normalized.has_root() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
 }
