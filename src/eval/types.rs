@@ -362,9 +362,9 @@ pub(super) fn type_default_value(ty: &crate::parser::TypeExpr, scope: &Scope) ->
             type_default_for_name(name, scope)
         }
         TypeExpr::Generic(name, _) => match name.as_str() {
-            "Collection" | "List" | "Set" | "Listing" => Some(Value::List(Vec::new().into())),
+            "Collection" | "List" | "Set" | "Listing" => Some(empty_collection(name)),
             "Map" | "Mapping" => Some(Value::Object(Arc::default(), None)),
-            _ => resolve_dotted(scope, name),
+            _ => resolve_dotted(scope, name).map(as_instance),
         },
         TypeExpr::Union(variants) => variants
             .iter()
@@ -378,12 +378,22 @@ pub(super) fn type_default_for_name(name: &str, scope: &Scope) -> Option<Value> 
     let base_name = name.split('<').next().unwrap_or(name);
     match base_name {
         "Null" => Some(Value::Null),
-        "Collection" | "List" | "Set" | "Listing" => Some(Value::List(Vec::new().into())),
+        "Collection" | "List" | "Set" | "Listing" => Some(empty_collection(base_name)),
         "Map" | "Mapping" => Some(Value::Object(Arc::default(), None)),
         "String" | "Boolean" | "Bool" | "Int" | "Float" | "Number" | "Any" | "Dynamic"
         | "Duration" | "DataSize" | "Pair" | "Regex" => None,
-        other => resolve_dotted(scope, other),
+        other => resolve_dotted(scope, other).map(as_instance),
     }
+}
+
+/// An empty value of the collection type `name`.
+fn empty_collection(name: &str) -> Value {
+    let kind = match name {
+        "Listing" => ListKind::Listing,
+        "Set" => ListKind::Set,
+        _ => ListKind::List,
+    };
+    Value::List(ListValue::new(kind, Vec::new()))
 }
 
 pub(super) fn nullable_inner_default(ty: &crate::parser::TypeExpr, scope: &Scope) -> Option<Value> {
@@ -680,6 +690,9 @@ pub(super) fn is_null_value(value: &Value) -> bool {
     matches!(value, Value::Null)
 }
 
+/// Pkl's `==`. Collections and objects compare by kind and members (see
+/// [`ListKind`] and [`ObjectKind`]), sets and mappings without regard to
+/// order, classes by identity, and functions only equal themselves.
 pub(super) fn values_eq(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (left, right) if is_null_value(left) && is_null_value(right) => true,
@@ -689,7 +702,85 @@ pub(super) fn values_eq(a: &Value, b: &Value) -> bool {
         (Value::Int(a), Value::Float(b)) => (*a as f64) == *b,
         (Value::Float(a), Value::Int(b)) => *a == (*b as f64),
         (Value::String(a), Value::String(b)) => a == b,
+        (Value::List(a), Value::List(b)) => {
+            a.kind() == b.kind()
+                && a.len() == b.len()
+                && if a.kind() == ListKind::Set {
+                    a.iter().all(|item| set_contains(b, item))
+                } else {
+                    a.iter().zip(b.iter()).all(|(a, b)| values_eq(a, b))
+                }
+        }
+        (Value::Object(a_map, a_src), Value::Object(b_map, b_src)) => {
+            if Arc::ptr_eq(a_map, b_map) && a_src == b_src {
+                return true;
+            }
+            match object_kinds_match(a_src.as_deref(), b_src.as_deref()) {
+                Some(true) => true,
+                Some(false) => false,
+                None => {
+                    a_map.len() == b_map.len()
+                        && a_map.iter().all(|(key, a)| {
+                            b_map.get(key).is_some_and(|b| {
+                                values_eq(a, b)
+                                    // Both are of the same class, so have the
+                                    // same methods.
+                                    || matches!(a, Value::Lambda(..))
+                                        && a_src.as_deref().is_some_and(|src| is_method(src, key))
+                            })
+                        })
+                }
+            }
+        }
+        (Value::Lambda(_, a_body, a_captured), Value::Lambda(_, b_body, b_captured)) => {
+            Arc::ptr_eq(a_body, b_body) && Arc::ptr_eq(a_captured, b_captured)
+        }
         _ => false,
+    }
+}
+
+/// Whether `name` is a method of the object `src` describes.
+fn is_method(src: &ObjectSource, name: &str) -> bool {
+    src.type_name.is_some()
+        && src.entries.iter().any(
+            |entry| matches!(entry, Entry::Property(prop) if prop.is_method && prop.name == name),
+        )
+}
+
+/// Whether `set` has an element equal to `item`.
+pub(super) fn set_contains(set: &[Value], item: &Value) -> bool {
+    set.iter().any(|element| values_eq(element, item))
+}
+
+/// Compares what two objects are. `Some(false)` when they are of different
+/// kinds or classes, `Some(true)` when both are the same class (which compare
+/// by identity), and `None` when their members decide. An object without a
+/// source (a module, a `Map`, or a `Dynamic` built by a method) is not told
+/// apart from a `Dynamic` or a `Mapping`.
+fn object_kinds_match(a: Option<&ObjectSource>, b: Option<&ObjectSource>) -> Option<bool> {
+    fn class(src: Option<&ObjectSource>) -> Option<(&String, bool)> {
+        let src = src?;
+        let name = src.type_name.as_ref()?;
+        Some((
+            src.type_identity.as_ref().unwrap_or(name),
+            src.kind == ObjectKind::Class,
+        ))
+    }
+    match (class(a), class(b)) {
+        (Some((a, a_is_class)), Some((b, b_is_class))) => {
+            if a != b || a_is_class != b_is_class {
+                Some(false)
+            } else if a_is_class {
+                Some(true)
+            } else {
+                None
+            }
+        }
+        (Some(_), None) | (None, Some(_)) => Some(false),
+        (None, None) => match (a.map(|src| src.kind), b.map(|src| src.kind)) {
+            (Some(a), Some(b)) if a != b => Some(false),
+            _ => None,
+        },
     }
 }
 
@@ -701,7 +792,14 @@ pub(super) fn add_values(l: Value, r: Value) -> Result<Value> {
         (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a + b as f64)),
         (Value::String(a), Value::String(b)) => Ok(Value::String(format!("{a}{b}").into())),
         (Value::List(mut a), Value::List(b)) => {
-            Arc::make_mut(&mut a).extend(b.iter().cloned());
+            let set = a.kind() == ListKind::Set;
+            let items = a.make_mut();
+            for item in b.iter() {
+                // A set's union keeps one of each element.
+                if !set || !items.iter().any(|existing| values_eq(existing, item)) {
+                    items.push(item.clone());
+                }
+            }
             Ok(Value::List(a))
         }
         (Value::Object(mut a, _), Value::Object(b, _)) => {
@@ -756,6 +854,19 @@ pub(super) fn value_cmp(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
     }
 }
 
+/// `value`, or an instance of it if it is a class. A class used as a default
+/// or template stands for an instance with the class's defaults.
+pub(super) fn as_instance(value: Value) -> Value {
+    match value {
+        Value::Object(map, Some(src)) if src.kind == ObjectKind::Class => {
+            let mut src = Arc::unwrap_or_clone(src);
+            src.kind = ObjectKind::Object;
+            Value::Object(map, Some(Arc::new(src)))
+        }
+        value => value,
+    }
+}
+
 pub(super) fn merge_values(base: Value, overlay: Value) -> Value {
     match (base, overlay) {
         (Value::Object(mut b, base_src), Value::Object(o, overlay_src)) => {
@@ -783,7 +894,7 @@ pub(super) fn merge_values(base: Value, overlay: Value) -> Value {
                 (Some(b), _) => Some(b),
                 (None, o) => o,
             };
-            Value::Object(b, src)
+            as_instance(Value::Object(b, src))
         }
         (_, overlay) => overlay,
     }

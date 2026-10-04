@@ -490,6 +490,137 @@ x = if (true || v.missing) "y" else "n"
     assert_eq!(json["x"], "y");
 }
 
+#[test]
+fn equality_of_listings() {
+    let json = eval(
+        r#"
+local x = new Listing { "one"; "two" }
+same = x == x
+equal = x == new Listing { "one"; "two" }
+reordered = x == new Listing { "two"; "one" }
+amended = x == (x) {}
+withDefault = x == (x) { default = 9 }
+withLocal = new Listing { y; local y = "one" } == new Listing { "one" }
+ne = x != new Listing { "one" }
+"#,
+    );
+    assert_eq!(json["same"], true);
+    assert_eq!(json["equal"], true);
+    assert_eq!(json["reordered"], false);
+    assert_eq!(json["amended"], true);
+    assert_eq!(json["withDefault"], true);
+    assert_eq!(json["withLocal"], true);
+    assert_eq!(json["ne"], true);
+}
+
+#[test]
+fn equality_of_mappings_ignores_order() {
+    let json = eval(
+        r#"
+local x = new Mapping { ["one"] = 1; ["two"] = 2 }
+reordered = x == new Mapping { ["two"] = 2; ["one"] = 1 }
+changed = x == (x) { ["one"] = 2 }
+amended = x == (x) { ["one"] = 1 }
+dynamic = x == new Dynamic { ["one"] = 1; ["two"] = 2 }
+"#,
+    );
+    assert_eq!(json["reordered"], true);
+    assert_eq!(json["changed"], false);
+    assert_eq!(json["amended"], true);
+    assert_eq!(json["dynamic"], false);
+}
+
+#[test]
+fn equality_of_collections_depends_on_kind() {
+    let json = eval(
+        r#"
+lists = List(1, 2) == List(1, 2)
+listVsListing = List(1, 2) == new Listing { 1; 2 }
+listVsSet = List(1, 2) == Set(1, 2)
+sets = Set(1, 2) == Set(2, 1)
+toSet = List(2, 1, 2).toSet() == Set(1, 2)
+toList = new Listing { 1 }.toList() == List(1)
+"#,
+    );
+    assert_eq!(json["lists"], true);
+    assert_eq!(json["listVsListing"], false);
+    assert_eq!(json["listVsSet"], false);
+    assert_eq!(json["sets"], true);
+    assert_eq!(json["toSet"], true);
+    assert_eq!(json["toList"], true);
+}
+
+#[test]
+fn equality_of_typed_objects() {
+    let json = eval(
+        r#"
+open class Person {
+  name = "Pigeon"
+  hidden street: String
+  function greet() = "hi \(name)"
+}
+class Person2 { name = "Pigeon" }
+class Student extends Person {}
+same = new Person {} == new Person {}
+hiddenIgnored = new Person { street = "Fox St." } == new Person {}
+changed = new Person { name = "Parrot" } == new Person {}
+otherClass = new Person {} == new Person2 {}
+subclass = new Student {} == new Person {}
+dynamic = new Person {} == new Dynamic { name = "Pigeon" }
+classes = Person == Person
+classVsInstance = new Person {} == Person
+differentClasses = Person == Person2
+"#,
+    );
+    assert_eq!(json["same"], true);
+    assert_eq!(json["hiddenIgnored"], true);
+    assert_eq!(json["changed"], false);
+    assert_eq!(json["otherClass"], false);
+    assert_eq!(json["subclass"], false);
+    assert_eq!(json["dynamic"], false);
+    assert_eq!(json["classes"], true);
+    assert_eq!(json["classVsInstance"], false);
+    assert_eq!(json["differentClasses"], false);
+}
+
+#[test]
+fn equality_of_lambdas_is_identity() {
+    let json = eval(
+        r#"
+local f = () -> 1
+same = f == f
+sameBody = (() -> 1) == (() -> 1)
+"#,
+    );
+    assert_eq!(json["same"], true);
+    assert_eq!(json["sameBody"], false);
+}
+
+#[test]
+fn sets_use_pkl_equality() {
+    let json = eval(
+        r#"
+size = Set(new Dynamic { a = 1 }, new Dynamic { a = 1 }).length
+contains = List(new Dynamic { a = 1 }).contains(new Dynamic { a = 1 })
+union = Set(1, 2) + Set(2, 3)
+"#,
+    );
+    assert_eq!(json["size"], 1);
+    assert_eq!(json["contains"], true);
+    assert_eq!(json["union"], serde_json::json!([1, 2, 3]));
+}
+
+#[test]
+fn negated_listing_element() {
+    let json = eval(
+        r#"
+local function f(x) = x > 1
+res { !f(0); -1 }
+"#,
+    );
+    assert_eq!(json["res"], serde_json::json!([true, -1]));
+}
+
 // ============================================================
 // Null coalescing
 // ============================================================
