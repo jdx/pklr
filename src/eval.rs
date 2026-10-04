@@ -2716,7 +2716,7 @@ impl Evaluator {
         let mut receiver_scope = scope.clone();
         receiver_scope.receiver_entries = Some(entries.clone());
         receiver_scope.receiver_list_base = None;
-        self.eval_entries_with_lexical_scopes(entries, &receiver_scope, depth, None, None)
+        self.eval_entries_with_lexical_scopes(entries, &receiver_scope, depth, None, None, None)
     }
 
     fn eval_entries_with_lexical_scopes(
@@ -2726,6 +2726,10 @@ impl Evaluator {
         depth: usize,
         entry_scopes: Option<&[Option<Arc<CapturedScope>>]>,
         inherited_source: Option<&ObjectSource>,
+        // For a generator body, the members its receiver holds so far. Its
+        // members are the receiver's, so a body amendment (`o { ... }` or
+        // `["k"] { ... }`) amends the receiver's existing member.
+        receiver_members: Option<&ObjectMap>,
     ) -> Result<Value> {
         let mut child_scope = scope.child();
         let entry_owners = entry_scope_owners(entries, entry_scopes, inherited_source);
@@ -2943,12 +2947,15 @@ impl Evaluator {
                         &entry_owners,
                         own_body_scope,
                     );
-                    // `o { ... }` amends a member an earlier generator produced,
-                    // which is in the object but not bound in scope.
+                    // eval_property amends the value bound for the name in the
+                    // receiver's own scope. A generator body can amend both a
+                    // member previously generated in this body and one held by
+                    // its enclosing receiver.
                     if prop.value.is_none()
                         && prop.body.is_some()
-                        && generated.contains(prop.name.as_str())
-                        && let Some(existing) = all_props.get(prop.name.as_str())
+                        && let Some(existing) = all_props
+                            .get(prop.name.as_str())
+                            .or_else(|| receiver_members.and_then(|members| members.get(prop.name.as_str())))
                     {
                         active_scope.set(&prop.name, existing.clone());
                     }
@@ -2991,8 +2998,10 @@ impl Evaluator {
                     // (for example when amending an untyped `Mapping`) rather than
                     // replacing it.
                     if let Expr::ObjectBody(body) = val_expr
-                        && let Some(existing @ (Value::Object(..) | Value::List(_))) =
-                            map.get(&key_str).cloned()
+                        && let Some(existing @ (Value::Object(..) | Value::List(_))) = map
+                            .get(&key_str)
+                            .or_else(|| receiver_members.and_then(|members| members.get(&key_str)))
+                            .cloned()
                     {
                         // A listing amendment only takes elements, so a property
                         // would otherwise be dropped silently. Reject it as Pkl does.
@@ -3127,6 +3136,7 @@ impl Evaluator {
                             depth,
                             None,
                             None,
+                            Some(&generator_receiver(receiver_members, &all_props)),
                         )?;
                         if let Value::Object(m, _) = body_val {
                             entry_owners.release_this(&this_aliases);
@@ -3158,6 +3168,7 @@ impl Evaluator {
                             depth,
                             None,
                             None,
+                            Some(&generator_receiver(receiver_members, &all_props)),
                         )?;
                         if let Value::Object(m, _) = body_val {
                             entry_owners.release_this(&this_aliases);
@@ -3178,6 +3189,7 @@ impl Evaluator {
                             depth,
                             None,
                             None,
+                            Some(&generator_receiver(receiver_members, &all_props)),
                         )?;
                         if let Value::Object(m, _) = else_val {
                             entry_owners.release_this(&this_aliases);
@@ -3906,6 +3918,7 @@ impl Evaluator {
             depth + 1,
             Some(&merged_entry_scopes),
             Some(base_source),
+            None,
         )?;
         if let Value::Object(map, Some(source)) = result {
             let mut source = Arc::unwrap_or_clone(source);
@@ -6062,6 +6075,22 @@ impl Evaluator {
 /// Converted values by the address of the object or list they came from (see
 /// `apply_converters_recursive`), each kept with its original.
 type ConverterMemo = HashMap<(usize, usize), (Value, Option<Value>)>;
+
+/// The members a generator body's receiver holds so far: those of the object
+/// it is directly in, over those of any generator body enclosing that.
+fn generator_receiver<'a>(
+    outer: Option<&'a ObjectMap>,
+    own: &'a ObjectMap,
+) -> std::borrow::Cow<'a, ObjectMap> {
+    match outer {
+        None => std::borrow::Cow::Borrowed(own),
+        Some(outer) => {
+            let mut members = outer.clone();
+            members.extend(own.iter().map(|(k, v)| (k.clone(), v.clone())));
+            std::borrow::Cow::Owned(members)
+        }
+    }
+}
 
 #[cfg(test)]
 mod requested_field_tests {
