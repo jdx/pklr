@@ -21,9 +21,11 @@ use crate::value::{
 mod analysis;
 mod glob;
 mod mapping;
+mod output;
 mod package;
 mod prefetch;
 mod remote;
+pub(crate) mod render;
 mod scope;
 mod types;
 
@@ -109,6 +111,18 @@ pub struct Evaluator {
     /// Converters extracted from `output.renderer.converters`.
     /// Each entry maps a class name to a converter lambda.
     converters: Vec<(String, Value)>,
+    /// Cached templates for the built-in classes used by module output.
+    builtin_classes: HashMap<&'static str, Value>,
+    /// `output` declarations belonging to the module being evaluated.
+    output_props: Vec<Arc<Property>>,
+    /// Evaluated module output, when the module declares an `output` block.
+    module_output: Option<Value>,
+    /// Whether an output declaration explicitly assigned `output.value`.
+    output_sets_value: bool,
+    /// Whether an output declaration explicitly enabled JSON null omission.
+    output_sets_omit_nulls: bool,
+    /// The default renderer used while evaluating module output.
+    output_format: render::RendererKind,
     /// Set of (property_name, message) pairs already warned about.
     /// Used to deduplicate `@Deprecated` warnings so a deprecated property
     /// referenced inside a loop or template doesn't flood stderr.
@@ -411,6 +425,12 @@ impl Evaluator {
             offline: false,
             http_rewrites: Vec::new(),
             converters: Vec::new(),
+            builtin_classes: HashMap::default(),
+            output_props: Vec::new(),
+            module_output: None,
+            output_sets_value: false,
+            output_sets_omit_nulls: false,
+            output_format: render::RendererKind::Json,
             warned_deprecated: std::collections::HashSet::default(),
             module_names: HashMap::default(),
         }
@@ -543,6 +563,10 @@ impl Evaluator {
         self.rendered_member_failed = false;
         self.scoped_imports_in_flight.clear();
         self.converters.clear();
+        self.output_props.clear();
+        self.module_output = None;
+        self.output_sets_value = false;
+        self.output_sets_omit_nulls = false;
         self.prefetch = prefetch::PrefetchState::new(self.cancel.clone());
         self.module_names.clear();
     }
@@ -948,13 +972,6 @@ impl Evaluator {
         let tokens = lexer::lex_named(source, &name)?;
         let module = parser::parse_named(&tokens, source, &name)?;
         self.eval_module(&module, path, 0)
-    }
-
-    /// Evaluate a local pkl file and apply its output converters.
-    #[cfg(feature = "native-io")]
-    pub(crate) fn eval_file_converted(&mut self, path: &Path) -> Result<Value> {
-        let value = self.eval_file(path)?;
-        self.apply_converters(value)
     }
 
     /// Evaluate a local pkl file by path.
@@ -2196,7 +2213,7 @@ impl Evaluator {
                         // Clear any base-inherited converters so child overrides take precedence.
                         if prop.name == "output" {
                             if depth == 0 {
-                                self.converters.clear();
+                                self.output_props.push(Arc::clone(prop));
                                 self.extract_converters_from_ast(prop, &scope, depth);
                             }
                             continue;
@@ -2591,7 +2608,11 @@ impl Evaluator {
         {
             return Err(Error::Eval(message.to_string()));
         }
-        Ok(Value::Object(Arc::new(out), source))
+        let module_map = Arc::new(out);
+        if depth == 0 {
+            self.eval_module_output(module, &module_map, &scope, path, depth)?;
+        }
+        Ok(Value::Object(module_map, source))
     }
 
     fn eval_property(
@@ -3045,8 +3066,17 @@ impl Evaluator {
                         &entry_owners,
                         own_body_scope,
                     );
-                    let key = self.eval_expr(key_expr, &active_scope, depth)?;
-                    let key_str = value_to_key(&key)?;
+                    let class_key = self.class_key_of(key_expr, &active_scope);
+                    let key = class_key
+                        .is_none()
+                        .then(|| self.eval_expr(key_expr, &active_scope, depth))
+                        .transpose()?;
+                    let key_str = match class_key {
+                        Some(key) => key,
+                        None => value_to_key(
+                            key.as_ref().expect("non-class mapping keys are evaluated"),
+                        )?,
+                    };
                     // A body may define each key once. An object body still
                     // amends an inherited value, but it is a definition in
                     // this body and must participate in duplicate detection.
@@ -3054,9 +3084,10 @@ impl Evaluator {
                         let defined_by_layer = defined_by_layer.get_or_insert_default();
                         let layer = entry_layer(entry_scopes, entry_index);
                         if !defined_by_layer.insert((layer, key_str.clone())) {
-                            let key = match &key {
-                                Value::String(s) => format!("{s:?}"),
-                                key => value_to_display(key),
+                            let key = match key.as_ref() {
+                                None => key_str.to_string(),
+                                Some(Value::String(s)) => format!("{s:?}"),
+                                Some(key) => value_to_display(key),
                             };
                             return Err(Error::Eval(format!(
                                 "Duplicate definition of member `{key}`."
@@ -4589,6 +4620,13 @@ impl Evaluator {
                             }
                             Some(val)
                         });
+                        let base = match base {
+                            Some(base) => Some(base),
+                            None => match type_name.as_deref() {
+                                Some(name) => self.builtin_class(name)?,
+                                None => None,
+                            },
+                        };
                         // A class whose definition failed (for example one
                         // reading a `module` property not evaluated yet) is
                         // poisoned; report why instead of building a bare object.
@@ -5020,6 +5058,9 @@ impl Evaluator {
             if let Some(result) = self.eval_method_call(&obj, method, &evaled_args, depth)? {
                 return Ok(result);
             }
+            if let Some(result) = self.eval_renderer_method(&obj, method, &evaled_args, depth)? {
+                return Ok(result);
+            }
             if let Some(result) = self.eval_object_method_call(&obj, method, &evaled_args, depth)? {
                 return Ok(result);
             }
@@ -5042,6 +5083,9 @@ impl Evaluator {
                 evaled_args.push(self.eval_expr(a, scope, depth + 1)?);
             }
             if let Some(result) = self.eval_method_call(&obj, method, &evaled_args, depth)? {
+                return Ok(result);
+            }
+            if let Some(result) = self.eval_renderer_method(&obj, method, &evaled_args, depth)? {
                 return Ok(result);
             }
             if let Some(result) = self.eval_object_method_call(&obj, method, &evaled_args, depth)? {
@@ -5777,16 +5821,26 @@ impl Evaluator {
         for entry in entries {
             match entry {
                 Entry::DynProperty(key_expr, val_expr) => {
-                    let key = self.eval_expr(key_expr, &entry_scope, depth + 1)?;
-                    let key_str = value_to_key(&key)?;
+                    let class_key = self.class_key_of(key_expr, &entry_scope);
+                    let key = class_key
+                        .is_none()
+                        .then(|| self.eval_expr(key_expr, &entry_scope, depth + 1))
+                        .transpose()?;
+                    let key_str = match class_key {
+                        Some(key) => key,
+                        None => value_to_key(
+                            key.as_ref().expect("non-class mapping keys are evaluated"),
+                        )?,
+                    };
                     // Mapping storage preserves Pkl key identity: `1`, `1.0`
                     // and `"1"` are distinct mapping keys.
                     // Object-body entries may amend an earlier value from this
                     // body.
                     if !defined_keys.insert(key_str.clone()) {
-                        let key = match &key {
-                            Value::String(s) => format!("{s:?}"),
-                            key => value_to_display(key),
+                        let key = match key.as_ref() {
+                            None => key_str.to_string(),
+                            Some(Value::String(s)) => format!("{s:?}"),
+                            Some(key) => value_to_display(key),
                         };
                         return Err(Error::Eval(format!(
                             "Duplicate definition of member `{key}`."
@@ -6091,6 +6145,9 @@ impl Evaluator {
                 if let Ok(lambda) = self.eval_expr(val_expr, &converter_scope, depth)
                     && matches!(lambda, Value::Lambda(..))
                 {
+                    // Child output declarations override converters for the
+                    // same class while retaining unrelated inherited ones.
+                    self.converters.retain(|(name, _)| name != &class_name);
                     self.converters.push((class_name, lambda));
                 }
             }
@@ -6100,7 +6157,13 @@ impl Evaluator {
     /// Apply `output.renderer.converters` to a value tree.
     /// Walks recursively, replacing typed objects with their converter output.
     pub fn apply_converters(&mut self, value: Value) -> Result<Value> {
+        if self.module_output.is_some() && self.output_has_scalar_converter()? {
+            return self.apply_output_converters(value);
+        }
         if self.converters.is_empty() {
+            if self.module_output.is_some() {
+                return self.apply_output_converters(value);
+            }
             return Ok(value);
         }
         let converters = self.converters.clone();
