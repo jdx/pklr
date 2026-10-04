@@ -3903,22 +3903,31 @@ impl Evaluator {
         }
 
         // Build scope: start with the base's captured scope, then layer current scope
+        // The new scope starts empty, so the base's maps are copied whole
+        // rather than rebinding each name.
         let mut eval_scope = Scope {
             type_namespace: object_source_type_namespace(base_source),
             ..Scope::default()
         };
-        for (k, v) in base_scope {
-            if base_source.scope_declared().contains(&**k) {
-                eval_scope.declare_name(k.clone(), v.clone());
-            } else {
-                eval_scope.set_name(k.clone(), v.clone());
+        if !base_scope.is_empty() {
+            eval_scope.vars = Arc::new(base_scope.clone());
+            let base_declared = base_source.scope_declared();
+            if !base_declared.is_empty() {
+                eval_scope.declared = Arc::new(
+                    base_declared
+                        .iter()
+                        .filter(|name| base_scope.contains_key(&***name))
+                        .cloned()
+                        .collect(),
+                );
             }
         }
         for (name, identity) in base_source.scope_module_identities() {
             eval_scope.set_module_identity(name.clone(), identity.clone());
         }
-        for (name, ty) in base_source.scope_type_aliases() {
-            eval_scope.set_type_alias(name.clone(), ty.clone());
+        let base_type_aliases = base_source.scope_type_aliases();
+        if !base_type_aliases.is_empty() {
+            eval_scope.type_aliases = Arc::new(base_type_aliases.clone());
         }
         // Layer in current scope values (imports, module-level locals, etc.).
         // The same imported module can be field-pruned differently at its

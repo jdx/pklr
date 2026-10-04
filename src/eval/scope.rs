@@ -361,11 +361,12 @@ impl Scope {
     }
 
     pub(super) fn flatten(&self) -> ScopeMap {
-        let mut result = self
-            .parent
-            .as_ref()
-            .map(|p| p.flatten())
-            .unwrap_or_default();
+        // The outermost levels (the module scope) usually hold most bindings:
+        // cloning that map whole is much cheaper than reinserting each one.
+        let mut result = match self.parent.as_ref().map(|p| p.flatten()) {
+            Some(result) if !result.is_empty() => result,
+            _ => return (*self.vars).clone(),
+        };
         for name in self.poisoned.keys() {
             result.shift_remove(&**name);
         }
@@ -401,11 +402,10 @@ impl Scope {
     }
 
     pub(super) fn flatten_type_aliases(&self) -> TypeAliasMap {
-        let mut result = self
-            .parent
-            .as_ref()
-            .map(|p| p.flatten_type_aliases())
-            .unwrap_or_default();
+        let mut result = match self.parent.as_ref().map(|p| p.flatten_type_aliases()) {
+            Some(result) if !result.is_empty() => result,
+            _ => return (*self.type_aliases).clone(),
+        };
         result.extend(
             self.type_aliases
                 .iter()
@@ -701,19 +701,22 @@ pub(super) fn capture_object_source_scope(source: &ObjectSource) -> CapturedScop
 }
 
 pub(super) fn restore_scope(captured: &CapturedScope) -> Scope {
+    // A fresh scope has no poisoned names, module identities or `this`
+    // aliases for `set_name` to clear, so the captured maps can be copied
+    // whole instead of rehashing every binding into a new map.
     let mut scope = Scope {
         type_namespace: captured.type_namespace.clone(),
         ..Scope::default()
     };
-    for (name, value) in &captured.values {
-        scope.set_name(name.clone(), value.clone());
+    if !captured.values.is_empty() {
+        scope.vars = Arc::new(captured.values.clone());
     }
     scope.declared = Arc::new(captured.declared.clone());
     for (name, identity) in &captured.module_identities {
         scope.set_module_identity(name.clone(), identity.clone());
     }
-    for (name, ty) in &captured.type_aliases {
-        scope.set_type_alias(name.clone(), ty.clone());
+    if !captured.type_aliases.is_empty() {
+        scope.type_aliases = Arc::new(captured.type_aliases.clone());
     }
     scope
 }
