@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.0](https://github.com/jdx/pklr/compare/v3.0.4...v4.0.0) - 2026-10-04
+
+### Fixed
+
+- *(eval)* resolve glob imports from a bare relative entry path ([#231](https://github.com/jdx/pklr/pull/231))
+
+### Other
+
+- *(eval)* evaluate only the glob-imported modules that are read (hk config 180 ms -> 24 ms) ([#229](https://github.com/jdx/pklr/pull/229))
+- *(parser)* [**breaking**] share object bodies between the AST and evaluated objects ([#228](https://github.com/jdx/pklr/pull/228))
+- *(eval)* update per-entry object scopes instead of rebuilding them ([#227](https://github.com/jdx/pklr/pull/227))
+- *(eval)* [**breaking**] share lambdas and captured scopes (hk config 371 ms -> 190 ms) ([#225](https://github.com/jdx/pklr/pull/225))
+- *(eval)* don't capture unused `this` aliases in nested objects ([#224](https://github.com/jdx/pklr/pull/224))
+- *(eval)* cache imports and cut scope copying (2.6x faster on hk's config) ([#223](https://github.com/jdx/pklr/pull/223))
+- *(eval)* stop copying the property map for every `this` refresh ([#221](https://github.com/jdx/pklr/pull/221))
+- *(parser)* borrow source text instead of copying it per parser ([#220](https://github.com/jdx/pklr/pull/220))
+
 ## [3.0.4](https://github.com/jdx/pklr/compare/v3.0.3...v3.0.4) - 2026-10-03
 
 ### Fixed
