@@ -597,6 +597,38 @@ sameBody = (() -> 1) == (() -> 1)
 }
 
 #[test]
+fn collection_methods_keep_set_kind() {
+    let json = eval(
+        r#"
+filtered = Set(1, 2).filter((x) -> true) == Set(1, 2)
+mapped = Set(1, 2).map((x) -> x % 2) == Set(1, 0)
+mappedSize = Set(1, 2, 3).map((x) -> x % 2).length
+flatMapped = Set(1, 2).flatMap((x) -> List(x, x + 1)).length
+nonNull = Set(1, null).filterNonNull() == Set(1)
+list = List(1, 2).filter((x) -> true) == List(1, 2)
+"#,
+    );
+    for key in ["filtered", "mapped", "nonNull", "list"] {
+        assert_eq!(json[key], true, "{key}");
+    }
+    assert_eq!(json["mappedSize"], 2);
+    assert_eq!(json["flatMapped"], 3);
+}
+
+#[test]
+fn mapping_typed_default_is_a_mapping() {
+    let json = eval(
+        r#"
+class C { m: Mapping<String, Int> }
+mapping = new C {}.m == new Mapping {}
+dynamic = new C {}.m == new Dynamic {}
+"#,
+    );
+    assert_eq!(json["mapping"], true);
+    assert_eq!(json["dynamic"], false);
+}
+
+#[test]
 fn sets_use_pkl_equality() {
     let json = eval(
         r#"

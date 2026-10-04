@@ -379,7 +379,7 @@ pub(super) fn apply_mapping_type_annotation(
             mapping_value_types: Vec::new(),
             deprecated: IndexMap::new(),
             poisoned_members: None,
-            kind: ObjectKind::Object,
+            kind: ObjectKind::Mapping,
         })
     });
     let src = Arc::make_mut(src);

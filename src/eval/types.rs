@@ -760,6 +760,22 @@ fn is_method(src: &ObjectSource, name: &str) -> bool {
         )
 }
 
+/// The result of a `map`, `flatMap` or `filter` on a collection of `kind`:
+/// a `Set` stays a set (keeping one of equal elements), anything else gives
+/// a `List`, as `Listing` has no such methods.
+pub(super) fn collection_result(kind: ListKind, items: Vec<Value>) -> Value {
+    if kind != ListKind::Set {
+        return Value::List(items.into());
+    }
+    let mut set = Vec::with_capacity(items.len());
+    for item in items {
+        if !set_contains(&set, &item) {
+            set.push(item);
+        }
+    }
+    Value::List(ListValue::new(ListKind::Set, set))
+}
+
 /// Whether `set` has an element equal to `item`.
 pub(super) fn set_contains(set: &[Value], item: &Value) -> bool {
     set.iter().any(|element| values_eq(element, item))

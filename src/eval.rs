@@ -5302,7 +5302,7 @@ impl Evaluator {
                 for item in items.iter() {
                     result.push(self.invoke_lambda(lambda, std::slice::from_ref(item), depth)?);
                 }
-                Ok(Some(Value::List(result.into())))
+                Ok(Some(collection_result(items.kind(), result)))
             }
             (Value::List(items), "flatMap") => {
                 let lambda = args
@@ -5317,7 +5317,7 @@ impl Evaluator {
                         result.push(val);
                     }
                 }
-                Ok(Some(Value::List(result.into())))
+                Ok(Some(collection_result(items.kind(), result)))
             }
             (Value::List(items), "filter") => {
                 let lambda = args
@@ -5330,15 +5330,15 @@ impl Evaluator {
                         result.push(item.clone());
                     }
                 }
-                Ok(Some(Value::List(result.into())))
+                Ok(Some(collection_result(items.kind(), result)))
             }
-            (Value::List(items), "filterNonNull") => Ok(Some(Value::List(
+            (Value::List(items), "filterNonNull") => Ok(Some(collection_result(
+                items.kind(),
                 items
                     .iter()
                     .filter(|item| !is_null_value(item))
                     .cloned()
-                    .collect::<Vec<_>>()
-                    .into(),
+                    .collect(),
             ))),
             (Value::List(items), "fold") => {
                 let init = args
