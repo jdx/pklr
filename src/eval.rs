@@ -440,9 +440,10 @@ impl Evaluator {
     /// capabilities run on the caller's executor.
     ///
     /// If the returned future is dropped before it finishes, the worker stops
-    /// at its next expression, and the evaluator keeps its
-    /// capabilities, configuration and download caches. Per-evaluation caches
-    /// are reset by the next evaluation anyway.
+    /// at its next expression, and the evaluator keeps its capabilities,
+    /// configuration and extracted package directories. It loses its other
+    /// caches; copying them up front would cost every call for the sake of a
+    /// rare cancellation.
     async fn run_on_worker<A, R>(&mut self, arg: A, work: fn(&mut Evaluator, A) -> R) -> R
     where
         A: Send + 'static,
@@ -504,7 +505,6 @@ impl Evaluator {
         copy.package_http_roots = self.package_http_roots.clone();
         copy.offline = self.offline;
         copy.http_rewrites = self.http_rewrites.clone();
-        copy.http_cache = self.http_cache.clone();
         #[cfg(feature = "package-zip-core")]
         {
             copy.package_dirs = self.package_dirs.clone();
