@@ -395,9 +395,10 @@ pub(super) fn expand_requested_fields(
                 collect_sibling_field_refs_entries(body, &mut refs);
             }
             // A definition's constraints resolve aliases where the check
-            // happens. If this property's bodies redeclare a module alias, a
-            // check inside them can read a followed definition differently, so
-            // follow definitions without resolving aliases there.
+            // happens. If this property's bodies redeclare a module alias with
+            // a different meaning, a check inside them can read a followed
+            // definition differently, so follow definitions without resolving
+            // aliases there.
             let definition_aliases =
                 if aliases.is_some_and(|aliases| property_redeclares_alias(prop, aliases)) {
                     None
@@ -514,7 +515,8 @@ type TypeAliases<'a> = HashMap<&'a str, &'a crate::parser::TypeExpr>;
 
 /// Whether a type alias or class declared anywhere inside `prop` (in its
 /// body or in object bodies within its value) has the name of one of
-/// `aliases`.
+/// `aliases` and may mean something else: a class, or an alias whose
+/// definition differs. An identical redeclaration reads the same either way.
 fn property_redeclares_alias(prop: &Property, aliases: &TypeAliases) -> bool {
     prop.value
         .as_ref()
@@ -527,11 +529,14 @@ fn property_redeclares_alias(prop: &Property, aliases: &TypeAliases) -> bool {
 
 fn entries_redeclare_alias(entries: &[Entry], aliases: &TypeAliases) -> bool {
     entries.iter().any(|entry| match entry {
-        Entry::TypeAlias(name, _) | Entry::ClassDef(name, ..)
-            if aliases.contains_key(name.as_str()) =>
+        Entry::TypeAlias(name, ty)
+            if aliases
+                .get(name.as_str())
+                .is_some_and(|outer_ty| *outer_ty != ty) =>
         {
             true
         }
+        Entry::ClassDef(name, ..) if aliases.contains_key(name.as_str()) => true,
         Entry::Property(prop) => property_redeclares_alias(prop, aliases),
         Entry::DynProperty(key, value) => {
             expr_redeclares_alias(key, aliases) || expr_redeclares_alias(value, aliases)

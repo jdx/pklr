@@ -2462,9 +2462,17 @@ async fn narrowed_import_respects_aliases_redeclared_in_nested_bodies() {
         "length = 1\ntypealias S = Int\nresult {\n  local checked = 1 is S(this == length)\n  typealias S = String\n  ok = checked\n}\n",
     )
     .unwrap();
+    // A module alias `T` built on `S` is checked inside a body that
+    // redeclares `S` identically, so `S` is still a String and binds the
+    // string's own `length`; the module's unused `length` must not be read.
+    std::fs::write(
+        dir.join("dep_followed_same.pkl"),
+        "length = throw(\"unused\")\ntypealias S = String\ntypealias T = S(length == 1)\nresult {\n  typealias S = String\n  ok = \"b\" is T\n}\n",
+    )
+    .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"dep.pkl\" as Dep\nimport \"dep_string.pkl\" as DepString\nimport \"dep_order.pkl\" as DepOrder\nimport \"dep_followed.pkl\" as DepFollowed\nout = Dep.result.ok\noutString = DepString.result.ok\noutOrder = DepOrder.result.ok\noutFollowed = DepFollowed.result.ok\n",
+        "import \"dep.pkl\" as Dep\nimport \"dep_string.pkl\" as DepString\nimport \"dep_order.pkl\" as DepOrder\nimport \"dep_followed.pkl\" as DepFollowed\nimport \"dep_followed_same.pkl\" as DepFollowedSame\nout = Dep.result.ok\noutString = DepString.result.ok\noutOrder = DepOrder.result.ok\noutFollowed = DepFollowed.result.ok\noutFollowedSame = DepFollowedSame.result.ok\n",
     )
     .unwrap();
 
@@ -2475,4 +2483,5 @@ async fn narrowed_import_respects_aliases_redeclared_in_nested_bodies() {
     assert_eq!(val["outString"], true);
     assert_eq!(val["outOrder"], true);
     assert_eq!(val["outFollowed"], true);
+    assert_eq!(val["outFollowedSame"], true);
 }
