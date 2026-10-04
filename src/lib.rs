@@ -159,13 +159,14 @@ impl AsyncEvaluatorBuilder {
     ///
     /// A package that fails to preload is skipped and fetched normally.
     pub async fn build(self) -> Evaluator {
-        let mut evaluator = Evaluator::new_async();
-        #[cfg(feature = "http")]
-        if let Some(client) = self.client {
-            evaluator
-                .set_http_client(client)
-                .expect("native async capabilities accept reqwest clients");
-        }
+        // Build the default client only when none was given; building one
+        // loads the platform's TLS roots.
+        let mut evaluator = match self.client {
+            Some(client) => {
+                Evaluator::with_capabilities(NativeCapabilities::with_http_client(client))
+            }
+            None => Evaluator::new_async(),
+        };
         evaluator.set_http_rewrites(&self.http_rewrites);
         if let Some(cache_dir) = self.package_cache_dir {
             evaluator.set_package_cache_dir(cache_dir);
@@ -261,7 +262,10 @@ impl EvaluatorBuilder {
 
     /// Evaluate a Pkl file synchronously and return its result and dependencies.
     pub fn eval(self, path: &Path) -> Result<EvalOutcome> {
-        pollster::block_on(eval_with_evaluator(path, self.build()))
+        let mut evaluator = self.build();
+        evaluator.set_base_path(path.parent().unwrap_or(Path::new(".")));
+        let value = evaluator.eval_file_converted_blocking(path)?;
+        Ok(outcome(value, &mut evaluator))
     }
 }
 
@@ -321,15 +325,19 @@ pub fn eval_with_options(path: &Path, options: EvalOptions) -> Result<EvalOutcom
     builder.eval(path)
 }
 
-#[cfg(feature = "native-io")]
+#[cfg(feature = "async")]
 async fn eval_with_evaluator(path: &Path, mut evaluator: Evaluator) -> Result<EvalOutcome> {
     evaluator.set_base_path(path.parent().unwrap_or(Path::new(".")));
-    let value = evaluator.eval_file_pub(path).await?;
-    let value = evaluator.apply_converters(value).await?;
-    Ok(EvalOutcome {
+    let value = evaluator.eval_file_converted(path).await?;
+    Ok(outcome(value, &mut evaluator))
+}
+
+#[cfg(feature = "native-io")]
+fn outcome(value: Value, evaluator: &mut Evaluator) -> EvalOutcome {
+    EvalOutcome {
         json: value.to_json(),
         env_reads: evaluator.take_env_reads(),
-    })
+    }
 }
 
 /// Analyze imports of a pkl file, returning all transitive local file dependencies.
