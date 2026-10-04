@@ -3974,7 +3974,10 @@ function: Function1<Int, Int> = (x) -> x
     assert_eq!(json["instance"]["value"], 1);
 
     let class_default = eval_fails("class C { value: Int = \"bad\" }\ninstance = new C {}\n");
-    assert!(class_default.contains("property 'value'"), "{class_default}");
+    assert!(
+        class_default.contains("property 'value'"),
+        "{class_default}"
+    );
 
     let body = eval_fails("items: Listing(this.length == 1) { 1; 2 }\n");
     assert!(body.contains("property 'items'"), "{body}");
