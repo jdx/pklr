@@ -1004,3 +1004,105 @@ pub(super) fn mapping_amendment_scopes(
     }
     (inherited, amendment)
 }
+
+#[cfg(test)]
+mod source_scope_tests {
+    use super::*;
+
+    fn int(scope: &SourceScope, name: &str) -> Option<i64> {
+        match scope.parts().values.get(name) {
+            Some(Value::Int(n)) => Some(*n),
+            None => None,
+            Some(other) => panic!("expected an int for {name}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn keeps_bindings_from_capture_time() {
+        let mut outer = Scope::default();
+        outer.set("a", Value::Int(1));
+        let mut inner = outer.child();
+        inner.set("b", Value::Int(2));
+        let captured = SourceScope::lazy(&inner, Vec::new(), Vec::new());
+        // Writes after the capture, to the captured level and to the live
+        // scope it shares maps with, must not show through.
+        inner.set("b", Value::Int(20));
+        inner.set("c", Value::Int(3));
+        outer.set("a", Value::Int(10));
+        assert_eq!(int(&captured, "a"), Some(1));
+        assert_eq!(int(&captured, "b"), Some(2));
+        assert_eq!(int(&captured, "c"), None);
+    }
+
+    #[test]
+    fn flattens_like_the_scope() {
+        let mut outer = Scope::default();
+        outer.set("a", Value::Int(1));
+        outer.declare("d", Value::Int(4));
+        outer.set_module_identity("m".into(), "mod.pkl".into());
+        outer.set_type_alias("T", crate::parser::TypeExpr::Named("Int".into()));
+        let mut inner = outer.child();
+        inner.set("a", Value::Int(2));
+        inner.declare_poisoned("p".into(), "failed".into());
+        let captured = SourceScope::lazy(&inner, Vec::new(), Vec::new());
+        let parts = captured.parts();
+        assert_eq!(parts.values, inner.flatten());
+        assert_eq!(parts.declared, inner.flatten_declared());
+        assert_eq!(parts.module_identities, inner.flatten_module_identities());
+        assert_eq!(parts.type_aliases, inner.flatten_type_aliases());
+        assert_eq!(int(&captured, "a"), Some(2));
+    }
+
+    #[test]
+    fn leaves_out_hidden_bindings() {
+        let mut scope = Scope::default();
+        for name in ["this", "outer", "kept"] {
+            scope.set(name, Value::Int(1));
+            scope.set_module_identity(name.into(), format!("{name}.pkl"));
+        }
+        let captured = SourceScope::lazy(
+            &scope,
+            vec![name_of("this"), name_of("outer")],
+            vec!["outer"],
+        );
+        let parts = captured.parts();
+        assert_eq!(
+            parts.values.keys().map(|k| &**k).collect::<Vec<_>>(),
+            ["kept"]
+        );
+        assert_eq!(
+            parts.module_identities.keys().collect::<Vec<_>>(),
+            ["this", "kept"]
+        );
+    }
+
+    #[test]
+    fn clones_match_before_and_after_flattening() {
+        let mut scope = Scope::default();
+        scope.set("a", Value::Int(1));
+        let captured = SourceScope::lazy(&scope, Vec::new(), Vec::new());
+        // Cloned while still pending: it keeps its own copy of the chain.
+        let pending_clone = captured.clone();
+        scope.set("a", Value::Int(2));
+        captured.parts();
+        // Cloned after flattening: it copies the flattened bindings.
+        let flattened_clone = captured.clone();
+        assert_eq!(int(&pending_clone, "a"), Some(1));
+        assert_eq!(int(&flattened_clone, "a"), Some(1));
+        assert_eq!(pending_clone, captured);
+        assert_eq!(flattened_clone, captured);
+    }
+
+    #[test]
+    fn writes_go_to_the_flattened_bindings() {
+        let mut scope = Scope::default();
+        scope.set("a", Value::Int(1));
+        let mut captured = SourceScope::lazy(&scope, Vec::new(), Vec::new());
+        captured
+            .parts_mut()
+            .values
+            .insert(name_of("b"), Value::Int(2));
+        assert_eq!(int(&captured, "a"), Some(1));
+        assert_eq!(int(&captured, "b"), Some(2));
+    }
+}
