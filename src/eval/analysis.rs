@@ -966,7 +966,7 @@ pub(super) fn collect_sibling_field_refs_expr(
         Expr::Index(base, index) => {
             if is_module_sibling_ref(base, include_this) {
                 if let Expr::String(key) = index.as_ref() {
-                    refs.insert(key.clone());
+                    refs.insert(key.to_string());
                 } else {
                     refs.insert(DYNAMIC_SIBLING_REF.to_string());
                 }
@@ -1011,8 +1011,8 @@ pub(super) fn collect_sibling_field_refs_expr(
             // `module.field` reads in the checked type's constraints.
             collect_sibling_field_refs_type(ty, refs);
         }
-        Expr::Lambda(_, body)
-        | Expr::Unop(_, body)
+        Expr::Lambda(_, body) => collect_sibling_field_refs_expr(body, refs, include_this),
+        Expr::Unop(_, body)
         | Expr::Throw(body)
         | Expr::Trace(body)
         | Expr::Read(body)
@@ -1818,8 +1818,8 @@ pub(super) fn collect_unshadowed_names(expr: &Expr, names: &mut HashSet<String>)
             collect_unshadowed_names(value, names);
             collect_unshadowed_type_names(ty, names);
         }
-        Expr::Lambda(_, value)
-        | Expr::Unop(_, value)
+        Expr::Lambda(_, value) => collect_unshadowed_names(value, names),
+        Expr::Unop(_, value)
         | Expr::Throw(value)
         | Expr::Trace(value)
         | Expr::Read(value)
@@ -2000,8 +2000,8 @@ fn expr_mentions(expr: &Expr, name: &str) -> bool {
         Expr::Is(value, ty) | Expr::As(value, ty) => {
             expr_mentions(value, name) || type_mentions(ty, name)
         }
-        Expr::Lambda(_, value)
-        | Expr::Unop(_, value)
+        Expr::Lambda(_, value) => expr_mentions(value, name),
+        Expr::Unop(_, value)
         | Expr::Throw(value)
         | Expr::Trace(value)
         | Expr::Read(value)
@@ -2089,7 +2089,7 @@ impl InstanceReads {
             }
             Expr::Index(base, index) if is_reference(base) => match index.as_ref() {
                 Expr::String(key) => {
-                    self.members.insert(key.clone());
+                    self.members.insert(key.to_string());
                 }
                 index => {
                     self.escapes = true;
@@ -2125,8 +2125,8 @@ impl InstanceReads {
             }
             // A type's constraints bind `this` to the checked value.
             Expr::Is(value, _) | Expr::As(value, _) => self.expr(value, depth),
-            Expr::Lambda(_, value)
-            | Expr::Unop(_, value)
+            Expr::Lambda(_, value) => self.expr(value, depth),
+            Expr::Unop(_, value)
             | Expr::Throw(value)
             | Expr::Trace(value)
             | Expr::Read(value)

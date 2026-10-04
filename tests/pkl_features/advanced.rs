@@ -131,6 +131,45 @@ myStep = new Step {
 }
 
 #[test]
+fn converter_applies_to_every_reference_to_a_shared_value() {
+    // The same mapping and step are referenced from several places; each
+    // occurrence is converted, including inside a value that is also
+    // converted on its own.
+    let json = eval_with_converters(
+        r#"
+class Step {
+    check: String = ""
+}
+
+output {
+    renderer {
+        converters {
+            [Step] = (s) -> new Dynamic {
+                _type = "step"
+                ...s.toMap().toDynamic()
+            }
+        }
+    }
+}
+
+local sharedStep = new Step { check = "a" }
+local sharedSteps = new Mapping { ["one"] = sharedStep; ["two"] = sharedStep }
+first { steps = sharedSteps }
+second { steps = sharedSteps }
+list = List(sharedStep, sharedSteps)
+"#,
+    );
+    for hook in ["first", "second"] {
+        for name in ["one", "two"] {
+            assert_eq!(json[hook]["steps"][name]["_type"], "step");
+            assert_eq!(json[hook]["steps"][name]["check"], "a");
+        }
+    }
+    assert_eq!(json["list"][0]["_type"], "step");
+    assert_eq!(json["list"][1]["two"]["_type"], "step");
+}
+
+#[test]
 fn converter_applies_to_amended_instance() {
     // Amending an instance preserves its class identity, so the class-keyed
     // converter still matches the amended value.

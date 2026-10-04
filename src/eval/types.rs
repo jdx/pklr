@@ -18,7 +18,7 @@ pub(super) fn collect_deprecated(entries: &[Entry]) -> IndexMap<String, Option<S
                         && p.name == "message"
                         && let Some(Expr::String(s)) = &p.value
                     {
-                        message = Some(s.clone());
+                        message = Some(s.to_string());
                     }
                 }
                 out.insert(prop.name.clone(), message);
@@ -46,12 +46,24 @@ pub(super) fn merge_deprecated(
 /// Resolve return-type aliases while their definition scope is available.
 /// Value::Lambda captures values, so type aliases would otherwise be lost at
 /// invocation. Keep inference errors lazy until the selected branch is called.
+/// Whether [`capture_method_result_types`] would change `expr`.
+pub(super) fn needs_method_result_types(expr: &Expr) -> bool {
+    match expr {
+        Expr::InferredNew(..) => true,
+        Expr::If(_, then_expr, else_expr) => {
+            needs_method_result_types(then_expr) || needs_method_result_types(else_expr)
+        }
+        Expr::Let(_, _, body) | Expr::Trace(body) => needs_method_result_types(body),
+        _ => false,
+    }
+}
+
 pub(super) fn capture_method_result_types(expr: &mut Expr, scope: &Scope) {
     match expr {
         Expr::InferredNew(ty, entries) => {
             *expr = match inferred_new_type(ty, scope, 0) {
                 Ok((name, params)) => Expr::New(Some(name), std::mem::take(entries), params),
-                Err(error) => Expr::Throw(Box::new(Expr::String(error.to_string()))),
+                Err(error) => Expr::Throw(Box::new(Expr::String(error.to_string().into()))),
             };
         }
         Expr::If(_, then_expr, else_expr) => {
@@ -99,11 +111,11 @@ impl AliasResolver<'_> {
             Expr::Field(value, _)
             | Expr::NullSafeField(value, _)
             | Expr::Unop(_, value)
-            | Expr::Lambda(_, value)
             | Expr::Throw(value)
             | Expr::Trace(value)
             | Expr::Read(value)
             | Expr::ReadOrNull(value) => self.expr(value, shadowed),
+            Expr::Lambda(_, value) => self.expr(Arc::make_mut(value), shadowed),
             Expr::Index(left, right) | Expr::Binop(_, left, right) | Expr::Let(_, left, right) => {
                 self.expr(left, shadowed);
                 self.expr(right, shadowed);
@@ -159,6 +171,7 @@ impl AliasResolver<'_> {
     fn entry(&mut self, entry: &mut Entry, shadowed: &HashSet<String>) {
         match entry {
             Entry::Property(prop) => {
+                let prop = Arc::make_mut(prop);
                 if let Some(ty) = &mut prop.type_ann {
                     self.ty(ty, shadowed);
                 }
