@@ -60,6 +60,55 @@ amended = (factory) { stdin = true }
     assert_eq!(val["amended"]["step"]["check"], "prettier --stdin-filepath");
 }
 
+/// Set in the child process spawned by `import_glob_keys_are_relative_for_relative_entry_path`.
+const RELATIVE_GLOB_CHILD_ENV: &str = "PKLR_TEST_RELATIVE_GLOB_CHILD";
+
+#[tokio::test]
+async fn import_glob_keys_are_relative_for_relative_entry_path() {
+    if std::env::var_os(RELATIVE_GLOB_CHILD_ENV).is_some() {
+        // Running in the child process, whose cwd is the temp dir.
+        let val = pklr::eval_to_json_async(std::path::Path::new("main.pkl"))
+            .await
+            .unwrap();
+        assert_eq!(val["result"], "used");
+        return;
+    }
+
+    let temp = TestTempDir::new("pklr_test_import_glob_relative_entry");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("parts")).unwrap();
+    std::fs::write(dir.join("parts/used.pkl"), r#"value = "used""#).unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import* "parts/*.pkl" as Parts
+result = Parts["parts/used.pkl"].value
+"#,
+    )
+    .unwrap();
+
+    // The entry path must be bare (`main.pkl`) to hit the empty-parent case, which
+    // needs the cwd to be the temp dir. Changing the cwd in-process would race
+    // with other tests that use cwd-relative paths, so rerun just this test in a
+    // child process instead.
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "imports::import_glob_keys_are_relative_for_relative_entry_path",
+            "--exact",
+            "--nocapture",
+        ])
+        .env(RELATIVE_GLOB_CHILD_ENV, "1")
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "child test failed:\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[tokio::test]
 async fn import_glob_double_star_crosses_directories() {
     let temp = TestTempDir::new("pklr_test_import_glob_double_star");

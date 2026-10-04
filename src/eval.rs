@@ -836,7 +836,9 @@ impl Evaluator {
         if uri.contains("://") {
             return Ok(Value::Object(Arc::new(IndexMap::new()), None));
         }
-        let base_dir = path.parent().unwrap_or(Path::new("."));
+        // Match `expand_glob`, which walks `.` for a bare entry path, so the
+        // matched paths share this prefix and the keys come out relative.
+        let base_dir = module_dir(path.parent().unwrap_or(Path::new(".")));
         let matched = self.capabilities.glob(base_dir, uri).await?;
         let matched = matched
             .into_iter()
