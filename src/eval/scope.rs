@@ -54,6 +54,11 @@ pub(super) struct Scope {
     /// captured: an instance's scopes, and modules imported meanwhile, start
     /// without it.
     pub(super) defining_class: bool,
+    /// For a `for`/`when` body: the members it writes that a later entry
+    /// of the enclosing amendment amends. Only those are built unchecked
+    /// (as with `defining_class`); siblings keep their checks. Read by the
+    /// body that receives this scope, not by bodies nested in it.
+    pub(super) deferred_members: Option<Arc<FxHashSet<String>>>,
     /// Type names that resolve as no alias from this scope, whatever an
     /// enclosing scope declares: a check scope restoring how a declared type
     /// resolved before a later alias of the same name. Not inherited by
@@ -127,6 +132,7 @@ impl Default for Scope {
             shadows_builtin_type: false,
             aliases_mention_outer: false,
             defining_class: false,
+            deferred_members: None,
             type_alias_barrier: None,
             module_identities: Arc::clone(&empty.strings),
             poisoned: Arc::clone(&empty.strings),
@@ -157,6 +163,7 @@ impl Scope {
             shadows_builtin_type: self.shadows_builtin_type,
             aliases_mention_outer: self.aliases_mention_outer,
             defining_class: self.defining_class,
+            deferred_members: self.deferred_members.clone(),
             type_namespace: self.type_namespace.clone(),
             receiver_entries: self.receiver_entries.clone(),
             receiver_list_base: self.receiver_list_base,
