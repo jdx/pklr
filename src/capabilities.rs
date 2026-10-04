@@ -81,6 +81,18 @@ pub trait EvalCapabilities: Send + Sync {
         base: &'a Path,
         pattern: &'a str,
     ) -> BoxFuture<'a, Result<Vec<PathBuf>>>;
+
+    /// Capabilities to use for everything except HTTP fetches, whose futures
+    /// complete when blocked on from any thread.
+    ///
+    /// The evaluator is synchronous. Under the async API it blocks on host IO
+    /// either in place (on a multi-threaded tokio runtime) or on a worker
+    /// thread that sends each call back to the caller's task. Returning
+    /// capabilities here lets it do file and environment access directly in
+    /// both cases instead. HTTP fetches always use `self`.
+    fn blocking_capabilities(&self) -> Option<Box<dyn EvalCapabilities>> {
+        None
+    }
 }
 
 #[cfg(feature = "native-io")]
@@ -390,6 +402,10 @@ impl EvalCapabilities for NativeCapabilities {
         Ok(())
     }
 
+    fn blocking_capabilities(&self) -> Option<Box<dyn EvalCapabilities>> {
+        Some(Box::new(StdCapabilities))
+    }
+
     fn temp_dir<'a>(&'a mut self, prefix: &'a str) -> BoxFuture<'a, Result<PathBuf>> {
         Box::pin(async move {
             #[cfg(feature = "async")]
@@ -429,6 +445,64 @@ impl EvalCapabilities for NativeCapabilities {
             #[cfg(not(feature = "async"))]
             crate::eval::expand_glob(base, pattern)
         })
+    }
+}
+
+/// [`NativeCapabilities`]' file and environment access without tokio, for
+/// blocking on from any thread. It cannot fetch over HTTP.
+#[cfg(feature = "native-io")]
+struct StdCapabilities;
+
+#[cfg(feature = "native-io")]
+impl EvalCapabilities for StdCapabilities {
+    fn read_to_string<'a>(&'a mut self, path: &'a Path) -> BoxFuture<'a, Result<String>> {
+        Box::pin(async move {
+            std::fs::read_to_string(path)
+                .map_err(|error| crate::Error::Io(path.to_path_buf(), error))
+        })
+    }
+
+    fn path_exists<'a>(&'a mut self, path: &'a Path) -> BoxFuture<'a, Result<bool>> {
+        Box::pin(async move { Ok(path.exists()) })
+    }
+
+    fn canonicalize<'a>(&'a mut self, path: &'a Path) -> BoxFuture<'a, Result<PathBuf>> {
+        Box::pin(async move {
+            path.canonicalize()
+                .map_err(|error| crate::Error::Io(path.to_path_buf(), error))
+        })
+    }
+
+    fn read_env<'a>(&'a mut self, name: &'a str) -> BoxFuture<'a, Result<Option<String>>> {
+        Box::pin(async move { Ok(std::env::var(name).ok()) })
+    }
+
+    fn fetch_text<'a>(&'a mut self, url: &'a str) -> BoxFuture<'a, Result<String>> {
+        Box::pin(async move {
+            Err(crate::Error::Unsupported(format!(
+                "HTTP fetch is not available here: {url}"
+            )))
+        })
+    }
+
+    fn fetch_bytes<'a>(&'a mut self, url: &'a str) -> BoxFuture<'a, Result<Vec<u8>>> {
+        Box::pin(async move {
+            Err(crate::Error::Unsupported(format!(
+                "HTTP fetch is not available here: {url}"
+            )))
+        })
+    }
+
+    fn temp_dir<'a>(&'a mut self, prefix: &'a str) -> BoxFuture<'a, Result<PathBuf>> {
+        Box::pin(async move { unique_temp_dir(prefix) })
+    }
+
+    fn glob<'a>(
+        &'a mut self,
+        base: &'a Path,
+        pattern: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<PathBuf>>> {
+        Box::pin(async move { crate::eval::expand_glob(base, pattern) })
     }
 }
 
