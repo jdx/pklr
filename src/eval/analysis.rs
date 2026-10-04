@@ -1099,6 +1099,12 @@ fn module_member_dependencies(entry: &Entry) -> HashSet<String> {
             }
         }
         Entry::ClassDef(_, _, parent, body) => {
+            // Keep qualified `module.x` reads separate from lexical class
+            // member references. A class property named `x` shadows a bare
+            // `x`, but must not erase this explicit dependency on the
+            // module's `x` when we remove those lexical members below.
+            let mut module_refs = HashSet::default();
+            collect_sibling_field_refs_entries(body, &mut module_refs);
             collect_sibling_field_refs_entries(body, &mut refs);
             if let Some((root, rest)) = parent.as_deref().and_then(|name| name.split_once('.'))
                 && root == "module"
@@ -1110,6 +1116,7 @@ fn module_member_dependencies(entry: &Entry) -> HashSet<String> {
                     refs.remove(&prop.name);
                 }
             }
+            refs.extend(module_refs);
         }
         Entry::TypeAlias(_, ty) => collect_sibling_field_refs_type(ty, &mut refs),
         _ => {}
