@@ -54,7 +54,7 @@ impl PrefetchState {
         Self {
             attempted: HashSet::default(),
             requests: MAX_REQUESTS,
-            bytes: FetchBudget::new(MAX_BYTES).cancelled_by(cancel),
+            bytes: FetchBudget::with_cancel(MAX_BYTES, cancel),
         }
     }
 }

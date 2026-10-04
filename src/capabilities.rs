@@ -118,9 +118,15 @@ pub trait EvalCapabilities: Send + Sync {
 /// A byte budget shared by the requests of a batch fetch
 /// ([`EvalCapabilities::fetch_text_many`] and
 /// [`EvalCapabilities::fetch_bytes_many`]). It is safe to use from several
-/// threads at once.
-#[derive(Debug)]
+/// threads at once, and clones share it, so tasks that must own their budget
+/// (for example on an async runtime) can each hold a clone.
+#[derive(Debug, Clone)]
 pub struct FetchBudget {
+    state: std::sync::Arc<BudgetState>,
+}
+
+#[derive(Debug)]
+struct BudgetState {
     remaining: AtomicU64,
     /// When set, the budget counts as spent.
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
@@ -129,23 +135,25 @@ pub struct FetchBudget {
 impl FetchBudget {
     /// A budget of `bytes` response bytes.
     pub fn new(bytes: u64) -> Self {
+        Self::with_cancel(bytes, None)
+    }
+
+    /// A budget of `bytes` that counts as spent once `cancel` is set.
+    pub(crate) fn with_cancel(
+        bytes: u64,
+        cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Self {
         Self {
-            remaining: AtomicU64::new(bytes),
-            cancel: None,
+            state: std::sync::Arc::new(BudgetState {
+                remaining: AtomicU64::new(bytes),
+                cancel,
+            }),
         }
     }
 
-    /// Treat the budget as spent once `cancel` is set.
-    pub(crate) fn cancelled_by(
-        mut self,
-        cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    ) -> Self {
-        self.cancel = cancel;
-        self
-    }
-
     fn is_cancelled(&self) -> bool {
-        self.cancel
+        self.state
+            .cancel
             .as_ref()
             .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
     }
@@ -160,7 +168,7 @@ impl FetchBudget {
         if self.is_cancelled() {
             return 0;
         }
-        self.remaining.load(Ordering::Acquire)
+        self.state.remaining.load(Ordering::Acquire)
     }
 
     /// Whether no bytes are left, so no new request should start.
@@ -183,15 +191,11 @@ impl FetchBudget {
     /// Atomically replace the remaining bytes with `next(remaining)`, unless
     /// it returns `None`. Returns the new value.
     fn update(&self, next: impl Fn(u64) -> Option<u64>) -> Option<u64> {
-        let mut left = self.remaining.load(Ordering::Acquire);
+        let remaining = &self.state.remaining;
+        let mut left = remaining.load(Ordering::Acquire);
         loop {
             let new = next(left)?;
-            match self.remaining.compare_exchange_weak(
-                left,
-                new,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
+            match remaining.compare_exchange_weak(left, new, Ordering::AcqRel, Ordering::Acquire) {
                 Ok(_) => return Some(new),
                 Err(actual) => left = actual,
             }
@@ -556,12 +560,10 @@ mod reqwest_backend {
     {
         let client = client.clone();
         let urls = urls.to_vec();
-        // The tasks need a budget they can own; settle with the caller's
-        // when they are done.
-        let start = budget.remaining();
-        let shared = Arc::new(FetchBudget::new(start));
-        let task_budget = shared.clone();
-        let results = block_on(async move {
+        // Every task holds a clone of the caller's budget, so bytes and
+        // cancellation are shared with it as they happen.
+        let task_budget = budget.clone();
+        block_on(async move {
             let permits = Arc::new(tokio::sync::Semaphore::new(super::MAX_CONCURRENT_FETCHES));
             let mut tasks = tokio::task::JoinSet::new();
             for (index, url) in urls.into_iter().enumerate() {
@@ -569,6 +571,12 @@ mod reqwest_backend {
                 let permits = permits.clone();
                 let budget = task_budget.clone();
                 tasks.spawn(async move {
+                    // Queued tasks give up without a request once the budget
+                    // is spent (or the evaluation cancelled), before and
+                    // after waiting for a permit.
+                    if budget.is_spent() {
+                        return (index, Err(budget_spent(&url)));
+                    }
                     let _permit = permits
                         .acquire_owned()
                         .await
@@ -592,9 +600,7 @@ mod reqwest_backend {
                 .into_iter()
                 .map(|result| result.expect("every URL is fetched"))
                 .collect()
-        });
-        budget.charge(start - shared.remaining());
-        results
+        })
     }
 
     /// Fetch `url`'s body. No request starts once `budget` is spent, and a

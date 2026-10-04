@@ -296,3 +296,53 @@ fn a_cancelled_evaluation_fails_with_a_cancelled_error() {
 
     assert!(error.contains("evaluation cancelled"), "{error}");
 }
+
+/// With a reqwest client, dropping `eval_async`'s future also stops the
+/// prefetch batch: tasks still queued for a permit send no request.
+#[tokio::test(flavor = "multi_thread")]
+async fn timing_out_eval_async_stops_a_reqwest_batch() {
+    const WIDE: usize = 32;
+    let server = common::DelayedServer::start_with(
+        |path| {
+            if path == "/Main.pkl" {
+                let mut main = String::new();
+                for index in 0..WIDE {
+                    main.push_str(&format!("import \"W{index}.pkl\"\n"));
+                }
+                main.push_str("value = W0.value\n");
+                return Some(main);
+            }
+            Some("value = 1\n".to_string())
+        },
+        std::time::Duration::from_millis(300),
+    );
+    let path = common::write_entry(
+        "async_timeout_cancels_reqwest",
+        "main.pkl",
+        &format!("import \"{}/Main.pkl\"\nresult = Main.value\n", server.base),
+    );
+
+    // Main takes one delay; its 32 imports then go out eight at a time, so
+    // the whole batch would take four more.
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(450),
+        pklr::EvaluatorBuilder::new()
+            .http_client(pklr::reqwest::Client::new())
+            .eval_to_json_async(&path),
+    )
+    .await;
+    assert!(result.is_err(), "evaluation finished before the timeout");
+
+    // Let the requests in flight at the timeout finish.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let after_cancel = server.requests();
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+
+    assert_eq!(
+        server.requests(),
+        after_cancel,
+        "requests kept starting after the evaluation was cancelled"
+    );
+    // Main plus at most one round of eight.
+    assert!(after_cancel <= 9, "{after_cancel} requests");
+}
