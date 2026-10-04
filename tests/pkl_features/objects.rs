@@ -1407,6 +1407,32 @@ obj = (base) { checked: Int(this < limit) = 1 }
 }
 
 #[test]
+fn amendment_constraint_reads_sibling_added_by_amendment() {
+    let json = eval(
+        r#"
+base {}
+obj = (base) {
+  checked: Int(this < limit) = 1
+  limit: Int = 2
+  hidden secret: Int(this < limit) = 0
+}
+"#,
+    );
+    assert_eq!(json["obj"]["checked"], 1);
+    assert_eq!(json["obj"]["limit"], 2);
+    let message = eval_fails(
+        r#"
+base {}
+obj = (base) {
+  checked: Int(this < limit) = 3
+  limit: Int = 2
+}
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+}
+
+#[test]
 fn local_checked_against_alias_declared_later() {
     let message = eval_fails(
         r#"
