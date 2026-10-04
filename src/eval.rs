@@ -458,11 +458,7 @@ impl Evaluator {
             Err(_) => current_path.to_path_buf(),
         };
         #[cfg(feature = "package-zip")]
-        let roots: Vec<PathBuf> = self
-            .package_dirs
-            .values()
-            .cloned()
-            .collect();
+        let roots: Vec<PathBuf> = self.package_dirs.values().cloned().collect();
         #[cfg(feature = "package-zip")]
         let root = roots.into_iter().find_map(|root| {
             let root = self.canonicalize_io(&root).unwrap_or(root);
