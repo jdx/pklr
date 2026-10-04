@@ -1079,7 +1079,9 @@ impl Evaluator {
             if uri.contains("://") {
                 break;
             }
-            let base_path = self.resolve_local_path(&from, &uri);
+            let Ok(base_path) = self.resolve_local_path(&from, &uri) else {
+                break;
+            };
             let Ok(base) = self.parse_file(&base_path) else {
                 break;
             };
