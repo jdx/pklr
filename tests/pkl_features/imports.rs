@@ -2682,10 +2682,9 @@ fn triple_dot_import_from_relative_entry_path() {
 /// `path` relative to the current directory, through `..` components.
 fn pathdiff(path: &std::path::Path) -> std::path::PathBuf {
     let cwd = std::env::current_dir().unwrap();
-    let common = cwd
-        .ancestors()
-        .find(|ancestor| path.starts_with(ancestor))
-        .unwrap();
+    let Some(common) = cwd.ancestors().find(|ancestor| path.starts_with(ancestor)) else {
+        return path.to_path_buf();
+    };
     let ups = cwd.strip_prefix(common).unwrap().components().count();
     let mut relative: std::path::PathBuf = std::iter::repeat_n("..", ups).collect();
     relative.push(path.strip_prefix(common).unwrap());

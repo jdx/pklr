@@ -433,7 +433,9 @@ impl Evaluator {
         if let Some(triple_dot) = parse_triple_dot_path(uri)? {
             return Ok(self
                 .resolve_triple_dot(current_path, triple_dot)?
-                .unwrap_or_else(|| PathBuf::from(uri)));
+                // Keep a miss in the importing module's namespace. Returning
+                // the URI by itself would let a CWD entry named `...` win.
+                .unwrap_or_else(|| current_path.parent().unwrap_or(Path::new(".")).join(uri)));
         }
         Ok(current_path.parent().unwrap_or(Path::new(".")).join(uri))
     }
