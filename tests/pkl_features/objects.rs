@@ -5290,3 +5290,19 @@ fn self_referential_type_alias_is_an_error() {
         assert!(err.contains("refers to itself"), "{src}: {err}");
     }
 }
+
+#[test]
+fn class_named_like_a_builtin_type_is_resolved_in_declared_types() {
+    // A class shadows the built-in type of the same name, so the declared
+    // type names the class, in properties and object bodies alike.
+    let json = eval("class Int { v = 1 }\nx: Int = new Int {}\n");
+    assert_eq!(json["x"]["v"], 1);
+    let err = eval_fails("class Int { v = 1 }\nx: Int = 1\n");
+    assert!(err.contains("property 'x' expected Int"), "{err}");
+    let json = eval("class String { v = 1 }\nobj { x: String = new String {} }\n");
+    assert_eq!(json["obj"]["x"]["v"], 1);
+    let err = eval_fails("class String { v = 1 }\nobj { x: String = \"s\" }\n");
+    assert!(err.contains("property 'x' expected String"), "{err}");
+    let json = eval("class Int { v = 1 }\nx: Int? = null\n");
+    assert_eq!(json["x"], serde_json::Value::Null);
+}

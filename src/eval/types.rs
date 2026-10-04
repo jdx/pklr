@@ -74,7 +74,7 @@ pub(super) fn capture_type_aliases(expr: &mut Expr, scope: &Scope) {
         scope,
         expanding: Vec::new(),
     }
-    .expr(expr, &HashSet::new());
+    .expr(expr, &HashSet::default());
 }
 
 struct AliasResolver<'a> {
@@ -204,7 +204,7 @@ impl AliasResolver<'_> {
         self.expanding.push(name.to_string());
         // The definition belongs to the defining scope, where names the use
         // site redeclares still mean the enclosing aliases.
-        self.ty(&mut ty, &HashSet::new());
+        self.ty(&mut ty, &HashSet::default());
         self.expanding.pop();
         Some(ty)
     }
