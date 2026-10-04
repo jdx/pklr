@@ -660,6 +660,20 @@ setPlusList = (Set(1, 2) + List(2, 3)) == Set(1, 2, 3)
 }
 
 #[test]
+fn amending_a_mapping_typed_value_keeps_its_entries() {
+    let json = eval(
+        r#"
+class C { m: Mapping = Map("a", 1).toMapping() }
+bare = new C { m { ["b"] = 2 } }
+class D { m: Mapping<String, Int> = Map("a", 1).toMapping() }
+typed = new D { m { ["b"] = 2 } }
+"#,
+    );
+    assert_eq!(json["bare"]["m"], serde_json::json!({ "a": 1, "b": 2 }));
+    assert_eq!(json["typed"]["m"], serde_json::json!({ "a": 1, "b": 2 }));
+}
+
+#[test]
 fn bare_mapping_default_is_a_mapping() {
     let json = eval(
         r#"
