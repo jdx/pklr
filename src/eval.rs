@@ -971,6 +971,14 @@ fn amendment_deferral(
     (FxHashSet<usize>, FxHashMap<usize, Arc<FxHashSet<String>>>),
     Vec<(usize, String)>,
 ) {
+    // Most amendments amend no member with a body at all.
+    if !merged.iter().any(|entry| match entry {
+        Entry::Property(prop) => prop.body.is_some() && prop.value.is_none(),
+        Entry::ForGenerator(_) | Entry::WhenGenerator(_) => true,
+        _ => false,
+    }) {
+        return Default::default();
+    }
     let mut amended = FxHashSet::default();
     let mut generator_members: FxHashMap<usize, FxHashSet<String>> = FxHashMap::default();
     let mut uncertain = Vec::new();
@@ -6093,7 +6101,6 @@ impl Evaluator {
         let mut never_deferred: FxHashSet<(usize, String)> = FxHashSet::default();
         let mut result = loop {
             let (deferral, uncertain) = amendment_deferral(&merged, &never_deferred);
-            let uncertain_entries = uncertain.clone();
             let checked = match overlay_checked.take() {
                 Some(checked) if !uncertain.is_empty() => {
                     overlay_checked = Some(checked.clone());
@@ -6107,6 +6114,7 @@ impl Evaluator {
                 (!uncertain.is_empty())
                     .then(|| uncertain.iter().map(|(_, name)| name.clone()).collect()),
             );
+            let uncertain_entries = uncertain;
             let retrying = !never_deferred.is_empty();
             if retrying {
                 self.retry_passes += 1;
