@@ -34,6 +34,7 @@ use mapping::*;
 pub(crate) use package::write_atomic;
 use package::*;
 use remote::*;
+pub(crate) use remote::{parse_triple_dot_path, resolve_triple_dot};
 pub(crate) use scope::SourceScope;
 use scope::*;
 use types::*;
@@ -415,20 +416,42 @@ impl Evaluator {
         self.base_path = path.to_path_buf();
     }
 
-    fn resolve_local_path(&self, current_path: &Path, uri: &str) -> PathBuf {
+    /// The local file a `file:` or relative module URI in the module at
+    /// `current_path` names.
+    fn local_file_path(&mut self, current_path: &Path, uri: &str) -> Result<PathBuf> {
+        match uri.strip_prefix("file://") {
+            Some(path) => Ok(PathBuf::from(path)),
+            None => self.resolve_local_path(current_path, uri),
+        }
+    }
+
+    /// Resolve a local module or resource URI against the module at
+    /// `current_path`. A triple-dot URI is searched for upward from the
+    /// module's directory (see [`Self::resolve_triple_dot`]); a path that
+    /// cannot be found resolves to a path that does not exist.
+    fn resolve_local_path(&mut self, current_path: &Path, uri: &str) -> Result<PathBuf> {
+        if let Some(triple_dot) = parse_triple_dot_path(uri)? {
+            return Ok(self
+                .resolve_triple_dot(current_path, triple_dot)?
+                .unwrap_or_else(|| PathBuf::from(uri)));
+        }
+        Ok(current_path.parent().unwrap_or(Path::new(".")).join(uri))
+    }
+
+    /// Resolve the triple-dot `path` for the module at `current_path`.
+    /// Inside an extracted package the search stops at the package root.
+    fn resolve_triple_dot(&mut self, current_path: &Path, path: &str) -> Result<Option<PathBuf>> {
         #[cfg(feature = "package-zip")]
-        if let Some(from_root) = uri.strip_prefix(".../")
-            && let Some(root) = self
-                .package_dirs
-                .values()
-                .find(|root| current_path.starts_with(root))
-        {
-            return root.join(from_root);
-        }
-        if let Some(from_root) = uri.strip_prefix(".../") {
-            return self.base_path.join(from_root);
-        }
-        current_path.parent().unwrap_or(Path::new(".")).join(uri)
+        let root = self
+            .package_dirs
+            .values()
+            .find(|root| current_path.starts_with(root))
+            .cloned();
+        #[cfg(not(feature = "package-zip"))]
+        let root: Option<PathBuf> = None;
+        resolve_triple_dot(current_path, path, root.as_deref(), |candidate| {
+            self.path_exists_io(candidate)
+        })
     }
 
     fn module_type_namespace(&mut self, path: &Path) -> String {
@@ -694,11 +717,7 @@ impl Evaluator {
         if uri.starts_with("pkl:") || (uri.contains("://") && !uri.starts_with("file://")) {
             return Ok(None);
         }
-        let import_path = if let Some(rel) = uri.strip_prefix("file://") {
-            PathBuf::from(rel)
-        } else {
-            self.resolve_local_path(path, uri)
-        };
+        let import_path = self.local_file_path(path, uri)?;
         if !self.path_exists_io(&import_path)? {
             return Ok(None);
         }
@@ -1190,11 +1209,7 @@ impl Evaluator {
         }
 
         if !uri.contains("://") || uri.starts_with("file://") {
-            let import_path = if let Some(rel) = uri.strip_prefix("file://") {
-                PathBuf::from(rel)
-            } else {
-                self.resolve_local_path(path, uri)
-            };
+            let import_path = self.local_file_path(path, uri)?;
             if !self.path_exists_io(&import_path)? {
                 return Err(Error::ImportNotFound(import_path.display().to_string()));
             }
@@ -1563,8 +1578,9 @@ impl Evaluator {
             .amends
             .iter()
             .chain(module.extends.iter())
-            .filter_map(|uri| local_module_path(path, uri))
-            .collect();
+            .filter(|uri| local_module_path(path, uri).is_some())
+            .map(|uri| self.local_file_path(path, uri))
+            .collect::<Result<_>>()?;
         let mut deferred_inherited_imports = Vec::new();
 
         // Process imports
@@ -1712,11 +1728,7 @@ impl Evaluator {
                 continue;
             }
 
-            let import_path = if let Some(rel) = uri.strip_prefix("file://") {
-                PathBuf::from(rel)
-            } else {
-                self.resolve_local_path(path, uri)
-            };
+            let import_path = self.local_file_path(path, uri)?;
             let alias = import.alias.clone().unwrap_or_else(|| {
                 import_path
                     .file_stem()
@@ -1833,11 +1845,7 @@ impl Evaluator {
             } else if !uri.starts_with("pkl:")
                 && (!uri.contains("://") || uri.starts_with("file://"))
             {
-                let amends_path = if let Some(rel) = uri.strip_prefix("file://") {
-                    PathBuf::from(rel)
-                } else {
-                    self.resolve_local_path(path, uri)
-                };
+                let amends_path = self.local_file_path(path, uri)?;
                 if self.path_exists_io(&amends_path)? {
                     self.check_not_self(module, path, &amends_path, "amend")?;
                     let base_val =
@@ -1913,11 +1921,7 @@ impl Evaluator {
             let resolved_extends = resolve_remote_relative(path, extends_uri);
             let uri: &str = resolved_extends.as_deref().unwrap_or(extends_uri);
             if !uri.contains("://") || uri.starts_with("file://") {
-                let extends_path = if let Some(rel) = uri.strip_prefix("file://") {
-                    PathBuf::from(rel)
-                } else {
-                    self.resolve_local_path(path, uri)
-                };
+                let extends_path = self.local_file_path(path, uri)?;
                 if self.path_exists_io(&extends_path)? {
                     self.check_not_self(module, path, &extends_path, "extend")?;
                     let base_module = self.parse_file(&extends_path)?;
