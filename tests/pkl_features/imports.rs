@@ -2470,9 +2470,22 @@ async fn narrowed_import_respects_aliases_redeclared_in_nested_bodies() {
         "length = throw(\"unused\")\ntypealias S = String\ntypealias T = S(length == 1)\nresult {\n  typealias S = String\n  ok = \"b\" is T\n}\n",
     )
     .unwrap();
+    // An identical nested `S = String` still means `Int` when the body also
+    // declares `String = Int`, so checks through `S` (followed via `T`, or
+    // directly) read the module's `length`.
+    std::fs::write(
+        dir.join("dep_followed_shadowed.pkl"),
+        "length = 1\ntypealias S = String\ntypealias T = S(length == 1)\nresult {\n  typealias String = Int\n  typealias S = String\n  ok = 1 is T\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep_shadowed.pkl"),
+        "length = 1\ntypealias S = String\nresult {\n  typealias String = Int\n  typealias S = String\n  ok = 1 is S(this == length)\n}\n",
+    )
+    .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"dep.pkl\" as Dep\nimport \"dep_string.pkl\" as DepString\nimport \"dep_order.pkl\" as DepOrder\nimport \"dep_followed.pkl\" as DepFollowed\nimport \"dep_followed_same.pkl\" as DepFollowedSame\nout = Dep.result.ok\noutString = DepString.result.ok\noutOrder = DepOrder.result.ok\noutFollowed = DepFollowed.result.ok\noutFollowedSame = DepFollowedSame.result.ok\n",
+        "import \"dep.pkl\" as Dep\nimport \"dep_string.pkl\" as DepString\nimport \"dep_order.pkl\" as DepOrder\nimport \"dep_followed.pkl\" as DepFollowed\nimport \"dep_followed_same.pkl\" as DepFollowedSame\nimport \"dep_followed_shadowed.pkl\" as DepFollowedShadowed\nimport \"dep_shadowed.pkl\" as DepShadowed\nout = Dep.result.ok\noutString = DepString.result.ok\noutOrder = DepOrder.result.ok\noutFollowed = DepFollowed.result.ok\noutFollowedSame = DepFollowedSame.result.ok\noutFollowedShadowed = DepFollowedShadowed.result.ok\noutShadowed = DepShadowed.result.ok\n",
     )
     .unwrap();
 
@@ -2484,4 +2497,6 @@ async fn narrowed_import_respects_aliases_redeclared_in_nested_bodies() {
     assert_eq!(val["outOrder"], true);
     assert_eq!(val["outFollowed"], true);
     assert_eq!(val["outFollowedSame"], true);
+    assert_eq!(val["outFollowedShadowed"], true);
+    assert_eq!(val["outShadowed"], true);
 }

@@ -395,10 +395,10 @@ pub(super) fn expand_requested_fields(
                 collect_sibling_field_refs_entries(body, &mut refs);
             }
             // A definition's constraints resolve aliases where the check
-            // happens. If this property's bodies redeclare a module alias with
-            // a different meaning, a check inside them can read a followed
-            // definition differently, so follow definitions without resolving
-            // aliases there.
+            // happens. If this property's bodies declare a type other than an
+            // identical redeclaration of a module alias, a check inside them
+            // can read a followed definition differently, so follow
+            // definitions without resolving aliases there.
             let definition_aliases =
                 if aliases.is_some_and(|aliases| property_redeclares_alias(prop, aliases)) {
                     None
@@ -514,9 +514,10 @@ fn constraint_bound_names(base: &str) -> &'static [&'static str] {
 type TypeAliases<'a> = HashMap<&'a str, &'a crate::parser::TypeExpr>;
 
 /// Whether a type alias or class declared anywhere inside `prop` (in its
-/// body or in object bodies within its value) has the name of one of
-/// `aliases` and may mean something else: a class, or an alias whose
-/// definition differs. An identical redeclaration reads the same either way.
+/// body or in object bodies within its value) may change what a name in
+/// `aliases` means: a class, or an alias that isn't an identical
+/// redeclaration of the module alias of the same name. A new name counts too,
+/// since an identical alias can refer to it (`typealias String = Int`).
 fn property_redeclares_alias(prop: &Property, aliases: &TypeAliases) -> bool {
     prop.value
         .as_ref()
@@ -529,14 +530,8 @@ fn property_redeclares_alias(prop: &Property, aliases: &TypeAliases) -> bool {
 
 fn entries_redeclare_alias(entries: &[Entry], aliases: &TypeAliases) -> bool {
     entries.iter().any(|entry| match entry {
-        Entry::TypeAlias(name, ty)
-            if aliases
-                .get(name.as_str())
-                .is_some_and(|outer_ty| *outer_ty != ty) =>
-        {
-            true
-        }
-        Entry::ClassDef(name, ..) if aliases.contains_key(name.as_str()) => true,
+        Entry::TypeAlias(name, ty) => !is_identical_alias(name, ty, aliases),
+        Entry::ClassDef(..) => true,
         Entry::Property(prop) => property_redeclares_alias(prop, aliases),
         Entry::DynProperty(key, value) => {
             expr_redeclares_alias(key, aliases) || expr_redeclares_alias(value, aliases)
@@ -554,8 +549,22 @@ fn entries_redeclare_alias(entries: &[Entry], aliases: &TypeAliases) -> bool {
                     .is_some_and(|body| entries_redeclare_alias(body, aliases))
         }
         Entry::Spread(expr) | Entry::Elem(expr) => expr_redeclares_alias(expr, aliases),
-        Entry::ClassDef(_, _, _, body) => entries_redeclare_alias(body, aliases),
-        Entry::TypeAlias(..) => false,
+    })
+}
+
+/// Whether `typealias name = ty` redeclares the module alias `name` with the
+/// same definition.
+fn is_identical_alias(name: &str, ty: &crate::parser::TypeExpr, aliases: &TypeAliases) -> bool {
+    aliases.get(name).is_some_and(|outer_ty| *outer_ty == ty)
+}
+
+/// Whether `entries` declare a type alias or class directly (not in nested
+/// bodies) other than an identical redeclaration of one of `aliases`.
+fn declares_other_type(entries: &[Entry], aliases: &TypeAliases) -> bool {
+    entries.iter().any(|entry| match entry {
+        Entry::TypeAlias(name, ty) => !is_identical_alias(name, ty, aliases),
+        Entry::ClassDef(..) => true,
+        _ => false,
     })
 }
 
@@ -777,38 +786,14 @@ fn collect_entry_refs_in(
 ) {
     let mut entry_shadows = shadows.clone();
     entry_shadows.extend(declared_entry_roots(entries));
-    // A type alias or class declared in this body shadows a module alias of
-    // the same name, but only from its declaration on: a local evaluated
-    // earlier in the body still sees the module's alias. So keep resolving the
-    // name only when the body redeclares it identically, which reads the same
-    // in either order, and otherwise stop resolving it, keeping the
-    // conservative reading of its constraints.
-    let narrowed_aliases;
-    let aliases = match aliases {
-        Some(outer)
-            if entries.iter().any(|entry| {
-                matches!(entry, Entry::TypeAlias(name, _) | Entry::ClassDef(name, ..)
-                    if outer.contains_key(name.as_str()))
-            }) =>
-        {
-            let mut narrowed: TypeAliases = outer.iter().map(|(name, ty)| (*name, *ty)).collect();
-            for entry in entries {
-                match entry {
-                    Entry::TypeAlias(name, ty)
-                        if outer
-                            .get(name.as_str())
-                            .is_some_and(|outer_ty| *outer_ty == ty) => {}
-                    Entry::TypeAlias(name, _) | Entry::ClassDef(name, ..) => {
-                        narrowed.remove(name.as_str());
-                    }
-                    _ => {}
-                }
-            }
-            narrowed_aliases = narrowed;
-            Some(&narrowed_aliases)
-        }
-        other => other,
-    };
+    // A type alias or class declared in this body takes effect only from its
+    // declaration on (a local evaluated earlier still sees the module's
+    // aliases), and it can change what a module alias's definition refers to
+    // (`typealias String = Int` under an identical `typealias S = String`). An
+    // identical redeclaration reads the same either way; any other declaration
+    // stops alias resolution in this body, keeping the conservative reading of
+    // its constraints.
+    let aliases = aliases.filter(|aliases| !declares_other_type(entries, aliases));
     for entry in entries {
         match entry {
             Entry::Property(prop) => {
