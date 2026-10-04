@@ -38,7 +38,13 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          if git cat-file -e "$(git merge-base "$BASE_SHA" HEAD):tak.toml" 2>/dev/null; then
+          if ! [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::unexpected base sha: $BASE_SHA"
+            exit 1
+          fi
+          base=$(git rev-parse --verify --end-of-options "$BASE_SHA^{commit}")
+          merge_base=$(git merge-base "$base" HEAD)
+          if git cat-file -e "$merge_base:tak.toml" 2>/dev/null; then
             echo "fail-on-nothing-compared=auto" >> "$GITHUB_OUTPUT"
           else
             echo "fail-on-nothing-compared=false" >> "$GITHUB_OUTPUT"
