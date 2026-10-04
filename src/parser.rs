@@ -67,6 +67,7 @@ pub fn parse_expr_tokens(tokens: &[Token], source: &str, name: &str) -> Result<E
     p.parse_expr()
 }
 
+#[cfg(feature = "eval-core")]
 pub(crate) fn parse_type_name(name: &str) -> Result<TypeExpr> {
     let tokens = crate::lexer::lex(name)?;
     Parser::new(&tokens, name, "<type>").parse_type()
