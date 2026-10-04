@@ -1473,7 +1473,7 @@ impl Evaluator {
             return Err(Error::Eval("maximum recursion depth exceeded".into()));
         }
         let scope = scope.child();
-        for entry in entries {
+        for entry in entries.iter() {
             match entry {
                 Entry::Elem(_) => *length += 1,
                 Entry::DynProperty(index, _) => {
@@ -2941,10 +2941,24 @@ impl Evaluator {
         // Names of members produced by generators and not since rebound by a
         // property entry.
         let mut generated: HashSet<Arc<str>> = HashSet::default();
+        // Most object bodies have only ordinary properties. Avoid allocating
+        // duplicate-tracking maps for that hot path; a generator can itself
+        // produce a duplicate, while dynamic keys only need tracking when
+        // another dynamic key or a generator can collide with them.
+        let mut dynamic_keys = 0usize;
+        let mut has_generator = false;
+        for entry in entries.iter() {
+            match entry {
+                Entry::DynProperty(..) => dynamic_keys += 1,
+                Entry::ForGenerator(..) | Entry::WhenGenerator(..) => has_generator = true,
+                _ => {}
+            }
+        }
         // Members generators produced, by the body (layer) they belong to.
-        let mut generated_by_layer: HashSet<(usize, Arc<str>)> = HashSet::default();
+        let mut generated_by_layer = has_generator.then(HashSet::default);
         // Keys `[key] = value` entries defined, by body (layer) and key type.
-        let mut defined_by_layer: HashSet<(usize, &'static str, Arc<str>)> = HashSet::default();
+        let mut defined_by_layer = (dynamic_keys > 1 || (dynamic_keys != 0 && has_generator))
+            .then(HashSet::default);
         for (entry_index, entry) in entries.iter().enumerate() {
             match entry {
                 Entry::Property(prop) => {
@@ -3028,12 +3042,17 @@ impl Evaluator {
                     let key = self.eval_expr(key_expr, &active_scope, depth)?;
                     let key_str = value_to_key(&key)?;
                     // A body may define each key once (`["k"] { ... }` amends).
-                    if !matches!(val_expr, Expr::ObjectBody(_)) {
+                    if !matches!(val_expr, Expr::ObjectBody(_))
+                        && let Some(defined_by_layer) = &mut defined_by_layer
+                    {
                         let layer = entry_layer(entry_scopes, entry_index);
                         let key_type = value_type_name(&key);
                         if !defined_by_layer.insert((layer, key_type, key_str.clone()))
-                            || (key_type == "String"
-                                && generated_by_layer.contains(&(layer, key_str.clone())))
+                            || (key_type == "String" && generated_by_layer.as_ref().is_some_and(
+                                |generated_by_layer| {
+                                    generated_by_layer.contains(&(layer, key_str.clone()))
+                                },
+                            ))
                         {
                             let key = match &key {
                                 Value::String(s) => format!("{s:?}"),
@@ -3191,9 +3210,11 @@ impl Evaluator {
                                 outer: receiver_members,
                             }),
                         )?;
-                        if let Value::Object(m, _) = body_val {
+                        if let (Value::Object(m, _), Some(generated_by_layer)) =
+                            (body_val, &mut generated_by_layer)
+                        {
                             record_generated_members(
-                                &mut generated_by_layer,
+                                generated_by_layer,
                                 entry_layer(entry_scopes, entry_index),
                                 &m,
                                 &fgen.body,
@@ -3232,9 +3253,11 @@ impl Evaluator {
                                 outer: receiver_members,
                             }),
                         )?;
-                        if let Value::Object(m, _) = body_val {
+                        if let (Value::Object(m, _), Some(generated_by_layer)) =
+                            (body_val, &mut generated_by_layer)
+                        {
                             record_generated_members(
-                                &mut generated_by_layer,
+                                generated_by_layer,
                                 entry_layer(entry_scopes, entry_index),
                                 &m,
                                 &wgen.body,
@@ -3262,9 +3285,11 @@ impl Evaluator {
                                 outer: receiver_members,
                             }),
                         )?;
-                        if let Value::Object(m, _) = else_val {
+                        if let (Value::Object(m, _), Some(generated_by_layer)) =
+                            (else_val, &mut generated_by_layer)
+                        {
                             record_generated_members(
-                                &mut generated_by_layer,
+                                generated_by_layer,
                                 entry_layer(entry_scopes, entry_index),
                                 &m,
                                 else_body,
