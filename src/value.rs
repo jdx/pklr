@@ -143,11 +143,12 @@ impl ObjectSource {
         &self.captured.parts().type_aliases
     }
 
-    /// Whether this source only carries metadata (a module object's failed
-    /// members, or that a mapping is a mapping), with no entries to rebuild
-    /// the object from on amendment: amendments merge into its members.
+    /// Whether this source only carries metadata (failed module members, an
+    /// abstract module marker, or a bare Mapping tag), with no entries to
+    /// rebuild the object from on amendment.
     pub(crate) fn is_metadata_only(&self) -> bool {
         (self.poisoned_members.is_some()
+            || self.is_abstract
             || (self.kind == ObjectKind::Mapping && self.mapping_value_types.is_empty()))
             && self.entries.is_empty()
             && self.evaluated_properties.is_empty()

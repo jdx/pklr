@@ -2667,7 +2667,8 @@ impl Evaluator {
                 is_open: true,
                 is_abstract,
                 type_name: None,
-                type_identity: None,
+                // An abstract module records its name for the `new` error.
+                type_identity: is_abstract.then(|| module_display_name(module, path)),
                 parent_type_names: Vec::new(),
                 parent_type_identities: Vec::new(),
                 entry_scopes: Vec::new(),
@@ -5541,6 +5542,16 @@ impl Evaluator {
         scope: &Scope,
         depth: usize,
     ) -> Result<Value> {
+        // Amending an abstract module's object instantiates it.
+        if let Value::Object(_, Some(source)) = &base
+            && source.is_abstract
+            && source.type_name.is_none()
+        {
+            return Err(Error::Eval(format!(
+                "Cannot instantiate abstract class `{}`.",
+                source.type_identity.as_deref().unwrap_or_default()
+            )));
+        }
         if let Value::List(existing) = base {
             let mut amended = existing;
             let mut amendment_scope = scope.child();

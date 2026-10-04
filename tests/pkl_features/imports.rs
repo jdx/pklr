@@ -3524,4 +3524,20 @@ fn abstract_module_cannot_be_instantiated() {
         pklr::eval_to_json(&dir.join("main.pkl")).unwrap()["y"]["x"],
         2
     );
+    // Amending the object of an abstract module instantiates it too, while
+    // reading its members works.
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"modB.pkl\"\ny = (modB) { z = 2 }\n",
+    )
+    .unwrap();
+    let err = pklr::eval_to_json(&dir.join("main.pkl"))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("Cannot instantiate abstract class `modB`."),
+        "{err}"
+    );
+    std::fs::write(dir.join("main.pkl"), "import \"modB.pkl\"\ny = modB.x\n").unwrap();
+    assert_eq!(pklr::eval_to_json(&dir.join("main.pkl")).unwrap()["y"], 1);
 }
