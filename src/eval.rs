@@ -2432,6 +2432,7 @@ impl Evaluator {
                 && !has_modifier(&prop.modifiers, Modifier::Local)
                 && (prop.value.is_some() || prop.body.is_some())
                 && prop.type_ann.is_some()
+                && scope.is_declared(&prop.name)
                 && let Some(value) = scope.get(&prop.name)
             {
                 self.check_declared_property_type(prop, value, &scope, depth)?;
