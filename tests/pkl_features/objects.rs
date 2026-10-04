@@ -1918,6 +1918,52 @@ second = (first) { when (true) { limit = 4 } }
 }
 
 #[test]
+fn object_local_naming_later_body_alias_is_checked_when_read() {
+    let message = eval_fails(
+        r#"
+obj { local bad: Small = 3; typealias Small = Int(this < 2); out = bad }
+"#,
+    );
+    assert!(
+        message.contains("property 'bad' expected Small"),
+        "{message}"
+    );
+    let json = eval(
+        r#"
+obj { local ok: Small = 1; typealias Small = Int(this < 2); out = ok }
+other { local bad: Small = 3; typealias Small = Int(this < 2); out = 1 }
+"#,
+    );
+    assert_eq!(json["obj"]["out"], 1);
+    assert_eq!(json["other"]["out"], 1);
+    // A name that already resolves keeps that meaning: the module's alias.
+    let json = eval(
+        r#"
+typealias Small = Int(this < 5)
+obj { local x: Small = 3; typealias Small = Int(this < 2); out = x }
+"#,
+    );
+    assert_eq!(json["obj"]["out"], 3);
+}
+
+#[test]
+fn direct_property_constraint_reads_generated_sibling() {
+    let message = eval_fails(
+        r#"
+limit = 10
+obj { checked: Int(this < limit) = 3; when (true) { limit = 2 } }
+"#,
+    );
+    assert!(message.contains("property 'checked' expected"), "{message}");
+    let json = eval(
+        r#"
+obj { checked: Int(this < limit) = 1; when (true) { limit = 2 } }
+"#,
+    );
+    assert_eq!(json["obj"]["checked"], 1);
+}
+
+#[test]
 fn amendment_keeps_inherited_typed_local_lazy() {
     let json = eval(
         r#"

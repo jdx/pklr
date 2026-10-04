@@ -85,6 +85,9 @@ pub struct Evaluator {
     /// Typed properties produced by `for`/`when` bodies, waiting to be
     /// checked once the enclosing object is complete.
     generator_type_checks: Vec<PendingTypeCheck>,
+    /// Number of poison-and-retry passes in progress (see `BodyOutcome`).
+    /// Output with side effects, such as `trace`, is not repeated in them.
+    retry_passes: usize,
 }
 
 /// A declared-type check of a generator-produced property. It runs in the
@@ -217,6 +220,60 @@ fn layer_finished_members(
         layered.insert(name.clone());
     }
     layered
+}
+
+/// The type names `ty` mentions (without `*`, `?` or type arguments).
+fn type_expr_names(ty: &crate::parser::TypeExpr, names: &mut HashSet<String>) {
+    use crate::parser::TypeExpr;
+    let base = |name: &str| {
+        name.trim_start_matches('*')
+            .trim_end_matches('?')
+            .split('<')
+            .next()
+            .unwrap_or(name)
+            .to_string()
+    };
+    match ty {
+        TypeExpr::Named(name) | TypeExpr::Constrained(name, _) => {
+            names.insert(base(name));
+        }
+        TypeExpr::Nullable(inner) => type_expr_names(inner, names),
+        TypeExpr::Union(variants) => {
+            for variant in variants {
+                type_expr_names(variant, names);
+            }
+        }
+        TypeExpr::Generic(name, args) => {
+            names.insert(base(name));
+            for arg in args {
+                type_expr_names(arg, names);
+            }
+        }
+    }
+}
+
+/// Whether `ty` names a type that is not resolvable at the entry at
+/// `entry_index` but is a type alias declared later in the same body. A
+/// body's alias applies only after its declaration, so a name that already
+/// resolves (to an earlier or enclosing alias, or a class) keeps that
+/// meaning. A name that does not resolve yet means the later alias, so the
+/// check waits for the finished body, where it is registered.
+fn names_later_alias(
+    ty: &crate::parser::TypeExpr,
+    scope: &Scope,
+    entries: &[Entry],
+    entry_index: usize,
+) -> bool {
+    let mut names = HashSet::new();
+    type_expr_names(ty, &mut names);
+    names.iter().any(|name| {
+        // Built-in types, aliases in scope and classes already resolve.
+        !type_is_runtime_checkable(&crate::parser::TypeExpr::Named(name.clone()), scope)
+            && entries
+                .iter()
+                .skip(entry_index + 1)
+                .any(|entry| matches!(entry, Entry::TypeAlias(alias, _) if alias == name))
+    })
 }
 
 /// The bindings of the locals written in the same body as the entry at
@@ -524,6 +581,7 @@ impl Default for Evaluator {
             converters: Vec::new(),
             warned_deprecated: std::collections::HashSet::new(),
             generator_type_checks: Vec::new(),
+            retry_passes: 0,
         }
     }
 }
@@ -564,6 +622,7 @@ impl Evaluator {
             converters: Vec::new(),
             warned_deprecated: std::collections::HashSet::new(),
             generator_type_checks: Vec::new(),
+            retry_passes: 0,
         }
     }
 
@@ -1630,7 +1689,11 @@ impl Evaluator {
         // pass poisons at least one more local, so this terminates.
         let mut poisoned_locals = HashMap::new();
         loop {
-            match self
+            let retrying = !poisoned_locals.is_empty();
+            if retrying {
+                self.retry_passes += 1;
+            }
+            let outcome = self
                 .eval_module_pass(
                     module,
                     path,
@@ -1639,8 +1702,11 @@ impl Evaluator {
                     requested_fields.clone(),
                     &poisoned_locals,
                 )
-                .await?
-            {
+                .await;
+            if retrying {
+                self.retry_passes -= 1;
+            }
+            match outcome? {
                 BodyOutcome::Done(value) => return Ok(value),
                 BodyOutcome::PoisonAndRetry(failures) => poisoned_locals.extend(failures),
             }
@@ -2823,6 +2889,10 @@ impl Evaluator {
         let mut poisoned_locals = HashMap::new();
         loop {
             let generator_mark = self.generator_type_checks.len();
+            let retrying = !poisoned_locals.is_empty();
+            if retrying {
+                self.retry_passes += 1;
+            }
             let result = self
                 .eval_body_entries(
                     entries,
@@ -2834,6 +2904,9 @@ impl Evaluator {
                     &poisoned_locals,
                 )
                 .await;
+            if retrying {
+                self.retry_passes -= 1;
+            }
             match result {
                 Ok(BodyOutcome::Done(value)) => return Ok(value),
                 Ok(BodyOutcome::PoisonAndRetry(failures)) => {
@@ -3037,6 +3110,12 @@ impl Evaluator {
                             Ok(val)
                                 if prop.type_ann.as_ref().is_some_and(|ty| {
                                     constraint_reads_members(ty, &active_scope, &body_members)
+                                        || names_later_alias(
+                                            ty,
+                                            &active_scope,
+                                            entries,
+                                            entry_index,
+                                        )
                                 }) =>
                             {
                                 deferred_locals.push((prop, entry_index));
@@ -3521,7 +3600,28 @@ impl Evaluator {
                 });
                 continue;
             }
-            self.check_declared_property_type(prop, &value, &active_scope, depth)
+            // A constraint reading members resolves them as Pkl does:
+            // lexically first, otherwise the finished object's member, which
+            // may be one a generator produced (not bound by name in the
+            // body's scope) or replaced.
+            let reads_members = prop
+                .type_ann
+                .as_ref()
+                .is_some_and(|ty| constraint_reads_members(ty, &active_scope, &body_members));
+            let mut check_scope = active_scope.child();
+            if reads_members {
+                let own_bindings =
+                    same_body_local_bindings(entries, entry_index, &entry_owner, &local_bindings);
+                layer_finished_members(
+                    &mut check_scope,
+                    &all_props,
+                    |name| {
+                        entry_owners.hides_member(entry_index, entry_scopes, own_body_scope, name)
+                    },
+                    &own_bindings,
+                );
+            }
+            self.check_declared_property_type(prop, &value, &check_scope, depth)
                 .await?;
         }
         // Check what this object's `for`/`when` bodies produced, unless this
@@ -5124,7 +5224,11 @@ impl Evaluator {
             }
             Expr::Trace(expr) => {
                 let v = self.eval_expr(expr, scope, depth + 1).await?;
-                eprintln!("[pklr trace] {}", value_to_display(&v));
+                // A retry pass re-evaluates a body whose first pass already
+                // ran to completion and printed its traces.
+                if self.retry_passes == 0 {
+                    eprintln!("[pklr trace] {}", value_to_display(&v));
+                }
                 Ok(v)
             }
             Expr::Read(uri_expr) => {
