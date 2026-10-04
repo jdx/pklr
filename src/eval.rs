@@ -3477,7 +3477,14 @@ impl Evaluator {
                         check_scope.poison(name, message);
                     }
                 }
-                self.check_declared_property_type(&check.prop, &check.value, &check_scope, depth)
+                // Check the member's final value: a later entry (such as an
+                // instance's override of a class default) may have replaced
+                // the value the generator produced.
+                let value = all_props
+                    .get(&check.prop.name)
+                    .cloned()
+                    .unwrap_or(check.value);
+                self.check_declared_property_type(&check.prop, &value, &check_scope, depth)
                     .await?;
             }
         }

@@ -1904,6 +1904,24 @@ c = new C {}
 }
 
 #[test]
+fn class_generator_default_overridden_by_instance_passes() {
+    let json = eval(
+        r#"
+class C { for (x in List(1)) { v: Int = "x" } }
+c = new C { v = 1 }
+"#,
+    );
+    assert_eq!(json["c"]["v"], 1);
+    let message = eval_fails(
+        r#"
+class C { for (x in List(1)) { v: Int = "x" } }
+c = new C {}
+"#,
+    );
+    assert!(message.contains("property 'v' expected Int"), "{message}");
+}
+
+#[test]
 fn amendment_generator_declared_property_is_checked() {
     let message = eval_fails(
         r#"
