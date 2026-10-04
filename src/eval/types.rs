@@ -600,6 +600,11 @@ pub(super) fn value_type_name(v: &Value) -> &'static str {
 }
 
 pub(super) fn value_to_key(v: &Value) -> Result<Arc<str>> {
+    // Object and list keys use the renderer's stable content key before the
+    // typed storage key machinery, whose fallback display contains internals.
+    if matches!(v, Value::Object(_, _) | Value::List(_)) {
+        return Ok(super::render::object_key(v));
+    }
     if let Some(key) = crate::value::mapping_storage_key(v) {
         return Ok(key);
     }

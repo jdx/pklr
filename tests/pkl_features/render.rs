@@ -432,3 +432,67 @@ fn base_output_uses_base_locals_and_final_properties() {
         serde_json::json!({"suffix2": "%!%", "x": "child!%"})
     );
 }
+
+// PListRenderer, pkl:jsonnet and pkl:xml.
+fn render_with_imports(expr: &str) -> String {
+    let json = eval(&format!(
+        "import \"pkl:jsonnet\"\nimport \"pkl:xml\"\n{DYNAMIC}\nclass Person {{ name: String; age: Int }}\nres = {expr}"
+    ));
+    json["res"].as_str().unwrap().to_string()
+}
+
+#[test]
+fn plist_renderer() {
+    assert_eq!(
+        render(r#"new PListRenderer {}.renderValue(List(1, 2.5, true, "<&>"))"#),
+        "<array>\n  <integer>1</integer>\n  <real>2.5</real>\n  <true/>\n  <string>&lt;&amp;&gt;</string>\n</array>"
+    );
+    assert_eq!(
+        render("new PListRenderer {}.renderDocument(new Dynamic { a = 1; b {} })"),
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n  <key>a</key>\n  <integer>1</integer>\n  <key>b</key>\n    <dict/>\n</dict>\n</plist>\n"
+    );
+}
+
+#[test]
+fn jsonnet_renderer() {
+    assert_eq!(
+        render_with_imports(
+            r#"new jsonnet.Renderer { indent = "" }.renderDocument((d) { q = "it's"; `local` = 1 })"#
+        ),
+        "{ name: 'pigeon', nested: { list: [1, 'two', { z: true }], empty: {} }, ratio: 1.5, q: \"it's\", 'local': 1, 'entry key': 'v' }\n"
+    );
+    assert_eq!(
+        render_with_imports(
+            r#"new jsonnet.Renderer {}.renderDocument(new Dynamic { a = jsonnet.ExtVar("x"); b = jsonnet.ImportStr("f.txt") })"#
+        ),
+        "{\n  a: std.extVar('x'),\n  b: importstr 'f.txt',\n}\n"
+    );
+}
+
+#[test]
+fn xml_renderer() {
+    assert_eq!(
+        render_with_imports(
+            r#"new xml.Renderer { rootElementName = "people"; rootElementAttributes { ["v"] = 1 } }.renderDocument(new Dynamic { p = new Person { name = "a"; age = 2 }; l = new Listing { new Person { name = "b"; age = 3 }; "x"; xml.Comment("c"); xml.CData("<d>") } })"#
+        ),
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<people v=\"1\">\n  <p>\n    <name>a</name>\n    <age>2</age>\n  </p>\n  <l>\n    <Person>\n      <name>b</name>\n      <age>3</age>\n    </Person>x\n    <!--c--><![CDATA[<d>]]>\n  </l>\n</people>\n"
+    );
+    let err = eval_fails(
+        "import \"pkl:xml\"\nres = new xml.Renderer {}.renderDocument(new Dynamic { [\"entry key\"] = 1 })",
+    );
+    assert!(
+        err.contains("Invalid XML 1.0 element name: `entry key`"),
+        "{err}"
+    );
+}
+
+#[test]
+fn render_directive_keys() {
+    let json = eval(
+        r#"local m = new Mapping { ["key"] = "value"; [new RenderDirective { text = "🔑" }] = 42 }
+res = new YamlRenderer {}.renderValue(m)
+json = new JsonRenderer { indent = "" }.renderValue(m)"#,
+    );
+    assert_eq!(json["res"], "key: value\n🔑: 42");
+    assert_eq!(json["json"], r#"{"key":"value",🔑:42}"#);
+}
