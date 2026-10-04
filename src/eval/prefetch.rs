@@ -56,16 +56,24 @@ impl PrefetchState {
     }
 }
 
+/// Direct-download package roots that are certain to be registered in
+/// `package_http_roots` by the time evaluation resolves a module's imports:
+/// those of the packages the module itself belongs to. Evaluation registers a
+/// root when it loads a file of that package, so a file's own imports always
+/// see it, while an unrelated import elsewhere may be evaluated without it.
+type Roots = Rc<Vec<String>>;
+
 /// The remote imports of each module prefetching loaded, with the path
-/// evaluation gives that module, to queue for the next level.
-type Scanned = Vec<(Vec<String>, String)>;
+/// evaluation gives that module and its [`Roots`], to queue for the next
+/// level.
+type Scanned = Vec<(Vec<String>, String, Roots)>;
 
 /// Record the non-glob import URIs of `source` (loaded from `path`) for the
 /// next level, scanning its tokens for the same import forms
 /// `module_import_uris` reads from a parsed module, without parsing a module
 /// evaluation may never use. A module that does not lex is skipped;
 /// evaluation reports its error if it is used.
-fn scan(scanned: &mut Scanned, source: &str, path: String) {
+fn scan(scanned: &mut Scanned, source: &str, path: String, roots: Roots) {
     let Ok(tokens) = lexer::lex_named(source, &path) else {
         return;
     };
@@ -74,7 +82,7 @@ fn scan(scanned: &mut Scanned, source: &str, path: String) {
         // Glob imports are expanded at evaluation time.
         .filter_map(|(uri, is_glob)| (!is_glob).then_some(uri))
         .collect();
-    scanned.push((imports, path));
+    scanned.push((imports, path, roots));
 }
 
 /// The URIs of the modules `module` imports, amends or extends, other than
@@ -95,19 +103,28 @@ fn module_import_uris(module: &Module) -> impl Iterator<Item = &str> {
         .map(String::as_str)
 }
 
-/// A remote module to prefetch.
+/// A remote module to prefetch. `roots` are the [`Roots`] of the module once
+/// loaded, for resolving its own imports.
 enum Prefetch {
     /// A plain HTTP module, cached in `http_cache` under its rewritten URL.
-    Http { url: String, fetch_url: String },
+    Http {
+        url: String,
+        fetch_url: String,
+        roots: Roots,
+    },
     /// A direct-download package source, cached in `http_cache` under its URL
     /// and in the persistent package cache.
-    PackageFile { url: String },
+    PackageFile { url: String, roots: Roots },
     /// A package archive, cached in the persistent package cache and
     /// extracted into `package_dirs`.
     /// `entries` are the archive paths imported from it, each scanned after
     /// the single extraction.
     #[cfg(feature = "package-zip")]
-    PackageZip { url: String, entries: Vec<String> },
+    PackageZip {
+        url: String,
+        entries: Vec<String>,
+        roots: Roots,
+    },
 }
 
 impl Prefetch {
@@ -116,7 +133,7 @@ impl Prefetch {
     fn attempt_key(&self) -> String {
         match self {
             Prefetch::Http { fetch_url, .. } => format!("http {fetch_url}"),
-            Prefetch::PackageFile { url } => format!("pkl {url}"),
+            Prefetch::PackageFile { url, .. } => format!("pkl {url}"),
             #[cfg(feature = "package-zip")]
             Prefetch::PackageZip { url, .. } => format!("zip {url}"),
         }
@@ -156,7 +173,7 @@ impl Evaluator {
         let base_is_remote = path
             .to_str()
             .is_some_and(|base| base.starts_with("http://") || base.starts_with("https://"));
-        let mut roots = HashSet::default();
+        let roots = Roots::default();
         let mut level = Vec::new();
         for uri in module_import_uris(module) {
             if base_is_remote
@@ -164,23 +181,23 @@ impl Evaluator {
                 || uri.starts_with("http://")
                 || uri.starts_with("package://")
             {
-                self.prefetch_target(uri, path, &mut roots, &mut level);
+                self.prefetch_target(uri, path, &roots, &mut level);
             }
         }
         if !level.is_empty() {
-            self.prefetch_levels(level, roots);
+            self.prefetch_levels(level);
         }
     }
 
-    /// Queue `uri`, referenced from the module at `base`, when it names a
-    /// remote module that is not cached yet.
-    fn prefetch_target(
-        &self,
-        uri: &str,
-        base: &Path,
-        roots: &mut HashSet<String>,
-        out: &mut Vec<Prefetch>,
-    ) {
+    /// Queue `uri`, referenced from the module at `base` (whose [`Roots`] are
+    /// `roots`), when it names a remote module that is not cached yet.
+    ///
+    /// The cache key is the one `fetch_source` will use: an HTTP URL under a
+    /// package root registered now, or under one of `roots`, is a package
+    /// file keyed by its URL; any other is keyed by its rewritten URL. Roots
+    /// of other prefetched packages are not consulted, since evaluation may
+    /// never load those packages.
+    fn prefetch_target(&self, uri: &str, base: &Path, roots: &Roots, out: &mut Vec<Prefetch>) {
         let resolved = resolve_remote_relative(base, uri);
         let uri = resolved.as_deref().unwrap_or(uri);
         if uri.starts_with("https://") || uri.starts_with("http://") {
@@ -193,6 +210,7 @@ impl Evaluator {
                 if !self.http_cache.contains_key(uri) {
                     out.push(Prefetch::PackageFile {
                         url: uri.to_string(),
+                        roots: roots.clone(),
                     });
                 }
                 return;
@@ -202,14 +220,23 @@ impl Evaluator {
                 out.push(Prefetch::Http {
                     url: uri.to_string(),
                     fetch_url,
+                    roots: roots.clone(),
                 });
             }
         } else if uri.starts_with("package://") {
             match resolve_package_uri(uri) {
                 Ok(PackageSource::Direct { url, root }) => {
-                    roots.insert(root);
                     if !self.http_cache.contains_key(&url) {
-                        out.push(Prefetch::PackageFile { url });
+                        // Loading this file registers its root, so the file's
+                        // own imports resolve under it.
+                        let roots = if roots.contains(&root) {
+                            roots.clone()
+                        } else {
+                            let mut with_root = (**roots).clone();
+                            with_root.push(root);
+                            Rc::new(with_root)
+                        };
+                        out.push(Prefetch::PackageFile { url, roots });
                     }
                 }
                 #[cfg(feature = "package-zip")]
@@ -218,6 +245,7 @@ impl Evaluator {
                         out.push(Prefetch::PackageZip {
                             url,
                             entries: vec![entry],
+                            roots: roots.clone(),
                         });
                     }
                 }
@@ -228,7 +256,7 @@ impl Evaluator {
         }
     }
 
-    fn prefetch_levels(&mut self, mut level: Vec<Prefetch>, mut roots: HashSet<String>) {
+    fn prefetch_levels(&mut self, mut level: Vec<Prefetch>) {
         for _ in 0..MAX_LEVELS {
             level.retain(|target| !self.prefetch.attempted.contains(&target.attempt_key()));
             let mut downloads = self.group_downloads(level);
@@ -295,9 +323,9 @@ impl Evaluator {
                 break;
             }
             let mut next = Vec::new();
-            for (imports, source_path) in &sources {
+            for (imports, source_path, roots) in &sources {
                 for uri in imports {
-                    self.prefetch_target(uri, Path::new(source_path), &mut roots, &mut next);
+                    self.prefetch_target(uri, Path::new(source_path), roots, &mut next);
                 }
             }
             level = next;
@@ -312,7 +340,7 @@ impl Evaluator {
         for target in level {
             let fetch_url = match &target {
                 Prefetch::Http { fetch_url, .. } => fetch_url.clone(),
-                Prefetch::PackageFile { url } => self.rewrite_url(url).into_owned(),
+                Prefetch::PackageFile { url, .. } => self.rewrite_url(url).into_owned(),
                 #[cfg(feature = "package-zip")]
                 Prefetch::PackageZip { url, .. } => self.rewrite_url(url).into_owned(),
             };
@@ -354,23 +382,27 @@ impl Evaluator {
     fn load_cached_package(&mut self, target: &Prefetch, sources: &mut Scanned) -> bool {
         match target {
             Prefetch::Http { .. } => false,
-            Prefetch::PackageFile { url } => match self.cached_package(url, "pkl") {
+            Prefetch::PackageFile { url, roots } => match self.cached_package(url, "pkl") {
                 Some(cached) => {
                     if let Ok(source) = std::str::from_utf8(&cached) {
-                        scan(sources, source, url.clone());
+                        scan(sources, source, url.clone(), roots.clone());
                     }
                     true
                 }
                 None => false,
             },
             #[cfg(feature = "package-zip")]
-            Prefetch::PackageZip { url, entries } => {
+            Prefetch::PackageZip {
+                url,
+                entries,
+                roots,
+            } => {
                 if self.cached_package(url, "zip").is_none() {
                     return false;
                 }
                 // Extracting a cached archive needs no network.
                 if let Ok(dir) = self.extract_package_zip(url) {
-                    self.push_package_entries(&dir, entries, sources);
+                    self.push_package_entries(&dir, entries, roots, sources);
                 }
                 true
             }
@@ -379,9 +411,14 @@ impl Evaluator {
 
     /// Cache a plain HTTP module's text, as `fetch_source` would.
     fn store_text(&mut self, target: Prefetch, body: String, sources: &mut Scanned) {
-        if let Prefetch::Http { url, fetch_url } = target {
+        if let Prefetch::Http {
+            url,
+            fetch_url,
+            roots,
+        } = target
+        {
             // Scan first so the body can move into the cache uncopied.
-            scan(sources, &body, url);
+            scan(sources, &body, url, roots);
             self.http_cache.insert(fetch_url, body);
         }
     }
@@ -397,18 +434,22 @@ impl Evaluator {
                     self.store_text(target, body.to_string(), sources);
                 }
             }
-            Prefetch::PackageFile { url } => {
+            Prefetch::PackageFile { url, roots } => {
                 if validate_package_bytes(&url, "pkl", bytes).is_err() {
                     return;
                 }
                 let _ = self.write_package_cache(&url, "pkl", bytes);
                 if let Ok(source) = std::str::from_utf8(bytes) {
-                    scan(sources, source, url.clone());
+                    scan(sources, source, url.clone(), roots);
                     self.http_cache.insert(url, source.to_string());
                 }
             }
             #[cfg(feature = "package-zip")]
-            Prefetch::PackageZip { url, entries } => {
+            Prefetch::PackageZip {
+                url,
+                entries,
+                roots,
+            } => {
                 if validate_package_bytes(&url, "zip", bytes).is_err() {
                     return;
                 }
@@ -421,7 +462,7 @@ impl Evaluator {
                     return;
                 }
                 self.package_dirs.insert(url, dir.clone());
-                self.push_package_entries(&dir, &entries, sources);
+                self.push_package_entries(&dir, &entries, &roots, sources);
             }
         }
     }
@@ -434,11 +475,17 @@ impl Evaluator {
     }
 
     #[cfg(feature = "package-zip")]
-    fn push_package_entries(&mut self, dir: &Path, entries: &[String], sources: &mut Scanned) {
+    fn push_package_entries(
+        &mut self,
+        dir: &Path,
+        entries: &[String],
+        roots: &Roots,
+        sources: &mut Scanned,
+    ) {
         for entry in entries {
             let path = dir.join(entry);
             if let Ok(source) = self.read_to_string_io(&path) {
-                scan(sources, &source, path.display().to_string());
+                scan(sources, &source, path.display().to_string(), roots.clone());
             }
         }
     }

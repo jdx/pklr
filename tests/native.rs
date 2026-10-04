@@ -1227,3 +1227,63 @@ fn short_operator_chains_still_parse() {
     assert_eq!(json["sum"], 10);
     assert_eq!(json["field"], 5);
 }
+
+#[test]
+fn an_unused_package_import_does_not_change_how_a_used_import_is_cached() {
+    let used_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = used_requests.clone();
+    let server = common::DelayedServer::start_with(
+        move |path| match path {
+            "/o/r/releases/download/v1/Unused.pkl" => Some("value = 1\n".to_string()),
+            "/o/r/releases/download/v1/Used.pkl" => {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Some("value = 42\n".to_string())
+            }
+            _ => None,
+        },
+        std::time::Duration::ZERO,
+    );
+    let mut evaluator = Evaluator::new();
+    evaluator.set_http_rewrites(&[format!("https://github.com/={}/", server.base)]);
+
+    let json = evaluator
+        .eval_source(
+            "import \"package://pkg.pkl-lang.org/github.com/o/r@v1#/Unused.pkl\" as Unused\nimport \"https://github.com/o/r/releases/download/v1/Used.pkl\" as Used\nresult = Used.value\n",
+            Path::new("entry.pkl"),
+        )
+        .unwrap()
+        .to_json();
+
+    assert_eq!(json["result"], 42);
+    assert_eq!(
+        used_requests.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the used file was fetched again during evaluation"
+    );
+}
+
+#[test]
+fn a_direct_package_files_own_imports_are_prefetched_under_its_root() {
+    let server = delayed(&[
+        (
+            "/o/r/releases/download/v1/Config.pkl",
+            "import \"A.pkl\"\nimport \"B.pkl\"\nvalue = A.value + B.value\n",
+        ),
+        ("/o/r/releases/download/v1/A.pkl", "value = 1\n"),
+        ("/o/r/releases/download/v1/B.pkl", "value = 2\n"),
+    ]);
+    let mut evaluator = Evaluator::new();
+    evaluator.set_http_rewrites(&[format!("https://github.com/={}/", server.base)]);
+
+    let json = evaluator
+        .eval_source(
+            "import \"package://pkg.pkl-lang.org/github.com/o/r@v1#/Config.pkl\" as Config\nresult = Config.value\n",
+            Path::new("entry.pkl"),
+        )
+        .unwrap()
+        .to_json();
+
+    assert_eq!(json["result"], 3);
+    assert_eq!(server.requests(), 3);
+    assert_eq!(server.peak_in_flight(), 2);
+}
