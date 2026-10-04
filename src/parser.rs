@@ -79,6 +79,15 @@ pub(crate) fn parse_type_name(name: &str) -> Result<TypeExpr> {
     Parser::new(&tokens, name, "<type>").parse_type()
 }
 
+/// The most expressions, object bodies and types that may nest inside each
+/// other. The parser recurses for each level, so the limit turns input that
+/// would overflow the stack into a parse error.
+///
+/// Each level of parenthesised expression costs about 5.5 KiB of stack in an
+/// optimized build (far more in a debug build), so 128 levels fit well inside
+/// a 2 MiB thread stack. No hk config or test comes within 24 levels.
+pub const MAX_NESTING_DEPTH: usize = 128;
+
 struct Parser<'a> {
     tokens: &'a [Token],
     source: &'a str,
@@ -88,6 +97,8 @@ struct Parser<'a> {
     last_line: usize,
     /// URIs of the `import(...)` expressions parsed so far.
     import_exprs: Vec<String>,
+    /// Expressions, object bodies and types open around the current token.
+    depth: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -99,7 +110,22 @@ impl<'a> Parser<'a> {
             pos: 0,
             last_line: 1,
             import_exprs: Vec::new(),
+            depth: 0,
         }
+    }
+
+    /// Run `parse` one nesting level deeper, failing past
+    /// [`MAX_NESTING_DEPTH`].
+    fn nested<T>(&mut self, parse: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        if self.depth >= MAX_NESTING_DEPTH {
+            return Err(self.parse_error(format!(
+                "expressions nest more than {MAX_NESTING_DEPTH} levels deep"
+            )));
+        }
+        self.depth += 1;
+        let result = parse(self);
+        self.depth -= 1;
+        result
     }
 
     fn parse_error(&self, message: impl Into<String>) -> Error {
@@ -254,6 +280,10 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_entries(&mut self) -> Result<Vec<Entry>> {
+        self.nested(Self::parse_entries_inner)
+    }
+
+    fn parse_entries_inner(&mut self) -> Result<Vec<Entry>> {
         let mut entries = Vec::new();
         while !self.at_eof() && !matches!(self.peek(), TokenKind::RBrace) {
             if matches!(self.peek(), TokenKind::Comma | TokenKind::Semicolon) {
@@ -813,6 +843,10 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type(&mut self) -> Result<TypeExpr> {
+        self.nested(Self::parse_type_inner)
+    }
+
+    fn parse_type_inner(&mut self) -> Result<TypeExpr> {
         let (first, first_is_default) = self.parse_type_member()?;
         let mut variants = vec![(first, first_is_default)];
         while matches!(self.peek(), TokenKind::Pipe) {
@@ -923,7 +957,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_expr(&mut self) -> Result<Expr> {
-        self.parse_pipe()
+        self.nested(Self::parse_pipe)
     }
 
     fn parse_pipe(&mut self) -> Result<Expr> {
@@ -1148,6 +1182,7 @@ impl<'a> Parser<'a> {
                         }
                         crate::lexer::StringPart::Tokens(tokens) => {
                             let mut nested = Parser::new(&tokens, self.source, self.name);
+                            nested.depth = self.depth;
                             let expr = nested.parse_expr()?;
                             self.import_exprs.append(&mut nested.import_exprs);
                             interp_parts.push(StringInterpPart::Expr(expr));

@@ -86,8 +86,10 @@ enum Prefetch {
     PackageFile { url: String },
     /// A package archive, cached in the persistent package cache and
     /// extracted into `package_dirs`.
+    /// `entries` are the archive paths imported from it, each scanned after
+    /// the single extraction.
     #[cfg(feature = "package-zip")]
-    PackageZip { url: String, entry: String },
+    PackageZip { url: String, entries: Vec<String> },
 }
 
 impl Prefetch {
@@ -163,7 +165,10 @@ impl Evaluator {
                 #[cfg(feature = "package-zip")]
                 Ok(PackageSource::Zip(url, entry)) => {
                     if !self.package_dirs.contains_key(&url) {
-                        out.push(Prefetch::PackageZip { url, entry });
+                        out.push(Prefetch::PackageZip {
+                            url,
+                            entries: vec![entry],
+                        });
                     }
                 }
                 #[cfg(not(feature = "package-zip"))]
@@ -176,6 +181,7 @@ impl Evaluator {
     fn prefetch_levels(&mut self, mut level: Vec<Prefetch>, mut roots: HashSet<String>) {
         for _ in 0..MAX_LEVELS {
             level.retain(|target| !self.prefetch.attempted.contains(target.key()));
+            level = dedupe_level(level);
             // Targets past the request budget are left to evaluation.
             level.truncate(self.prefetch.requests);
             if level.is_empty() {
@@ -201,14 +207,14 @@ impl Evaluator {
                         None => bytes.push(Prefetch::PackageFile { url }),
                     },
                     #[cfg(feature = "package-zip")]
-                    Prefetch::PackageZip { url, entry } => {
+                    Prefetch::PackageZip { url, entries } => {
                         if self.cached_package(&url, "zip").is_some() {
                             // Extracting a cached archive needs no network.
                             if let Ok(dir) = self.extract_package_zip(&url) {
-                                self.push_package_entry(&dir, &entry, &mut sources);
+                                self.push_package_entries(&dir, &entries, &mut sources);
                             }
                         } else {
-                            bytes.push(Prefetch::PackageZip { url, entry });
+                            bytes.push(Prefetch::PackageZip { url, entries });
                         }
                     }
                 }
@@ -254,7 +260,7 @@ impl Evaluator {
                             }
                         }
                         #[cfg(feature = "package-zip")]
-                        Prefetch::PackageZip { url, entry } => {
+                        Prefetch::PackageZip { url, entries } => {
                             if validate_package_bytes(&url, "zip", &fetched).is_err() {
                                 continue;
                             }
@@ -267,7 +273,7 @@ impl Evaluator {
                                 continue;
                             }
                             self.package_dirs.insert(url, dir.clone());
-                            self.push_package_entry(&dir, &entry, &mut sources);
+                            self.push_package_entries(&dir, &entries, &mut sources);
                         }
                         Prefetch::Http { .. } => {}
                     }
@@ -277,19 +283,21 @@ impl Evaluator {
             if self.prefetch.exhausted() {
                 break;
             }
-            // Scan the fetched modules exactly as the entry module was
-            // scanned. A module that does not parse is skipped; evaluation
-            // reports its error if it is used.
+            // Scan the fetched modules' tokens for the same import forms
+            // `module_import_uris` reads from a parsed module, without
+            // parsing modules evaluation may never use. A module that does
+            // not lex is skipped; evaluation reports its error if it is used.
             let mut next = Vec::new();
             for (source, source_path) in &sources {
                 let Ok(tokens) = lexer::lex_named(source, source_path) else {
                     continue;
                 };
-                let Ok(module) = parser::parse_named(&tokens, source, source_path) else {
-                    continue;
-                };
-                for uri in module_import_uris(&module) {
-                    self.prefetch_target(uri, Path::new(source_path), &mut roots, &mut next);
+                for uri in parser::collect_imports(&tokens) {
+                    // Glob imports are expanded at evaluation time.
+                    if uri.contains('*') {
+                        continue;
+                    }
+                    self.prefetch_target(&uri, Path::new(source_path), &mut roots, &mut next);
                 }
             }
             level = next;
@@ -304,10 +312,50 @@ impl Evaluator {
     }
 
     #[cfg(feature = "package-zip")]
-    fn push_package_entry(&mut self, dir: &Path, entry: &str, sources: &mut Vec<(String, String)>) {
-        let path = dir.join(entry);
-        if let Ok(source) = self.read_to_string_io(&path) {
-            sources.push((source, path.display().to_string()));
+    fn push_package_entries(
+        &mut self,
+        dir: &Path,
+        entries: &[String],
+        sources: &mut Vec<(String, String)>,
+    ) {
+        for entry in entries {
+            let path = dir.join(entry);
+            if let Ok(source) = self.read_to_string_io(&path) {
+                sources.push((source, path.display().to_string()));
+            }
         }
     }
+}
+
+/// Collapse targets that share a cache key, so each URL is requested (and
+/// each archive extracted) once per level. Entries of the same archive are
+/// merged so every one of them is still scanned.
+fn dedupe_level(level: Vec<Prefetch>) -> Vec<Prefetch> {
+    let mut index_by_key: HashMap<String, usize> = HashMap::default();
+    let mut deduped: Vec<Prefetch> = Vec::with_capacity(level.len());
+    for target in level {
+        match index_by_key.get(target.key()) {
+            None => {
+                index_by_key.insert(target.key().to_string(), deduped.len());
+                deduped.push(target);
+            }
+            #[cfg(feature = "package-zip")]
+            Some(&index) => {
+                if let (
+                    Prefetch::PackageZip { entries, .. },
+                    Prefetch::PackageZip { entries: more, .. },
+                ) = (&mut deduped[index], target)
+                {
+                    for entry in more {
+                        if !entries.contains(&entry) {
+                            entries.push(entry);
+                        }
+                    }
+                }
+            }
+            #[cfg(not(feature = "package-zip"))]
+            Some(_) => {}
+        }
+    }
+    deduped
 }

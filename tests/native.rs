@@ -678,3 +678,230 @@ fn native_batch_fetch_is_bounded() {
     assert!(server.peak_in_flight() <= 8, "{}", server.peak_in_flight());
     assert!(server.peak_in_flight() > 1, "{}", server.peak_in_flight());
 }
+
+/// Native capabilities that record every batch fetch and zip extraction.
+#[derive(Default)]
+struct Recording {
+    native: pklr::NativeCapabilities,
+    text_batches: Arc<Mutex<Vec<Vec<String>>>>,
+    bytes_batches: Arc<Mutex<Vec<Vec<String>>>>,
+    extractions: Arc<Mutex<usize>>,
+}
+
+impl EvalCapabilities for Recording {
+    fn read_to_string(&mut self, path: &Path) -> pklr::Result<String> {
+        self.native.read_to_string(path)
+    }
+
+    fn path_exists(&mut self, path: &Path) -> pklr::Result<bool> {
+        self.native.path_exists(path)
+    }
+
+    fn canonicalize(&mut self, path: &Path) -> pklr::Result<PathBuf> {
+        self.native.canonicalize(path)
+    }
+
+    fn extract_zip(&mut self, bytes: Vec<u8>, destination: &Path) -> pklr::Result<()> {
+        *self.extractions.lock().unwrap() += 1;
+        self.native.extract_zip(bytes, destination)
+    }
+
+    fn read_env(&mut self, name: &str) -> pklr::Result<Option<String>> {
+        self.native.read_env(name)
+    }
+
+    fn fetch_text(&mut self, url: &str) -> pklr::Result<String> {
+        self.native.fetch_text(url)
+    }
+
+    fn fetch_bytes(&mut self, url: &str) -> pklr::Result<Vec<u8>> {
+        self.native.fetch_bytes(url)
+    }
+
+    fn fetch_text_many(&mut self, urls: &[String]) -> Vec<pklr::Result<String>> {
+        self.text_batches.lock().unwrap().push(urls.to_vec());
+        self.native.fetch_text_many(urls)
+    }
+
+    fn fetch_bytes_many(&mut self, urls: &[String]) -> Vec<pklr::Result<Vec<u8>>> {
+        self.bytes_batches.lock().unwrap().push(urls.to_vec());
+        self.native.fetch_bytes_many(urls)
+    }
+
+    fn temp_dir(&mut self, prefix: &str) -> pklr::Result<PathBuf> {
+        self.native.temp_dir(prefix)
+    }
+
+    fn glob(&mut self, base: &Path, pattern: &str) -> pklr::Result<Vec<PathBuf>> {
+        self.native.glob(base, pattern)
+    }
+}
+
+#[test]
+fn entries_of_one_package_zip_share_one_fetch_and_extraction() {
+    let zip = package_zip_entries(&[
+        (
+            "A.pkl",
+            "import \"https://example.com/X.pkl\"\nvalue = X.value\n",
+        ),
+        (
+            "B.pkl",
+            "import \"https://example.com/Y.pkl\"\nvalue = Y.value\n",
+        ),
+    ]);
+    let server = common::DelayedServer::start_bytes(
+        move |path| match path {
+            "/pkg@1.0.0.zip" => Some(zip.clone()),
+            "/X.pkl" => Some(b"value = 1\n".to_vec()),
+            "/Y.pkl" => Some(b"value = 2\n".to_vec()),
+            _ => None,
+        },
+        std::time::Duration::ZERO,
+    );
+    let capabilities = Recording::default();
+    let text_batches = capabilities.text_batches.clone();
+    let bytes_batches = capabilities.bytes_batches.clone();
+    let extractions = capabilities.extractions.clone();
+    let mut evaluator = Evaluator::with_capabilities(capabilities);
+    evaluator.set_http_rewrites(&[format!("https://example.com/={}/", server.base)]);
+
+    let json = evaluator
+        .eval_source(
+            "import \"package://example.com/pkg@1.0.0#/A.pkl\"\nimport \"package://example.com/pkg@1.0.0#/B.pkl\"\na = A.value\nb = B.value\n",
+            Path::new("entry.pkl"),
+        )
+        .unwrap()
+        .to_json();
+
+    assert_eq!(json["a"], 1);
+    assert_eq!(json["b"], 2);
+    assert_eq!(server.requests(), 3);
+    assert_eq!(*extractions.lock().unwrap(), 1);
+    assert_eq!(
+        *bytes_batches.lock().unwrap(),
+        vec![vec![format!("{}/pkg@1.0.0.zip", server.base)]]
+    );
+    let text_batches = text_batches.lock().unwrap();
+    assert_eq!(text_batches.len(), 1);
+    let mut next_level = text_batches[0].clone();
+    next_level.sort();
+    assert_eq!(
+        next_level,
+        vec![
+            format!("{}/X.pkl", server.base),
+            format!("{}/Y.pkl", server.base)
+        ]
+    );
+}
+
+#[test]
+fn a_declaration_and_an_import_expression_of_one_url_share_one_request() {
+    let server =
+        common::DelayedServer::start(&[("/A.pkl", "value = 1\n")], std::time::Duration::ZERO);
+    let source = format!(
+        "import \"{0}/A.pkl\"\na = A.value\nb = import(\"{0}/A.pkl\").value\n",
+        server.base
+    );
+
+    let json = Evaluator::new()
+        .eval_source(&source, Path::new("entry.pkl"))
+        .unwrap()
+        .to_json();
+
+    assert_eq!(json["a"], 1);
+    assert_eq!(json["b"], 1);
+    assert_eq!(server.requests(), 1);
+}
+
+#[test]
+fn deeply_nested_unused_remote_modules_do_not_crash_prefetching() {
+    const DEPTH: usize = 100_000;
+    let parens = format!("value = {}1{}\n", "(".repeat(DEPTH), ")".repeat(DEPTH));
+    let interpolations = format!(
+        "value = {}1{}\n",
+        "\"\\(".repeat(DEPTH),
+        ")\"".repeat(DEPTH)
+    );
+    let server = common::DelayedServer::start_with(
+        move |path| match path {
+            "/Main.pkl" => Some(
+                "import \"Parens.pkl\"\nimport \"Interpolations.pkl\"\nvalue = 42\n".to_string(),
+            ),
+            "/Parens.pkl" => Some(parens.clone()),
+            "/Interpolations.pkl" => Some(interpolations.clone()),
+            _ => None,
+        },
+        std::time::Duration::ZERO,
+    );
+    let source = format!("import \"{}/Main.pkl\"\nresult = Main.value\n", server.base);
+
+    let json = Evaluator::new()
+        .eval_source(&source, Path::new("entry.pkl"))
+        .unwrap()
+        .to_json();
+
+    assert_eq!(json["result"], 42);
+    assert_eq!(server.requests(), 3);
+}
+
+#[test]
+fn nesting_past_the_limit_is_a_parse_error() {
+    let depth = pklr::parser::MAX_NESTING_DEPTH + 1;
+    let path = common::write_entry(
+        "nesting_limit",
+        "main.pkl",
+        &format!("value = {}1{}\n", "(".repeat(depth), ")".repeat(depth)),
+    );
+
+    let error = on_large_stack(move || pklr::eval_to_json(&path))
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("levels deep"), "{error}");
+}
+
+#[test]
+fn nesting_up_to_the_limit_parses() {
+    // The module body and the property's value take two levels.
+    let depth = pklr::parser::MAX_NESTING_DEPTH - 2;
+    let path = common::write_entry(
+        "nesting_below_limit",
+        "main.pkl",
+        &format!("value = {}1{}\n", "(".repeat(depth), ")".repeat(depth)),
+    );
+
+    let json = on_large_stack(move || pklr::eval_to_json(&path)).unwrap();
+
+    assert_eq!(json["value"], 1);
+}
+
+#[test]
+fn interpolation_nesting_past_the_limit_is_a_lex_error() {
+    let depth = pklr::parser::MAX_NESTING_DEPTH + 1;
+    let path = common::write_entry(
+        "interpolation_limit",
+        "main.pkl",
+        &format!(
+            "value = {}1{}\n",
+            "\"\\(".repeat(depth),
+            ")\"".repeat(depth)
+        ),
+    );
+
+    let error = on_large_stack(move || pklr::eval_to_json(&path))
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("levels deep"), "{error}");
+}
+
+/// Run `f` on a thread with a large stack: a debug build of the parser uses
+/// many times the stack per nesting level that an optimized build does.
+fn on_large_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(f)
+        .unwrap()
+        .join()
+        .unwrap()
+}

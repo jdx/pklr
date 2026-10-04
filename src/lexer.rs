@@ -19,7 +19,14 @@ struct Lexer<'a> {
     pos: usize,
     line: usize,
     col: usize,
+    /// String interpolations currently open around the lexer's position.
+    interpolation_depth: usize,
 }
+
+/// The most string interpolations that may nest inside each other. The lexer
+/// recurses for each one, so the limit keeps hostile input from overflowing
+/// the stack.
+const MAX_INTERPOLATION_DEPTH: usize = crate::parser::MAX_NESTING_DEPTH;
 
 impl<'a> Lexer<'a> {
     fn new(source: &'a str, name: &str) -> Self {
@@ -29,6 +36,7 @@ impl<'a> Lexer<'a> {
             pos: 0,
             line: 1,
             col: 1,
+            interpolation_depth: 0,
         }
     }
 
@@ -165,6 +173,12 @@ impl<'a> Lexer<'a> {
                         Some('(') => {
                             has_interpolation = true;
                             parts.push(StringPart::Literal(std::mem::take(&mut current)));
+                            if self.interpolation_depth >= MAX_INTERPOLATION_DEPTH {
+                                return Err(self.lex_error(format!(
+                                    "string interpolations nest more than {MAX_INTERPOLATION_DEPTH} levels deep"
+                                )));
+                            }
+                            self.interpolation_depth += 1;
                             // Lex tokens until matching ')'
                             let mut depth = 1;
                             let mut expr_tokens = Vec::new();
@@ -204,6 +218,7 @@ impl<'a> Lexer<'a> {
                                 col: self.col,
                                 offset: self.pos,
                             });
+                            self.interpolation_depth -= 1;
                             parts.push(StringPart::Tokens(expr_tokens));
                         }
                         Some(c) => {

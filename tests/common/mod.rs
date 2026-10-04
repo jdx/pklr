@@ -30,6 +30,14 @@ impl DelayedServer {
         respond: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
         delay: Duration,
     ) -> Self {
+        Self::start_bytes(move |path| respond(path).map(String::into_bytes), delay)
+    }
+
+    /// Like [`DelayedServer::start_with`], with binary bodies.
+    pub fn start_bytes(
+        respond: impl Fn(&str) -> Option<Vec<u8>> + Send + Sync + 'static,
+        delay: Duration,
+    ) -> Self {
         let routes = Arc::new(respond);
         let in_flight = Arc::new(AtomicUsize::new(0));
         let peak_in_flight = Arc::new(AtomicUsize::new(0));
@@ -72,14 +80,19 @@ impl DelayedServer {
                     std::thread::sleep(delay);
                     in_flight.fetch_sub(1, Ordering::SeqCst);
                     let response = match routes(&path) {
-                        Some(body) => format!(
-                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                            body.len()
-                        ),
-                        None => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                            .to_string(),
+                        Some(body) => {
+                            let mut response = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                body.len()
+                            )
+                            .into_bytes();
+                            response.extend_from_slice(&body);
+                            response
+                        }
+                        None => b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .to_vec(),
                     };
-                    let _ = stream.write_all(response.as_bytes());
+                    let _ = stream.write_all(&response);
                     let _ = stream.flush();
                 });
             }
