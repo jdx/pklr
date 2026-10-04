@@ -1374,7 +1374,9 @@ impl Evaluator {
                     "length" => Value::Int(keys.len() as i64),
                     "keys" => Value::List(ListValue::new(
                         ListKind::Set,
-                        keys.into_keys().map(Value::String).collect::<Vec<_>>(),
+                        keys.into_keys()
+                            .map(|key| crate::value::mapping_storage_value(&key))
+                            .collect::<Vec<_>>(),
                     )),
                     "isEmpty" => Value::Bool(keys.is_empty()),
                     _ => Value::Bool(!keys.is_empty()),
@@ -4763,7 +4765,7 @@ impl Evaluator {
                         return Ok(Value::List(ListValue::new(
                             ListKind::Set,
                             map.keys()
-                                .map(|k| Value::String(k.clone()))
+                                .map(|key| crate::value::mapping_storage_value(key))
                                 .collect::<Vec<_>>(),
                         )));
                     }
@@ -5781,9 +5783,7 @@ impl Evaluator {
                     // and `"1"` are distinct mapping keys.
                     // Object-body entries may amend an earlier value from this
                     // body.
-                    if !matches!(val_expr, Expr::ObjectBody(_))
-                        && !defined_keys.insert(key_str.clone())
-                    {
+                    if !defined_keys.insert(key_str.clone()) {
                         let key = match &key {
                             Value::String(s) => format!("{s:?}"),
                             key => value_to_display(key),

@@ -562,7 +562,7 @@ pub(super) fn record_generated_members(
             let name = if is_property {
                 name.to_string()
             } else {
-                format!("{:?}", &**name)
+                format!("{:?}", crate::value::display_storage_key(name))
             };
             return Err(Error::Eval(format!(
                 "Duplicate definition of member `{name}`."

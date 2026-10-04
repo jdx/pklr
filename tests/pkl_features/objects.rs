@@ -172,6 +172,7 @@ local differentTypeKeys = new Mapping<Any, Int> { [1] = 10; ["1"] = 20 }
 numberKey = differentTypeKeys[1]
 stringKey = differentTypeKeys["1"]
 differentTypeKeyCount = differentTypeKeys.length
+typedKeys = differentTypeKeys.keys
 "#,
     );
     let duplicate = "Duplicate definition of member `\"a\"`.";
@@ -190,6 +191,7 @@ differentTypeKeyCount = differentTypeKeys.length
     assert_eq!(json["numberKey"], 10);
     assert_eq!(json["stringKey"], 20);
     assert_eq!(json["differentTypeKeyCount"], 2);
+    assert_eq!(json["typedKeys"], serde_json::json!([1, "1"]));
 }
 
 #[test]

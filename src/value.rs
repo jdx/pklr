@@ -30,10 +30,37 @@ pub(crate) fn mapping_storage_key(value: &Value) -> Option<Arc<str>> {
     Some(format!("{MAPPING_KEY_PREFIX}{kind}:{identity:016x}:{display}").into())
 }
 
-fn display_storage_key(key: &str) -> &str {
+pub(crate) fn display_storage_key(key: &str) -> &str {
     key.strip_prefix(MAPPING_KEY_PREFIX)
         .and_then(|key| key.rsplit_once(':').map(|(_, display)| display))
         .unwrap_or(key)
+}
+
+pub(crate) fn mapping_storage_value(key: &str) -> Value {
+    let Some(key) = key.strip_prefix(MAPPING_KEY_PREFIX) else {
+        return Value::String(key.into());
+    };
+    let Some((kind, rest)) = key.split_once(':') else {
+        return Value::String(key.into());
+    };
+    let Some((_, display)) = rest.split_once(':') else {
+        return Value::String(key.into());
+    };
+    match kind {
+        "bool" => display
+            .parse()
+            .map(Value::Bool)
+            .unwrap_or_else(|_| Value::String(display.into())),
+        "int" => display
+            .parse()
+            .map(Value::Int)
+            .unwrap_or_else(|_| Value::String(display.into())),
+        "float" => display
+            .parse()
+            .map(Value::Float)
+            .unwrap_or_else(|_| Value::String(display.into())),
+        _ => Value::String(display.into()),
+    }
 }
 
 /// Captured lexical bindings. The same type as [`ObjectMap`], so a scope can
