@@ -5,6 +5,11 @@ use rustc_hash::{FxBuildHasher, FxHashSet};
 
 pub(super) type FxIndexMap<K, V> = IndexMap<K, V, FxBuildHasher>;
 
+/// A binding name in a [`Scope`]. Reference-counted so copying bindings
+/// between scopes, which happens for every evaluated entry, does not
+/// allocate.
+pub(super) type Name = Arc<str>;
+
 // --- Scope ---
 
 #[derive(Clone)]
@@ -30,16 +35,16 @@ pub(super) struct Scope {
     // does for every nested body, does not copy its bindings.
     // They also use a fast non-cryptographic hasher: lookups and inserts on
     // these maps dominate evaluation, and the keys come from trusted source.
-    pub(super) vars: Rc<FxIndexMap<String, Value>>,
-    pub(super) type_aliases: Rc<FxIndexMap<String, crate::parser::TypeExpr>>,
-    pub(super) module_identities: Rc<FxIndexMap<String, String>>,
-    pub(super) poisoned: Rc<FxIndexMap<String, String>>,
+    pub(super) vars: Rc<FxIndexMap<Name, Value>>,
+    pub(super) type_aliases: Rc<FxIndexMap<Name, crate::parser::TypeExpr>>,
+    pub(super) module_identities: Rc<FxIndexMap<Name, String>>,
+    pub(super) poisoned: Rc<FxIndexMap<Name, String>>,
     /// Names in `vars` or `poisoned` declared by an entry written in the body
     /// that owns this scope, as opposed to members an object inherits from its
     /// class or parent. Pkl resolves a name in lexically enclosing bodies
     /// before falling back to the object's inherited members, so only these
     /// declared names may win over an inherited member of an inner object.
-    pub(super) declared: Rc<FxHashSet<String>>,
+    pub(super) declared: Rc<FxHashSet<Name>>,
     /// Names in `vars` bound by a `local` that aliases the `this` of the
     /// object owning this scope (`local self = this`). Unlike a property such
     /// as `me = this`, such a local is not a member, so a nested object whose
@@ -75,14 +80,18 @@ impl Scope {
     }
 
     pub(super) fn set(&mut self, name: String, val: Value) {
-        if self.poisoned.contains_key(&name) {
-            Rc::make_mut(&mut self.poisoned).shift_remove(&name);
+        self.set_name(name.into(), val);
+    }
+
+    pub(super) fn set_name(&mut self, name: Name, val: Value) {
+        if self.poisoned.contains_key(&*name) {
+            Rc::make_mut(&mut self.poisoned).shift_remove(&*name);
         }
-        if self.module_identities.contains_key(&name) {
-            Rc::make_mut(&mut self.module_identities).shift_remove(&name);
+        if self.module_identities.contains_key(&*name) {
+            Rc::make_mut(&mut self.module_identities).shift_remove(&*name);
         }
-        if self.this_aliases.contains(&name) {
-            Rc::make_mut(&mut self.this_aliases).remove(&name);
+        if self.this_aliases.contains(&*name) {
+            Rc::make_mut(&mut self.this_aliases).remove(&*name);
         }
         Rc::make_mut(&mut self.vars).insert(name, val);
     }
@@ -125,18 +134,23 @@ impl Scope {
 
     /// Bind a name declared in the body that owns this scope.
     pub(super) fn declare(&mut self, name: String, val: Value) {
-        if !self.declared.contains(&name) {
+        self.declare_name(name.into(), val);
+    }
+
+    pub(super) fn declare_name(&mut self, name: Name, val: Value) {
+        if !self.declared.contains(&*name) {
             Rc::make_mut(&mut self.declared).insert(name.clone());
         }
-        self.set(name, val);
+        self.set_name(name, val);
     }
 
     /// Poison a local declared in the body that owns this scope.
     pub(super) fn declare_poisoned(&mut self, name: String, message: String) {
-        if !self.declared.contains(&name) {
+        let name = Name::from(name);
+        if !self.declared.contains(&*name) {
             Rc::make_mut(&mut self.declared).insert(name.clone());
         }
-        self.poison(name, message);
+        Rc::make_mut(&mut self.poisoned).insert(name, message);
     }
 
     /// Whether the innermost binding of `name` was declared in a body rather
@@ -151,7 +165,7 @@ impl Scope {
         }
     }
 
-    pub(super) fn flatten_declared(&self) -> HashSet<String> {
+    pub(super) fn flatten_declared(&self) -> NameSet {
         let mut declared = self
             .parent
             .as_ref()
@@ -168,7 +182,7 @@ impl Scope {
     }
 
     pub(super) fn set_module_identity(&mut self, name: String, identity: String) {
-        Rc::make_mut(&mut self.module_identities).insert(name, identity);
+        Rc::make_mut(&mut self.module_identities).insert(name.into(), identity);
     }
 
     pub(super) fn module_identity(&self, name: &str) -> Option<&String> {
@@ -186,18 +200,18 @@ impl Scope {
             .map(|parent| parent.flatten_module_identities())
             .unwrap_or_default();
         for name in self.vars.keys() {
-            identities.shift_remove(name);
+            identities.shift_remove(&**name);
         }
         identities.extend(
             self.module_identities
                 .iter()
-                .map(|(k, v)| (k.clone(), v.clone())),
+                .map(|(k, v)| (k.to_string(), v.clone())),
         );
         identities
     }
 
     pub(super) fn poison(&mut self, name: String, message: String) {
-        Rc::make_mut(&mut self.poisoned).insert(name, message);
+        Rc::make_mut(&mut self.poisoned).insert(name.into(), message);
     }
 
     pub(super) fn poison_of(&self, name: &str) -> Option<&String> {
@@ -209,7 +223,7 @@ impl Scope {
     }
 
     pub(super) fn set_type_alias(&mut self, name: String, ty: crate::parser::TypeExpr) {
-        Rc::make_mut(&mut self.type_aliases).insert(name, ty);
+        Rc::make_mut(&mut self.type_aliases).insert(name.into(), ty);
     }
 
     pub(super) fn get_type_alias(&self, name: &str) -> Option<&crate::parser::TypeExpr> {
@@ -227,17 +241,44 @@ impl Scope {
             .or_else(|| self.parent.as_ref().and_then(|p| p.get(name)))
     }
 
-    pub(super) fn flatten(&self) -> IndexMap<String, Value> {
+    pub(super) fn flatten(&self) -> ScopeMap {
         let mut result = self
             .parent
             .as_ref()
             .map(|p| p.flatten())
             .unwrap_or_default();
         for name in self.poisoned.keys() {
-            result.shift_remove(name);
+            result.shift_remove(&**name);
         }
         result.extend(self.vars.iter().map(|(k, v)| (k.clone(), v.clone())));
         result
+    }
+
+    /// The subset of `flatten` for `names`, sorted by name.
+    pub(super) fn flatten_names<'a>(&self, names: impl IntoIterator<Item = &'a str>) -> ScopeMap {
+        let mut names = names.into_iter().collect::<Vec<_>>();
+        names.sort_unstable();
+        names.dedup();
+        names
+            .into_iter()
+            .filter_map(|name| {
+                let (key, value) = self.flattened(name)?;
+                Some((key.clone(), value.clone()))
+            })
+            .collect()
+    }
+
+    /// The binding `flatten` would hold for `name`, with the scope's stored
+    /// key: an inner binding wins, and a name poisoned at a level hides outer
+    /// bindings unless that same level also binds it.
+    fn flattened(&self, name: &str) -> Option<(&Name, &Value)> {
+        if let Some(binding) = self.vars.get_key_value(name) {
+            return Some(binding);
+        }
+        if self.poisoned.contains_key(name) {
+            return None;
+        }
+        self.parent.as_ref()?.flattened(name)
     }
 
     pub(super) fn flatten_type_aliases(&self) -> IndexMap<String, crate::parser::TypeExpr> {
@@ -249,7 +290,7 @@ impl Scope {
         result.extend(
             self.type_aliases
                 .iter()
-                .map(|(k, v)| (k.clone(), v.clone())),
+                .map(|(k, v)| (k.to_string(), v.clone())),
         );
         result
     }
@@ -289,9 +330,9 @@ pub(super) fn restore_scope(captured: &CapturedScope) -> Scope {
         ..Scope::default()
     };
     for (name, value) in &captured.values {
-        scope.set(name.clone(), value.clone());
+        scope.set_name(name.clone(), value.clone());
     }
-    scope.declared = Rc::new(captured.declared.iter().cloned().collect());
+    scope.declared = Rc::new(captured.declared.clone());
     for (name, identity) in &captured.module_identities {
         scope.set_module_identity(name.clone(), identity.clone());
     }
@@ -456,36 +497,37 @@ pub(super) fn scope_with_object_bindings(
     // of going through `declare`/`set`, which also clear stale poison and
     // module identities for each name.
     let mut vars = FxIndexMap::with_capacity_and_hasher(object.vars.len(), FxBuildHasher);
-    let mut declared = FxHashSet::default();
+    let mut declared =
+        FxHashSet::with_capacity_and_hasher(owned.len().min(object.vars.len()), FxBuildHasher);
     for (name, value) in object.vars.iter() {
         // `super` belongs to the body that declared the entry. A later
         // amendment must not replace an inherited entry's parent binding.
-        if name == "super" {
+        if &**name == "super" {
             continue;
         }
-        if owned.contains(name) {
+        if owned.contains(&**name) {
             declared.insert(name.clone());
             vars.insert(name.clone(), value.clone());
         } else if !lexical.is_declared(name) {
             vars.insert(name.clone(), value.clone());
         }
     }
-    scope.vars = Rc::new(vars);
-    scope.declared = Rc::new(declared);
-    scope.this_aliases = object.this_aliases.clone();
+    let mut poisoned = FxIndexMap::default();
     for (name, message) in object.poisoned.iter() {
-        if owned.contains(name) {
-            scope.declare_poisoned(name.clone(), message.clone());
+        if owned.contains(&**name) {
+            declared.insert(name.clone());
+            poisoned.insert(name.clone(), message.clone());
         } else if !lexical.is_declared(name) {
-            scope.poison(name.clone(), message.clone());
+            poisoned.insert(name.clone(), message.clone());
         }
     }
-    for (name, ty) in object.type_aliases.iter() {
-        scope.set_type_alias(name.clone(), ty.clone());
-    }
-    for (name, identity) in object.module_identities.iter() {
-        scope.set_module_identity(name.clone(), identity.clone());
-    }
+    scope.vars = Rc::new(vars);
+    scope.declared = Rc::new(declared);
+    scope.poisoned = Rc::new(poisoned);
+    scope.this_aliases = object.this_aliases.clone();
+    // The child's own maps are empty, so it can share the object's.
+    scope.type_aliases = object.type_aliases.clone();
+    scope.module_identities = object.module_identities.clone();
     scope
 }
 
@@ -494,25 +536,25 @@ pub(super) fn scope_with_object_bindings(
 /// Both scopes keep which of their names were declared in a body, so an entry's
 /// inherited members still resolve after those names.
 pub(super) fn mapping_amendment_scopes(
-    captured: &IndexMap<String, Value>,
-    captured_declared: &HashSet<String>,
+    captured: &ScopeMap,
+    captured_declared: &NameSet,
     current: &Scope,
 ) -> (Scope, Scope) {
     let current_declared = current.flatten_declared();
     let mut inherited = Scope::default();
     for (key, value) in captured {
-        if captured_declared.contains(key) {
-            inherited.declare(key.clone(), value.clone());
+        if captured_declared.contains(&**key) {
+            inherited.declare_name(key.clone(), value.clone());
         } else {
-            inherited.set(key.clone(), value.clone());
+            inherited.set_name(key.clone(), value.clone());
         }
     }
     for (key, value) in current.flatten() {
         if inherited.get(&key).is_none() {
-            if current_declared.contains(&key) {
-                inherited.declare(key, value);
+            if current_declared.contains(&*key) {
+                inherited.declare_name(key, value);
             } else {
-                inherited.set(key, value);
+                inherited.set_name(key, value);
             }
         }
     }
@@ -522,11 +564,11 @@ pub(super) fn mapping_amendment_scopes(
 
     let mut amendment = inherited.clone();
     for (key, value) in current.flatten() {
-        if current_declared.contains(&key) {
-            amendment.declare(key, value);
+        if current_declared.contains(&*key) {
+            amendment.declare_name(key, value);
         } else {
-            Rc::make_mut(&mut amendment.declared).remove(&key);
-            amendment.set(key, value);
+            Rc::make_mut(&mut amendment.declared).remove(&*key);
+            amendment.set_name(key, value);
         }
     }
     for (key, ty) in current.flatten_type_aliases() {

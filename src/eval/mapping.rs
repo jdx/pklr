@@ -306,8 +306,8 @@ pub(super) fn apply_mapping_type_annotation(
         .map(|src| (**src).clone())
         .unwrap_or_else(|| ObjectSource {
             entries: Vec::new(),
-            scope: IndexMap::new(),
-            scope_declared: HashSet::new(),
+            scope: ScopeMap::default(),
+            scope_declared: NameSet::default(),
             body_members: HashSet::new(),
             is_open: true,
             type_name: None,

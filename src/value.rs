@@ -6,11 +6,18 @@ use serde_json::json;
 
 use crate::parser::{Entry, Expr, TypeExpr};
 
+/// Captured lexical bindings, keyed by shared names so capturing a scope does
+/// not allocate a string per binding.
+pub type ScopeMap = IndexMap<Arc<str>, Value, rustc_hash::FxBuildHasher>;
+
+/// A set of binding names, shared with the scopes they came from.
+pub(crate) type NameSet = rustc_hash::FxHashSet<Arc<str>>;
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CapturedScope {
-    pub values: IndexMap<String, Value>,
+    pub values: ScopeMap,
     /// Names in `values` declared in a lexically enclosing body.
-    pub declared: HashSet<String>,
+    pub declared: NameSet,
     /// Members declared by the body whose entries are evaluated in this scope,
     /// kept so an amendment that replaces one does not drop it from the body.
     pub body_members: HashSet<String>,
@@ -26,10 +33,10 @@ pub(crate) struct CapturedScope {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObjectSource {
     pub entries: Vec<Entry>,
-    pub scope: IndexMap<String, Value>,
+    pub scope: ScopeMap,
     /// Names in `scope` declared in a lexically enclosing body, which an
     /// inherited member of an inner object must not shadow.
-    pub(crate) scope_declared: HashSet<String>,
+    pub(crate) scope_declared: NameSet,
     /// Members declared by the object's own definition body, including ones an
     /// amendment has since replaced.
     pub(crate) body_members: HashSet<String>,
@@ -89,9 +96,10 @@ pub enum Value {
     /// Listing (ordered list).
     List(Vec<Value>),
     /// Lambda function: param names + body expression + captured scope values.
-    /// Captures are Arc-wrapped so cloning a Lambda is O(1) even when scopes
-    /// contain many nested Lambdas (e.g. TestMaker with checkPass/checkFail/etc.).
-    Lambda(Vec<String>, Expr, Arc<IndexMap<String, Value>>),
+    /// All three are Arc-wrapped so cloning a Lambda is O(1): lambdas are
+    /// copied whenever a scope holding them is captured, and deep-copying the
+    /// body each time dominated evaluation.
+    Lambda(Arc<[String]>, Arc<Expr>, Arc<ScopeMap>),
 }
 
 impl Value {

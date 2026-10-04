@@ -3013,3 +3013,142 @@ result = new Listing { local n = 7; local m = n; for (n in List(2)) { m + n }; s
     );
     assert_eq!(v["result"], serde_json::json!([9, 9]));
 }
+
+#[test]
+fn lambda_object_reads_enclosing_bindings_through_outer() {
+    let json = eval(
+        r#"
+local x = 42
+local make = () -> new Dynamic {
+  value = outer.x
+  indexed = outer["x"]
+}
+result = make.apply()
+"#,
+    );
+    assert_eq!(json["result"]["value"], 42);
+    assert_eq!(json["result"]["indexed"], 42);
+}
+
+#[test]
+fn lambda_object_local_reads_enclosing_binding_before_its_own() {
+    let json = eval(
+        r#"
+local x = 41
+local make = () -> new Dynamic {
+  local y = x
+  local x = 0
+  value = y
+}
+result = make.apply()
+"#,
+    );
+    assert_eq!(json["result"]["value"], 41);
+}
+
+#[test]
+fn lambda_object_keeps_default_type_binding() {
+    let json = eval(
+        r#"
+class Step { value = 42 }
+local make = () -> new Dynamic {
+  selected: *Step | String
+}
+result = make.apply()
+"#,
+    );
+    assert_eq!(json["result"]["selected"]["value"], 42);
+}
+
+#[test]
+fn lambda_keeps_quoted_class_name() {
+    let json = eval(
+        r#"
+class `Step?` { value = 42 }
+local make = () -> new `Step?` {}
+result = make.apply()
+"#,
+    );
+    assert_eq!(json["result"]["value"], 42);
+}
+
+#[test]
+fn lambda_object_keeps_generic_default_type_binding() {
+    let json = eval(
+        r#"
+class Container<T> { value = 42 }
+local make = () -> new Dynamic {
+  selected: *Container<String> | String
+}
+result = make.apply()
+"#,
+    );
+    assert_eq!(json["result"]["selected"]["value"], 42);
+}
+
+#[test]
+fn lambda_object_keeps_quoted_default_type_binding() {
+    let json = eval(
+        r#"
+class `Foo-Bar` { value = 42 }
+class `My Step` { value = 43 }
+local make = () -> new Dynamic {
+  selected: *`Foo-Bar` | String
+  spaced: *`My Step` | String
+}
+result = make.apply()
+"#,
+    );
+    assert_eq!(json["result"]["selected"]["value"], 42);
+    assert_eq!(json["result"]["spaced"]["value"], 43);
+}
+
+#[test]
+fn lambda_let_and_for_bindings_shadow_captured_names() {
+    // The capture collector ignores shadowing, so it also captures the outer
+    // `x`; the inner `let` and `for` bindings must still win.
+    let json = eval(
+        r#"
+local x = 1
+local f = (n) -> let (x = n + 10) x
+local g = (xs) -> new Listing { for (x in xs) { x * 2 } }
+local h = (n) -> let (y = n) y + x
+a = f.apply(1)
+b = g.apply(List(1, 2))
+c = h.apply(5)
+"#,
+    );
+    assert_eq!(json["a"], 11);
+    assert_eq!(json["b"], serde_json::json!([2, 4]));
+    assert_eq!(json["c"], 6);
+}
+
+#[test]
+fn lambda_constrained_check_keeps_quoted_class_with_comma() {
+    let json = eval(
+        r#"
+class `Foo,Bar` { value = 1 }
+class Other { value = 2 }
+local check = (v) -> v is `Foo,Bar`(true)
+yes = check.apply(new `Foo,Bar` {})
+no = check.apply(new Other {})
+"#,
+    );
+    assert_eq!(json["yes"], true);
+    assert_eq!(json["no"], false);
+}
+
+#[test]
+fn lambda_constrained_check_keeps_quoted_generic_class() {
+    let json = eval(
+        r#"
+class `Box,Pair`<T> { value = 1 }
+class Other { value = 2 }
+local check = (v) -> v is `Box,Pair`<String>(true)
+yes = check.apply(new `Box,Pair`<String> {})
+no = check.apply(new Other {})
+"#,
+    );
+    assert_eq!(json["yes"], true);
+    assert_eq!(json["no"], false);
+}

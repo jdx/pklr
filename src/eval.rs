@@ -10,7 +10,7 @@ use crate::capabilities::EvalCapabilities;
 use crate::error::{Error, Result};
 use crate::lexer;
 use crate::parser::{self, BinOp, Entry, Expr, Modifier, Module, Property, StringInterpPart, UnOp};
-use crate::value::{CapturedScope, ObjectSource, Value};
+use crate::value::{CapturedScope, NameSet, ObjectSource, ScopeMap, Value};
 
 mod analysis;
 mod glob;
@@ -90,7 +90,7 @@ struct MappingInheritedDefault {
 
 #[derive(Clone, Default)]
 struct ModuleScopeSnapshot {
-    values: IndexMap<String, Value>,
+    values: ScopeMap,
     type_aliases: IndexMap<String, crate::parser::TypeExpr>,
     late_properties: Vec<Property>,
 }
@@ -794,8 +794,8 @@ impl Evaluator {
             return;
         };
         for (name, value) in &inherited.values {
-            if name != "this" && name != "module" {
-                scope.set(name.clone(), value.clone());
+            if &**name != "this" && &**name != "module" {
+                scope.set_name(name.clone(), value.clone());
             }
         }
         for (name, ty) in &inherited.type_aliases {
@@ -1225,7 +1225,7 @@ impl Evaluator {
         seed_builtins(&mut scope);
         if let Some(inherited_scope) = inherited_scope {
             for (key, value) in inherited_scope.flatten() {
-                scope.set(key, value);
+                scope.set_name(key, value);
             }
             for (key, ty) in inherited_scope.flatten_type_aliases() {
                 scope.set_type_alias(key, ty);
@@ -2055,8 +2055,8 @@ impl Evaluator {
         } else {
             Some(Arc::new(ObjectSource {
                 entries: Vec::new(),
-                scope: IndexMap::new(),
-                scope_declared: HashSet::new(),
+                scope: ScopeMap::default(),
+                scope_declared: NameSet::default(),
                 body_members: HashSet::new(),
                 is_open: true,
                 type_name: None,
@@ -2121,7 +2121,7 @@ impl Evaluator {
             // inherited, is a different member and must not become the base.
             let scoped = scope
                 .get(&prop.name)
-                .filter(|_| scope.vars.contains_key(&prop.name));
+                .filter(|_| scope.vars.contains_key(prop.name.as_str()));
             let amendment_base = scoped
                 .filter(|value| !is_null_value(value))
                 .or(nullable_default.as_ref())
@@ -2273,7 +2273,7 @@ impl Evaluator {
                 if let Entry::Property(prop) = entry
                     && !has_modifier(&prop.modifiers, Modifier::Local)
                     && source.evaluated_properties.contains(&prop.name)
-                    && let Some(value) = source.scope.get(&prop.name)
+                    && let Some(value) = source.scope.get(prop.name.as_str())
                 {
                     child_scope.set(prop.name.clone(), value.clone());
                 }
@@ -2310,20 +2310,28 @@ impl Evaluator {
             }
         };
         for name in &unused_this_aliases {
-            outer_map.shift_remove(name);
+            outer_map.shift_remove(name.as_str());
         }
         for entry in entries {
             if let Entry::Property(prop) = entry
                 && prop.value.is_none()
                 && prop.body.is_none()
                 && !has_modifier(&prop.modifiers, Modifier::Local)
-                && !outer_map.contains_key(&prop.name)
+                && !outer_map.contains_key(prop.name.as_str())
                 && matches!(prop.type_ann, Some(crate::parser::TypeExpr::Nullable(_)))
             {
-                outer_map.insert(prop.name.clone(), Value::Null);
+                outer_map.insert(prop.name.as_str().into(), Value::Null);
             }
         }
-        let outer_obj = Value::Object(Arc::new(outer_map), None);
+        let outer_obj = Value::Object(
+            Arc::new(
+                outer_map
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), v))
+                    .collect(),
+            ),
+            None,
+        );
         child_scope.set("outer".into(), outer_obj);
         // Class-as-a-function definitions commonly use `local self = this` so
         // output properties can close over the amended instance. Bind `this`
@@ -2338,6 +2346,16 @@ impl Evaluator {
         // to a second pass so they capture the fully-populated scope.
         let mut deferred_lambdas: Vec<(String, &crate::parser::Expr, usize)> = Vec::new();
         for (entry_index, entry) in entries.iter().enumerate() {
+            // Only locals, classes and type aliases are handled in this pass,
+            // so build the entry's scope only for those.
+            if !matches!(
+                entry,
+                Entry::Property(prop)
+                    if has_modifier(&prop.modifiers, Modifier::Local) && prop.value.is_some()
+            ) && !matches!(entry, Entry::ClassDef(..) | Entry::TypeAlias(..))
+            {
+                continue;
+            }
             let active_scope = scope_for_object_entry(
                 entry_index,
                 &child_scope,
@@ -2401,7 +2419,7 @@ impl Evaluator {
                     let mut resolved_scope = active_scope;
                     self.eval_type_alias(name, ty, &mut resolved_scope);
                     child_scope.set_type_alias(name.clone(), ty.clone());
-                    if let Some(value) = resolved_scope.vars.get(name) {
+                    if let Some(value) = resolved_scope.vars.get(name.as_str()) {
                         child_scope.set(name.clone(), value.clone());
                     }
                 }
@@ -2539,8 +2557,8 @@ impl Evaluator {
                                 }
                                 None => ObjectSource {
                                     entries: vec![],
-                                    scope: IndexMap::new(),
-                                    scope_declared: HashSet::new(),
+                                    scope: ScopeMap::default(),
+                                    scope_declared: NameSet::default(),
                                     body_members: HashSet::new(),
                                     is_open: true,
                                     type_name: Some(tn.clone()),
@@ -2710,8 +2728,10 @@ impl Evaluator {
         let mut source_scope = child_scope.flatten();
         for name in &unused_this_aliases {
             // A binding of the same name made by this body shadows the alias.
-            if !child_scope.vars.contains_key(name) && !child_scope.poisoned.contains_key(name) {
-                source_scope.shift_remove(name);
+            if !child_scope.vars.contains_key(name.as_str())
+                && !child_scope.poisoned.contains_key(name.as_str())
+            {
+                source_scope.shift_remove(name.as_str());
             }
         }
         let source = ObjectSource {
@@ -2834,7 +2854,7 @@ impl Evaluator {
                                 );
                                 if psrc.evaluated_properties.contains(&p.name) {
                                     combined_evaluated_properties.push(p.name.clone());
-                                    if let Some(value) = psrc.scope.get(&p.name) {
+                                    if let Some(value) = psrc.scope.get(p.name.as_str()) {
                                         inherited_property_values
                                             .insert(p.name.clone(), value.clone());
                                     }
@@ -2854,9 +2874,13 @@ impl Evaluator {
                         // that property's value in `scope`, even when a child
                         // module has a same-named lexical binding.
                         for name in inherited_property_values.keys() {
-                            src.scope_declared.remove(name);
+                            src.scope_declared.remove(name.as_str());
                         }
-                        src.scope.extend(inherited_property_values);
+                        src.scope.extend(
+                            inherited_property_values
+                                .into_iter()
+                                .map(|(k, v)| (Arc::from(k), v)),
+                        );
                         src.entries = combined_entries;
                         src.entry_scopes = combined_entry_scopes;
                         src.evaluated_properties = combined_evaluated_properties;
@@ -3052,7 +3076,7 @@ impl Evaluator {
     async fn eval_amended_object(
         &mut self,
         base_map: &Arc<IndexMap<String, Value>>,
-        base_source: &ObjectSource,
+        base_source: &Arc<ObjectSource>,
         overlay_entries: &[Entry],
         current_scope: &Scope,
         depth: usize,
@@ -3071,17 +3095,14 @@ impl Evaluator {
         // they need not have a binding in the lexical scope.
         for name in &base_source.evaluated_properties {
             if !parent_members.contains_key(name)
-                && let Some(value) = base_source.scope.get(name)
+                && let Some(value) = base_source.scope.get(name.as_str())
             {
                 parent_members.insert(name.clone(), value.clone());
             }
         }
         amendment_scope.values.insert(
             "super".into(),
-            Value::Object(
-                Arc::new(parent_members),
-                Some(Arc::new(base_source.clone())),
-            ),
+            Value::Object(Arc::new(parent_members), Some(Arc::clone(base_source))),
         );
         let amendment_entry_scope = Some(Arc::new(CapturedScope {
             body_members: overlay_entries
@@ -3176,10 +3197,10 @@ impl Evaluator {
             ..Scope::default()
         };
         for (k, v) in base_scope {
-            if base_source.scope_declared.contains(k) {
-                eval_scope.declare(k.clone(), v.clone());
+            if base_source.scope_declared.contains(&**k) {
+                eval_scope.declare_name(k.clone(), v.clone());
             } else {
-                eval_scope.set(k.clone(), v.clone());
+                eval_scope.set_name(k.clone(), v.clone());
             }
         }
         for (name, identity) in &base_source.scope_module_identities {
@@ -3200,7 +3221,7 @@ impl Evaluator {
         for (k, v) in current_scope.flatten() {
             // Inherited entries retain their original parent. The overlay's
             // parent is captured separately in amendment_entry_scope.
-            if k == "super" {
+            if &*k == "super" {
                 continue;
             }
             let same_module = eval_scope
@@ -3213,18 +3234,18 @@ impl Evaluator {
                     .get(&k)
                     .and_then(|base| merge_partial_module_values(base, &v))
                     .unwrap_or(v)
-            } else if inherited_references.contains(&k) && eval_scope.get(&k).is_some() {
+            } else if inherited_references.contains(&*k) && eval_scope.get(&k).is_some() {
                 preserved_inherited_bindings.insert(k.clone());
                 continue;
             } else {
                 // A use-site binding is not declared in the base's body.
-                Rc::make_mut(&mut eval_scope.declared).remove(&k);
+                Rc::make_mut(&mut eval_scope.declared).remove(&*k);
                 v
             };
-            eval_scope.set(k, value);
+            eval_scope.set_name(k, value);
         }
         for (name, identity) in current_scope.flatten_module_identities() {
-            if !preserved_inherited_bindings.contains(&name) {
+            if !preserved_inherited_bindings.contains(&*name) {
                 eval_scope.set_module_identity(name, identity);
             }
         }
@@ -3290,7 +3311,7 @@ impl Evaluator {
                         .then(|| {
                             source
                                 .as_ref()
-                                .and_then(|source| source.scope.get(&prop.name))
+                                .and_then(|source| source.scope.get(prop.name.as_str()))
                         })
                         .flatten()
                 });
@@ -3347,7 +3368,7 @@ impl Evaluator {
                 continue;
             };
             let binding = format!("\0mapping_template:{key}");
-            source.scope.insert(binding.clone(), value.clone());
+            source.scope.insert(binding.as_str().into(), value.clone());
             let mut replaced = false;
             for (index, entry) in source.entries.iter_mut().enumerate() {
                 if let Entry::Property(prop) = entry
@@ -3375,7 +3396,7 @@ impl Evaluator {
             }
             source.body_members.insert(key.clone());
         }
-        self.eval_amended_object(template_map, &source, body, scope, depth)
+        self.eval_amended_object(template_map, &Arc::new(source), body, scope, depth)
             .await
     }
 
@@ -3654,20 +3675,42 @@ impl Evaluator {
                 )
             }),
             Expr::Lambda(params, body) => {
-                // Capture current scope values (Arc-wrapped for O(1) clone)
-                let captured = Arc::new(scope.flatten());
                 let mut body = (**body).clone();
                 capture_method_result_types(&mut body, scope);
                 let mut refs = HashSet::new();
                 let shadows = params.iter().cloned().collect::<HashSet<_>>();
                 collect_expr_refs(&body, &mut refs, &shadows);
+                // Capture only the bindings the body can reach: every name it
+                // mentions, ignoring shadowing, plus the implicit receivers.
+                // Flattening the whole scope for every lambda value, and
+                // restoring all of it on every call, dominated evaluation. An
+                // object built in the body sees its enclosing bindings through
+                // `outer`, so a body that mentions `outer` keeps everything, as
+                // does a body that names a type (see `NAMES_A_TYPE`).
+                let mut names = HashSet::new();
+                collect_unshadowed_names(&body, &mut names);
+                let captured =
+                    Arc::new(if names.contains("outer") || names.contains(NAMES_A_TYPE) {
+                        scope.flatten()
+                    } else {
+                        scope.flatten_names(
+                            names
+                                .iter()
+                                .map(String::as_str)
+                                .chain(["this", "module", "super"]),
+                        )
+                    });
                 let captured_body = refs
                     .iter()
                     .filter(|name| scope.get(name).is_none())
                     .find_map(|name| scope.poison_of(name))
                     .map(|message| Expr::Throw(Box::new(Expr::String(message.clone()))))
                     .unwrap_or(body);
-                Ok(Value::Lambda(params.clone(), captured_body, captured))
+                Ok(Value::Lambda(
+                    params.as_slice().into(),
+                    Arc::new(captured_body),
+                    captured,
+                ))
             }
             Expr::InferredNew(ty, entries) => {
                 let (name, params) = inferred_new_type(ty, scope, 0)?;
@@ -3846,8 +3889,8 @@ impl Evaluator {
                                 } else {
                                     ObjectSource {
                                         entries: Vec::new(),
-                                        scope: IndexMap::new(),
-                                        scope_declared: HashSet::new(),
+                                        scope: ScopeMap::default(),
+                                        scope_declared: NameSet::default(),
                                         body_members: HashSet::new(),
                                         is_open,
                                         type_name: tn,
@@ -3887,8 +3930,8 @@ impl Evaluator {
                             }
                             let src = ObjectSource {
                                 entries: Vec::new(),
-                                scope: IndexMap::new(),
-                                scope_declared: HashSet::new(),
+                                scope: ScopeMap::default(),
+                                scope_declared: NameSet::default(),
                                 body_members: HashSet::new(),
                                 is_open: true,
                                 type_name: type_name.clone(),
@@ -4238,7 +4281,7 @@ impl Evaluator {
             let mut call_scope = Scope::default();
             // Restore captured scope
             for (k, v) in captured.iter() {
-                call_scope.set(k.clone(), v.clone());
+                call_scope.set_name(k.clone(), v.clone());
             }
             // If we're inside a method call context (scope has `this` as an Object),
             // layer the instance's properties so local functions see overridden values
@@ -4311,7 +4354,7 @@ impl Evaluator {
         {
             let mut call_scope = Scope::default();
             for (k, v) in captured.iter() {
-                call_scope.set(k.clone(), v.clone());
+                call_scope.set_name(k.clone(), v.clone());
             }
             // Layer in all instance properties, including lambdas, so local
             // functions called by this method see overrides.
@@ -4558,7 +4601,7 @@ impl Evaluator {
             (Value::Lambda(params, body, captured), "apply") => {
                 let mut call_scope = Scope::default();
                 for (k, v) in captured.iter() {
-                    call_scope.set(k.clone(), v.clone());
+                    call_scope.set_name(k.clone(), v.clone());
                 }
                 for (param, arg) in params.iter().zip(args.iter()) {
                     call_scope.declare(param.clone(), arg.clone());
@@ -4580,7 +4623,7 @@ impl Evaluator {
         if let Value::Lambda(params, body, captured) = lambda {
             let mut scope = Scope::default();
             for (k, v) in captured.iter() {
-                scope.set(k.clone(), v.clone());
+                scope.set_name(k.clone(), v.clone());
             }
             for (param, arg) in params.iter().zip(args.iter()) {
                 scope.declare(param.clone(), arg.clone());
@@ -4794,7 +4837,7 @@ impl Evaluator {
                         }
                         let mut call_scope = Scope::default();
                         for (k, v) in captured.iter() {
-                            call_scope.set(k.clone(), v.clone());
+                            call_scope.set_name(k.clone(), v.clone());
                         }
                         call_scope.declare(params[0].clone(), l);
                         self.eval_expr(&body, &call_scope, depth + 1).await
@@ -5044,8 +5087,8 @@ impl Evaluator {
                                     }
                                     None => ObjectSource {
                                         entries: vec![],
-                                        scope: IndexMap::new(),
-                                        scope_declared: HashSet::new(),
+                                        scope: ScopeMap::default(),
+                                        scope_declared: NameSet::default(),
                                         body_members: HashSet::new(),
                                         is_open: true,
                                         type_name: Some(tn.to_string()),
@@ -5255,7 +5298,7 @@ impl Evaluator {
                             {
                                 let mut call_scope = Scope::default();
                                 for (k, v) in captured.iter() {
-                                    call_scope.set(k.clone(), v.clone());
+                                    call_scope.set_name(k.clone(), v.clone());
                                 }
                                 // Bind the object as the first parameter
                                 if let Some(param) = params.first() {

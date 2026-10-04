@@ -692,3 +692,142 @@ pub(super) fn declared_entry_roots(entries: &[Entry]) -> HashSet<String> {
         })
         .collect()
 }
+
+/// Every name an expression could resolve in its enclosing scope, ignoring
+/// shadowing. Over-approximating is safe for deciding what a lambda captures:
+/// a local of an object built in the body may be read before it is declared,
+/// so an enclosing binding of the same name must stay reachable.
+pub(super) fn collect_unshadowed_names(expr: &Expr, names: &mut HashSet<String>) {
+    match expr {
+        Expr::Ident(name) => {
+            names.insert(name.clone());
+        }
+        Expr::New(type_name, entries, generic_params) => {
+            if type_name.is_some() || !generic_params.is_empty() {
+                mark_type_use(names);
+            }
+            collect_unshadowed_entry_names(entries, names);
+        }
+        Expr::Field(base, _) | Expr::NullSafeField(base, _) => {
+            collect_unshadowed_names(base, names);
+        }
+        Expr::Index(base, index) | Expr::Binop(_, base, index) => {
+            collect_unshadowed_names(base, names);
+            collect_unshadowed_names(index, names);
+        }
+        Expr::Call(callee, args) => {
+            collect_unshadowed_names(callee, names);
+            for arg in args {
+                collect_unshadowed_names(arg, names);
+            }
+        }
+        Expr::If(cond, then_expr, else_expr) => {
+            collect_unshadowed_names(cond, names);
+            collect_unshadowed_names(then_expr, names);
+            collect_unshadowed_names(else_expr, names);
+        }
+        Expr::Let(_, value, body) => {
+            collect_unshadowed_names(value, names);
+            collect_unshadowed_names(body, names);
+        }
+        Expr::Is(value, ty) | Expr::As(value, ty) => {
+            collect_unshadowed_names(value, names);
+            collect_unshadowed_type_names(ty, names);
+        }
+        Expr::Lambda(_, value)
+        | Expr::Unop(_, value)
+        | Expr::Throw(value)
+        | Expr::Trace(value)
+        | Expr::Read(value)
+        | Expr::ReadOrNull(value) => collect_unshadowed_names(value, names),
+        Expr::InferredNew(ty, entries) => {
+            collect_unshadowed_type_names(ty, names);
+            collect_unshadowed_entry_names(entries, names);
+        }
+        Expr::ObjectBody(entries) => collect_unshadowed_entry_names(entries, names),
+        Expr::StringInterpolation(parts) => {
+            for part in parts {
+                if let StringInterpPart::Expr(expr) = part {
+                    collect_unshadowed_names(expr, names);
+                }
+            }
+        }
+        Expr::Null
+        | Expr::Bool(_)
+        | Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::String(_)
+        | Expr::Import(..)
+        | Expr::ImportGlob(..) => {}
+    }
+}
+
+fn collect_unshadowed_entry_names(entries: &[Entry], names: &mut HashSet<String>) {
+    for entry in entries {
+        match entry {
+            Entry::Property(prop) => {
+                if let Some(ty) = &prop.type_ann {
+                    collect_unshadowed_type_names(ty, names);
+                }
+                if let Some(expr) = &prop.value {
+                    collect_unshadowed_names(expr, names);
+                }
+                if let Some(body) = &prop.body {
+                    collect_unshadowed_entry_names(body, names);
+                }
+            }
+            Entry::DynProperty(key, value) => {
+                collect_unshadowed_names(key, names);
+                collect_unshadowed_names(value, names);
+            }
+            Entry::ForGenerator(fgen) => {
+                collect_unshadowed_names(&fgen.collection, names);
+                collect_unshadowed_entry_names(&fgen.body, names);
+            }
+            Entry::WhenGenerator(wgen) => {
+                collect_unshadowed_names(&wgen.condition, names);
+                collect_unshadowed_entry_names(&wgen.body, names);
+                if let Some(else_body) = &wgen.else_body {
+                    collect_unshadowed_entry_names(else_body, names);
+                }
+            }
+            Entry::Spread(expr) | Entry::Elem(expr) => collect_unshadowed_names(expr, names),
+            Entry::ClassDef(_, _, parent, body) => {
+                if parent.is_some() {
+                    mark_type_use(names);
+                }
+                collect_unshadowed_entry_names(body, names);
+            }
+            Entry::TypeAlias(_, ty) => collect_unshadowed_type_names(ty, names),
+        }
+    }
+}
+
+fn collect_unshadowed_type_names(ty: &crate::parser::TypeExpr, names: &mut HashSet<String>) {
+    mark_type_use(names);
+    // A constraint is an ordinary expression evaluated against the value.
+    if let crate::parser::TypeExpr::Constrained(_, constraint) = ty {
+        collect_unshadowed_names(constraint, names);
+    }
+    match ty {
+        crate::parser::TypeExpr::Nullable(inner) => collect_unshadowed_type_names(inner, names),
+        crate::parser::TypeExpr::Union(types) | crate::parser::TypeExpr::Generic(_, types) => {
+            for ty in types {
+                collect_unshadowed_type_names(ty, names);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Recorded by [`collect_unshadowed_names`] when the expression names a type
+/// or class anywhere (`new T`, `is`/`as`, type annotations, constraints, class
+/// parents). Type names come in many spellings (defaults, generics, quoted
+/// names containing separators), and resolving them looks up bindings in ways
+/// a name list cannot capture reliably, so callers that see this capture the
+/// whole scope.
+pub(super) const NAMES_A_TYPE: &str = "\0type";
+
+fn mark_type_use(names: &mut HashSet<String>) {
+    names.insert(NAMES_A_TYPE.to_string());
+}
