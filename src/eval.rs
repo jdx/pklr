@@ -2914,13 +2914,9 @@ impl Evaluator {
         // Non-lambda locals are evaluated eagerly; lambda locals are deferred
         // to a second pass so they capture the fully-populated scope.
         let mut deferred_lambdas: Vec<(String, &crate::parser::Expr, usize)> = Vec::new();
-        // Type aliases are declarative: register them all up front so typed
-        // locals can be checked against any of them when they are bound.
-        for entry in entries.iter() {
-            if let Entry::TypeAlias(name, ty) = entry {
-                child_scope.set_type_alias(name.clone(), ty.clone());
-            }
-        }
+        // Unlike a module's, a type alias declared in an object body is
+        // visible only to entries after it (as narrowed-import analysis
+        // assumes), so it is registered in declaration order below.
         for (entry_index, entry) in entries.iter().enumerate() {
             // Only locals, classes and type aliases are handled in this pass,
             // so build the entry's scope only for those.
