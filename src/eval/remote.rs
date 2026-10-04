@@ -121,8 +121,18 @@ fn normalize_lexical_path(path: &Path) -> PathBuf {
         match component {
             std::path::Component::CurDir => {}
             std::path::Component::ParentDir => {
-                if !normalized.pop() && !normalized.has_root() {
-                    normalized.push(component.as_os_str());
+                // Only a real path component can cancel a `..`. In
+                // particular, do not pop a preceding unresolved `..`, and
+                // never pop the root of an absolute path.
+                match normalized.components().next_back() {
+                    Some(std::path::Component::Normal(_)) => {
+                        normalized.pop();
+                    }
+                    Some(std::path::Component::RootDir | std::path::Component::Prefix(_)) => {}
+                    Some(std::path::Component::ParentDir) | None => {
+                        normalized.push(component.as_os_str());
+                    }
+                    Some(std::path::Component::CurDir) => unreachable!("paths are normalized"),
                 }
             }
             _ => normalized.push(component.as_os_str()),
