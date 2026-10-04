@@ -353,7 +353,7 @@ impl Parser<'_> {
     /// Record an object entry whose key is a constant.
     pub(super) fn check_entry_key(&mut self, offset: usize, key: &Expr) {
         let key = match key {
-            Expr::String(s) => ConstKey::String(s.clone()),
+            Expr::String(s) => ConstKey::String(s.to_string()),
             Expr::Int(i) => ConstKey::Int(*i),
             Expr::Bool(b) => ConstKey::Bool(*b),
             _ => return,
