@@ -3685,19 +3685,21 @@ impl Evaluator {
                 // Flattening the whole scope for every lambda value, and
                 // restoring all of it on every call, dominated evaluation. An
                 // object built in the body sees its enclosing bindings through
-                // `outer`, so a body that mentions `outer` keeps everything.
+                // `outer`, so a body that mentions `outer` keeps everything, as
+                // does a body that names a type (see `NAMES_A_TYPE`).
                 let mut names = HashSet::new();
                 collect_unshadowed_names(&body, &mut names);
-                let captured = Arc::new(if names.contains("outer") {
-                    scope.flatten()
-                } else {
-                    scope.flatten_names(
-                        names
-                            .iter()
-                            .map(String::as_str)
-                            .chain(["this", "module", "super"]),
-                    )
-                });
+                let captured =
+                    Arc::new(if names.contains("outer") || names.contains(NAMES_A_TYPE) {
+                        scope.flatten()
+                    } else {
+                        scope.flatten_names(
+                            names
+                                .iter()
+                                .map(String::as_str)
+                                .chain(["this", "module", "super"]),
+                        )
+                    });
                 let captured_body = refs
                     .iter()
                     .filter(|name| scope.get(name).is_none())
