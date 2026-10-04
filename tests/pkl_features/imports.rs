@@ -2297,3 +2297,32 @@ async fn narrowed_import_follows_type_alias_constraints() {
     assert_eq!(val["ok"], true);
     assert_eq!(val["out"], true);
 }
+
+#[tokio::test]
+async fn narrowed_import_follows_module_reads_but_not_checked_value_members() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_constraint_names");
+    let dir = temp.path();
+    // `length` in the constraint is the checked string's length, so the
+    // unused module property of that name must not be evaluated.
+    std::fs::write(
+        dir.join("short.pkl"),
+        "length = throw(\"unused\")\ntypealias IsShort = String(length == 1)\nresult = \"b\" is IsShort\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("module_read.pkl"),
+        "expected = \"b\"\ntypealias IsB = String(this == module.expected)\nresult = \"b\" is IsB\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"short.pkl\" as Short\nimport \"module_read.pkl\" as ModuleRead\nshort = Short.result\nmoduleRead = ModuleRead.result\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["short"], true);
+    assert_eq!(val["moduleRead"], true);
+}

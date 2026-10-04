@@ -396,11 +396,15 @@ pub(super) fn expand_requested_fields(
                     continue;
                 }
                 let mut definition_refs = HashSet::new();
-                collect_entry_refs(
-                    std::slice::from_ref(*definition),
-                    &mut definition_refs,
-                    &shadows,
-                );
+                let definition = std::slice::from_ref(*definition);
+                collect_entry_refs(definition, &mut definition_refs, &shadows);
+                collect_sibling_field_refs_entries(definition, &mut definition_refs);
+                // A type check binds these for the value being checked, so in
+                // a constraint they are not module properties. Leaving one out
+                // is never worse than not following the definition at all.
+                for name in ["this", "length", "isEmpty"] {
+                    definition_refs.remove(name);
+                }
                 for dep in definition_refs {
                     if refs.insert(dep.clone()) {
                         pending.push(dep);
@@ -429,6 +433,9 @@ pub(super) fn collect_sibling_field_refs_entries(entries: &[Entry], refs: &mut H
     for entry in entries {
         match entry {
             Entry::Property(prop) => {
+                if let Some(ty) = &prop.type_ann {
+                    collect_sibling_field_refs_type(ty, refs);
+                }
                 if let Some(expr) = &prop.value {
                     collect_sibling_field_refs_expr(expr, refs, false);
                 }
@@ -455,8 +462,25 @@ pub(super) fn collect_sibling_field_refs_entries(entries: &[Entry], refs: &mut H
                 collect_sibling_field_refs_expr(expr, refs, false);
             }
             Entry::ClassDef(_, _, _, body) => collect_sibling_field_refs_entries(body, refs),
-            Entry::TypeAlias(..) => {}
+            Entry::TypeAlias(_, ty) => collect_sibling_field_refs_type(ty, refs),
         }
+    }
+}
+
+/// `module.field` reads in a type's constraints, which run when a value is
+/// checked against it.
+fn collect_sibling_field_refs_type(ty: &crate::parser::TypeExpr, refs: &mut HashSet<String>) {
+    match ty {
+        crate::parser::TypeExpr::Constrained(_, constraint) => {
+            collect_sibling_field_refs_expr(constraint, refs, false);
+        }
+        crate::parser::TypeExpr::Nullable(inner) => collect_sibling_field_refs_type(inner, refs),
+        crate::parser::TypeExpr::Union(types) | crate::parser::TypeExpr::Generic(_, types) => {
+            for ty in types {
+                collect_sibling_field_refs_type(ty, refs);
+            }
+        }
+        crate::parser::TypeExpr::Named(_) => {}
     }
 }
 
