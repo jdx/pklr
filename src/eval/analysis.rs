@@ -678,9 +678,9 @@ fn collect_entry_refs_in(
     let mut entry_shadows = shadows.clone();
     entry_shadows.extend(declared_entry_roots(entries));
     // A type alias or class declared in this body shadows a module alias of
-    // the same name, so stop resolving that name here (keeping the
-    // conservative reading of its constraints) rather than resolving it to the
-    // outer definition.
+    // the same name. Resolve the name to the nested alias, which is what
+    // evaluation uses, and stop resolving it for a nested class, keeping the
+    // conservative reading of its constraints.
     let narrowed_aliases;
     let aliases = match aliases {
         Some(outer)
@@ -689,16 +689,19 @@ fn collect_entry_refs_in(
                     if outer.contains_key(name.as_str()))
             }) =>
         {
-            narrowed_aliases = outer
-                .iter()
-                .filter(|(name, _)| {
-                    !entries.iter().any(|entry| {
-                        matches!(entry, Entry::TypeAlias(declared, _) | Entry::ClassDef(declared, ..)
-                            if declared == *name)
-                    })
-                })
-                .map(|(name, ty)| (*name, *ty))
-                .collect::<TypeAliases>();
+            let mut narrowed: TypeAliases = outer.iter().map(|(name, ty)| (*name, *ty)).collect();
+            for entry in entries {
+                match entry {
+                    Entry::TypeAlias(name, ty) => {
+                        narrowed.insert(name.as_str(), ty);
+                    }
+                    Entry::ClassDef(name, ..) => {
+                        narrowed.remove(name.as_str());
+                    }
+                    _ => {}
+                }
+            }
+            narrowed_aliases = narrowed;
             Some(&narrowed_aliases)
         }
         other => other,
