@@ -4019,3 +4019,20 @@ entry = (entryBase) { for (_ in List(1)) { ["k"] { w = 2 } } }
     assert_eq!(json["property"], serde_json::json!({"o": {"v": 1, "w": 2}}));
     assert_eq!(json["entry"], serde_json::json!({"k": {"v": 1, "w": 2}}));
 }
+
+#[test]
+fn inherited_body_listings_are_not_applied_twice_when_amended() {
+    let result = eval(
+        r#"
+b { l { 1 } }
+b2 = (b) { l { 2 } }
+b3 = (b2) { l { 3 } }
+class D { l: Listing<Int> }
+d = new D { l { 1 } }
+d2 = (d) { l { 2 } }
+"#,
+    );
+    assert_eq!(result["b2"]["l"], serde_json::json!([1, 2]));
+    assert_eq!(result["b3"]["l"], serde_json::json!([1, 2, 3]));
+    assert_eq!(result["d2"]["l"], serde_json::json!([1, 2]));
+}
