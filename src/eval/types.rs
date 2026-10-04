@@ -600,11 +600,12 @@ pub(super) fn value_type_name(v: &Value) -> &'static str {
 }
 
 pub(super) fn value_to_key(v: &Value) -> Result<Arc<str>> {
+    if let Some(key) = crate::value::mapping_storage_key(v) {
+        return Ok(key);
+    }
     match v {
         Value::String(s) => Ok(Arc::clone(s)),
-        Value::Int(n) => Ok(n.to_string().into()),
-        Value::Bool(b) => Ok(b.to_string().into()),
-        Value::Float(f) => Ok(f.to_string().into()),
+        Value::Int(_) | Value::Bool(_) | Value::Float(_) => unreachable!(),
         Value::Object(_, _) | Value::List(_) | Value::Lambda(..) | Value::Null => {
             Ok(value_to_display(v).into())
         }

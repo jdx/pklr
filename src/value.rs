@@ -10,6 +10,32 @@ use crate::parser::{Expr, TypeExpr};
 /// names so copying members between objects and scopes does not allocate.
 pub type ObjectMap = IndexMap<Arc<str>, Value, rustc_hash::FxBuildHasher>;
 
+// `ObjectMap` is also the backing store for Pkl Mappings.  Keep non-string
+// mapping keys disjoint from property names and from string keys that render
+// alike (for example `1` and `"1"`).  The final component preserves the
+// user-facing spelling for JSON/object rendering.
+pub(crate) const MAPPING_KEY_PREFIX: &str = "\0pklr:mapping-key:";
+
+pub(crate) fn mapping_storage_key(value: &Value) -> Option<Arc<str>> {
+    let (kind, identity, display) = match value {
+        Value::String(_) => return None,
+        Value::Bool(value) => ("bool", u64::from(*value), value.to_string()),
+        Value::Int(value) => ("int", *value as u64, value.to_string()),
+        Value::Float(value) => {
+            let identity = if *value == 0.0 { 0.0 } else { *value };
+            ("float", identity.to_bits(), value.to_string())
+        }
+        other => ("display", 0, format!("{other:?}")),
+    };
+    Some(format!("{MAPPING_KEY_PREFIX}{kind}:{identity:016x}:{display}").into())
+}
+
+fn display_storage_key(key: &str) -> &str {
+    key.strip_prefix(MAPPING_KEY_PREFIX)
+        .and_then(|key| key.rsplit_once(':').map(|(_, display)| display))
+        .unwrap_or(key)
+}
+
 /// Captured lexical bindings. The same type as [`ObjectMap`], so a scope can
 /// become an object (and back) without rebuilding it.
 pub type ScopeMap = ObjectMap;
@@ -276,7 +302,7 @@ impl Value {
             Value::Object(map, _) => {
                 let mut obj = serde_json::Map::new();
                 for (k, v) in map.iter() {
-                    obj.insert(k.to_string(), v.to_json());
+                    obj.insert(display_storage_key(k).to_string(), v.to_json());
                 }
                 serde_json::Value::Object(obj)
             }

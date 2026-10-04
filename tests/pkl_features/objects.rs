@@ -168,6 +168,10 @@ amendedTwice = test.catch(() -> (m) { for (i in List(1, 2)) { ["a"] = i } })
 amendsParent = (m) { for (i in List(1)) { ["a"] = i } }
 nextLayer = new Mapping { ["a"] = 1 } { ["a"] = 2 }
 differentTypes = test.catchOrNull(() -> new Mapping<Any, Int> { [1] = 10; ["1"] = 20 })
+local differentTypeKeys = new Mapping<Any, Int> { [1] = 10; ["1"] = 20 }
+numberKey = differentTypeKeys[1]
+stringKey = differentTypeKeys["1"]
+differentTypeKeyCount = differentTypeKeys.length
 "#,
     );
     let duplicate = "Duplicate definition of member `\"a\"`.";
@@ -183,6 +187,9 @@ differentTypes = test.catchOrNull(() -> new Mapping<Any, Int> { [1] = 10; ["1"] 
     assert_eq!(json["amendsParent"]["a"], 1);
     assert_eq!(json["nextLayer"]["a"], 2);
     assert!(json["differentTypes"].is_null());
+    assert_eq!(json["numberKey"], 10);
+    assert_eq!(json["stringKey"], 20);
+    assert_eq!(json["differentTypeKeyCount"], 2);
 }
 
 #[test]

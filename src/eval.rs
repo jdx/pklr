@@ -5714,7 +5714,7 @@ impl Evaluator {
         type_defaults: &[(String, Value)],
         value_type_names: &[String],
         inherited_default: MappingInheritedDefault,
-        defined_keys: &mut HashSet<(&'static str, Arc<str>)>,
+        defined_keys: &mut HashSet<Arc<str>>,
     ) -> Result<()> {
         let mut entry_scope = scope.child();
         let mut deferred_lambdas: Vec<(String, &crate::parser::Expr)> = Vec::new();
@@ -5777,11 +5777,12 @@ impl Evaluator {
                 Entry::DynProperty(key_expr, val_expr) => {
                     let key = self.eval_expr(key_expr, &entry_scope, depth + 1)?;
                     let key_str = value_to_key(&key)?;
-                    // Mapping keys retain their Pkl value type: `1` and `"1"`
-                    // are distinct. Object-body entries may amend an earlier
-                    // value from this body.
+                    // Mapping storage preserves Pkl key identity: `1`, `1.0`
+                    // and `"1"` are distinct mapping keys.
+                    // Object-body entries may amend an earlier value from this
+                    // body.
                     if !matches!(val_expr, Expr::ObjectBody(_))
-                        && !defined_keys.insert((value_type_name(&key), key_str.clone()))
+                        && !defined_keys.insert(key_str.clone())
                     {
                         let key = match &key {
                             Value::String(s) => format!("{s:?}"),
