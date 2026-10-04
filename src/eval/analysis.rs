@@ -339,9 +339,14 @@ fn mark_other_use(uses: &mut HashMap<String, ImportUse>, name: &str) {
     }
 }
 
+/// `inherited_builtins` are the built-in type names (of
+/// `BINDING_BUILTIN_TYPES`) that a module this one amends or extends may
+/// redefine: checks here also resolve its type aliases, which this analysis
+/// doesn't see.
 pub(super) fn expand_requested_fields(
     entries: &[Entry],
     requested: &HashSet<String>,
+    inherited_builtins: &[&str],
 ) -> HashSet<String> {
     let property_names: HashSet<String> = entries
         .iter()
@@ -355,27 +360,43 @@ pub(super) fn expand_requested_fields(
     // Type aliases and classes evaluate their constraints and defaults when a
     // value is checked or built, so a property using one also depends on what
     // the definition reads.
-    let definitions: HashMap<&str, &Entry> = entries
+    let definitions = Definitions {
+        types: entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::TypeAlias(name, _) | Entry::ClassDef(name, ..) => {
+                    Some((name.as_str(), entry))
+                }
+                _ => None,
+            })
+            .collect(),
+        values: entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Property(prop) => Some(prop.name.as_str()),
+                _ => None,
+            })
+            .collect(),
+    };
+    let mut module_aliases: TypeAliases = entries
         .iter()
         .filter_map(|entry| match entry {
-            Entry::TypeAlias(name, _) | Entry::ClassDef(name, ..) => Some((name.as_str(), entry)),
+            Entry::TypeAlias(name, ty) => Some((name.as_str(), Some(ty))),
             _ => None,
         })
         .collect();
-    let module_aliases: TypeAliases = entries
-        .iter()
-        .filter_map(|entry| match entry {
-            Entry::TypeAlias(name, ty) => Some((name.as_str(), ty)),
-            _ => None,
-        })
-        .collect();
+    // Leave the built-ins an inherited alias may redefine (and this module
+    // doesn't) unresolved.
+    for builtin in inherited_builtins {
+        module_aliases.entry(builtin).or_insert(None);
+    }
     let aliases = Some(&module_aliases);
     // An importer reading `dep.ClassName` needs the module properties the
     // class reads through `module` (it is evaluated against them). Other
     // definitions don't see module properties, so they need nothing more.
     let module_reading_definitions = if requested
         .iter()
-        .any(|name| definitions.contains_key(name.as_str()))
+        .any(|name| definitions.types.contains_key(name.as_str()))
     {
         module_dependent_members(entries)
     } else {
@@ -388,20 +409,31 @@ pub(super) fn expand_requested_fields(
         for entry in entries {
             let mut refs = HashSet::new();
             let shadows = HashSet::new();
-            let prop = match entry {
+            match entry {
                 Entry::Property(prop) if expanded.contains(&prop.name) => {
                     if let Some(ty) = &prop.type_ann {
-                        collect_type_refs(ty, &mut refs, &shadows, aliases);
+                        collect_type_refs(ty, &mut refs, &shadows, aliases, Some(&definitions));
                     }
                     if let Some(expr) = &prop.value {
-                        collect_expr_refs_in(expr, &mut refs, &shadows, aliases);
+                        collect_expr_refs_in(
+                            expr,
+                            &mut refs,
+                            &shadows,
+                            aliases,
+                            Some(&definitions),
+                        );
                         collect_sibling_field_refs_expr(expr, &mut refs, true);
                     }
                     if let Some(body) = &prop.body {
-                        collect_entry_refs_in(body, &mut refs, &shadows, aliases);
+                        collect_entry_refs_in(
+                            body,
+                            &mut refs,
+                            &shadows,
+                            aliases,
+                            Some(&definitions),
+                        );
                         collect_sibling_field_refs_entries(body, &mut refs);
                     }
-                    Some(prop)
                 }
                 // A requested class or type alias that reads `module` (an
                 // importer reading `dep.ClassName`) depends on what its
@@ -410,49 +442,12 @@ pub(super) fn expand_requested_fields(
                     if expanded.contains(name) && module_reading_definitions.contains(name) =>
                 {
                     refs.insert(name.clone());
-                    None
                 }
                 _ => continue,
-            };
-            // A definition's constraints resolve aliases where the check
-            // happens. If this property's bodies declare types (other than
-            // identical redeclarations of module aliases), a check inside them
-            // can read a followed definition differently, so follow
-            // definitions without resolving the aliases that reach those
-            // names.
-            let narrowed = prop.and_then(|prop| {
-                let mut declared = HashSet::new();
-                collect_property_type_decls(prop, &module_aliases, &mut declared);
-                narrow_aliases(&module_aliases, &declared)
-            });
-            let definition_aliases = narrowed.as_ref().or(aliases);
-            let mut pending: Vec<String> = refs.iter().cloned().collect();
-            let mut visited = HashSet::new();
-            while let Some(name) = pending.pop() {
-                let Some(definition) = definitions.get(name.as_str()) else {
-                    continue;
-                };
-                if !visited.insert(name) {
-                    continue;
-                }
-                let mut definition_refs = HashSet::new();
-                collect_entry_refs_unnarrowed(
-                    std::slice::from_ref(*definition),
-                    &mut definition_refs,
-                    &shadows,
-                    definition_aliases,
-                );
-                collect_sibling_field_refs_entries(
-                    std::slice::from_ref(*definition),
-                    &mut definition_refs,
-                );
-                definition_refs.remove("this");
-                for dep in definition_refs {
-                    if refs.insert(dep.clone()) {
-                        pending.push(dep);
-                    }
-                }
             }
+            // Bodies that change the aliases followed what they reach
+            // themselves (see `collect_entry_refs_in`).
+            follow_definitions(&definitions, &mut refs, aliases);
             for dep in refs {
                 if dep == DYNAMIC_SIBLING_REF {
                     for name in &property_names {
@@ -469,6 +464,42 @@ pub(super) fn expand_requested_fields(
         }
     }
     expanded
+}
+
+/// Adds to `refs` what the type aliases and classes in `definitions` that
+/// `refs` names read (transitively), resolving constraint bases through
+/// `aliases`.
+fn follow_definitions(
+    definitions: &Definitions,
+    refs: &mut HashSet<String>,
+    aliases: Option<&TypeAliases>,
+) {
+    let shadows = HashSet::new();
+    let mut pending: Vec<String> = refs.iter().cloned().collect();
+    let mut visited = HashSet::new();
+    while let Some(name) = pending.pop() {
+        let Some(definition) = definitions.types.get(name.as_str()) else {
+            continue;
+        };
+        if !visited.insert(name) {
+            continue;
+        }
+        let mut definition_refs = HashSet::new();
+        collect_entry_refs_unnarrowed(
+            std::slice::from_ref(*definition),
+            &mut definition_refs,
+            &shadows,
+            aliases,
+            None,
+        );
+        collect_sibling_field_refs_entries(std::slice::from_ref(*definition), &mut definition_refs);
+        definition_refs.remove("this");
+        for dep in definition_refs {
+            if refs.insert(dep.clone()) {
+                pending.push(dep);
+            }
+        }
+    }
 }
 
 pub(super) fn collect_sibling_field_refs_entries(entries: &[Entry], refs: &mut HashSet<String>) {
@@ -523,126 +554,60 @@ fn constraint_bound_names(base: &str) -> &'static [&'static str] {
     let base = base.trim_start_matches('*');
     // A generic base such as `Listing<String>` checks as its class.
     let base = base.split('<').next().unwrap_or(base).trim();
-    match base {
-        "String" | "List" | "Listing" | "Map" | "Mapping" | "Set" | "Collection" => {
-            &["this", "length", "isEmpty"]
-        }
-        _ => &["this"],
+    if BINDING_BUILTIN_TYPES.contains(&base) {
+        &["this", "length", "isEmpty"]
+    } else {
+        &["this"]
     }
 }
+
+/// The built-in types whose constraints bind `length` and `isEmpty`; see
+/// `constraint_bound_names`.
+pub(super) const BINDING_BUILTIN_TYPES: &[&str] = &[
+    "String",
+    "List",
+    "Listing",
+    "Map",
+    "Mapping",
+    "Set",
+    "Collection",
+];
 
 /// A module's own type aliases by name, for resolving a constraint's base.
-type TypeAliases<'a> = HashMap<&'a str, &'a crate::parser::TypeExpr>;
+/// `None` marks a name that can't be resolved here: a built-in type that a
+/// nested body redeclares, which may no longer bind what the built-in does.
+type TypeAliases<'a> = HashMap<&'a str, Option<&'a crate::parser::TypeExpr>>;
 
-/// Type names declared anywhere inside `prop` (in its body or in object
-/// bodies within its value), other than identical redeclarations of
-/// `aliases`; see `collect_entries_type_decls`.
-fn collect_property_type_decls<'e>(
-    prop: &'e Property,
-    aliases: &TypeAliases,
-    out: &mut HashSet<&'e str>,
-) {
-    if let Some(expr) = &prop.value {
-        collect_expr_type_decls(expr, aliases, out);
-    }
-    if let Some(body) = &prop.body {
-        collect_entries_type_decls(body, aliases, true, out);
-    }
+/// A module's own type aliases and classes by name, and the names of its
+/// properties, which live in a separate namespace and may share a type's name.
+struct Definitions<'a> {
+    types: HashMap<&'a str, &'a Entry>,
+    values: HashSet<&'a str>,
 }
 
-/// Adds to `out` the name of every type alias or class declared in `entries`
-/// (and, when `nested`, in bodies within them), except a type alias that
-/// redeclares one of `aliases` identically, which reads the same either way.
+/// Adds to `out` the name of every type alias or class declared directly in
+/// `entries`, except a type alias that redeclares one of `aliases`
+/// identically, which reads the same either way.
 fn collect_entries_type_decls<'e>(
     entries: &'e [Entry],
     aliases: &TypeAliases,
-    nested: bool,
     out: &mut HashSet<&'e str>,
 ) {
     for entry in entries {
         match entry {
             Entry::TypeAlias(name, ty) => {
-                if aliases.get(name.as_str()).is_none_or(|outer| *outer != ty) {
+                if aliases
+                    .get(name.as_str())
+                    .is_none_or(|outer| *outer != Some(ty))
+                {
                     out.insert(name);
                 }
             }
-            Entry::ClassDef(name, _, _, body) => {
+            Entry::ClassDef(name, ..) => {
                 out.insert(name);
-                if nested {
-                    collect_entries_type_decls(body, aliases, true, out);
-                }
             }
-            _ if !nested => {}
-            Entry::Property(prop) => collect_property_type_decls(prop, aliases, out),
-            Entry::DynProperty(key, value) => {
-                collect_expr_type_decls(key, aliases, out);
-                collect_expr_type_decls(value, aliases, out);
-            }
-            Entry::ForGenerator(fgen) => {
-                collect_expr_type_decls(&fgen.collection, aliases, out);
-                collect_entries_type_decls(&fgen.body, aliases, true, out);
-            }
-            Entry::WhenGenerator(wgen) => {
-                collect_expr_type_decls(&wgen.condition, aliases, out);
-                collect_entries_type_decls(&wgen.body, aliases, true, out);
-                if let Some(body) = &wgen.else_body {
-                    collect_entries_type_decls(body, aliases, true, out);
-                }
-            }
-            Entry::Spread(expr) | Entry::Elem(expr) => collect_expr_type_decls(expr, aliases, out),
+            _ => {}
         }
-    }
-}
-
-fn collect_expr_type_decls<'e>(expr: &'e Expr, aliases: &TypeAliases, out: &mut HashSet<&'e str>) {
-    match expr {
-        Expr::New(_, entries, _) | Expr::InferredNew(_, entries) | Expr::ObjectBody(entries) => {
-            collect_entries_type_decls(entries, aliases, true, out)
-        }
-        Expr::Field(base, _) | Expr::NullSafeField(base, _) => {
-            collect_expr_type_decls(base, aliases, out)
-        }
-        Expr::Index(base, index) | Expr::Binop(_, base, index) => {
-            collect_expr_type_decls(base, aliases, out);
-            collect_expr_type_decls(index, aliases, out);
-        }
-        Expr::Call(callee, args) => {
-            collect_expr_type_decls(callee, aliases, out);
-            for arg in args {
-                collect_expr_type_decls(arg, aliases, out);
-            }
-        }
-        Expr::If(cond, then_expr, else_expr) => {
-            collect_expr_type_decls(cond, aliases, out);
-            collect_expr_type_decls(then_expr, aliases, out);
-            collect_expr_type_decls(else_expr, aliases, out);
-        }
-        Expr::Let(_, value, body) => {
-            collect_expr_type_decls(value, aliases, out);
-            collect_expr_type_decls(body, aliases, out);
-        }
-        Expr::Is(value, _) | Expr::As(value, _) => collect_expr_type_decls(value, aliases, out),
-        Expr::Lambda(_, value)
-        | Expr::Unop(_, value)
-        | Expr::Throw(value)
-        | Expr::Trace(value)
-        | Expr::Read(value)
-        | Expr::ReadOrNull(value) => collect_expr_type_decls(value, aliases, out),
-        Expr::StringInterpolation(parts) => {
-            for part in parts {
-                if let StringInterpPart::Expr(expr) = part {
-                    collect_expr_type_decls(expr, aliases, out);
-                }
-            }
-        }
-        Expr::Ident(_)
-        | Expr::Null
-        | Expr::Bool(_)
-        | Expr::Int(_)
-        | Expr::Float(_)
-        | Expr::String(_)
-        | Expr::Import(..)
-        | Expr::ImportGlob(..) => {}
     }
 }
 
@@ -676,8 +641,10 @@ fn mentioned_type_names<'t>(ty: &'t crate::parser::TypeExpr, out: &mut Vec<&'t s
 
 /// `aliases` without each alias whose meaning may differ where the `declared`
 /// type names are in scope: one that is itself declared, or whose definition,
-/// followed through the other `aliases`, mentions a declared name. `None`
-/// when every alias is kept.
+/// followed through the other `aliases`, mentions a declared name. Such an
+/// alias named after a built-in that `constraint_bound_names` reads is marked
+/// unresolvable rather than dropped, since dropped it would read as the
+/// built-in. `None` when every alias is kept.
 fn narrow_aliases<'a>(
     aliases: &TypeAliases<'a>,
     declared: &HashSet<&str>,
@@ -695,23 +662,97 @@ fn narrow_aliases<'a>(
             if !seen.insert(name) {
                 continue;
             }
-            if let Some(ty) = aliases.get(name) {
+            if let Some(Some(ty)) = aliases.get(name) {
                 mentioned_type_names(ty, &mut pending);
             }
         }
         false
     };
+    let mut changed = false;
     let kept: TypeAliases<'a> = aliases
         .iter()
-        .filter(|(name, _)| !affected(name))
-        .map(|(name, ty)| (*name, *ty))
+        .filter_map(|(name, ty)| {
+            if ty.is_none() || !affected(name) {
+                return Some((*name, *ty));
+            }
+            changed = true;
+            BINDING_BUILTIN_TYPES
+                .contains(name)
+                .then_some((*name, None))
+        })
         .collect();
-    (kept.len() != aliases.len()).then_some(kept)
+    changed.then_some(kept)
+}
+
+/// `aliases` with each of the `declared` names that `constraint_bound_names`
+/// would read as a built-in marked unresolvable, since where the declaration
+/// is in scope the built-in's bindings may no longer apply. A built-in that
+/// `entries` only redeclares as one type alias which binds the same names
+/// (such as `typealias String = List`) stays resolved, to that definition, when
+/// nothing in `aliases` already gave it another meaning: it binds them before
+/// and after the declaration alike, and a deeper body that redeclares what
+/// the definition refers to still sees it. `None` when `aliases` is
+/// unchanged.
+fn with_builtins_unresolved<'a>(
+    aliases: &TypeAliases<'a>,
+    entries: &'a [Entry],
+    declared: &HashSet<&str>,
+) -> Option<TypeAliases<'a>> {
+    let redeclared: Vec<&str> = BINDING_BUILTIN_TYPES
+        .iter()
+        .copied()
+        .filter(|builtin| declared.contains(builtin) && aliases.get(builtin) != Some(&None))
+        .collect();
+    if redeclared.is_empty() {
+        return None;
+    }
+    let mut marked = aliases.clone();
+    for builtin in &redeclared {
+        marked.insert(builtin, None);
+    }
+    // Resolve the new definitions with every redeclared built-in unresolved,
+    // so one that reaches another still counts as unknown.
+    let binding_definition = |builtin: &str| {
+        if aliases.contains_key(builtin) {
+            return None;
+        }
+        let mut definitions = entries.iter().filter_map(|entry| match entry {
+            Entry::TypeAlias(name, ty) if name == builtin => Some(Some(ty)),
+            Entry::ClassDef(name, ..) if name == builtin => Some(None),
+            _ => None,
+        });
+        match (definitions.next(), definitions.next()) {
+            (Some(Some(ty)), None) if alias_binds_collection_names(ty, &marked) => Some(ty),
+            _ => None,
+        }
+    };
+    let kept: Vec<_> = redeclared
+        .iter()
+        .filter_map(|builtin| Some((*builtin, binding_definition(builtin)?)))
+        .collect();
+    for (builtin, ty) in kept {
+        marked.insert(builtin, Some(ty));
+    }
+    Some(marked)
+}
+
+/// Whether a check against the type alias definition `ty` binds `length` and
+/// `isEmpty`, resolving through `aliases`.
+fn alias_binds_collection_names(ty: &crate::parser::TypeExpr, aliases: &TypeAliases) -> bool {
+    match ty {
+        crate::parser::TypeExpr::Named(base)
+        | crate::parser::TypeExpr::Generic(base, _)
+        | crate::parser::TypeExpr::Constrained(base, _) => {
+            constraint_bound_names_resolving(base, Some(aliases)).contains(&"length")
+        }
+        crate::parser::TypeExpr::Nullable(_) | crate::parser::TypeExpr::Union(_) => false,
+    }
 }
 
 /// `constraint_bound_names`, after following `base` through `aliases` (with
 /// cycle protection) to the type it names. A base that resolves to a nullable
-/// or union type, or that loops, binds only `this`; a name that isn't one of
+/// or union type, to an unresolvable name, or that loops, binds only `this`;
+/// a name that isn't one of
 /// `aliases` (a class, an imported alias, an unknown name) is left to
 /// `constraint_bound_names` as is.
 fn constraint_bound_names_resolving(
@@ -731,6 +772,9 @@ fn constraint_bound_names_resolving(
         let name = name.split('<').next().unwrap_or(name).trim();
         let Some(ty) = aliases.get(name) else {
             return constraint_bound_names(base);
+        };
+        let Some(ty) = ty else {
+            return &["this"];
         };
         if !seen.insert(name) {
             return &["this"];
@@ -908,7 +952,7 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
             }
             Entry::TypeAlias(name, ty) => {
                 let mut refs = HashSet::new();
-                collect_type_refs(ty, &mut refs, &HashSet::new(), None);
+                collect_type_refs(ty, &mut refs, &HashSet::new(), None, None);
                 // `typealias Ok = Int(module.C.v == "b")` reads `C` when a
                 // value is checked against it.
                 collect_sibling_field_refs_type(ty, &mut refs);
@@ -1065,7 +1109,7 @@ pub(super) fn qualified_module_member_refs(entry: &Entry) -> HashSet<String> {
 pub(super) fn reads_module_members(prop: &Property, members: &indexmap::IndexSet<String>) -> bool {
     let mut refs = property_reference_names(prop);
     if let Some(ty) = &prop.type_ann {
-        collect_type_refs(ty, &mut refs, &HashSet::new(), None);
+        collect_type_refs(ty, &mut refs, &HashSet::new(), None, None);
         collect_sibling_field_refs_type(ty, &mut refs);
     }
     refs.contains(DYNAMIC_SIBLING_REF)
@@ -1111,7 +1155,7 @@ pub(super) fn collect_entry_refs(
     refs: &mut HashSet<String>,
     shadows: &HashSet<String>,
 ) {
-    collect_entry_refs_in(entries, refs, shadows, None);
+    collect_entry_refs_in(entries, refs, shadows, None, None);
 }
 
 /// Like `collect_entry_refs`, but resolves a constraint's base through the
@@ -1121,6 +1165,7 @@ fn collect_entry_refs_in(
     refs: &mut HashSet<String>,
     shadows: &HashSet<String>,
     aliases: Option<&TypeAliases>,
+    definitions: Option<&Definitions>,
 ) {
     // A type alias or class declared in this body takes effect only from its
     // declaration on (a local evaluated earlier still sees the module's
@@ -1128,13 +1173,46 @@ fn collect_entry_refs_in(
     // (`typealias String = Int` under an identical `typealias S = String`). So
     // stop resolving the module aliases whose definitions reach a name this
     // body declares (other than by an identical redeclaration), keeping the
-    // conservative reading of their constraints.
-    let narrowed = aliases.and_then(|aliases| {
+    // conservative reading of their constraints, and leave a redeclared
+    // built-in unresolved (even without module aliases).
+    let no_aliases = TypeAliases::new();
+    let narrowed = {
+        let aliases = aliases.unwrap_or(&no_aliases);
         let mut declared = HashSet::new();
-        collect_entries_type_decls(entries, aliases, false, &mut declared);
-        narrow_aliases(aliases, &declared)
-    });
-    collect_entry_refs_unnarrowed(entries, refs, shadows, narrowed.as_ref().or(aliases));
+        collect_entries_type_decls(entries, aliases, &mut declared);
+        let narrowed = narrow_aliases(aliases, &declared);
+        with_builtins_unresolved(narrowed.as_ref().unwrap_or(aliases), entries, &declared)
+            .or(narrowed)
+    };
+    // A definition's constraints resolve aliases where the check happens, so
+    // when following `definitions` and this body changes the aliases, follow
+    // the ones reached from here with this body's aliases, and leave only
+    // what they read to the caller (keeping a name that is also a module
+    // property, which this body may read as a value).
+    if let (Some(narrowed), Some(definitions)) = (&narrowed, definitions) {
+        let mut body_refs = HashSet::new();
+        collect_entry_refs_unnarrowed(
+            entries,
+            &mut body_refs,
+            shadows,
+            Some(narrowed),
+            Some(definitions),
+        );
+        follow_definitions(definitions, &mut body_refs, Some(narrowed));
+        body_refs.retain(|name| {
+            !definitions.types.contains_key(name.as_str())
+                || definitions.values.contains(name.as_str())
+        });
+        refs.extend(body_refs);
+        return;
+    }
+    collect_entry_refs_unnarrowed(
+        entries,
+        refs,
+        shadows,
+        narrowed.as_ref().or(aliases),
+        definitions,
+    );
 }
 
 /// `collect_entry_refs_in` without narrowing `aliases` for the types
@@ -1144,6 +1222,7 @@ fn collect_entry_refs_unnarrowed(
     refs: &mut HashSet<String>,
     shadows: &HashSet<String>,
     aliases: Option<&TypeAliases>,
+    definitions: Option<&Definitions>,
 ) {
     let mut entry_shadows = shadows.clone();
     entry_shadows.extend(declared_entry_roots(entries));
@@ -1151,45 +1230,47 @@ fn collect_entry_refs_unnarrowed(
         match entry {
             Entry::Property(prop) => {
                 if let Some(ty) = &prop.type_ann {
-                    collect_type_refs(ty, refs, &entry_shadows, aliases);
+                    collect_type_refs(ty, refs, &entry_shadows, aliases, definitions);
                 }
                 if let Some(expr) = &prop.value {
-                    collect_expr_refs_in(expr, refs, &entry_shadows, aliases);
+                    collect_expr_refs_in(expr, refs, &entry_shadows, aliases, definitions);
                 }
                 if let Some(body) = &prop.body {
-                    collect_entry_refs_in(body, refs, &entry_shadows, aliases);
+                    collect_entry_refs_in(body, refs, &entry_shadows, aliases, definitions);
                 }
             }
             Entry::DynProperty(key, value) => {
-                collect_expr_refs_in(key, refs, &entry_shadows, aliases);
-                collect_expr_refs_in(value, refs, &entry_shadows, aliases);
+                collect_expr_refs_in(key, refs, &entry_shadows, aliases, definitions);
+                collect_expr_refs_in(value, refs, &entry_shadows, aliases, definitions);
             }
             Entry::ForGenerator(fgen) => {
-                collect_expr_refs_in(&fgen.collection, refs, &entry_shadows, aliases);
+                collect_expr_refs_in(&fgen.collection, refs, &entry_shadows, aliases, definitions);
                 let mut body_shadows = entry_shadows.clone();
                 body_shadows.insert(fgen.val_var.clone());
                 if let Some(key_var) = &fgen.key_var {
                     body_shadows.insert(key_var.clone());
                 }
-                collect_entry_refs_in(&fgen.body, refs, &body_shadows, aliases);
+                collect_entry_refs_in(&fgen.body, refs, &body_shadows, aliases, definitions);
             }
             Entry::WhenGenerator(wgen) => {
-                collect_expr_refs_in(&wgen.condition, refs, &entry_shadows, aliases);
-                collect_entry_refs_in(&wgen.body, refs, &entry_shadows, aliases);
+                collect_expr_refs_in(&wgen.condition, refs, &entry_shadows, aliases, definitions);
+                collect_entry_refs_in(&wgen.body, refs, &entry_shadows, aliases, definitions);
                 if let Some(else_body) = &wgen.else_body {
-                    collect_entry_refs_in(else_body, refs, &entry_shadows, aliases);
+                    collect_entry_refs_in(else_body, refs, &entry_shadows, aliases, definitions);
                 }
             }
             Entry::Spread(expr) | Entry::Elem(expr) => {
-                collect_expr_refs_in(expr, refs, &entry_shadows, aliases)
+                collect_expr_refs_in(expr, refs, &entry_shadows, aliases, definitions)
             }
             Entry::ClassDef(_, _, parent, body) => {
                 if let Some(parent) = parent {
                     collect_name_root(parent, refs, &entry_shadows);
                 }
-                collect_entry_refs_in(body, refs, &entry_shadows, aliases);
+                collect_entry_refs_in(body, refs, &entry_shadows, aliases, definitions);
             }
-            Entry::TypeAlias(_, ty) => collect_type_refs(ty, refs, &entry_shadows, aliases),
+            Entry::TypeAlias(_, ty) => {
+                collect_type_refs(ty, refs, &entry_shadows, aliases, definitions)
+            }
         }
     }
 }
@@ -1214,7 +1295,7 @@ pub(super) fn collect_expr_refs(
     refs: &mut HashSet<String>,
     shadows: &HashSet<String>,
 ) {
-    collect_expr_refs_in(expr, refs, shadows, None);
+    collect_expr_refs_in(expr, refs, shadows, None, None);
 }
 
 fn collect_expr_refs_in(
@@ -1222,6 +1303,7 @@ fn collect_expr_refs_in(
     refs: &mut HashSet<String>,
     shadows: &HashSet<String>,
     aliases: Option<&TypeAliases>,
+    definitions: Option<&Definitions>,
 ) {
     match expr {
         Expr::Ident(name) => {
@@ -1236,55 +1318,59 @@ fn collect_expr_refs_in(
             for param in generic_params {
                 collect_name_root(param, refs, shadows);
             }
-            collect_entry_refs_in(entries, refs, shadows, aliases);
+            collect_entry_refs_in(entries, refs, shadows, aliases, definitions);
         }
         Expr::Field(base, _) | Expr::NullSafeField(base, _) => {
-            collect_expr_refs_in(base, refs, shadows, aliases);
+            collect_expr_refs_in(base, refs, shadows, aliases, definitions);
         }
         Expr::Index(base, index) | Expr::Binop(_, base, index) => {
-            collect_expr_refs_in(base, refs, shadows, aliases);
-            collect_expr_refs_in(index, refs, shadows, aliases);
+            collect_expr_refs_in(base, refs, shadows, aliases, definitions);
+            collect_expr_refs_in(index, refs, shadows, aliases, definitions);
         }
         Expr::Call(callee, args) => {
-            collect_expr_refs_in(callee, refs, shadows, aliases);
+            collect_expr_refs_in(callee, refs, shadows, aliases, definitions);
             for arg in args {
-                collect_expr_refs_in(arg, refs, shadows, aliases);
+                collect_expr_refs_in(arg, refs, shadows, aliases, definitions);
             }
         }
         Expr::If(cond, then_expr, else_expr) => {
-            collect_expr_refs_in(cond, refs, shadows, aliases);
-            collect_expr_refs_in(then_expr, refs, shadows, aliases);
-            collect_expr_refs_in(else_expr, refs, shadows, aliases);
+            collect_expr_refs_in(cond, refs, shadows, aliases, definitions);
+            collect_expr_refs_in(then_expr, refs, shadows, aliases, definitions);
+            collect_expr_refs_in(else_expr, refs, shadows, aliases, definitions);
         }
         Expr::Let(name, value, body) => {
-            collect_expr_refs_in(value, refs, shadows, aliases);
+            collect_expr_refs_in(value, refs, shadows, aliases, definitions);
             let mut body_shadows = shadows.clone();
             body_shadows.insert(name.clone());
-            collect_expr_refs_in(body, refs, &body_shadows, aliases);
+            collect_expr_refs_in(body, refs, &body_shadows, aliases, definitions);
         }
         Expr::Is(value, ty) | Expr::As(value, ty) => {
-            collect_expr_refs_in(value, refs, shadows, aliases);
-            collect_type_refs(ty, refs, shadows, aliases);
+            collect_expr_refs_in(value, refs, shadows, aliases, definitions);
+            collect_type_refs(ty, refs, shadows, aliases, definitions);
         }
         Expr::Lambda(params, value) => {
             let mut body_shadows = shadows.clone();
             body_shadows.extend(params.iter().cloned());
-            collect_expr_refs_in(value, refs, &body_shadows, aliases);
+            collect_expr_refs_in(value, refs, &body_shadows, aliases, definitions);
         }
         Expr::Unop(_, value)
         | Expr::Throw(value)
         | Expr::Trace(value)
         | Expr::Read(value)
-        | Expr::ReadOrNull(value) => collect_expr_refs_in(value, refs, shadows, aliases),
-        Expr::InferredNew(ty, entries) => {
-            collect_type_refs(ty, refs, shadows, aliases);
-            collect_entry_refs_in(entries, refs, shadows, aliases);
+        | Expr::ReadOrNull(value) => {
+            collect_expr_refs_in(value, refs, shadows, aliases, definitions)
         }
-        Expr::ObjectBody(entries) => collect_entry_refs_in(entries, refs, shadows, aliases),
+        Expr::InferredNew(ty, entries) => {
+            collect_type_refs(ty, refs, shadows, aliases, definitions);
+            collect_entry_refs_in(entries, refs, shadows, aliases, definitions);
+        }
+        Expr::ObjectBody(entries) => {
+            collect_entry_refs_in(entries, refs, shadows, aliases, definitions)
+        }
         Expr::StringInterpolation(parts) => {
             for part in parts {
                 if let StringInterpPart::Expr(expr) = part {
-                    collect_expr_refs_in(expr, refs, shadows, aliases);
+                    collect_expr_refs_in(expr, refs, shadows, aliases, definitions);
                 }
             }
         }
@@ -1303,21 +1389,22 @@ fn collect_type_refs(
     refs: &mut HashSet<String>,
     shadows: &HashSet<String>,
     aliases: Option<&TypeAliases>,
+    definitions: Option<&Definitions>,
 ) {
     match ty {
         crate::parser::TypeExpr::Named(name) => collect_name_root(name, refs, shadows),
         crate::parser::TypeExpr::Nullable(inner) => {
-            collect_type_refs(inner, refs, shadows, aliases)
+            collect_type_refs(inner, refs, shadows, aliases, definitions)
         }
         crate::parser::TypeExpr::Union(types) => {
             for ty in types {
-                collect_type_refs(ty, refs, shadows, aliases);
+                collect_type_refs(ty, refs, shadows, aliases, definitions);
             }
         }
         crate::parser::TypeExpr::Generic(name, params) => {
             collect_name_root(name, refs, shadows);
             for param in params {
-                collect_type_refs(param, refs, shadows, aliases);
+                collect_type_refs(param, refs, shadows, aliases, definitions);
             }
         }
         crate::parser::TypeExpr::Constrained(base, constraint) => {
@@ -1332,7 +1419,7 @@ fn collect_type_refs(
                     .iter()
                     .map(|name| name.to_string()),
             );
-            collect_expr_refs_in(constraint, refs, &constraint_shadows, aliases);
+            collect_expr_refs_in(constraint, refs, &constraint_shadows, aliases, definitions);
         }
     }
 }
