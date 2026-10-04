@@ -2,12 +2,14 @@ use crate::error::{Error, Result};
 use crate::lexer::{StringPart, Token, TokenKind};
 
 mod ast;
+mod checks;
 
 pub use ast::{
     Annotation, BinOp, Body, Entry, Expr, ForGenerator, Import, Modifier, Module, Property,
     StringInterpPart, TypeExpr, UnOp, WhenGenerator,
 };
 use ast::{infer_method_return_new, type_expr_runtime_name};
+use checks::{BodyKind, BodyScope};
 
 /// Collect all import URIs from a token stream (fast path, no full parse needed).
 pub fn collect_imports(tokens: &[Token]) -> Vec<String> {
@@ -80,6 +82,8 @@ struct Parser<'a> {
     pos: usize,
     /// Line of the last consumed token (used for newline-sensitive parsing).
     last_line: usize,
+    /// Members of the body being parsed, for static checks.
+    body: BodyScope,
 }
 
 impl<'a> Parser<'a> {
@@ -90,6 +94,7 @@ impl<'a> Parser<'a> {
             name,
             pos: 0,
             last_line: 1,
+            body: BodyScope::new(BodyKind::Object, None),
         }
     }
 
@@ -174,8 +179,11 @@ impl<'a> Parser<'a> {
         let mut annotations = self.parse_annotations()?;
 
         // Parse header: module declaration, amends, imports
+        let module_modifiers_offset = self.peek_tok().offset;
+        let mut module_modifiers = Vec::new();
         if self.peek_is_modifier() && self.peek_past_modifiers_is(TokenKind::KwModule) {
-            for modifier in self.collect_modifiers() {
+            module_modifiers = self.collect_modifiers();
+            for modifier in &module_modifiers {
                 annotations.push(Annotation {
                     name: format!("pklr:module:{modifier:?}"),
                     body: Vec::new(),
@@ -233,7 +241,17 @@ impl<'a> Parser<'a> {
             }
         }
 
-        let body = self.parse_entries()?;
+        self.check_module_modifiers(module_modifiers_offset, &module_modifiers, amends.is_some())?;
+        let kind = if amends.is_some() {
+            BodyKind::AmendingModule
+        } else {
+            BodyKind::Module
+        };
+        let mut scope = BodyScope::new(kind, None);
+        if let Some(name) = scope.declare_imports(&imports) {
+            return Err(self.duplicate_error(self.peek_tok().offset, &name));
+        }
+        let body = self.parse_body(scope)?;
         Ok(Module {
             amends,
             extends,
@@ -244,6 +262,21 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_entries(&mut self) -> Result<Vec<Entry>> {
+        self.parse_body(BodyScope::new(BodyKind::Object, None))
+    }
+
+    /// Parse the members of a body, checking them against the rules for the
+    /// kind of body `scope` describes.
+    fn parse_body(&mut self, scope: BodyScope) -> Result<Vec<Entry>> {
+        let saved = std::mem::replace(&mut self.body, scope);
+        let entries = self.parse_body_entries();
+        let scope = std::mem::replace(&mut self.body, saved);
+        let entries = entries?;
+        self.finish_body(&scope)?;
+        Ok(entries)
+    }
+
+    fn parse_body_entries(&mut self) -> Result<Vec<Entry>> {
         let mut entries = Vec::new();
         while !self.at_eof() && !matches!(self.peek(), TokenKind::RBrace) {
             if matches!(self.peek(), TokenKind::Comma | TokenKind::Semicolon) {
@@ -251,6 +284,7 @@ impl<'a> Parser<'a> {
                 continue;
             }
             let entry_annotations = self.parse_annotations()?;
+            let member_offset = self.peek_tok().offset;
             // Parse class definitions (with optional modifiers); skip typealias/function declarations
             let class_modifiers =
                 if self.peek_is_modifier() && self.peek_past_modifiers_is(TokenKind::KwClass) {
@@ -261,9 +295,9 @@ impl<'a> Parser<'a> {
             if matches!(self.peek(), TokenKind::KwClass) {
                 self.advance(); // consume 'class'
                 let name = self.expect_ident()?;
-                // Skip optional type params <...>
+                self.check_class(member_offset, &class_modifiers, &name)?;
                 if matches!(self.peek(), TokenKind::Lt) {
-                    self.skip_generic_params()?;
+                    return Err(self.type_parameters_error());
                 }
                 // Parse optional extends clause
                 let parent = if matches!(self.peek(), TokenKind::KwExtends) {
@@ -286,7 +320,7 @@ impl<'a> Parser<'a> {
                 };
                 if matches!(self.peek(), TokenKind::LBrace) {
                     self.advance();
-                    let body = self.parse_entries()?;
+                    let body = self.parse_body(BodyScope::new(BodyKind::Class, None))?;
                     self.expect(&TokenKind::RBrace)?;
                     entries.push(Entry::ClassDef(name, class_modifiers, parent, body.into()));
                 }
@@ -295,8 +329,9 @@ impl<'a> Parser<'a> {
             if matches!(self.peek(), TokenKind::KwTypeAlias) {
                 self.advance(); // consume 'typealias'
                 let name = self.expect_ident()?;
-                // Skip optional generic params
+                self.check_type_alias(member_offset, &[], &name)?;
                 if matches!(self.peek(), TokenKind::Lt) {
+                    self.check_type_parameters(self.pos)?;
                     self.skip_generic_params()?;
                 }
                 self.expect(&TokenKind::Equals)?;
@@ -305,7 +340,7 @@ impl<'a> Parser<'a> {
                 continue;
             }
             if matches!(self.peek(), TokenKind::KwFunction) {
-                if let Some(entry) = self.try_parse_function_def(Vec::new())? {
+                if let Some(entry) = self.try_parse_function_def(member_offset, Vec::new())? {
                     entries.push(entry);
                 }
                 continue;
@@ -314,11 +349,22 @@ impl<'a> Parser<'a> {
             if self.peek_is_modifier() && self.peek_past_modifiers_is_decl() {
                 let mods = self.collect_modifiers();
                 if matches!(self.peek(), TokenKind::KwFunction) {
-                    if let Some(entry) = self.try_parse_function_def(mods)? {
+                    if let Some(entry) = self.try_parse_function_def(member_offset, mods)? {
                         entries.push(entry);
                     }
                 } else {
                     // typealias — skip as before
+                    if let Some(TokenKind::Ident(name)) =
+                        self.tokens.get(self.pos + 1).map(|tok| &tok.kind)
+                    {
+                        self.check_type_alias(member_offset, &mods, name)?;
+                    }
+                    if matches!(
+                        self.tokens.get(self.pos + 2).map(|tok| &tok.kind),
+                        Some(TokenKind::Lt)
+                    ) {
+                        self.check_type_parameters(self.pos + 2)?;
+                    }
                     self.skip_declaration();
                 }
                 continue;
@@ -327,6 +373,14 @@ impl<'a> Parser<'a> {
                 break;
             }
             let mut entry = self.parse_entry()?;
+            match &entry {
+                Entry::Property(prop) => self.check_property(member_offset, prop)?,
+                Entry::DynProperty(key, _) => self.check_entry_key(member_offset, key),
+                Entry::ForGenerator(_) | Entry::WhenGenerator(_) | Entry::Spread(_) => {
+                    self.body.set_has_generator();
+                }
+                _ => {}
+            }
             // Attach annotations to the parsed property
             if !entry_annotations.is_empty()
                 && let Entry::Property(ref mut prop) = entry
@@ -503,7 +557,11 @@ impl<'a> Parser<'a> {
 
     /// Parse `function name(params...): ReturnType = body` into a Property with Lambda value.
     /// Returns None if the function body can't be parsed (falls back to skip).
-    fn try_parse_function_def(&mut self, modifiers: Vec<Modifier>) -> Result<Option<Entry>> {
+    fn try_parse_function_def(
+        &mut self,
+        offset: usize,
+        modifiers: Vec<Modifier>,
+    ) -> Result<Option<Entry>> {
         let saved_pos = self.pos;
         let saved_last_line = self.last_line;
         self.advance(); // consume `function`
@@ -517,6 +575,10 @@ impl<'a> Parser<'a> {
                 return Ok(None);
             }
         };
+        self.check_method(offset, &modifiers, &name)?;
+        if matches!(self.peek(), TokenKind::Lt) {
+            return Err(self.type_parameters_error());
+        }
         // Parse parameter list: (param1: Type, param2: Type, ...)
         if !matches!(self.peek(), TokenKind::LParen) {
             self.pos = saved_pos;
@@ -651,13 +713,18 @@ impl<'a> Parser<'a> {
                 }
             }
             TokenKind::KwFor => {
+                let for_offset = self.peek_tok().offset;
                 self.advance(); // consume 'for'
                 self.expect(&TokenKind::LParen)?;
                 // for (k, v in collection) or (v in collection)
                 let first = self.expect_ident()?;
                 let (key_var, val_var, collection) = if matches!(self.peek(), TokenKind::Comma) {
                     self.advance();
+                    let v_offset = self.peek_tok().offset;
                     let v = self.expect_ident()?;
+                    if v == first {
+                        return Err(self.duplicate_error(v_offset, &v));
+                    }
                     self.expect(&TokenKind::KwIn)?;
                     let coll = self.parse_expr()?;
                     (Some(first), v, coll)
@@ -668,7 +735,7 @@ impl<'a> Parser<'a> {
                 };
                 self.expect(&TokenKind::RParen)?;
                 self.expect(&TokenKind::LBrace)?;
-                let body = self.parse_entries()?;
+                let body = self.parse_body(self.for_scope(for_offset))?;
                 self.expect(&TokenKind::RBrace)?;
                 Ok(Entry::ForGenerator(ForGenerator {
                     key_var,
@@ -683,12 +750,12 @@ impl<'a> Parser<'a> {
                 let cond = self.parse_expr()?;
                 self.expect(&TokenKind::RParen)?;
                 self.expect(&TokenKind::LBrace)?;
-                let body = self.parse_entries()?;
+                let body = self.parse_body(self.when_scope())?;
                 self.expect(&TokenKind::RBrace)?;
                 let else_body = if matches!(self.peek(), TokenKind::KwElse) {
                     self.advance();
                     self.expect(&TokenKind::LBrace)?;
-                    let eb = self.parse_entries()?;
+                    let eb = self.parse_body(self.when_scope())?;
                     self.expect(&TokenKind::RBrace)?;
                     Some(eb)
                 } else {
