@@ -902,22 +902,82 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
             _ => None,
         })
         .collect();
+    let classes: HashMap<&str, (Option<&str>, &[Entry])> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::ClassDef(name, _, parent, body) => {
+                Some((name.as_str(), (parent.as_deref(), body.as_slice())))
+            }
+            _ => None,
+        })
+        .collect();
+    // The non-local properties `class` inherits from ancestors declared in
+    // this module.
+    fn inherited_properties<'a>(
+        classes: &HashMap<&'a str, (Option<&'a str>, &'a [Entry])>,
+        class: &'a str,
+    ) -> HashSet<&'a str> {
+        let mut names = HashSet::new();
+        let mut seen = HashSet::from([class]);
+        let mut next = classes.get(class).and_then(|(parent, _)| *parent);
+        while let Some(class) = next
+            && seen.insert(class)
+            && let Some((parent, body)) = classes.get(class)
+        {
+            names.extend(body.iter().filter_map(|entry| match entry {
+                Entry::Property(prop) if !has_modifier(&prop.modifiers, Modifier::Local) => {
+                    Some(prop.name.as_str())
+                }
+                _ => None,
+            }));
+            next = *parent;
+        }
+        names
+    }
     let members: Vec<(&String, bool, HashSet<String>)> = entries
         .iter()
         .filter_map(|entry| match entry {
             Entry::ClassDef(name, _, parent, body) => {
-                // A bare root naming a module property that the body doesn't
-                // declare itself reads it like `module.name`. An inherited
-                // property of that name still needs the refresh: the body's
-                // defaults are first evaluated before the parent's members
-                // are merged in, which fails until the module's is bound.
                 let mut refs = referenced_roots(body);
-                if refs.iter().any(|root| {
-                    module_properties.contains(root.as_str())
-                        && !body.iter().any(
-                            |entry| matches!(entry, Entry::Property(prop) if prop.name == *root),
-                        )
-                }) {
+                // A bare root naming a module property that the body doesn't
+                // declare itself reads it like `module.name`. The body's
+                // defaults are first evaluated before the parent's members
+                // are merged in, so an inherited property of that name read
+                // by a default still needs the refresh. A method runs on the
+                // built instance, where it reads the inherited property.
+                let module_reads: Vec<&String> = refs
+                    .iter()
+                    .filter(|root| {
+                        module_properties.contains(root.as_str())
+                            && !body.iter().any(|entry| {
+                                matches!(entry, Entry::Property(prop) if prop.name == **root)
+                            })
+                    })
+                    .collect();
+                let reads_module = !module_reads.is_empty() && {
+                    let inherited = inherited_properties(&classes, name);
+                    module_reads
+                        .iter()
+                        .any(|root| !inherited.contains(root.as_str()))
+                        || {
+                            let defaults: Vec<Entry> = body
+                                .iter()
+                                .filter(|entry| {
+                                    !matches!(
+                                        entry,
+                                        Entry::Property(prop)
+                                            if matches!(prop.value, Some(Expr::Lambda(..)))
+                                    )
+                                })
+                                .cloned()
+                                .collect();
+                            let default_refs = referenced_roots(&defaults);
+                            module_reads
+                                .iter()
+                                .any(|root| default_refs.contains(root.as_str()))
+                        }
+                };
+                if reads_module {
                     refs.insert("module".to_string());
                 }
                 // Inside a class body `this` is the instance, so only

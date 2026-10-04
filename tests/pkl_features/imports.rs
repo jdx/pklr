@@ -2389,6 +2389,36 @@ async fn narrowed_import_follows_module_reads_named_like_inherited_properties() 
 }
 
 #[tokio::test]
+async fn narrowed_import_skips_module_properties_named_like_inherited_method_reads() {
+    let temp = TestTempDir::new("pklr_test_narrowed_import_inherited_method");
+    let dir = temp.path();
+    // A method body runs on a built instance, where `min` is the inherited
+    // property, so the unused module `min` is not needed.
+    std::fs::write(
+        dir.join("inherited.pkl"),
+        "min = throw(\"unused\")\nopen class Parent { min = 2 }\nclass Child extends Parent { function getMin() = min }\n",
+    )
+    .unwrap();
+    // A module property the instance doesn't have is still read by a method.
+    std::fs::write(
+        dir.join("module.pkl"),
+        "max = 3\nopen class Parent { min = 2 }\nclass Child extends Parent { function getMax() = max }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"inherited.pkl\" as I\nimport \"module.pkl\" as M\nmin = (new I.Child {}).getMin()\nmax = (new M.Child {}).getMax()\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json_async(&dir.join("main.pkl"))
+        .await
+        .unwrap();
+    assert_eq!(val["min"], 2);
+    assert_eq!(val["max"], 3);
+}
+
+#[tokio::test]
 async fn narrowed_import_follows_module_reads_but_not_checked_value_members() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_constraint_names");
     let dir = temp.path();
