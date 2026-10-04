@@ -751,8 +751,8 @@ pub(super) fn collect_unshadowed_names(expr: &Expr, names: &mut HashSet<String>)
             names.insert(name.clone());
         }
         Expr::New(type_name, entries, generic_params) => {
-            for name in type_name.iter().chain(generic_params) {
-                insert_name_roots(names, name);
+            if type_name.is_some() || !generic_params.is_empty() {
+                mark_type_use(names);
             }
             collect_unshadowed_entry_names(entries, names);
         }
@@ -841,8 +841,8 @@ fn collect_unshadowed_entry_names(entries: &[Entry], names: &mut HashSet<String>
             }
             Entry::Spread(expr) | Entry::Elem(expr) => collect_unshadowed_names(expr, names),
             Entry::ClassDef(_, _, parent, body) => {
-                if let Some(parent) = parent {
-                    insert_name_roots(names, parent);
+                if parent.is_some() {
+                    mark_type_use(names);
                 }
                 collect_unshadowed_entry_names(body, names);
             }
@@ -852,49 +852,30 @@ fn collect_unshadowed_entry_names(entries: &[Entry], names: &mut HashSet<String>
 }
 
 fn collect_unshadowed_type_names(ty: &crate::parser::TypeExpr, names: &mut HashSet<String>) {
+    mark_type_use(names);
+    // A constraint is an ordinary expression evaluated against the value.
+    if let crate::parser::TypeExpr::Constrained(_, constraint) = ty {
+        collect_unshadowed_names(constraint, names);
+    }
     match ty {
-        crate::parser::TypeExpr::Named(name) => {
-            insert_name_roots(names, name);
-        }
         crate::parser::TypeExpr::Nullable(inner) => collect_unshadowed_type_names(inner, names),
-        crate::parser::TypeExpr::Union(types) => {
+        crate::parser::TypeExpr::Union(types) | crate::parser::TypeExpr::Generic(_, types) => {
             for ty in types {
                 collect_unshadowed_type_names(ty, names);
             }
         }
-        crate::parser::TypeExpr::Generic(name, params) => {
-            insert_name_roots(names, name);
-            for param in params {
-                collect_unshadowed_type_names(param, names);
-            }
-        }
-        crate::parser::TypeExpr::Constrained(base, constraint) => {
-            // The base may be a quoted name containing a separator, so keep it
-            // whole as well as split into components.
-            insert_name_roots(names, base);
-            for component in constrained_type_components(base) {
-                insert_name_roots(names, component);
-            }
-            collect_unshadowed_names(constraint, names);
-        }
+        _ => {}
     }
 }
 
-/// Insert every binding a type or class name could resolve through. A name
-/// may be a plain or dotted identifier, a quoted identifier that contains
-/// any characters (`` `Step?` ``), or a serialized type such as a default
-/// (`*Step`, ``*`Foo-Bar` ``) or a generic (`*Container<String>`). Keep the
-/// name as written, without its default and nullable markers, and also each
-/// identifier in it; over-capturing is safe.
-fn insert_name_roots(names: &mut HashSet<String>, name: &str) {
-    for name in [name, name.trim_start_matches('*').trim_end_matches('?')] {
-        names.insert(name.split('.').next().unwrap_or(name).to_string());
-    }
-    for token in name.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$' || c == '.')) {
-        if let Some(root) = token.split('.').next()
-            && !root.is_empty()
-        {
-            names.insert(root.to_string());
-        }
-    }
+/// Recorded by [`collect_unshadowed_names`] when the expression names a type
+/// or class anywhere (`new T`, `is`/`as`, type annotations, constraints, class
+/// parents). Type names come in many spellings (defaults, generics, quoted
+/// names containing separators), and resolving them looks up bindings in ways
+/// a name list cannot capture reliably, so callers that see this capture the
+/// whole scope.
+pub(super) const NAMES_A_TYPE: &str = "\0type";
+
+fn mark_type_use(names: &mut HashSet<String>) {
+    names.insert(NAMES_A_TYPE.to_string());
 }
