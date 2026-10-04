@@ -2448,6 +2448,13 @@ async fn narrowed_import_respects_aliases_redeclared_in_nested_bodies() {
         "length = throw(\"unused\")\ntypealias S = String\nresult {\n  typealias S = String\n  ok = \"b\" is S(length == 1)\n}\n",
     )
     .unwrap();
+    // A module alias `T` built on `S` is checked inside a body that
+    // redeclares `S = Int`, so its constraint reads the module's `length`.
+    std::fs::write(
+        dir.join("dep_followed.pkl"),
+        "length = 1\ntypealias S = String\ntypealias T = S(length == 1)\nresult {\n  typealias S = Int\n  ok = 1 is T\n}\n",
+    )
+    .unwrap();
     // A local evaluated before the nested alias still sees the module's
     // `S = Int`, whose check binds no `length`.
     std::fs::write(
@@ -2457,7 +2464,7 @@ async fn narrowed_import_respects_aliases_redeclared_in_nested_bodies() {
     .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"dep.pkl\" as Dep\nimport \"dep_string.pkl\" as DepString\nimport \"dep_order.pkl\" as DepOrder\nout = Dep.result.ok\noutString = DepString.result.ok\noutOrder = DepOrder.result.ok\n",
+        "import \"dep.pkl\" as Dep\nimport \"dep_string.pkl\" as DepString\nimport \"dep_order.pkl\" as DepOrder\nimport \"dep_followed.pkl\" as DepFollowed\nout = Dep.result.ok\noutString = DepString.result.ok\noutOrder = DepOrder.result.ok\noutFollowed = DepFollowed.result.ok\n",
     )
     .unwrap();
 
@@ -2467,4 +2474,5 @@ async fn narrowed_import_respects_aliases_redeclared_in_nested_bodies() {
     assert_eq!(val["out"], true);
     assert_eq!(val["outString"], true);
     assert_eq!(val["outOrder"], true);
+    assert_eq!(val["outFollowed"], true);
 }

@@ -394,6 +394,16 @@ pub(super) fn expand_requested_fields(
                 collect_entry_refs_in(body, &mut refs, &shadows, aliases);
                 collect_sibling_field_refs_entries(body, &mut refs);
             }
+            // A definition's constraints resolve aliases where the check
+            // happens. If this property's bodies redeclare a module alias, a
+            // check inside them can read a followed definition differently, so
+            // follow definitions without resolving aliases there.
+            let definition_aliases =
+                if aliases.is_some_and(|aliases| property_redeclares_alias(prop, aliases)) {
+                    None
+                } else {
+                    aliases
+                };
             let mut pending: Vec<String> = refs.iter().cloned().collect();
             let mut visited = HashSet::new();
             while let Some(name) = pending.pop() {
@@ -408,7 +418,7 @@ pub(super) fn expand_requested_fields(
                     std::slice::from_ref(*definition),
                     &mut definition_refs,
                     &shadows,
-                    aliases,
+                    definition_aliases,
                 );
                 collect_sibling_field_refs_entries(
                     std::slice::from_ref(*definition),
@@ -501,6 +511,91 @@ fn constraint_bound_names(base: &str) -> &'static [&'static str] {
 
 /// A module's own type aliases by name, for resolving a constraint's base.
 type TypeAliases<'a> = HashMap<&'a str, &'a crate::parser::TypeExpr>;
+
+/// Whether a type alias or class declared anywhere inside `prop` (in its
+/// body or in object bodies within its value) has the name of one of
+/// `aliases`.
+fn property_redeclares_alias(prop: &Property, aliases: &TypeAliases) -> bool {
+    prop.value
+        .as_ref()
+        .is_some_and(|expr| expr_redeclares_alias(expr, aliases))
+        || prop
+            .body
+            .as_ref()
+            .is_some_and(|body| entries_redeclare_alias(body, aliases))
+}
+
+fn entries_redeclare_alias(entries: &[Entry], aliases: &TypeAliases) -> bool {
+    entries.iter().any(|entry| match entry {
+        Entry::TypeAlias(name, _) | Entry::ClassDef(name, ..)
+            if aliases.contains_key(name.as_str()) =>
+        {
+            true
+        }
+        Entry::Property(prop) => property_redeclares_alias(prop, aliases),
+        Entry::DynProperty(key, value) => {
+            expr_redeclares_alias(key, aliases) || expr_redeclares_alias(value, aliases)
+        }
+        Entry::ForGenerator(fgen) => {
+            expr_redeclares_alias(&fgen.collection, aliases)
+                || entries_redeclare_alias(&fgen.body, aliases)
+        }
+        Entry::WhenGenerator(wgen) => {
+            expr_redeclares_alias(&wgen.condition, aliases)
+                || entries_redeclare_alias(&wgen.body, aliases)
+                || wgen
+                    .else_body
+                    .as_ref()
+                    .is_some_and(|body| entries_redeclare_alias(body, aliases))
+        }
+        Entry::Spread(expr) | Entry::Elem(expr) => expr_redeclares_alias(expr, aliases),
+        Entry::ClassDef(_, _, _, body) => entries_redeclare_alias(body, aliases),
+        Entry::TypeAlias(..) => false,
+    })
+}
+
+fn expr_redeclares_alias(expr: &Expr, aliases: &TypeAliases) -> bool {
+    match expr {
+        Expr::New(_, entries, _) | Expr::InferredNew(_, entries) | Expr::ObjectBody(entries) => {
+            entries_redeclare_alias(entries, aliases)
+        }
+        Expr::Field(base, _) | Expr::NullSafeField(base, _) => expr_redeclares_alias(base, aliases),
+        Expr::Index(base, index) | Expr::Binop(_, base, index) => {
+            expr_redeclares_alias(base, aliases) || expr_redeclares_alias(index, aliases)
+        }
+        Expr::Call(callee, args) => {
+            expr_redeclares_alias(callee, aliases)
+                || args.iter().any(|arg| expr_redeclares_alias(arg, aliases))
+        }
+        Expr::If(cond, then_expr, else_expr) => {
+            expr_redeclares_alias(cond, aliases)
+                || expr_redeclares_alias(then_expr, aliases)
+                || expr_redeclares_alias(else_expr, aliases)
+        }
+        Expr::Let(_, value, body) => {
+            expr_redeclares_alias(value, aliases) || expr_redeclares_alias(body, aliases)
+        }
+        Expr::Is(value, _) | Expr::As(value, _) => expr_redeclares_alias(value, aliases),
+        Expr::Lambda(_, value)
+        | Expr::Unop(_, value)
+        | Expr::Throw(value)
+        | Expr::Trace(value)
+        | Expr::Read(value)
+        | Expr::ReadOrNull(value) => expr_redeclares_alias(value, aliases),
+        Expr::StringInterpolation(parts) => parts.iter().any(|part| match part {
+            StringInterpPart::Expr(expr) => expr_redeclares_alias(expr, aliases),
+            StringInterpPart::Literal(_) => false,
+        }),
+        Expr::Ident(_)
+        | Expr::Null
+        | Expr::Bool(_)
+        | Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::String(_)
+        | Expr::Import(..)
+        | Expr::ImportGlob(..) => false,
+    }
+}
 
 /// `constraint_bound_names`, after following `base` through `aliases` (with
 /// cycle protection) to the type it names. A base that resolves to a nullable
