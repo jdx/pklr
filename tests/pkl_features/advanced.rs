@@ -3137,3 +3137,18 @@ no = check.apply(new Other {})
     assert_eq!(json["yes"], true);
     assert_eq!(json["no"], false);
 }
+
+#[test]
+fn lambda_constrained_check_keeps_quoted_generic_class() {
+    let json = eval(
+        r#"
+class `Box,Pair`<T> { value = 1 }
+class Other { value = 2 }
+local check = (v) -> v is `Box,Pair`<String>(true)
+yes = check.apply(new `Box,Pair`<String> {})
+no = check.apply(new Other {})
+"#,
+    );
+    assert_eq!(json["yes"], true);
+    assert_eq!(json["no"], false);
+}
