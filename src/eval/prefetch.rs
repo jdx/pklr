@@ -93,13 +93,34 @@ enum Prefetch {
 }
 
 impl Prefetch {
-    fn key(&self) -> &str {
+    /// Identifies this target's cache work, for skipping targets already
+    /// attempted in this evaluation.
+    fn attempt_key(&self) -> String {
         match self {
-            Prefetch::Http { fetch_url, .. } => fetch_url,
-            Prefetch::PackageFile { url } => url,
+            Prefetch::Http { fetch_url, .. } => format!("http {fetch_url}"),
+            Prefetch::PackageFile { url } => format!("pkl {url}"),
             #[cfg(feature = "package-zip")]
-            Prefetch::PackageZip { url, .. } => url,
+            Prefetch::PackageZip { url, .. } => format!("zip {url}"),
         }
+    }
+
+    fn is_http(&self) -> bool {
+        matches!(self, Prefetch::Http { .. })
+    }
+}
+
+/// One request and every target that needs its response. Targets that share
+/// a URL are fetched once, and each still does its own cache work.
+struct Download {
+    fetch_url: String,
+    targets: Vec<Prefetch>,
+}
+
+impl Download {
+    /// Plain HTTP modules are fetched as text, as evaluation fetches them;
+    /// anything involving a package as bytes.
+    fn is_text(&self) -> bool {
+        self.targets.iter().all(Prefetch::is_http)
     }
 }
 
@@ -180,102 +201,56 @@ impl Evaluator {
 
     fn prefetch_levels(&mut self, mut level: Vec<Prefetch>, mut roots: HashSet<String>) {
         for _ in 0..MAX_LEVELS {
-            level.retain(|target| !self.prefetch.attempted.contains(target.key()));
-            level = dedupe_level(level);
-            // Targets past the request budget are left to evaluation.
-            level.truncate(self.prefetch.requests);
-            if level.is_empty() {
+            level.retain(|target| !self.prefetch.attempted.contains(&target.attempt_key()));
+            let mut downloads = self.group_downloads(level);
+            // Downloads past the request budget are left to evaluation.
+            downloads.truncate(self.prefetch.requests);
+            if downloads.is_empty() {
                 break;
-            }
-            for target in &level {
-                self.prefetch.attempted.insert(target.key().to_string());
             }
             // Sources fetched (or found in the package cache) at this level,
             // with the path evaluation gives them, to scan for the next level.
             let mut sources: Vec<(String, String)> = Vec::new();
-            let mut http = Vec::new();
-            let mut bytes = Vec::new();
-            for target in level {
-                match target {
-                    Prefetch::Http { url, fetch_url } => http.push((url, fetch_url)),
-                    Prefetch::PackageFile { url } => match self.cached_package(&url, "pkl") {
-                        Some(cached) => {
-                            if let Ok(source) = String::from_utf8(cached) {
-                                sources.push((source, url));
-                            }
-                        }
-                        None => bytes.push(Prefetch::PackageFile { url }),
-                    },
-                    #[cfg(feature = "package-zip")]
-                    Prefetch::PackageZip { url, entries } => {
-                        if self.cached_package(&url, "zip").is_some() {
-                            // Extracting a cached archive needs no network.
-                            if let Ok(dir) = self.extract_package_zip(&url) {
-                                self.push_package_entries(&dir, &entries, &mut sources);
-                            }
-                        } else {
-                            bytes.push(Prefetch::PackageZip { url, entries });
-                        }
+            for download in &mut downloads {
+                for target in &download.targets {
+                    self.prefetch.attempted.insert(target.attempt_key());
+                }
+                // A package already in the persistent cache needs no network.
+                let targets = std::mem::take(&mut download.targets);
+                for target in targets {
+                    if !self.load_cached_package(&target, &mut sources) {
+                        download.targets.push(target);
                     }
                 }
             }
+            downloads.retain(|download| !download.targets.is_empty());
+            let (text, bytes): (Vec<Download>, Vec<Download>) =
+                downloads.into_iter().partition(Download::is_text);
 
-            if !http.is_empty() {
-                let urls: Vec<String> = http
-                    .iter()
-                    .map(|(_, fetch_url)| fetch_url.clone())
-                    .collect();
+            if !text.is_empty() {
+                let urls: Vec<String> = text.iter().map(|d| d.fetch_url.clone()).collect();
                 self.prefetch.requests -= urls.len();
                 let results = self.capabilities.fetch_text_many(&urls);
-                for ((url, fetch_url), result) in http.into_iter().zip(results) {
+                for (download, result) in text.into_iter().zip(results) {
                     if let Ok(body) = result {
                         self.prefetch.spend_bytes(body.len());
-                        self.http_cache.insert(fetch_url, body.clone());
-                        sources.push((body, url));
+                        for target in download.targets {
+                            self.store_text(target, body.clone(), &mut sources);
+                        }
                     }
                 }
             }
 
             if !bytes.is_empty() {
-                let urls: Vec<String> = bytes
-                    .iter()
-                    .map(|target| self.rewrite_url(target.key()).into_owned())
-                    .collect();
+                let urls: Vec<String> = bytes.iter().map(|d| d.fetch_url.clone()).collect();
                 self.prefetch.requests -= urls.len();
                 let results = self.capabilities.fetch_bytes_many(&urls);
-                for (target, result) in bytes.into_iter().zip(results) {
-                    let Ok(fetched) = result else {
-                        continue;
-                    };
-                    self.prefetch.spend_bytes(fetched.len());
-                    match target {
-                        Prefetch::PackageFile { url } => {
-                            if validate_package_bytes(&url, "pkl", &fetched).is_err() {
-                                continue;
-                            }
-                            let _ = self.write_package_cache(&url, "pkl", &fetched);
-                            if let Ok(source) = String::from_utf8(fetched) {
-                                self.http_cache.insert(url.clone(), source.clone());
-                                sources.push((source, url));
-                            }
+                for (download, result) in bytes.into_iter().zip(results) {
+                    if let Ok(fetched) = result {
+                        self.prefetch.spend_bytes(fetched.len());
+                        for target in download.targets {
+                            self.store_bytes(target, &fetched, &mut sources);
                         }
-                        #[cfg(feature = "package-zip")]
-                        Prefetch::PackageZip { url, entries } => {
-                            if validate_package_bytes(&url, "zip", &fetched).is_err() {
-                                continue;
-                            }
-                            let _ = self.write_package_cache(&url, "zip", &fetched);
-                            let prefix = format!("pklr-pkg-{}", self.package_dirs.len());
-                            let Ok(dir) = self.temp_dir_io(&prefix) else {
-                                continue;
-                            };
-                            if self.extract_zip_io(fetched, &dir).is_err() {
-                                continue;
-                            }
-                            self.package_dirs.insert(url, dir.clone());
-                            self.push_package_entries(&dir, &entries, &mut sources);
-                        }
-                        Prefetch::Http { .. } => {}
                     }
                 }
             }
@@ -292,15 +267,140 @@ impl Evaluator {
                 let Ok(tokens) = lexer::lex_named(source, source_path) else {
                     continue;
                 };
-                for uri in parser::collect_imports(&tokens) {
+                for (uri, is_glob) in parser::collect_imports_with_kind(&tokens) {
                     // Glob imports are expanded at evaluation time.
-                    if uri.contains('*') {
+                    if is_glob {
                         continue;
                     }
                     self.prefetch_target(&uri, Path::new(source_path), &mut roots, &mut next);
                 }
             }
             level = next;
+        }
+    }
+
+    /// Group targets by the URL actually requested, merging the entries of
+    /// one package archive, so each URL is downloaded once per level.
+    fn group_downloads(&self, level: Vec<Prefetch>) -> Vec<Download> {
+        let mut index_by_url: HashMap<String, usize> = HashMap::default();
+        let mut downloads: Vec<Download> = Vec::new();
+        for target in level {
+            let fetch_url = match &target {
+                Prefetch::Http { fetch_url, .. } => fetch_url.clone(),
+                Prefetch::PackageFile { url } => self.rewrite_url(url).into_owned(),
+                #[cfg(feature = "package-zip")]
+                Prefetch::PackageZip { url, .. } => self.rewrite_url(url).into_owned(),
+            };
+            let index = *index_by_url.entry(fetch_url.clone()).or_insert_with(|| {
+                downloads.push(Download {
+                    fetch_url,
+                    targets: Vec::new(),
+                });
+                downloads.len() - 1
+            });
+            let targets = &mut downloads[index].targets;
+            if let Some(existing) = targets
+                .iter_mut()
+                .find(|existing| existing.attempt_key() == target.attempt_key())
+            {
+                #[cfg(feature = "package-zip")]
+                if let (
+                    Prefetch::PackageZip { entries, .. },
+                    Prefetch::PackageZip { entries: more, .. },
+                ) = (existing, target)
+                {
+                    for entry in more {
+                        if !entries.contains(&entry) {
+                            entries.push(entry);
+                        }
+                    }
+                }
+                #[cfg(not(feature = "package-zip"))]
+                let _ = existing;
+            } else {
+                targets.push(target);
+            }
+        }
+        downloads
+    }
+
+    /// Load `target` from the persistent package cache. Returns whether it
+    /// was a cached package, which then needs no request.
+    fn load_cached_package(
+        &mut self,
+        target: &Prefetch,
+        sources: &mut Vec<(String, String)>,
+    ) -> bool {
+        match target {
+            Prefetch::Http { .. } => false,
+            Prefetch::PackageFile { url } => match self.cached_package(url, "pkl") {
+                Some(cached) => {
+                    if let Ok(source) = String::from_utf8(cached) {
+                        sources.push((source, url.clone()));
+                    }
+                    true
+                }
+                None => false,
+            },
+            #[cfg(feature = "package-zip")]
+            Prefetch::PackageZip { url, entries } => {
+                if self.cached_package(url, "zip").is_none() {
+                    return false;
+                }
+                // Extracting a cached archive needs no network.
+                if let Ok(dir) = self.extract_package_zip(url) {
+                    self.push_package_entries(&dir, entries, sources);
+                }
+                true
+            }
+        }
+    }
+
+    /// Cache a plain HTTP module's text, as `fetch_source` would.
+    fn store_text(&mut self, target: Prefetch, body: String, sources: &mut Vec<(String, String)>) {
+        if let Prefetch::Http { url, fetch_url } = target {
+            self.http_cache.insert(fetch_url, body.clone());
+            sources.push((body, url));
+        }
+    }
+
+    /// Do `target`'s cache work with downloaded `bytes`, as evaluation would
+    /// after fetching it.
+    fn store_bytes(&mut self, target: Prefetch, bytes: &[u8], sources: &mut Vec<(String, String)>) {
+        match target {
+            Prefetch::Http { .. } => {
+                // `fetch_text` rejects bodies that are not UTF-8; leave those
+                // to evaluation so it reports the same error.
+                if let Ok(body) = std::str::from_utf8(bytes) {
+                    self.store_text(target, body.to_string(), sources);
+                }
+            }
+            Prefetch::PackageFile { url } => {
+                if validate_package_bytes(&url, "pkl", bytes).is_err() {
+                    return;
+                }
+                let _ = self.write_package_cache(&url, "pkl", bytes);
+                if let Ok(source) = std::str::from_utf8(bytes) {
+                    self.http_cache.insert(url.clone(), source.to_string());
+                    sources.push((source.to_string(), url));
+                }
+            }
+            #[cfg(feature = "package-zip")]
+            Prefetch::PackageZip { url, entries } => {
+                if validate_package_bytes(&url, "zip", bytes).is_err() {
+                    return;
+                }
+                let _ = self.write_package_cache(&url, "zip", bytes);
+                let prefix = format!("pklr-pkg-{}", self.package_dirs.len());
+                let Ok(dir) = self.temp_dir_io(&prefix) else {
+                    return;
+                };
+                if self.extract_zip_io(bytes.to_vec(), &dir).is_err() {
+                    return;
+                }
+                self.package_dirs.insert(url, dir.clone());
+                self.push_package_entries(&dir, &entries, sources);
+            }
         }
     }
 
@@ -325,37 +425,4 @@ impl Evaluator {
             }
         }
     }
-}
-
-/// Collapse targets that share a cache key, so each URL is requested (and
-/// each archive extracted) once per level. Entries of the same archive are
-/// merged so every one of them is still scanned.
-fn dedupe_level(level: Vec<Prefetch>) -> Vec<Prefetch> {
-    let mut index_by_key: HashMap<String, usize> = HashMap::default();
-    let mut deduped: Vec<Prefetch> = Vec::with_capacity(level.len());
-    for target in level {
-        match index_by_key.get(target.key()) {
-            None => {
-                index_by_key.insert(target.key().to_string(), deduped.len());
-                deduped.push(target);
-            }
-            #[cfg(feature = "package-zip")]
-            Some(&index) => {
-                if let (
-                    Prefetch::PackageZip { entries, .. },
-                    Prefetch::PackageZip { entries: more, .. },
-                ) = (&mut deduped[index], target)
-                {
-                    for entry in more {
-                        if !entries.contains(&entry) {
-                            entries.push(entry);
-                        }
-                    }
-                }
-            }
-            #[cfg(not(feature = "package-zip"))]
-            Some(_) => {}
-        }
-    }
-    deduped
 }

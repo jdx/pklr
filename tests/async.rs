@@ -181,3 +181,59 @@ fn reqwest_batch_fetch_is_bounded() {
     assert!(server.peak_in_flight() <= 8, "{}", server.peak_in_flight());
     assert!(server.peak_in_flight() > 1, "{}", server.peak_in_flight());
 }
+
+/// `eval_to_json_async` runs the evaluation under `spawn_blocking`, and the
+/// reqwest backend then blocks on the caller's multi-threaded runtime with
+/// `block_in_place` + `Handle::block_on` from that blocking thread. This
+/// must not panic, for single fetches or for prefetch batches.
+#[tokio::test(flavor = "multi_thread")]
+async fn eval_async_with_reqwest_on_a_multi_thread_runtime() {
+    let server = common::DelayedServer::start(
+        &[("/A.pkl", "value = 1\n"), ("/B.pkl", "value = 2\n")],
+        std::time::Duration::ZERO,
+    );
+    let path = common::write_entry(
+        "async_multi_thread_reqwest",
+        "main.pkl",
+        &format!(
+            "import \"{0}/A.pkl\"\nimport \"{0}/B.pkl\"\nresult = A.value + B.value\n",
+            server.base
+        ),
+    );
+
+    let json = pklr::EvaluatorBuilder::new()
+        .http_client(pklr::reqwest::Client::new())
+        .eval_to_json_async(&path)
+        .await
+        .unwrap();
+
+    assert_eq!(json["result"], 3);
+    assert_eq!(server.requests(), 2);
+}
+
+/// The current-thread counterpart of
+/// `eval_async_with_reqwest_on_a_multi_thread_runtime`.
+#[tokio::test(flavor = "current_thread")]
+async fn eval_async_with_reqwest_on_a_current_thread_runtime() {
+    let server = common::DelayedServer::start(
+        &[("/A.pkl", "value = 1\n"), ("/B.pkl", "value = 2\n")],
+        std::time::Duration::ZERO,
+    );
+    let path = common::write_entry(
+        "async_current_thread_reqwest",
+        "main.pkl",
+        &format!(
+            "import \"{0}/A.pkl\"\nimport \"{0}/B.pkl\"\nresult = A.value + B.value\n",
+            server.base
+        ),
+    );
+
+    let json = pklr::EvaluatorBuilder::new()
+        .http_client(pklr::reqwest::Client::new())
+        .eval_to_json_async(&path)
+        .await
+        .unwrap();
+
+    assert_eq!(json["result"], 3);
+    assert_eq!(server.requests(), 2);
+}

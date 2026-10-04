@@ -45,6 +45,9 @@ zip             = { version = "8", default-features = false, features = ["deflat
 tokio           = { version = "1", features = ["rt", "rt-multi-thread", "sync"], optional = true }
 url             = { version = "2", optional = true }
 
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
 [[test]]
 name = "integration"
 required-features = ["http", "package-zip"]

@@ -905,3 +905,68 @@ fn on_large_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> 
         .join()
         .unwrap()
 }
+
+#[test]
+fn a_shared_download_fills_the_package_cache_for_offline_use() {
+    let server = common::DelayedServer::start(
+        &[("/o/r/releases/download/v1/Config.pkl", "value = 21\n")],
+        std::time::Duration::ZERO,
+    );
+    let rewrite = format!("https://github.com/={}/", server.base);
+    let path = common::write_entry(
+        "shared_download_cache",
+        "main.pkl",
+        "import \"https://github.com/o/r/releases/download/v1/Config.pkl\" as Direct\nimport \"package://pkg.pkl-lang.org/github.com/o/r@v1#/Config.pkl\" as Pkg\nresult = Direct.value + Pkg.value\n",
+    );
+    let cache_dir = path.with_file_name("cache");
+
+    let json = pklr::EvaluatorBuilder::new()
+        .http_rewrites([rewrite.clone()])
+        .package_cache_dir(&cache_dir)
+        .eval_to_json(&path)
+        .unwrap();
+    assert_eq!(json["result"], 42);
+    assert_eq!(server.requests(), 1);
+
+    let offline_path = path.with_file_name("offline.pkl");
+    std::fs::write(
+        &offline_path,
+        "import \"package://pkg.pkl-lang.org/github.com/o/r@v1#/Config.pkl\" as Pkg\nresult = Pkg.value\n",
+    )
+    .unwrap();
+    let json = pklr::EvaluatorBuilder::new()
+        .http_rewrites([rewrite])
+        .package_cache_dir(&cache_dir)
+        .offline(true)
+        .eval_to_json(&offline_path)
+        .unwrap();
+    assert_eq!(json["result"], 21);
+    assert_eq!(server.requests(), 1);
+}
+
+#[test]
+fn glob_imports_in_fetched_modules_are_not_prefetched() {
+    let server = common::DelayedServer::start(
+        &[
+            (
+                "/Main.pkl",
+                "import* \"https://example.com/a.pkl\" as Globbed\nvalue = 1\n",
+            ),
+            ("/a.pkl", "value = 2\n"),
+        ],
+        std::time::Duration::ZERO,
+    );
+    let mut evaluator = Evaluator::new();
+    evaluator.set_http_rewrites(&[format!("https://example.com/={}/", server.base)]);
+
+    let json = evaluator
+        .eval_source(
+            "import \"https://example.com/Main.pkl\"\nresult = Main.value\n",
+            Path::new("entry.pkl"),
+        )
+        .unwrap()
+        .to_json();
+
+    assert_eq!(json["result"], 1);
+    assert_eq!(server.requests(), 1);
+}
