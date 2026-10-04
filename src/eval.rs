@@ -1079,6 +1079,21 @@ fn bind_instance_members(call_scope: &mut Scope, captured: &ScopeMap, instance: 
     }
 }
 
+/// Add the failed members of `source`, an object whose members are being
+/// copied into another, to `failures`.
+fn copy_member_failures(
+    failures: &mut IndexMap<String, PoisonedMember>,
+    source: Option<&ObjectSource>,
+) {
+    if let Some(members) = source.and_then(|source| source.poisoned_members.as_ref()) {
+        failures.extend(
+            members
+                .iter()
+                .map(|(name, member)| (name.clone(), member.clone())),
+        );
+    }
+}
+
 /// The error of the first member of `value`, an object, that failed to
 /// evaluate, rendered or not.
 fn first_member_failure(value: &Value) -> Option<&str> {
@@ -3425,6 +3440,18 @@ impl Evaluator {
                             }
                             Err(Error::Eval(message)) => {
                                 scope.declare_poisoned(prop.name.clone(), message.clone());
+                                // Reading it through `this`/`module` reports the
+                                // error too, not an inherited value or nothing.
+                                scope.set_member_poison(&prop.name, Some(message.clone()));
+                                if all_props.contains_key(prop.name.as_str()) {
+                                    for name in ["this", "module"] {
+                                        scope.set(name, Value::Null);
+                                    }
+                                    Arc::make_mut(&mut all_props).shift_remove(prop.name.as_str());
+                                    let snapshot = Value::Object(Arc::clone(&all_props), None);
+                                    scope.set("this", snapshot.clone());
+                                    scope.set("module", snapshot);
+                                }
                                 failed.insert(&prop.name, message);
                                 failed_indices.insert(index);
                                 continue;
@@ -3432,6 +3459,7 @@ impl Evaluator {
                             Err(error) => return Err(error),
                         };
                         if let Some(v) = val {
+                            scope.set_member_poison(&prop.name, None);
                             // const/fixed: error if overriding an immutable property from base
                             if (has_modifier(mods, Modifier::Const)
                                 || has_modifier(mods, Modifier::Fixed))
@@ -4144,9 +4172,22 @@ impl Evaluator {
         let binds_declared = |name: &str| own_body.as_ref().is_none_or(|own| own.contains(name));
         let own_body_scope = own_body.as_ref().map(|own| (scope, own));
         if let Some(source) = inherited_source {
+            // A property this body assigns again gets its new value, so an
+            // entry reading it before then waits for it (it is evaluated again
+            // after the others) rather than read the inherited value.
+            let assigned: HashSet<&str> = entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    Entry::Property(prop) if prop.value.is_some() || prop.body.is_some() => {
+                        Some(prop.name.as_str())
+                    }
+                    _ => None,
+                })
+                .collect();
             for entry in source.entries.iter() {
                 if let Entry::Property(prop) = entry
                     && !has_modifier(&prop.modifiers, Modifier::Local)
+                    && !assigned.contains(prop.name.as_str())
                     && let Some(value) = source.evaluated_properties.get(prop.name.as_str())
                 {
                     child_scope.set(&prop.name, value.clone());
@@ -4374,6 +4415,9 @@ impl Evaluator {
         let mut map: ObjectMap = ObjectMap::default();
         // The entry that added each key of `map`, in insertion order.
         let mut key_entries: Vec<usize> = Vec::new();
+        // Failed members of the objects a generator or spread copies members
+        // from, which stay failed members of this object.
+        let mut copied_failures: IndexMap<String, PoisonedMember> = IndexMap::new();
         // A property that fails may have read a member declared after it,
         // which Pkl allows (members are evaluated lazily). Failed properties
         // are evaluated again once the other entries are, until a pass makes
@@ -4596,7 +4640,8 @@ impl Evaluator {
                             entry_index,
                         );
                         let val = self.eval_expr(expr, &active_scope, depth)?;
-                        if let Value::Object(m, _) = val {
+                        if let Value::Object(m, source) = val {
+                            copy_member_failures(&mut copied_failures, source.as_deref());
                             drop(active_scope);
                             entry_owners.release_this(&this_aliases);
                             props_extend(
@@ -4652,12 +4697,8 @@ impl Evaluator {
                                 pending,
                                 poisoned_locals,
                             )?;
-                            // A generator's members join this object, which has no
-                            // entry to poison for one that failed: fail with it.
-                            if let Some(message) = first_member_failure(&body_val) {
-                                return Err(Error::Eval(message.to_string()));
-                            }
-                            if let Value::Object(m, _) = body_val {
+                            if let Value::Object(m, source) = body_val {
+                                copy_member_failures(&mut copied_failures, source.as_deref());
                                 entry_owners.release_this(&this_aliases);
                                 props_extend(
                                     &mut child_scope,
@@ -4704,12 +4745,8 @@ impl Evaluator {
                                 pending,
                                 poisoned_locals,
                             )?;
-                            // A generator's members join this object, which has no
-                            // entry to poison for one that failed: fail with it.
-                            if let Some(message) = first_member_failure(&body_val) {
-                                return Err(Error::Eval(message.to_string()));
-                            }
-                            if let Value::Object(m, _) = body_val {
+                            if let Value::Object(m, source) = body_val {
+                                copy_member_failures(&mut copied_failures, source.as_deref());
                                 entry_owners.release_this(&this_aliases);
                                 props_extend(
                                     &mut child_scope,
@@ -4736,12 +4773,8 @@ impl Evaluator {
                                 pending,
                                 poisoned_locals,
                             )?;
-                            // A generator's members join this object, which has no
-                            // entry to poison for one that failed: fail with it.
-                            if let Some(message) = first_member_failure(&else_val) {
-                                return Err(Error::Eval(message.to_string()));
-                            }
-                            if let Value::Object(m, _) = else_val {
+                            if let Value::Object(m, source) = else_val {
+                                copy_member_failures(&mut copied_failures, source.as_deref());
                                 entry_owners.release_this(&this_aliases);
                                 props_extend(
                                     &mut child_scope,
@@ -4818,24 +4851,22 @@ impl Evaluator {
                 .map(|(_, key, value)| (key, value))
                 .collect();
         }
-        let poisoned_members = (!failed.is_empty()).then(|| {
-            Arc::new(
-                failed
-                    .into_iter()
-                    .filter_map(|(index, message)| {
-                        let Entry::Property(prop) = &entries[index] else {
-                            return None;
-                        };
-                        let rendered = !has_modifier(&prop.modifiers, Modifier::Hidden);
-                        self.rendered_member_failed |= rendered;
-                        Some((prop.name.clone(), PoisonedMember { message, rendered }))
-                    })
-                    .collect::<IndexMap<_, _>>(),
-            )
+        let poisoned_members = (!failed.is_empty() || !copied_failures.is_empty()).then(|| {
+            let mut members = copied_failures;
+            for (index, message) in failed {
+                let Entry::Property(prop) = &entries[index] else {
+                    continue;
+                };
+                let rendered = !has_modifier(&prop.modifiers, Modifier::Hidden);
+                self.rendered_member_failed |= rendered;
+                members.insert(prop.name.clone(), PoisonedMember { message, rendered });
+            }
+            Arc::new(members)
         });
         // Evaluate deferred local lambdas (function definitions) AFTER all
         // properties so they capture overridden values (late binding).
         refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
+        let rebound_locals = !deferred_lambdas.is_empty();
         for (name, expr, entry_index) in deferred_lambdas {
             let active_scope = restore_shadowed(
                 scope_for_object_entry(
@@ -4856,6 +4887,53 @@ impl Evaluator {
                 local_bindings.insert(entry_index, Ok(val.clone()));
             }
             child_scope.set(name, val);
+        }
+        // Methods captured the local functions before they were bound again,
+        // so capture them again too: a call would otherwise run the earlier
+        // local function, which captured none of the object's properties.
+        if rebound_locals {
+            for (entry_index, entry) in entries.iter().enumerate() {
+                let Entry::Property(prop) = entry else {
+                    continue;
+                };
+                let Some(expr @ Expr::Lambda(..)) = &prop.value else {
+                    continue;
+                };
+                if has_modifier(&prop.modifiers, Modifier::Local)
+                    || !all_props.contains_key(prop.name.as_str())
+                {
+                    continue;
+                }
+                let active_scope = restore_shadowed(
+                    scope_for_object_entry(
+                        entry_index,
+                        &child_scope,
+                        entry_scopes,
+                        &entry_owners,
+                        own_body_scope,
+                    ),
+                    &shadowed,
+                    entry_index,
+                );
+                let val = self.eval_expr(expr, &active_scope, depth)?;
+                drop(active_scope);
+                if binds_declared(&prop.name) {
+                    child_scope.declare(&prop.name, val.clone());
+                } else {
+                    child_scope.set(&prop.name, val.clone());
+                }
+                entry_owners.release_this(&this_aliases);
+                props_insert(
+                    &mut child_scope,
+                    &this_aliases,
+                    &mut all_props,
+                    prop.name.clone(),
+                    val.clone(),
+                );
+                if map.contains_key(prop.name.as_str()) {
+                    map.insert(prop.name.as_str().into(), val);
+                }
+            }
         }
         // Check typed locals whose constraint reads members of this body
         // against the finished body, once local functions are re-bound to it.
@@ -5895,7 +5973,23 @@ impl Evaluator {
             type_namespace: object_source_type_namespace(base_source),
             ..Scope::default()
         };
+        // The base's own members are in its captured scope with the base's
+        // values. A member assigned again here is the instance's, so an entry
+        // reading it before it is evaluated waits for it (see
+        // `eval_entries_with_lexical_scopes`) instead of reading the base's.
+        let reassigned: HashSet<&str> = merged
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Property(prop) if prop.value.is_some() || prop.body.is_some() => {
+                    Some(prop.name.as_str())
+                }
+                _ => None,
+            })
+            .collect();
         for (k, v) in base_scope {
+            if reassigned.contains(&**k) && base_source.evaluated_properties.contains_key(&**k) {
+                continue;
+            }
             if base_source.scope_declared().contains(&**k) {
                 eval_scope.declare_name(k.clone(), v.clone());
             } else {
@@ -5966,6 +6060,7 @@ impl Evaluator {
                 && prop.value.is_none()
                 && prop.body.is_none()
                 && !has_modifier(&prop.modifiers, Modifier::Local)
+                && !reassigned.contains(prop.name.as_str())
                 && eval_scope.get(&prop.name).is_none()
                 && matches!(prop.type_ann, Some(crate::parser::TypeExpr::Nullable(_)))
             {
@@ -7153,6 +7248,23 @@ impl Evaluator {
         args: &[Value],
         depth: usize,
     ) -> Result<Option<Value>> {
+        // A method that reads an object's member values reads a failed one
+        // too, which reports its error, as reading it directly would.
+        if let Value::Object(_, Some(source)) = obj
+            && let Some(members) = &source.poisoned_members
+        {
+            let failure = match method {
+                "containsKey" | "hasProperty" | "keys" | "length" | "isEmpty" => None,
+                "getOrNull" | "get" | "getProperty" | "getPropertyOrNull" => args
+                    .first()
+                    .and_then(Value::as_str)
+                    .and_then(|key| members.get(key)),
+                _ => members.values().find(|member| member.rendered),
+            };
+            if let Some(member) = failure {
+                return Err(Error::Eval(member.message.clone()));
+            }
+        }
         match (obj, method) {
             // String methods
             (Value::String(s), "contains") => {

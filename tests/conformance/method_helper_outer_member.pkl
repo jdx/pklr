@@ -1,0 +1,20 @@
+class T { env: Mapping<String, String> = new Mapping<String, String> {} ; run: String = "x" }
+class TestMaker {
+  env: Mapping<String, String> = new Mapping {}
+  local function makeTest(r: String): T = new T {
+    run = r
+    env = outer.env
+  }
+  function checkPass(): T = makeTest("check")
+}
+class Step {
+  env: Mapping<String, String> = new Mapping<String, String> {}
+  tests: Mapping<String, T> = new Mapping<String, T> {}
+}
+s = new Step {
+  env { ["RUST_LOG"] = "warn" }
+  tests {
+    local testMaker = new TestMaker {}
+    ["a"] = testMaker.checkPass()
+  }
+}

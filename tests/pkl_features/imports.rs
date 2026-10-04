@@ -2479,7 +2479,7 @@ async fn narrowed_import_skips_methods_class_defaults_do_not_call() {
     // never needed.
     std::fs::write(
         dir.join("dep.pkl"),
-        "min = throw(\"unused\")\nopen class Parent { min = 2 }\nclass Child extends Parent {\n  x = 3\n  a = this.x\n  obj { y = 4; b = this.y; c = outer.x; inner { d = outer.y; e = (outer) } }\n  function getMin() = min\n}\n",
+        "min = throw(\"unused\")\nopen class Parent { min = 2 }\nclass Child extends Parent {\n  x = 3\n  a = this.x\n  obj { y = 4; b = this.y; c = outer.x; inner { d = outer.y } }\n  function getMin() = min\n}\n",
     )
     .unwrap();
     std::fs::write(

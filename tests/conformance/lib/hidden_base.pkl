@@ -1,0 +1,2 @@
+open module hidden_base
+hidden x = 1
