@@ -62,7 +62,8 @@ fn int_between(value: i64, lo: i64, hi: i64) -> Result<i64> {
 /// Like Java, it rounds the shortest decimal form of `x` (half to even),
 /// consulting the exact binary value only when that form ends in a tie.
 fn to_fixed(x: f64, digits: usize) -> String {
-    if let Some(integer) = java_integer_digits(x) {
+    let shortest = format!("{:e}", x.abs());
+    if let Some(integer) = java_integer_digits(x, &shortest) {
         let sign = if x < 0.0 { "-" } else { "" };
         let fraction = if digits > 0 {
             format!(".{}", "0".repeat(digits))
@@ -71,7 +72,6 @@ fn to_fixed(x: f64, digits: usize) -> String {
         };
         return format!("{sign}{integer}{fraction}");
     }
-    let shortest = format!("{:e}", x.abs());
     let significant_digits = shortest
         .split_once('e')
         .expect("`{:e}` has an exponent")
@@ -203,7 +203,7 @@ fn shortest_decimal_is_midpoint(x: f64, shortest: &str) -> bool {
 /// a whole number below 2^63: the exact value, with the low digits that the
 /// double cannot distinguish rounded away (`5274019902629789696.0` prints
 /// as `5274019902629789700`).
-fn java_integer_digits(x: f64) -> Option<String> {
+fn java_integer_digits(x: f64, shortest: &str) -> Option<String> {
     // `insignificantDigitsForPow2` in OpenJDK's FloatingDecimal.
     const INSIGNIFICANT: [u32; 64] = [
         0, 0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 5, 5, 5, 6, 6, 6, 6, 7, 7, 7, 8, 8, 8,
@@ -211,7 +211,33 @@ fn java_integer_digits(x: f64) -> Option<String> {
         16, 16, 16, 17, 17, 17, 18, 18, 18, 19,
     ];
     let abs = x.abs();
-    if !(1.0..9_223_372_036_854_775_808.0).contains(&abs) || abs.fract() != 0.0 {
+    if abs.fract() != 0.0 {
+        return None;
+    }
+    if abs >= FLOAT_INT_LIMIT {
+        let significant_digits = shortest
+            .split_once('e')?
+            .0
+            .bytes()
+            .filter(|digit| *digit != b'.')
+            .count();
+        let bits = abs.to_bits();
+        let significand = bits & ((1u64 << 52) - 1);
+        let decimal_power_of_two = shortest_significand_is_power_of_two(shortest);
+        if significant_digits == 1
+            || significand == 0
+            || decimal_power_of_two
+            || shortest_decimal_is_midpoint(abs, shortest)
+        {
+            return java_large_integer_digits(
+                abs,
+                significand == 0,
+                decimal_power_of_two && significant_digits > 1,
+            );
+        }
+        return None;
+    }
+    if abs < 1.0 {
         return None;
     }
     let bin_exp = ((abs.to_bits() >> 52) as i64) - 1023;
@@ -228,6 +254,58 @@ fn java_integer_digits(x: f64) -> Option<String> {
         return Some(format!("{value}{}", "0".repeat(insignificant as usize)));
     }
     Some(value.to_string())
+}
+
+fn shortest_significand_is_power_of_two(shortest: &str) -> bool {
+    let Some((mantissa, _)) = shortest.split_once('e') else {
+        return false;
+    };
+    let digits = mantissa.replace('.', "");
+    digits
+        .parse::<u128>()
+        .is_ok_and(|significand| significand.is_power_of_two())
+}
+
+/// The large-whole-number branch of Java's FloatingDecimal interval logic.
+/// Above 2^63 a binary64 is integral. Its exact significand still fits in a
+/// `u128` through exponent 127, enough to preserve the decimal stopping
+/// interval instead of forcing an arbitrary scientific precision.
+fn java_large_integer_digits(
+    abs: f64,
+    power_of_two: bool,
+    coarse_decimal_interval: bool,
+) -> Option<String> {
+    let bits = abs.to_bits();
+    let exponent = ((bits >> 52) & 0x7ff) as i32 - 1023;
+    let shift = exponent - 52;
+    if !(0..=75).contains(&shift) {
+        return None;
+    }
+    let significand = (bits & ((1u64 << 52) - 1)) | (1u64 << 52);
+    let exact = (significand as u128) << shift;
+    // The decimal stopping interval is one decimal decade no finer than the
+    // binary ULP. Rounding the exact significand at that boundary reproduces
+    // FloatingDecimal for large integral binary64 values, including powers
+    // of two and their adjacent decimal midpoints.
+    let mut insignificant = 0u32;
+    let mut decade = 1u128;
+    let ulp = 1u128 << shift;
+    // A normal power of two is at the asymmetric end of its decimal interval:
+    // FloatingDecimal uses the half-ULP margin for its stopping decade.
+    let ulp = if power_of_two { ulp / 2 } else { ulp };
+    while decade.checked_mul(10).is_some_and(|next| next <= ulp) {
+        decade *= 10;
+        insignificant += 1;
+    }
+    if coarse_decimal_interval {
+        decade = decade.checked_mul(10)?;
+        insignificant += 1;
+    }
+    if insignificant == 0 {
+        return Some(exact.to_string());
+    }
+    let rounded = (exact / decade) + u128::from(exact % decade >= decade / 2);
+    Some(format!("{rounded}{}", "0".repeat(insignificant as usize)))
 }
 
 /// `Long.toString(n, radix)`.
@@ -763,6 +841,9 @@ mod tests {
             (1.16e23, "115999999999999990000000"),
             (1.24e23, "124000000000000010000000"),
             (1.03e23, "103000000000000000000000"),
+            (2e23, "199999999999999980000000"),
+            (5.902958103587057e20, "590295810358705650000"),
+            (1.048576e29, "104857600000000000000000000000"),
         ] {
             assert_eq!(to_fixed(value, 0), expected, "{value:e}");
             assert_eq!(to_fixed(-value, 0), format!("-{expected}"), "-{value:e}");
