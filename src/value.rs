@@ -93,6 +93,11 @@ pub(crate) fn mapping_storage_key(value: &Value) -> Option<Arc<str>> {
             mapping_compound_identity(&Value::List(value.clone())),
             Value::List(value.clone()).to_json().to_string(),
         ),
+        Value::Object(map, source) => (
+            "object",
+            mapping_object_identity(map, source.as_deref()),
+            Value::Object(map.clone(), source.clone()).to_json().to_string(),
+        ),
         other => (
             "display",
             "0000000000000000".to_string(),
@@ -126,10 +131,29 @@ fn mapping_compound_identity(value: &Value) -> String {
             identity.push(']');
             identity
         }
-        // Keep the established fallback for object/function keys until their
-        // full Pkl identity has a native representation.
+        Value::Object(map, source) => mapping_object_identity(map, source.as_deref()),
+        // Functions have identity semantics and are not structurally keyable.
         other => format!("debug:{other:?}"),
     }
+}
+
+fn mapping_object_identity(map: &ObjectMap, source: Option<&ObjectSource>) -> String {
+    let mut members = map
+        .iter()
+        .map(|(key, value)| {
+            let value = mapping_compound_identity(value);
+            format!("{}:{key}:{}:{value}", key.len(), value.len())
+        })
+        .collect::<Vec<_>>();
+    // Mapping and Dynamic equality compare members independent of declaration
+    // order. Sorting also makes this identity independent of hash/map layout.
+    members.sort_unstable();
+    let kind = source.map_or("Dynamic", |source| match source.kind {
+        ObjectKind::Mapping => "Mapping",
+        ObjectKind::Object => source.type_identity.as_deref().unwrap_or("Dynamic"),
+        ObjectKind::Class => source.type_identity.as_deref().unwrap_or("Class"),
+    });
+    format!("object:{kind}:{}", members.join("|"))
 }
 
 /// Whether two storage keys name equal native-unit mapping keys. Their final
@@ -176,10 +200,14 @@ pub(crate) fn mapping_storage_value(key: &str) -> Value {
             .map(Value::Float)
             .unwrap_or_else(|_| Value::String(display.into())),
         "duration" => parse_unit_value(display, DurationUnit::parse)
-            .map(|(value, unit)| Value::Duration(Duration::with_nan_identity(value, unit, identity)))
+            .map(|(value, unit)| {
+                Value::Duration(Duration::with_mapping_identity(value, unit, identity))
+            })
             .unwrap_or_else(|| Value::String(display.into())),
         "dataSize" => parse_unit_value(display, DataSizeUnit::parse)
-            .map(|(value, unit)| Value::DataSize(DataSize::with_nan_identity(value, unit, identity)))
+            .map(|(value, unit)| {
+                Value::DataSize(DataSize::with_mapping_identity(value, unit, identity))
+            })
             .unwrap_or_else(|| Value::String(display.into())),
         _ => Value::String(display.into()),
     }
@@ -188,6 +216,14 @@ pub(crate) fn mapping_storage_value(key: &str) -> Value {
 fn parse_unit_value<U>(display: &str, unit: impl FnOnce(&str) -> Option<U>) -> Option<(f64, U)> {
     let (value, unit_name) = display.rsplit_once('.')?;
     Some((value.parse().ok()?, unit(unit_name)?))
+}
+
+fn mapping_nan_identity(identity: &str) -> Option<(u64, u64)> {
+    let mut parts = identity.strip_prefix("nan-")?.split('-');
+    let _unit = parts.next()?;
+    let bits = u64::from_str_radix(parts.next()?, 16).ok()?;
+    let nonce = u64::from_str_radix(parts.next()?, 16).ok()?;
+    parts.next().is_none().then_some((bits, nonce))
 }
 
 /// Captured lexical bindings. The same type as [`ObjectMap`], so a scope can
@@ -530,11 +566,10 @@ impl Duration {
         }
     }
 
-    fn with_nan_identity(value: f64, unit: DurationUnit, identity: &str) -> Self {
-        let nan_identity = identity
-            .rsplit_once('-')
-            .and_then(|(_, id)| u64::from_str_radix(id, 16).ok())
-            .unwrap_or_else(|| NEXT_NAN_MAPPING_KEY.fetch_add(1, Ordering::Relaxed));
+    fn with_mapping_identity(value: f64, unit: DurationUnit, identity: &str) -> Self {
+        let (value, nan_identity) = mapping_nan_identity(identity)
+            .map(|(bits, nonce)| (f64::from_bits(bits), nonce))
+            .unwrap_or_else(|| (value, NEXT_NAN_MAPPING_KEY.fetch_add(1, Ordering::Relaxed)));
         Self { value, unit, nan_identity }
     }
 
@@ -638,11 +673,10 @@ impl DataSize {
         }
     }
 
-    fn with_nan_identity(value: f64, unit: DataSizeUnit, identity: &str) -> Self {
-        let nan_identity = identity
-            .rsplit_once('-')
-            .and_then(|(_, id)| u64::from_str_radix(id, 16).ok())
-            .unwrap_or_else(|| NEXT_NAN_MAPPING_KEY.fetch_add(1, Ordering::Relaxed));
+    fn with_mapping_identity(value: f64, unit: DataSizeUnit, identity: &str) -> Self {
+        let (value, nan_identity) = mapping_nan_identity(identity)
+            .map(|(bits, nonce)| (f64::from_bits(bits), nonce))
+            .unwrap_or_else(|| (value, NEXT_NAN_MAPPING_KEY.fetch_add(1, Ordering::Relaxed)));
         Self { value, unit, nan_identity }
     }
 

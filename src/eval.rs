@@ -3231,7 +3231,7 @@ impl Evaluator {
                                 &mut all_props,
                                 m.iter().map(|(k, v)| (k.clone(), v.clone())),
                             );
-                            map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                            extend_object_entries(&mut map, &m, mapping_entries);
                             if let Some(source) = source {
                                 elements.extend(source.elements.iter().cloned());
                             }
@@ -3285,7 +3285,7 @@ impl Evaluator {
                                 m.iter().map(|(k, v)| (k.clone(), v.clone())),
                             );
                             generated.extend(m.keys().cloned());
-                            map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                            extend_object_entries(&mut map, &m, mapping_entries);
                             if let Some(source) = source {
                                 elements.extend(source.elements.iter().cloned());
                             }
@@ -3331,7 +3331,7 @@ impl Evaluator {
                                 m.iter().map(|(k, v)| (k.clone(), v.clone())),
                             );
                             generated.extend(m.keys().cloned());
-                            map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                            extend_object_entries(&mut map, &m, mapping_entries);
                             if let Some(source) = source {
                                 elements.extend(source.elements.iter().cloned());
                             }
@@ -3366,7 +3366,7 @@ impl Evaluator {
                                 m.iter().map(|(k, v)| (k.clone(), v.clone())),
                             );
                             generated.extend(m.keys().cloned());
-                            map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                            extend_object_entries(&mut map, &m, mapping_entries);
                             if let Some(source) = source {
                                 elements.extend(source.elements.iter().cloned());
                             }
@@ -5652,7 +5652,20 @@ impl Evaluator {
                         entries: find_default_body_entries(&base_src.entries),
                     },
                 )?;
-                return Ok(Value::Object(Arc::new(amended), Some(Arc::clone(base_src))));
+                // A metadata-only Mapping has no entries of its own, so this
+                // specialized first amendment must retain the overlay as its
+                // future source. Otherwise a later ordinary amendment loses
+                // an introduced `default` (and any captured bindings it uses).
+                let mut source = Arc::unwrap_or_clone(Arc::clone(base_src));
+                source.entries = base_src
+                    .entries
+                    .iter()
+                    .cloned()
+                    .chain(overlay_entries.iter().cloned())
+                    .collect::<Vec<_>>()
+                    .into();
+                source.captured = SourceScope::lazy(scope, Vec::new(), Vec::new());
+                return Ok(Value::Object(Arc::new(amended), Some(Arc::new(source))));
             }
         }
         if let Value::List(existing) = base {
@@ -6480,6 +6493,16 @@ fn insert_mapping_entry(map: &mut ObjectMap, key: Arc<str>, value: Value) {
     map.insert(storage_key, value);
 }
 
+fn extend_object_entries(target: &mut ObjectMap, entries: &ObjectMap, mapping_entries: bool) {
+    for (key, value) in entries {
+        if mapping_entries {
+            insert_mapping_entry(target, key.clone(), value.clone());
+        } else {
+            target.insert(key.clone(), value.clone());
+        }
+    }
+}
+
 fn converter_is_blocked(blocked: &[(String, Value)], name: &str, value: &Value) -> bool {
     blocked
         .iter()
@@ -6500,8 +6523,9 @@ fn same_value_identity(a: &Value, b: &Value) -> bool {
         // have no allocation identity to compare. Their value identity is
         // sufficient here: only the converter root is blocked, while a
         // distinct nested object/list still follows its normal converter path.
-        (Value::Duration(a), Value::Duration(b)) => a == b,
-        (Value::DataSize(a), Value::DataSize(b)) => a == b,
+        (Value::Duration(_) | Value::DataSize(_), Value::Duration(_) | Value::DataSize(_)) => {
+            crate::value::mapping_storage_key(a) == crate::value::mapping_storage_key(b)
+        }
         (Value::Regex(a), Value::Regex(b)) => Arc::ptr_eq(a, b),
         _ => false,
     }

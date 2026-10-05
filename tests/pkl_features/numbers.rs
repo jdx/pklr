@@ -139,10 +139,14 @@ overwritten = a { [1.s] = 2 } {}
 listing = new Mapping { [1.s] = new Listing { 1 } } { [1.s] { 2 } }
 typed = new Mapping<Duration, C> {} { [1.s] {} }
 explicitDefault = new Mapping<Duration, C> { default = new C { x = 7 } } { [1.s] {} }
-values = List(c.length, overwritten.length, overwritten[1.s], listing[1.s].length, listing[1.s].first, listing[1.s].last, typed[1.s].x, explicitDefault[1.s].x)
+metadataBase = new Mapping {}
+metadataDefault = metadataBase { default { x = 7 } }
+metadataStringAmended = metadataDefault { ["k"] {} }
+metadataUnitAmended = metadataDefault { [1.s] {} }
+values = List(c.length, overwritten.length, overwritten[1.s], listing[1.s].length, listing[1.s].first, listing[1.s].last, typed[1.s].x, explicitDefault[1.s].x, metadataStringAmended["k"].x, metadataUnitAmended[1.s].x)
 "#,
     );
-    assert_eq!(json["values"], serde_json::json!([3, 1, 2, 2, 1, 2, 1, 7]));
+    assert_eq!(json["values"], serde_json::json!([3, 1, 2, 2, 1, 2, 1, 7, 7, 7]));
 }
 
 #[test]
@@ -151,9 +155,28 @@ fn compound_mapping_keys_do_not_capture_native_unit_debug_identity() {
         r#"
 m = Map(List(1.s), "value")
 value = m[List(1.s)]
+object = Map(Map("d", 1.s), "object-value")
+objectValue = object[Map("d", 1.s)]
 "#,
     );
     assert_eq!(json["value"], "value");
+    assert_eq!(json["objectValue"], "object-value");
+}
+
+#[test]
+fn generated_mapping_entries_use_native_unit_identity() {
+    let json = eval(
+        r#"
+a = new Mapping { [1.s] = 1 }
+whenAmended = a { when (true) { [1000.ms] = 2 } }
+forAmended = a { for (n in List(1000)) { [n.ms] = 2 } }
+values = List(
+  whenAmended.length, whenAmended[1.s], whenAmended[1000.ms],
+  forAmended.length, forAmended[1.s], forAmended[1000.ms],
+)
+"#,
+    );
+    assert_eq!(json["values"], serde_json::json!([1, 2, 2, 1, 2, 2]));
 }
 
 #[test]
@@ -168,6 +191,8 @@ local sameUnitNan = Map(nan.ns, "first", nan.ns, "second")
 local finiteAndNan = Map(nan.ns, "nan", 9.580033485766655e293.ns, "finite")
 local nanKey = nan.s
 local nanLookup = Map(nanKey, "found")
+local negativeNanKey = (-0.0 / 0.0).s
+local negativeNanLookup = Map(negativeNanKey, "negative")
 values = List(
   signedZero.length,
   signedZero[0.ns],
@@ -178,12 +203,13 @@ values = List(
   finiteAndNan.length,
   nanLookup[nanKey],
   nanLookup[nanLookup.keys.first],
+  negativeNanLookup[negativeNanLookup.keys.first],
 )
 "#,
     );
     assert_eq!(
         json["values"],
-        serde_json::json!([1, "positive", 1, "second", 2, 2, 2, "found", "found"])
+        serde_json::json!([1, "positive", 1, "second", 2, 2, 2, "found", "found", "negative"])
     );
 }
 

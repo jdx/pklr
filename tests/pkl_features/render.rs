@@ -462,6 +462,7 @@ fn apply_converters_does_not_reenter_native_scalar_converter_roots() {
             r#"
 d = 1.s
 size = 1.kb
+nan = (0.0 / 0.0).s
 pattern = Regex("x")
 output {
   renderer {
@@ -484,6 +485,7 @@ output {
         serde_json::json!({
             "d": ["1.s"],
             "size": ["1.kb"],
+            "nan": ["NaN.s"],
             "pattern": [{"_type": "regex", "pattern": "x"}],
         })
     );
