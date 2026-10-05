@@ -555,7 +555,7 @@ impl Evaluator {
             }),
             "endsWith" => Value::Bool(match Pattern::from_arg(a.value(0)?)? {
                 Pattern::Literal(p) => s.ends_with(p),
-                Pattern::Regex(re) => re.find_all(s)?.last().map(|m| m.end()) == Some(s.len()),
+                Pattern::Regex(re) => super::regex::ends_at(&re, s)?,
             }),
             "indexOf" | "indexOfOrNull" | "lastIndexOf" | "lastIndexOfOrNull" => {
                 let pattern = Pattern::from_arg(a.value(0)?)?;
@@ -683,12 +683,13 @@ impl Evaluator {
                     _ => super::regex::Which::All,
                 };
                 let selected = super::regex::select_matches(&re, s, which)?;
+                let offsets = super::regex::utf16_offsets(s);
                 let mut out = String::with_capacity(s.len());
                 let mut last_end = 0;
                 for groups in selected {
                     let (start, end) = groups[0].expect("group 0 always matches");
                     out.push_str(&s[last_end..start]);
-                    let regex_match = super::regex::regex_match_value(s, &groups, true);
+                    let regex_match = super::regex::regex_match_value(s, &offsets, &groups, true);
                     match self.invoke_lambda(mapper, &[regex_match], depth)? {
                         Value::String(r) => out.push_str(&r),
                         other => return Err(type_mismatch("String", &other)),

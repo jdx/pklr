@@ -30,11 +30,12 @@ pub(crate) fn compile(pattern: &str) -> Result<Regex> {
 
 /// Java only accepts group names made of ASCII letters and digits, starting
 /// with a letter; the Rust engine also accepts `_`. Skips escapes, `\Q...\E`
-/// quotes, character classes and, in `(?x)` mode, `#` comments.
+/// quotes, character classes and comments while extended mode is active.
 fn check_group_names(pattern: &str) -> std::result::Result<(), String> {
     let bytes = pattern.as_bytes();
-    let extended = has_extended_flag(pattern);
     let mut class_depth = 0usize;
+    let mut extended = false;
+    let mut group_modes = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
@@ -56,29 +57,44 @@ fn check_group_names(pattern: &str) -> std::result::Result<(), String> {
                 }
             }
             b']' if class_depth > 0 => class_depth -= 1,
+            b'(' if class_depth == 0 => {
+                if let Some((end, scoped, mode)) = inline_extended_mode(bytes, i) {
+                    if scoped {
+                        group_modes.push(extended);
+                    }
+                    extended = mode;
+                    i = end;
+                } else {
+                    if bytes[i + 1..].starts_with(b"?<")
+                        && !matches!(bytes.get(i + 3), Some(b'=' | b'!'))
+                    {
+                        let name_start = i + 3;
+                        let name_len = bytes[name_start..]
+                            .iter()
+                            .take_while(|b| b.is_ascii_alphanumeric())
+                            .count();
+                        if name_len == 0 || !bytes[name_start].is_ascii_alphabetic() {
+                            return Err(format!(
+                                "capturing group name does not start with a Latin letter near index {name_start}"
+                            ));
+                        }
+                        if bytes.get(name_start + name_len) != Some(&b'>') {
+                            return Err(format!(
+                                "named capturing group is missing trailing '>' near index {}",
+                                name_start + name_len
+                            ));
+                        }
+                    }
+                    group_modes.push(extended);
+                }
+            }
+            b')' if class_depth == 0 => {
+                if let Some(mode) = group_modes.pop() {
+                    extended = mode;
+                }
+            }
             b'#' if extended && class_depth == 0 => {
                 i = pattern[i..].find('\n').map_or(bytes.len(), |end| i + end);
-            }
-            b'(' if class_depth == 0
-                && bytes[i + 1..].starts_with(b"?<")
-                && !matches!(bytes.get(i + 3), Some(b'=' | b'!')) =>
-            {
-                let name_start = i + 3;
-                let name_len = bytes[name_start..]
-                    .iter()
-                    .take_while(|b| b.is_ascii_alphanumeric())
-                    .count();
-                if name_len == 0 || !bytes[name_start].is_ascii_alphabetic() {
-                    return Err(format!(
-                        "capturing group name does not start with a Latin letter near index {name_start}"
-                    ));
-                }
-                if bytes.get(name_start + name_len) != Some(&b'>') {
-                    return Err(format!(
-                        "named capturing group is missing trailing '>' near index {}",
-                        name_start + name_len
-                    ));
-                }
             }
             _ => {}
         }
@@ -87,15 +103,72 @@ fn check_group_names(pattern: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
-/// Whether `pattern` turns on extended (`x`) mode with an inline flag such as
-/// `(?x)` or `(?ix:`.
-fn has_extended_flag(pattern: &str) -> bool {
-    pattern.match_indices("(?").any(|(i, _)| {
-        pattern[i + 2..]
-            .chars()
-            .take_while(|c| c.is_ascii_alphabetic())
-            .any(|c| c == 'x')
-    })
+/// If this is an inline flag group that changes `x`, returns its delimiter,
+/// whether the flags are scoped by `:`, and the resulting extended-mode state.
+fn inline_extended_mode(bytes: &[u8], start: usize) -> Option<(usize, bool, bool)> {
+    if bytes.get(start + 1) != Some(&b'?') {
+        return None;
+    }
+    let mut i = start + 2;
+    let mut disabled = false;
+    let mut mode = None;
+    while let Some(&byte) = bytes.get(i) {
+        match byte {
+            b'-' => disabled = true,
+            b'x' => mode = Some(!disabled),
+            b'a'..=b'z' | b'A'..=b'Z' => {}
+            b':' | b')' => return mode.map(|mode| (i, byte == b':', mode)),
+            _ => return None,
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Whether the final part of `pattern` is an extended-mode line comment.
+/// The wrapper used by anchored matching needs one newline in exactly this
+/// case, so its closing parenthesis is not consumed by the comment.
+fn has_trailing_extended_comment(pattern: &str) -> bool {
+    let bytes = pattern.as_bytes();
+    let mut class_depth = 0usize;
+    let mut extended = false;
+    let mut group_modes = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if bytes.get(i + 1) == Some(&b'Q') => {
+                i = pattern[i + 2..]
+                    .find("\\E")
+                    .map_or(bytes.len(), |end| i + 2 + end + 2);
+                continue;
+            }
+            b'\\' => i += 1,
+            b'[' => class_depth += 1,
+            b']' if class_depth > 0 => class_depth -= 1,
+            b'(' if class_depth == 0 => {
+                if let Some((end, scoped, mode)) = inline_extended_mode(bytes, i) {
+                    if scoped {
+                        group_modes.push(extended);
+                    }
+                    extended = mode;
+                    i = end;
+                } else {
+                    group_modes.push(extended);
+                }
+            }
+            b')' if class_depth == 0 => {
+                if let Some(mode) = group_modes.pop() {
+                    extended = mode;
+                }
+            }
+            b'#' if extended && class_depth == 0 => {
+                return !pattern[i..].contains('\n');
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
 }
 
 /// A regex matching `literal` verbatim.
@@ -227,7 +300,7 @@ fn groups_of(caps: &fancy_regex::Captures<'_>) -> Groups {
 /// trailing `#` comment would swallow the closing parenthesis, so end it
 /// with a newline, which extended mode ignores.
 fn comment_end(regex: &Regex) -> &'static str {
-    if has_extended_flag(regex.pattern()) {
+    if has_trailing_extended_comment(regex.pattern()) {
         "\n"
     } else {
         ""
@@ -251,6 +324,13 @@ pub(super) fn matches_entire(regex: &Regex, text: &str) -> Result<Option<Groups>
 /// Java's `Matcher.lookingAt`: a match starting at the beginning of `text`.
 pub(super) fn looking_at(regex: &Regex, text: &str) -> Result<bool> {
     let anchored = compile(&format!(r"\A(?:{}{})", regex.pattern(), comment_end(regex)))?;
+    anchored.compiled().is_match(text).map_err(engine_error)
+}
+
+/// Whether a match can end at the end of `text`, including an overlapping
+/// suffix that a left-to-right sequence of `find` calls would skip.
+pub(super) fn ends_at(regex: &Regex, text: &str) -> Result<bool> {
+    let anchored = compile(&format!(r"(?:{}{})\z", regex.pattern(), comment_end(regex)))?;
     anchored.compiled().is_match(text).map_err(engine_error)
 }
 
@@ -404,24 +484,36 @@ fn expand_replacement(
     Ok(())
 }
 
-/// The number of UTF-16 code units before byte offset `offset`, which is
-/// how pkl (a JVM program) reports match positions.
-fn utf16_offset(text: &str, offset: usize) -> i64 {
-    text[..offset].encode_utf16().count() as i64
+/// UTF-16 offsets for every UTF-8 character boundary in `text`. Pkl reports
+/// match positions in UTF-16 code units, as it runs on the JVM.
+pub(super) fn utf16_offsets(text: &str) -> Vec<i64> {
+    let mut offsets = vec![0; text.len() + 1];
+    let mut units = 0;
+    for (byte, c) in text.char_indices() {
+        offsets[byte] = units;
+        units += c.len_utf16() as i64;
+        offsets[byte + c.len_utf8()] = units;
+    }
+    offsets
 }
 
 /// A `RegexMatch` for a match's group 0, or for group `index` with no
 /// groups of its own.
-fn group_match_value(text: &str, (start, end): (usize, usize), groups: Option<&Groups>) -> Value {
+fn group_match_value(
+    text: &str,
+    offsets: &[i64],
+    (start, end): (usize, usize),
+    groups: Option<&Groups>,
+) -> Value {
     let mut map = ObjectMap::default();
     map.insert("value".into(), Value::String(text[start..end].into()));
-    map.insert("start".into(), Value::Int(utf16_offset(text, start)));
-    map.insert("end".into(), Value::Int(utf16_offset(text, end)));
+    map.insert("start".into(), Value::Int(offsets[start]));
+    map.insert("end".into(), Value::Int(offsets[end]));
     let group_values = match groups {
         Some(groups) => groups
             .iter()
             .map(|group| match group {
-                Some(span) => group_match_value(text, *span, None),
+                Some(span) => group_match_value(text, offsets, *span, None),
                 None => Value::Null,
             })
             .collect(),
@@ -471,9 +563,14 @@ fn mid_surrogate_empty_match(position: i64, groups: &Groups) -> Value {
 
 /// The `RegexMatch` for a match with `groups`. `with_groups` is false for a
 /// group's own match, which lists no groups.
-pub(super) fn regex_match_value(text: &str, groups: &Groups, with_groups: bool) -> Value {
+pub(super) fn regex_match_value(
+    text: &str,
+    offsets: &[i64],
+    groups: &Groups,
+    with_groups: bool,
+) -> Value {
     let span = groups[0].expect("group 0 always matches");
-    group_match_value(text, span, with_groups.then_some(groups))
+    group_match_value(text, offsets, span, with_groups.then_some(groups))
 }
 
 pub(super) fn property(regex: &Arc<Regex>, name: &str) -> Option<Result<Value>> {
@@ -497,11 +594,12 @@ impl Evaluator {
         Some((|| {
             check_arity(args, 1)?;
             let text = Args { method: name, args }.string(0)?;
+            let offsets = utf16_offsets(text);
             Ok(if name == "findMatchesIn" {
                 let mut matches = Vec::new();
                 for groups in regex.matches(text) {
                     let groups = groups?;
-                    matches.push(regex_match_value(text, &groups, true));
+                    matches.push(regex_match_value(text, &offsets, &groups, true));
                     // After an empty match Java resumes one UTF-16 code unit
                     // later, which inside a surrogate pair is the middle of a
                     // character. The empty match it finds there has no text
@@ -512,16 +610,13 @@ impl Evaluator {
                         && c.len_utf16() == 2
                         && matches_empty_mid_char(regex, text, end, c)?
                     {
-                        matches.push(mid_surrogate_empty_match(
-                            utf16_offset(text, end) + 1,
-                            &groups,
-                        ));
+                        matches.push(mid_surrogate_empty_match(offsets[end] + 1, &groups));
                     }
                 }
                 Value::List(matches.into())
             } else {
                 match matches_entire(regex, text)? {
-                    Some(groups) => regex_match_value(text, &groups, true),
+                    Some(groups) => regex_match_value(text, &offsets, &groups, true),
                     None => Value::Null,
                 }
             })

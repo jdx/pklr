@@ -678,6 +678,7 @@ pub(super) fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
             "Float" => matches!(val, Value::Float(_)),
             "Number" => matches!(val, Value::Int(_) | Value::Float(_)),
             "String" => matches!(val, Value::String(_)),
+            "Regex" => matches!(val, Value::Regex(_)),
             "List" | "Listing" | "Set" => matches!(val, Value::List(_)),
             "Map" | "Mapping" | "Object" | "Dynamic" => matches!(val, Value::Object(..)),
             "Function" => matches!(val, Value::Lambda(..)),
@@ -694,6 +695,7 @@ pub(super) fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
             match name.as_str() {
                 "List" | "Listing" | "Set" => matches!(val, Value::List(_)),
                 "Map" | "Mapping" => matches!(val, Value::Object(..)),
+                "Regex" => matches!(val, Value::Regex(_)),
                 "Function" | "Function0" | "Function1" | "Function2" | "Function3"
                 | "Function4" | "Function5" => matches!(val, Value::Lambda(..)),
                 _ => matches!(val, Value::Object(..)),
@@ -964,7 +966,7 @@ pub(super) fn add_values(l: Value, r: Value) -> Result<Value> {
             Arc::make_mut(&mut a).extend(b.iter().map(|(k, v)| (k.clone(), v.clone())));
             Ok(Value::Object(a, None))
         }
-        (l, r) => Err(Error::Eval(format!("cannot add {:?} and {:?}", l, r))),
+        (l, r) => Err(Error::Eval(format!("cannot add {l:?} and {r:?}"))),
     }
 }
 
@@ -980,8 +982,7 @@ pub(super) fn arithmetic(
         (Value::Int(a), Value::Float(b)) => Ok(Value::Float(ff(a as f64, b)?)),
         (Value::Float(a), Value::Int(b)) => Ok(Value::Float(ff(a, b as f64)?)),
         (l, r) => Err(Error::Eval(format!(
-            "arithmetic type mismatch: {:?} vs {:?}",
-            l, r
+            "arithmetic type mismatch: {l:?} vs {r:?}"
         ))),
     }
 }
@@ -1008,7 +1009,7 @@ pub(super) fn value_cmp(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
             .partial_cmp(&(*y as f64))
             .unwrap_or(std::cmp::Ordering::Equal)),
         (Value::String(x), Value::String(y)) => Ok(x.cmp(y)),
-        _ => Err(Error::Eval(format!("cannot compare {:?} and {:?}", a, b))),
+        _ => Err(Error::Eval(format!("cannot compare {a:?} and {b:?}"))),
     }
 }
 

@@ -1059,7 +1059,7 @@ impl<'a> Parser<'a> {
                 }
             }
             tok => {
-                return Err(self.parse_error(format!("expected type, got {:?}", tok)));
+                return Err(self.parse_error(format!("expected type, got {tok:?}")));
             }
         };
 
@@ -1536,7 +1536,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Expr::Ident("module".into()))
             }
-            tok => Err(self.parse_error(format!("unexpected token in expression: {:?}", tok))),
+            tok => Err(self.parse_error(format!("unexpected token in expression: {tok:?}"))),
         }
     }
 
@@ -1607,7 +1607,7 @@ impl<'a> Parser<'a> {
                 self.name,
                 self.source,
                 offset,
-                format!("expected string, got {:?}", kind),
+                format!("expected string, got {kind:?}"),
             ))
         }
     }
@@ -1628,7 +1628,7 @@ impl<'a> Parser<'a> {
                 self.name,
                 self.source,
                 offset,
-                format!("expected identifier, got {:?}", other),
+                format!("expected identifier, got {other:?}"),
             )),
         }
     }

@@ -191,8 +191,8 @@ fn eval_simple_expr(
         // object-body amendment, which need the evaluator. `&&`, `||` keep
         // short-circuiting; the depth mirrors `eval_binop`'s `depth + 1`.
         Expr::Binop(op, left, right)
-            if !matches!(op, BinOp::Pipe)
-                && !(matches!(op, BinOp::Add) && matches!(right.as_ref(), Expr::ObjectBody(_))) =>
+            if !(matches!(op, BinOp::Pipe)
+                || matches!(op, BinOp::Add) && matches!(right.as_ref(), Expr::ObjectBody(_))) =>
         {
             if !is_simple_expr(left) || !is_simple_expr(right) {
                 return None;
@@ -235,8 +235,8 @@ fn is_simple_expr(expr: &Expr) -> bool {
         | Expr::String(_)
         | Expr::Ident(_) => true,
         Expr::Binop(op, left, right) => {
-            !matches!(op, BinOp::Pipe)
-                && !(matches!(op, BinOp::Add) && matches!(right.as_ref(), Expr::ObjectBody(_)))
+            !(matches!(op, BinOp::Pipe)
+                || matches!(op, BinOp::Add) && matches!(right.as_ref(), Expr::ObjectBody(_)))
                 && is_simple_expr(left)
                 && is_simple_expr(right)
         }
@@ -4489,7 +4489,7 @@ impl Evaluator {
                         StringInterpPart::Literal(s) => result.push_str(s),
                         StringInterpPart::Expr(e) => {
                             let val = self.eval_expr(e, scope, depth + 1)?;
-                            result.push_str(&value_to_display(&val));
+                            result.push_str(&self.value_to_string(&val, depth + 1)?);
                         }
                     }
                 }
@@ -4712,8 +4712,7 @@ impl Evaluator {
                                             if !base_names.contains(&**key) =>
                                         {
                                             return Err(Error::Eval(format!(
-                                                "cannot add property '{}' to non-open class",
-                                                key
+                                                "cannot add property '{key}' to non-open class"
                                             )));
                                         }
                                         _ => {}
@@ -4899,6 +4898,9 @@ impl Evaluator {
                 let obj = self.eval_field_base(obj_expr, field, scope, depth)?;
                 match &obj {
                     Value::Null => Ok(Value::Null),
+                    _ if self.stdlib_property(&obj, field).is_some() => {
+                        self.stdlib_property(&obj, field).unwrap()
+                    }
                     Value::Object(map, source) => {
                         if !map.contains_key(field.as_str())
                             && let Some(message) =

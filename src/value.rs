@@ -439,7 +439,7 @@ impl Value {
             Value::Object(map, _) => {
                 let mut obj = serde_json::Map::new();
                 for (k, v) in map.iter() {
-                    obj.insert(k.to_string(), v.try_to_json()?);
+                    obj.insert(display_storage_key(k).to_string(), v.try_to_json()?);
                 }
                 Ok(serde_json::Value::Object(obj))
             }

@@ -251,6 +251,37 @@ object = new Dynamic { a = 1; b = "x" }.toString()
 }
 
 #[test]
+fn regexes_work_in_type_checks_and_null_safe_properties() {
+    let json = eval(
+        r#"
+local regex = Regex("a")
+isRegex = regex is Regex
+isUnion = regex is Regex | String
+cast = (regex as Regex).pattern
+nullSafe = regex?.pattern
+"#,
+    );
+    assert_eq!(json["isRegex"], true);
+    assert_eq!(json["isUnion"], true);
+    assert_eq!(json["cast"], "a");
+    assert_eq!(json["nullSafe"], "a");
+}
+
+#[test]
+fn interpolation_uses_custom_to_string_not_a_matching_class_name() {
+    let json = eval(
+        r#"
+class RegexMatch {
+  value: String = "wrong"
+  function toString(): String = "right"
+}
+rendered = "\(new RegexMatch {})"
+"#,
+    );
+    assert_eq!(json["rendered"], "right");
+}
+
+#[test]
 fn regex_find_matches_reports_groups() {
     let json = eval(
         r##"
@@ -281,7 +312,8 @@ fn regex_syntax_errors_are_reported() {
     assert!(eval_fails(r#"x = Regex("a(b")"#).contains("Syntax error in regex `a(b`"));
 }
 
-#[tokio::test]
+#[cfg_attr(feature = "async", tokio::test)]
+#[cfg(feature = "async")]
 async fn regex_cannot_be_rendered_as_json() {
     let temp = TestTempDir::new("pklr_test_regex_json");
     let path = temp.path().join("test.pkl");
@@ -296,7 +328,8 @@ async fn regex_cannot_be_rendered_as_json() {
     );
 }
 
-#[tokio::test]
+#[cfg_attr(feature = "async", tokio::test)]
+#[cfg(feature = "async")]
 async fn regex_converter_renders_regex_as_json() {
     let temp = TestTempDir::new("pklr_test_regex_converter");
     let path = temp.path().join("test.pkl");
@@ -331,11 +364,10 @@ fn regexes_with_equal_patterns_are_equal() {
 }
 
 #[test]
-fn regex_ends_with_checks_the_last_match_like_pkl() {
-    // pkl finds matches left to right and checks where the last one ends,
-    // so a suffix that overlaps an earlier match does not count.
+fn regex_ends_with_allows_overlapping_suffixes() {
+    // The suffix can overlap an earlier candidate match.
     let json = eval(r#"x = List("aaa".endsWith(Regex("aa")), "abab".endsWith(Regex("ab")))"#);
-    assert_eq!(json["x"], serde_json::json!([false, true]));
+    assert_eq!(json["x"], serde_json::json!([true, true]));
 }
 
 #[test]
@@ -406,6 +438,32 @@ starts = "abx".startsWith(Regex("(?x)ab # c"))
     assert_eq!(json["matches"], true);
     assert_eq!(json["entire"], true);
     assert_eq!(json["starts"], true);
+}
+
+#[test]
+fn only_trailing_extended_comments_need_an_anchor_newline() {
+    let json = eval(
+        r##"
+x = List(
+  Regex(#"\(\?x\)"#).matchEntire("(?x)") != null,
+  Regex(#"\Q(?x)\E"#).matchEntire("(?x)") != null,
+  Regex(#"[(?x)]"#).matchEntire("x") != null,
+  Regex(#"(?x:a)"#).matchEntire("a") != null,
+  Regex(#"(?x)(?-x)#"#).matchEntire("#") != null,
+  Regex("(?x)a # comment").matchEntire("a") != null
+)
+"##,
+    );
+    assert_eq!(
+        json["x"],
+        serde_json::json!([true, true, true, true, true, true])
+    );
+}
+
+#[test]
+fn extended_mode_respects_disabled_comments_for_group_names() {
+    let json = eval(r##"x = "(?x)(?-x)#(?<bad_name>x)".isRegex"##);
+    assert_eq!(json["x"], false);
 }
 
 #[test]

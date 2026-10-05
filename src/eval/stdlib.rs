@@ -56,9 +56,8 @@ pub(super) fn typed_object(type_name: &str, members: ObjectMap) -> Value {
     Value::Object(Arc::new(members), Some(Arc::new(source)))
 }
 
-/// Whether `value` is an instance of the built-in class `type_name`.
-pub(super) fn is_typed_object(value: &Value, type_name: &str) -> bool {
-    matches!(value, Value::Object(_, Some(source)) if source.type_name() == Some(type_name))
+fn is_builtin_regex_match(value: &Value) -> bool {
+    matches!(value, Value::Object(_, Some(source)) if source.type_identity.as_deref() == Some("pkl:base#RegexMatch"))
 }
 
 /// pkl's error for a value of the wrong type.
@@ -157,7 +156,7 @@ impl Evaluator {
     /// defines `toString()` gets to choose its text.
     pub(super) fn value_to_string(&mut self, value: &Value, depth: usize) -> Result<String> {
         if let Value::Object(members, _) = value {
-            if is_typed_object(value, "RegexMatch")
+            if is_builtin_regex_match(value)
                 && let Some(Value::String(s)) = members.get("value")
             {
                 return Ok(s.to_string());

@@ -117,7 +117,7 @@ fn render_key_or_value(value: &str, escape_space: bool, restrict_charset: bool) 
         } else if restrict_charset && !(' '..='~').contains(&ch) {
             let mut buf = [0u16; 2];
             for unit in ch.encode_utf16(&mut buf) {
-                out.push_str(&format!("\\u{:04X}", unit));
+                out.push_str(&format!("\\u{unit:04X}"));
             }
         } else {
             out.push(ch);
