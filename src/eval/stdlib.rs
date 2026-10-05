@@ -67,6 +67,10 @@ fn is_builtin_regex_match(value: &Value) -> bool {
     matches!(value, Value::Object(_, Some(source)) if source.type_identity.as_deref() == Some("pkl:base#RegexMatch"))
 }
 
+fn is_typed_object(value: &Value, type_name: &str) -> bool {
+    matches!(value, Value::Object(_, Some(source)) if source.type_name.as_deref() == Some(type_name))
+}
+
 /// pkl's error for a value of the wrong type.
 pub(super) fn type_mismatch(expected: &str, actual: &Value) -> Error {
     error_with_values(

@@ -654,7 +654,7 @@ impl Value {
         crate::Error::Eval(format!(
             "Cannot render value of type `{}` as JSON.\nValue: {}",
             self.type_name(),
-            crate::eval::render_value(self)
+            crate::eval::stdlib::render_value(self)
         ))
     }
 
@@ -680,7 +680,9 @@ impl Value {
             }
             Value::Lambda(..) => json!("<lambda>"),
             Value::Regex(regex) => json!({ "_type": "regex", "pattern": regex.pattern() }),
-            Value::Duration(_) | Value::DataSize(_) => json!(crate::eval::render_value(self)),
+            Value::Duration(_) | Value::DataSize(_) => {
+                json!(crate::eval::stdlib::render_value(self))
+            }
         }
     }
 
