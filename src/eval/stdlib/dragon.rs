@@ -387,11 +387,12 @@ pub(crate) fn format_shortest(value: f64) -> Option<(bool, Vec<u8>, i16)> {
         let up = scale.cmp(&upper) == Ordering::Less
             || (scale.cmp(&upper) == Ordering::Equal && rounding == Ordering::Greater);
         if down || up {
-            if up && (!down || mant.clone().mul_pow2(1).cmp(&scale) != Ordering::Less) {
-                if let Some(extra) = round_up(&mut digits) {
-                    digits.push(extra);
-                    exponent += 1;
-                }
+            if up
+                && (!down || mant.clone().mul_pow2(1).cmp(&scale) != Ordering::Less)
+                && let Some(extra) = round_up(&mut digits)
+            {
+                digits.push(extra);
+                exponent += 1;
             }
             break;
         }
@@ -531,11 +532,10 @@ fn format_compatible_digits(value: f64, decoded: Decoded) -> (Vec<u8>, i16) {
                 && (!low
                     || twice == Ordering::Greater
                     || (twice == Ordering::Equal && digits.last().is_some_and(|d| d & 1 == 1)))
+                && let Some(extra) = round_up(&mut digits)
             {
-                if let Some(extra) = round_up(&mut digits) {
-                    digits.push(extra);
-                    exponent += 1;
-                }
+                digits.push(extra);
+                exponent += 1;
             }
             break;
         }
