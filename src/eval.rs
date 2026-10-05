@@ -23,6 +23,7 @@ mod glob;
 mod mapping;
 mod output;
 mod package;
+mod parsers;
 mod prefetch;
 mod remote;
 pub(crate) mod render;

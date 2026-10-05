@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use super::render::{Converters, Invoke, Kind, PathPart, kind_of};
 use crate::error::{Error, Result};
-use crate::value::{ObjectMap, Value};
+use crate::value::{ListKind, ListValue, ObjectMap, Value};
 
 /// Parse `text` as a JSON document. Objects become `Dynamic`s, or
 /// `Mapping`s with `use_mapping`; arrays become `Listing`s.
@@ -236,7 +236,7 @@ impl JsonParser<'_> {
             }
         }
         self.path.pop();
-        Ok(Value::List(Arc::new(items)))
+        Ok(Value::List(ListValue::new(ListKind::Listing, items)))
     }
 
     fn object(&mut self) -> Result<Value> {

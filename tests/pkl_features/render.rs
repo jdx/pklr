@@ -606,3 +606,41 @@ json = new JsonRenderer { indent = "" }.renderValue(m)"#,
     assert_eq!(json["res"], "key: value\n🔑: 42");
     assert_eq!(json["json"], r#"{"key":"value",🔑:42}"#);
 }
+
+#[test]
+fn json_parser() {
+    let json = eval(
+        r##"import "pkl:json"
+local parser = new json.Parser {}
+a = parser.parse(#"{ "name": "Pigeon", "tags": ["a", 1, 2.5, true, null], "nested": { "x": "é\n" } }"#)
+b = parser.parse("123.0")
+c = new json.Parser { useMapping = true }.parse(#"{ "k": 1 }"#).length
+"##,
+    );
+    assert_eq!(
+        json["a"],
+        serde_json::json!({"name": "Pigeon", "tags": ["a", 1, 2.5, true, null], "nested": {"x": "é\n"}})
+    );
+    assert_eq!(json["b"], serde_json::json!(123.0));
+    assert_eq!(json["c"], 1);
+}
+
+#[test]
+fn json_parser_converters_and_errors() {
+    let json = eval(
+        r##"import "pkl:json"
+local parser = new json.Parser { converters { [Int] = (it) -> it + 1; [String] = (it) -> it + "x"; ["tags[*]"] = (_) -> "element" } }
+a = parser.parse(#"{ "n": 1, "s": "a", "tags": [1, 2] }"#)
+"##,
+    );
+    assert_eq!(
+        json["a"],
+        serde_json::json!({"n": 2, "s": "ax", "tags": ["element", "element"]})
+    );
+    for doc in ["0123", "0x1A3", "", "[1,]", "{\"a\" 1}"] {
+        let err = eval_fails(&format!(
+            "import \"pkl:json\"\nres = new json.Parser {{}}.parse({doc:?})"
+        ));
+        assert!(err.contains("Error parsing JSON document."), "{doc}: {err}");
+    }
+}
