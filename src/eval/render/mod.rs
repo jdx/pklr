@@ -1059,6 +1059,9 @@ pub(crate) fn display_value(value: &Value) -> String {
         (_, Value::Int(n)) => n.to_string(),
         (_, Value::Float(f)) => java_double_to_string(*f),
         (_, Value::String(s)) => format!("{s:?}"),
+        (Kind::Duration | Kind::DataSize, Value::Duration(_) | Value::DataSize(_)) => {
+            crate::eval::stdlib::render_value(value)
+        }
         (Kind::Duration | Kind::DataSize, Value::Object(map, _)) => {
             let number = match map.get("value") {
                 Some(Value::Int(n)) => n.to_string(),
