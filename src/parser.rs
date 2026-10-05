@@ -884,6 +884,7 @@ impl<'a> Parser<'a> {
                         | TokenKind::KwTrace
                         | TokenKind::KwRead
                         | TokenKind::KwReadOrNull
+                        | TokenKind::KwReadGlob
                 );
                 let is_bare_ident = matches!(self.peek(), TokenKind::Ident(_))
                     && self.pos + 1 < self.tokens.len()
@@ -1500,14 +1501,21 @@ impl<'a> Parser<'a> {
                 self.expect(&TokenKind::LParen)?;
                 let e = self.parse_expr()?;
                 self.expect(&TokenKind::RParen)?;
-                Ok(Expr::Read(Box::new(e)))
+                Ok(Expr::Read(Box::new(e), self.name.to_string()))
             }
             TokenKind::KwReadOrNull => {
                 self.advance();
                 self.expect(&TokenKind::LParen)?;
                 let e = self.parse_expr()?;
                 self.expect(&TokenKind::RParen)?;
-                Ok(Expr::ReadOrNull(Box::new(e)))
+                Ok(Expr::ReadOrNull(Box::new(e), self.name.to_string()))
+            }
+            TokenKind::KwReadGlob => {
+                self.advance();
+                self.expect(&TokenKind::LParen)?;
+                let e = self.parse_expr()?;
+                self.expect(&TokenKind::RParen)?;
+                Ok(Expr::ReadGlob(Box::new(e), self.name.to_string()))
             }
             TokenKind::KwImport => {
                 self.advance();

@@ -27,6 +27,7 @@ mod parsers;
 mod prefetch;
 mod remote;
 pub(crate) mod render;
+mod resource;
 mod scope;
 pub(crate) mod stdlib;
 mod types;
@@ -39,6 +40,7 @@ pub(crate) use package::write_atomic;
 use package::*;
 use remote::*;
 pub(crate) use remote::{parse_triple_dot_path, resolve_triple_dot};
+use resource::*;
 pub(crate) use scope::SourceScope;
 use scope::*;
 use types::*;
@@ -81,6 +83,10 @@ pub struct Evaluator {
     /// Resources read in this run, by URI. As in Pkl, reading a resource again
     /// returns the first result, so reads are deterministic.
     resource_cache: HashMap<String, Value>,
+    /// URI prefixes resources may be read from. Empty denies all resources.
+    allowed_resources: Vec<String>,
+    environment: Option<BTreeMap<String, String>>,
+    external_properties: BTreeMap<String, String>,
     /// Final scopes for modules evaluated in this run, used to preserve inherited locals.
     module_scopes: HashMap<PathBuf, ModuleScopeSnapshot>,
     /// Whether a module evaluated in this run has a failed property that
@@ -413,6 +419,12 @@ impl Evaluator {
             body_roots_cache: HashMap::default(),
             plan_cache: HashMap::default(),
             resource_cache: HashMap::default(),
+            allowed_resources: DEFAULT_ALLOWED_RESOURCES
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+            environment: None,
+            external_properties: BTreeMap::default(),
             module_scopes: HashMap::default(),
             rendered_member_failed: false,
             env_reads: BTreeMap::new(),
@@ -440,6 +452,17 @@ impl Evaluator {
 
     pub fn set_base_path(&mut self, path: &Path) {
         self.base_path = path.to_path_buf();
+    }
+
+    pub fn set_allowed_resources(&mut self, resources: Vec<String>) {
+        self.allowed_resources = resources;
+    }
+
+    pub fn set_environment_variables(&mut self, vars: BTreeMap<String, String>) {
+        self.environment = Some(vars);
+    }
+    pub fn set_external_properties(&mut self, properties: BTreeMap<String, String>) {
+        self.external_properties = properties;
     }
 
     /// The local file a `file:` or relative module URI in the module at
@@ -629,49 +652,6 @@ impl Evaluator {
         match best {
             Some((src, tgt)) => std::borrow::Cow::Owned(format!("{}{}", tgt, &url[src.len()..])),
             None => std::borrow::Cow::Borrowed(url),
-        }
-    }
-
-    /// Read a resource by URI, reusing an earlier read of the same URI.
-    fn read_resource(&mut self, uri: &str) -> Result<Value> {
-        if let Some(value) = self.resource_cache.get(uri) {
-            return Ok(value.clone());
-        }
-        let value = self.read_resource_uncached(uri)?;
-        self.resource_cache.insert(uri.to_string(), value.clone());
-        Ok(value)
-    }
-
-    /// Read a resource by URI scheme.
-    fn read_resource_uncached(&mut self, uri: &str) -> Result<Value> {
-        if let Some(path) = uri.strip_prefix("file://") {
-            // file:// — read local file
-            let content = self.read_to_string_io(Path::new(path))?;
-            Ok(Value::String(content.into()))
-        } else if let Some(var_name) = uri.strip_prefix("env:") {
-            // env: — read environment variable
-            let value = self.read_env_io(var_name)?;
-            self.env_reads.insert(var_name.to_string(), value.clone());
-            let Some(val) = value else {
-                return Err(Error::Eval(format!(
-                    "environment variable not found: {var_name}"
-                )));
-            };
-            Ok(Value::String(val.into()))
-        } else if let Some(prop_name) = uri.strip_prefix("prop:") {
-            // prop: — system properties (not standard in Rust, return empty)
-            Err(Error::Eval(format!(
-                "system property not available: {prop_name}"
-            )))
-        } else if uri.starts_with("https://") || uri.starts_with("http://") {
-            // HTTP/HTTPS
-            let content = self.fetch_source(uri)?;
-            Ok(Value::String(content.into()))
-        } else {
-            // Bare path — treat as file relative to base_path
-            let file_path = self.base_path.join(uri);
-            let content = self.read_to_string_io(&file_path)?;
-            Ok(Value::String(content.into()))
         }
     }
 
@@ -5016,10 +4996,9 @@ impl Evaluator {
                 eprintln!("[pklr trace] {}", value_to_display(&v));
                 Ok(v)
             }
-            Expr::Read(uri_expr) => {
+            Expr::Read(uri_expr, module_path) => {
                 let uri = self.eval_expr(uri_expr, scope, depth + 1)?;
-                let uri_str = value_to_display(&uri);
-                self.read_resource(&uri_str)
+                self.eval_read(&value_to_display(&uri), Path::new(module_path), false)
             }
             Expr::Import(uri, module_path) => {
                 self.eval_import_expr(uri, Path::new(module_path), depth, None)
@@ -5030,13 +5009,13 @@ impl Evaluator {
                 let pattern: &str = resolved.as_deref().unwrap_or(pattern);
                 self.eval_glob_import(pattern, module_path, depth, None)
             }
-            Expr::ReadOrNull(uri_expr) => {
+            Expr::ReadOrNull(uri_expr, module_path) => {
                 let uri = self.eval_expr(uri_expr, scope, depth + 1)?;
-                let uri_str = value_to_display(&uri);
-                match self.read_resource(&uri_str) {
-                    Ok(v) => Ok(v),
-                    Err(_) => Ok(Value::Null),
-                }
+                self.eval_read(&value_to_display(&uri), Path::new(module_path), true)
+            }
+            Expr::ReadGlob(pattern_expr, module_path) => {
+                let pattern = self.eval_expr(pattern_expr, scope, depth + 1)?;
+                self.eval_read_glob(&value_to_display(&pattern), Path::new(module_path))
             }
         }
     }
@@ -6454,36 +6433,6 @@ mod requested_field_tests {
         assert!(source.scope_module_identities().contains_key("Config"));
 
         std::fs::remove_dir_all(test_dir).unwrap();
-    }
-}
-
-#[cfg(test)]
-mod glob_tests {
-    use super::{glob_matches, max_glob_depth};
-
-    #[test]
-    fn double_star_crosses_directories() {
-        assert!(glob_matches("**.pkl", "config/foo.pkl"));
-        assert!(glob_matches("a/**/b.pkl", "a/x/y/b.pkl"));
-    }
-
-    #[test]
-    fn double_star_slash_keeps_literal_separator() {
-        assert!(glob_matches("**/foo.pkl", "foo.pkl"));
-        assert!(glob_matches("**/foo.pkl", "config/foo.pkl"));
-    }
-
-    #[test]
-    fn star_stays_in_one_directory_segment() {
-        assert!(glob_matches("*/*.pkl", "config/foo.pkl"));
-        assert!(!glob_matches("*/*.pkl", "nested/config/foo.pkl"));
-    }
-
-    #[test]
-    fn non_recursive_patterns_have_bounded_depth() {
-        assert_eq!(max_glob_depth("*.pkl"), Some(0));
-        assert_eq!(max_glob_depth("*/*.pkl"), Some(1));
-        assert_eq!(max_glob_depth("**.pkl"), None);
     }
 }
 

@@ -18,6 +18,67 @@ struct MemoryCapabilities {
     fetches: Arc<Mutex<Vec<String>>>,
 }
 
+struct ResourceCapabilities {
+    files: HashMap<String, Vec<u8>>,
+    io_paths: Arc<Mutex<Vec<PathBuf>>>,
+    glob_calls: Arc<Mutex<usize>>,
+    remote_error: Option<pklr::Error>,
+}
+
+impl EvalCapabilities for ResourceCapabilities {
+    fn read_to_string(&mut self, path: &Path) -> pklr::Result<String> {
+        Err(pklr::Error::ImportNotFound(path.display().to_string()))
+    }
+
+    fn path_exists(&mut self, path: &Path) -> pklr::Result<bool> {
+        self.io_paths.lock().unwrap().push(path.to_path_buf());
+        Ok(self.files.contains_key(&path.display().to_string()))
+    }
+
+    fn canonicalize(&mut self, path: &Path) -> pklr::Result<PathBuf> {
+        self.io_paths.lock().unwrap().push(path.to_path_buf());
+        Ok(path.to_path_buf())
+    }
+
+    fn read_bytes(&mut self, path: &Path) -> pklr::Result<Vec<u8>> {
+        self.io_paths.lock().unwrap().push(path.to_path_buf());
+        if path == Path::new("virtual/race.txt") {
+            return Err(pklr::Error::Io(
+                path.to_path_buf(),
+                std::io::ErrorKind::NotFound.into(),
+            ));
+        }
+        self.files
+            .get(&path.display().to_string())
+            .cloned()
+            .ok_or_else(|| pklr::Error::Io(path.to_path_buf(), std::io::ErrorKind::NotFound.into()))
+    }
+
+    fn read_env(&mut self, _name: &str) -> pklr::Result<Option<String>> {
+        Ok(None)
+    }
+
+    fn fetch_text(&mut self, url: &str) -> pklr::Result<String> {
+        Err(pklr::Error::ImportNotFound(url.to_string()))
+    }
+
+    fn fetch_bytes(&mut self, url: &str) -> pklr::Result<Vec<u8>> {
+        Err(self
+            .remote_error
+            .take()
+            .unwrap_or_else(|| pklr::Error::ImportNotFound(url.to_string())))
+    }
+
+    fn temp_dir(&mut self, prefix: &str) -> pklr::Result<PathBuf> {
+        Ok(PathBuf::from(prefix))
+    }
+
+    fn glob(&mut self, base: &Path, pattern: &str) -> pklr::Result<Vec<PathBuf>> {
+        *self.glob_calls.lock().unwrap() += 1;
+        pklr::eval::expand_glob(base, pattern)
+    }
+}
+
 impl EvalCapabilities for MemoryCapabilities {
     fn read_to_string(&mut self, path: &Path) -> pklr::Result<String> {
         let key = path.display().to_string().replace('\\', "/");
@@ -258,6 +319,166 @@ fn custom_capabilities_handle_virtual_local_import() {
         .to_json();
 
     assert_eq!(json["result"], 42);
+}
+
+#[test]
+fn resource_reads_keep_virtual_paths_relative_and_missing_remote_is_nullable() {
+    let io_paths = Arc::new(Mutex::new(Vec::new()));
+    let glob_calls = Arc::new(Mutex::new(0));
+    let mut evaluator = pklr::Evaluator::with_capabilities(ResourceCapabilities {
+        files: HashMap::from([("virtual/data.txt".to_string(), b"virtual".to_vec())]),
+        io_paths: io_paths.clone(),
+        glob_calls,
+        remote_error: Some(pklr::Error::ImportNotFound(
+            "https://example.test/missing".to_string(),
+        )),
+    });
+
+    let value = evaluator
+        .eval_source(
+            "resource = read(\"data.txt\")\nremote = read?(\"https://example.test/missing\")\n",
+            Path::new("virtual/entry.pkl"),
+        )
+        .unwrap()
+        .to_json();
+    assert_eq!(value["resource"]["text"], "virtual");
+    assert!(value["remote"].is_null());
+    assert!(
+        io_paths
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|path| path == Path::new("virtual/data.txt"))
+    );
+}
+
+#[test]
+fn resource_glob_rejects_triple_dot_before_capability_io() {
+    let io_paths = Arc::new(Mutex::new(Vec::new()));
+    let glob_calls = Arc::new(Mutex::new(0));
+    let mut evaluator = pklr::Evaluator::with_capabilities(ResourceCapabilities {
+        files: HashMap::new(),
+        io_paths: io_paths.clone(),
+        glob_calls: glob_calls.clone(),
+        remote_error: None,
+    });
+
+    let error = evaluator
+        .eval_source(
+            "value = read*(\".../secret/*.txt\")\n",
+            Path::new("virtual/entry.pkl"),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("Cannot combine resource globs with triple-dot"),
+        "{error}"
+    );
+    assert_eq!(*glob_calls.lock().unwrap(), 0);
+    assert!(
+        io_paths
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|path| !path.to_string_lossy().contains("secret"))
+    );
+}
+
+#[test]
+fn denied_relative_resource_does_not_resolve_or_read_it() {
+    let io_paths = Arc::new(Mutex::new(Vec::new()));
+    let mut evaluator = pklr::Evaluator::with_capabilities(ResourceCapabilities {
+        files: HashMap::new(),
+        io_paths: io_paths.clone(),
+        glob_calls: Arc::new(Mutex::new(0)),
+        remote_error: None,
+    });
+    evaluator.set_allowed_resources(vec!["env:".to_string()]);
+
+    let error = evaluator
+        .eval_source(
+            "value = read?(\".../secret.txt\")\n",
+            Path::new("virtual/entry.pkl"),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Refusing to read resource"), "{error}");
+    assert!(
+        io_paths
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|path| !path.to_string_lossy().contains("secret"))
+    );
+}
+
+#[test]
+fn empty_resource_allowlist_rejects_relative_reads_before_target_io() {
+    let io_paths = Arc::new(Mutex::new(Vec::new()));
+    let mut evaluator = pklr::Evaluator::with_capabilities(ResourceCapabilities {
+        files: HashMap::new(),
+        io_paths: io_paths.clone(),
+        glob_calls: Arc::new(Mutex::new(0)),
+        remote_error: None,
+    });
+    evaluator.set_allowed_resources(Vec::new());
+    assert!(
+        evaluator
+            .eval_source(
+                "value = read?(\"secret.txt\")\n",
+                Path::new("virtual/entry.pkl"),
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("Refusing to read resource")
+    );
+    assert!(
+        io_paths
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|path| !path.to_string_lossy().contains("secret"))
+    );
+}
+
+#[test]
+fn nullable_local_resource_read_handles_not_found_races() {
+    let mut evaluator = pklr::Evaluator::with_capabilities(ResourceCapabilities {
+        // `path_exists` returns true, but `read_bytes` returns NotFound.
+        files: HashMap::from([("virtual/race.txt".to_string(), Vec::new())]),
+        io_paths: Arc::new(Mutex::new(Vec::new())),
+        glob_calls: Arc::new(Mutex::new(0)),
+        remote_error: None,
+    });
+    let value = evaluator
+        .eval_source(
+            "value = read?(\"race.txt\")\n",
+            Path::new("virtual/entry.pkl"),
+        )
+        .unwrap()
+        .to_json();
+    assert!(value["value"].is_null());
+}
+
+#[test]
+fn nullable_resource_reads_map_not_found_io_to_null() {
+    let mut evaluator = pklr::Evaluator::with_capabilities(ResourceCapabilities {
+        files: HashMap::new(),
+        io_paths: Arc::new(Mutex::new(Vec::new())),
+        glob_calls: Arc::new(Mutex::new(0)),
+        remote_error: Some(pklr::Error::Io(
+            PathBuf::from("package-entry"),
+            std::io::ErrorKind::NotFound.into(),
+        )),
+    });
+    let value = evaluator
+        .eval_source(
+            "value = read?(\"https://example.test/missing\")\n",
+            Path::new("virtual/entry.pkl"),
+        )
+        .unwrap()
+        .to_json();
+    assert!(value["value"].is_null());
 }
 
 #[test]

@@ -27,8 +27,8 @@ use crate::Result;
 /// temp directories and globs. The defaulted methods (`read_bytes`,
 /// `create_dir_all`, `write_atomic`, `remove_file` and, with the
 /// `package-zip` feature, `extract_zip`) use the standard library; the
-/// evaluator only calls them for `package://` imports and the persistent
-/// package cache.
+/// evaluator uses them for general resource reads as well as `package://`
+/// imports and the persistent package cache.
 pub trait EvalCapabilities: Send + Sync {
     fn read_to_string(&mut self, path: &Path) -> Result<String>;
 
@@ -59,6 +59,13 @@ pub trait EvalCapabilities: Send + Sync {
     }
 
     fn read_env(&mut self, name: &str) -> Result<Option<String>>;
+
+    /// Every environment variable, used by `read*("env:...")`. Capability
+    /// implementations that do not wish to expose enumeration can keep the
+    /// safe default of no entries.
+    fn env_vars(&mut self) -> Result<Vec<(String, String)>> {
+        Ok(Vec::new())
+    }
 
     fn fetch_text(&mut self, url: &str) -> Result<String>;
 
@@ -300,7 +307,18 @@ impl EvalCapabilities for NativeCapabilities {
     }
 
     fn path_exists(&mut self, path: &Path) -> Result<bool> {
-        Ok(path.exists())
+        match std::fs::metadata(path) {
+            Ok(_) => Ok(true),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput
+                ) =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(crate::Error::Io(path.to_path_buf(), error)),
+        }
     }
 
     fn canonicalize(&mut self, path: &Path) -> Result<PathBuf> {
@@ -310,6 +328,12 @@ impl EvalCapabilities for NativeCapabilities {
 
     fn read_env(&mut self, name: &str) -> Result<Option<String>> {
         Ok(std::env::var(name).ok())
+    }
+
+    fn env_vars(&mut self) -> Result<Vec<(String, String)>> {
+        Ok(std::env::vars_os()
+            .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+            .collect())
     }
 
     fn fetch_text(&mut self, url: &str) -> Result<String> {

@@ -113,8 +113,9 @@ impl AliasResolver<'_> {
             | Expr::Unop(_, value)
             | Expr::Throw(value)
             | Expr::Trace(value)
-            | Expr::Read(value)
-            | Expr::ReadOrNull(value) => self.expr(value, shadowed),
+            | Expr::Read(value, _)
+            | Expr::ReadOrNull(value, _)
+            | Expr::ReadGlob(value, _) => self.expr(value, shadowed),
             Expr::Lambda(_, value) => self.expr(Arc::make_mut(value), shadowed),
             Expr::Index(left, right) | Expr::Binop(_, left, right) | Expr::Let(_, left, right) => {
                 self.expr(left, shadowed);

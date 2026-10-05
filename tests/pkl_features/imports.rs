@@ -173,7 +173,7 @@ nested_value = Index["nested/foo.pkl"].value
 
 #[cfg(unix)]
 #[test]
-fn import_glob_matches_symlinked_files() {
+fn import_glob_skips_symlinked_files() {
     let temp = TestTempDir::new("pklr_test_import_glob_symlinked_files");
     let dir = temp.path();
     std::fs::create_dir_all(dir.join("real")).unwrap();
@@ -183,13 +183,13 @@ fn import_glob_matches_symlinked_files() {
         dir.join("main.pkl"),
         r#"
 import* "*.pkl" as Index
-value = Index["linked.pkl"].value
+value = Index.containsKey("linked.pkl")
 "#,
     )
     .unwrap();
 
     let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
-    assert_eq!(val["value"], "foo");
+    assert_eq!(val["value"], false);
 }
 
 #[cfg(unix)]
