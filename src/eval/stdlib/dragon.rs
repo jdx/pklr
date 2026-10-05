@@ -70,9 +70,11 @@ pub(crate) fn decode_f64(value: f64) -> (bool, FullDecoded) {
         return (negative, FullDecoded::Zero);
     }
 
-    // This is `RawFloat::integer_decode`'s representation for f64.
+    // This is `RawFloat::integer_decode`'s representation for f64.  In
+    // particular, subnormal mantissas are shifted so their neighbouring
+    // half-ULP interval has the same shared binary exponent.
     let (mant, exp) = if exponent == 0 {
-        (fraction, -1074)
+        (fraction << 1, -1075)
     } else {
         (fraction | (1_u64 << 52), exponent - 1075)
     };
@@ -85,8 +87,9 @@ pub(crate) fn decode_f64(value: f64) -> (bool, FullDecoded) {
             exp,
             inclusive,
         }
-    } else if exponent == 1 && fraction == 0 {
-        // The lower neighbour of the smallest normal has half the spacing.
+    } else if fraction == 0 {
+        // Every normal exact power of two has a lower neighbour with half
+        // the spacing. This includes, but is not limited to, MIN_POSITIVE.
         Decoded {
             mant: mant << 2,
             minus: 1,
@@ -139,6 +142,11 @@ impl Big {
 
     fn is_zero(&self) -> bool {
         self.base[..self.size].iter().all(|digit| *digit == 0)
+    }
+
+    fn bit_len(&self) -> usize {
+        let high = self.base[self.size - 1];
+        (self.size - 1) * 32 + (u32::BITS - high.leading_zeros()) as usize
     }
 
     fn cmp(&self, other: &Self) -> Ordering {
@@ -412,94 +420,32 @@ pub(crate) fn format_compatible(value: f64) -> Option<(bool, Vec<u8>, i16)> {
     if decoded.mant == 0 {
         return Some((negative, vec![b'0'], 1));
     }
-    if let Some((digits, exponent)) = compatible_integral_digits(value.abs()) {
+    if let Some((digits, exponent)) = compact_integral_digits(value.abs()) {
         return Some((negative, digits, exponent));
     }
-    format_shortest(value)
+    let (digits, exponent) = format_compatible_digits(value.abs(), decoded);
+    Some((negative, digits, exponent))
 }
 
-/// Chooses a compact decimal within an integral binary64's rounding interval.
-/// A candidate is accepted exactly when decimal-to-binary conversion recovers
-/// the source bit pattern.  This is the interval membership test; checking the
-/// lower candidate before its upper neighbour preserves Java's historical
-/// direction at boundaries such as `1e23`.
-fn compatible_integral_digits(value: f64) -> Option<(Vec<u8>, i16)> {
+/// The narrow integer path rounds only decimal places that are less precise
+/// than the binary significand.  Its applicability follows the exact integer
+/// and word-width bounds, so it is independent of any hand-picked exponent.
+fn compact_integral_digits(value: f64) -> Option<(Vec<u8>, i16)> {
+    if value.fract() != 0.0 {
+        return None;
+    }
     let bits = value.to_bits();
     let exponent = ((bits >> 52) & 0x7ff) as i32 - 1023;
-    if !(52..=127).contains(&exponent) {
+    if !(52..=62).contains(&exponent) {
         return None;
     }
     let mantissa = (bits & ((1_u64 << 52) - 1)) | (1_u64 << 52);
-    let integer = u128::from(mantissa) << (exponent - 52) as u32;
-    if exponent <= 62 {
-        return compact_integral_digits(integer, exponent);
-    }
-    let source_bits = value.to_bits();
-    let integer_text = integer.to_string();
-    let length = integer_text.len();
-    for precision in 1..=length.min(MAX_SIG_DIGITS) {
-        let scale = length - precision;
-        let base = integer / 10_u128.pow(scale as u32);
-        let mut selected = None;
-        for candidate in [base, base + 1] {
-            let digits = candidate.to_string().into_bytes();
-            // DecimalFormat retains significant digits; a candidate that ends
-            // in zero is the same decimal with fewer digits and must be
-            // considered at that shorter precision instead.
-            if digits.last() == Some(&b'0') {
-                continue;
-            }
-            let point = i16::try_from(scale + digits.len()).ok()?;
-            let decimal = format!(
-                "{}.{}e{}",
-                digits[0] as char,
-                String::from_utf8_lossy(&digits[1..]),
-                point - 1
-            );
-            if decimal.parse::<f64>().ok()?.to_bits() == source_bits {
-                let expanded = candidate * 10_u128.pow(scale as u32);
-                let distance = integer.abs_diff(expanded);
-                let ulp = 1_u128 << (exponent - 52) as u32;
-                if integer.is_power_of_two() && (64..=69).contains(&exponent) && precision < 17 {
-                    continue;
-                }
-                // The wide compatibility path does not terminate on a
-                // decimal that lands exactly at a binary rounding boundary:
-                // it emits another digit and preserves the boundary's
-                // direction. Other inexact coarse candidates remain valid.
-                if precision < 16
-                    && distance != 0
-                    && distance * 2 == ulp
-                    && digits.len() < 7
-                    && !integer.is_power_of_two()
-                {
-                    continue;
-                }
-                if selected
-                    .as_ref()
-                    .is_none_or(|(best, _, _)| distance < *best)
-                {
-                    selected = Some((distance, digits, point));
-                }
-            }
-        }
-        if let Some((_, digits, point)) = selected {
-            return Some((digits, point));
-        }
-    }
-    None
-}
-
-/// Java's compact binary64 path discards only decimal places below the
-/// significand's precision before fixed-scale rounding.  The number of such
-/// places follows from the integer's binary exponent, rather than from a
-/// separately formatted decimal string.
-fn compact_integral_digits(mut integer: u128, exponent: i32) -> Option<(Vec<u8>, i16)> {
+    let mut integer = u128::from(mantissa) << (exponent - 52) as u32;
     let mut discarded = 0_u32;
     if exponent > 54 {
-        let mut precision = 1_u64 << (exponent - 54);
-        while precision >= 10 {
-            precision /= 10;
+        let mut place = 1_u64 << (exponent - 54);
+        while place >= 10 {
+            place /= 10;
             discarded += 1;
         }
     }
@@ -517,6 +463,128 @@ fn compact_integral_digits(mut integer: u128, exponent: i32) -> Option<(Vec<u8>,
         digits.pop();
     }
     Some((digits, point))
+}
+
+/// Emit the decimal selected by the fixed-format compatibility profile.
+///
+/// Like Dragon shortest conversion, this works entirely with the exact
+/// binary rounding interval.  The compatibility profile has one observable
+/// distinction: while the decimal operands fit in a machine word its upper
+/// endpoint is open; after they grow wider, it is closed.  This is expressed
+/// from operand widths at each emitted digit, rather than from a binary or
+/// decimal exponent (which would create accidental exponent-specific cases).
+fn format_compatible_digits(value: f64, decoded: Decoded) -> (Vec<u8>, i16) {
+    let mut exponent = estimate_scaling_factor(decoded.mant + decoded.plus, decoded.exp);
+    let mut mant = Big::from_u64(decoded.mant);
+    let mut minus = Big::from_u64(decoded.minus);
+    // The compatibility selector uses the shared decimal half-ULP interval;
+    // for an exact power of two this is the smaller (lower) half spacing.
+    // The foundation decoder retains the full asymmetric IEEE interval for
+    // shortest conversion and round-trip invariants.
+    let mut plus = Big::from_u64(decoded.minus);
+    let mut scale = Big::from_small(1);
+    if decoded.exp < 0 {
+        scale.mul_pow2((-decoded.exp) as usize);
+    } else {
+        mant.mul_pow2(decoded.exp as usize);
+        minus.mul_pow2(decoded.exp as usize);
+        plus.mul_pow2(decoded.exp as usize);
+    }
+    if exponent >= 0 {
+        mul_pow10(&mut scale, exponent as usize);
+    } else {
+        mul_pow10(&mut mant, (-exponent) as usize);
+        mul_pow10(&mut minus, (-exponent) as usize);
+        mul_pow10(&mut plus, (-exponent) as usize);
+    }
+    let mut upper = mant.clone();
+    upper.add(&plus);
+    if scale.cmp(&upper) == Ordering::Less {
+        exponent += 1;
+    } else {
+        mant.mul_small(10);
+        minus.mul_small(10);
+        plus.mul_small(10);
+    }
+    let wide = compatibility_interval_is_wide(value, exponent - 1);
+    let mut scale2 = scale.clone();
+    scale2.mul_pow2(1);
+    let mut scale4 = scale.clone();
+    scale4.mul_pow2(2);
+    let mut scale8 = scale.clone();
+    scale8.mul_pow2(3);
+    let mut digits = Vec::with_capacity(MAX_SIG_DIGITS);
+    loop {
+        let (digit, _) = div_rem_upto_16(&mut mant, &scale, &scale2, &scale4, &scale8);
+        digits.push(b'0' + digit);
+        let low = mant.cmp(&minus) == Ordering::Less;
+        let mut upper = mant.clone();
+        upper.add(&plus);
+        let high = match scale.cmp(&upper) {
+            Ordering::Less => true,
+            Ordering::Equal => wide,
+            Ordering::Greater => false,
+        };
+        if low || high {
+            let twice = mant.clone().mul_pow2(1).cmp(&scale);
+            if high
+                && (!low
+                    || twice == Ordering::Greater
+                    || (twice == Ordering::Equal && digits.last().is_some_and(|d| d & 1 == 1)))
+            {
+                if let Some(extra) = round_up(&mut digits) {
+                    digits.push(extra);
+                    exponent += 1;
+                }
+            }
+            break;
+        }
+        mant.mul_small(10);
+        minus.mul_small(10);
+        plus.mul_small(10);
+        assert!(digits.len() <= MAX_SIG_DIGITS);
+    }
+    (digits, exponent)
+}
+
+/// Return whether the normalized decimal denominator crosses the compatibility
+/// word-width boundary.  This is calculated from the exact binary
+/// significand, its discarded factors of two, and the current decimal decade;
+/// it is intentionally not inferred from an exponent range.
+fn compatibility_interval_is_wide(value: f64, decimal_exponent: i16) -> bool {
+    let bits = value.to_bits();
+    let exponent_bits = ((bits >> 52) & 0x7ff) as i32;
+    if exponent_bits == 0 {
+        // The subnormal denominator is necessarily wider than the primitive
+        // interval after its binary normalization.
+        return true;
+    }
+    let significand = (bits & ((1_u64 << 52) - 1)) | (1_u64 << 52);
+    let fraction_bits = 53 - significand.trailing_zeros() as i32;
+    let binary_exponent = exponent_bits - 1023;
+    let tiny_bits = (fraction_bits - binary_exponent - 1).max(0);
+    let decimal_exponent = i32::from(decimal_exponent);
+    let power_five = decimal_exponent.max(0);
+    let mut scale_twos = power_five + tiny_bits;
+    let mut value_twos = (-decimal_exponent).max(0) + tiny_bits + binary_exponent;
+    let mut margin_twos = value_twos - 53;
+    value_twos -= fraction_bits - 1;
+    let common_twos = value_twos.min(scale_twos);
+    scale_twos -= common_twos;
+    margin_twos -= common_twos;
+    if fraction_bits == 1 {
+        margin_twos -= 1;
+    }
+    if margin_twos < 0 {
+        scale_twos -= margin_twos;
+    }
+    debug_assert!(scale_twos >= 0);
+    let mut scale = Big::from_small(1);
+    for _ in 0..power_five {
+        scale.mul_small(5);
+    }
+    scale.mul_pow2(scale_twos as usize);
+    scale.mul_small(10).bit_len() >= 64
 }
 
 #[cfg(test)]
@@ -581,12 +649,69 @@ mod tests {
             let (_, digits, point) = format_compatible(value).unwrap();
             (String::from_utf8(digits).unwrap(), point)
         };
+        assert!(!compatibility_interval_is_wide(2_f64.powi(69), 20));
         assert_eq!(render(2_f64.powi(63)), ("9223372036854776".into(), 19));
         assert_eq!(render(1e23), ("9999999999999999".into(), 23));
         assert_eq!(
             render(1.0000000000000002e19),
             ("10000000000000002".into(), 20)
         );
+        assert_eq!(render(2_f64.powi(66)), ("7378697629483821".into(), 20));
+        assert_eq!(render(2_f64.powi(69)), ("59029581035870565".into(), 21));
+        assert_eq!(render(2_f64.powi(82)), ("48357032784585167".into(), 25));
+        assert_eq!(render(2_f64.powi(132)), ("54445178707350154".into(), 40));
         assert_eq!(render(1.6e24), ("15999999999999999".into(), 25));
+    }
+
+    #[test]
+    fn decoder_preserves_binary64_neighbour_intervals() {
+        let (_, FullDecoded::Finite(subnormal)) = decode_f64(f64::from_bits(1)) else {
+            panic!("smallest subnormal must decode as finite");
+        };
+        assert_eq!(
+            (
+                subnormal.mant,
+                subnormal.minus,
+                subnormal.plus,
+                subnormal.exp
+            ),
+            (2, 1, 1, -1075)
+        );
+
+        for exponent in -1022..=1023 {
+            let value = 2_f64.powi(exponent);
+            let (_, FullDecoded::Finite(decoded)) = decode_f64(value) else {
+                panic!("power of two must decode as finite");
+            };
+            assert_eq!(decoded.minus, 1, "2^{exponent}");
+            assert_eq!(decoded.plus, 2, "2^{exponent}");
+            assert_eq!(decoded.mant, 1_u64 << 54, "2^{exponent}");
+        }
+    }
+
+    #[test]
+    fn compatible_digits_round_trip_a_broad_binary_grid() {
+        let mut values = vec![f64::from_bits(1), f64::MIN_POSITIVE, 0.5, 1.0];
+        for exponent in -1022..=1023 {
+            let value = 2_f64.powi(exponent);
+            values.extend([value, f64::from_bits(value.to_bits() - 1)]);
+            if value != f64::MAX {
+                values.push(f64::from_bits(value.to_bits() + 1));
+            }
+        }
+        for value in values {
+            let (_, digits, point) = format_compatible(value).unwrap();
+            let decimal = format!(
+                "{}.{}e{}",
+                digits[0] as char,
+                String::from_utf8_lossy(&digits[1..]),
+                i32::from(point) - 1
+            );
+            assert_eq!(
+                decimal.parse::<f64>().unwrap().to_bits(),
+                value.to_bits(),
+                "{value:e}"
+            );
+        }
     }
 }
