@@ -2714,3 +2714,29 @@ fn analyze_imports_resolves_triple_dot_imports() {
     let imports = pklr::analyze_imports(&dir.join("a/b/main.pkl")).unwrap();
     assert_eq!(imports, vec![dir.join("Lib.pkl")]);
 }
+
+#[test]
+fn subclass_untyped_new_uses_imported_parent_type_scope() {
+    let temp = TestTempDir::new("pklr_test_subclass_imported_parent_type");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("lib.pkl"),
+        r#"
+class P { a = 1; b = 2 }
+open class C { p: P = new { a = 5 } }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "lib.pkl"
+class D extends lib.C { p = new { b = 3 } }
+d = new D {}
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
+    assert_eq!(json["d"]["p"], serde_json::json!({"a": 1, "b": 3}));
+}

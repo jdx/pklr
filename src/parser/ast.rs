@@ -127,18 +127,35 @@ pub(super) fn type_expr_runtime_name(ty: &TypeExpr) -> String {
     }
 }
 
+/// Whether `expr` has an untyped `new { ... }` in a result position.
+pub(crate) fn has_untyped_result_new(expr: &Expr) -> bool {
+    match expr {
+        Expr::New(None, _, _) => true,
+        Expr::If(_, then_expr, else_expr) => {
+            has_untyped_result_new(then_expr) || has_untyped_result_new(else_expr)
+        }
+        Expr::Let(_, _, body) | Expr::Trace(body, _) => has_untyped_result_new(body),
+        _ => false,
+    }
+}
+
 /// Propagate the method's expected result type through result expressions only.
 /// Nested members and call arguments have their own inference contexts.
-pub(super) fn infer_method_return_new(expr: &mut Expr, return_type: &TypeExpr) {
+pub(crate) fn infer_method_return_new(expr: &mut Expr, return_type: &TypeExpr) {
+    rewrite_untyped_result_new(expr, &mut |entries| {
+        Expr::InferredNew(return_type.clone(), entries)
+    });
+}
+
+/// Replace each untyped `new { ... }` in a result position of `expr`.
+pub(crate) fn rewrite_untyped_result_new(expr: &mut Expr, rewrite: &mut impl FnMut(Body) -> Expr) {
     match expr {
-        Expr::New(None, entries, _) => {
-            *expr = Expr::InferredNew(return_type.clone(), std::mem::take(entries));
-        }
+        Expr::New(None, entries, _) => *expr = rewrite(std::mem::take(entries)),
         Expr::If(_, then_expr, else_expr) => {
-            infer_method_return_new(then_expr, return_type);
-            infer_method_return_new(else_expr, return_type);
+            rewrite_untyped_result_new(then_expr, rewrite);
+            rewrite_untyped_result_new(else_expr, rewrite);
         }
-        Expr::Let(_, _, body) | Expr::Trace(body, _) => infer_method_return_new(body, return_type),
+        Expr::Let(_, _, body) | Expr::Trace(body, _) => rewrite_untyped_result_new(body, rewrite),
         _ => {}
     }
 }

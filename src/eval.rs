@@ -2574,6 +2574,7 @@ impl Evaluator {
                     .then(|| Arc::new(poisoned_members)),
                 kind: ObjectKind::Object,
                 is_parsed_json: false,
+                prototype: None,
             }))
         };
         let mut effective_late_properties = IndexMap::new();
@@ -2620,7 +2621,16 @@ impl Evaluator {
         depth: usize,
     ) -> Result<Option<Value>> {
         if let Some(expr) = &prop.value {
-            let mut value = self.eval_expr(expr, scope, depth)?;
+            // `x: T = new { ... }` amends T's default, so an untyped `new`
+            // takes its parent from the declared type.
+            let mut value = match &prop.type_ann {
+                Some(ty) if parser::has_untyped_result_new(expr) && !type_is_any(ty) => {
+                    let mut inferred = expr.clone();
+                    parser::infer_method_return_new(&mut inferred, ty);
+                    self.eval_expr(&inferred, scope, depth)?
+                }
+                _ => self.eval_expr(expr, scope, depth)?,
+            };
             apply_mapping_type_annotation(&mut value, prop.type_ann.as_ref());
             return Ok(Some(value));
         }
@@ -3232,6 +3242,7 @@ impl Evaluator {
                                     poisoned_members: None,
                                     kind: ObjectKind::Object,
                                     is_parsed_json: false,
+                                    prototype: None,
                                 },
                             };
                             *result_src = Some(std::sync::Arc::new(new_src));
@@ -3491,6 +3502,7 @@ impl Evaluator {
             poisoned_members: None,
             kind: ObjectKind::Object,
             is_parsed_json: false,
+            prototype: None,
         };
         Ok(Value::Object(Arc::new(map), Some(Arc::new(source))))
     }
@@ -3543,6 +3555,17 @@ impl Evaluator {
         if let Some(ref pv) = parent_val {
             child_scope.set("super", pv.clone());
         }
+
+        // A property the child redefines without restating its type keeps the
+        // parent's declared type. Its default is resolved in that parent's
+        // definition scope, which matters for imported parent classes.
+        let typed_body = match &parent_val {
+            Some(Value::Object(_, Some(parent))) => {
+                self.inherit_property_types(body, parent, &mut child_scope, depth)?
+            }
+            _ => None,
+        };
+        let body = typed_body.as_ref().unwrap_or(body);
 
         let child_defaults = self.eval_entries(body, &child_scope, depth + 1)?;
         if let Some(Value::Object(parent_map, parent_src)) = parent_val {
@@ -3919,6 +3942,160 @@ impl Evaluator {
         roots
     }
 
+    /// Give each property a child class redefines without a type the parent's
+    /// declared type. Untyped `new` values amend a default constructed where
+    /// that inherited type was declared.
+    fn inherit_property_types(
+        &mut self,
+        body: &Body,
+        parent: &ObjectSource,
+        child_scope: &mut Scope,
+        depth: usize,
+    ) -> Result<Option<Body>> {
+        let parent_type = |name: &str| {
+            parent
+                .entries
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(index, entry)| match entry {
+                    Entry::Property(prop)
+                        if prop.name == name && !has_modifier(&prop.modifiers, Modifier::Local) =>
+                    {
+                        prop.type_ann.as_ref().map(|ty| (index, ty))
+                    }
+                    _ => None,
+                })
+        };
+        let needs_type = |entry: &Entry| match entry {
+            Entry::Property(prop)
+                if prop.type_ann.is_none() && !has_modifier(&prop.modifiers, Modifier::Local) =>
+            {
+                parent_type(&prop.name)
+            }
+            _ => None,
+        };
+        if !body.iter().any(|entry| needs_type(entry).is_some()) {
+            return Ok(None);
+        }
+
+        let mut parent_scope = None;
+        let mut typed = Vec::with_capacity(body.len());
+        for entry in body.iter() {
+            let (Entry::Property(prop), Some((index, ty))) = (entry, needs_type(entry)) else {
+                typed.push(entry.clone());
+                continue;
+            };
+            let mut prop = (**prop).clone();
+            prop.type_ann = Some(ty.clone());
+            if let Some(expr) = &mut prop.value
+                && parser::has_untyped_result_new(expr)
+                && !type_is_any(ty)
+            {
+                let binding = format!("#parent:{}", prop.name);
+                let default = match parent.scope().get(binding.as_str()) {
+                    Some(default) => default.clone(),
+                    None => {
+                        let scope = match parent.entry_scopes.get(index).and_then(Clone::clone) {
+                            Some(captured) => restore_scope(&captured),
+                            None => parent_scope
+                                .get_or_insert_with(|| {
+                                    restore_scope(&capture_object_source_scope(parent))
+                                })
+                                .clone(),
+                        };
+                        self.eval_expr(
+                            &Expr::InferredNew(ty.clone(), Vec::new().into()),
+                            &scope,
+                            depth + 1,
+                        )?
+                    }
+                };
+                child_scope.set(&binding, default);
+                parser::rewrite_untyped_result_new(expr, &mut |entries| {
+                    Expr::Binop(
+                        BinOp::Add,
+                        Box::new(Expr::Ident(binding.clone())),
+                        Box::new(Expr::ObjectBody(entries)),
+                    )
+                });
+            }
+            typed.push(Entry::Property(Arc::new(prop)));
+        }
+        Ok(Some(typed.into()))
+    }
+
+    /// Rewrite assignments of untyped `new` on an instance to amend the
+    /// corresponding property of its class default object.
+    fn amend_prototype_members(
+        &self,
+        prototype: &Value,
+        overlay_entries: &[Entry],
+        amendment_scope: &mut CapturedScope,
+    ) -> Option<Vec<Entry>> {
+        let Value::Object(prototype_map, prototype_source) = prototype else {
+            return None;
+        };
+        let class_default = |name: &str| {
+            prototype_map
+                .get(name)
+                .or_else(|| {
+                    let source = prototype_source.as_ref()?;
+                    source
+                        .evaluated_properties
+                        .iter()
+                        .any(|evaluated| evaluated == name)
+                        .then(|| source.scope().get(name))
+                        .flatten()
+                })
+                .filter(|value| matches!(value, Value::Object(..) | Value::List(_)))
+        };
+        let amended_default = |entry: &Entry| match entry {
+            Entry::Property(prop)
+                if !has_modifier(&prop.modifiers, Modifier::Local)
+                    && prop
+                        .value
+                        .as_ref()
+                        .is_some_and(parser::has_untyped_result_new) =>
+            {
+                class_default(&prop.name).cloned()
+            }
+            _ => None,
+        };
+        if !overlay_entries
+            .iter()
+            .any(|entry| amended_default(entry).is_some())
+        {
+            return None;
+        }
+        Some(
+            overlay_entries
+                .iter()
+                .map(|entry| {
+                    let (Entry::Property(prop), Some(value)) = (entry, amended_default(entry))
+                    else {
+                        return entry.clone();
+                    };
+                    let binding = format!("#parent:{}", prop.name);
+                    amendment_scope
+                        .values
+                        .insert(binding.as_str().into(), value);
+                    let mut prop = (**prop).clone();
+                    if let Some(expr) = &mut prop.value {
+                        parser::rewrite_untyped_result_new(expr, &mut |entries| {
+                            Expr::Binop(
+                                BinOp::Add,
+                                Box::new(Expr::Ident(binding.clone())),
+                                Box::new(Expr::ObjectBody(entries)),
+                            )
+                        });
+                    }
+                    Entry::Property(Arc::new(prop))
+                })
+                .collect(),
+        )
+    }
+
     fn eval_amended_object(
         &mut self,
         base_map: &Arc<ObjectMap>,
@@ -3963,6 +4140,14 @@ impl Evaluator {
             "super".into(),
             Value::Object(Arc::new(parent_members), Some(Arc::clone(base_source))),
         );
+        let prototype = base_source.prototype.clone().or_else(|| {
+            (base_source.kind == ObjectKind::Class)
+                .then(|| Value::Object(Arc::clone(base_map), Some(Arc::clone(base_source))))
+        });
+        let rewritten_overlay = prototype.as_ref().and_then(|prototype| {
+            self.amend_prototype_members(prototype, overlay_entries, &mut amendment_scope)
+        });
+        let overlay_entries = rewritten_overlay.as_deref().unwrap_or(overlay_entries);
         let amendment_captured = Arc::new(CapturedScope {
             body_members: overlay_entries
                 .iter()
@@ -4214,6 +4399,7 @@ impl Evaluator {
                 new_src.type_identity = base_type.identity;
                 new_src.parent_type_names = base_type.parent_names;
                 new_src.parent_type_identities = base_type.parent_identities;
+                new_src.prototype = prototype;
                 Ok(Value::Object(map, Some(Arc::new(new_src))))
             }
             // An amended mapping is still a mapping.
@@ -4630,7 +4816,38 @@ impl Evaluator {
                 constructor_scope.receiver_entries = Some(entries.clone());
                 constructor_scope.receiver_list_base = None;
                 let scope = &constructor_scope;
+                // A Dynamic holding only elements renders as a JSON array. If
+                // a generator may create either elements or members, decide
+                // based on the branch actually taken.
+                let has_elements = matches!(type_name.as_deref(), None | Some("Dynamic"))
+                    && entries_are_listing_amendment(entries);
+                let defines_members = has_elements && entries_define_members(entries);
+                let eval_elements = |this: &mut Self| -> Result<Vec<Value>> {
+                    let mut listing_scope = scope.child();
+                    listing_scope.set(
+                        "super",
+                        Value::List(ListValue::new(ListKind::Listing, Vec::new())),
+                    );
+                    listing_scope.receiver_list_base = Some(0);
+                    let mut items = Vec::new();
+                    this.eval_listing_entries(entries, &listing_scope, depth + 1, &mut items)?;
+                    Ok(items)
+                };
                 match type_name.as_deref() {
+                    _ if has_elements && !defines_members => Ok(Value::List(ListValue::new(
+                        ListKind::Listing,
+                        eval_elements(self)?,
+                    ))),
+                    _ if has_elements => {
+                        let object = self.eval_entries(entries, scope, depth + 1)?;
+                        if matches!(&object, Value::Object(map, _) if map.is_empty()) {
+                            let items = eval_elements(self)?;
+                            if !items.is_empty() {
+                                return Ok(Value::List(ListValue::new(ListKind::Listing, items)));
+                            }
+                        }
+                        Ok(object)
+                    }
                     Some("Listing") => {
                         let mut listing_scope = scope.child();
                         listing_scope.set(
@@ -4712,6 +4929,7 @@ impl Evaluator {
                             poisoned_members: None,
                             kind: ObjectKind::Mapping,
                             is_parsed_json: false,
+                            prototype: None,
                         };
                         Ok(Value::Object(Arc::new(map), Some(Arc::new(source))))
                     }
@@ -4826,6 +5044,7 @@ impl Evaluator {
                                         poisoned_members: None,
                                         kind: ObjectKind::Object,
                                         is_parsed_json: false,
+                                        prototype: None,
                                     }
                                 };
                                 *src_slot = Some(Arc::new(new_src));
@@ -4867,6 +5086,7 @@ impl Evaluator {
                                 poisoned_members: None,
                                 kind: ObjectKind::Object,
                                 is_parsed_json: false,
+                                prototype: None,
                             };
                             Ok(Value::Object(Arc::new(merged), Some(Arc::new(src))))
                         } else {
@@ -6168,6 +6388,7 @@ impl Evaluator {
                                         poisoned_members: None,
                                         kind: ObjectKind::Object,
                                         is_parsed_json: false,
+                                        prototype: None,
                                     },
                                 };
                                 *result_src = Some(std::sync::Arc::new(new_src));

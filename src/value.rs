@@ -322,6 +322,10 @@ pub struct ObjectSource {
     /// from a Pkl body. Such objects retain their evaluated members when
     /// amended, but still render as Dynamics.
     pub(crate) is_parsed_json: bool,
+    /// For an instance of a class, the class's default object. An untyped
+    /// `new { ... }` assigned to one of the instance's properties amends the
+    /// class default of that property, not the receiver's current value.
+    pub(crate) prototype: Option<Value>,
 }
 
 /// What an object with an [`ObjectSource`] is, beyond its members. Objects

@@ -4,11 +4,12 @@ use crate::lexer::{StringPart, Token, TokenKind};
 mod ast;
 mod checks;
 
+use ast::type_expr_runtime_name;
 pub use ast::{
     Annotation, BinOp, Body, Entry, Expr, ForGenerator, Import, Modifier, Module, Property,
     StringInterpPart, TraceSite, TypeExpr, UnOp, WhenGenerator,
 };
-use ast::{infer_method_return_new, type_expr_runtime_name};
+pub(crate) use ast::{has_untyped_result_new, infer_method_return_new, rewrite_untyped_result_new};
 use checks::{BodyKind, BodyScope};
 
 /// Collect all import URIs from a token stream (fast path, no full parse needed).

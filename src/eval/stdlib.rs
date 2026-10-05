@@ -61,6 +61,7 @@ pub(super) fn typed_object(type_name: &str, members: ObjectMap) -> Value {
         poisoned_members: None,
         kind: ObjectKind::Object,
         is_parsed_json: false,
+        prototype: None,
     };
     Value::Object(Arc::new(members), Some(Arc::new(source)))
 }
