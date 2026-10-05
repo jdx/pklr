@@ -209,13 +209,17 @@ enum GlobToken {
         negated: bool,
         items: Vec<(char, char)>,
     },
+    /// `{a,b}`: any one of the branches. Branches contain no groups.
+    Group(Vec<Vec<GlobToken>>),
 }
 
-/// A compiled glob. `{a,b}` sub-patterns are expanded into alternatives.
+/// A compiled glob. `{a,b}` sub-patterns are matched in place rather than
+/// expanded, so adjacent groups cannot multiply into exponentially many
+/// alternatives.
 #[derive(Debug, Clone)]
 pub(super) struct GlobPart {
     source: String,
-    alternatives: Vec<Vec<GlobToken>>,
+    tokens: Vec<GlobToken>,
     globstar: bool,
 }
 
@@ -224,18 +228,15 @@ impl GlobPart {
     /// `GlobResolver.toRegexString`.
     pub(super) fn compile(part: &str, pattern: &str) -> Result<Self> {
         let chars: Vec<char> = part.chars().collect();
-        // Each alternative being built; a sub-pattern multiplies them.
-        let mut alternatives: Vec<Vec<GlobToken>> = vec![Vec::new()];
+        let mut tokens: Vec<GlobToken> = Vec::new();
         let mut group: Option<Vec<Vec<GlobToken>>> = None;
         let mut i = 0;
         let push = |group: &mut Option<Vec<Vec<GlobToken>>>,
-                    alternatives: &mut Vec<Vec<GlobToken>>,
+                    tokens: &mut Vec<GlobToken>,
                     token: GlobToken| {
             match group {
                 Some(branches) => branches.last_mut().unwrap().push(token),
-                None => alternatives
-                    .iter_mut()
-                    .for_each(|alternative| alternative.push(token.clone())),
+                None => tokens.push(token),
             }
         };
         while i < chars.len() {
@@ -252,16 +253,7 @@ impl GlobPart {
                 }
                 '}' if group.is_some() => {
                     let branches = group.take().unwrap();
-                    alternatives = alternatives
-                        .iter()
-                        .flat_map(|prefix| {
-                            branches.iter().map(move |branch| {
-                                let mut alternative = prefix.clone();
-                                alternative.extend(branch.iter().cloned());
-                                alternative
-                            })
-                        })
-                        .collect();
+                    tokens.push(GlobToken::Group(branches));
                 }
                 ',' if group.is_some() => group.as_mut().unwrap().push(Vec::new()),
                 '\\' => {
@@ -277,12 +269,12 @@ impl GlobPart {
                             &format!("Invalid escape character `\\{next}`."),
                         ));
                     }
-                    push(&mut group, &mut alternatives, GlobToken::Char(next));
+                    push(&mut group, &mut tokens, GlobToken::Char(next));
                     i += 1;
                 }
                 '[' => {
                     let (token, end) = compile_glob_class(&chars, i, pattern)?;
-                    push(&mut group, &mut alternatives, token);
+                    push(&mut group, &mut tokens, token);
                     i = end;
                 }
                 c @ ('?' | '*' | '+' | '@' | '!') if next == Some('(') => {
@@ -292,13 +284,13 @@ impl GlobPart {
                         "Extended globbing features are not supported.",
                     ));
                 }
-                '?' => push(&mut group, &mut alternatives, GlobToken::Any),
+                '?' => push(&mut group, &mut tokens, GlobToken::Any),
                 '*' if next == Some('*') => {
-                    push(&mut group, &mut alternatives, GlobToken::StarStar);
+                    push(&mut group, &mut tokens, GlobToken::StarStar);
                     i += 1;
                 }
-                '*' => push(&mut group, &mut alternatives, GlobToken::Star),
-                c => push(&mut group, &mut alternatives, GlobToken::Char(c)),
+                '*' => push(&mut group, &mut tokens, GlobToken::Star),
+                c => push(&mut group, &mut tokens, GlobToken::Char(c)),
             }
             i += 1;
         }
@@ -310,16 +302,14 @@ impl GlobPart {
         }
         Ok(Self {
             source: pattern.to_string(),
-            alternatives,
+            tokens,
             globstar: part.contains("**"),
         })
     }
 
     pub(super) fn matches(&self, name: &str) -> bool {
         let name: Vec<char> = name.chars().collect();
-        self.alternatives
-            .iter()
-            .any(|tokens| glob_tokens_match(tokens, &name))
+        glob_tokens_match(&self.tokens, &name)
     }
 }
 
@@ -383,6 +373,13 @@ fn glob_tokens_match(tokens: &[GlobToken], name: &[char]) -> bool {
     // `matched[j]`: the tokens so far can match `name[..j]`.
     let mut matched = vec![false; name.len() + 1];
     matched[0] = true;
+    matched = advance_glob_tokens(tokens, name, matched);
+    matched[name.len()]
+}
+
+/// The positions in `name` reachable by matching `tokens` from any position
+/// set in `matched`.
+fn advance_glob_tokens(tokens: &[GlobToken], name: &[char], mut matched: Vec<bool>) -> Vec<bool> {
     for token in tokens {
         let mut next = vec![false; name.len() + 1];
         match token {
@@ -393,15 +390,26 @@ fn glob_tokens_match(tokens: &[GlobToken], name: &[char]) -> bool {
                     next[j] = matched[j] || (can_extend && next[j - 1]);
                 }
             }
+            GlobToken::Group(branches) => {
+                for branch in branches {
+                    let reached = advance_glob_tokens(branch, name, matched.clone());
+                    for (next, reached) in next.iter_mut().zip(reached) {
+                        *next |= reached;
+                    }
+                }
+            }
             _ => {
                 for j in 1..=name.len() {
                     next[j] = matched[j - 1] && glob_token_matches_char(token, name[j - 1]);
                 }
             }
         }
+        if !next.contains(&true) {
+            return next;
+        }
         matched = next;
     }
-    matched[name.len()]
+    matched
 }
 
 fn glob_token_matches_char(token: &GlobToken, c: char) -> bool {
@@ -411,7 +419,9 @@ fn glob_token_matches_char(token: &GlobToken, c: char) -> bool {
         GlobToken::Class { negated, items } => {
             c != '/' && items.iter().any(|(lo, hi)| (*lo..=*hi).contains(&c)) != *negated
         }
-        GlobToken::Star | GlobToken::StarStar => unreachable!("handled by glob_tokens_match"),
+        GlobToken::Star | GlobToken::StarStar | GlobToken::Group(_) => {
+            unreachable!("handled by advance_glob_tokens")
+        }
     }
 }
 
@@ -437,26 +447,4 @@ pub(super) fn pathdiff_or_full(path: &Path, base: &Path) -> String {
 
 pub(super) fn normalize_pkl_path(path: &str) -> String {
     path.replace('\\', "/")
-}
-
-// Kept for the evaluator's small matcher regression tests. The resolver above
-// is the authoritative implementation used for filesystem traversal.
-#[cfg(test)]
-pub(super) fn glob_matches(pattern: &str, path: &str) -> bool {
-    if let Some(rest) = pattern.strip_prefix("**/") {
-        return GlobPart::compile(rest, pattern)
-            .map(|glob| glob.matches(path))
-            .unwrap_or(false)
-            || GlobPart::compile(pattern, pattern)
-                .map(|glob| glob.matches(path))
-                .unwrap_or(false);
-    }
-    GlobPart::compile(pattern, pattern)
-        .map(|glob| glob.matches(path))
-        .unwrap_or(false)
-}
-
-#[cfg(test)]
-pub(super) fn max_glob_depth(pattern: &str) -> Option<usize> {
-    (!pattern.contains("**")).then(|| pattern.chars().filter(|c| *c == '/').count())
 }

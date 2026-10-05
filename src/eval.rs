@@ -6437,36 +6437,6 @@ mod requested_field_tests {
 }
 
 #[cfg(test)]
-mod glob_tests {
-    use super::{glob_matches, max_glob_depth};
-
-    #[test]
-    fn double_star_crosses_directories() {
-        assert!(glob_matches("**.pkl", "config/foo.pkl"));
-        assert!(glob_matches("a/**/b.pkl", "a/x/y/b.pkl"));
-    }
-
-    #[test]
-    fn double_star_slash_keeps_literal_separator() {
-        assert!(glob_matches("**/foo.pkl", "foo.pkl"));
-        assert!(glob_matches("**/foo.pkl", "config/foo.pkl"));
-    }
-
-    #[test]
-    fn star_stays_in_one_directory_segment() {
-        assert!(glob_matches("*/*.pkl", "config/foo.pkl"));
-        assert!(!glob_matches("*/*.pkl", "nested/config/foo.pkl"));
-    }
-
-    #[test]
-    fn non_recursive_patterns_have_bounded_depth() {
-        assert_eq!(max_glob_depth("*.pkl"), Some(0));
-        assert_eq!(max_glob_depth("*/*.pkl"), Some(1));
-        assert_eq!(max_glob_depth("**.pkl"), None);
-    }
-}
-
-#[cfg(test)]
 mod remote_relative_tests {
     use super::{canonical_remote_module_identity, resolve_http_relative};
 

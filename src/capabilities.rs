@@ -27,8 +27,8 @@ use crate::Result;
 /// temp directories and globs. The defaulted methods (`read_bytes`,
 /// `create_dir_all`, `write_atomic`, `remove_file` and, with the
 /// `package-zip` feature, `extract_zip`) use the standard library; the
-/// evaluator only calls them for `package://` imports and the persistent
-/// package cache.
+/// evaluator uses them for general resource reads as well as `package://`
+/// imports and the persistent package cache.
 pub trait EvalCapabilities: Send + Sync {
     fn read_to_string(&mut self, path: &Path) -> Result<String>;
 

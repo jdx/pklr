@@ -2961,6 +2961,24 @@ fn resource_allowlist_normalizes_paths_before_io() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("Refusing to read resource"), "{error}");
+
+    // A non-directory URI prefix remains a prefix, as documented by the
+    // builder, while a trailing slash above keeps directory boundaries.
+    std::fs::write(dir.join("allowed/config-current.txt"), "prefix").unwrap();
+    let path = dir.join("allowed/main.pkl");
+    std::fs::write(&path, "value = read(\"config-current.txt\")\n").unwrap();
+    let allowed = format!("file:{}/allowed/config-", dir.display());
+    let value = pklr::EvaluatorBuilder::new()
+        .allowed_resources(vec![allowed])
+        .eval_to_json(&path)
+        .unwrap();
+    assert_eq!(value["value"]["text"], "prefix");
+
+    let value = pklr::EvaluatorBuilder::new()
+        .allowed_resources(vec!["file:///".to_string()])
+        .eval_to_json(&path)
+        .unwrap();
+    assert_eq!(value["value"]["text"], "prefix");
 }
 
 #[test]
@@ -2984,6 +3002,115 @@ fn resource_env_prop_and_file_globs() {
     assert_eq!(value["props"]["prop:apple"], "pie");
     assert_eq!(value["files"]["a.txt"]["text"], "a");
     assert_eq!(value["files"]["b.txt"]["text"], "b");
+}
+
+#[test]
+fn resource_glob_keys_stay_module_relative_and_braces_do_not_expand() {
+    let temp = TestTempDir::new("pklr_test_resources_glob_keys");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("nested")).unwrap();
+    std::fs::create_dir_all(dir.join("literal")).unwrap();
+    std::fs::write(dir.join("literal/value.txt"), "value").unwrap();
+    std::fs::write(
+        dir.join("nested/main.pkl"),
+        "values = read*(\"../literal/*.txt\")\n",
+    )
+    .unwrap();
+    let value = pklr::eval_to_json(&dir.join("nested/main.pkl")).unwrap();
+    assert_eq!(value["values"]["../literal/value.txt"]["text"], "value");
+
+    // This is deliberately invoked through read* so the production resolver,
+    // not a test-only matcher, compiles the adjacent groups.
+    let pattern = std::iter::repeat_n("{a,b}", 30).collect::<String>();
+    let name = "a".repeat(30);
+    std::fs::write(dir.join(&name), "safe").unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        format!("values = read*(\"{pattern}\")\n"),
+    )
+    .unwrap();
+    let value = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
+    assert_eq!(value["values"][name]["text"], "safe");
+}
+
+#[test]
+fn resource_file_allowlist_accepts_equivalent_uri_spellings() {
+    let temp = TestTempDir::new("pklr_test_resources_uri_spellings");
+    let dir = temp.path();
+    std::fs::write(dir.join("data.txt"), "allowed").unwrap();
+    let path = dir.join("main.pkl");
+    std::fs::write(&path, "value = read(\"data.txt\")\n").unwrap();
+    let allowed = format!("file:{}", dir.display());
+    let value = pklr::EvaluatorBuilder::new()
+        .allowed_resources(vec![allowed])
+        .eval_to_json(&path)
+        .unwrap();
+    assert_eq!(value["value"]["text"], "allowed");
+
+    std::fs::create_dir_all(dir.join("allowed")).unwrap();
+    std::fs::create_dir_all(dir.join("allowed-sibling")).unwrap();
+    std::fs::write(dir.join("allowed-sibling/secret.txt"), "secret").unwrap();
+    let path = dir.join("allowed/main.pkl");
+    std::fs::write(&path, "value = read(\"../allowed-sibling/secret.txt\")\n").unwrap();
+    let allowed = format!("file:{}/allowed/", dir.display());
+    let error = pklr::EvaluatorBuilder::new()
+        .allowed_resources(vec![allowed])
+        .eval_to_json(&path)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Refusing to read resource"), "{error}");
+}
+
+#[test]
+fn narrow_native_allowlist_keeps_missing_relative_resources_nullable() {
+    let temp = TestTempDir::new("pklr_test_resources_missing_narrow");
+    let dir = temp.path().join("safe");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("main.pkl");
+    std::fs::write(&path, "value = read?(\"missing.txt\")\n").unwrap();
+    let allowed = format!("file:{}/", dir.display());
+    let value = pklr::EvaluatorBuilder::new()
+        .allowed_resources(vec![allowed])
+        .eval_to_json(&path)
+        .unwrap();
+    assert!(value["value"].is_null());
+
+    // The module itself need not exist for eval_source. Its existing relative
+    // parent still establishes the native allowlist base.
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let allowed = format!("file:{}/", fixture.display());
+    let mut evaluator = pklr::eval::Evaluator::new();
+    evaluator.set_allowed_resources(vec![allowed]);
+    let value = evaluator
+        .eval_source(
+            "value = read?(\"missing-from-unsaved.txt\")\n",
+            std::path::Path::new("tests/fixtures/unsaved-resource-module.pkl"),
+        )
+        .unwrap()
+        .to_json();
+    assert!(value["value"].is_null());
+
+    let cwd = std::env::current_dir().unwrap();
+    let allowed = format!("file:{}/", cwd.display());
+    let mut evaluator = pklr::eval::Evaluator::new();
+    evaluator.set_allowed_resources(vec![allowed]);
+    let value = evaluator
+        .eval_source(
+            "value = read?(\"missing-from-bare-unsaved.txt\")\n",
+            std::path::Path::new("unsaved-resource-module.pkl"),
+        )
+        .unwrap()
+        .to_json();
+    assert!(value["value"].is_null());
+}
+
+#[test]
+fn resource_glob_rejects_triple_dot_before_traversal() {
+    let error = eval_fails(r#"x = read*(".../secret/*.txt")"#);
+    assert!(
+        error.contains("Cannot combine resource globs with triple-dot"),
+        "{error}"
+    );
 }
 
 #[test]

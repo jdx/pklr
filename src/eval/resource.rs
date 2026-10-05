@@ -38,12 +38,22 @@ impl Evaluator {
                 if !self.path_exists_io(&path)? {
                     return Ok(None);
                 }
-                Ok(Some(resource_value(&uri, &self.read_bytes_io(&path)?)))
+                match self.read_bytes_io(&path) {
+                    Ok(bytes) => Ok(Some(resource_value(&uri, &bytes))),
+                    Err(Error::Io(_, error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                        Ok(None)
+                    }
+                    Err(error) => Err(error),
+                }
             }
-            Target::Remote(uri) => Ok(Some(resource_value(
-                &uri,
-                &self.read_remote_resource(&uri)?,
-            ))),
+            Target::Remote(uri) => match self.read_remote_resource(&uri) {
+                Ok(bytes) => Ok(Some(resource_value(&uri, &bytes))),
+                Err(Error::ImportNotFound(_)) => Ok(None),
+                Err(Error::Io(_, error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                    Ok(None)
+                }
+                Err(error) => Err(error),
+            },
             Target::Unreadable => Ok(None),
         };
         if let Some(value) = value? {
@@ -87,7 +97,7 @@ impl Evaluator {
         // Checking the spelling first would let `/safe/../secret` (including
         // percent-encoded dot segments) escape an allowed directory.
         if uri_scheme(uri) == Some("file") {
-            let path = absolute_clean(&file_uri_path(uri)?);
+            let path = absolute_clean(&self.host_absolute_path(file_uri_path(uri)?));
             let normalized = file_uri(&path);
             self.check_resource_allowed(&normalized)?;
             return Ok(Target::File {
@@ -100,7 +110,17 @@ impl Evaluator {
             None => match resolve_remote_relative(module, uri) {
                 Some(remote) => remote,
                 None => {
-                    let path = absolute_clean(&self.resolve_local_path(module, uri)?);
+                    // When no file URI can possibly be allowed, fail before
+                    // resolving a relative path through a capability.
+                    if !self
+                        .allowed_resources
+                        .iter()
+                        .any(|prefix| uri_scheme(prefix) == Some("file"))
+                    {
+                        self.check_resource_allowed("file:")?;
+                    }
+                    let path = self.resolve_resource_local_path(module, uri)?;
+                    let path = absolute_clean(&self.host_absolute_path(path));
                     let normalized = file_uri(&path);
                     self.check_resource_allowed(&normalized)?;
                     return Ok(Target::File {
@@ -128,11 +148,15 @@ impl Evaluator {
     fn check_resource_allowed(&self, uri: &str) -> Result<()> {
         // Schemes are case-sensitive in Pkl.  A prefix is compared after a
         // file URI has been normalized; this prevents `../` allowlist escapes.
-        if self
-            .allowed_resources
-            .iter()
-            .any(|prefix| uri.starts_with(prefix))
-        {
+        if self.allowed_resources.iter().any(|prefix| {
+            if uri_scheme(uri) == Some("file") && uri_scheme(prefix) == Some("file") {
+                return file_allowlist_matches(uri, prefix);
+            }
+            if uri.starts_with(prefix) {
+                return true;
+            }
+            false
+        }) {
             return Ok(());
         }
         Err(Error::Eval(format!(
@@ -149,7 +173,57 @@ impl Evaluator {
         Ok(value)
     }
 
+    /// Give native paths their canonical absolute spelling while leaving a
+    /// capability's virtual relative namespace untouched. Native
+    /// canonicalization produces an absolute path; sandbox capabilities can
+    /// return their own virtual path unchanged.
+    fn host_absolute_path(&mut self, path: PathBuf) -> PathBuf {
+        if path.is_absolute() {
+            path
+        } else {
+            self.canonicalize_io(&path).unwrap_or(path)
+        }
+    }
+
+    /// Resolve a triple-dot resource while checking each actual candidate
+    /// before asking the host whether that candidate exists.
+    fn resolve_resource_local_path(&mut self, module: &Path, uri: &str) -> Result<PathBuf> {
+        let Some(triple_dot) = parse_triple_dot_path(uri)? else {
+            // Resolve the module identity, not the target: canonicalizing a
+            // missing resource would fail and lose a valid native base path.
+            let parent = module_dir(module.parent().unwrap_or(Path::new(".")));
+            let parent = self
+                .canonicalize_io(parent)
+                .unwrap_or_else(|_| parent.to_path_buf());
+            return Ok(parent.join(uri));
+        };
+        let module = self
+            .canonicalize_io(module)
+            .unwrap_or_else(|_| module.to_path_buf());
+        #[cfg(feature = "package-zip")]
+        let roots: Vec<PathBuf> = self.package_dirs.values().cloned().collect();
+        #[cfg(feature = "package-zip")]
+        let root = roots.into_iter().find_map(|root| {
+            let root = self.canonicalize_io(&root).unwrap_or(root);
+            module.starts_with(&root).then_some(root)
+        });
+        #[cfg(not(feature = "package-zip"))]
+        let root: Option<PathBuf> = None;
+        let found = resolve_triple_dot(&module, triple_dot, root.as_deref(), |candidate| {
+            self.check_resource_allowed(&file_uri(&absolute_clean(candidate)))?;
+            self.path_exists_io(candidate)
+        })?;
+        Ok(found.unwrap_or_else(|| module.parent().unwrap_or(Path::new(".")).join(uri)))
+    }
+
     pub(super) fn eval_read_glob(&mut self, pattern: &str, module: &Path) -> Result<Value> {
+        // Resource globs never support triple-dot lookup; reject it before
+        // resolving a path or listing any ancestor directory.
+        if parse_triple_dot_path(pattern)?.is_some() {
+            return Err(Error::Eval(
+                "Cannot combine resource globs with triple-dot module URIs.".into(),
+            ));
+        }
         // Relative resources in an HTTP/package module are remote-relative,
         // never paths in the evaluator process' filesystem namespace.
         let resolved_remote = uri_scheme(pattern)
@@ -195,22 +269,18 @@ impl Evaluator {
                     let path = file_uri_path(pattern)?;
                     let normalized = file_uri(&absolute_clean(&path));
                     self.check_resource_allowed(&normalized)?;
-                    (
-                        PathBuf::from("/"),
-                        path.strip_prefix("/")
-                            .unwrap_or(&path)
-                            .to_string_lossy()
-                            .to_string(),
-                        true,
-                    )
+                    let (base, glob) = file_glob_base_and_pattern(&path);
+                    (base, glob, true)
                 } else {
-                    let base = module_dir(module.parent().unwrap_or(Path::new("."))).to_path_buf();
+                    let base = absolute_clean(&self.host_absolute_path(
+                        module_dir(module.parent().unwrap_or(Path::new("."))).to_path_buf(),
+                    ));
                     // Validate the resolved, normalized pattern before globbing.
                     self.check_resource_allowed(&file_uri(&absolute_clean(&base.join(pattern))))?;
                     (base, pattern.to_string(), false)
                 };
                 for path in self.glob_io(&base, &glob)? {
-                    let path = absolute_clean(&path);
+                    let path = absolute_clean(&self.host_absolute_path(path));
                     let uri = file_uri(&path);
                     self.check_resource_allowed(&uri)?;
                     // Pkl keys explicit file globs by the same normalized,
@@ -218,7 +288,7 @@ impl Evaluator {
                     let key = if file_keys {
                         uri.clone()
                     } else {
-                        pathdiff_or_full(&path, &base)
+                        relative_glob_key(&path, &base)
                     };
                     out.insert(
                         key.into(),
@@ -282,19 +352,63 @@ fn file_uri_path(uri: &str) -> Result<PathBuf> {
             "Resource URI `{uri}` has invalid syntax. File URIs must have a path that starts with `/` (e.g. file:/path/to/my_resource)."
         )));
     }
-    Ok(PathBuf::from(percent_decode(path)))
+    let path = percent_decode(path);
+    #[cfg(windows)]
+    let path = path
+        .strip_prefix('/')
+        .filter(|path| {
+            path.as_bytes().len() >= 2
+                && path.as_bytes()[0].is_ascii_alphabetic()
+                && path.as_bytes()[1] == b':'
+        })
+        .unwrap_or(&path);
+    Ok(PathBuf::from(path))
 }
 
 fn file_uri(path: &Path) -> String {
-    format!(
-        "file://{}",
-        percent_encode(&normalize_pkl_path(&path.to_string_lossy()))
-    )
+    let path = percent_encode(&normalize_pkl_path(&path.to_string_lossy()));
+    if path.len() >= 2 && path.as_bytes()[0].is_ascii_alphabetic() && path.as_bytes()[1] == b':' {
+        format!("file:///{path}")
+    } else {
+        format!("file://{path}")
+    }
+}
+
+fn file_glob_base_and_pattern(path: &Path) -> (PathBuf, String) {
+    #[cfg(windows)]
+    {
+        use std::path::Component;
+
+        let mut base = PathBuf::new();
+        let mut components = path.components();
+        if let Some(Component::Prefix(prefix)) = components.next() {
+            base.push(prefix.as_os_str());
+        }
+        if let Some(Component::RootDir) = components.next() {
+            base.push(Path::new("\\"));
+        }
+        return (
+            base,
+            normalize_pkl_path(&components.as_path().to_string_lossy()),
+        );
+    }
+    #[cfg(not(windows))]
+    {
+        (
+            PathBuf::from("/"),
+            path.strip_prefix("/")
+                .unwrap_or(path)
+                .to_string_lossy()
+                .to_string(),
+        )
+    }
 }
 fn percent_encode(text: &str) -> String {
     text.bytes()
         .map(|b| {
-            if b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'-' | b'_' | b'~' | b'*') {
+            if b.is_ascii_alphanumeric()
+                || matches!(b, b'/' | b'.' | b'-' | b'_' | b'~' | b'*' | b':')
+            {
                 (b as char).to_string()
             } else {
                 format!("%{b:02X}")
@@ -331,18 +445,65 @@ fn hex(byte: u8) -> Option<u8> {
     }
 }
 fn absolute_clean(path: &Path) -> PathBuf {
-    let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
     let mut out = PathBuf::new();
     for component in path.components() {
         match component {
             std::path::Component::ParentDir => {
-                out.pop();
+                if out.components().next_back().is_some_and(|component| {
+                    !matches!(
+                        component,
+                        std::path::Component::ParentDir
+                            | std::path::Component::RootDir
+                            | std::path::Component::Prefix(_)
+                    )
+                }) {
+                    out.pop();
+                } else if !out.has_root() {
+                    out.push(component);
+                }
             }
             std::path::Component::CurDir => {}
             _ => out.push(component),
         }
     }
     out
+}
+
+/// A resource glob key remains relative to its importing module, even when a
+/// literal `..` prefix walks above that directory.
+fn relative_glob_key(path: &Path, base: &Path) -> String {
+    let path: Vec<_> = path.components().collect();
+    let base: Vec<_> = base.components().collect();
+    let shared = path.iter().zip(&base).take_while(|(a, b)| a == b).count();
+    let mut key = PathBuf::new();
+    for _ in shared..base.len() {
+        key.push("..");
+    }
+    for component in &path[shared..] {
+        key.push(component.as_os_str());
+    }
+    normalize_pkl_path(&key.to_string_lossy())
+}
+
+/// Match normalized file allowlist entries. A trailing slash declares a
+/// directory prefix; other prefixes retain the builder's documented URI
+/// prefix semantics.
+fn file_allowlist_matches(uri: &str, prefix: &str) -> bool {
+    if prefix == "file:" {
+        return true;
+    }
+    let Ok(path) = file_uri_path(prefix) else {
+        return false;
+    };
+    let directory = prefix.ends_with('/');
+    let prefix = file_uri(&absolute_clean(&path));
+    if !directory || prefix == "file:///" || prefix.ends_with(":/") {
+        return uri.starts_with(&prefix);
+    }
+    uri == prefix
+        || uri
+            .strip_prefix(&prefix)
+            .is_some_and(|remaining| remaining.starts_with('/'))
 }
 fn resource_value(uri: &str, bytes: &[u8]) -> Value {
     let mut map = ObjectMap::default();
