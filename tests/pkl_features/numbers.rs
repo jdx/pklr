@@ -46,6 +46,18 @@ fn int_errors_match_pkl() {
 }
 
 #[test]
+fn int_is_between_keeps_exact_comparisons_per_bound() {
+    let json = eval(
+        r#"
+first = 9007199254740992.isBetween(9007199254740993, 1e20)
+second = 9007199254740993.isBetween(0.0, 9007199254740992)
+"#,
+    );
+    assert_eq!(json["first"], false);
+    assert_eq!(json["second"], false);
+}
+
+#[test]
 fn float_properties_and_methods() {
     let json = eval(
         r##"

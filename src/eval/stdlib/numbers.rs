@@ -247,11 +247,19 @@ fn number_is_between(x: f64, n: Option<i64>, args: &Args<'_>) -> Result<Value> {
     };
     let (start, start_int) = bound(0)?;
     let (end, end_int) = bound(1)?;
-    // Compare two Ints exactly; anything involving a Float as doubles.
-    Ok(Value::Bool(match (n, start_int, end_int) {
-        (Some(n), Some(s), Some(e)) => s <= n && n <= e,
-        _ => start <= x && x <= end,
-    }))
+    // Preserve an Int receiver's exact comparison with each Int bound. A
+    // Float on one side only requires converting that comparison to doubles;
+    // converting both bounds merely because either is a Float loses precision
+    // for the other bound above 2^53.
+    let after_start = match (n, start_int) {
+        (Some(n), Some(start)) => start <= n,
+        _ => start <= x,
+    };
+    let before_end = match (n, end_int) {
+        (Some(n), Some(end)) => n <= end,
+        _ => x <= end,
+    };
+    Ok(Value::Bool(after_start && before_end))
 }
 
 pub(super) fn int_method(n: i64, name: &str, args: &[Value]) -> Option<Result<Value>> {
