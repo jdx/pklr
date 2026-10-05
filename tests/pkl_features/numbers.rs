@@ -192,17 +192,24 @@ receiverAmended = a {
   when (true) { [1000.ms] = 2 }
   ["seen"] = this[1.s]
 }
+receiverBodyAmended = a {
+  when (true) {
+    [1000.ms] = 2
+    ["seen"] = this[1.s]
+  }
+}
 values = List(
   whenAmended.length, whenAmended[1.s], whenAmended[1000.ms],
   forAmended.length, forAmended[1.s], forAmended[1000.ms],
   objectAmended[1.s].x, objectAmended[1.s].y,
   receiverAmended[1.s], receiverAmended["seen"],
+  receiverBodyAmended[1.s], receiverBodyAmended["seen"],
 )
 "#,
     );
     assert_eq!(
         json["values"],
-        serde_json::json!([1, 2, 2, 1, 2, 2, 1, 2, 2, 2])
+        serde_json::json!([1, 2, 2, 1, 2, 2, 1, 2, 2, 2, 2, 2])
     );
     assert!(
         eval_fails(r#"x = new Mapping { when (true) { [1.s] = 1; [1000.ms] = 2 } }"#)

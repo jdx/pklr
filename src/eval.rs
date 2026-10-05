@@ -3179,12 +3179,13 @@ impl Evaluator {
                             self.eval_value_amendment(existing, body, &active_scope, depth)?;
                         drop(active_scope);
                         entry_owners.release_this(&this_aliases);
-                        props_insert(
+                        props_insert_mapping(
                             &mut child_scope,
                             &this_aliases,
                             &mut all_props,
                             storage_key.clone(),
                             val.clone(),
+                            mapping_entries,
                         );
                         map.insert(storage_key, val);
                         refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
@@ -3245,12 +3246,13 @@ impl Evaluator {
                     };
                     drop(active_scope);
                     entry_owners.release_this(&this_aliases);
-                    props_insert(
+                    props_insert_mapping(
                         &mut child_scope,
                         &this_aliases,
                         &mut all_props,
                         storage_key.clone(),
                         val.clone(),
+                        mapping_entries,
                     );
                     map.insert(storage_key, val);
                     refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
