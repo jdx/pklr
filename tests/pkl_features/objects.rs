@@ -4565,3 +4565,54 @@ h3 = (h) { f = new { a = 7 } }
     assert_eq!(json["h2"]["f"], serde_json::json!({"a": 1, "b": 10}));
     assert_eq!(json["h3"]["f"], serde_json::json!({"a": 7, "b": 3}));
 }
+
+#[test]
+fn object_locals_retry_after_body_members_bind() {
+    let json = eval("bar = 5\nfoo { bar = 1; local loc = bar; qux = loc }");
+    assert_eq!(json["foo"], serde_json::json!({"bar": 1, "qux": 1}));
+
+    // Both locals recover once `b` binds, then the earlier property that
+    // depended on them is retried.
+    let json = eval("foo { local a = b; local c = a + 1; d = c; b = 2 }");
+    assert_eq!(json["foo"], serde_json::json!({"d": 3, "b": 2}));
+
+    // A local that never resolves remains lazy and fails only when read.
+    let err = eval_fails("foo { local a = missing; b = a }");
+    assert!(err.contains("missing"), "{err}");
+}
+
+#[test]
+fn const_locals_reject_non_const_members_that_are_actually_bound() {
+    for src in [
+        r#"
+foo {
+  res1 = 15
+  const local qux = this.res1
+  res2 = qux
+}
+"#,
+        r#"
+foo {
+  when (true) {
+    res1 = 15
+  }
+  const local qux = res1
+  res2 = qux
+}
+"#,
+        r#"
+open class Parent { res1 = 15 }
+class Child extends Parent {
+  const local qux = res1
+  res2 = qux
+}
+foo = new Child {}
+"#,
+    ] {
+        let err = eval_fails(src);
+        assert!(
+            err.contains("Cannot reference property `res1` from here because it is not `const`"),
+            "{src}: {err}"
+        );
+    }
+}
