@@ -619,7 +619,10 @@ impl Value {
                     if unrenderable.is_some() {
                         break;
                     }
-                    obj.insert(display_storage_key(k).to_string(), v.json_checked(unrenderable));
+                    obj.insert(
+                        display_storage_key(k).to_string(),
+                        v.json_checked(unrenderable),
+                    );
                 }
                 serde_json::Value::Object(obj)
             }
