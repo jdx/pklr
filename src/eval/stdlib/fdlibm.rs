@@ -1,10 +1,9 @@
 //! `pkl:math`'s IEEE-754 functions.
 //!
-//! These wrappers use `libm` 0.2.16 (MIT OR Apache-2.0), whose implementations
+//! These wrappers use `libm` 0.2.16 (MIT), whose implementations
 //! retain the original Sun/FreeBSD fdlibm notices where applicable. Pkl uses
-//! Java `StrictMath`; the only semantic adjustment needed by its `pow` wrapper
-//! is the Java result for an infinite exponent and a base whose magnitude is
-//! exactly one.
+//! Java `StrictMath`; its `pow` wrapper needs the Java result for a base whose
+//! magnitude is exactly one with either a NaN or infinite exponent.
 
 #[inline]
 pub(crate) fn sin(x: f64) -> f64 {
@@ -42,7 +41,7 @@ pub(crate) fn cbrt(x: f64) -> f64 {
 /// Java `StrictMath.pow`, including its special `±1 ^ ±∞` result.
 #[inline]
 pub(crate) fn pow(x: f64, y: f64) -> f64 {
-    if y.is_infinite() && x.abs() == 1.0 {
+    if x.abs() == 1.0 && (y.is_nan() || y.is_infinite()) {
         f64::NAN
     } else {
         libm::pow(x, y)
@@ -70,5 +69,7 @@ mod tests {
     fn pow_matches_java_at_one_and_infinity() {
         assert!(pow(1.0, f64::INFINITY).is_nan());
         assert!(pow(-1.0, f64::NEG_INFINITY).is_nan());
+        assert!(pow(1.0, f64::NAN).is_nan());
+        assert!(pow(-1.0, f64::NAN).is_nan());
     }
 }
