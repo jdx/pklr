@@ -1792,6 +1792,42 @@ fn trailing_semicolons_before_end_of_file() {
 
 #[test]
 fn function_types_are_accepted_in_type_positions() {
-    let json = eval("f: (Int) -> Int = (x) -> x\nout = f(1)");
-    assert_eq!(json["out"], 1);
+    let json = eval("zero: () -> Int = () -> 1\none: (Int,) -> String = (x) -> x.toString()\ntwo: (Int, String) -> String = (x, y) -> y\nnested: ((Int) -> Int) -> Int = (f) -> f(2)\nout = List(zero(), one(3), two(0, \"x\"), nested((x) -> x + 1))");
+    assert_eq!(json["out"], serde_json::json!([1, "3", "x", 3]));
+}
+
+#[test]
+fn function_types_support_aliases_unions_generics_and_method_returns() {
+    let json = eval(
+        r#"
+typealias Unary = (Int,) -> Int
+typealias OptionalUnary = Unary|Null
+local increment: Unary = (x) -> x + 1
+local maybe: OptionalUnary = increment
+local callbacks: Listing<(Int) -> String> = new Listing { (x) -> x.toString() }
+function makeFormatter(): (Int) -> String = (x) -> x.toString()
+function applyTwice(f: (Int) -> Int): Int = f.apply(f.apply(1))
+out = List(
+  applyTwice(increment),
+  callbacks.length,
+  makeFormatter().apply(5),
+  ((f: (Int) -> Int) -> f.apply(6)).apply(increment),
+)
+"#,
+    );
+    assert_eq!(json["out"], serde_json::json!([3, 1, "5", 7]));
+}
+
+#[test]
+fn function_types_reject_non_lambdas_and_invalid_parenthesized_forms() {
+    let err = eval_fails("bad: (Int) -> Int = 1");
+    assert!(err.contains("Function1"), "{err}");
+
+    for src in [
+        "bad: () = () -> 1",
+        "bad: (Int, String) = (x, y) -> x",
+        "bad: (Int,,) -> Int = (x) -> x",
+    ] {
+        assert!(!eval_fails(src).is_empty(), "{src}");
+    }
 }

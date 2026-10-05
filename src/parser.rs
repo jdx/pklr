@@ -1024,6 +1024,9 @@ impl<'a> Parser<'a> {
                     params.push(self.parse_type()?);
                     while matches!(self.peek(), TokenKind::Comma) {
                         self.advance();
+                        if matches!(self.peek(), TokenKind::RParen) {
+                            break;
+                        }
                         params.push(self.parse_type()?);
                     }
                 }
