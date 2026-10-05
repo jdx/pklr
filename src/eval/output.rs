@@ -7,7 +7,7 @@ use std::sync::Arc;
 use super::remote::resolve_remote_relative;
 use super::render::{self, Converters, Invoke, Kind, RendererKind, Settings};
 use super::types::resolve_dotted;
-use super::{Evaluator, Scope, SourceScope, seed_builtins};
+use super::{Evaluator, MODULE_OUTPUT_TEXT_CONTEXT, Scope, SourceScope, seed_builtins};
 use crate::error::{Error, Result};
 use crate::lexer;
 use crate::parser::{self, Entry, Expr, Modifier, Module, Property, TypeExpr};
@@ -333,9 +333,12 @@ impl Evaluator {
         let renderer = self
             .builtin_class(self.output_format.class_name())?
             .unwrap_or_default();
+        let default_value = module_object(module_map, path);
+        let default_renderer = renderer.clone();
+        let mut output_value_is_explicit = false;
         if let Value::Object(map, _) = &mut output {
             let map = Arc::make_mut(map);
-            map.insert("value".into(), module_object(module_map, path));
+            map.insert("value".into(), default_value.clone());
             map.insert("renderer".into(), renderer);
         }
         for (prop, base) in &props {
@@ -374,25 +377,77 @@ impl Evaluator {
                     )));
                 }
                 self.output_sets_value = true;
+                output_value_is_explicit = true;
                 output = value;
             }
             if let Some(body) = &prop.body {
-                self.output_sets_value |= body
+                let body_sets_value = body
                     .iter()
                     .any(|entry| matches!(entry, Entry::Property(p) if p.name == "value"));
+                self.output_sets_value |= body_sets_value;
                 // The body reads the members it amends (`renderer`,
                 // `value`) by name.
                 let mut body_scope = scope.child();
+                body_scope.set(
+                    MODULE_OUTPUT_TEXT_CONTEXT,
+                    module_output_text_context(
+                        &output,
+                        output_value_is_explicit,
+                        &default_value,
+                        &default_renderer,
+                    ),
+                );
                 if let Value::Object(map, _) = &output {
                     for (name, value) in map.iter() {
                         body_scope.set_name(name.clone(), value.clone());
                     }
                 }
                 output = self.eval_value_amendment(output, body, &body_scope, depth)?;
+                output_value_is_explicit |= body_sets_value;
             }
         }
         self.module_output = Some(output);
         Ok(())
+    }
+
+    /// Render `ModuleOutput.text` only when `super.text` is evaluated.
+    /// `output` amendments can update `value` and `renderer`, so read both
+    /// from the particular inherited output being accessed.
+    pub(super) fn module_output_text(&mut self, context: &Value, depth: usize) -> Result<Value> {
+        let Value::Object(context, _) = context else {
+            return Err(Error::Eval("invalid ModuleOutput text context".into()));
+        };
+        let Value::Object(output, _) = context
+            .get("output")
+            .ok_or_else(|| Error::Eval("missing ModuleOutput text output".into()))?
+        else {
+            return Err(Error::Eval("invalid ModuleOutput text output".into()));
+        };
+        let value_is_explicit = matches!(context.get("valueIsExplicit"), Some(Value::Bool(true)));
+        let value = output
+            .get("value")
+            .or_else(|| {
+                (!value_is_explicit)
+                    .then(|| context.get("implicitValue"))
+                    .flatten()
+            })
+            .ok_or_else(|| Error::Eval("missing ModuleOutput default value".into()))?;
+        let renderer = output
+            .get("renderer")
+            .or_else(|| context.get("implicitRenderer"))
+            .ok_or_else(|| Error::Eval("missing ModuleOutput default renderer".into()))?;
+        let kind = render::renderer_kind(renderer).unwrap_or(self.output_format);
+        // The implicit module object is a typed value. An explicit
+        // `output.value`, including one inherited through `amends`, keeps its
+        // own kind (Mapping, Listing, scalar, or a converter target).
+        let top_kind = (!value_is_explicit).then_some(Kind::Typed);
+        let text = Settings::read(kind, renderer)?.render(
+            value,
+            true,
+            top_kind,
+            &mut Invoker(self, depth),
+        )?;
+        Ok(Value::String(text.into()))
     }
 
     /// The `output` properties of the modules `module` amends or extends,
@@ -554,6 +609,20 @@ impl Evaluator {
         let settings = Settings::read(kind, &renderer)?;
         settings.render(&value, true, top_kind, &mut Invoker(self, 0))
     }
+}
+
+fn module_output_text_context(
+    output: &Value,
+    value_is_explicit: bool,
+    implicit_value: &Value,
+    implicit_renderer: &Value,
+) -> Value {
+    let mut context = ObjectMap::default();
+    context.insert("output".into(), output.clone());
+    context.insert("valueIsExplicit".into(), Value::Bool(value_is_explicit));
+    context.insert("implicitValue".into(), implicit_value.clone());
+    context.insert("implicitRenderer".into(), implicit_renderer.clone());
+    Value::Object(Arc::new(context), None)
 }
 
 fn renderer_converters(renderer: &Value) -> Result<Converters> {

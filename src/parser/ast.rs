@@ -64,6 +64,11 @@ pub enum Entry {
     Spread(Expr),
     /// Bare element expression (used in Listing bodies)
     Elem(Expr),
+    /// Member predicate: `[[predicate]] = expr` or `[[predicate]] { body }`
+    /// (the body form is an `Expr::ObjectBody`). Applies to every element or
+    /// entry of the amended object for which `predicate` holds, with `this`
+    /// bound to the element or entry value.
+    Predicate(Expr, Expr),
     /// Class definition: `[modifiers] class Name [extends Parent] { properties... }`
     /// Fields: (name, modifiers, optional_parent, body)
     ClassDef(String, Vec<Modifier>, Option<String>, Body),

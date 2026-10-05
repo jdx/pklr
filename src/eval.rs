@@ -52,7 +52,9 @@ fn cancelled() -> Error {
 }
 
 const DYNAMIC_SIBLING_REF: &str = "\0pklr:dynamic-sibling";
-
+// Scoped context for lazily materializing an inherited `ModuleOutput.text`.
+// It is an impossible user identifier and is captured by output-body lambdas.
+const MODULE_OUTPUT_TEXT_CONTEXT: &str = "\0pklr:module-output-text-context";
 /// Evaluates pkl source files to [`Value`].
 pub struct Evaluator {
     base_path: PathBuf,
@@ -252,6 +254,10 @@ fn is_simple_expr(expr: &Expr) -> bool {
         }
         _ => false,
     }
+}
+
+fn member_predicates_unsupported() -> Error {
+    Error::Eval("member predicates (`[[...]]`) are not supported".into())
 }
 
 /// Apply a binary operator other than `|>` to evaluated operands.
@@ -1399,6 +1405,16 @@ impl Evaluator {
         }
         if let Some(value) = map.get(field) {
             return Ok(value.clone());
+        }
+        if field == "text"
+            && source
+                .as_ref()
+                .is_some_and(|source| source.type_name.as_deref() == Some("ModuleOutput"))
+        {
+            let context = scope
+                .get(MODULE_OUTPUT_TEXT_CONTEXT)
+                .ok_or_else(|| Error::Eval("missing ModuleOutput text context".into()))?;
+            return self.module_output_text(context, depth + 1);
         }
         // An untyped object's prototype supplies an empty Dynamic default
         // for a newly declared property, never a member of an outer object.
@@ -3452,6 +3468,7 @@ impl Evaluator {
                     elements.push(self.eval_expr(expr, &active_scope, depth + 1)?);
                 }
                 Entry::ClassDef(..) | Entry::TypeAlias(..) => {} // handled in scope setup
+                Entry::Predicate(..) => return Err(member_predicates_unsupported()),
             }
         }
         // Evaluate deferred local lambdas (function definitions) AFTER all
@@ -4595,6 +4612,7 @@ impl Evaluator {
                         )?;
                     }
                 }
+                Entry::Predicate(..) => return Err(member_predicates_unsupported()),
                 _ => {}
             }
         }
@@ -4641,6 +4659,7 @@ impl Evaluator {
         }
         for entry in entries {
             match entry {
+                Entry::Predicate(..) => return Err(member_predicates_unsupported()),
                 Entry::Property(_) => {}
                 Entry::Elem(expr) => items.push(self.eval_expr(expr, &listing_scope, depth + 1)?),
                 Entry::DynProperty(index, value) => {
@@ -4785,12 +4804,12 @@ impl Evaluator {
                     Arc::new(if names.contains("outer") || names.contains(NAMES_A_TYPE) {
                         scope.flatten()
                     } else {
-                        scope.flatten_names(
-                            names
-                                .iter()
-                                .map(String::as_str)
-                                .chain(["this", "module", "super"]),
-                        )
+                        scope.flatten_names(names.iter().map(String::as_str).chain([
+                            "this",
+                            "module",
+                            "super",
+                            MODULE_OUTPUT_TEXT_CONTEXT,
+                        ]))
                     });
                 let captured_body = refs
                     .iter()
@@ -4834,6 +4853,7 @@ impl Evaluator {
                     Ok(items)
                 };
                 match type_name.as_deref() {
+                    Some("module") => Err(Error::Eval("`new module` is not supported".into())),
                     _ if has_elements && !defines_members => Ok(Value::List(ListValue::new(
                         ListKind::Listing,
                         eval_elements(self)?,
@@ -5532,6 +5552,13 @@ impl Evaluator {
             for a in args {
                 evaled_args.push(self.eval_expr(a, scope, depth + 1)?);
             }
+            if params.len() != evaled_args.len() {
+                return Err(Error::Eval(format!(
+                    "Expected {} function arguments but got {}.",
+                    params.len(),
+                    evaled_args.len()
+                )));
+            }
             for (param, arg) in params.iter().zip(evaled_args) {
                 call_scope.declare(param, arg);
             }
@@ -5588,6 +5615,13 @@ impl Evaluator {
         if let Value::Object(map, _) = obj
             && let Some(Value::Lambda(params, body, captured)) = map.get(method)
         {
+            if params.len() != evaled_args.len() {
+                return Err(Error::Eval(format!(
+                    "Expected {} function arguments but got {}.",
+                    params.len(),
+                    evaled_args.len()
+                )));
+            }
             let mut call_scope = Scope::for_call(captured);
             // Layer in all instance properties, including lambdas, so local
             // functions called by this method see overrides.
@@ -5824,6 +5858,13 @@ impl Evaluator {
 
             // Lambda.apply()
             (Value::Lambda(params, body, captured), "apply") => {
+                if params.len() != args.len() {
+                    return Err(Error::Eval(format!(
+                        "Expected {} function arguments but got {}.",
+                        params.len(),
+                        args.len()
+                    )));
+                }
                 let mut call_scope = Scope::for_call(captured);
                 for (param, arg) in params.iter().zip(args.iter()) {
                     call_scope.declare(param, arg.clone());
@@ -5837,6 +5878,13 @@ impl Evaluator {
 
     fn invoke_lambda(&mut self, lambda: &Value, args: &[Value], depth: usize) -> Result<Value> {
         if let Value::Lambda(params, body, captured) = lambda {
+            if params.len() != args.len() {
+                return Err(Error::Eval(format!(
+                    "Expected {} function arguments but got {}.",
+                    params.len(),
+                    args.len()
+                )));
+            }
             let mut scope = Scope::for_call(captured);
             for (param, arg) in params.iter().zip(args.iter()) {
                 scope.declare(param, arg.clone());
@@ -5950,6 +5998,14 @@ impl Evaluator {
             }
         }
         if let Value::List(existing) = base {
+            if overlay_entries.iter().any(|entry| {
+                matches!(entry, Entry::Property(prop)
+                    if prop.name != "default" && !has_modifier(&prop.modifiers, Modifier::Local))
+            }) {
+                return Err(Error::Eval(
+                    "Object of type `Listing` cannot have a property.".into(),
+                ));
+            }
             let mut amended = existing;
             let mut amendment_scope = scope.child();
             amendment_scope.set("super", Value::List(amended.clone()));
@@ -6046,6 +6102,29 @@ impl Evaluator {
             && let Expr::ObjectBody(overlay_entries) = right
         {
             let base = self.eval_expr(left, scope, depth + 1)?;
+            // Amending a function amends its result: `f { ... }` is
+            // `(args) -> f.apply(args) { ... }`.
+            if let Value::Lambda(params, ..) = &base {
+                let function = "\0amended_function";
+                let call = Expr::Call(
+                    Box::new(Expr::Field(
+                        Box::new(Expr::Ident(function.into())),
+                        "apply".into(),
+                    )),
+                    params.iter().map(|p| Expr::Ident(p.clone())).collect(),
+                );
+                let lambda = Expr::Lambda(
+                    params.to_vec().into(),
+                    Arc::new(Expr::Binop(
+                        BinOp::Add,
+                        Box::new(call),
+                        Box::new(Expr::ObjectBody(overlay_entries.clone())),
+                    )),
+                );
+                let mut lambda_scope = scope.child();
+                lambda_scope.set(function, base);
+                return self.eval_expr(&lambda, &lambda_scope, depth + 1);
+            }
             return self.eval_value_amendment(base, overlay_entries, scope, depth);
         }
 
@@ -6208,6 +6287,7 @@ impl Evaluator {
 
         for entry in entries {
             match entry {
+                Entry::Predicate(..) => return Err(member_predicates_unsupported()),
                 Entry::DynProperty(key_expr, val_expr) => {
                     let class_key = self.class_key_of(key_expr, &entry_scope);
                     let key = class_key
@@ -7715,10 +7795,11 @@ mod super_deprecation_tests {
     fn super_property_access_warns_once() {
         let mut evaluator = super::Evaluator::default();
         let source = r#"
-local base = new {
+class Base {
   @Deprecated { message = "use replacement" }
-  old = 1
+  old: Int = 1
 }
+local base = new Base {}
 result = (base) { old = super.old + super.old }
 "#;
         let value = evaluator

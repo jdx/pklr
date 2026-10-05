@@ -19,9 +19,6 @@ struct Lexer<'a> {
     pos: usize,
     line: usize,
     col: usize,
-    token_start_line: usize,
-    token_start_col: usize,
-    token_start_offset: usize,
     /// String interpolations currently open around the lexer's position.
     interpolation_depth: usize,
 }
@@ -31,6 +28,43 @@ struct Lexer<'a> {
 /// the stack.
 const MAX_INTERPOLATION_DEPTH: usize = crate::parser::MAX_NESTING_DEPTH;
 
+/// One piece of a multi-line string before indentation is stripped.
+enum Piece<'a> {
+    Newline,
+    /// Raw characters of (part of) a line, and their byte offset.
+    Text(&'a str, usize),
+    /// A decoded escape sequence, and its byte offset.
+    Escape(String, usize),
+    /// `\` followed by a newline: joins two lines.
+    Continuation(usize),
+    Interp(Vec<Token>, usize),
+}
+
+/// Accumulates string literal parts, keeping `StringPart`s alternating
+/// between literals and interpolations.
+#[derive(Default)]
+struct StringBuilder {
+    parts: Vec<StringPart>,
+    current: String,
+}
+
+impl StringBuilder {
+    fn push_interp(&mut self, tokens: Vec<Token>) {
+        self.parts
+            .push(StringPart::Literal(std::mem::take(&mut self.current)));
+        self.parts.push(StringPart::Tokens(tokens));
+    }
+
+    fn finish(mut self) -> TokenKind {
+        if self.parts.is_empty() {
+            TokenKind::StringLit(self.current)
+        } else {
+            self.parts.push(StringPart::Literal(self.current));
+            TokenKind::InterpolatedString(self.parts)
+        }
+    }
+}
+
 impl<'a> Lexer<'a> {
     fn new(source: &'a str, name: &str) -> Self {
         Self {
@@ -39,15 +73,20 @@ impl<'a> Lexer<'a> {
             pos: 0,
             line: 1,
             col: 1,
-            token_start_line: 1,
-            token_start_col: 1,
-            token_start_offset: 0,
             interpolation_depth: 0,
         }
     }
 
     fn lex_error(&self, message: impl Into<String>) -> Error {
-        Error::lex(&self.name, self.source, self.pos, message.into())
+        self.lex_error_at(self.pos, message)
+    }
+
+    fn lex_error_at(&self, offset: usize, message: impl Into<String>) -> Error {
+        Error::lex(&self.name, self.source, offset, message.into())
+    }
+
+    fn rest(&self) -> &'a str {
+        &self.source[self.pos..]
     }
 
     #[cold]
@@ -59,11 +98,11 @@ impl<'a> Lexer<'a> {
     }
 
     fn peek(&self) -> Option<char> {
-        self.source[self.pos..].chars().next()
+        self.rest().chars().next()
     }
 
     fn peek_nth(&self, n: usize) -> Option<char> {
-        self.source[self.pos..].chars().nth(n)
+        self.rest().chars().nth(n)
     }
 
     fn advance(&mut self) -> Option<char> {
@@ -78,19 +117,20 @@ impl<'a> Lexer<'a> {
         Some(ch)
     }
 
-    fn mark_token_start(&mut self) {
-        self.token_start_line = self.line;
-        self.token_start_col = self.col;
-        self.token_start_offset = self.pos;
+    /// Advance past `n` bytes of ASCII text known not to contain a newline.
+    fn advance_ascii(&mut self, n: usize) {
+        self.pos += n;
+        self.col += n;
     }
 
-    fn skip_whitespace_and_comments(&mut self) {
+    /// Skip whitespace and comments other than doc comments.
+    fn skip_whitespace_and_comments(&mut self) -> Result<()> {
         loop {
             // Skip whitespace. ASCII whitespace is one byte per column, so
             // scan bytes rather than decoding a char at a time.
             let bytes = self.source.as_bytes();
             while let Some(&byte) = bytes.get(self.pos)
-                && byte.is_ascii_whitespace()
+                && matches!(byte, b' ' | b'\n' | b'\t' | b'\r' | b'\x0c')
             {
                 self.pos += 1;
                 if byte == b'\n' {
@@ -100,651 +140,722 @@ impl<'a> Lexer<'a> {
                     self.col += 1;
                 }
             }
-            // Skip line comments, up to (not including) the newline
-            if self.source[self.pos..].starts_with("//") {
-                let rest = &self.source[self.pos..];
-                let len = rest.find('\n').unwrap_or(rest.len());
+            let rest = self.rest();
+            // Skip line comments, up to (not including) the newline.
+            // `///` starts a doc comment, which is a token.
+            if rest.starts_with("//") && !rest.starts_with("///") {
+                let len = rest.find(['\n', '\r']).unwrap_or(rest.len());
                 self.col += rest[..len].chars().count();
                 self.pos += len;
                 continue;
             }
-            // Skip block comments /* ... */
-            if self.source[self.pos..].starts_with("/*") {
-                self.advance();
-                self.advance(); // consume /*
+            if rest.starts_with("/*") {
+                let start = self.pos;
+                self.advance_ascii(2);
                 loop {
-                    if self.source[self.pos..].starts_with("*/") {
-                        self.advance();
-                        self.advance();
+                    if self.rest().starts_with("*/") {
+                        self.advance_ascii(2);
                         break;
                     }
                     if self.advance().is_none() {
-                        break;
+                        return Err(self.lex_error_at(start, "Unexpected end of file."));
                     }
                 }
                 continue;
             }
-            break;
-        }
-    }
-
-    fn read_string_token(&mut self) -> Result<TokenKind> {
-        // Assumes opening quote already consumed
-        // Recursive interpolation lexing updates the shared token-start fields.
-        // Restore this string's span before returning to its enclosing tokenizer.
-        let token_start = (
-            self.token_start_line,
-            self.token_start_col,
-            self.token_start_offset,
-        );
-        let mut current = String::new();
-        let mut parts: Vec<StringPart> = Vec::new();
-        let mut has_interpolation = false;
-        loop {
-            match self.advance() {
-                None => {
-                    return Err(self.lex_error("unterminated string"));
-                }
-                Some('"') => break,
-                Some('\\') => {
-                    match self.advance() {
-                        Some('n') => current.push('\n'),
-                        Some('t') => current.push('\t'),
-                        Some('r') => current.push('\r'),
-                        Some('"') => current.push('"'),
-                        Some('\\') => current.push('\\'),
-                        Some('u') => {
-                            // Unicode escape: \u{XXXX}
-                            if self.peek() == Some('{') {
-                                self.advance(); // consume '{'
-                                let mut hex = String::new();
-                                loop {
-                                    match self.peek() {
-                                        Some('}') => {
-                                            self.advance();
-                                            break;
-                                        }
-                                        Some(c) if c.is_ascii_hexdigit() => {
-                                            hex.push(c);
-                                            self.advance();
-                                        }
-                                        _ => {
-                                            return Err(
-                                                self.lex_error("invalid unicode escape sequence")
-                                            );
-                                        }
-                                    }
-                                }
-                                if hex.is_empty() {
-                                    return Err(self.lex_error(
-                                        "unicode escape must have at least one hex digit: \\u{XXXX}",
-                                    ));
-                                }
-                                let code_point = u32::from_str_radix(&hex, 16).map_err(|_| {
-                                    self.lex_error(format!(
-                                        "invalid unicode code point: \\u{{{hex}}}"
-                                    ))
-                                })?;
-                                let ch = char::from_u32(code_point).ok_or_else(|| {
-                                    self.lex_error(format!(
-                                        "invalid unicode code point: \\u{{{hex}}}"
-                                    ))
-                                })?;
-                                current.push(ch);
-                            } else {
-                                return Err(
-                                    self.lex_error("invalid unicode escape: expected \\u{XXXX}")
-                                );
-                            }
-                        }
-                        Some('(') => {
-                            has_interpolation = true;
-                            parts.push(StringPart::Literal(std::mem::take(&mut current)));
-                            if self.interpolation_depth >= MAX_INTERPOLATION_DEPTH {
-                                return Err(self.interpolation_depth_error());
-                            }
-                            self.interpolation_depth += 1;
-                            // Lex tokens until matching ')'
-                            let mut depth = 1;
-                            let mut expr_tokens = Vec::new();
-                            loop {
-                                self.skip_whitespace_and_comments();
-                                if self.peek().is_none() {
-                                    return Err(self.lex_error("unterminated string interpolation"));
-                                }
-                                if self.peek() == Some(')') && depth == 1 {
-                                    self.advance();
-                                    break;
-                                }
-                                // Use the main tokenizer to get one token
-                                let kind = self.read_one_token()?;
-                                if matches!(kind, TokenKind::LParen) {
-                                    depth += 1;
-                                } else if matches!(kind, TokenKind::RParen) {
-                                    depth -= 1;
-                                    if depth == 0 {
-                                        break;
-                                    }
-                                }
-                                expr_tokens.push(Token {
-                                    kind,
-                                    line: self.token_start_line,
-                                    col: self.token_start_col,
-                                    offset: self.token_start_offset,
-                                    end: self.pos,
-                                });
-                            }
-                            // Add Eof token so the parser knows when to stop
-                            expr_tokens.push(Token {
-                                kind: TokenKind::Eof,
-                                line: self.line,
-                                col: self.col,
-                                offset: self.pos,
-                                end: self.pos,
-                            });
-                            self.interpolation_depth -= 1;
-                            parts.push(StringPart::Tokens(expr_tokens));
-                        }
-                        Some(c) => {
-                            current.push('\\');
-                            current.push(c);
-                        }
-                        None => {
-                            return Err(self.lex_error("unterminated escape"));
-                        }
-                    }
-                }
-                Some(c) => current.push(c),
-            }
-        }
-        let token = if has_interpolation {
-            parts.push(StringPart::Literal(current));
-            TokenKind::InterpolatedString(parts)
-        } else {
-            TokenKind::StringLit(current)
-        };
-        (
-            self.token_start_line,
-            self.token_start_col,
-            self.token_start_offset,
-        ) = token_start;
-        Ok(token)
-    }
-
-    fn read_multiline_string(&mut self) -> Result<String> {
-        // Already consumed the first three `"`
-        // Read until closing `"""`
-        let mut s = String::new();
-        loop {
-            if self.source[self.pos..].starts_with("\"\"\"") {
-                self.advance();
-                self.advance();
-                self.advance();
-                break;
-            }
-            match self.advance() {
-                None => {
-                    return Err(self.lex_error("unterminated multiline string"));
-                }
-                Some(c) => s.push(c),
-            }
-        }
-        normalize_multiline_string(&s)
-    }
-
-    fn read_raw_multiline_string(&mut self, hash_count: usize) -> Result<String> {
-        // Already consumed the opening hashes and `"""`
-        // Read until the matching closing `"""` plus the same number of hashes.
-        let closing = format!("\"\"\"{}", "#".repeat(hash_count));
-        let mut s = String::new();
-        loop {
-            if self.source[self.pos..].starts_with(&closing) {
-                for _ in 0..closing.chars().count() {
-                    self.advance();
-                }
-                break;
-            }
-            match self.advance() {
-                None => {
-                    return Err(self.lex_error("unterminated raw multiline string"));
-                }
-                Some(c) => s.push(c),
-            }
-        }
-        normalize_multiline_string(&s)
-    }
-
-    fn read_number(&mut self, first: char) -> Result<TokenKind> {
-        // self.pos is already PAST first (caller called advance() before us)
-        let start = self.pos - first.len_utf8();
-
-        // Handle 0x / 0b / 0o prefixes immediately after '0'
-        if first == '0' {
-            match self.peek() {
-                Some('x') | Some('X') => {
-                    self.advance(); // consume 'x'
-                    while self
-                        .peek()
-                        .map(|c| c.is_ascii_hexdigit() || c == '_')
-                        .unwrap_or(false)
-                    {
-                        self.advance();
-                    }
-                    let raw = self.source[start..self.pos].replace('_', "");
-                    let v = i64::from_str_radix(&raw[2..], 16)
-                        .map_err(|_| self.lex_error(format!("invalid hex literal: {raw}")))?;
-                    return Ok(TokenKind::IntLit(v));
-                }
-                Some('b') | Some('B') => {
-                    self.advance();
-                    while self
-                        .peek()
-                        .map(|c| c == '0' || c == '1' || c == '_')
-                        .unwrap_or(false)
-                    {
-                        self.advance();
-                    }
-                    let raw = self.source[start..self.pos].replace('_', "");
-                    let v = i64::from_str_radix(&raw[2..], 2)
-                        .map_err(|_| self.lex_error(format!("invalid binary literal: {raw}")))?;
-                    return Ok(TokenKind::IntLit(v));
-                }
-                Some('o') | Some('O') => {
-                    self.advance();
-                    while self
-                        .peek()
-                        .map(|c| matches!(c, '0'..='7') || c == '_')
-                        .unwrap_or(false)
-                    {
-                        self.advance();
-                    }
-                    let raw = self.source[start..self.pos].replace('_', "");
-                    let v = i64::from_str_radix(&raw[2..], 8)
-                        .map_err(|_| self.lex_error(format!("invalid octal literal: {raw}")))?;
-                    return Ok(TokenKind::IntLit(v));
-                }
-                _ => {}
-            }
-        }
-
-        // Consume remaining decimal digits
-        while self
-            .peek()
-            .map(|c| c.is_ascii_digit() || c == '_')
-            .unwrap_or(false)
-        {
-            self.advance();
-        }
-        // Only treat '.' as decimal point if followed by a digit
-        let is_float = self.peek() == Some('.')
-            && self
-                .peek_nth(1)
-                .map(|c| c.is_ascii_digit())
-                .unwrap_or(false);
-        if is_float {
-            self.advance(); // consume '.'
-            while self
-                .peek()
-                .map(|c| c.is_ascii_digit() || c == '_')
-                .unwrap_or(false)
-            {
-                self.advance();
-            }
-        }
-        // Exponent
-        if self.peek().map(|c| c == 'e' || c == 'E').unwrap_or(false) {
-            self.advance();
-            if self.peek().map(|c| c == '+' || c == '-').unwrap_or(false) {
-                self.advance();
-            }
-            while self.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
-                self.advance();
-            }
-        }
-        let raw = &self.source[start..self.pos];
-        let cleaned = raw.replace('_', "");
-        if is_float || cleaned.contains('e') || cleaned.contains('E') {
-            let v: f64 = cleaned
-                .parse()
-                .map_err(|_| self.lex_error(format!("invalid float: {raw}")))?;
-            Ok(TokenKind::FloatLit(v))
-        } else {
-            let v = cleaned
-                .parse::<i64>()
-                .map_err(|_| self.lex_error(format!("invalid integer: {raw}")))?;
-            Ok(TokenKind::IntLit(v))
+            return Ok(());
         }
     }
 
     fn tokenize(&mut self) -> Result<Vec<Token>> {
         let mut tokens = Vec::new();
+        if self.rest().starts_with("#!") {
+            // Shebang line
+            let len = self.rest().find('\n').unwrap_or(self.rest().len());
+            self.col += self.rest()[..len].chars().count();
+            self.pos += len;
+        }
         loop {
-            self.skip_whitespace_and_comments();
-            self.mark_token_start();
-
-            let ch = match self.peek() {
-                None => {
-                    tokens.push(Token {
-                        kind: TokenKind::Eof,
-                        line: self.token_start_line,
-                        col: self.token_start_col,
-                        offset: self.token_start_offset,
-                        end: self.token_start_offset,
-                    });
-                    break;
-                }
-                Some(c) => c,
-            };
-
-            let kind = self.read_one_token_from(ch)?;
-
-            tokens.push(Token {
-                kind,
-                line: self.token_start_line,
-                col: self.token_start_col,
-                offset: self.token_start_offset,
-                end: self.pos,
-            });
+            let token = self.next_token()?;
+            let eof = matches!(token.kind, TokenKind::Eof);
+            tokens.push(token);
+            if eof {
+                break;
+            }
         }
         Ok(tokens)
     }
 
-    fn read_one_token(&mut self) -> Result<TokenKind> {
-        self.skip_whitespace_and_comments();
-        self.mark_token_start();
-        let ch = self
-            .peek()
-            .ok_or_else(|| self.lex_error("unexpected end of input"))?;
-        self.read_one_token_from(ch)
+    /// Lex the next token, skipping whitespace and comments first.
+    fn next_token(&mut self) -> Result<Token> {
+        self.skip_whitespace_and_comments()?;
+        let line = self.line;
+        let col = self.col;
+        let offset = self.pos;
+        let kind = match self.peek() {
+            None => TokenKind::Eof,
+            Some(ch) => self.read_token_from(ch)?,
+        };
+        Ok(Token {
+            kind,
+            line,
+            col,
+            offset,
+            end: self.pos,
+        })
     }
 
-    fn read_one_token_from(&mut self, ch: char) -> Result<TokenKind> {
-        let kind = match ch {
-            '{' => {
-                self.advance();
-                TokenKind::LBrace
+    fn read_token_from(&mut self, ch: char) -> Result<TokenKind> {
+        // Only compared with ASCII punctuation, so a byte is enough.
+        let next = self
+            .source
+            .as_bytes()
+            .get(self.pos + ch.len_utf8())
+            .map(|&b| b as char);
+        // Fixed-width punctuation: (token, byte length)
+        let (kind, len) = match (ch, next) {
+            ('{', _) => (TokenKind::LBrace, 1),
+            ('}', _) => (TokenKind::RBrace, 1),
+            ('(', _) => (TokenKind::LParen, 1),
+            (')', _) => (TokenKind::RParen, 1),
+            ('[', Some('[')) => (TokenKind::LPred, 2),
+            ('[', _) => (TokenKind::LBracket, 1),
+            (']', _) => (TokenKind::RBracket, 1),
+            (',', _) => (TokenKind::Comma, 1),
+            (';', _) => (TokenKind::Semicolon, 1),
+            ('=', Some('=')) => (TokenKind::EqEq, 2),
+            ('=', Some('>')) => (TokenKind::ThinArrow, 2),
+            ('=', _) => (TokenKind::Equals, 1),
+            (':', _) => (TokenKind::Colon, 1),
+            ('?', Some('?')) => (TokenKind::QuestionQuestion, 2),
+            ('?', Some('.')) => (TokenKind::QuestionDot, 2),
+            ('?', _) => (TokenKind::QuestionMark, 1),
+            ('!', Some('=')) => (TokenKind::BangEq, 2),
+            ('!', Some('!')) => (TokenKind::BangBang, 2),
+            ('!', _) => (TokenKind::Bang, 1),
+            ('|', Some('|')) => (TokenKind::PipePipe, 2),
+            ('|', Some('>')) => (TokenKind::PipeGt, 2),
+            ('|', _) => (TokenKind::Pipe, 1),
+            ('^', _) => (TokenKind::Caret, 1),
+            ('@', _) => (TokenKind::At, 1),
+            ('+', _) => (TokenKind::Plus, 1),
+            ('-', Some('>')) => (TokenKind::Arrow, 2),
+            ('-', _) => (TokenKind::Minus, 1),
+            ('*', Some('*')) => (TokenKind::StarStar, 2),
+            ('*', _) => (TokenKind::Star, 1),
+            ('/', Some('/')) => {
+                // Doc comment (`///`); plain comments were skipped already.
+                // The token's span covers the comment text.
+                let rest = self.rest();
+                let len = rest.find(['\n', '\r']).unwrap_or(rest.len());
+                self.col += rest[..len].chars().count();
+                self.pos += len;
+                return Ok(TokenKind::DocComment);
             }
-            '}' => {
-                self.advance();
-                TokenKind::RBrace
+            ('/', _) => (TokenKind::Slash, 1),
+            ('%', _) => (TokenKind::Percent, 1),
+            ('<', Some('=')) => (TokenKind::LtEq, 2),
+            ('<', _) => (TokenKind::Lt, 1),
+            ('>', Some('=')) => (TokenKind::GtEq, 2),
+            ('>', _) => (TokenKind::Gt, 1),
+            ('&', Some('&')) => (TokenKind::AmpAmp, 2),
+            ('&', _) => {
+                return Err(self.lex_error("Unexpected character `&`. Did you mean `&&`?"));
             }
-            '(' => {
-                self.advance();
-                TokenKind::LParen
+            ('~', Some('/')) => (TokenKind::TildeSlash, 2),
+            ('~', _) => {
+                return Err(self.lex_error("Unexpected character `~`. Did you mean `~/`?"));
             }
-            ')' => {
-                self.advance();
-                TokenKind::RParen
-            }
-            '[' => {
-                self.advance();
-                TokenKind::LBracket
-            }
-            ']' => {
-                self.advance();
-                TokenKind::RBracket
-            }
-            ',' => {
-                self.advance();
-                TokenKind::Comma
-            }
-            ';' => {
-                self.advance();
-                TokenKind::Semicolon
-            }
-            '.' => {
-                self.advance();
-                if self.source[self.pos..].starts_with("..") {
-                    self.advance();
-                    self.advance();
-                    TokenKind::DotDotDot
+            ('.', Some('.')) => {
+                if self.rest().starts_with("...?") {
+                    (TokenKind::QuestionDotDotDot, 4)
+                } else if self.rest().starts_with("...") {
+                    (TokenKind::DotDotDot, 3)
                 } else {
-                    TokenKind::Dot
+                    return Err(self.lex_error(
+                        "Unexpected character `..`. Did you mean `.`, `...` or `...?`?",
+                    ));
                 }
             }
-            '=' => {
-                self.advance();
-                if self.peek() == Some('=') {
-                    self.advance();
-                    TokenKind::EqEq
-                } else if self.peek() == Some('>') {
-                    self.advance();
-                    TokenKind::ThinArrow
-                } else {
-                    TokenKind::Equals
-                }
+            ('.', Some(c)) if c.is_ascii_digit() => {
+                return self.read_number();
             }
-            ':' => {
-                self.advance();
-                TokenKind::Colon
+            ('.', _) => (TokenKind::Dot, 1),
+            ('"', _) => {
+                self.advance_ascii(1);
+                return self.read_string(0);
             }
-            '?' => {
-                self.advance();
-                if self.peek() == Some('?') {
-                    self.advance();
-                    TokenKind::QuestionQuestion
-                } else if self.peek() == Some('.') {
-                    self.advance();
-                    TokenKind::QuestionDot
-                } else {
-                    TokenKind::QuestionMark
-                }
-            }
-            '!' => {
-                self.advance();
-                if self.peek() == Some('=') {
-                    self.advance();
-                    TokenKind::BangEq
-                } else if self.peek() == Some('!') {
-                    self.advance();
-                    TokenKind::BangBang
-                } else {
-                    TokenKind::Bang
-                }
-            }
-            '|' => {
-                self.advance();
-                if self.peek() == Some('|') {
-                    self.advance();
-                    TokenKind::PipePipe
-                } else if self.peek() == Some('>') {
-                    self.advance();
-                    TokenKind::PipeGt
-                } else {
-                    TokenKind::Pipe
-                }
-            }
-            '^' => {
-                self.advance();
-                TokenKind::Caret
-            }
-            '@' => {
-                self.advance();
-                TokenKind::At
-            }
-            '+' => {
-                self.advance();
-                TokenKind::Plus
-            }
-            '-' => {
-                self.advance();
-                if self.peek() == Some('>') {
-                    self.advance();
-                    TokenKind::Arrow
-                } else {
-                    TokenKind::Minus
-                }
-            }
-            '*' => {
-                self.advance();
-                if self.peek() == Some('*') {
-                    self.advance();
-                    TokenKind::StarStar
-                } else {
-                    TokenKind::Star
-                }
-            }
-            '/' => {
-                self.advance();
-                TokenKind::Slash
-            }
-            '%' => {
-                self.advance();
-                TokenKind::Percent
-            }
-            '<' => {
-                self.advance();
-                if self.peek() == Some('=') {
-                    self.advance();
-                    TokenKind::LtEq
-                } else {
-                    TokenKind::Lt
-                }
-            }
-            '>' => {
-                self.advance();
-                if self.peek() == Some('=') {
-                    self.advance();
-                    TokenKind::GtEq
-                } else {
-                    TokenKind::Gt
-                }
-            }
-            '&' => {
-                self.advance();
-                if self.peek() == Some('&') {
-                    self.advance();
-                    TokenKind::AmpAmp
-                } else {
-                    return Err(self.lex_error("unexpected '&'"));
-                }
-            }
-            '"' => {
-                self.advance();
-                // Check for multiline string `"""`
-                if self.source[self.pos..].starts_with("\"\"") {
-                    self.advance();
-                    self.advance();
-                    let s = self.read_multiline_string()?;
-                    TokenKind::StringLit(s)
-                } else {
-                    self.read_string_token()?
-                }
-            }
-            '#' => {
-                // #"..."# and #"""..."""# raw strings. Pkl allows multiple hashes.
-                let mut hash_count = 0;
-                while self.peek() == Some('#') {
-                    self.advance();
-                    hash_count += 1;
-                }
-                if self.source[self.pos..].starts_with("\"\"\"") {
-                    self.advance();
-                    self.advance();
-                    self.advance();
-                    let s = self.read_raw_multiline_string(hash_count)?;
-                    TokenKind::StringLit(s)
-                } else if self.peek() == Some('"') {
-                    self.advance();
-                    let s = self.read_raw_string(hash_count)?;
-                    TokenKind::StringLit(s)
-                } else {
-                    // Could be a shebang line or annotation — skip line
-                    while self.peek().map(|c| c != '\n').unwrap_or(false) {
-                        self.advance();
-                    }
-                    return self.read_one_token();
-                }
-            }
-            '~' => {
-                self.advance();
-                if self.peek() == Some('/') {
-                    self.advance();
-                    TokenKind::TildeSlash
-                } else {
-                    return Err(self.lex_error("unexpected '~'"));
-                }
-            }
-            c if c.is_ascii_digit() => {
-                self.advance();
-                self.read_number(c)?
-            }
-            c if c.is_alphabetic() || c == '_' => {
-                let start = self.pos; // pos points TO current char before advance
-                self.advance();
-                while self
-                    .peek()
-                    .map(|c| c.is_alphanumeric() || c == '_')
-                    .unwrap_or(false)
-                {
-                    self.advance();
-                }
-                let ident = &self.source[start..self.pos];
-                // Handle `import*` and `read?` as single tokens
-                if ident == "import" && self.peek() == Some('*') {
-                    self.advance();
-                    TokenKind::KwImportStar
-                } else if ident == "read" && self.peek() == Some('?') {
-                    self.advance();
-                    TokenKind::KwReadOrNull
-                } else if ident == "read" && self.peek() == Some('*') {
-                    self.advance();
-                    TokenKind::KwReadGlob
-                } else {
-                    keyword_or_ident(ident)
-                }
-            }
-            '`' => {
-                self.advance();
+            ('#', _) => {
                 let start = self.pos;
-                while self.peek().is_some_and(|c| c != '`') {
-                    self.advance();
+                let mut pounds = 0;
+                while self.peek() == Some('#') {
+                    self.advance_ascii(1);
+                    pounds += 1;
                 }
-                if self.peek() != Some('`') {
-                    return Err(self.lex_error("unterminated quoted identifier"));
+                if self.peek() != Some('"') {
+                    return Err(self.lex_error_at(
+                        start,
+                        format!(
+                            "Unexpected character `{}`. Did you mean `\"`?",
+                            self.peek().map(String::from).unwrap_or("EOF".into())
+                        ),
+                    ));
                 }
-                let ident = self.source[start..self.pos].to_string();
-                self.advance();
-                if ident.is_empty() {
-                    return Err(self.lex_error("empty quoted identifier"));
-                }
-                TokenKind::Ident(ident)
+                self.advance_ascii(1);
+                return self.read_string(pounds);
             }
-            c => {
-                return Err(self.lex_error(format!("unexpected character: {c:?}")));
+            ('`', _) => return self.read_quoted_ident(),
+            (c, _) if c.is_ascii_digit() => return self.read_number(),
+            (c, _) if is_identifier_start(c) => return Ok(self.read_ident()),
+            (c, _) => {
+                return Err(self.lex_error(format!("Invalid character `{c}`.")));
             }
         };
+        self.advance_ascii(len);
         Ok(kind)
     }
 
-    fn read_raw_string(&mut self, hash_count: usize) -> Result<String> {
-        // Read until the closing quote plus the same number of hashes.
-        let closing = format!("\"{}", "#".repeat(hash_count));
-        let mut s = String::new();
-        loop {
-            if self.source[self.pos..].starts_with(&closing) {
-                for _ in 0..closing.chars().count() {
-                    self.advance();
-                }
-                break;
+    fn read_ident(&mut self) -> TokenKind {
+        let start = self.pos;
+        self.advance();
+        while self.peek().is_some_and(is_identifier_part) {
+            self.advance();
+        }
+        let ident = &self.source[start..self.pos];
+        // `import*`, `read*` and `read?` are single tokens
+        match (ident, self.peek()) {
+            ("import", Some('*')) => {
+                self.advance_ascii(1);
+                TokenKind::KwImportStar
             }
-            match self.advance() {
-                None => {
-                    return Err(self.lex_error("unterminated raw string"));
+            ("read", Some('*')) => {
+                self.advance_ascii(1);
+                TokenKind::KwReadGlob
+            }
+            ("read", Some('?')) => {
+                self.advance_ascii(1);
+                TokenKind::KwReadOrNull
+            }
+            _ => keyword_or_ident(ident),
+        }
+    }
+
+    fn read_quoted_ident(&mut self) -> Result<TokenKind> {
+        let start = self.pos;
+        self.advance_ascii(1);
+        let ident_start = self.pos;
+        while self.peek().is_some_and(|c| !matches!(c, '`' | '\n' | '\r')) {
+            self.advance();
+        }
+        if self.peek() != Some('`') {
+            return Err(self.lex_error_at(start, "Unterminated quoted identifier."));
+        }
+        let ident = self.source[ident_start..self.pos].to_string();
+        self.advance_ascii(1);
+        if ident.is_empty() {
+            return Err(self.lex_error_at(start, "Empty quoted identifier."));
+        }
+        Ok(TokenKind::Ident(ident))
+    }
+
+    fn consume_digits(&mut self, is_digit: impl Fn(char) -> bool) {
+        while self.peek().is_some_and(|c| is_digit(c) || c == '_') {
+            self.advance_ascii(1);
+        }
+    }
+
+    fn separator_error(&self) -> Error {
+        self.lex_error(
+            "Unexpected separator character.\n\nThe separator character (`_`) cannot follow \
+             `0x`, `0b`, `.`, `e`, or 'E' in a number literal.",
+        )
+    }
+
+    /// Lex the digits of a radix-prefixed literal after `0x`/`0b`/`0o`.
+    fn read_radix_digits(&mut self, radix: u32, what: &str) -> Result<()> {
+        match self.peek() {
+            Some('_') => Err(self.separator_error()),
+            Some(c) if c.is_digit(radix) => {
+                self.consume_digits(|c| c.is_digit(radix));
+                Ok(())
+            }
+            other => Err(self.lex_error(format!(
+                "Unexpected character `{}`. Did you mean {what}?",
+                other.map(String::from).unwrap_or("EOF".into())
+            ))),
+        }
+    }
+
+    /// Lex the exponent of a float literal; `e`/`E` is already consumed.
+    fn read_exponent(&mut self) -> Result<()> {
+        if matches!(self.peek(), Some('+' | '-')) {
+            self.advance_ascii(1);
+        }
+        match self.peek() {
+            Some('_') => Err(self.separator_error()),
+            Some(c) if c.is_ascii_digit() => {
+                self.consume_digits(|c| c.is_ascii_digit());
+                Ok(())
+            }
+            other => Err(self.lex_error(format!(
+                "Unexpected character `{}`. Did you mean number?",
+                other.map(String::from).unwrap_or("EOF".into())
+            ))),
+        }
+    }
+
+    /// Lex the fraction (and optional exponent) of a float literal; `.` is
+    /// already consumed.
+    fn read_fraction(&mut self) -> Result<()> {
+        if self.peek() == Some('_') {
+            return Err(self.separator_error());
+        }
+        self.consume_digits(|c| c.is_ascii_digit());
+        if matches!(self.peek(), Some('e' | 'E')) {
+            self.advance_ascii(1);
+            self.read_exponent()?;
+        }
+        Ok(())
+    }
+
+    fn read_number(&mut self) -> Result<TokenKind> {
+        let start = self.pos;
+        let first = self.advance().expect("caller saw a digit or `.`");
+        let mut is_float = false;
+        let mut radix = 10;
+        if first == '.' {
+            self.read_fraction()?;
+            is_float = true;
+        } else if first == '0' && matches!(self.peek(), Some('x' | 'X')) {
+            self.advance_ascii(1);
+            self.read_radix_digits(16, "hexadecimal number")?;
+            radix = 16;
+        } else if first == '0' && matches!(self.peek(), Some('b' | 'B')) {
+            self.advance_ascii(1);
+            self.read_radix_digits(2, "binary number")?;
+            radix = 2;
+        } else if first == '0' && matches!(self.peek(), Some('o' | 'O')) {
+            self.advance_ascii(1);
+            self.read_radix_digits(8, "octal number")?;
+            radix = 8;
+        } else {
+            self.consume_digits(|c| c.is_ascii_digit());
+            if matches!(self.peek(), Some('e' | 'E')) {
+                self.advance_ascii(1);
+                self.read_exponent()?;
+                is_float = true;
+            } else if self.peek() == Some('.') {
+                match self.peek_nth(1) {
+                    Some('_') => {
+                        self.advance_ascii(1);
+                        return Err(self.separator_error());
+                    }
+                    Some(c) if c.is_ascii_digit() => {
+                        self.advance_ascii(1);
+                        self.read_fraction()?;
+                        is_float = true;
+                    }
+                    // `1.foo` is a member access on an Int
+                    _ => {}
                 }
-                Some(c) => s.push(c),
             }
         }
-        Ok(s)
+        let raw = &self.source[start..self.pos];
+        let cleaned = raw.replace('_', "");
+        if is_float {
+            let v: f64 = cleaned
+                .parse()
+                .map_err(|_| self.lex_error_at(start, format!("Invalid float literal `{raw}`.")))?;
+            return Ok(TokenKind::FloatLit(v));
+        }
+        let digits = if radix == 10 {
+            &cleaned[..]
+        } else {
+            &cleaned[2..]
+        };
+        // Parse as u64 so that `-9223372036854775808` can be lexed. Preserve
+        // 2^63 as a distinct token so the parser accepts it only as the
+        // operand of a unary minus, never after binary subtraction.
+        match u64::from_str_radix(digits, radix) {
+            Ok(v) if v <= i64::MAX as u64 => Ok(TokenKind::IntLit(v as i64)),
+            Ok(v) if v == 1 << 63 => Ok(TokenKind::MinIntLit),
+            _ => Err(self.lex_error_at(start, format!("Integer literal `{raw}` is too large."))),
+        }
+    }
+
+    /// Lex a string literal. The opening pounds and first quote are consumed.
+    fn read_string(&mut self, pounds: usize) -> Result<TokenKind> {
+        let start = self.pos - 1 - pounds;
+        if self.rest().starts_with("\"\"") {
+            self.advance_ascii(2);
+            return self.read_multiline_string(pounds, start);
+        }
+        let closing = delimiter("\"", pounds);
+        let escape = delimiter("\\", pounds);
+        let mut builder = StringBuilder::default();
+        loop {
+            let chunk = self.take_plain_chunk();
+            if !chunk.is_empty() {
+                builder.current.push_str(chunk);
+                continue;
+            }
+            let rest = self.rest();
+            if rest.starts_with(&*closing) {
+                self.advance_ascii(closing.len());
+                return Ok(builder.finish());
+            }
+            if rest.starts_with(&*escape) {
+                let escape_start = self.pos;
+                self.advance_ascii(escape.len());
+                match self.read_escape(pounds, escape_start)? {
+                    Escaped::Text(s) => builder.current.push_str(&s),
+                    Escaped::Interp(tokens) => builder.push_interp(tokens),
+                    Escaped::Continuation => {
+                        return Err(self.lex_error_at(
+                            escape_start,
+                            "Invalid line continuation escape sequence.\n\n\
+                             Line continuations are only allowed in multi-line strings.",
+                        ));
+                    }
+                }
+                continue;
+            }
+            match self.peek() {
+                None | Some('\n' | '\r') => {
+                    return Err(self.lex_error_at(start, format!("Missing `{closing}` delimiter.")));
+                }
+                Some(c) => {
+                    self.advance();
+                    builder.current.push(c);
+                }
+            }
+        }
+    }
+
+    /// Consume string characters up to the next quote, backslash or line
+    /// break, none of which can end the text or start an escape.
+    fn take_plain_chunk(&mut self) -> &'a str {
+        let rest = self.rest();
+        let len = rest.find(['"', '\\', '\n', '\r']).unwrap_or(rest.len());
+        let chunk = &rest[..len];
+        self.col += chunk.chars().count();
+        self.pos += len;
+        chunk
+    }
+
+    fn read_multiline_string(&mut self, pounds: usize, start: usize) -> Result<TokenKind> {
+        let closing = delimiter("\"\"\"", pounds);
+        let escape = delimiter("\\", pounds);
+        let source = self.source;
+        let mut pieces = Vec::new();
+        let mut text_start = self.pos;
+        // Text is a contiguous run of source between escapes and newlines.
+        let flush = |text_start: usize, end: usize, pieces: &mut Vec<Piece<'a>>| {
+            if end > text_start {
+                pieces.push(Piece::Text(&source[text_start..end], text_start));
+            }
+        };
+        loop {
+            if !self.take_plain_chunk().is_empty() {
+                continue;
+            }
+            let rest = self.rest();
+            if rest.starts_with(&*closing) {
+                flush(text_start, self.pos, &mut pieces);
+                self.advance_ascii(closing.len());
+                break;
+            }
+            if rest.starts_with(&*escape) {
+                flush(text_start, self.pos, &mut pieces);
+                let escape_start = self.pos;
+                self.advance_ascii(escape.len());
+                pieces.push(match self.read_escape(pounds, escape_start)? {
+                    Escaped::Text(s) => Piece::Escape(s, escape_start),
+                    Escaped::Interp(tokens) => Piece::Interp(tokens, escape_start),
+                    Escaped::Continuation => Piece::Continuation(escape_start),
+                });
+                text_start = self.pos;
+                continue;
+            }
+            match self.peek() {
+                None => {
+                    return Err(self.lex_error_at(start, format!("Missing `{closing}` delimiter.")));
+                }
+                Some('\n' | '\r') => {
+                    flush(text_start, self.pos, &mut pieces);
+                    if self.advance() == Some('\r') && self.peek() == Some('\n') {
+                        self.advance();
+                    }
+                    pieces.push(Piece::Newline);
+                    text_start = self.pos;
+                }
+                Some(_) => {
+                    self.advance();
+                }
+            }
+        }
+        self.render_multiline_string(pieces, start)
+    }
+
+    /// Strip the closing delimiter's indentation from every line of a
+    /// multi-line string, as pkl's parser does.
+    fn render_multiline_string(&self, pieces: Vec<Piece<'a>>, start: usize) -> Result<TokenKind> {
+        if !matches!(pieces.first(), Some(Piece::Newline)) {
+            return Err(self.lex_error_at(
+                start,
+                "The content of a multi-line string must begin on a new line.",
+            ));
+        }
+        if pieces.len() == 1 {
+            return Ok(TokenKind::StringLit(String::new()));
+        }
+        let closing_error = || {
+            self.lex_error_at(
+                start,
+                "The closing delimiter of a multi-line string must begin on a new line.",
+            )
+        };
+        let (indent, end) = match &pieces[pieces.len() - 1] {
+            Piece::Newline => ("", pieces.len() - 1),
+            // A line continuation consumed the newline immediately before
+            // the closing delimiter, but that delimiter is still on its own
+            // source line.
+            Piece::Continuation(_) => ("", pieces.len() - 1),
+            Piece::Text(text, _)
+                if matches!(
+                    pieces[pieces.len() - 2],
+                    Piece::Newline | Piece::Continuation(_)
+                ) && text.chars().all(|c| c == ' ' || c == '\t') =>
+            {
+                (*text, pieces.len() - 2)
+            }
+            _ => return Err(closing_error()),
+        };
+        let indent_error = |offset: usize| {
+            self.lex_error_at(
+                offset,
+                "Line must match or exceed indentation of the String's last line.",
+            )
+        };
+        let mut builder = StringBuilder::default();
+        let mut at_line_start = true;
+        for piece in pieces.into_iter().take(end).skip(1) {
+            match piece {
+                Piece::Newline => {
+                    builder.current.push('\n');
+                    at_line_start = true;
+                }
+                // An escape can't start a line that must be indented.
+                Piece::Continuation(offset)
+                | Piece::Interp(_, offset)
+                | Piece::Escape(_, offset)
+                    if at_line_start && !indent.is_empty() =>
+                {
+                    return Err(indent_error(offset));
+                }
+                Piece::Continuation(_) => at_line_start = true,
+                Piece::Text(text, offset) => {
+                    if at_line_start {
+                        let Some(stripped) = text.strip_prefix(indent) else {
+                            let leading = text.len() - text.trim_start_matches([' ', '\t']).len();
+                            return Err(indent_error(offset + leading));
+                        };
+                        builder.current.push_str(stripped);
+                    } else {
+                        builder.current.push_str(text);
+                    }
+                    at_line_start = false;
+                }
+                Piece::Escape(text, _) => {
+                    builder.current.push_str(&text);
+                    at_line_start = false;
+                }
+                Piece::Interp(tokens, _) => {
+                    builder.push_interp(tokens);
+                    at_line_start = false;
+                }
+            }
+        }
+        Ok(builder.finish())
+    }
+
+    /// Lex an escape sequence; the backslash and pounds are consumed.
+    fn read_escape(&mut self, pounds: usize, escape_start: usize) -> Result<Escaped> {
+        let Some(ch) = self.advance() else {
+            return Err(self.lex_error("Unexpected end of file."));
+        };
+        let text = match ch {
+            'n' => "\n",
+            't' => "\t",
+            'r' => "\r",
+            '"' => "\"",
+            '\\' => "\\",
+            '(' => return self.read_interpolation().map(Escaped::Interp),
+            'u' => {
+                return self
+                    .read_unicode_escape(pounds, escape_start)
+                    .map(Escaped::Text);
+            }
+            '\n' => return Ok(Escaped::Continuation),
+            '\r' => {
+                if self.peek() == Some('\n') {
+                    self.advance();
+                }
+                return Ok(Escaped::Continuation);
+            }
+            ' ' | '\t' => {
+                let rest = self.rest();
+                let trailing = rest.trim_start_matches([' ', '\t']);
+                if trailing.starts_with(['\n', '\r']) {
+                    return Err(self.lex_error_at(
+                        escape_start,
+                        "Invalid line continuation escape sequence.\n\n\
+                         Whitespace between the continuation escape and following newline \
+                         is not allowed.",
+                    ));
+                }
+                return Err(self.lex_error_at(
+                    escape_start,
+                    format!("Invalid character escape sequence `\\{ch}`."),
+                ));
+            }
+            other => {
+                return Err(self.lex_error_at(
+                    escape_start,
+                    format!("Invalid character escape sequence `\\{other}`."),
+                ));
+            }
+        };
+        Ok(Escaped::Text(text.to_string()))
+    }
+
+    /// Lex `{XXXX}` after `\u`, returning the decoded text.
+    fn read_unicode_escape(&mut self, pounds: usize, escape_start: usize) -> Result<String> {
+        let code_point = self.read_code_point(escape_start)?;
+        // pkl strings are UTF-16: a surrogate pair written as two escapes is
+        // one character, and a lone surrogate renders as `?`.
+        if (0xD800..0xDC00).contains(&code_point) {
+            let next_escape = format!("\\{}u{{", "#".repeat(pounds));
+            if self.rest().starts_with(&next_escape) {
+                let saved = (self.pos, self.line, self.col);
+                let low_start = self.pos;
+                self.advance_ascii(next_escape.len() - 1);
+                if let Ok(low) = self.read_code_point(low_start)
+                    && (0xDC00..0xE000).contains(&low)
+                {
+                    let combined = 0x10000 + ((code_point - 0xD800) << 10) + (low - 0xDC00);
+                    return Ok(char::from_u32(combined).unwrap_or('?').to_string());
+                }
+                (self.pos, self.line, self.col) = saved;
+            }
+        }
+        if (0xD800..0xE000).contains(&code_point) {
+            return Ok("?".to_string());
+        }
+        char::from_u32(code_point).map(String::from).ok_or_else(|| {
+            self.lex_error_at(
+                escape_start,
+                format!(
+                    "Invalid Unicode escape sequence `{}`.",
+                    &self.source[escape_start..self.pos]
+                ),
+            )
+        })
+    }
+
+    fn read_code_point(&mut self, escape_start: usize) -> Result<u32> {
+        if self.peek() != Some('{') {
+            return Err(self.lex_error(format!(
+                "Unexpected character `{}`. Did you mean `{{`?",
+                self.peek().map(String::from).unwrap_or("EOF".into())
+            )));
+        }
+        self.advance_ascii(1);
+        let digits_start = self.pos;
+        while self.peek().is_some_and(|c| c.is_alphanumeric()) {
+            self.advance();
+        }
+        if self.peek() != Some('}') {
+            return Err(self.lex_error_at(
+                escape_start,
+                format!(
+                    "Unterminated Unicode escape sequence `{}`.",
+                    &self.source[escape_start..self.pos]
+                ),
+            ));
+        }
+        let digits = &self.source[digits_start..self.pos];
+        self.advance_ascii(1);
+        u32::from_str_radix(digits, 16).map_err(|_| {
+            self.lex_error_at(
+                escape_start,
+                format!(
+                    "Invalid Unicode escape sequence `{}`.",
+                    &self.source[escape_start..self.pos]
+                ),
+            )
+        })
+    }
+
+    /// Lex the tokens of a `\(...)` interpolation; `\(` is consumed. The
+    /// returned tokens end with `Eof` in place of the closing `)`.
+    fn read_interpolation(&mut self) -> Result<Vec<Token>> {
+        if self.interpolation_depth >= MAX_INTERPOLATION_DEPTH {
+            return Err(self.interpolation_depth_error());
+        }
+        self.interpolation_depth += 1;
+        let result = (|| {
+            let mut depth = 1;
+            let mut tokens = Vec::new();
+            loop {
+                let token = self.next_token()?;
+                match token.kind {
+                    TokenKind::Eof => {
+                        return Err(self.lex_error("Unexpected end of file."));
+                    }
+                    TokenKind::LParen => depth += 1,
+                    TokenKind::RParen => {
+                        depth -= 1;
+                        if depth == 0 {
+                            tokens.push(Token {
+                                kind: TokenKind::Eof,
+                                ..token
+                            });
+                            return Ok(tokens);
+                        }
+                    }
+                    _ => {}
+                }
+                tokens.push(token);
+            }
+        })();
+        self.interpolation_depth -= 1;
+        result
     }
 }
 
-fn normalize_multiline_string(s: &str) -> Result<String> {
-    let s = s
-        .strip_prefix("\r\n")
-        .or_else(|| s.strip_prefix('\n'))
-        .unwrap_or(s);
-    dedent(s)
+/// `prefix` followed by `pounds` `#` characters, without allocating for
+/// the common case of no pounds.
+fn delimiter(prefix: &'static str, pounds: usize) -> std::borrow::Cow<'static, str> {
+    if pounds == 0 {
+        prefix.into()
+    } else {
+        format!("{prefix}{}", "#".repeat(pounds)).into()
+    }
+}
+
+enum Escaped {
+    Text(String),
+    Interp(Vec<Token>),
+    Continuation,
+}
+
+fn is_identifier_start(c: char) -> bool {
+    c == '_' || c == '$' || c.is_alphabetic()
+}
+
+fn is_identifier_part(c: char) -> bool {
+    c == '_' || c == '$' || c.is_alphanumeric()
 }
 
 fn keyword_or_ident(s: &str) -> TokenKind {
@@ -775,8 +886,6 @@ fn keyword_or_ident(s: &str) -> TokenKind {
         "throw" => TokenKind::KwThrow,
         "trace" => TokenKind::KwTrace,
         "read" => TokenKind::KwRead,
-        "read?" => TokenKind::KwReadOrNull,
-        "read*" => TokenKind::KwReadGlob,
         "for" => TokenKind::KwFor,
         "in" => TokenKind::KwIn,
         "true" => TokenKind::BoolLit(true),
@@ -788,37 +897,20 @@ fn keyword_or_ident(s: &str) -> TokenKind {
     }
 }
 
-fn dedent(s: &str) -> Result<String> {
-    let lines: Vec<&str> = s.lines().collect();
-    if lines.is_empty() {
-        return Ok(String::new());
-    }
-    // Find minimum indentation (ignoring empty lines)
-    let min_indent = lines
-        .iter()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| l.len() - l.trim_start().len())
-        .min()
-        .unwrap_or(0);
-    let dedented: Vec<&str> = lines
-        .iter()
-        .map(|l| {
-            if l.len() >= min_indent {
-                &l[min_indent..]
-            } else {
-                l.trim_start()
-            }
-        })
-        .collect();
-    Ok(dedented.join("\n"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn kinds(src: &str) -> Vec<TokenKind> {
         lex(src).unwrap().into_iter().map(|t| t.kind).collect()
+    }
+
+    fn string(src: &str) -> TokenKind {
+        kinds(src).into_iter().next().unwrap()
+    }
+
+    fn lex_err(src: &str) -> String {
+        lex(src).unwrap_err().to_string()
     }
 
     #[test]
@@ -850,16 +942,44 @@ mod tests {
 
     #[test]
     fn test_numbers() {
-        let toks = kinds("42 1.23 0xFF");
+        let toks = kinds("42 1.23 0xFF .5 1e3 1_000 0b1_0 0o17");
         assert_eq!(
             toks,
             vec![
                 TokenKind::IntLit(42),
                 TokenKind::FloatLit(1.23),
                 TokenKind::IntLit(255),
+                TokenKind::FloatLit(0.5),
+                TokenKind::FloatLit(1000.0),
+                TokenKind::IntLit(1000),
+                TokenKind::IntLit(2),
+                TokenKind::IntLit(15),
                 TokenKind::Eof,
             ]
         );
+    }
+
+    #[test]
+    fn test_int_member_access() {
+        assert_eq!(
+            kinds("1.abs"),
+            vec![
+                TokenKind::IntLit(1),
+                TokenKind::Dot,
+                TokenKind::Ident("abs".into()),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_number_errors() {
+        assert!(lex_err("0x_01").contains("separator"));
+        assert!(lex_err("0b_01").contains("separator"));
+        assert!(lex_err("1._5").contains("separator"));
+        assert!(lex_err("1e_5").contains("separator"));
+        assert!(lex_err("9223372036854775809").contains("too large"));
+        assert_eq!(kinds("9223372036854775808")[0], TokenKind::MinIntLit);
     }
 
     #[test]
@@ -880,5 +1000,104 @@ mod tests {
     fn test_line_comment() {
         let toks = kinds("// comment\nfoo");
         assert_eq!(toks, vec![TokenKind::Ident("foo".into()), TokenKind::Eof]);
+    }
+
+    #[test]
+    fn test_doc_comment() {
+        let toks = kinds("/// doc\nfoo");
+        assert_eq!(
+            toks,
+            vec![
+                TokenKind::DocComment,
+                TokenKind::Ident("foo".into()),
+                TokenKind::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn test_token_end() {
+        let toks = lex("foo = \"bar\"").unwrap();
+        assert_eq!((toks[0].offset, toks[0].end), (0, 3));
+        assert_eq!((toks[2].offset, toks[2].end), (6, 11));
+    }
+
+    #[test]
+    fn test_spread_and_predicate_tokens() {
+        assert_eq!(
+            kinds("...?x [[y]]"),
+            vec![
+                TokenKind::QuestionDotDotDot,
+                TokenKind::Ident("x".into()),
+                TokenKind::LPred,
+                TokenKind::Ident("y".into()),
+                TokenKind::RBracket,
+                TokenKind::RBracket,
+                TokenKind::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn test_identifiers() {
+        assert_eq!(string("$foo"), TokenKind::Ident("$foo".into()));
+        assert_eq!(string("日本語"), TokenKind::Ident("日本語".into()));
+        assert_eq!(string("`a b`"), TokenKind::Ident("a b".into()));
+        assert_eq!(string("read*"), TokenKind::KwReadGlob);
+    }
+
+    #[test]
+    fn test_string_escapes() {
+        assert_eq!(
+            string(r#""a\n\t\"\\\u{41}""#),
+            TokenKind::StringLit("a\n\t\"\\A".into())
+        );
+        assert_eq!(
+            string(r#""\u{D83D}\u{DE00}""#),
+            TokenKind::StringLit("\u{1F600}".into())
+        );
+        assert_eq!(string(r#""\u{D800}h""#), TokenKind::StringLit("?h".into()));
+        assert!(lex_err(r#""\a""#).contains("Invalid character escape"));
+        assert!(lex_err("\"abc\n\"").contains("Missing"));
+        assert!(lex_err("\"abc \\\ndef\"").contains("continuation"));
+    }
+
+    #[test]
+    fn test_raw_strings() {
+        assert_eq!(
+            string(r##"#"a\n"b\#n"#"##),
+            TokenKind::StringLit("a\\n\"b\n".into())
+        );
+        assert_eq!(
+            string(r###"##"\#(x)"##"###),
+            TokenKind::StringLit("\\#(x)".into())
+        );
+        let TokenKind::InterpolatedString(parts) = string(r##"#"a\#(x)b"#"##) else {
+            panic!("expected interpolation");
+        };
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0], StringPart::Literal("a".into()));
+        assert_eq!(parts[2], StringPart::Literal("b".into()));
+    }
+
+    #[test]
+    fn test_multiline_strings() {
+        assert_eq!(
+            string("\"\"\"\n  a\n    b\n  \"\"\""),
+            TokenKind::StringLit("a\n  b".into())
+        );
+        assert_eq!(
+            string("\"\"\"\n  a \\\n  b\\t\n  \"\"\""),
+            TokenKind::StringLit("a b\t".into())
+        );
+        assert_eq!(string("\"\"\"\n\"\"\""), TokenKind::StringLit("".into()));
+        assert!(matches!(
+            string("\"\"\"\n  a \\(x)\n  \"\"\""),
+            TokenKind::InterpolatedString(_)
+        ));
+        assert!(lex_err("\"\"\"\n a\n  \"\"\"").contains("indentation"));
+        assert!(lex_err("\"\"\"a\n\"\"\"").contains("new line"));
+        assert!(lex_err("\"\"\"\na\"\"\"").contains("new line"));
+        assert!(lex_err("\"\"\"\n a \\  \n \"\"\"").contains("Whitespace"));
     }
 }

@@ -731,7 +731,7 @@ fn trace_records_its_source_text_and_line() {
 
 #[test]
 fn trace_uses_the_argument_source_section() {
-    let source = "a = trace(\n  /* grouping */ ((1)) /* note */\n)\nb = trace(1 // note\n)\nc = trace(\"https://example.com/(x)\")\nd = trace(# annotation\n  1)\n";
+    let source = "a = trace(\n  /* grouping */ ((1)) /* note */\n)\nb = trace(1 // note\n)\nc = trace(\"https://example.com/(x)\")\nd = trace(// annotation\n  1)\n";
     let module = pklr::parser::parse_named(&lex(source).unwrap(), source, "main.pkl").unwrap();
     let Entry::Property(a) = &module.body[0] else {
         panic!("expected property a");
@@ -770,7 +770,7 @@ fn trace_source_keeps_the_enclosing_interpolated_string_span() {
     for source in [
         "x = trace(\"a \\(1)\")\n",
         "x = trace(\"outer \\(\"inner \\(1)\")\")\n",
-        "x = trace(\"first\n  \\(1)\nlast\")\n",
+        "x = trace(\"\"\"\nfirst\n  \\(1)\nlast\n\"\"\")\n",
     ] {
         let tokens = lex(source).unwrap();
         let module = pklr::parser::parse_named(&tokens, source, "main.pkl").unwrap();
@@ -815,7 +815,7 @@ items {
 #[test]
 fn quoted_identifier_reports_missing_terminator() {
     let error = lex("`runs-on = true").unwrap_err().to_string();
-    assert!(error.contains("unterminated quoted identifier"));
+    assert!(error.contains("Unterminated quoted identifier"));
 }
 
 #[test]

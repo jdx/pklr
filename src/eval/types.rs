@@ -183,7 +183,7 @@ impl AliasResolver<'_> {
                     self.body(body, shadowed);
                 }
             }
-            Entry::DynProperty(key, value) => {
+            Entry::DynProperty(key, value) | Entry::Predicate(key, value) => {
                 self.expr(key, shadowed);
                 self.expr(value, shadowed);
             }

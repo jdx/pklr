@@ -334,10 +334,132 @@ fn output_is_inherited_through_the_amends_chain() {
 
 #[cfg(feature = "native-io")]
 #[test]
+fn output_super_text_uses_the_inherited_value_and_renderer() {
+    let dir = TestTempDir::new("pklr_render_inherited_super_text");
+    std::fs::write(
+        dir.path().join("base.pkl"),
+        "output {\n  value = new Dynamic { inherited = \"yes\" }\n  renderer = new JsonRenderer {}\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("child.pkl"),
+        "amends \"base.pkl\"\noutput { text = super.text }\n",
+    )
+    .unwrap();
+    assert_eq!(
+        pklr::eval_to_text(&dir.path().join("child.pkl")).unwrap(),
+        "{\n  \"inherited\": \"yes\"\n}\n"
+    );
+}
+
+#[cfg(feature = "native-io")]
+#[test]
+fn output_super_text_preserves_explicit_value_kinds() {
+    for (name, output, expected) in [
+        (
+            "pklr_render_super_text_mapping",
+            r#"value = new Mapping { ["a"] = 1 }
+  renderer = new JsonRenderer { converters { [Mapping] = (_) -> "mapping" } }"#,
+            "\"mapping\"\n",
+        ),
+        (
+            "pklr_render_super_text_listing",
+            r#"value = new Listing { 1; 2 }
+  renderer = new JsonRenderer { converters { [Listing] = (_) -> "listing" } }"#,
+            "\"listing\"\n",
+        ),
+        (
+            "pklr_render_super_text_scalar",
+            r#"value = 1
+  renderer = new JsonRenderer { converters { [Int] = (_) -> "integer" } }"#,
+            "\"integer\"\n",
+        ),
+    ] {
+        let dir = TestTempDir::new(name);
+        std::fs::write(
+            dir.path().join("base.pkl"),
+            format!("output {{\n  {output}\n}}\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("child.pkl"),
+            "amends \"base.pkl\"\noutput { text = super.text }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            pklr::eval_to_text(&dir.path().join("child.pkl")).unwrap(),
+            expected,
+            "{name}"
+        );
+    }
+}
+
+#[cfg(feature = "native-io")]
+#[test]
+fn output_super_text_treats_implicit_module_values_as_typed() {
+    let dir = TestTempDir::new("pklr_render_super_text_implicit_module");
+    std::fs::write(
+        dir.path().join("base.pkl"),
+        "a = \"module\"\noutput { renderer = new JsonRenderer {} }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("child.pkl"),
+        "amends \"base.pkl\"\noutput { text = super.text }\n",
+    )
+    .unwrap();
+    assert_eq!(
+        pklr::eval_to_text(&dir.path().join("child.pkl")).unwrap(),
+        "{\n  \"a\": \"module\"\n}\n"
+    );
+}
+
+#[cfg(feature = "native-io")]
+#[test]
 fn output_body_sees_default_renderer_and_value() {
     let (_dir, path) = module_file(
         "pklr_render_output_defaults",
         "x = 1\noutput {\n  value = new Dynamic { a = 1 }\n  text = renderer.renderDocument(value)\n}\n",
+    );
+    assert_eq!(pklr::eval_to_text(&path).unwrap(), "a = 1\n");
+}
+
+#[cfg(feature = "native-io")]
+#[test]
+fn output_super_text_is_evaluated_lazily() {
+    for (name, output) in [
+        (
+            "pklr_render_output_unreachable_super_text",
+            "text = if (false) super.text else \"ok\"",
+        ),
+        (
+            "pklr_render_output_uncalled_super_text_lambda",
+            "local delayed = () -> super.text\n  text = \"ok\"",
+        ),
+    ] {
+        let (_dir, path) = module_file(
+            name,
+            &format!(
+                r#"m = new Mapping {{ [1.s] = "value" }}
+output {{
+  {output}
+  renderer = new JsonRenderer {{
+    converters {{ [Duration] = (_) -> "duration-key" }}
+  }}
+}}
+"#
+            ),
+        );
+        assert_eq!(
+            pklr::eval_to_json(&path).unwrap(),
+            serde_json::json!({"m": {"duration-key": "value"}}),
+            "{name}"
+        );
+    }
+
+    let (_dir, path) = module_file(
+        "pklr_render_output_called_super_text_lambda",
+        "a = 1\noutput {\n  local delayed = () -> super.text\n  text = delayed()\n}\n",
     );
     assert_eq!(pklr::eval_to_text(&path).unwrap(), "a = 1\n");
 }
@@ -623,7 +745,7 @@ fn xml_constraints_apply_to_all_renderers() {
 fn xml_renderer_preserves_element_content_and_attribute_whitespace() {
     assert_eq!(
         render_with_imports(
-            r#"new xml.Renderer {}.renderDocument(xml.Element("parent") { "before"; xml.Element("child") { "nested" }; "after"; ignored = "property" })"#
+            r#"new xml.Renderer {}.renderDocument((xml.Element("parent")) { "before"; (xml.Element("child")) { "nested" }; "after"; ignored = "property" })"#
         ),
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<parent>before\n  <child>nested</child>after\n</parent>\n"
     );
@@ -641,7 +763,7 @@ fn xml_renderer_preserves_element_content_and_attribute_whitespace() {
     );
     assert_eq!(
         render_with_imports(
-            r#"new xml.Renderer {}.renderDocument(xml.Element("parent") { for (v in List("before", "after")) { v }; ...List("list", "items"); ...new Listing { "listing" }; ...Set("set"); ...new Dynamic { xml.Element("child") { "nested" } }; ignored = "property" })"#
+            r#"new xml.Renderer {}.renderDocument((xml.Element("parent")) { for (v in List("before", "after")) { v }; ...List("list", "items"); ...new Listing { "listing" }; ...Set("set"); ...new Dynamic { (xml.Element("child")) { "nested" } }; ignored = "property" })"#
         ),
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<parent>beforeafterlistitemslistingset\n  <child>nested</child>\n</parent>\n"
     );

@@ -1022,7 +1022,7 @@ class Step {
 
 steps = new Mapping<String, Step | Group> {
     ["group"] = new Group {
-        unknown = true
+        `unknown` = true
     }
 }
 "#,
@@ -1504,7 +1504,7 @@ values {
     local f = (x) -> x + h
     local g = f.apply(1)
     local h = 42
-    out = g
+    `out` = g
 }
 "#,
     );
@@ -3395,7 +3395,7 @@ result {
     typealias T = String
     inner = x is T
   }.inner
-  g = (x) -> new Dynamic { outer = x is T }.outer
+  g = (x) -> new Dynamic { nested = x is T }.nested
   a = f.apply("s")
   b = f.apply(1)
   c = g.apply(1)
