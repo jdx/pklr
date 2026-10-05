@@ -1,0 +1,8 @@
+module trace_e2e
+
+scientific = trace(1e7)
+local regex = trace(Regex(#"\d+"#))
+listing = trace(new Listing { 1; 2 })
+source = trace(
+  (("https://example.com/(x)")) /* ignored by trace source */
+)
