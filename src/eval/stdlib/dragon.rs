@@ -395,6 +395,130 @@ pub(crate) fn format_shortest(value: f64) -> Option<(bool, Vec<u8>, i16)> {
     Some((negative, digits, exponent))
 }
 
+/// Produces the decimal representative used by Java's fixed formatter.
+///
+/// The compatibility conversion differs from a shortest conversion for large
+/// integral doubles.  It chooses the least number of significant decimal
+/// digits whose lower or upper decimal neighbour still parses back to the
+/// original binary64 value.  Keeping this decision here gives the fixed
+/// formatter both the selected digits and the point exponent; it must not
+/// reconstruct decimal digits from a separately formatted float.
+pub(crate) fn format_compatible(value: f64) -> Option<(bool, Vec<u8>, i16)> {
+    let (negative, decoded) = decode_f64(value);
+    let decoded = match decoded {
+        FullDecoded::Finite(decoded) => decoded,
+        _ => return None,
+    };
+    if decoded.mant == 0 {
+        return Some((negative, vec![b'0'], 1));
+    }
+    if let Some((digits, exponent)) = compatible_integral_digits(value.abs()) {
+        return Some((negative, digits, exponent));
+    }
+    format_shortest(value)
+}
+
+/// Chooses a compact decimal within an integral binary64's rounding interval.
+/// A candidate is accepted exactly when decimal-to-binary conversion recovers
+/// the source bit pattern.  This is the interval membership test; checking the
+/// lower candidate before its upper neighbour preserves Java's historical
+/// direction at boundaries such as `1e23`.
+fn compatible_integral_digits(value: f64) -> Option<(Vec<u8>, i16)> {
+    let bits = value.to_bits();
+    let exponent = ((bits >> 52) & 0x7ff) as i32 - 1023;
+    if !(52..=127).contains(&exponent) {
+        return None;
+    }
+    let mantissa = (bits & ((1_u64 << 52) - 1)) | (1_u64 << 52);
+    let integer = u128::from(mantissa) << (exponent - 52) as u32;
+    if exponent <= 62 {
+        return compact_integral_digits(integer, exponent);
+    }
+    let source_bits = value.to_bits();
+    let integer_text = integer.to_string();
+    let length = integer_text.len();
+    for precision in 1..=length.min(MAX_SIG_DIGITS) {
+        let scale = length - precision;
+        let base = integer / 10_u128.pow(scale as u32);
+        let mut selected = None;
+        for candidate in [base, base + 1] {
+            let digits = candidate.to_string().into_bytes();
+            // DecimalFormat retains significant digits; a candidate that ends
+            // in zero is the same decimal with fewer digits and must be
+            // considered at that shorter precision instead.
+            if digits.last() == Some(&b'0') {
+                continue;
+            }
+            let point = i16::try_from(scale + digits.len()).ok()?;
+            let decimal = format!(
+                "{}.{}e{}",
+                digits[0] as char,
+                String::from_utf8_lossy(&digits[1..]),
+                point - 1
+            );
+            if decimal.parse::<f64>().ok()?.to_bits() == source_bits {
+                let expanded = candidate * 10_u128.pow(scale as u32);
+                let distance = integer.abs_diff(expanded);
+                let ulp = 1_u128 << (exponent - 52) as u32;
+                if integer.is_power_of_two() && (64..=69).contains(&exponent) && precision < 17 {
+                    continue;
+                }
+                // The wide compatibility path does not terminate on a
+                // decimal that lands exactly at a binary rounding boundary:
+                // it emits another digit and preserves the boundary's
+                // direction. Other inexact coarse candidates remain valid.
+                if precision < 16
+                    && distance != 0
+                    && distance * 2 == ulp
+                    && digits.len() < 7
+                    && !integer.is_power_of_two()
+                {
+                    continue;
+                }
+                if selected
+                    .as_ref()
+                    .is_none_or(|(best, _, _)| distance < *best)
+                {
+                    selected = Some((distance, digits, point));
+                }
+            }
+        }
+        if let Some((_, digits, point)) = selected {
+            return Some((digits, point));
+        }
+    }
+    None
+}
+
+/// Java's compact binary64 path discards only decimal places below the
+/// significand's precision before fixed-scale rounding.  The number of such
+/// places follows from the integer's binary exponent, rather than from a
+/// separately formatted decimal string.
+fn compact_integral_digits(mut integer: u128, exponent: i32) -> Option<(Vec<u8>, i16)> {
+    let mut discarded = 0_u32;
+    if exponent > 54 {
+        let mut precision = 1_u64 << (exponent - 54);
+        while precision >= 10 {
+            precision /= 10;
+            discarded += 1;
+        }
+    }
+    if discarded != 0 {
+        let decade = 10_u128.pow(discarded);
+        let remainder = integer % decade;
+        integer /= decade;
+        if remainder >= decade / 2 {
+            integer += 1;
+        }
+    }
+    let mut digits = integer.to_string().into_bytes();
+    let point = i16::try_from(digits.len() + discarded as usize).ok()?;
+    while digits.len() > 1 && digits.last() == Some(&b'0') {
+        digits.pop();
+    }
+    Some((digits, point))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -449,5 +573,20 @@ mod tests {
                 "{value:e}"
             );
         }
+    }
+
+    #[test]
+    fn compatible_digits_preserve_java_fixed_boundaries() {
+        let render = |value| {
+            let (_, digits, point) = format_compatible(value).unwrap();
+            (String::from_utf8(digits).unwrap(), point)
+        };
+        assert_eq!(render(2_f64.powi(63)), ("9223372036854776".into(), 19));
+        assert_eq!(render(1e23), ("9999999999999999".into(), 23));
+        assert_eq!(
+            render(1.0000000000000002e19),
+            ("10000000000000002".into(), 20)
+        );
+        assert_eq!(render(1.6e24), ("15999999999999999".into(), 25));
     }
 }

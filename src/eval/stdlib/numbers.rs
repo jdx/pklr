@@ -1,12 +1,12 @@
 //! `Int`, `Float` and `Boolean` members, and pkl's arithmetic and
 //! comparison operators on numbers, durations and data sizes.
 
+use super::dragon;
 use super::fdlibm;
 use super::render::{format_float, group_digits};
 use super::units::{data_size_unit_arg, duration_unit_arg};
 use super::*;
 use crate::value::{DataSize, DataSizeUnit, Duration, DurationUnit};
-use num_bigint::BigUint;
 
 fn integer_overflow() -> Error {
     Error::Eval("Integer overflow.".into())
@@ -63,12 +63,14 @@ fn int_between(value: i64, lo: i64, hi: i64) -> Result<i64> {
 /// Like Java, it starts from `FloatingDecimal`'s interval-selected decimal
 /// digits, then applies half-even rounding for the requested scale.
 fn to_fixed(x: f64, digits: usize) -> String {
-    let shortest = format!("{:e}", x.abs());
-    let (mut sig, mut point) = if let Some((significand, point)) = decimal_power_of_two(&shortest) {
-        (significand.to_string().into_bytes(), point)
+    let (mut sig, point) = if x == 0.0 {
+        (vec![b'0'], 1)
     } else {
-        legacy_decimal_digits(x.abs())
+        let (_, digits, point) =
+            dragon::format_compatible(x.abs()).expect("finite non-zero values have Dragon digits");
+        (digits, point)
     };
+    let mut point = i64::from(point);
     let keep = point + digits as i64;
     if x != 0.0 && keep < sig.len() as i64 {
         let round_up = if keep < 0 {
@@ -127,223 +129,6 @@ fn to_fixed(x: f64, digits: usize) -> String {
         out.extend((point..point + digits as i64).map(digit_at));
     }
     out
-}
-
-/// Selects the decimal digit interval used by Java 17's fixed formatter.
-///
-/// This is a BigUint implementation of the modified Dragon algorithm from
-/// Burger and Dybvig, "Printing Floating-Point Numbers Quickly and
-/// Accurately" (1996). Its structure follows the permissively licensed Rust
-/// standard-library Dragon implementation (Rust 1.90, MIT OR Apache-2.0):
-/// <https://github.com/rust-lang/rust/blob/1.90.0/library/core/src/num/flt2dec/strategy/dragon.rs>.
-///
-/// `DecimalFormat` does not format the binary value directly: it first selects
-/// a decimal in its binary64 rounding interval, then rounds that decimal to
-/// the requested scale. The observable Java 17 profile has a strict upper
-/// boundary for the compact primitive interval and an inclusive upper boundary
-/// once the scaled operands are at least 64 bits. Keeping that profile here is
-/// necessary for values such as `1e23` and `1.6e24`.
-fn legacy_decimal_digits(abs: f64) -> (Vec<u8>, i64) {
-    if abs == 0.0 {
-        return (vec![b'0'], 1);
-    }
-
-    let bits = abs.to_bits();
-    let exponent_bits = ((bits >> 52) & 0x7ff) as i32;
-    let mut fraction = bits & ((1u64 << 52) - 1);
-    let (bin_exp, significant_bits) = if exponent_bits == 0 {
-        let shift = fraction.leading_zeros() as i32 - 11;
-        fraction <<= shift;
-        (1 - shift - 1023, 64 - fraction.leading_zeros() as i32)
-    } else {
-        fraction |= 1u64 << 52;
-        (exponent_bits - 1023, 53)
-    };
-    let tail_zeros = fraction.trailing_zeros() as i32;
-    let fraction_bits = 53 - tail_zeros;
-    let tiny_bits = (fraction_bits - bin_exp - 1).max(0);
-
-    // Java 17 uses a compact integer interval below 2^63. Its decimal
-    // representative removes digits below the binary precision; the later
-    // DecimalFormat round observes that representative, so preserve it.
-    if tiny_bits == 0 && (-63..=62).contains(&bin_exp) {
-        let mut value = if bin_exp >= 52 {
-            fraction << (bin_exp - 52)
-        } else {
-            fraction >> (52 - bin_exp)
-        };
-        let insignificant = if bin_exp > significant_bits {
-            insignificant_decimal_digits(bin_exp - significant_bits - 1)
-        } else {
-            0
-        };
-        if insignificant > 0 {
-            let decade = 10u64.pow(insignificant);
-            let residue = value % decade;
-            value /= decade;
-            if residue >= decade / 2 {
-                value += 1;
-            }
-        }
-        let mut decimal_exponent = insignificant as i64;
-        let mut text = value.to_string().into_bytes();
-        while text.len() > 1 && text.last() == Some(&b'0') {
-            text.pop();
-            decimal_exponent += 1;
-        }
-        let point = decimal_exponent + i64::try_from(text.len()).unwrap();
-        return (text, point);
-    }
-
-    // The logarithm merely selects an initial decade. Exact integer
-    // comparisons below establish the decade before any digits are emitted.
-    let mut decimal_exponent = abs.log10().floor() as i32;
-    let mut b5 = (-decimal_exponent).max(0);
-    let mut b2 = b5 + tiny_bits + bin_exp;
-    let mut s5 = decimal_exponent.max(0);
-    let mut s2 = s5 + tiny_bits;
-    let mut m5 = b5;
-    let mut m2 = b2 - significant_bits;
-    let reduced_fraction = fraction >> tail_zeros;
-    b2 -= fraction_bits - 1;
-    let common_two = b2.min(s2);
-    b2 -= common_two;
-    s2 -= common_two;
-    m2 -= common_two;
-    if fraction_bits == 1 {
-        m2 -= 1;
-    }
-    if m2 < 0 {
-        b2 -= m2;
-        s2 -= m2;
-        m2 = 0;
-    }
-
-    let make_values = |b5: i32, b2: i32, s5: i32, s2: i32, m5: i32, m2: i32| {
-        let b =
-            (BigUint::from(reduced_fraction) * BigUint::from(5u8).pow(b5 as u32)) << b2 as usize;
-        let s = BigUint::from(5u8).pow(s5 as u32) << s2 as usize;
-        let m = BigUint::from(5u8).pow(m5 as u32) << m2 as usize;
-        (b, s, m)
-    };
-    let (mut value, mut scale, mut margin) = make_values(b5, b2, s5, s2, m5, m2);
-    while value < scale {
-        decimal_exponent -= 1;
-        b5 += 1;
-        b2 += 1;
-        m5 += 1;
-        m2 += 1;
-        (value, scale, margin) = make_values(b5, b2, s5, s2, m5, m2);
-    }
-    while value >= &scale * 10u8 {
-        decimal_exponent += 1;
-        s5 += 1;
-        s2 += 1;
-        (value, scale, margin) = make_values(b5, b2, s5, s2, m5, m2);
-    }
-
-    let ten_scale = &scale * 10u8;
-    let mut digits = Vec::with_capacity(20);
-    loop {
-        let quotient = &value / &scale;
-        debug_assert!(quotient < BigUint::from(10u8));
-        value = (value % &scale) * 10u8;
-        margin *= 10u8;
-        let low = value < margin;
-        // Java 17's wide-integer decimal profile includes the upper interval
-        // boundary; compact machine-word arithmetic leaves it strict.
-        let wide_interval = value.bits() >= 64 || ten_scale.bits() >= 64;
-        let high = if wide_interval {
-            &value + &margin >= ten_scale
-        } else {
-            &value + &margin > ten_scale
-        };
-        digits.push(b'0' + quotient.to_u32_digits().first().copied().unwrap_or(0) as u8);
-        if low || high {
-            if high
-                && (!low
-                    || &value * 2u8 > ten_scale
-                    || (&value * 2u8 == ten_scale && digits.last().is_some_and(|d| d & 1 == 1)))
-            {
-                let mut index = digits.len() - 1;
-                loop {
-                    if digits[index] != b'9' {
-                        digits[index] += 1;
-                        break;
-                    }
-                    digits[index] = b'0';
-                    if index == 0 {
-                        digits[0] = b'1';
-                        decimal_exponent += 1;
-                        break;
-                    }
-                    index -= 1;
-                }
-            }
-            break;
-        }
-    }
-    let point = i64::from(decimal_exponent) + 1;
-    compact_large_integer_edge(abs, &digits, point).unwrap_or((digits, point))
-}
-
-/// Java's compact decimal path can select a one- or two-digit decimal that is
-/// inside the binary interval but not equal to the integral binary value. For
-/// that case its wide-integer conversion continues to the leading decimal
-/// interval edge rather than retaining the compact upper neighbour. This is
-/// observable for `1.6e24`, whose binary64 value is just below `1.6e24`.
-fn compact_large_integer_edge(abs: f64, digits: &[u8], point: i64) -> Option<(Vec<u8>, i64)> {
-    let compact_len = digits.iter().rposition(|digit| *digit != b'0').unwrap_or(0) + 1;
-    let digits = &digits[..compact_len];
-    if digits.len() > 2 || point <= 19 || abs.fract() != 0.0 {
-        return None;
-    }
-    let bits = abs.to_bits();
-    let exponent = ((bits >> 52) & 0x7ff) as i32 - 1023;
-    if exponent < 52 {
-        return None;
-    }
-    let significand = (bits & ((1u64 << 52) - 1)) | (1u64 << 52);
-    let exact = BigUint::from(significand) << (exponent - 52) as usize;
-    let candidate = BigUint::parse_bytes(digits, 10)?
-        * BigUint::from(10u8).pow((point - digits.len() as i64) as u32);
-    if exact == candidate {
-        return None;
-    }
-    let exact = exact.to_string();
-    let significant = exact.as_bytes()[..exact.len().min(16)].to_vec();
-    Some((significant, exact.len() as i64))
-}
-
-fn insignificant_decimal_digits(power_of_two: i32) -> u32 {
-    let mut value = 1u64 << power_of_two;
-    let mut digits = 0;
-    while value >= 10 {
-        value /= 10;
-        digits += 1;
-    }
-    digits
-}
-
-/// A multi-digit power of two is an exact decimal representative in the
-/// legacy interval profile. Single- and two-digit forms still need interval
-/// selection: notably, binary64 `1.6e24` lies below decimal `1.6e24`.
-fn decimal_power_of_two(shortest: &str) -> Option<(u128, i64)> {
-    let (mantissa, exponent) = shortest.split_once('e')?;
-    let significand = mantissa.replace('.', "").parse::<u128>().ok()?;
-    if !mantissa.contains('.')
-        || significand.to_string().len() <= 2
-        || !significand.is_power_of_two()
-    {
-        return None;
-    }
-    let fractional_digits =
-        mantissa.len() - mantissa.find('.').map_or(mantissa.len(), |dot| dot + 1);
-    let exponent = exponent.parse::<i64>().ok()?;
-    Some((
-        significand,
-        exponent - fractional_digits as i64 + i64::try_from(significand.to_string().len()).ok()?,
-    ))
 }
 
 /// `Long.toString(n, radix)`.
