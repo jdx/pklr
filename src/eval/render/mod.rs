@@ -889,9 +889,11 @@ pub(crate) trait StringRenderer<'a> {
         let kind = self.walk().kind(value);
         if kind == Kind::Typed
             && typed_class_is(value, "pkl:xml", "CommentClass")
-            && matches!(value, Value::Object(map, _) if map.get("text").and_then(Value::as_str).is_some_and(|text| text.contains("--")))
+            && matches!(value, Value::Object(map, _) if map.get("text").and_then(Value::as_str).is_some_and(|text| text.contains("--") || text.ends_with('-')))
         {
-            return Err(Error::Eval("XML comments must not contain `--`.".into()));
+            return Err(Error::Eval(
+                "XML comments must not contain `--` or end with `-`.".into(),
+            ));
         }
         match (kind, value) {
             (Kind::Null, _) => self.visit_null(),
@@ -1006,6 +1008,43 @@ pub(crate) fn cannot_render_non_string_key(key: &Value, name: &str) -> Error {
         "Cannot render object with non-string key as {name}.\nKey   : {}",
         display_value(key)
     ))
+}
+
+/// Check that `text` can be emitted in the selected XML version. XML 1.1's
+/// restricted controls are allowed only where the renderer can write them as
+/// character references.
+pub(crate) fn validate_xml_characters(
+    text: &str,
+    version: &str,
+    context: &str,
+    allow_xml11_restricted: bool,
+) -> Result<()> {
+    for ch in text.chars() {
+        let code = ch as u32;
+        let valid = if version == "1.1" {
+            (1..=0xD7FF).contains(&code)
+                || (0xE000..=0xFFFD).contains(&code)
+                || (0x10000..=0x10FFFF).contains(&code)
+        } else {
+            matches!(code, 0x9 | 0xA | 0xD)
+                || (0x20..=0xD7FF).contains(&code)
+                || (0xE000..=0xFFFD).contains(&code)
+                || (0x10000..=0x10FFFF).contains(&code)
+        };
+        if !valid {
+            return Err(Error::Eval(format!(
+                "Invalid XML {version} character U+{code:04X} in {context}."
+            )));
+        }
+        let restricted_xml11 =
+            matches!(code, 0x1..=0x8 | 0xB | 0xC | 0xE..=0x1F | 0x7F..=0x84 | 0x86..=0x9F);
+        if version == "1.1" && restricted_xml11 && !allow_xml11_restricted {
+            return Err(Error::Eval(format!(
+                "XML 1.1 restricted character U+{code:04X} cannot be written in {context}."
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// A short Pkl rendering of `value` for error messages.
@@ -1351,9 +1390,11 @@ impl JsonValue<'_> {
     fn value(&mut self, value: &Value, kind: Kind) -> Result<serde_json::Value> {
         if kind == Kind::Typed
             && typed_class_is(value, "pkl:xml", "CommentClass")
-            && matches!(value, Value::Object(map, _) if map.get("text").and_then(Value::as_str).is_some_and(|text| text.contains("--")))
+            && matches!(value, Value::Object(map, _) if map.get("text").and_then(Value::as_str).is_some_and(|text| text.contains("--") || text.ends_with('-')))
         {
-            return Err(Error::Eval("XML comments must not contain `--`.".into()));
+            return Err(Error::Eval(
+                "XML comments must not contain `--` or end with `-`.".into(),
+            ));
         }
         Ok(match (kind, value) {
             (Kind::Null, _) => serde_json::Value::Null,

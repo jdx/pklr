@@ -2571,6 +2571,7 @@ impl Evaluator {
                 parent_type_identities: Vec::new(),
                 entry_scopes: Vec::new(),
                 evaluated_properties: Vec::new(),
+                elements: Vec::new(),
                 mapping_value_types: Vec::new(),
                 deprecated,
                 poisoned_members: (!poisoned_members.is_empty())
@@ -2961,6 +2962,10 @@ impl Evaluator {
         }
 
         let mut map: ObjectMap = ObjectMap::default();
+        // A Dynamic body can contain bare elements as well as named members.
+        // Keep the former separately so XML elements can render precisely the
+        // values Pkl gives them, in source order.
+        let mut elements: Vec<Value> = Vec::new();
         // Names of members produced by generators and not since rebound by a
         // property entry.
         let mut generated: HashSet<Arc<str>> = HashSet::default();
@@ -3163,6 +3168,7 @@ impl Evaluator {
                                     parent_type_identities: src.parent_type_identities.clone(),
                                     entry_scopes: Vec::new(),
                                     evaluated_properties: Vec::new(),
+                                    elements: Vec::new(),
                                     mapping_value_types: Vec::new(),
                                     deprecated: merge_deprecated(&src.deprecated, body),
                                     poisoned_members: None,
@@ -3201,17 +3207,24 @@ impl Evaluator {
                     );
                     let val = self.eval_expr(expr, &active_scope, depth)?;
                     check_iterable(&val)?;
-                    if let Value::Object(m, _) = val {
-                        drop(active_scope);
-                        entry_owners.release_this(&this_aliases);
-                        props_extend(
-                            &mut child_scope,
-                            &this_aliases,
-                            &mut all_props,
-                            m.iter().map(|(k, v)| (k.clone(), v.clone())),
-                        );
-                        map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
-                        refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
+                    match val {
+                        Value::Object(m, source) => {
+                            drop(active_scope);
+                            entry_owners.release_this(&this_aliases);
+                            props_extend(
+                                &mut child_scope,
+                                &this_aliases,
+                                &mut all_props,
+                                m.iter().map(|(k, v)| (k.clone(), v.clone())),
+                            );
+                            map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                            if let Some(source) = source {
+                                elements.extend(source.elements.iter().cloned());
+                            }
+                            refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
+                        }
+                        Value::List(items) => elements.extend(items.iter().cloned()),
+                        _ => unreachable!("check_iterable accepted an unsupported value"),
                     }
                 }
                 Entry::ForGenerator(fgen) => {
@@ -3241,7 +3254,7 @@ impl Evaluator {
                                 outer: receiver_members,
                             }),
                         )?;
-                        if let Value::Object(m, _) = body_val {
+                        if let Value::Object(m, source) = body_val {
                             if track_dynamic_members {
                                 record_generated_members(
                                     defined_by_layer.get_or_insert_default(),
@@ -3259,6 +3272,9 @@ impl Evaluator {
                             );
                             generated.extend(m.keys().cloned());
                             map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                            if let Some(source) = source {
+                                elements.extend(source.elements.iter().cloned());
+                            }
                             refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                         }
                     }
@@ -3284,7 +3300,7 @@ impl Evaluator {
                                 outer: receiver_members,
                             }),
                         )?;
-                        if let Value::Object(m, _) = body_val {
+                        if let Value::Object(m, source) = body_val {
                             if track_dynamic_members {
                                 record_generated_members(
                                     defined_by_layer.get_or_insert_default(),
@@ -3302,6 +3318,9 @@ impl Evaluator {
                             );
                             generated.extend(m.keys().cloned());
                             map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                            if let Some(source) = source {
+                                elements.extend(source.elements.iter().cloned());
+                            }
                             refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                         }
                     } else if let Some(else_body) = &wgen.else_body {
@@ -3316,7 +3335,7 @@ impl Evaluator {
                                 outer: receiver_members,
                             }),
                         )?;
-                        if let Value::Object(m, _) = else_val {
+                        if let Value::Object(m, source) = else_val {
                             if track_dynamic_members {
                                 record_generated_members(
                                     defined_by_layer.get_or_insert_default(),
@@ -3334,11 +3353,23 @@ impl Evaluator {
                             );
                             generated.extend(m.keys().cloned());
                             map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                            if let Some(source) = source {
+                                elements.extend(source.elements.iter().cloned());
+                            }
                             refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                         }
                     }
                 }
-                Entry::Elem(_) => {} // bare elements only valid in Listing bodies
+                Entry::Elem(expr) => {
+                    let active_scope = scope_for_object_entry(
+                        entry_index,
+                        &child_scope,
+                        entry_scopes,
+                        &entry_owners,
+                        own_body_scope,
+                    );
+                    elements.push(self.eval_expr(expr, &active_scope, depth + 1)?);
+                }
                 Entry::ClassDef(..) | Entry::TypeAlias(..) => {} // handled in scope setup
             }
         }
@@ -3384,6 +3415,7 @@ impl Evaluator {
             parent_type_identities: Vec::new(),
             entry_scopes: entry_scopes.map(<[_]>::to_vec).unwrap_or_default(),
             evaluated_properties: all_props.keys().map(|k| k.to_string()).collect(),
+            elements,
             mapping_value_types: Vec::new(),
             deprecated: collect_deprecated(entries),
             poisoned_members: None,
@@ -4599,6 +4631,7 @@ impl Evaluator {
                             parent_type_identities: Vec::new(),
                             entry_scopes: Vec::new(),
                             evaluated_properties: map.keys().map(|k| k.to_string()).collect(),
+                            elements: Vec::new(),
                             mapping_value_types: generic_params.iter().skip(1).cloned().collect(),
                             deprecated,
                             poisoned_members: None,
@@ -4712,6 +4745,7 @@ impl Evaluator {
                                             .clone(),
                                         entry_scopes: Vec::new(),
                                         evaluated_properties: Vec::new(),
+                                        elements: Vec::new(),
                                         mapping_value_types: Vec::new(),
                                         deprecated: merge_deprecated(&base_src.deprecated, entries),
                                         poisoned_members: None,
@@ -4751,6 +4785,7 @@ impl Evaluator {
                                 parent_type_identities: Vec::new(),
                                 entry_scopes: Vec::new(),
                                 evaluated_properties: Vec::new(),
+                                elements: Vec::new(),
                                 mapping_value_types: Vec::new(),
                                 deprecated,
                                 poisoned_members: None,
@@ -5991,6 +6026,7 @@ impl Evaluator {
                                         parent_type_identities: src.parent_type_identities.clone(),
                                         entry_scopes: Vec::new(),
                                         evaluated_properties: Vec::new(),
+                                        elements: Vec::new(),
                                         mapping_value_types: Vec::new(),
                                         deprecated: merge_deprecated(&src.deprecated, body),
                                         poisoned_members: None,

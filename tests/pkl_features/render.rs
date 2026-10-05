@@ -539,6 +539,54 @@ fn xml_constraints_apply_to_all_renderers() {
 }
 
 #[test]
+fn xml_renderer_preserves_element_content_and_attribute_whitespace() {
+    assert_eq!(
+        render_with_imports(
+            r#"new xml.Renderer {}.renderDocument(xml.Element("parent") { "before"; xml.Element("child") { "nested" }; "after"; ignored = "property" })"#
+        ),
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<parent>before\n  <child>nested</child>after\n</parent>\n"
+    );
+    assert_eq!(
+        render_with_imports(
+            r#"new xml.Renderer { rootElementAttributes { value = "a\tb\nc\rd" } }.renderDocument("x")"#
+        ),
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<root value=\"a&#x9;b&#xA;c&#xD;d\">x</root>\n"
+    );
+    assert_eq!(
+        render_with_imports(
+            r#"new xml.Renderer { xmlVersion = "1.1"; rootElementAttributes { value = "a\u{85}b\u{2028}c" } }.renderDocument("x")"#
+        ),
+        "<?xml version=\"1.1\" encoding=\"UTF-8\"?>\n<root value=\"a&#x85;b&#x2028;c\">x</root>\n"
+    );
+    assert_eq!(
+        render_with_imports(
+            r#"new xml.Renderer {}.renderDocument(xml.Element("parent") { for (v in List("before", "after")) { v }; ...List("list", "items"); ...new Listing { "listing" }; ...Set("set"); ...new Dynamic { xml.Element("child") { "nested" } }; ignored = "property" })"#
+        ),
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<parent>beforeafterlistitemslistingset\n  <child>nested</child>\n</parent>\n"
+    );
+}
+
+#[test]
+fn xml_renderer_rejects_invalid_comment_and_characters() {
+    let err = eval_fails(
+        "import \"pkl:xml\"\nres = new xml.Renderer {}.renderValue(xml.Comment(\"trailing-\"))",
+    );
+    assert!(
+        err.contains("must not contain `--` or end with `-`"),
+        "{err}"
+    );
+    let err =
+        eval_fails("import \"pkl:xml\"\nres = new xml.Renderer {}.renderValue(\"bad\\u{0}\")");
+    assert!(err.contains("Invalid XML 1.0 character U+0000"), "{err}");
+    let err = eval_fails("res = new PListRenderer {}.renderValue(\"bad\\u{0}\")");
+    assert!(err.contains("Invalid XML 1.0 character U+0000"), "{err}");
+    assert_eq!(
+        render_with_imports(r#"new xml.Renderer { xmlVersion = "1.1" }.renderValue("a\u{1}b")"#),
+        "a&#x1;b"
+    );
+}
+
+#[test]
 fn nullable_indent_is_jsonnet_only() {
     assert_eq!(
         render_with_imports("new jsonnet.Renderer { indent = null }.renderValue(List(1, 2))"),

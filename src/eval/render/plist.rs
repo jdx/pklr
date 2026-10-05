@@ -2,7 +2,7 @@
 
 use super::{
     Kind, StringRenderer, Walk, cannot_render_non_string_key, cannot_render_type, display_value,
-    java_double_to_string, kind_of, render_directive_text,
+    java_double_to_string, kind_of, render_directive_text, validate_xml_characters,
 };
 use crate::error::{Error, Result};
 use crate::value::Value;
@@ -65,12 +65,14 @@ impl<'a> PList<'a> {
         self.out.push('>');
     }
 
-    fn key(&mut self, name: &str) {
+    fn key(&mut self, name: &str) -> Result<()> {
+        validate_xml_characters(name, "1.0", "XML property-list key", false)?;
         self.out.push_str(&self.curr_indent);
         self.out.push_str("<key>");
         escape_xml_text(name, &mut self.out);
         self.out.push_str("</key>\n");
         self.out.push_str(&self.curr_indent);
+        Ok(())
     }
 }
 
@@ -128,6 +130,7 @@ impl<'a> StringRenderer<'a> for PList<'a> {
     }
 
     fn visit_string(&mut self, value: &str) -> Result<()> {
+        validate_xml_characters(value, "1.0", "XML property-list string", false)?;
         self.out.push_str("<string>");
         escape_xml_text(value, &mut self.out);
         self.out.push_str("</string>");
@@ -189,7 +192,7 @@ impl<'a> StringRenderer<'a> for PList<'a> {
             (_, Value::String(s)) => s.clone(),
             _ => return Err(cannot_render_non_string_key(key, NAME)),
         };
-        self.key(&text);
+        self.key(&text)?;
         Ok(())
     }
 
@@ -203,7 +206,7 @@ impl<'a> StringRenderer<'a> for PList<'a> {
         if is_first {
             self.out.push_str("<dict>\n");
         }
-        self.key(name);
+        self.key(name)?;
         self.visit(value)?;
         self.out.push('\n');
         Ok(())
