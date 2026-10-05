@@ -36,7 +36,11 @@ fn write_trace_value(value: &Value, out: &mut String, top: bool) {
         Value::Float(f) => out.push_str(&trace_float(*f)),
         Value::String(s) => write_trace_string(s, out),
         Value::List(items) => {
-            out.push_str("List(");
+            out.push_str(match items.kind() {
+                ListKind::List => "List(",
+                ListKind::Listing => "Listing(",
+                ListKind::Set => "Set(",
+            });
             for (i, item) in items.iter().enumerate() {
                 if i > 0 {
                     out.push_str(", ");
@@ -84,6 +88,11 @@ fn write_trace_value(value: &Value, out: &mut String, top: bool) {
         Value::Lambda(params, ..) => {
             out.push_str(&format!("<function({})>", params.join(", ")));
         }
+        Value::Regex(regex) => {
+            out.push_str("Regex(");
+            write_trace_string(regex.pattern(), out);
+            out.push(')');
+        }
     }
 }
 
@@ -125,6 +134,7 @@ fn write_trace_string(s: &str, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::value::Regex;
 
     #[test]
     fn renders_values_like_pkl() {
@@ -134,8 +144,12 @@ mod tests {
         );
         assert_eq!(trace_value(&Value::Float(2.0)), "2.0");
         assert_eq!(
-            trace_value(&Value::List(Arc::new(vec![Value::Int(1), Value::Int(2)]))),
+            trace_value(&Value::List(vec![Value::Int(1), Value::Int(2)].into())),
             "List(1, 2)"
+        );
+        assert_eq!(
+            trace_value(&Value::Regex(Arc::new(Regex::new("a.*").unwrap()))),
+            r#"Regex("a.*")"#
         );
         let mut inner = ObjectMap::default();
         inner.insert("name".into(), Value::String("Parrot".into()));
