@@ -209,17 +209,20 @@ fn eval_simple_expr(
                 Err(error) => return Some(Err(error)),
             };
             if matches!(op, BinOp::And | BinOp::Or) {
-                let left_truthy = is_truthy(&l);
+                let left = match stdlib::logical_left(*op, &l) {
+                    Ok(left) => left,
+                    Err(error) => return Some(Err(error)),
+                };
                 let short_circuit = match op {
-                    BinOp::And => !left_truthy,
-                    _ => left_truthy,
+                    BinOp::And => !left,
+                    _ => left,
                 };
                 if short_circuit {
-                    return Some(Ok(Value::Bool(left_truthy)));
+                    return Some(Ok(Value::Bool(left)));
                 }
                 return Some(
                     eval_simple_expr(right, scope, depth + 1, max_depth)?
-                        .map(|r| Value::Bool(is_truthy(&r))),
+                        .and_then(|r| stdlib::logical_right(*op, &l, &r).map(Value::Bool)),
                 );
             }
             let r = match eval_simple_expr(right, scope, depth + 1, max_depth)? {
@@ -253,6 +256,9 @@ fn is_simple_expr(expr: &Expr) -> bool {
 
 /// Apply a binary operator other than `|>` to evaluated operands.
 fn apply_binop(op: BinOp, l: Value, r: Value) -> Result<Value> {
+    if let Some(result) = stdlib::binary_op(op, &l, &r) {
+        return result;
+    }
     match op {
         BinOp::Add => add_values(l, r),
         BinOp::Sub => arithmetic(l, r, |a, b| Ok(a - b), |a, b| Ok(a - b)),
@@ -287,8 +293,13 @@ fn apply_binop(op: BinOp, l: Value, r: Value) -> Result<Value> {
         BinOp::Le => compare_or_eq(l, r, std::cmp::Ordering::Less),
         BinOp::Gt => compare(l, r, std::cmp::Ordering::Greater),
         BinOp::Ge => compare_or_eq(l, r, std::cmp::Ordering::Greater),
-        BinOp::And => Ok(Value::Bool(is_truthy(&l) && is_truthy(&r))),
-        BinOp::Or => Ok(Value::Bool(is_truthy(&l) || is_truthy(&r))),
+        BinOp::And | BinOp::Or => {
+            let left = stdlib::logical_left(op, &l)?;
+            if left == matches!(op, BinOp::Or) {
+                return Ok(Value::Bool(left));
+            }
+            stdlib::logical_right(op, &l, &r).map(Value::Bool)
+        }
         BinOp::IntDiv => arithmetic(
             l,
             r,
@@ -2741,9 +2752,18 @@ impl Evaluator {
         let mut receiver_scope = scope.clone();
         receiver_scope.receiver_entries = Some(entries.clone());
         receiver_scope.receiver_list_base = None;
-        self.eval_entries_with_lexical_scopes(entries, &receiver_scope, depth, None, None, None)
+        self.eval_entries_with_lexical_scopes(
+            entries,
+            &receiver_scope,
+            depth,
+            None,
+            None,
+            false,
+            None,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)] // Mapping context is independent of inherited source.
     fn eval_entries_with_lexical_scopes(
         &mut self,
         entries: &Body,
@@ -2751,11 +2771,20 @@ impl Evaluator {
         depth: usize,
         entry_scopes: Option<&[Option<Arc<CapturedScope>>]>,
         inherited_source: Option<&ObjectSource>,
+        // Generator bodies do not inherit the receiver's source entries, but
+        // they do inherit its mapping-key semantics.
+        mapping_context: bool,
         // For a generator body, the members its receiver holds so far. Its
         // members are the receiver's, so a body amendment (`o { ... }` or
         // `["k"] { ... }`) amends the receiver's existing member.
         receiver_members: Option<&ReceiverMembers<'_>>,
     ) -> Result<Value> {
+        // A Mapping may retain the first spelling of a native-unit key, while
+        // Pkl identity is its normalized amount. Keep that rule in the shared
+        // amendment evaluator rather than selecting a second evaluator from
+        // the key's surface syntax.
+        let mapping_entries = mapping_context
+            || inherited_source.is_some_and(|source| source.kind == ObjectKind::Mapping);
         let mut child_scope = scope.child();
         let entry_owners = entry_scope_owners(entries, entry_scopes, inherited_source);
         let own_body = own_body_names(entries, entry_scopes, inherited_source);
@@ -2835,7 +2864,21 @@ impl Evaluator {
         // output properties can close over the amended instance. Bind `this`
         // before locals are evaluated, then keep direct aliases synchronized as
         // properties populate the instance.
-        let mut all_props: Arc<ObjectMap> = Arc::default();
+        // A generator body is evaluated as a temporary object, but its `this`
+        // is the enclosing receiver. Seed its receiver view without copying
+        // those members into its output map.
+        let mut all_props: Arc<ObjectMap> = receiver_members.map_or_else(Arc::default, |members| {
+            let mut receiver = members
+                .outer
+                .map_or_else(ObjectMap::default, |outer| (*outer.own).clone());
+            receiver.extend(
+                members
+                    .own
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone())),
+            );
+            Arc::new(receiver)
+        });
         let mut this_aliases = Vec::new();
         refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
         // First pass: collect locals, class definitions, and type aliases in
@@ -3068,13 +3111,26 @@ impl Evaluator {
                             key.as_ref().expect("non-class mapping keys are evaluated"),
                         )?,
                     };
+                    let storage_key = if mapping_entries {
+                        equivalent_mapping_key(&map, &key_str).unwrap_or_else(|| key_str.clone())
+                    } else {
+                        key_str.clone()
+                    };
                     // A body may define each key once. An object body still
                     // amends an inherited value, but it is a definition in
                     // this body and must participate in duplicate detection.
                     if track_dynamic_members {
                         let defined_by_layer = defined_by_layer.get_or_insert_default();
                         let layer = entry_layer(entry_scopes, entry_index);
-                        if !defined_by_layer.insert((layer, key_str.clone())) {
+                        let duplicate = mapping_entries
+                            && defined_by_layer.iter().any(|(defined_layer, defined_key)| {
+                                *defined_layer == layer
+                                    && crate::value::mapping_storage_keys_equal(
+                                        defined_key,
+                                        &key_str,
+                                    )
+                            });
+                        if duplicate || !defined_by_layer.insert((layer, key_str.clone())) {
                             let key = match key.as_ref() {
                                 None => key_str.to_string(),
                                 Some(Value::String(s)) => format!("{s:?}"),
@@ -3090,8 +3146,23 @@ impl Evaluator {
                     // replacing it.
                     if let Expr::ObjectBody(body) = val_expr
                         && let Some(existing @ (Value::Object(..) | Value::List(_))) = map
-                            .get(&key_str)
-                            .or_else(|| receiver_members.and_then(|members| members.get(&key_str)))
+                            .get(&storage_key)
+                            .or_else(|| {
+                                receiver_members.and_then(|members| {
+                                    if mapping_entries {
+                                        equivalent_mapping_key(members.own, &key_str)
+                                            .and_then(|key| members.own.get(&key))
+                                            .or_else(|| {
+                                                members.outer.and_then(|outer| {
+                                                    equivalent_mapping_key(outer.own, &key_str)
+                                                        .and_then(|key| outer.own.get(&key))
+                                                })
+                                            })
+                                    } else {
+                                        members.get(&key_str)
+                                    }
+                                })
+                            })
                             .cloned()
                     {
                         // A listing amendment only takes elements, so a property
@@ -3108,14 +3179,15 @@ impl Evaluator {
                             self.eval_value_amendment(existing, body, &active_scope, depth)?;
                         drop(active_scope);
                         entry_owners.release_this(&this_aliases);
-                        props_insert(
+                        props_insert_mapping(
                             &mut child_scope,
                             &this_aliases,
                             &mut all_props,
-                            key_str.clone(),
+                            storage_key.clone(),
                             val.clone(),
+                            mapping_entries,
                         );
-                        map.insert(key_str, val);
+                        map.insert(storage_key, val);
                         refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                         continue;
                     }
@@ -3174,14 +3246,15 @@ impl Evaluator {
                     };
                     drop(active_scope);
                     entry_owners.release_this(&this_aliases);
-                    props_insert(
+                    props_insert_mapping(
                         &mut child_scope,
                         &this_aliases,
                         &mut all_props,
-                        key_str.clone(),
+                        storage_key.clone(),
                         val.clone(),
+                        mapping_entries,
                     );
-                    map.insert(key_str, val);
+                    map.insert(storage_key, val);
                     refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                 }
                 Entry::Spread(expr) => {
@@ -3198,13 +3271,14 @@ impl Evaluator {
                         Value::Object(m, source) => {
                             drop(active_scope);
                             entry_owners.release_this(&this_aliases);
-                            props_extend(
+                            props_extend_mapping(
                                 &mut child_scope,
                                 &this_aliases,
                                 &mut all_props,
                                 m.iter().map(|(k, v)| (k.clone(), v.clone())),
+                                mapping_entries,
                             );
-                            map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                            extend_object_entries(&mut map, &m, mapping_entries);
                             if let Some(source) = source {
                                 elements.extend(source.elements.iter().cloned());
                             }
@@ -3236,6 +3310,7 @@ impl Evaluator {
                             depth,
                             None,
                             None,
+                            mapping_entries,
                             Some(&ReceiverMembers {
                                 own: &all_props,
                                 outer: receiver_members,
@@ -3248,17 +3323,19 @@ impl Evaluator {
                                     entry_layer(entry_scopes, entry_index),
                                     &m,
                                     &fgen.body,
+                                    mapping_entries,
                                 )?;
                             }
                             entry_owners.release_this(&this_aliases);
-                            props_extend(
+                            props_extend_mapping(
                                 &mut child_scope,
                                 &this_aliases,
                                 &mut all_props,
                                 m.iter().map(|(k, v)| (k.clone(), v.clone())),
+                                mapping_entries,
                             );
                             generated.extend(m.keys().cloned());
-                            map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                            extend_object_entries(&mut map, &m, mapping_entries);
                             if let Some(source) = source {
                                 elements.extend(source.elements.iter().cloned());
                             }
@@ -3282,6 +3359,7 @@ impl Evaluator {
                             depth,
                             None,
                             None,
+                            mapping_entries,
                             Some(&ReceiverMembers {
                                 own: &all_props,
                                 outer: receiver_members,
@@ -3294,17 +3372,19 @@ impl Evaluator {
                                     entry_layer(entry_scopes, entry_index),
                                     &m,
                                     &wgen.body,
+                                    mapping_entries,
                                 )?;
                             }
                             entry_owners.release_this(&this_aliases);
-                            props_extend(
+                            props_extend_mapping(
                                 &mut child_scope,
                                 &this_aliases,
                                 &mut all_props,
                                 m.iter().map(|(k, v)| (k.clone(), v.clone())),
+                                mapping_entries,
                             );
                             generated.extend(m.keys().cloned());
-                            map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                            extend_object_entries(&mut map, &m, mapping_entries);
                             if let Some(source) = source {
                                 elements.extend(source.elements.iter().cloned());
                             }
@@ -3317,6 +3397,7 @@ impl Evaluator {
                             depth,
                             None,
                             None,
+                            mapping_entries,
                             Some(&ReceiverMembers {
                                 own: &all_props,
                                 outer: receiver_members,
@@ -3329,17 +3410,19 @@ impl Evaluator {
                                     entry_layer(entry_scopes, entry_index),
                                     &m,
                                     else_body,
+                                    mapping_entries,
                                 )?;
                             }
                             entry_owners.release_this(&this_aliases);
-                            props_extend(
+                            props_extend_mapping(
                                 &mut child_scope,
                                 &this_aliases,
                                 &mut all_props,
                                 m.iter().map(|(k, v)| (k.clone(), v.clone())),
+                                mapping_entries,
                             );
                             generated.extend(m.keys().cloned());
-                            map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                            extend_object_entries(&mut map, &m, mapping_entries);
                             if let Some(source) = source {
                                 elements.extend(source.elements.iter().cloned());
                             }
@@ -4071,6 +4154,7 @@ impl Evaluator {
             depth + 1,
             Some(&merged_entry_scopes),
             Some(base_source),
+            false,
             None,
         )?;
         if let Value::Object(map, Some(source)) = result {
@@ -4470,7 +4554,10 @@ impl Evaluator {
                         StringInterpPart::Literal(s) => result.push_str(s),
                         StringInterpPart::Expr(e) => {
                             let val = self.eval_expr(e, scope, depth + 1)?;
-                            result.push_str(&self.value_to_string(&val, depth + 1)?);
+                            match &val {
+                                Value::String(s) => result.push_str(s),
+                                _ => result.push_str(&self.value_to_string(&val, depth + 1)?),
+                            }
                         }
                     }
                 }
@@ -4802,7 +4889,11 @@ impl Evaluator {
                     return Ok(value);
                 }
                 let obj = self.eval_field_base(obj_expr, field, scope, depth)?;
-                if let Some(result) = self.stdlib_property(&obj, field) {
+                // Objects resolve their own members below; built-in values
+                // answer from the standard library.
+                if !matches!(obj, Value::Object(..))
+                    && let Some(result) = self.stdlib_property(&obj, field)
+                {
                     return result;
                 }
                 // Built-in properties
@@ -4839,14 +4930,6 @@ impl Evaluator {
                         return Ok(Value::List(
                             map.values().cloned().collect::<Vec<_>>().into(),
                         ));
-                    }
-                    // Duration and DataSize units on numbers
-                    (
-                        Value::Int(_) | Value::Float(_),
-                        "ns" | "us" | "ms" | "s" | "min" | "h" | "d" | "b" | "kb" | "mb" | "gb"
-                        | "tb" | "pb" | "kib" | "mib" | "gib" | "tib" | "pib",
-                    ) => {
-                        return Ok(make_unit_object(obj, field));
                     }
                     _ => {}
                 }
@@ -4925,12 +5008,22 @@ impl Evaluator {
                 }
                 let key_str = value_to_key(&key)?;
                 match obj {
-                    Value::Object(map, source) => map.get(&key_str).cloned().ok_or_else(|| {
-                        Error::Eval(
-                            missing_member_error(&source, obj_expr, &key_str, scope)
-                                .unwrap_or_else(|| format!("key not found: {key_str}")),
-                        )
-                    }),
+                    Value::Object(map, source) => map
+                        .get(&key_str)
+                        .cloned()
+                        .or_else(|| {
+                            map.iter()
+                                .find(|(stored, _)| {
+                                    crate::value::mapping_storage_keys_equal(stored, &key_str)
+                                })
+                                .map(|(_, value)| value.clone())
+                        })
+                        .ok_or_else(|| {
+                            Error::Eval(
+                                missing_member_error(&source, obj_expr, &key_str, scope)
+                                    .unwrap_or_else(|| format!("key not found: {key_str}")),
+                            )
+                        }),
                     _ => Err(Error::Eval("cannot index non-object".into())),
                 }
             }
@@ -4953,12 +5046,16 @@ impl Evaluator {
             Expr::Unop(op, operand) => {
                 let v = self.eval_expr(operand, scope, depth + 1)?;
                 match op {
-                    UnOp::Neg => match v {
-                        Value::Int(n) => Ok(Value::Int(-n)),
-                        Value::Float(f) => Ok(Value::Float(-f)),
-                        _ => Err(Error::Eval("cannot negate non-number".into())),
-                    },
-                    UnOp::Not => Ok(Value::Bool(!is_truthy(&v))),
+                    UnOp::Neg => stdlib::negate(&v).unwrap_or_else(|| {
+                        Err(stdlib::error_with_values(
+                            format!(
+                                "Operator `-` is not defined for operand type `{}`.",
+                                v.type_name()
+                            ),
+                            &[("Operand", &v)],
+                        ))
+                    }),
+                    UnOp::Not => stdlib::logical_not(&v),
                     UnOp::NonNull => {
                         if is_null_value(&v) {
                             Err(Error::Eval(
@@ -5187,7 +5284,8 @@ impl Evaluator {
                     }
                     for pair in evaled.chunks(2) {
                         if let [k, v] = pair {
-                            map.insert(value_to_key(k)?, v.clone());
+                            let key = value_to_key(k)?;
+                            insert_mapping_entry(&mut map, key, v.clone());
                         }
                     }
                     return Ok(Value::Object(Arc::new(map), None));
@@ -5570,7 +5668,7 @@ impl Evaluator {
                 // Unannotated mapping entries with bodies still use the general
                 // amendment path, which preserves Listing-shaped entry bodies.
             } else {
-                let (_, mut amendment_scope) =
+                let (inherited_scope, mut amendment_scope) =
                     mapping_amendment_scopes(base_src.scope(), base_src.scope_declared(), scope);
                 amendment_scope.set("super", base.clone());
                 let mut receiver_entries = base_map
@@ -5579,7 +5677,25 @@ impl Evaluator {
                     .collect::<Vec<_>>();
                 receiver_entries.extend_from_slice(overlay_entries);
                 amendment_scope.receiver_entries = Some(Arc::new(receiver_entries));
+                let value_type_defaults = base_src
+                    .mapping_value_types
+                    .iter()
+                    .filter_map(|name| {
+                        resolve_dotted(&inherited_scope, name).map(|value| (name.clone(), value))
+                    })
+                    .collect::<Vec<_>>();
+                let inherited_default =
+                    self.find_default_template(&base_src.entries, &inherited_scope, depth)?;
                 let mut amended = ObjectMap::default();
+                self.eval_mapping_entries_with_type_default(
+                    &base_src.entries,
+                    &inherited_scope,
+                    depth,
+                    &mut amended,
+                    &value_type_defaults,
+                    &base_src.mapping_value_types,
+                    MappingInheritedDefault::default(),
+                )?;
                 amended.extend(
                     base_map
                         .iter()
@@ -5590,12 +5706,25 @@ impl Evaluator {
                     &amendment_scope,
                     depth,
                     &mut amended,
-                    &[],
-                    &[],
-                    MappingInheritedDefault::default(),
+                    &value_type_defaults,
+                    &base_src.mapping_value_types,
+                    MappingInheritedDefault {
+                        value: inherited_default,
+                        entries: find_default_body_entries(&base_src.entries),
+                    },
                 )?;
+                // A metadata-only Mapping has no entries of its own, so this
+                // specialized first amendment must retain the overlay as its
+                // future source. Otherwise a later ordinary amendment loses
+                // an introduced `default` (and any captured bindings it uses).
                 let mut source = Arc::unwrap_or_clone(Arc::clone(base_src));
-                source.entries = overlay_entries.to_vec().into();
+                source.entries = base_src
+                    .entries
+                    .iter()
+                    .cloned()
+                    .chain(overlay_entries.iter().cloned())
+                    .collect::<Vec<_>>()
+                    .into();
                 source.captured = SourceScope::lazy(scope, Vec::new(), Vec::new());
                 return Ok(Value::Object(Arc::new(amended), Some(Arc::new(source))));
             }
@@ -5705,16 +5834,17 @@ impl Evaluator {
         // `x is Foo && x.fooField` must not touch `fooField` when `x` is not a
         // `Foo`).
         if matches!(op, BinOp::And | BinOp::Or) {
-            let left_truthy = is_truthy(&self.eval_expr(left, scope, depth + 1)?);
+            let l = self.eval_expr(left, scope, depth + 1)?;
+            let left_value = stdlib::logical_left(op, &l)?;
             let short_circuit = match op {
-                BinOp::And => !left_truthy,
-                _ => left_truthy,
+                BinOp::And => !left_value,
+                _ => left_value,
             };
             if short_circuit {
-                return Ok(Value::Bool(left_truthy));
+                return Ok(Value::Bool(left_value));
             }
-            let right_truthy = is_truthy(&self.eval_expr(right, scope, depth + 1)?);
-            return Ok(Value::Bool(right_truthy));
+            let r = self.eval_expr(right, scope, depth + 1)?;
+            return stdlib::logical_right(op, &l, &r).map(Value::Bool);
         }
 
         let l = self.eval_expr(left, scope, depth + 1)?;
@@ -5874,7 +6004,9 @@ impl Evaluator {
                     // and `"1"` are distinct mapping keys.
                     // Object-body entries may amend an earlier value from this
                     // body.
-                    if !defined_keys.insert(key_str.clone()) {
+                    let storage_key =
+                        equivalent_mapping_key(map, &key_str).unwrap_or_else(|| key_str.clone());
+                    if !insert_mapping_key(defined_keys, &key_str) {
                         let key = match key.as_ref() {
                             None => key_str.to_string(),
                             Some(Value::String(s)) => format!("{s:?}"),
@@ -5884,7 +6016,8 @@ impl Evaluator {
                             "Duplicate definition of member `{key}`."
                         )));
                     }
-                    if let Some(Value::Object(existing_map, Some(existing_src))) = map.get(&key_str)
+                    if let Some(Value::Object(existing_map, Some(existing_src))) =
+                        map.get(&storage_key)
                         && let Expr::ObjectBody(body) = val_expr
                     {
                         let val = self.eval_amended_object(
@@ -5894,7 +6027,7 @@ impl Evaluator {
                             &entry_scope,
                             depth,
                         )?;
-                        map.insert(key_str, val);
+                        map.insert(storage_key, val);
                         continue;
                     }
                     let type_default = match val_expr {
@@ -6049,7 +6182,7 @@ impl Evaluator {
                                 &entry_scope,
                             )?
                         };
-                    map.insert(key_str, val);
+                    map.insert(storage_key, val);
                 }
                 Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {}
                 Entry::Property(prop)
@@ -6065,7 +6198,9 @@ impl Evaluator {
                         ));
                     }
                     if let Value::Object(m, _) = val {
-                        map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                        for (key, value) in m.iter() {
+                            insert_mapping_entry(map, key.clone(), value.clone());
+                        }
                     }
                 }
                 Entry::ForGenerator(fgen) => {
@@ -6209,7 +6344,7 @@ impl Evaluator {
         let converters = self.converters.clone();
         let mut memo = ConverterMemo::default();
         Ok(self
-            .apply_converters_recursive(&value, &converters, Vec::new(), &mut memo)?
+            .apply_converters_recursive(&value, &converters, Vec::new(), false, &mut memo)?
             .unwrap_or(value))
     }
 
@@ -6220,7 +6355,8 @@ impl Evaluator {
         &mut self,
         value: &Value,
         converters: &[(String, Value)],
-        blocked_root_converters: Vec<String>,
+        blocked_root_converters: Vec<(String, Value)>,
+        blocked_at_root: bool,
         memo: &mut ConverterMemo,
     ) -> Result<Option<Value>> {
         // A shared object or list (one mapping referenced from several places,
@@ -6241,8 +6377,13 @@ impl Evaluator {
         {
             return Ok(converted.clone());
         }
-        let converted =
-            self.apply_converters_uncached(value, converters, blocked_root_converters, memo)?;
+        let converted = self.apply_converters_uncached(
+            value,
+            converters,
+            blocked_root_converters,
+            blocked_at_root,
+            memo,
+        )?;
         if let Some(key) = key {
             // The original is kept so its address is not reused by another
             // value while the memo is alive.
@@ -6255,7 +6396,8 @@ impl Evaluator {
         &mut self,
         value: &Value,
         converters: &[(String, Value)],
-        blocked_root_converters: Vec<String>,
+        blocked_root_converters: Vec<(String, Value)>,
+        blocked_at_root: bool,
         memo: &mut ConverterMemo,
     ) -> Result<Option<Value>> {
         match value {
@@ -6275,7 +6417,11 @@ impl Evaluator {
                     for type_name in type_names {
                         for (conv_name, lambda) in converters {
                             if type_names_match(conv_name, type_name)
-                                && !blocked_root_converters.contains(conv_name)
+                                && !(blocked_at_root
+                                    && blocked_root_converters
+                                        .iter()
+                                        .any(|(blocked_name, _)| blocked_name == conv_name))
+                                && !converter_is_blocked(&blocked_root_converters, conv_name, value)
                                 && let Value::Lambda(params, body, captured) = lambda
                             {
                                 let mut call_scope = Scope::for_call(captured);
@@ -6285,9 +6431,9 @@ impl Evaluator {
                                 }
                                 let result = self.eval_expr(body, &call_scope, 0)?;
                                 let mut blocked = blocked_root_converters;
-                                blocked.push(conv_name.clone());
+                                blocked.push((conv_name.clone(), value.clone()));
                                 let converted = self.apply_converters_recursive(
-                                    &result, converters, blocked, memo,
+                                    &result, converters, blocked, true, memo,
                                 )?;
                                 return Ok(Some(converted.unwrap_or(result)));
                             }
@@ -6298,8 +6444,16 @@ impl Evaluator {
                 // No converter matched — recurse into children
                 let mut new_map: Option<ObjectMap> = None;
                 for (index, (k, v)) in map.iter().enumerate() {
-                    let converted =
-                        self.apply_converters_recursive(v, converters, Vec::new(), memo)?;
+                    // Keep blocked roots while walking converter output. The
+                    // block applies only to that exact value, so a distinct
+                    // nested value of the same class can still convert.
+                    let converted = self.apply_converters_recursive(
+                        v,
+                        converters,
+                        blocked_root_converters.clone(),
+                        false,
+                        memo,
+                    )?;
                     match (&mut new_map, converted) {
                         (Some(new_map), converted) => {
                             new_map.insert(k.clone(), converted.unwrap_or_else(|| v.clone()));
@@ -6321,8 +6475,13 @@ impl Evaluator {
             Value::List(items) => {
                 let mut new_items: Option<Vec<Value>> = None;
                 for (index, item) in items.iter().enumerate() {
-                    let converted =
-                        self.apply_converters_recursive(item, converters, Vec::new(), memo)?;
+                    let converted = self.apply_converters_recursive(
+                        item,
+                        converters,
+                        blocked_root_converters.clone(),
+                        false,
+                        memo,
+                    )?;
                     match (&mut new_items, converted) {
                         (Some(new_items), converted) => {
                             new_items.push(converted.unwrap_or_else(|| item.clone()));
@@ -6338,8 +6497,98 @@ impl Evaluator {
                 }
                 Ok(new_items.map(|new_items| Value::List(ListValue::new(items.kind(), new_items))))
             }
+            // Built-in values such as a `Regex` match a converter by class name.
+            Value::Regex(_) | Value::Duration(_) | Value::DataSize(_) => {
+                let class_name = value.type_name();
+                for (conv_name, lambda) in converters {
+                    if type_names_match(conv_name, class_name)
+                        && !(blocked_at_root
+                            && blocked_root_converters
+                                .iter()
+                                .any(|(blocked_name, _)| blocked_name == conv_name))
+                        && !converter_is_blocked(&blocked_root_converters, conv_name, value)
+                    {
+                        let result = self.invoke_lambda(lambda, std::slice::from_ref(value), 0)?;
+                        let mut blocked = blocked_root_converters;
+                        blocked.push((conv_name.clone(), value.clone()));
+                        let converted = self
+                            .apply_converters_recursive(&result, converters, blocked, true, memo)?;
+                        return Ok(Some(converted.unwrap_or(result)));
+                    }
+                }
+                Ok(None)
+            }
             _ => Ok(None),
         }
+    }
+}
+
+/// The backing map retains the first spelling of a native-unit key so `keys`
+/// and renderer converters see the source unit. Every mapping operation,
+/// however, resolves equivalent normalized amounts to that stored key.
+fn equivalent_mapping_key(map: &ObjectMap, key: &str) -> Option<Arc<str>> {
+    map.get_key_value(key)
+        .map(|(key, _)| key.clone())
+        .or_else(|| {
+            map.keys()
+                .find(|stored| crate::value::mapping_storage_keys_equal(stored, key))
+                .cloned()
+        })
+}
+
+fn insert_mapping_key(keys: &mut HashSet<Arc<str>>, key: &Arc<str>) -> bool {
+    if keys.contains(key)
+        || keys
+            .iter()
+            .any(|stored| crate::value::mapping_storage_keys_equal(stored, key))
+    {
+        false
+    } else {
+        keys.insert(key.clone());
+        true
+    }
+}
+
+fn insert_mapping_entry(map: &mut ObjectMap, key: Arc<str>, value: Value) {
+    let storage_key = equivalent_mapping_key(map, &key).unwrap_or(key);
+    map.insert(storage_key, value);
+}
+
+fn extend_object_entries(target: &mut ObjectMap, entries: &ObjectMap, mapping_entries: bool) {
+    for (key, value) in entries {
+        if mapping_entries {
+            insert_mapping_entry(target, key.clone(), value.clone());
+        } else {
+            target.insert(key.clone(), value.clone());
+        }
+    }
+}
+
+fn converter_is_blocked(blocked: &[(String, Value)], name: &str, value: &Value) -> bool {
+    blocked
+        .iter()
+        .any(|(blocked_name, root)| blocked_name == name && same_value_identity(root, value))
+}
+
+fn same_value_identity(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Object(a, a_source), Value::Object(b, b_source)) => {
+            Arc::ptr_eq(a, b)
+                && a_source
+                    .as_ref()
+                    .zip(b_source.as_ref())
+                    .is_none_or(|(a, b)| Arc::ptr_eq(a, b))
+        }
+        (Value::List(a), Value::List(b)) => a.items_ptr() == b.items_ptr() && a.kind() == b.kind(),
+        // Native scalar converter arguments are copied into a lambda, so they
+        // have no allocation identity to compare. Their value identity is
+        // sufficient here: only the converter root is blocked, while a
+        // distinct nested object/list still follows its normal converter path.
+        (Value::Duration(_) | Value::DataSize(_), Value::Duration(_) | Value::DataSize(_)) => {
+            crate::value::mapping_storage_key(a) == crate::value::mapping_storage_key(b)
+        }
+        (Value::Regex(a), Value::Regex(b)) => Arc::ptr_eq(a, b),
+        _ => false,
     }
 }
 
@@ -6883,6 +7132,9 @@ fn inherit_stdlib_module(name: &str, base_obj: &mut ObjectMap, scope: &mut Scope
 }
 
 fn stdlib_module(name: &str) -> Value {
+    if let Some(module) = stdlib::module(name) {
+        return module;
+    }
     let mut map = ObjectMap::default();
     if name == "base" {
         map.insert("Regex".into(), Value::String("Regex".into()));

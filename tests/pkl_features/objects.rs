@@ -992,56 +992,56 @@ result = new C {}
 
 #[test]
 fn duration_minutes() {
-    let json = eval(r#"x = 5.min"#);
+    let json = eval("local d = 5.min\nx { value = d.value; unit = d.unit }");
     assert_eq!(json["x"]["value"], 5);
     assert_eq!(json["x"]["unit"], "min");
 }
 
 #[test]
 fn duration_seconds() {
-    let json = eval(r#"x = 3.s"#);
+    let json = eval("local d = 3.s\nx { value = d.value; unit = d.unit }");
     assert_eq!(json["x"]["value"], 3);
     assert_eq!(json["x"]["unit"], "s");
 }
 
 #[test]
 fn duration_hours() {
-    let json = eval(r#"x = 2.h"#);
+    let json = eval("local d = 2.h\nx { value = d.value; unit = d.unit }");
     assert_eq!(json["x"]["value"], 2);
     assert_eq!(json["x"]["unit"], "h");
 }
 
 #[test]
 fn duration_days() {
-    let json = eval(r#"x = 7.d"#);
+    let json = eval("local d = 7.d\nx { value = d.value; unit = d.unit }");
     assert_eq!(json["x"]["value"], 7);
     assert_eq!(json["x"]["unit"], "d");
 }
 
 #[test]
 fn duration_milliseconds() {
-    let json = eval(r#"x = 100.ms"#);
+    let json = eval("local d = 100.ms\nx { value = d.value; unit = d.unit }");
     assert_eq!(json["x"]["value"], 100);
     assert_eq!(json["x"]["unit"], "ms");
 }
 
 #[test]
 fn duration_nanoseconds() {
-    let json = eval(r#"x = 50.ns"#);
+    let json = eval("local d = 50.ns\nx { value = d.value; unit = d.unit }");
     assert_eq!(json["x"]["value"], 50);
     assert_eq!(json["x"]["unit"], "ns");
 }
 
 #[test]
 fn duration_microseconds() {
-    let json = eval(r#"x = 10.us"#);
+    let json = eval("local d = 10.us\nx { value = d.value; unit = d.unit }");
     assert_eq!(json["x"]["value"], 10);
     assert_eq!(json["x"]["unit"], "us");
 }
 
 #[test]
 fn duration_float_value() {
-    let json = eval(r#"x = 5.5.min"#);
+    let json = eval("local d = 5.5.min\nx { value = d.value; unit = d.unit }");
     assert_eq!(json["x"]["value"], 5.5);
     assert_eq!(json["x"]["unit"], "min");
 }
@@ -1052,77 +1052,77 @@ fn duration_float_value() {
 
 #[test]
 fn datasize_bytes() {
-    let json = eval(r#"x = 512.b"#);
+    let json = eval("local d = 512.b\nx { value = d.value; unit = d.unit }");
     assert_eq!(json["x"]["value"], 512);
     assert_eq!(json["x"]["unit"], "b");
 }
 
 #[test]
 fn datasize_kilobytes() {
-    let json = eval(r#"x = 10.kb"#);
+    let json = eval("local d = 10.kb\nx { value = d.value; unit = d.unit }");
     assert_eq!(json["x"]["value"], 10);
     assert_eq!(json["x"]["unit"], "kb");
 }
 
 #[test]
 fn datasize_megabytes() {
-    let json = eval(r#"x = 256.mb"#);
+    let json = eval("local d = 256.mb\nx { value = d.value; unit = d.unit }");
     assert_eq!(json["x"]["value"], 256);
     assert_eq!(json["x"]["unit"], "mb");
 }
 
 #[test]
 fn datasize_gigabytes() {
-    let json = eval(r#"x = 4.gb"#);
+    let json = eval("local d = 4.gb\nx { value = d.value; unit = d.unit }");
     assert_eq!(json["x"]["value"], 4);
     assert_eq!(json["x"]["unit"], "gb");
 }
 
 #[test]
 fn datasize_terabytes() {
-    let json = eval(r#"x = 1.tb"#);
+    let json = eval("local d = 1.tb\nx { value = d.value; unit = d.unit }");
     assert_eq!(json["x"]["value"], 1);
     assert_eq!(json["x"]["unit"], "tb");
 }
 
 #[test]
 fn datasize_petabytes() {
-    let json = eval(r#"x = 2.pb"#);
+    let json = eval("local d = 2.pb\nx { value = d.value; unit = d.unit }");
     assert_eq!(json["x"]["value"], 2);
     assert_eq!(json["x"]["unit"], "pb");
 }
 
 #[test]
 fn datasize_gibibytes() {
-    let json = eval(r#"x = 8.gib"#);
+    let json = eval("local d = 8.gib\nx { value = d.value; unit = d.unit }");
     assert_eq!(json["x"]["value"], 8);
     assert_eq!(json["x"]["unit"], "gib");
 }
 
 #[test]
 fn datasize_mebibytes() {
-    let json = eval(r#"x = 16.mib"#);
+    let json = eval("local d = 16.mib\nx { value = d.value; unit = d.unit }");
     assert_eq!(json["x"]["value"], 16);
     assert_eq!(json["x"]["unit"], "mib");
 }
 
 #[test]
 fn datasize_tebibytes() {
-    let json = eval(r#"x = 1.tib"#);
+    let json = eval("local d = 1.tib\nx { value = d.value; unit = d.unit }");
     assert_eq!(json["x"]["value"], 1);
     assert_eq!(json["x"]["unit"], "tib");
 }
 
 #[test]
 fn datasize_pebibytes() {
-    let json = eval(r#"x = 1.pib"#);
+    let json = eval("local d = 1.pib\nx { value = d.value; unit = d.unit }");
     assert_eq!(json["x"]["value"], 1);
     assert_eq!(json["x"]["unit"], "pib");
 }
 
 #[test]
 fn datasize_kibibytes() {
-    let json = eval(r#"x = 64.kib"#);
+    let json = eval("local d = 64.kib\nx { value = d.value; unit = d.unit }");
     assert_eq!(json["x"]["value"], 64);
     assert_eq!(json["x"]["unit"], "kib");
 }
@@ -1831,7 +1831,7 @@ fn inherited_late_binding_propagates_errors() {
     let temp = TestTempDir::new("pklr_inherited_error");
     std::fs::write(
         temp.path().join("Base.pkl"),
-        "abstract module Base\nderived = 1 / denominator\ndenominator = 1\n",
+        "abstract module Base\nderived = 1 ~/ denominator\ndenominator = 1\n",
     )
     .unwrap();
     let child = temp.path().join("Child.pkl");
@@ -1840,7 +1840,7 @@ fn inherited_late_binding_propagates_errors() {
         .eval_to_json(&child)
         .unwrap_err()
         .to_string();
-    assert!(error.contains("division by zero"));
+    assert!(error.contains("Division by zero."), "{error}");
 }
 
 #[test]

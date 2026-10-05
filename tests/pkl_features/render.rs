@@ -425,6 +425,72 @@ fn apply_converters_converts_lists() {
     assert_eq!(converted.to_json(), serde_json::json!([2, [3]]));
 }
 
+#[test]
+fn apply_converters_does_not_reenter_converter_through_its_container_result() {
+    let mut ev = Evaluator::new();
+    let value = ev
+        .eval_source(
+            r#"
+class D {}
+d = new D {}
+output {
+  renderer {
+    converters {
+      [D] = (value) -> List(value)
+    }
+  }
+}
+
+"#,
+            std::path::Path::new("test.pkl"),
+        )
+        .unwrap();
+
+    // `D -> List(D)` must convert once, not overflow by applying the same
+    // converter again to the list child.
+    assert_eq!(
+        ev.apply_converters(value).unwrap().to_json(),
+        serde_json::json!({"d": [{}]})
+    );
+}
+
+#[test]
+fn apply_converters_does_not_reenter_native_scalar_converter_roots() {
+    let mut ev = Evaluator::new();
+    let value = ev
+        .eval_source(
+            r#"
+d = 1.s
+size = 1.kb
+nan = (0.0 / 0.0).s
+pattern = Regex("x")
+output {
+  renderer {
+    converters {
+      [Duration] = (value) -> List(value)
+      [DataSize] = (value) -> List(value)
+      [Regex] = (value) -> List(value)
+    }
+  }
+}
+"#,
+            std::path::Path::new("test.pkl"),
+        )
+        .unwrap();
+
+    // Each `List(value)` contains the original scalar root. Re-applying its
+    // converter would recurse forever, but unrelated converters still chain.
+    assert_eq!(
+        ev.apply_converters(value).unwrap().to_json(),
+        serde_json::json!({
+            "d": ["1.s"],
+            "size": ["1.kb"],
+            "nan": ["NaN.s"],
+            "pattern": [{"_type": "regex", "pattern": "x"}],
+        })
+    );
+}
+
 /// Quirks of pkl 0.32.1's renderers that pklr keeps.
 #[test]
 fn renderer_quirks_match_pkl() {

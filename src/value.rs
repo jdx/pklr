@@ -1,5 +1,8 @@
 use rustc_hash::FxHashSet as HashSet;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use indexmap::IndexMap;
 use serde_json::json;
@@ -16,19 +19,168 @@ pub type ObjectMap = IndexMap<Arc<str>, Value, rustc_hash::FxBuildHasher>;
 // user-facing spelling for JSON/object rendering.
 pub(crate) const MAPPING_KEY_PREFIX: &str = "\0pklr:mapping-key:";
 
+// NaN does not equal itself, so each occurrence must be a different map key.
+// This ID is internal-only: the stored key still renders from `display`.
+static NEXT_NAN_MAPPING_KEY: AtomicU64 = AtomicU64::new(0);
+
 pub(crate) fn mapping_storage_key(value: &Value) -> Option<Arc<str>> {
     let (kind, identity, display) = match value {
         Value::String(_) => return None,
-        Value::Null => ("null", 0, "null".to_string()),
-        Value::Bool(value) => ("bool", u64::from(*value), value.to_string()),
-        Value::Int(value) => ("int", *value as u64, value.to_string()),
+        Value::Null => ("null", "0000000000000000".to_string(), "null".to_string()),
+        Value::Bool(value) => (
+            "bool",
+            format!("{:016x}", u64::from(*value)),
+            value.to_string(),
+        ),
+        Value::Int(value) => ("int", format!("{:016x}", *value as u64), value.to_string()),
         Value::Float(value) => {
             let identity = if *value == 0.0 { 0.0 } else { *value };
-            ("float", identity.to_bits(), value.to_string())
+            (
+                "float",
+                format!("{:016x}", identity.to_bits()),
+                value.to_string(),
+            )
         }
-        other => ("display", 0, format!("{other:?}")),
+        // Units compare in their smallest units. Keep that normalized amount
+        // as identity, but retain the inserted spelling for `keys` and
+        // converters.
+        Value::Duration(value) => {
+            let identity = value.value_in(DurationUnit::Nanos);
+            let identity = if identity == 0.0 { 0.0 } else { identity };
+            let identity = if identity.is_nan() {
+                // Keep NaNs in a namespace which cannot collide with a finite
+                // normalized amount.  Do not XOR the unit into the bits: that
+                // can turn a NaN payload into a finite amount.
+                format!(
+                    "nan-{:02x}-{:016x}-{:016x}",
+                    value.unit as u8,
+                    value.value.to_bits(),
+                    value.nan_identity,
+                )
+            } else {
+                format!("finite-{:016x}", identity.to_bits())
+            };
+            (
+                "duration",
+                identity,
+                format!("{}.{}", value.value, value.unit.symbol()),
+            )
+        }
+        Value::DataSize(value) => {
+            let identity = value.value_in(DataSizeUnit::Bytes);
+            let identity = if identity == 0.0 { 0.0 } else { identity };
+            let identity = if identity.is_nan() {
+                format!(
+                    "nan-{:02x}-{:016x}-{:016x}",
+                    value.unit as u8,
+                    value.value.to_bits(),
+                    value.nan_identity,
+                )
+            } else {
+                format!("finite-{:016x}", identity.to_bits())
+            };
+            (
+                "dataSize",
+                identity,
+                format!("{}.{}", value.value, value.unit.symbol()),
+            )
+        }
+        // Do not use derived `Debug` for compound keys. Native units carry an
+        // internal NaN identity, and Debug would make two equal lists such as
+        // `List(1.s)` acquire unrelated mapping identities.
+        Value::List(value) => (
+            "list",
+            mapping_compound_identity(&Value::List(value.clone())),
+            Value::List(value.clone()).to_json().to_string(),
+        ),
+        Value::Object(map, source) => (
+            "object",
+            mapping_object_identity(map, source.as_deref()),
+            Value::Object(map.clone(), source.clone())
+                .to_json()
+                .to_string(),
+        ),
+        other => (
+            "display",
+            "0000000000000000".to_string(),
+            format!("{other:?}"),
+        ),
     };
-    Some(format!("{MAPPING_KEY_PREFIX}{kind}:{identity:016x}:{display}").into())
+    Some(format!("{MAPPING_KEY_PREFIX}{kind}:{identity}:{display}").into())
+}
+
+/// A typed, deterministic identity for a value used inside a compound mapping
+/// key. This is intentionally narrower than Pkl's full value equality: the
+/// fallback currently represents Lists, whose elements can include native
+/// units and regexes that must not inherit implementation-only Debug fields.
+fn mapping_compound_identity(value: &Value) -> String {
+    match value {
+        Value::Null => "null".into(),
+        Value::Bool(value) => format!("bool:{value}"),
+        Value::Int(value) => format!("int:{value}"),
+        Value::Float(value) => format!("float:{:016x}", value.to_bits()),
+        Value::String(value) => format!("string:{}:{value}", value.len()),
+        Value::Duration(_) | Value::DataSize(_) => mapping_storage_key(value)
+            .expect("native units have mapping keys")
+            .to_string(),
+        Value::Regex(value) => format!("regex:{}:{}", value.pattern().len(), value.pattern()),
+        Value::List(items) => {
+            let mut identity = format!("list:{:?}:[", items.kind());
+            for item in items.iter() {
+                let item = mapping_compound_identity(item);
+                identity.push_str(&format!("{}:{item}", item.len()));
+            }
+            identity.push(']');
+            identity
+        }
+        Value::Object(map, source) => mapping_object_identity(map, source.as_deref()),
+        // Functions have identity semantics and are not structurally keyable.
+        other => format!("debug:{other:?}"),
+    }
+}
+
+fn mapping_object_identity(map: &ObjectMap, source: Option<&ObjectSource>) -> String {
+    let mut members = map
+        .iter()
+        .map(|(key, value)| {
+            let value = mapping_compound_identity(value);
+            format!("{}:{key}:{}:{value}", key.len(), value.len())
+        })
+        .collect::<Vec<_>>();
+    // Mapping and Dynamic equality compare members independent of declaration
+    // order. Sorting also makes this identity independent of hash/map layout.
+    members.sort_unstable();
+    let kind = source.map_or_else(
+        || "Dynamic".to_string(),
+        |source| match source.kind {
+            ObjectKind::Mapping => "Mapping".to_string(),
+            // A class object and an instance intentionally share the class's
+            // definition-site identity, but they are not equal Pkl values and
+            // therefore must remain distinct when used as mapping keys.
+            ObjectKind::Object => source.type_identity.as_deref().map_or_else(
+                || "Dynamic".to_string(),
+                |identity| format!("instance:{identity}"),
+            ),
+            ObjectKind::Class => source.type_identity.as_deref().map_or_else(
+                || "Class".to_string(),
+                |identity| format!("class:{identity}"),
+            ),
+        },
+    );
+    format!("object:{kind}:{}", members.join("|"))
+}
+
+/// Whether two storage keys name equal native-unit mapping keys. Their final
+/// display component deliberately differs when equivalent units were spelled
+/// differently at insertion and lookup time.
+pub(crate) fn mapping_storage_keys_equal(a: &str, b: &str) -> bool {
+    fn parts(key: &str) -> Option<(&str, &str)> {
+        let key = key.strip_prefix(MAPPING_KEY_PREFIX)?;
+        let (kind, rest) = key.split_once(':')?;
+        let (identity, _) = rest.split_once(':')?;
+        matches!(kind, "duration" | "dataSize").then_some((kind, identity))
+    }
+    parts(a).zip(parts(b)).is_some_and(|(a, b)| a == b)
 }
 
 pub(crate) fn display_storage_key(key: &str) -> &str {
@@ -44,7 +196,7 @@ pub(crate) fn mapping_storage_value(key: &str) -> Value {
     let Some((kind, rest)) = key.split_once(':') else {
         return Value::String(key.into());
     };
-    let Some((_, display)) = rest.split_once(':') else {
+    let Some((identity, display)) = rest.split_once(':') else {
         return Value::String(key.into());
     };
     match kind {
@@ -61,8 +213,31 @@ pub(crate) fn mapping_storage_value(key: &str) -> Value {
             .parse()
             .map(Value::Float)
             .unwrap_or_else(|_| Value::String(display.into())),
+        "duration" => parse_unit_value(display, DurationUnit::parse)
+            .map(|(value, unit)| {
+                Value::Duration(Duration::with_mapping_identity(value, unit, identity))
+            })
+            .unwrap_or_else(|| Value::String(display.into())),
+        "dataSize" => parse_unit_value(display, DataSizeUnit::parse)
+            .map(|(value, unit)| {
+                Value::DataSize(DataSize::with_mapping_identity(value, unit, identity))
+            })
+            .unwrap_or_else(|| Value::String(display.into())),
         _ => Value::String(display.into()),
     }
+}
+
+fn parse_unit_value<U>(display: &str, unit: impl FnOnce(&str) -> Option<U>) -> Option<(f64, U)> {
+    let (value, unit_name) = display.rsplit_once('.')?;
+    Some((value.parse().ok()?, unit(unit_name)?))
+}
+
+fn mapping_nan_identity(identity: &str) -> Option<(u64, u64)> {
+    let mut parts = identity.strip_prefix("nan-")?.split('-');
+    let _unit = parts.next()?;
+    let bits = u64::from_str_radix(parts.next()?, 16).ok()?;
+    let nonce = u64::from_str_radix(parts.next()?, 16).ok()?;
+    parts.next().is_none().then_some((bits, nonce))
 }
 
 /// Captured lexical bindings. The same type as [`ObjectMap`], so a scope can
@@ -327,6 +502,216 @@ pub enum Value {
     Lambda(Arc<[String]>, Arc<Expr>, Arc<ScopeMap>),
     /// A compiled regular expression (`Regex(pattern)`).
     Regex(Arc<Regex>),
+    /// A quantity of time (`5.min`).
+    Duration(Duration),
+    /// A quantity of digital information (`5.mb`).
+    DataSize(DataSize),
+}
+
+/// The unit of a [`Duration`], smallest first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DurationUnit {
+    Nanos,
+    Micros,
+    Millis,
+    Seconds,
+    Minutes,
+    Hours,
+    Days,
+}
+
+impl DurationUnit {
+    pub const ALL: [DurationUnit; 7] = [
+        DurationUnit::Nanos,
+        DurationUnit::Micros,
+        DurationUnit::Millis,
+        DurationUnit::Seconds,
+        DurationUnit::Minutes,
+        DurationUnit::Hours,
+        DurationUnit::Days,
+    ];
+
+    /// The unit's pkl name, as in `5.min`.
+    pub fn symbol(self) -> &'static str {
+        match self {
+            DurationUnit::Nanos => "ns",
+            DurationUnit::Micros => "us",
+            DurationUnit::Millis => "ms",
+            DurationUnit::Seconds => "s",
+            DurationUnit::Minutes => "min",
+            DurationUnit::Hours => "h",
+            DurationUnit::Days => "d",
+        }
+    }
+
+    /// The unit named `symbol`, if any.
+    pub fn parse(symbol: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|unit| unit.symbol() == symbol)
+    }
+
+    /// Nanoseconds per unit.
+    pub fn nanos(self) -> f64 {
+        match self {
+            DurationUnit::Nanos => 1.0,
+            DurationUnit::Micros => 1e3,
+            DurationUnit::Millis => 1e6,
+            DurationUnit::Seconds => 1e9,
+            DurationUnit::Minutes => 60e9,
+            DurationUnit::Hours => 3600e9,
+            DurationUnit::Days => 86400e9,
+        }
+    }
+}
+
+/// A pkl `Duration`. Like pkl, the value is kept as a float in its unit.
+#[derive(Debug, Clone, Copy)]
+pub struct Duration {
+    pub value: f64,
+    pub unit: DurationUnit,
+    nan_identity: u64,
+}
+
+impl Duration {
+    pub(crate) fn new(value: f64, unit: DurationUnit) -> Self {
+        Self {
+            value,
+            unit,
+            nan_identity: NEXT_NAN_MAPPING_KEY.fetch_add(1, Ordering::Relaxed),
+        }
+    }
+
+    fn with_mapping_identity(value: f64, unit: DurationUnit, identity: &str) -> Self {
+        let (value, nan_identity) = mapping_nan_identity(identity)
+            .map(|(bits, nonce)| (f64::from_bits(bits), nonce))
+            .unwrap_or_else(|| (value, NEXT_NAN_MAPPING_KEY.fetch_add(1, Ordering::Relaxed)));
+        Self {
+            value,
+            unit,
+            nan_identity,
+        }
+    }
+
+    /// The value converted to `unit`.
+    pub fn value_in(&self, unit: DurationUnit) -> f64 {
+        self.value * self.unit.nanos() / unit.nanos()
+    }
+}
+
+impl PartialEq for Duration {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value && self.unit == other.unit
+    }
+}
+
+/// The unit of a [`DataSize`], smallest first, decimal before binary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DataSizeUnit {
+    Bytes,
+    Kilobytes,
+    Kibibytes,
+    Megabytes,
+    Mebibytes,
+    Gigabytes,
+    Gibibytes,
+    Terabytes,
+    Tebibytes,
+    Petabytes,
+    Pebibytes,
+}
+
+impl DataSizeUnit {
+    pub const ALL: [DataSizeUnit; 11] = [
+        DataSizeUnit::Bytes,
+        DataSizeUnit::Kilobytes,
+        DataSizeUnit::Kibibytes,
+        DataSizeUnit::Megabytes,
+        DataSizeUnit::Mebibytes,
+        DataSizeUnit::Gigabytes,
+        DataSizeUnit::Gibibytes,
+        DataSizeUnit::Terabytes,
+        DataSizeUnit::Tebibytes,
+        DataSizeUnit::Petabytes,
+        DataSizeUnit::Pebibytes,
+    ];
+
+    /// The unit's pkl name, as in `5.mb`.
+    pub fn symbol(self) -> &'static str {
+        match self {
+            DataSizeUnit::Bytes => "b",
+            DataSizeUnit::Kilobytes => "kb",
+            DataSizeUnit::Kibibytes => "kib",
+            DataSizeUnit::Megabytes => "mb",
+            DataSizeUnit::Mebibytes => "mib",
+            DataSizeUnit::Gigabytes => "gb",
+            DataSizeUnit::Gibibytes => "gib",
+            DataSizeUnit::Terabytes => "tb",
+            DataSizeUnit::Tebibytes => "tib",
+            DataSizeUnit::Petabytes => "pb",
+            DataSizeUnit::Pebibytes => "pib",
+        }
+    }
+
+    /// The unit named `symbol`, if any.
+    pub fn parse(symbol: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|unit| unit.symbol() == symbol)
+    }
+
+    /// Bytes per unit.
+    pub fn bytes(self) -> i64 {
+        match self {
+            DataSizeUnit::Bytes => 1,
+            DataSizeUnit::Kilobytes => 1000,
+            DataSizeUnit::Kibibytes => 1024,
+            DataSizeUnit::Megabytes => 1000_i64.pow(2),
+            DataSizeUnit::Mebibytes => 1024_i64.pow(2),
+            DataSizeUnit::Gigabytes => 1000_i64.pow(3),
+            DataSizeUnit::Gibibytes => 1024_i64.pow(3),
+            DataSizeUnit::Terabytes => 1000_i64.pow(4),
+            DataSizeUnit::Tebibytes => 1024_i64.pow(4),
+            DataSizeUnit::Petabytes => 1000_i64.pow(5),
+            DataSizeUnit::Pebibytes => 1024_i64.pow(5),
+        }
+    }
+}
+
+/// A pkl `DataSize`. Like pkl, the value is kept as a float in its unit.
+#[derive(Debug, Clone, Copy)]
+pub struct DataSize {
+    pub value: f64,
+    pub unit: DataSizeUnit,
+    nan_identity: u64,
+}
+
+impl DataSize {
+    pub(crate) fn new(value: f64, unit: DataSizeUnit) -> Self {
+        Self {
+            value,
+            unit,
+            nan_identity: NEXT_NAN_MAPPING_KEY.fetch_add(1, Ordering::Relaxed),
+        }
+    }
+
+    fn with_mapping_identity(value: f64, unit: DataSizeUnit, identity: &str) -> Self {
+        let (value, nan_identity) = mapping_nan_identity(identity)
+            .map(|(bits, nonce)| (f64::from_bits(bits), nonce))
+            .unwrap_or_else(|| (value, NEXT_NAN_MAPPING_KEY.fetch_add(1, Ordering::Relaxed)));
+        Self {
+            value,
+            unit,
+            nan_identity,
+        }
+    }
+
+    /// The value converted to `unit`.
+    pub fn value_in(&self, unit: DataSizeUnit) -> f64 {
+        self.value * self.unit.bytes() as f64 / unit.bytes() as f64
+    }
+}
+
+impl PartialEq for DataSize {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value && self.unit == other.unit
+    }
 }
 
 /// A pkl `Regex`: the pattern as written and its compiled form.
@@ -426,33 +811,81 @@ impl Value {
                 _ => "Function5",
             },
             Value::Regex(_) => "Regex",
+            Value::Duration(_) => "Duration",
+            Value::DataSize(_) => "DataSize",
         }
     }
 
     /// Convert to JSON, failing like `pkl eval -f json` does on values JSON
     /// cannot represent.
     pub fn try_to_json(&self) -> Result<serde_json::Value, crate::Error> {
+        let mut unrenderable = None;
+        let json = self.json_checked(&mut unrenderable);
+        match unrenderable {
+            None => Ok(json),
+            Some(value) => Err(value.json_render_error()),
+        }
+    }
+
+    /// [`Value::to_json`], noting in `unrenderable` the first value inside
+    /// that JSON cannot represent.
+    fn json_checked<'a>(&'a self, unrenderable: &mut Option<&'a Value>) -> serde_json::Value {
         match self {
-            Value::Regex(_) => Err(crate::Error::Eval(format!(
-                "Cannot render value of type `{}` as JSON.\nValue: {}",
-                self.type_name(),
-                crate::eval::stdlib::render_value(self)
-            ))),
+            Value::Float(f) if !f.is_finite() => {
+                unrenderable.get_or_insert(self);
+                serde_json::Value::Null
+            }
+            Value::Regex(_) | Value::Duration(_) | Value::DataSize(_) => {
+                unrenderable.get_or_insert(self);
+                serde_json::Value::Null
+            }
             Value::Object(map, _) => {
                 let mut obj = serde_json::Map::new();
                 for (k, v) in map.iter() {
-                    obj.insert(display_storage_key(k).to_string(), v.try_to_json()?);
+                    // The result is discarded once a value fails.
+                    if unrenderable.is_some() {
+                        break;
+                    }
+                    obj.insert(
+                        display_storage_key(k).to_string(),
+                        v.json_checked(unrenderable),
+                    );
                 }
-                Ok(serde_json::Value::Object(obj))
+                serde_json::Value::Object(obj)
             }
-            Value::List(items) => Ok(serde_json::Value::Array(
-                items
-                    .iter()
-                    .map(Value::try_to_json)
-                    .collect::<Result<_, _>>()?,
-            )),
-            _ => Ok(self.to_json()),
+            Value::List(items) => {
+                let mut array = Vec::with_capacity(items.len());
+                for item in items.iter() {
+                    if unrenderable.is_some() {
+                        break;
+                    }
+                    array.push(item.json_checked(unrenderable));
+                }
+                serde_json::Value::Array(array)
+            }
+            _ => self.to_json(),
         }
+    }
+
+    /// pkl's error for rendering this value as JSON.
+    fn json_render_error(&self) -> crate::Error {
+        if let Value::Float(f) = self {
+            return crate::Error::Eval(format!(
+                "Cannot render value `{}` as JSON.",
+                if f.is_nan() {
+                    "NaN"
+                } else if *f > 0.0 {
+                    "∞"
+                } else {
+                    "-∞"
+                }
+            ));
+        }
+        crate::Error::Eval(format!(
+            "Cannot render value of type `{}` as JSON.\nValue: {}",
+            self.type_name(),
+            crate::eval::stdlib::render_value(self)
+        ))
     }
 
     /// Convert to JSON. Values JSON cannot represent become a tagged object
@@ -477,6 +910,9 @@ impl Value {
             }
             Value::Lambda(..) => json!("<lambda>"),
             Value::Regex(regex) => json!({ "_type": "regex", "pattern": regex.pattern() }),
+            Value::Duration(_) | Value::DataSize(_) => {
+                json!(crate::eval::stdlib::render_value(self))
+            }
         }
     }
 
@@ -502,7 +938,17 @@ impl Value {
             (Value::Object(base, _), Value::Object(overlay, _)) => {
                 let base_map = Arc::make_mut(base);
                 for (k, v) in overlay.iter() {
-                    base_map.insert(k.clone(), v.clone());
+                    let storage_key = base_map
+                        .get_key_value(k)
+                        .map(|(key, _)| key.clone())
+                        .or_else(|| {
+                            base_map
+                                .keys()
+                                .find(|stored| mapping_storage_keys_equal(stored, k))
+                                .cloned()
+                        })
+                        .unwrap_or_else(|| k.clone());
+                    base_map.insert(storage_key, v.clone());
                 }
             }
             (s, other) => *s = other,

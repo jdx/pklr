@@ -55,14 +55,43 @@ pub(super) fn props_insert(
     Arc::make_mut(properties).insert(key.into(), value);
 }
 
-pub(super) fn props_extend(
+/// Insert a receiver member while preserving Mapping key identity for `this`
+/// reads that occur later in the same generated body.
+pub(super) fn props_insert_mapping(
+    scope: &mut Scope,
+    aliases: &[String],
+    properties: &mut Arc<ObjectMap>,
+    key: Arc<str>,
+    value: Value,
+    mapping_entries: bool,
+) {
+    release_this_aliases(scope, aliases);
+    let properties = Arc::make_mut(properties);
+    if mapping_entries {
+        super::insert_mapping_entry(properties, key, value);
+    } else {
+        properties.insert(key, value);
+    }
+}
+
+/// Extend a receiver snapshot while retaining a Mapping's semantic key
+/// identity for subsequent entries and `this` lookups.
+pub(super) fn props_extend_mapping(
     scope: &mut Scope,
     aliases: &[String],
     properties: &mut Arc<ObjectMap>,
     entries: impl Iterator<Item = (Arc<str>, Value)>,
+    mapping_entries: bool,
 ) {
     release_this_aliases(scope, aliases);
-    Arc::make_mut(properties).extend(entries);
+    let properties = Arc::make_mut(properties);
+    for (key, value) in entries {
+        if mapping_entries {
+            super::insert_mapping_entry(properties, key, value);
+        } else {
+            properties.insert(key, value);
+        }
+    }
 }
 
 /// Apply a mapping's default template to an `["key"] = expr` entry.

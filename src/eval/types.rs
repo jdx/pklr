@@ -554,9 +554,14 @@ pub(super) fn record_generated_members(
     layer: usize,
     members: &ObjectMap,
     body: &[Entry],
+    mapping_entries: bool,
 ) -> Result<()> {
     for name in members.keys() {
-        if !seen.insert((layer, name.clone())) {
+        let duplicate = mapping_entries
+            && seen.iter().any(|(seen_layer, seen_name)| {
+                *seen_layer == layer && crate::value::mapping_storage_keys_equal(seen_name, name)
+            });
+        if duplicate || !seen.insert((layer, name.clone())) {
             let is_property = body
                 .iter()
                 .any(|entry| matches!(entry, Entry::Property(prop) if *prop.name == **name));
@@ -598,6 +603,8 @@ pub(super) fn value_type_name(v: &Value) -> &'static str {
         Value::Object(..) => "Object",
         Value::List(_) => "List",
         Value::Lambda(..) => "Function",
+        Value::Duration(_) => "Duration",
+        Value::DataSize(_) => "DataSize",
     }
 }
 
@@ -618,6 +625,8 @@ pub(super) fn value_to_key(v: &Value) -> Result<Arc<str>> {
         | Value::List(_)
         | Value::Lambda(..)
         | Value::Regex(_)
+        | Value::Duration(_)
+        | Value::DataSize(_)
         | Value::Null => Ok(value_to_display(v).into()),
     }
 }
@@ -683,6 +692,8 @@ pub(super) fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
             "List" | "Listing" | "Set" => matches!(val, Value::List(_)),
             "Map" | "Mapping" | "Object" | "Dynamic" => matches!(val, Value::Object(..)),
             "Function" => matches!(val, Value::Lambda(..)),
+            "Duration" => matches!(val, Value::Duration(_)),
+            "DataSize" => matches!(val, Value::DataSize(_)),
             "Any" => true,
             _ => {
                 // Unknown type name -- could be a class; treat objects as matching
@@ -776,6 +787,9 @@ pub(super) fn type_is_runtime_checkable(ty: &crate::parser::TypeExpr, scope: &Sc
                         | "Object"
                         | "Dynamic"
                         | "Function"
+                        | "Regex"
+                        | "Duration"
+                        | "DataSize"
                         | "Any"
                 )
                 || scope.get_type_alias(runtime_name).is_some()
@@ -846,15 +860,24 @@ pub(super) fn values_eq(a: &Value, b: &Value) -> bool {
                 None => {
                     // Methods are not members, so they take no part.
                     members(a_map, a_src).count() == members(b_map, b_src).count()
-                        && members(a_map, a_src)
-                            .all(|(key, a)| b_map.get(key).is_some_and(|b| values_eq(a, b)))
+                        && members(a_map, a_src).all(|(key, a)| {
+                            b_map
+                                .get(key)
+                                .or_else(|| {
+                                    b_map.iter().find_map(|(stored, value)| {
+                                        crate::value::mapping_storage_keys_equal(stored, key)
+                                            .then_some(value)
+                                    })
+                                })
+                                .is_some_and(|b| values_eq(a, b))
+                        })
                 }
             }
         }
         (Value::Lambda(_, a_body, a_captured), Value::Lambda(_, b_body, b_captured)) => {
             Arc::ptr_eq(a_body, b_body) && Arc::ptr_eq(a_captured, b_captured)
         }
-        _ => false,
+        (a, b) => super::stdlib::units_equal(a, b).unwrap_or(false),
     }
 }
 
@@ -1032,10 +1055,20 @@ pub(super) fn merge_values(base: Value, overlay: Value) -> Value {
         (Value::Object(mut b, base_src), Value::Object(o, overlay_src)) => {
             let b_map = Arc::make_mut(&mut b);
             for (k, v) in o.iter() {
-                if let Some(existing) = b_map.shift_remove(k) {
-                    b_map.insert(k.clone(), merge_values(existing, v.clone()));
+                let storage_key = b_map
+                    .get_key_value(k)
+                    .map(|(key, _)| key.clone())
+                    .or_else(|| {
+                        b_map
+                            .keys()
+                            .find(|stored| crate::value::mapping_storage_keys_equal(stored, k))
+                            .cloned()
+                    })
+                    .unwrap_or_else(|| k.clone());
+                if let Some(existing) = b_map.shift_remove(&storage_key) {
+                    b_map.insert(storage_key, merge_values(existing, v.clone()));
                 } else {
-                    b_map.insert(k.clone(), v.clone());
+                    b_map.insert(storage_key, v.clone());
                 }
             }
             // Keep the base's source (entries/scope for late binding), but when it
@@ -1058,11 +1091,4 @@ pub(super) fn merge_values(base: Value, overlay: Value) -> Value {
         }
         (_, overlay) => overlay,
     }
-}
-
-pub(super) fn make_unit_object(value: Value, unit: &str) -> Value {
-    let mut map = ObjectMap::default();
-    map.insert("value".into(), value);
-    map.insert("unit".into(), Value::String(unit.into()));
-    Value::Object(Arc::new(map), None)
 }

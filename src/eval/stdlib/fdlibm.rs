@@ -1,0 +1,1278 @@
+//! Deterministic IEEE-754 math wrappers used by Pkl's standard library.
+//!
+//! Production implementation provenance is the MIT Rust libm crate plus
+//! original fdlibm 5.3 C routines from Netlib. The vector module below is
+//! oracle evidence generated from Java StrictMath; it is not implementation input.
+//!
+//! Source map:
+//! - https://www.netlib.org/fdlibm/e_atan2.c -> atan2
+//! - https://www.netlib.org/fdlibm/s_cbrt.c -> cbrt
+//! - https://www.netlib.org/fdlibm/e_log10.c -> log10
+//! - https://www.netlib.org/fdlibm/e_log.c -> log
+//! - https://www.netlib.org/fdlibm/k_sin.c, k_cos.c, s_sin.c, s_cos.c -> sin, cos
+//! - https://www.netlib.org/fdlibm/e_rem_pio2.c, k_rem_pio2.c -> trig reduction
+//! - MIT Rust libm 0.2.16 -> the remaining wrappers.
+//!
+//! The pow wrapper also states the Java-compatible NaN special cases directly.
+//!
+//! The source routines assume IEEE-754 binary64 arithmetic and 32-bit
+//! two's-complement words. Rust bit conversions replace fdlibm pointer
+//! aliasing macros.
+
+#![allow(clippy::approx_constant, clippy::eq_op, clippy::excessive_precision)]
+
+// Netlib fdlibm 5.3 source notice, preserved verbatim for the ports below:
+/*
+ * ====================================================
+ * Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+ *
+ * Developed at SunSoft, a Sun Microsystems, Inc. business.
+ * Permission to use, copy, modify, and distribute this
+ * software is freely granted, provided that this notice
+ * is preserved.
+ * ====================================================
+ *
+ */
+
+#[inline]
+fn hi(x: f64) -> i32 {
+    (x.to_bits() >> 32) as i32
+}
+
+#[inline]
+fn lo(x: f64) -> i32 {
+    x.to_bits() as i32
+}
+
+#[inline]
+fn with_hi(x: f64, high: i32) -> f64 {
+    f64::from_bits((x.to_bits() & 0xffff_ffff) | (u64::from(high as u32) << 32))
+}
+
+#[inline]
+fn with_lo(x: f64, low: i32) -> f64 {
+    f64::from_bits((x.to_bits() & 0xffff_ffff_0000_0000) | u64::from(low as u32))
+}
+
+// Ported from Netlib fdlibm 5.3 k_sin.c.
+fn kernel_sin(x: f64, y: f64, iy: i32) -> f64 {
+    const S1: f64 = -1.66666666666666324348e-01;
+    const S2: f64 = 8.33333333332248946124e-03;
+    const S3: f64 = -1.98412698298579493134e-04;
+    const S4: f64 = 2.75573137070700676789e-06;
+    const S5: f64 = -2.50507602534068634195e-08;
+    const S6: f64 = 1.58969099521155010221e-10;
+    if (hi(x) & 0x7fff_ffff) < 0x3e40_0000 && x as i32 == 0 {
+        return x;
+    }
+    let z = x * x;
+    let v = z * x;
+    let r = S2 + z * (S3 + z * (S4 + z * (S5 + z * S6)));
+    if iy == 0 {
+        x + v * (S1 + z * r)
+    } else {
+        x - ((z * (0.5 * y - v * r) - y) - v * S1)
+    }
+}
+// Ported from Netlib fdlibm 5.3 k_cos.c for the unreduced interval.
+fn kernel_cos(x: f64, y: f64) -> f64 {
+    const C1: f64 = 4.16666666666666019037e-02;
+    const C2: f64 = -1.38888888888741095749e-03;
+    const C3: f64 = 2.48015872894767294178e-05;
+    const C4: f64 = -2.75573143513906633035e-07;
+    const C5: f64 = 2.08757232129817482790e-09;
+    const C6: f64 = -1.13596475577881948265e-11;
+    let ix = hi(x) & 0x7fff_ffff;
+    if ix < 0x3e40_0000 && x as i32 == 0 {
+        return 1.0;
+    }
+    let z = x * x;
+    let r = z * (C1 + z * (C2 + z * (C3 + z * (C4 + z * (C5 + z * C6)))));
+    if ix < 0x3fd3_3333 {
+        1.0 - (0.5 * z - (z * r - x * y))
+    } else {
+        let qx = if ix > 0x3fe9_0000 {
+            0.28125
+        } else {
+            f64::from_bits(u64::from((ix - 0x0020_0000) as u32) << 32)
+        };
+        (1.0 - qx) - ((0.5 * z - qx) - (z * r - x * y))
+    }
+}
+pub(crate) fn cos(x: f64) -> f64 {
+    let ix = hi(x) & 0x7fff_ffff;
+    if ix <= 0x3fe9_21fb {
+        return kernel_cos(x, 0.0);
+    }
+    if ix >= 0x7ff0_0000 {
+        return x - x;
+    }
+    let (n, y0, y1) = rem_pio2(x);
+    match n & 3 {
+        0 => kernel_cos(y0, y1),
+        1 => -kernel_sin(y0, y1, 1),
+        2 => -kernel_cos(y0, y1),
+        _ => kernel_sin(y0, y1, 1),
+    }
+}
+// Ported from Netlib fdlibm 5.3 s_sin.c.
+pub(crate) fn sin(x: f64) -> f64 {
+    let ix = hi(x) & 0x7fff_ffff;
+    if ix <= 0x3fe9_21fb {
+        return kernel_sin(x, 0.0, 0);
+    }
+    if ix >= 0x7ff0_0000 {
+        return x - x;
+    }
+    let (n, y0, y1) = rem_pio2(x);
+    match n & 3 {
+        0 => kernel_sin(y0, y1, 1),
+        1 => kernel_cos(y0, y1),
+        2 => -kernel_sin(y0, y1, 1),
+        _ => -kernel_cos(y0, y1),
+    }
+}
+pub(crate) fn tan(x: f64) -> f64 {
+    libm::tan(x)
+}
+pub(crate) fn asin(x: f64) -> f64 {
+    libm::asin(x)
+}
+pub(crate) fn acos(x: f64) -> f64 {
+    libm::acos(x)
+}
+pub(crate) fn atan(x: f64) -> f64 {
+    libm::atan(x)
+}
+// Ported from Netlib fdlibm 5.3 e_rem_pio2.c and k_rem_pio2.c.
+fn rem_pio2(x: f64) -> (i32, f64, f64) {
+    const TWO_OVER_PI: [i32; 66] = [
+        0xA2F983, 0x6E4E44, 0x1529FC, 0x2757D1, 0xF534DD, 0xC0DB62, 0x95993C, 0x439041, 0xFE5163,
+        0xABDEBB, 0xC561B7, 0x246E3A, 0x424DD2, 0xE00649, 0x2EEA09, 0xD1921C, 0xFE1DEB, 0x1CB129,
+        0xA73EE8, 0x8235F5, 0x2EBB44, 0x84E99C, 0x7026B4, 0x5F7E41, 0x3991D6, 0x398353, 0x39F49C,
+        0x845F8B, 0xBDF928, 0x3B1FF8, 0x97FFDE, 0x05980F, 0xEF2F11, 0x8B5A0A, 0x6D1F6D, 0x367ECF,
+        0x27CB09, 0xB74F46, 0x3F669E, 0x5FEA2D, 0x7527BA, 0xC7EBE5, 0xF17B3D, 0x0739F7, 0x8A5292,
+        0xEA6BFB, 0x5FB11F, 0x8D5D08, 0x560330, 0x46FC7B, 0x6BABF0, 0xCFBC20, 0x9AF436, 0x1DA9E3,
+        0x91615E, 0xE61B08, 0x659985, 0x5F14A0, 0x68408D, 0xFFD880, 0x4D7327, 0x310606, 0x1556CA,
+        0x73A8C9, 0x60E27B, 0xC08C6B,
+    ];
+    const NPIO2: [i32; 32] = [
+        0x3FF921FB, 0x400921FB, 0x4012D97C, 0x401921FB, 0x401F6A7A, 0x4022D97C, 0x4025FDBB,
+        0x402921FB, 0x402C463A, 0x402F6A7A, 0x4031475C, 0x4032D97C, 0x40346B9C, 0x4035FDBB,
+        0x40378FDB, 0x403921FB, 0x403AB41B, 0x403C463A, 0x403DD85A, 0x403F6A7A, 0x40407E4C,
+        0x4041475C, 0x4042106C, 0x4042D97C, 0x4043A28C, 0x40446B9C, 0x404534AC, 0x4045FDBB,
+        0x4046C6CB, 0x40478FDB, 0x404858EB, 0x404921FB,
+    ];
+    const INV: f64 = 6.36619772367581382433e-01;
+    const P1: f64 = 1.57079632673412561417e0;
+    const P1T: f64 = 6.07710050650619224932e-11;
+    const P2: f64 = 6.07710050630396597660e-11;
+    const P2T: f64 = 2.02226624879595063154e-21;
+    const P3: f64 = 2.02226624871116645580e-21;
+    const P3T: f64 = 8.47842766036889956997e-32;
+    let hx = hi(x);
+    let ix = hx & 0x7fff_ffff;
+    if ix <= 0x3fe9_21fb {
+        return (0, x, 0.0);
+    }
+    if ix < 0x4002_d97c {
+        let z = if hx > 0 { x - P1 } else { x + P1 };
+        if ix != 0x3ff9_21fb {
+            let y0 = if hx > 0 { z - P1T } else { z + P1T };
+            return (
+                if hx > 0 { 1 } else { -1 },
+                y0,
+                if hx > 0 {
+                    (z - y0) - P1T
+                } else {
+                    (z - y0) + P1T
+                },
+            );
+        }
+        let z = if hx > 0 { z - P2 } else { z + P2 };
+        let y0 = if hx > 0 { z - P2T } else { z + P2T };
+        return (
+            if hx > 0 { 1 } else { -1 },
+            y0,
+            if hx > 0 {
+                (z - y0) - P2T
+            } else {
+                (z - y0) + P2T
+            },
+        );
+    }
+    if ix <= 0x4139_21fb {
+        let t = x.abs();
+        let n = (t * INV + 0.5) as i32;
+        let fn_ = n as f64;
+        let mut r = t - fn_ * P1;
+        let mut w = fn_ * P1T;
+        let mut y0 = r - w;
+        if n >= 32 || ix == NPIO2[(n - 1) as usize] {
+            let j = ix >> 20;
+            let mut d = j - ((hi(y0) >> 20) & 0x7ff);
+            if d > 16 {
+                let t = r;
+                w = fn_ * P2;
+                r = t - w;
+                w = fn_ * P2T - ((t - r) - w);
+                y0 = r - w;
+                d = j - ((hi(y0) >> 20) & 0x7ff);
+                if d > 49 {
+                    let t = r;
+                    w = fn_ * P3;
+                    r = t - w;
+                    w = fn_ * P3T - ((t - r) - w);
+                    y0 = r - w;
+                }
+            }
+        }
+        let y1 = (r - y0) - w;
+        return if hx < 0 { (-n, -y0, -y1) } else { (n, y0, y1) };
+    }
+    if ix >= 0x7ff0_0000 {
+        let y = x - x;
+        return (0, y, y);
+    }
+    // The large reduction is the same fdlibm base-2^24 convolution.
+    let mut z = f64::from_bits(
+        (x.to_bits() & 0xffff_ffff) | (u64::from((ix - (((ix >> 20) - 1046) << 20)) as u32) << 32),
+    );
+    let e0 = (ix >> 20) - 1046;
+    let mut tx = [0.0; 3];
+    for item in tx.iter_mut().take(2) {
+        *item = (z as i32) as f64;
+        z = (z - *item) * 16777216.0;
+    }
+    tx[2] = z;
+    let mut nx = 3;
+    while tx[nx - 1] == 0.0 {
+        nx -= 1;
+    }
+    let (n, y0, y1) = kernel_rem_pio2(&tx[..nx], e0, &TWO_OVER_PI);
+    if hx < 0 { (-n, -y0, -y1) } else { (n, y0, y1) }
+}
+
+fn kernel_rem_pio2(x: &[f64], e0: i32, ipio2: &[i32]) -> (i32, f64, f64) {
+    const PIO2: [f64; 8] = [
+        1.57079625129699707031e0,
+        7.54978941586159635335e-08,
+        5.39030252995776476554e-15,
+        3.28200341580791294123e-22,
+        1.27065575308067607349e-29,
+        1.22933308981111328932e-36,
+        2.73370053816464559624e-44,
+        2.16741683877804819444e-51,
+    ];
+    let jk = 4usize;
+    let jx = x.len() - 1;
+    let jv = ((e0 - 3) / 24).max(0) as usize;
+    let mut q0 = e0 - 24 * (jv as i32 + 1);
+    let mut f = [0.0; 20];
+    for (i, slot) in f.iter_mut().enumerate().take(jx + jk + 1) {
+        let j = jv as i32 - jx as i32 + i as i32;
+        *slot = if j < 0 { 0.0 } else { ipio2[j as usize] as f64 };
+    }
+    let mut q = [0.0; 20];
+    for i in 0..=jk {
+        for j in 0..=jx {
+            q[i] += x[j] * f[jx + i - j];
+        }
+    }
+    let mut jz = jk;
+    let mut iq = [0i32; 20];
+    let (n, ih) = loop {
+        let mut z = q[jz];
+        for i in 0..jz {
+            let fw = (z * 5.9604644775390625e-8) as i32 as f64;
+            iq[i] = (z - 16777216.0 * fw) as i32;
+            z = q[jz - 1 - i] + fw;
+        }
+        let mut zz = z * 2f64.powi(q0);
+        zz -= 8.0 * (zz * 0.125).floor();
+        let mut n = zz as i32;
+        zz -= n as f64;
+        let ih = if q0 > 0 {
+            let i = iq[jz - 1] >> (24 - q0);
+            n += i;
+            iq[jz - 1] -= i << (24 - q0);
+            iq[jz - 1] >> (23 - q0)
+        } else if q0 == 0 {
+            iq[jz - 1] >> 23
+        } else if zz >= 0.5 {
+            2
+        } else {
+            0
+        };
+        if ih > 0 {
+            n += 1;
+            let mut carry = 0;
+            for item in iq.iter_mut().take(jz) {
+                let v = *item;
+                if carry == 0 && v != 0 {
+                    carry = 1;
+                    *item = 0x1000000 - v;
+                } else if carry != 0 {
+                    *item = 0xffffff - v;
+                }
+            }
+            if q0 == 1 {
+                iq[jz - 1] &= 0x7fffff;
+            } else if q0 == 2 {
+                iq[jz - 1] &= 0x3fffff;
+            }
+            if ih == 2 {
+                zz = 1.0 - zz;
+                if carry != 0 {
+                    zz -= 2f64.powi(q0);
+                }
+            }
+        }
+        if zz == 0.0 && iq[jk..jz].iter().all(|&v| v == 0) {
+            let mut k = 1;
+            while iq[jk - k] == 0 {
+                k += 1;
+            }
+            for i in (jz + 1)..=(jz + k) {
+                f[jx + i] = ipio2[jv + i] as f64;
+                for j in 0..=jx {
+                    q[i] += x[j] * f[jx + i - j];
+                }
+            }
+            jz += k;
+            continue;
+        }
+        if zz == 0.0 {
+            jz -= 1;
+            q0 -= 24;
+            while iq[jz] == 0 {
+                jz -= 1;
+                q0 -= 24;
+            }
+        } else {
+            zz *= 2f64.powi(-q0);
+            if zz >= 16777216.0 {
+                let fw = (zz * 5.9604644775390625e-8) as i32 as f64;
+                iq[jz] = (zz - 16777216.0 * fw) as i32;
+                jz += 1;
+                q0 += 24;
+                iq[jz] = fw as i32;
+            } else {
+                iq[jz] = zz as i32;
+            }
+        }
+        break (n, ih);
+    };
+    let mut fw = 2f64.powi(q0);
+    for i in (0..=jz).rev() {
+        q[i] = fw * iq[i] as f64;
+        fw *= 5.9604644775390625e-8;
+    }
+    let mut fq = [0.0; 20];
+    for i in (0..=jz).rev() {
+        for k in 0..=jk.min(jz - i) {
+            fq[jz - i] += PIO2[k] * q[i + k];
+        }
+    }
+    let mut sum = 0.0;
+    for i in (0..=jz).rev() {
+        sum += fq[i];
+    }
+    let y0 = if ih == 0 { sum } else { -sum };
+    let mut tail = fq[0] - sum;
+    for item in fq.iter().take(jz + 1).skip(1) {
+        tail += *item;
+    }
+    (n & 7, y0, if ih == 0 { tail } else { -tail })
+}
+// Ported from Netlib fdlibm 5.3 e_atan2.c.
+pub(crate) fn atan2(y: f64, x: f64) -> f64 {
+    const PI: f64 = 3.1415926535897931160e0;
+    const PI_LO: f64 = 1.2246467991473531772e-16;
+    if x.is_nan() || y.is_nan() {
+        return x + y;
+    }
+    let hx = hi(x);
+    let lx = lo(x);
+    let hy = hi(y);
+    let ly = lo(y);
+    if (hx.wrapping_sub(0x3ff0_0000) | lx) == 0 {
+        return atan(y);
+    }
+    let ix = hx & 0x7fff_ffff;
+    let iy = hy & 0x7fff_ffff;
+    let m = ((hy >> 31) & 1) | ((hx >> 30) & 2);
+    if (iy | ly) == 0 {
+        return match m {
+            0 | 1 => y,
+            2 => PI,
+            _ => -PI,
+        };
+    }
+    if (ix | lx) == 0 {
+        return if hy < 0 { -PI / 2.0 } else { PI / 2.0 };
+    }
+    if ix == 0x7ff0_0000 {
+        if iy == 0x7ff0_0000 {
+            return match m {
+                0 => PI / 4.0,
+                1 => -PI / 4.0,
+                2 => 3.0 * PI / 4.0,
+                _ => -3.0 * PI / 4.0,
+            };
+        }
+        return match m {
+            0 => 0.0,
+            1 => -0.0,
+            2 => PI,
+            _ => -PI,
+        };
+    }
+    if iy == 0x7ff0_0000 {
+        return if hy < 0 { -PI / 2.0 } else { PI / 2.0 };
+    }
+    let k = (iy - ix) >> 20;
+    let z = if k > 60 {
+        PI / 2.0 + 0.5 * PI_LO
+    } else if hx < 0 && k < -60 {
+        0.0
+    } else {
+        atan((y / x).abs())
+    };
+    match m {
+        0 => z,
+        1 => -z,
+        2 => PI - (z - PI_LO),
+        _ => (z - PI_LO) - PI,
+    }
+}
+// Ported from Netlib fdlibm 5.3 s_cbrt.c.
+pub(crate) fn cbrt(mut x: f64) -> f64 {
+    const B1: i32 = 715094163;
+    const B2: i32 = 696219795;
+    const C: f64 = 5.42857142857142815906e-01;
+    const D: f64 = -7.05306122448979611050e-01;
+    const E: f64 = 1.41428571428571436819e0;
+    const F: f64 = 1.60714285714285720630e0;
+    const G: f64 = 3.57142857142857150787e-01;
+    let mut hx = hi(x);
+    let sign = hx & i32::MIN;
+    hx ^= sign;
+    if hx >= 0x7ff0_0000 {
+        return x + x;
+    }
+    if (hx | lo(x)) == 0 {
+        return x;
+    }
+    x = with_hi(x, hx);
+    let mut t = if hx < 0x0010_0000 {
+        let mut scaled = with_hi(0.0, 0x4350_0000) * x;
+        scaled = with_hi(scaled, hi(scaled) / 3 + B2);
+        scaled
+    } else {
+        with_hi(0.0, hx / 3 + B1)
+    };
+    let r = t * t / x;
+    let s = C + r * t;
+    t *= G + F / (s + E + D / s);
+    t = with_lo(t, 0);
+    t = with_hi(t, hi(t) + 1);
+    let s = t * t;
+    let r = x / s;
+    let w = t + t;
+    t += t * ((r - t) / (w + r));
+    with_hi(t, hi(t) | sign)
+}
+pub(crate) fn pow(x: f64, y: f64) -> f64 {
+    if y.is_nan() {
+        x + y
+    } else if x.abs() == 1.0 && y.is_infinite() {
+        f64::NAN
+    } else {
+        libm::pow(x, y)
+    }
+}
+pub(crate) fn exp(x: f64) -> f64 {
+    libm::exp(x)
+}
+pub(crate) fn log(x: f64) -> f64 {
+    // Ported from Netlib fdlibm 5.3 e_log.c.
+    const LN2_HI: f64 = 6.93147180369123816490e-01;
+    const LN2_LO: f64 = 1.90821492927058770002e-10;
+    const TWO54: f64 = 1.80143985094819840000e16;
+    const LG1: f64 = 6.666666666666735130e-01;
+    const LG2: f64 = 3.999999999940941908e-01;
+    const LG3: f64 = 2.857142874366239149e-01;
+    const LG4: f64 = 2.222219843214978396e-01;
+    const LG5: f64 = 1.818357216161805012e-01;
+    const LG6: f64 = 1.531383769920937332e-01;
+    const LG7: f64 = 1.479819860511658591e-01;
+    let mut x = x;
+    let mut hx = hi(x);
+    let lx = lo(x);
+    let mut k = 0;
+    if hx < 0x0010_0000 {
+        if ((hx & 0x7fff_ffff) | lx) == 0 {
+            return -TWO54 / 0.0;
+        }
+        if hx < 0 {
+            return (x - x) / 0.0;
+        }
+        k -= 54;
+        x *= TWO54;
+        hx = hi(x);
+    }
+    if hx >= 0x7ff0_0000 {
+        return x + x;
+    }
+    k += (hx >> 20) - 1023;
+    hx &= 0x000f_ffff;
+    let i = (hx + 0x95f64) & 0x100000;
+    x = with_hi(x, hx | (i ^ 0x3ff0_0000));
+    k += i >> 20;
+    let f = x - 1.0;
+    if (0x000f_ffff & (2 + hx)) < 3 {
+        if f == 0.0 {
+            if k == 0 {
+                return 0.0;
+            }
+            let dk = k as f64;
+            return dk * LN2_HI + dk * LN2_LO;
+        }
+        let r = f * f * (0.5 - 0.33333333333333333 * f);
+        if k == 0 {
+            return f - r;
+        }
+        let dk = k as f64;
+        return dk * LN2_HI - ((r - dk * LN2_LO) - f);
+    }
+    let s = f / (2.0 + f);
+    let dk = k as f64;
+    let z = s * s;
+    let i = hx - 0x6147a;
+    let w = z * z;
+    let j = 0x6b851 - hx;
+    let t1 = w * (LG2 + w * (LG4 + w * LG6));
+    let t2 = z * (LG1 + w * (LG3 + w * (LG5 + w * LG7)));
+    let r = t2 + t1;
+    if (i | j) > 0 {
+        let hfsq = 0.5 * f * f;
+        if k == 0 {
+            f - (hfsq - s * (hfsq + r))
+        } else {
+            dk * LN2_HI - ((hfsq - (s * (hfsq + r) + dk * LN2_LO)) - f)
+        }
+    } else if k == 0 {
+        f - s * (f - r)
+    } else {
+        dk * LN2_HI - ((s * (f - r) - dk * LN2_LO) - f)
+    }
+}
+// Ported from Netlib fdlibm 5.3 e_log10.c.
+pub(crate) fn log10(mut x: f64) -> f64 {
+    const TWO54: f64 = 1.80143985094819840000e16;
+    const IVLN10: f64 = 4.34294481903251816668e-01;
+    const LOG10_2HI: f64 = 3.01029995663611771306e-01;
+    const LOG10_2LO: f64 = 3.69423907715893078616e-13;
+    let mut hx = hi(x);
+    let lx = lo(x);
+    let mut k = 0;
+    if hx < 0x0010_0000 {
+        if ((hx & 0x7fff_ffff) | lx) == 0 {
+            return -TWO54 / 0.0;
+        }
+        if hx < 0 {
+            return (x - x) / 0.0;
+        }
+        k -= 54;
+        x *= TWO54;
+        hx = hi(x);
+    }
+    if hx >= 0x7ff0_0000 {
+        return x + x;
+    }
+    k += (hx >> 20) - 1023;
+    let i = ((k as u32) >> 31) as i32;
+    x = with_hi(x, (hx & 0x000f_ffff) | ((0x3ff - i) << 20));
+    let y = f64::from(k + i);
+    let z = y * LOG10_2LO + IVLN10 * log(x);
+    z + y * LOG10_2HI
+}
+
+#[cfg(test)]
+mod tests {
+    //! Regression vectors produced by `java.lang.StrictMath` on JDK 21, as
+    //! raw IEEE 754 bit patterns: `(x, expected)` or `(x, y, expected)`.
+    //! Any NaN result is accepted for an expected NaN.
+
+    use super::*;
+
+    fn check1(name: &str, f: fn(f64) -> f64, cases: &[(u64, u64)]) {
+        for &(x, want) in cases {
+            let x = f64::from_bits(x);
+            let got = f(x);
+            let want = f64::from_bits(want);
+            assert!(
+                (got.is_nan() && want.is_nan()) || got.to_bits() == want.to_bits(),
+                "{name}({x:e}): got {got:e} ({:#018x}), want {want:e} ({:#018x})",
+                got.to_bits(),
+                want.to_bits(),
+            );
+        }
+    }
+
+    fn check2(name: &str, f: fn(f64, f64) -> f64, cases: &[(u64, u64, u64)]) {
+        for &(x, y, want) in cases {
+            let (x, y) = (f64::from_bits(x), f64::from_bits(y));
+            let got = f(x, y);
+            let want = f64::from_bits(want);
+            assert!(
+                (got.is_nan() && want.is_nan()) || got.to_bits() == want.to_bits(),
+                "{name}({x:e}, {y:e}): got {got:e} ({:#018x}), want {want:e} ({:#018x})",
+                got.to_bits(),
+                want.to_bits(),
+            );
+        }
+    }
+
+    const SIN: &[(u64, u64)] = &[
+        (0x0000_0000_0000_0000, 0x0000_0000_0000_0000),
+        (0x8000_0000_0000_0000, 0x8000_0000_0000_0000),
+        (0x0000_0000_0000_0001, 0x0000_0000_0000_0001),
+        (0x0010_0000_0000_0000, 0x0010_0000_0000_0000),
+        (0x7ff0_0000_0000_0000, 0xfff8_0000_0000_0000),
+        (0xfff0_0000_0000_0000, 0xfff8_0000_0000_0000),
+        (0x3ff0_0000_0000_0000, 0x3fea_ed54_8f09_0cee),
+        (0xbff0_0000_0000_0000, 0xbfea_ed54_8f09_0cee),
+        (0x3fe0_0000_0000_0000, 0x3fde_aee8_744b_05f0),
+        (0x3fb9_9999_9999_999a, 0x3fb9_8eae_cb8b_cb2c),
+        (0x01a5_6e1f_c2f8_f359, 0x01a5_6e1f_c2f8_f359),
+        (0x7e37_e43c_8800_759c, 0xbfea_2c16_b010_e385),
+        (0xfe37_e43c_8800_759c, 0x3fea_2c16_b010_e385),
+        (0x4480_f0cf_064d_d592, 0xbfeb_453a_b76b_f397),
+        (0x4009_21fb_5444_2d18, 0x3ca1_a626_3314_5c07),
+        (0x3ff9_21fb_5444_2d18, 0x3ff0_0000_0000_0000),
+        (0x4086_2e42_fefa_39ef, 0xbfcb_963d_50b6_322a),
+        (0xc087_4910_d52d_3051, 0x3fe1_6c51_c71d_9462),
+        (0x412e_8480_0000_0000, 0xbfd6_664b_2568_d867),
+        (0x7ff8_0000_0000_0000, 0x7ff8_0000_0000_0000),
+        (0x4090_c7ff_ffff_ffff, 0xbfda_5ecc_9be3_3231),
+        (0x084a_5b9e_728a_70ab, 0x084a_5b9e_728a_70ab),
+        (0x85ae_7484_0d19_68af, 0x85ae_7484_0d19_68af),
+        (0xf36e_3678_2bc5_3b2f, 0x3fef_9057_980e_4f0a),
+        (0xa6c7_c6a1_bc0e_1d9e, 0xa6c7_c6a1_bc0e_1d9e),
+        (0x0073_ba94_e9f0_7cfe, 0x0073_ba94_e9f0_7cfe),
+        (0xc1ad_d6ec_fab7_aa66, 0x3fe6_8bc1_b33b_f9f6),
+        (0x3ea5_cbc2_3079_1df8, 0x3ea5_cbc2_3079_1c49),
+        (0x3d08_b9af_ecf8_cc56, 0x3d08_b9af_ecf8_cc56),
+        (0x4007_5a62_2fc1_dbc8, 0x3fcc_3d98_54cd_0994),
+        (0xbff7_4e1a_6bd4_a540, 0xbfef_ca9c_f978_53fe),
+        (0xbf9a_f265_9f98_7000, 0xbf9a_f199_ceaf_cd84),
+        (0x0008_febb_bb8e_637e, 0x0008_febb_bb8e_637e),
+        (0xc063_3e04_6c84_3285, 0xbd29_60cd_4fc6_e59d),
+        (0x403d_d85a_7410_f58d, 0xbff0_0000_0000_0000),
+        (0x406a_b41b_0988_6feb, 0x3d23_4fdd_da6e_978e),
+        (0x4139_0ced_ed4d_c73d, 0x3ff0_0000_0000_0000),
+        (0x4103_711e_0405_0724, 0x3ff0_0000_0000_0000),
+        (0xea9f_a050_3a51_3a84, 0xbfee_d20a_e1eb_3777),
+        (0xdba5_11bb_afd8_6a88, 0x3fef_5cde_cfb7_306c),
+        (0x54e2_814c_b9af_3b10, 0xbfeb_94f9_9b83_4078),
+        (0x4128_f11f_06c4_bcb4, 0xbfe6_0954_a22d_0ea2),
+        (0x412e_3911_8d7c_0194, 0x3fef_d3e9_c3ab_2934),
+        (0x4002_d97c_7f33_21d2, 0x3fe6_a09e_667f_3bcd),
+    ];
+    const COS: &[(u64, u64)] = &[
+        (0x0000_0000_0000_0000, 0x3ff0_0000_0000_0000),
+        (0x8000_0000_0000_0000, 0x3ff0_0000_0000_0000),
+        (0x0000_0000_0000_0001, 0x3ff0_0000_0000_0000),
+        (0x0010_0000_0000_0000, 0x3ff0_0000_0000_0000),
+        (0x7ff0_0000_0000_0000, 0xfff8_0000_0000_0000),
+        (0xfff0_0000_0000_0000, 0xfff8_0000_0000_0000),
+        (0x3ff0_0000_0000_0000, 0x3fe1_4a28_0fb5_068c),
+        (0xbff0_0000_0000_0000, 0x3fe1_4a28_0fb5_068c),
+        (0x3fe0_0000_0000_0000, 0x3fec_1528_065b_7d50),
+        (0x3fb9_9999_9999_999a, 0x3fef_d712_f9a8_17c0),
+        (0x01a5_6e1f_c2f8_f359, 0x3ff0_0000_0000_0000),
+        (0x7e37_e43c_8800_759c, 0xbfe2_6990_22ad_c4c1),
+        (0xfe37_e43c_8800_759c, 0xbfe2_6990_22ad_c4c1),
+        (0x4480_f0cf_064d_d592, 0x3fe0_be2c_ef01_c8f4),
+        (0x4009_21fb_5444_2d18, 0xbff0_0000_0000_0000),
+        (0x3ff9_21fb_5444_2d18, 0x3c91_a626_3314_5c07),
+        (0x4086_2e42_fefa_39ef, 0x3fef_3f7a_97bc_6780),
+        (0xc087_4910_d52d_3051, 0xbfea_d746_4b59_047f),
+        (0x412e_8480_0000_0000, 0x3fed_f9df_9906_d32c),
+        (0x7ff8_0000_0000_0000, 0x7ff8_0000_0000_0000),
+        (0x4090_c7ff_ffff_ffff, 0x3fed_2848_cd5d_0a27),
+        (0x084a_5b9e_728a_70ab, 0x3ff0_0000_0000_0000),
+        (0x85ae_7484_0d19_68af, 0x3ff0_0000_0000_0000),
+        (0xf36e_3678_2bc5_3b2f, 0xbfc5_0fbf_9fb5_f311),
+        (0xa6c7_c6a1_bc0e_1d9e, 0x3ff0_0000_0000_0000),
+        (0x0073_ba94_e9f0_7cfe, 0x3ff0_0000_0000_0000),
+        (0xc1ad_d6ec_fab7_aa66, 0xbfe6_b567_ef5c_143a),
+        (0x3ea5_cbc2_3079_1df8, 0x3fef_ffff_ffff_f894),
+        (0x3d08_b9af_ecf8_cc56, 0x3ff0_0000_0000_0000),
+        (0x4007_5a62_2fc1_dbc8, 0xbfef_3621_3883_859a),
+        (0xbff7_4e1a_6bd4_a540, 0x3fbd_2dc9_9fe1_ecce),
+        (0xbf9a_f265_9f98_7000, 0x3fef_fd29_e891_6d15),
+        (0x0008_febb_bb8e_637e, 0x3ff0_0000_0000_0000),
+        (0xc063_3e04_6c84_3285, 0xbff0_0000_0000_0000),
+        (0x403d_d85a_7410_f58d, 0x3cc6_1565_46af_a570),
+        (0x406a_b41b_0988_6feb, 0x3ff0_0000_0000_0000),
+        (0x4139_0ced_ed4d_c73d, 0xbdcf_b684_d316_1aae),
+        (0x4103_711e_0405_0724, 0x3da1_7a17_8fc6_715a),
+        (0xea9f_a050_3a51_3a84, 0xbfd1_374f_1bc8_b6c3),
+        (0xdba5_11bb_afd8_6a88, 0x3fc9_6abd_a928_ff6d),
+        (0x54e2_814c_b9af_3b10, 0xbfe0_397d_f279_7fa9),
+        (0x4128_f11f_06c4_bcb4, 0xbfe7_340e_129e_cd89),
+        (0x412e_3911_8d7c_0194, 0xbfba_85fe_a2c5_8261),
+        (0x4002_d97c_7f33_21d2, 0xbfe6_a09e_667f_3bcc),
+    ];
+    const TAN: &[(u64, u64)] = &[
+        (0x0000_0000_0000_0000, 0x0000_0000_0000_0000),
+        (0x8000_0000_0000_0000, 0x8000_0000_0000_0000),
+        (0x0000_0000_0000_0001, 0x0000_0000_0000_0001),
+        (0x0010_0000_0000_0000, 0x0010_0000_0000_0000),
+        (0x7ff0_0000_0000_0000, 0xfff8_0000_0000_0000),
+        (0xfff0_0000_0000_0000, 0xfff8_0000_0000_0000),
+        (0x3ff0_0000_0000_0000, 0x3ff8_eb24_5cbe_e3a6),
+        (0xbff0_0000_0000_0000, 0xbff8_eb24_5cbe_e3a6),
+        (0x3fe0_0000_0000_0000, 0x3fe1_7b4f_5bf3_474a),
+        (0x3fb9_9999_9999_999a, 0x3fb9_af88_7743_0b80),
+        (0x01a5_6e1f_c2f8_f359, 0x01a5_6e1f_c2f8_f359),
+        (0x7e37_e43c_8800_759c, 0x3ff6_be41_1f37_ac77),
+        (0xfe37_e43c_8800_759c, 0xbff6_be41_1f37_ac77),
+        (0x4480_f0cf_064d_d592, 0xbffa_0f79_c1b6_b258),
+        (0x4009_21fb_5444_2d18, 0xbca1_a626_3314_5c07),
+        (0x3ff9_21fb_5444_2d18, 0x434d_0296_7c31_cdb5),
+        (0x4086_2e42_fefa_39ef, 0xbfcc_4034_5185_1ab4),
+        (0xc087_4910_d52d_3051, 0xbfe4_c5a2_cec8_c14a),
+        (0x412e_8480_0000_0000, 0xbfd7_e976_8ab7_34c0),
+        (0x7ff8_0000_0000_0000, 0x7ff8_0000_0000_0000),
+        (0x4090_c7ff_ffff_ffff, 0xbfdc_f0f4_7e38_e065),
+        (0x084a_5b9e_728a_70ab, 0x084a_5b9e_728a_70ab),
+        (0x85ae_7484_0d19_68af, 0x85ae_7484_0d19_68af),
+        (0xf36e_3678_2bc5_3b2f, 0xc017_fa78_13ee_1488),
+        (0xa6c7_c6a1_bc0e_1d9e, 0xa6c7_c6a1_bc0e_1d9e),
+        (0x0073_ba94_e9f0_7cfe, 0x0073_ba94_e9f0_7cfe),
+        (0xc1ad_d6ec_fab7_aa66, 0xbfef_c54f_3d85_9e84),
+        (0x3ea5_cbc2_3079_1df8, 0x3ea5_cbc2_3079_2157),
+        (0x3d08_b9af_ecf8_cc56, 0x3d08_b9af_ecf8_cc56),
+        (0x4007_5a62_2fc1_dbc8, 0xbfcc_f440_1a6f_5c51),
+        (0xbff7_4e1a_6bd4_a540, 0xc021_6ebe_ccea_2564),
+        (0xbf9a_f265_9f98_7000, 0xbf9a_f3fd_61f0_ec23),
+        (0x0008_febb_bb8e_637e, 0x0008_febb_bb8e_637e),
+        (0xc063_3e04_6c84_3285, 0x3d29_60cd_4fc6_e59d),
+        (0x403d_d85a_7410_f58d, 0xc317_2f45_3d4f_5dec),
+        (0x406a_b41b_0988_6feb, 0x3d23_4fdd_da6e_978e),
+        (0x4139_0ced_ed4d_c73d, 0xc210_2512_b7dc_5ccb),
+        (0x4103_711e_0405_0724, 0x423d_4bb8_00d3_dc7e),
+        (0xea9f_a050_3a51_3a84, 0x400c_a4bb_4a5b_d13e),
+        (0xdba5_11bb_afd8_6a88, 0x4013_be2e_9bf3_3d59),
+        (0x54e2_814c_b9af_3b10, 0x3ffb_333c_f5d5_b017),
+        (0x4128_f11f_06c4_bcb4, 0x3fee_6406_938a_38a0),
+        (0x412e_3911_8d7c_0194, 0xc023_3326_c628_521e),
+        (0x4002_d97c_7f33_21d2, 0xbff0_0000_0000_0001),
+    ];
+    const ASIN: &[(u64, u64)] = &[
+        (0x0000_0000_0000_0000, 0x0000_0000_0000_0000),
+        (0x8000_0000_0000_0000, 0x8000_0000_0000_0000),
+        (0x0000_0000_0000_0001, 0x0000_0000_0000_0001),
+        (0x0010_0000_0000_0000, 0x0010_0000_0000_0000),
+        (0x7ff0_0000_0000_0000, 0xfff8_0000_0000_0000),
+        (0xfff0_0000_0000_0000, 0xfff8_0000_0000_0000),
+        (0x3ff0_0000_0000_0000, 0x3ff9_21fb_5444_2d18),
+        (0xbff0_0000_0000_0000, 0xbff9_21fb_5444_2d18),
+        (0x3fe0_0000_0000_0000, 0x3fe0_c152_382d_7366),
+        (0x3fb9_9999_9999_999a, 0x3fb9_a492_7603_7884),
+        (0x01a5_6e1f_c2f8_f359, 0x01a5_6e1f_c2f8_f359),
+        (0x7e37_e43c_8800_759c, 0xfff8_0000_0000_0000),
+        (0xfe37_e43c_8800_759c, 0xfff8_0000_0000_0000),
+        (0x4480_f0cf_064d_d592, 0xfff8_0000_0000_0000),
+        (0x4009_21fb_5444_2d18, 0xfff8_0000_0000_0000),
+        (0x3ff9_21fb_5444_2d18, 0xfff8_0000_0000_0000),
+        (0x4086_2e42_fefa_39ef, 0xfff8_0000_0000_0000),
+        (0xc087_4910_d52d_3051, 0xfff8_0000_0000_0000),
+        (0x412e_8480_0000_0000, 0xfff8_0000_0000_0000),
+        (0x7ff8_0000_0000_0000, 0x7ff8_0000_0000_0000),
+        (0x3fdc_0000_0000_0001, 0x3fdc_faf2_7460_fea0),
+        (0x092b_b148_b367_e168, 0x092b_b148_b367_e168),
+        (0x1491_43a0_8777_d3e1, 0x1491_43a0_8777_d3e1),
+        (0x8dc4_6690_29e8_92a9, 0x8dc4_6690_29e8_92a9),
+        (0xfe8b_ba65_c148_0a31, 0xfff8_0000_0000_0000),
+        (0xfa52_d8d1_39fd_64ec, 0xfff8_0000_0000_0000),
+        (0x0b41_d9a0_0ec6_cdfe, 0x0b41_d9a0_0ec6_cdfe),
+        (0xc070_b256_9a23_2310, 0xfff8_0000_0000_0000),
+        (0xc177_36eb_8e68_4b1a, 0xfff8_0000_0000_0000),
+        (0x3d0d_7c67_cb32_be66, 0x3d0d_7c67_cb32_be66),
+        (0x4013_4b86_7b49_0e8d, 0xfff8_0000_0000_0000),
+        (0x3fb3_cebd_d697_4d50, 0x3fb3_d3d0_8f2b_b23a),
+        (0xbfe0_748c_77fc_b6f4, 0xbfe1_488c_f16f_6d68),
+        (0xbfee_248d_6bf1_f91c, 0xbff3_a7a3_56cd_428e),
+        (0x000b_1033_b0e2_2add, 0x000b_1033_b0e2_2add),
+        (0x3fe8_fda5_9ef1_3449, 0x3fec_adb7_c835_8eca),
+        (0x3fed_9e46_ebb4_9653, 0x3ff2_ebb0_07bb_903e),
+        (0x3fe3_a5d3_303b_4c5a, 0x3fe5_27cd_56ae_4b3e),
+        (0xbfe7_f1eb_8d99_d700, 0xbfeb_0e11_ac0a_1841),
+        (0xbfed_c784_ec94_813a, 0xbff3_2313_468e_0045),
+        (0xbfe5_4619_1fe3_d78b, 0xbfe7_4582_f480_f702),
+        (0xbfed_2a17_af88_af48, 0xbff2_58a8_3740_04e3),
+        (0x3fef_ffff_ffff_fff9, 0x3ff9_21fb_49ae_ed43),
+        (0x3fef_ffff_ffff_ff02, 0x3ff9_21fb_1484_4d38),
+    ];
+    const ACOS: &[(u64, u64)] = &[
+        (0x0000_0000_0000_0000, 0x3ff9_21fb_5444_2d18),
+        (0x8000_0000_0000_0000, 0x3ff9_21fb_5444_2d18),
+        (0x0000_0000_0000_0001, 0x3ff9_21fb_5444_2d18),
+        (0x0010_0000_0000_0000, 0x3ff9_21fb_5444_2d18),
+        (0x7ff0_0000_0000_0000, 0xfff8_0000_0000_0000),
+        (0xfff0_0000_0000_0000, 0xfff8_0000_0000_0000),
+        (0x3ff0_0000_0000_0000, 0x0000_0000_0000_0000),
+        (0xbff0_0000_0000_0000, 0x4009_21fb_5444_2d18),
+        (0x3fe0_0000_0000_0000, 0x3ff0_c152_382d_7366),
+        (0x3fb9_9999_9999_999a, 0x3ff7_87b2_2ce3_f590),
+        (0x01a5_6e1f_c2f8_f359, 0x3ff9_21fb_5444_2d18),
+        (0x7e37_e43c_8800_759c, 0xfff8_0000_0000_0000),
+        (0xfe37_e43c_8800_759c, 0xfff8_0000_0000_0000),
+        (0x4480_f0cf_064d_d592, 0xfff8_0000_0000_0000),
+        (0x4009_21fb_5444_2d18, 0xfff8_0000_0000_0000),
+        (0x3ff9_21fb_5444_2d18, 0xfff8_0000_0000_0000),
+        (0x4086_2e42_fefa_39ef, 0xfff8_0000_0000_0000),
+        (0xc087_4910_d52d_3051, 0xfff8_0000_0000_0000),
+        (0x412e_8480_0000_0000, 0xfff8_0000_0000_0000),
+        (0x7ff8_0000_0000_0000, 0x7ff8_0000_0000_0000),
+        (0x3fdc_0000_0000_0001, 0x3ff1_e33e_b72b_ed70),
+        (0x092b_b148_b367_e168, 0x3ff9_21fb_5444_2d18),
+        (0x1491_43a0_8777_d3e1, 0x3ff9_21fb_5444_2d18),
+        (0x8dc4_6690_29e8_92a9, 0x3ff9_21fb_5444_2d18),
+        (0xfe8b_ba65_c148_0a31, 0xfff8_0000_0000_0000),
+        (0xfa52_d8d1_39fd_64ec, 0xfff8_0000_0000_0000),
+        (0x0b41_d9a0_0ec6_cdfe, 0x3ff9_21fb_5444_2d18),
+        (0xc070_b256_9a23_2310, 0xfff8_0000_0000_0000),
+        (0xc177_36eb_8e68_4b1a, 0xfff8_0000_0000_0000),
+        (0x3d0d_7c67_cb32_be66, 0x3ff9_21fb_5444_2cdd),
+        (0x4013_4b86_7b49_0e8d, 0xfff8_0000_0000_0000),
+        (0x3fb3_cebd_d697_4d50, 0x3ff7_e4be_4b51_71f5),
+        (0xbfe0_748c_77fc_b6f4, 0x4000_e320_e67d_f1e6),
+        (0xbfee_248d_6bf1_f91c, 0x4006_64cf_5588_b7d3),
+        (0x000b_1033_b0e2_2add, 0x3ff9_21fb_5444_2d18),
+        (0x3fe8_fda5_9ef1_3449, 0x3fe5_963e_e052_cb67),
+        (0x3fed_9e46_ebb4_9653, 0x3fd8_d92d_3222_7368),
+        (0x3fe3_a5d3_303b_4c5a, 0x3fed_1c29_51da_0ef2),
+        (0xbfe7_f1eb_8d99_d700, 0x4003_5482_1524_9c9c),
+        (0xbfed_c784_ec94_813a, 0x4006_2287_4d69_16af),
+        (0xbfe5_4619_1fe3_d78b, 0x4002_625e_6742_544d),
+        (0xbfed_2a17_af88_af48, 0x4005_bd51_c5c2_18fe),
+        (0x3fef_ffff_ffff_fff9, 0x3e65_2a7f_a9d2_f8ea),
+        (0x3fef_ffff_ffff_ff02, 0x3e8f_dfef_efeb_e3eb),
+    ];
+    const ATAN: &[(u64, u64)] = &[
+        (0x0000_0000_0000_0000, 0x0000_0000_0000_0000),
+        (0x8000_0000_0000_0000, 0x8000_0000_0000_0000),
+        (0x0000_0000_0000_0001, 0x0000_0000_0000_0001),
+        (0x0010_0000_0000_0000, 0x0010_0000_0000_0000),
+        (0x7ff0_0000_0000_0000, 0x3ff9_21fb_5444_2d18),
+        (0xfff0_0000_0000_0000, 0xbff9_21fb_5444_2d18),
+        (0x3ff0_0000_0000_0000, 0x3fe9_21fb_5444_2d18),
+        (0xbff0_0000_0000_0000, 0xbfe9_21fb_5444_2d18),
+        (0x3fe0_0000_0000_0000, 0x3fdd_ac67_0561_bb4f),
+        (0x3fb9_9999_9999_999a, 0x3fb9_83e2_82e2_cc4d),
+        (0x01a5_6e1f_c2f8_f359, 0x01a5_6e1f_c2f8_f359),
+        (0x7e37_e43c_8800_759c, 0x3ff9_21fb_5444_2d18),
+        (0xfe37_e43c_8800_759c, 0xbff9_21fb_5444_2d18),
+        (0x4480_f0cf_064d_d592, 0x3ff9_21fb_5444_2d18),
+        (0x4009_21fb_5444_2d18, 0x3ff4_33b8_a322_ddd2),
+        (0x3ff9_21fb_5444_2d18, 0x3ff0_0fe9_87ed_02ff),
+        (0x4086_2e42_fefa_39ef, 0x3ff9_1c36_02aa_f162),
+        (0xc087_4910_d52d_3051, 0xbff9_1c7c_18da_8562),
+        (0x412e_8480_0000_0000, 0x3ff9_21fa_47d4_b30d),
+        (0x7ff8_0000_0000_0000, 0x7ff8_0000_0000_0000),
+        (0xbe3f_ffff_ffff_ffff, 0xbe3f_ffff_ffff_ffff),
+        (0x8ca3_e092_bb2b_1fd1, 0x8ca3_e092_bb2b_1fd1),
+        (0x132d_80bb_3dd9_c5b6, 0x132d_80bb_3dd9_c5b6),
+        (0xeefc_7569_8b2f_3ac5, 0xbff9_21fb_5444_2d18),
+        (0xb866_371a_56ee_c6e6, 0xb866_371a_56ee_c6e6),
+        (0xbe82_7111_f1bc_366e, 0xbe82_7111_f1bc_364d),
+        (0x4460_5d15_0e36_e76a, 0x3ff9_21fb_5444_2d18),
+        (0x972f_4aba_8860_12bc, 0x972f_4aba_8860_12bc),
+        (0x5960_1110_1e55_ded9, 0x3ff9_21fb_5444_2d18),
+        (0xc83b_0649_2b03_b426, 0xbff9_21fb_5444_2d18),
+        (0x701c_100c_6961_f273, 0x3ff9_21fb_5444_2d18),
+        (0x5b58_9145_fc41_64db, 0x3ff9_21fb_5444_2d18),
+        (0xbd3a_5880_8ea3_f9d4, 0xbd3a_5880_8ea3_f9d4),
+        (0x4130_734f_7a8e_bd72, 0x3ff9_21fa_5b46_a053),
+        (0xbd0a_7273_8813_87ac, 0xbd0a_7273_8813_87ac),
+        (0x4155_b448_21d4_5541, 0x3ff9_21fb_2516_28d1),
+        (0x3dc1_6eaa_8ba3_76eb, 0x3dc1_6eaa_8ba3_76eb),
+        (0x3fe2_52b2_86c6_9210, 0x3fe0_a40b_4259_c79c),
+        (0xbfe2_48c8_8ed0_35c0, 0xbfe0_9c92_f247_6661),
+        (0xbfd7_ba3d_a0cd_c760, 0xbfd6_b8da_ba80_0b94),
+        (0x3fe3_e03c_8b0b_ddb0, 0x3fe1_c92a_23a4_b584),
+        (0xbfe8_4595_857d_af20, 0xbfe4_c3e9_e2dd_905d),
+        (0x0009_8646_2fac_f56e, 0x0009_8646_2fac_f56e),
+        (0x0006_4cb5_55c6_98a9, 0x0006_4cb5_55c6_98a9),
+    ];
+    const EXP: &[(u64, u64)] = &[
+        (0x0000_0000_0000_0000, 0x3ff0_0000_0000_0000),
+        (0x8000_0000_0000_0000, 0x3ff0_0000_0000_0000),
+        (0x0000_0000_0000_0001, 0x3ff0_0000_0000_0000),
+        (0x0010_0000_0000_0000, 0x3ff0_0000_0000_0000),
+        (0x7ff0_0000_0000_0000, 0x7ff0_0000_0000_0000),
+        (0xfff0_0000_0000_0000, 0x0000_0000_0000_0000),
+        (0x3ff0_0000_0000_0000, 0x4005_bf0a_8b14_576a),
+        (0xbff0_0000_0000_0000, 0x3fd7_8b56_362c_ef38),
+        (0x3fe0_0000_0000_0000, 0x3ffa_6129_8e1e_069c),
+        (0x3fb9_9999_9999_999a, 0x3ff1_aec7_b35a_00d4),
+        (0x01a5_6e1f_c2f8_f359, 0x3ff0_0000_0000_0000),
+        (0x7e37_e43c_8800_759c, 0x7ff0_0000_0000_0000),
+        (0xfe37_e43c_8800_759c, 0x0000_0000_0000_0000),
+        (0x4480_f0cf_064d_d592, 0x7ff0_0000_0000_0000),
+        (0x4009_21fb_5444_2d18, 0x4037_2404_6eb0_9339),
+        (0x3ff9_21fb_5444_2d18, 0x4013_3ded_c855_935f),
+        (0x4086_2e42_fefa_39ef, 0x7fef_ffff_ffff_ff2a),
+        (0xc087_4910_d52d_3051, 0x0000_0000_0000_0001),
+        (0x412e_8480_0000_0000, 0x7ff0_0000_0000_0000),
+        (0x7ff8_0000_0000_0000, 0x7ff8_0000_0000_0000),
+        (0x3fdc_0000_0000_0001, 0x3ff8_c802_477b_0010),
+        (0xf11f_ee81_9fb7_4a8e, 0x0000_0000_0000_0000),
+        (0xc2ae_3648_1aa7_1c2f, 0x0000_0000_0000_0000),
+        (0xf079_6356_3a83_3c3d, 0x0000_0000_0000_0000),
+        (0xd55e_7d1a_12d0_9a24, 0x0000_0000_0000_0000),
+        (0xba88_84e4_9a64_19fc, 0x3ff0_0000_0000_0000),
+        (0xb554_8067_b0b0_8860, 0x3ff0_0000_0000_0000),
+        (0x3c98_4244_a574_32aa, 0x3ff0_0000_0000_0000),
+        (0x4149_acf3_057c_5485, 0x7ff0_0000_0000_0000),
+        (0x3c93_df60_9d95_1fec, 0x3ff0_0000_0000_0000),
+        (0x4044_7191_7d2d_c52c, 0x439f_bb38_dbf2_4f4a),
+        (0xc07c_b5cd_aa02_a656, 0x1683_6c4a_6a55_f20c),
+        (0xc07e_7c9b_9315_1f22, 0x13f3_4d60_6259_cd3e),
+        (0xc065_02b5_1536_c828, 0x30c6_b56e_52c6_3efe),
+        (0x0002_acd3_a3c2_1196, 0x3ff0_0000_0000_0000),
+        (0xc01b_dccf_23c8_bd68, 0x3f4e_ecde_c411_95a2),
+        (0xbfe0_027e_b45e_2c40, 0x3fe3_672f_a6b2_b472),
+        (0xc032_7bf2_ee76_3f04, 0x3e44_2757_b60c_d992),
+        (0xc086_f9f6_4a5f_358e, 0x0000_0000_0000_2676),
+        (0xc086_8583_9a8a_e0f4, 0x0000_0004_cea0_cbea),
+        (0xc087_3a89_1c0e_7708, 0x0000_0000_0000_0003),
+        (0xc086_6e25_cc79_a1a0, 0x0000_0059_33c3_8c57),
+        (0x4086_03cd_5909_0e9c, 0x7f74_4b3d_90ee_3d7e),
+        (0x4085_f8a9_294d_1e41, 0x7f54_2a3a_2757_8b3f),
+    ];
+    const LOG: &[(u64, u64)] = &[
+        (0x0000_0000_0000_0000, 0xfff0_0000_0000_0000),
+        (0x8000_0000_0000_0000, 0xfff0_0000_0000_0000),
+        (0x0000_0000_0000_0001, 0xc087_4385_446d_71c3),
+        (0x0010_0000_0000_0000, 0xc086_232b_dd7a_bcd2),
+        (0x7ff0_0000_0000_0000, 0x7ff0_0000_0000_0000),
+        (0xfff0_0000_0000_0000, 0xfff8_0000_0000_0000),
+        (0x3ff0_0000_0000_0000, 0x0000_0000_0000_0000),
+        (0xbff0_0000_0000_0000, 0xfff8_0000_0000_0000),
+        (0x3fe0_0000_0000_0000, 0xbfe6_2e42_fefa_39ef),
+        (0x3fb9_9999_9999_999a, 0xc002_6bb1_bbb5_5515),
+        (0x01a5_6e1f_c2f8_f359, 0xc085_9634_47f8_7fb5),
+        (0x7e37_e43c_8800_759c, 0x4085_9634_47f8_7fb5),
+        (0xfe37_e43c_8800_759c, 0xfff8_0000_0000_0000),
+        (0x4480_f0cf_064d_d592, 0x4049_5414_6219_54fe),
+        (0x4009_21fb_5444_2d18, 0x3ff2_50d0_48e7_a1bd),
+        (0x3ff9_21fb_5444_2d18, 0x3fdc_e6bb_25aa_1315),
+        (0x4086_2e42_fefa_39ef, 0x401a_4284_94fa_f1b1),
+        (0xc087_4910_d52d_3051, 0xfff8_0000_0000_0000),
+        (0x412e_8480_0000_0000, 0x402b_a18a_998f_ffa0),
+        (0x7ff8_0000_0000_0000, 0x7ff8_0000_0000_0000),
+        (0xbfe6_0000_0000_0000, 0xfff8_0000_0000_0000),
+        (0x917a_6d81_5a9b_759c, 0xfff8_0000_0000_0000),
+        (0x5070_5294_5ba7_8f2c, 0x4066_e058_9b18_0062),
+        (0xcf7f_a1af_8f66_89fb, 0xfff8_0000_0000_0000),
+        (0xd0de_7743_dbab_17cd, 0xfff8_0000_0000_0000),
+        (0x7bc7_3395_619f_a857, 0x4084_bdb5_34f6_7807),
+        (0x6a91_709c_af71_2a45, 0x407d_8d00_32f0_205c),
+        (0x3d74_9c1c_0717_7108, 0xc03b_7903_7715_77f6),
+        (0xbea1_cb0a_1035_c902, 0xfff8_0000_0000_0000),
+        (0xc151_b619_fbec_c680, 0xfff8_0000_0000_0000),
+        (0x4092_1a03_0cfa_5d85, 0x401c_3833_7d38_0187),
+        (0x4056_fde2_9219_3428, 0x4012_15f1_90f3_0cf4),
+        (0x4052_6f9b_f478_c56b, 0x4011_33d0_0362_dee6),
+        (0x404c_d545_1b92_e542, 0x4010_37fb_99da_1a94),
+        (0x000e_1cf7_e697_6e37, 0xc086_242c_d9c3_4447),
+        (0x63e4_eac4_a9cf_9927, 0x4078_ed3d_df1c_782e),
+        (0x786f_c585_3f64_9d11, 0x4083_94c8_78fc_893e),
+        (0x16d3_293e_a128_2feb, 0xc07c_7e91_9da3_baca),
+        (0x3ff0_0000_0000_6e39, 0x3d9b_8e3f_ffff_a116),
+        (0x3ff0_0000_2327_40a0, 0x3e81_93a0_3cb0_f95a),
+        (0x3fef_a509_d32b_ed9a, 0xbf86_de1a_fc8d_81e2),
+        (0x009c_16c5_c525_3575, 0xc085_f24e_c0a3_0a5f),
+        (0x3f1a_36e2_eb1c_432d, 0xc022_6bb1_bbb5_5515),
+        (0x7d98_7706_b021_3d0a, 0x4085_5ef1_32c5_5fb6),
+    ];
+    const LOG10: &[(u64, u64)] = &[
+        (0x0000_0000_0000_0000, 0xfff0_0000_0000_0000),
+        (0x8000_0000_0000_0000, 0xfff0_0000_0000_0000),
+        (0x0000_0000_0000_0001, 0xc074_34e6_420f_4374),
+        (0x0010_0000_0000_0000, 0xc073_3a71_46f7_2a42),
+        (0x7ff0_0000_0000_0000, 0x7ff0_0000_0000_0000),
+        (0xfff0_0000_0000_0000, 0xfff8_0000_0000_0000),
+        (0x3ff0_0000_0000_0000, 0x0000_0000_0000_0000),
+        (0xbff0_0000_0000_0000, 0xfff8_0000_0000_0000),
+        (0x3fe0_0000_0000_0000, 0xbfd3_4413_509f_79ff),
+        (0x3fb9_9999_9999_999a, 0xbff0_0000_0000_0000),
+        (0x01a5_6e1f_c2f8_f359, 0xc072_c000_0000_0000),
+        (0x7e37_e43c_8800_759c, 0x4072_c000_0000_0000),
+        (0xfe37_e43c_8800_759c, 0xfff8_0000_0000_0000),
+        (0x4480_f0cf_064d_d592, 0x4036_0000_0000_0000),
+        (0x4009_21fb_5444_2d18, 0x3fdf_d14d_b31b_a3ba),
+        (0x3ff9_21fb_5444_2d18, 0x3fc9_1a74_c4f8_5377),
+        (0x4086_2e42_fefa_39ef, 0x4006_cf1a_d7ce_0276),
+        (0xc087_4910_d52d_3051, 0xfff8_0000_0000_0000),
+        (0x412e_8480_0000_0000, 0x4018_0000_0000_0000),
+        (0x7ff8_0000_0000_0000, 0x7ff8_0000_0000_0000),
+        (0xbfe6_0000_0000_0000, 0xfff8_0000_0000_0000),
+        (0x917a_6d81_5a9b_759c, 0xfff8_0000_0000_0000),
+        (0x5070_5294_5ba7_8f2c, 0x4053_dec1_f267_bd08),
+        (0xcf7f_a1af_8f66_89fb, 0xfff8_0000_0000_0000),
+        (0xd0de_7743_dbab_17cd, 0xfff8_0000_0000_0000),
+        (0x7bc7_3395_619f_a857, 0x4072_03f4_211e_290c),
+        (0x6a91_709c_af71_2a45, 0x4069_aae0_4dbe_f57e),
+        (0x3d74_9c1c_0717_7108, 0xc027_dccc_45c3_adc3),
+        (0xbea1_cb0a_1035_c902, 0xfff8_0000_0000_0000),
+        (0xc151_b619_fbec_c680, 0xfff8_0000_0000_0000),
+        (0x4092_1a03_0cfa_5d85, 0x4008_82dc_82f6_b469),
+        (0x4056_fde2_9219_3428, 0x3fff_6b09_2e12_fff3),
+        (0x4052_6f9b_f478_c56b, 0x3ffd_e234_b9ee_baf0),
+        (0x404c_d545_1b92_e542, 0x3ffc_2cbb_9f9f_2226),
+        (0x000e_1cf7_e697_6e37, 0xc073_3b50_7df1_3c3d),
+        (0x63e4_eac4_a9cf_9927, 0x4065_a6ad_151f_3058),
+        (0x786f_c585_3f64_9d11, 0x4071_020c_4ea8_9745),
+        (0x16d3_293e_a128_2feb, 0xc068_bffb_6217_9403),
+        (0x3ff0_0000_0000_6e39, 0x3d87_ef3e_62fc_85b9),
+        (0x3ff0_0000_2327_40a0, 0x3e6e_88a6_9d88_f941),
+        (0x3fef_a509_d32b_ed9a, 0xbf73_dccf_b51e_cf2c),
+        (0x009c_16c5_c525_3575, 0xc073_1000_0000_0000),
+        (0x3f1a_36e2_eb1c_432d, 0xc010_0000_0000_0000),
+        (0x7d98_7706_b021_3d0a, 0x4072_9000_0000_0000),
+    ];
+    const CBRT: &[(u64, u64)] = &[
+        (0x0000_0000_0000_0000, 0x0000_0000_0000_0000),
+        (0x8000_0000_0000_0000, 0x8000_0000_0000_0000),
+        (0x0000_0000_0000_0001, 0x2990_0000_0000_0000),
+        (0x0010_0000_0000_0000, 0x2aa4_28a2_f98d_728b),
+        (0x7ff0_0000_0000_0000, 0x7ff0_0000_0000_0000),
+        (0xfff0_0000_0000_0000, 0xfff0_0000_0000_0000),
+        (0x3ff0_0000_0000_0000, 0x3ff0_0000_0000_0000),
+        (0xbff0_0000_0000_0000, 0xbff0_0000_0000_0000),
+        (0x3fe0_0000_0000_0000, 0x3fe9_65fe_a53d_6e3d),
+        (0x3fb9_9999_9999_999a, 0x3fdd_b4c7_760b_cff3),
+        (0x01a5_6e1f_c2f8_f359, 0x2b2b_ff2e_e48e_0530),
+        (0x7e37_e43c_8800_759c, 0x54b2_49ad_2594_c37d),
+        (0xfe37_e43c_8800_759c, 0xd4b2_49ad_2594_c37d),
+        (0x4480_f0cf_064d_d592, 0x4174_8bd9_ae67_b4ba),
+        (0x4009_21fb_5444_2d18, 0x3ff7_6ef7_e731_04b7),
+        (0x3ff9_21fb_5444_2d18, 0x3ff2_9962_64e0_e3fe),
+        (0x4086_2e42_fefa_39ef, 0x4021_d725_ed9a_197f),
+        (0xc087_4910_d52d_3051, 0xc022_21be_b21c_ac5a),
+        (0x412e_8480_0000_0000, 0x4059_0000_0000_0000),
+        (0x7ff8_0000_0000_0000, 0x7ff8_0000_0000_0000),
+        (0x3c60_0000_0000_0001, 0x3ec0_0000_0000_0000),
+        (0xc868_a161_44d6_b3cb, 0xc2c2_7972_7eff_0dc2),
+        (0x4470_9a50_99e9_d2ba, 0x4170_32ce_355d_bea5),
+        (0x6461_4b3f_9daf_386b, 0x4c14_b029_7b0b_3e41),
+        (0xd0f1_7d23_1662_932f, 0xc59a_29b7_6ab6_5069),
+        (0xea91_8e2c_d75b_9d97, 0xce24_cab7_4ca6_3783),
+        (0xa598_9651_4fec_70d9, 0xb727_433e_4e83_08a9),
+        (0x800b_9e26_7395_aa29, 0xaaa2_1e6d_de74_75f8),
+        (0x82d2_7dc7_501f_7549, 0xab90_ca6c_9c09_9132),
+        (0x42ad_3b9c_6651_f4dc, 0x40d8_a4e6_99b7_e04b),
+        (0xd8ff_7d92_340d_c379, 0xc849_434d_82ba_4880),
+        (0xc166_6779_17e7_48df, 0xc06c_6a29_ca10_a786),
+        (0xbf9e_be4b_9e18_0c1d, 0xbfd3_e42d_c47a_786a),
+        (0x3ec1_fd4e_a3ae_5b91, 0x3f8a_6907_8cd9_06b1),
+        (0x401d_fb31_3190_f4ea, 0x3fff_4ff9_baf5_50e9),
+        (0x3e0f_1f2c_a156_ad27, 0x3f4f_b45c_a44f_c2fc),
+        (0xc076_a543_4cfe_347c, 0xc01c_8431_33b8_b5ea),
+        (0xc089_0133_304f_8980, 0xc022_9148_b414_e6f2),
+        (0x408e_a05f_1786_5490, 0x4023_ddb7_8476_aa0a),
+        (0x407b_771f_cbef_f648, 0x401e_692c_1076_ec73),
+        (0xc080_8bdb_0338_eb56, 0xc020_2e19_06cd_69de),
+        (0x0000_f489_633f_1af5, 0x2a8f_83da_4227_5b03),
+        (0x000c_0896_7a37_cf3c, 0x2aa2_551d_57ac_17cb),
+        (0x4128_8c0a_0000_0000, 0x4057_4000_0000_0000),
+    ];
+    #[rustfmt::skip]
+    const ATAN2: &[(u64, u64, u64)] = &[
+        (0x0000_0000_0000_0000, 0x0000_0000_0000_0000, 0x0000_0000_0000_0000),
+        (0x0010_0000_0000_0000, 0x3ddb_7cdf_d9d7_bdbb, 0x0222_a05f_2000_0000),
+        (0x7ff0_0000_0000_0000, 0x3fe9_0000_0000_0000, 0x3ff9_21fb_5444_2d18),
+        (0x3fe0_0000_0000_0000, 0x4129_21fb_5444_2d18, 0x3ea4_5f30_6dc9_c5c2),
+        (0x4008_0000_0000_0000, 0x3fef_ffff_ffff_ffff, 0x3ff3_fc17_6b7a_8560),
+        (0x81a5_6e1f_c2f8_f359, 0x8000_0000_0000_0001, 0xbff9_21fb_5444_2d19),
+        (0xbddb_7cdf_d9d7_bdbb, 0xbddb_7cdf_d9d7_bdbc, 0xc002_d97c_7f33_21d2),
+        (0xc480_f0cf_064d_d592, 0xbfe9_0000_0000_0001, 0xbff9_21fb_5444_2d19),
+        (0x800c_0000_0000_0000, 0xc129_21fb_5444_2d19, 0xc009_21fb_5444_2d18),
+        (0xbff9_21fb_5444_2d18, 0xbff0_0000_0000_0000, 0xc001_1a06_904d_ab99),
+        (0x4005_bf0a_8b14_576a, 0x0000_0000_0000_0001, 0x3ff9_21fb_5444_2d18),
+        (0x3fe5_94af_4f0d_844e, 0x4202_a05f_2000_0000, 0x3dd2_89ab_0915_2ea7),
+        (0x3fe9_0000_0000_0001, 0x3fef_3333_3333_3333, 0x3fe5_9de0_b754_7892),
+        (0x3fdc_0000_0000_0001, 0x412e_8480_0000_0000, 0x3e9d_5c31_593e_5da9),
+        (0x4003_8000_0000_0001, 0x3fdc_0000_0000_0000, 0x3ff6_4a8c_401e_22c0),
+        (0xbe20_0000_0000_0001, 0x8000_0000_0000_0002, 0xbff9_21fb_5444_2d19),
+        (0xbe30_0000_0000_0001, 0xc202_a05f_2000_0001, 0xc009_21fb_5444_2d18),
+        (0xc086_2e42_fefa_39f0, 0xbfef_3333_3333_3334, 0xbff9_279b_b709_7661),
+        (0xc129_21fb_5444_2d19, 0xc12e_8480_0000_0001, 0xc003_9f0a_365e_996e),
+        (0xc30c_6bf5_2634_0001, 0xbfdc_0000_0000_0001, 0xbff9_21fb_5444_2d1b),
+        (0x433f_ffff_ffff_ffff, 0x0010_0000_0000_0000, 0x3ff9_21fb_5444_2d18),
+        (0x43ef_ffff_ffff_ffff, 0x4480_f0cf_064d_d592, 0x3f5e_391d_d0f2_6a78),
+        (0x3fef_fffe_ffff_ffff, 0x3fdc_0000_0000_0000, 0x3ff2_88bf_7450_4bfe),
+        (0x3ff0_000a_7c5a_c471, 0x430c_6bf5_2634_0000, 0x3cd2_03bb_6d37_dc5e),
+        (0x3fef_ffff_ffff_fffe, 0x3fe6_0000_0000_0000, 0x3fee_fe06_8bba_2274),
+        (0xbfe5_ffff_ffff_ffff, 0x8010_0000_0000_0001, 0xbff9_21fb_5444_2d19),
+        (0xc003_7fff_ffff_ffff, 0xc480_f0cf_064d_d593, 0xc009_21fb_5444_2d18),
+        (0xbff0_a2b2_3f3b_ab72, 0xbfdc_0000_0000_0001, 0xbfff_8166_f1db_abe2),
+        (0xc08f_ffff_ffff_ffff, 0xc30c_6bf5_2634_0001, 0xc009_21fb_5444_2416),
+        (0x4090_c800_0000_0001, 0xbfe6_0000_0000_0001, 0x3ff9_249a_8ded_1ff7),
+        (0x40a1_9c38_4708_fd20, 0x40e7_7526_f512_0a28, 0x3fa8_016f_4cc5_e3f6),
+        (0xd7e1_6bd0_a6d4_2a1f, 0x1a74_9850_7582_2001, 0xbff9_21fb_5444_2d18),
+        (0x6e15_4906_f7ef_9982, 0x4459_0838_5543_c27c, 0x3ff9_21fb_5444_2d18),
+        (0x0000_0000_0000_0000, 0xbff0_0000_0000_0000, 0x4009_21fb_5444_2d18),
+        (0x8000_0000_0000_0000, 0xbff0_0000_0000_0000, 0xc009_21fb_5444_2d18),
+        (0x3ff0_0000_0000_0000, 0x0000_0000_0000_0000, 0x3ff9_21fb_5444_2d18),
+        (0xbff0_0000_0000_0000, 0x8000_0000_0000_0000, 0xbff9_21fb_5444_2d18),
+        (0x7ff0_0000_0000_0000, 0x7ff0_0000_0000_0000, 0x3fe9_21fb_5444_2d18),
+        (0xfff0_0000_0000_0000, 0xfff0_0000_0000_0000, 0xc002_d97c_7f33_21d2),
+        (0x7ff0_0000_0000_0000, 0xfff0_0000_0000_0000, 0x4002_d97c_7f33_21d2),
+        (0x3ff0_0000_0000_0000, 0x7ff0_0000_0000_0000, 0x0000_0000_0000_0000),
+        (0xbff0_0000_0000_0000, 0xfff0_0000_0000_0000, 0xc009_21fb_5444_2d18),
+        (0x7e37_e43c_8800_759c, 0x01a5_6e1f_c2f8_f359, 0x3ff9_21fb_5444_2d18),
+        (0x01a5_6e1f_c2f8_f359, 0xfe37_e43c_8800_759c, 0x4009_21fb_5444_2d18),
+        (0x4008_0000_0000_0000, 0x3ff0_0000_0000_0000, 0x3ff3_fc17_6b7a_8560),
+        (0xc000_0000_0000_0000, 0xc014_0000_0000_0000, 0xc006_16b4_66d7_3d60),
+        (0x3fe0_0000_0000_0000, 0xbfd0_0000_0000_0000, 0x4000_468a_8ace_4df6),
+        (0x7ff8_0000_0000_0000, 0x3ff0_0000_0000_0000, 0x7ff8_0000_0000_0000),
+    ];
+    #[rustfmt::skip]
+    const POW: &[(u64, u64, u64)] = &[
+        (0xc028_0000_0000_0000, 0xc028_0000_0000_0000, 0x3d3f_91bd_1b62_b9cf),
+        (0xc01c_0000_0000_0000, 0x4005_bf0a_8b14_5769, 0xfff8_0000_0000_0000),
+        (0xbff0_0000_0000_0000, 0xc090_c800_0000_0000, 0x3ff0_0000_0000_0000),
+        (0x4014_0000_0000_0000, 0x43b0_0000_0000_0000, 0x7ff0_0000_0000_0000),
+        (0x4026_0000_0000_0000, 0x3ff0_0000_0000_0001, 0x4026_0000_0000_0003),
+        (0x3ff8_0000_0000_0000, 0x0000_0000_0000_0001, 0x3ff0_0000_0000_0000),
+        (0x3fd5_5555_5555_5555, 0x4024_0000_0000_0000, 0x3ef1_c1fa_5f67_8882),
+        (0x3fb9_9999_9999_999a, 0xbff8_0000_0000_0000, 0x403f_9f6e_4990_f226),
+        (0x3ee4_f8b5_88e3_68f1, 0x401c_0000_0000_0000, 0x38aa_95a5_b7f8_7a13),
+        (0x7e37_e43c_8800_759c, 0xc014_0000_0000_0000, 0x0000_0000_0000_0000),
+        (0xffef_ffff_ffff_ffff, 0x41e6_5a0b_c000_0000, 0x7ff0_0000_0000_0000),
+        (0xfff8_0000_0000_0000, 0xbff0_0001_0000_0000, 0xfff8_0000_0000_0000),
+        (0xbfef_ffff_ffff_ffff, 0xc090_c800_0000_0000, 0x3ff0_0000_0000_0219),
+        (0xc340_0000_0000_0000, 0xc1e0_0000_0020_0000, 0x8000_0000_0000_0000),
+        (0xc08f_f800_0000_0000, 0x7ff0_0000_0000_0000, 0x7ff0_0000_0000_0000),
+        (0xc090_cc00_0000_0000, 0xc0f8_6a00_0000_0000, 0x0000_0000_0000_0000),
+        (0x4090_cc00_0000_0000, 0x3fd5_5555_5555_5555, 0x4024_7ced_50bc_2233),
+        (0xbfef_ffff_ca50_1acb, 0xbfe0_0000_0000_0000, 0xfff8_0000_0000_0000),
+        (0xc009_21fb_5444_2d18, 0x4000_0000_0000_0000, 0x4023_bd3c_c9be_45de),
+        (0x8010_0000_0000_0000, 0xc024_0000_0000_0000, 0x7ff0_0000_0000_0000),
+        (0x4018_6a02_1a84_75ca, 0xc010_c41e_fcb3_2a5a, 0x3f40_b2bc_d90f_474c),
+        (0x4004_429e_d8fe_128f, 0xc032_550f_4454_55db, 0x3e65_77ef_ec0b_db58),
+        (0x4002_e2cb_6f37_dfae, 0xc010_c09d_24de_d3d8, 0x3f9c_0ce0_5cb3_b036),
+        (0x50fe_21ae_5150_73fe, 0xbfbc_b173_2010_defc, 0x3e05_46ac_cff0_35fe),
+        (0x0eb6_19a3_a3be_0e97, 0x23e6_7030_14e8_6170, 0x3ff0_0000_0000_0000),
+        (0xf457_5646_ea36_90f6, 0x166e_e1d5_3456_b27e, 0xfff8_0000_0000_0000),
+        (0xc03c_0000_0000_0000, 0xc022_0000_0000_0000, 0xbd3a_9bbb_147e_0dd9),
+        (0x3fef_ffff_ffff_ff9b, 0x42dc_8b2b_bf6d_b554, 0x3fcf_52c0_a697_8b59),
+        (0x3fef_ffff_6c79_2034, 0x4312_f47a_48c4_f4f8, 0x0000_0000_0000_0000),
+        (0x3ffd_e6a1_21bd_de40, 0xc091_188e_e063_ae52, 0x023f_16c3_afd9_8fcb),
+        (0x3fe0_0000_0000_0000, 0x407e_8c42_261b_daec, 0x2162_d0c5_2a71_cfe8),
+        (0x4000_0000_0000_0000, 0xc08e_76c7_e5b9_e152, 0x0301_c858_1035_305b),
+        (0x0000_0000_0000_1b61, 0x3fe4_7d78_aa50_8d40, 0x1576_5210_8096_9d3c),
+        (0xc000_0000_0000_0000, 0x4008_0000_0000_0000, 0xc020_0000_0000_0000),
+        (0xc000_0000_0000_0000, 0xc008_0000_0000_0000, 0xbfc0_0000_0000_0000),
+        (0xc020_0000_0000_0000, 0x3fd5_5555_5555_5555, 0xfff8_0000_0000_0000),
+        (0x4000_0000_0000_0000, 0xc090_c800_0000_0000, 0x0000_0000_0000_0001),
+        (0x4000_0000_0000_0000, 0xc090_cc00_0000_0000, 0x0000_0000_0000_0000),
+        (0x4000_0000_0000_0000, 0x408f_f800_0000_0000, 0x7fe0_0000_0000_0000),
+        (0x4000_0000_0000_0000, 0x4090_0000_0000_0000, 0x7ff0_0000_0000_0000),
+        (0x8000_0000_0000_0000, 0xbff0_0000_0000_0000, 0xfff0_0000_0000_0000),
+        (0x8000_0000_0000_0000, 0xc000_0000_0000_0000, 0x7ff0_0000_0000_0000),
+        (0x0000_0000_0000_0000, 0xbfe0_0000_0000_0000, 0x7ff0_0000_0000_0000),
+        (0xbff0_0000_0000_0000, 0x7ff0_0000_0000_0000, 0xfff8_0000_0000_0000),
+        (0xfff0_0000_0000_0000, 0x4008_0000_0000_0000, 0xfff0_0000_0000_0000),
+        (0xfff0_0000_0000_0000, 0x3fe0_0000_0000_0000, 0x7ff0_0000_0000_0000),
+        (0x3ff0_0000_1ad7_f29b, 0x41e6_5a0b_c000_0000, 0x5afc_05a5_6d67_53a4),
+        (0x3fef_ffff_ca50_1acb, 0xc1e6_5a0b_c000_0000, 0x5afc_05db_e8fc_c6d2),
+        (0x4024_0000_0000_0000, 0xc014_0000_0000_0000, 0x3ee4_f8b5_88e3_68f0),
+        (0x4024_0000_0000_0000, 0x4036_0000_0000_0000, 0x4480_f0cf_064d_d592),
+        (0x4008_0000_0000_0000, 0x3fe0_0000_0000_0000, 0x3ffb_b67a_e858_4caa),
+        (0x0000_1268_8b70_e62b, 0x3fe8_0000_0000_0000, 0x0fa9_22f8_9593_5598),
+        (0x3fe0_0000_0000_0000, 0x4090_ca00_0000_0000, 0x0000_0000_0000_0001),
+        (0x7ff8_0000_0000_0000, 0x0000_0000_0000_0000, 0x3ff0_0000_0000_0000),
+        (0x3ff0_0000_0000_0000, 0x7ff8_0000_0000_0000, 0x7ff8_0000_0000_0000),
+        (0xc008_0000_0000_0000, 0x4376_3457_85d8_a000, 0x7ff0_0000_0000_0000),
+        (0x3ff8_0000_0000_0000, 0xc085_e200_0000_0000, 0x2654_d254_3a1e_b14e),
+    ];
+
+    #[test]
+    fn sin_matches_java() {
+        check1("sin", sin, SIN);
+    }
+
+    #[test]
+    fn cos_matches_java() {
+        check1("cos", cos, COS);
+    }
+
+    #[test]
+    fn tan_matches_java() {
+        check1("tan", tan, TAN);
+    }
+
+    #[test]
+    fn asin_matches_java() {
+        check1("asin", asin, ASIN);
+    }
+
+    #[test]
+    fn acos_matches_java() {
+        check1("acos", acos, ACOS);
+    }
+
+    #[test]
+    fn atan_matches_java() {
+        check1("atan", atan, ATAN);
+    }
+
+    #[test]
+    fn exp_matches_java() {
+        check1("exp", exp, EXP);
+    }
+
+    #[test]
+    fn log_matches_java() {
+        check1("log", log, LOG);
+    }
+
+    #[test]
+    fn log10_matches_java() {
+        check1("log10", log10, LOG10);
+    }
+
+    #[test]
+    fn cbrt_matches_java() {
+        check1("cbrt", cbrt, CBRT);
+    }
+
+    #[test]
+    fn atan2_matches_java() {
+        check2("atan2", atan2, ATAN2);
+    }
+
+    #[test]
+    fn pow_matches_java() {
+        check2("pow", pow, POW);
+    }
+
+    #[test]
+    fn reduced_trig_and_log10_match_java() {
+        assert_eq!(sin(1.21).to_bits(), 0x3fed_f090_f809_278c);
+        assert_eq!(cos(6.0).to_bits(), 0x3fee_b9b7_0978_22f6);
+        assert_eq!(log(1.23).to_bits(), 0x3fca_7f70_b7a8_3a7e);
+        assert_eq!(log10(1.23).to_bits(), 0x3fb7_0405_7960_1d76);
+        assert_eq!(log10(6.0).to_bits(), 0x3fe8_e69d_7377_a7fe);
+    }
+}

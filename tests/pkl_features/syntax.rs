@@ -233,8 +233,9 @@ fn arithmetic_mul() {
 
 #[test]
 fn arithmetic_div() {
-    let json = eval(r#"x = 10 / 3"#);
-    assert_eq!(json["x"], 3);
+    // `/` always divides as floats; `~/` truncates.
+    let json = eval(r#"x = 10 / 4"#);
+    assert_eq!(json["x"], 2.5);
 }
 
 #[test]
@@ -264,14 +265,15 @@ fn arithmetic_parens() {
 
 #[test]
 fn arithmetic_div_by_zero() {
-    let msg = eval_fails(r#"x = 1 / 0"#);
-    assert!(msg.contains("division by zero") || msg.contains("divide by zero"));
+    // `1 / 0` is Infinity, which JSON cannot represent.
+    let json = eval(r#"x = (1 / 0).isInfinite"#);
+    assert_eq!(json["x"], true);
 }
 
 #[test]
 fn arithmetic_mod_by_zero() {
     let msg = eval_fails(r#"x = 1 % 0"#);
-    assert!(msg.contains("modulo by zero"));
+    assert!(msg.contains("Division by zero."));
 }
 
 // ============================================================
@@ -299,7 +301,7 @@ fn int_div_float() {
 #[test]
 fn int_div_by_zero() {
     let msg = eval_fails(r#"x = 7 ~/ 0"#);
-    assert!(msg.contains("division by zero"));
+    assert!(msg.contains("Division by zero."));
 }
 
 // ============================================================
@@ -333,9 +335,9 @@ fn exp_precedence() {
 }
 
 #[test]
-fn exp_negative_exponent_errors() {
-    let msg = eval_fails(r#"x = 2 ** -1"#);
-    assert!(msg.contains("negative exponent"));
+fn exp_negative_exponent_is_float() {
+    let json = eval(r#"x = 2 ** -1"#);
+    assert_eq!(json["x"], 0.5);
 }
 
 #[test]
