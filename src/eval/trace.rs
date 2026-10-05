@@ -207,6 +207,13 @@ mod tests {
             trace_value(&Value::Object(Arc::new(mapping), None)),
             r#"new Dynamic { [1] = "one" }"#
         );
+        let mut null_key_mapping = ObjectMap::default();
+        let key = crate::value::mapping_storage_key(&Value::Null).unwrap();
+        null_key_mapping.insert(key, Value::String("null key".into()));
+        assert_eq!(
+            trace_value(&Value::Object(Arc::new(null_key_mapping), None)),
+            r#"new Dynamic { [null] = "null key" }"#
+        );
         let mut duration = ObjectMap::default();
         duration.insert("value".into(), Value::Int(5));
         duration.insert("unit".into(), Value::String("min".into()));

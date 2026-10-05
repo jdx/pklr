@@ -731,7 +731,7 @@ fn trace_records_its_source_text_and_line() {
 
 #[test]
 fn trace_uses_the_argument_source_section() {
-    let source = "a = trace(\n  /* grouping */ ((1)) /* note */\n)\nb = trace(1 // note\n)\nc = trace(\"https://example.com/(x)\")\n";
+    let source = "a = trace(\n  /* grouping */ ((1)) /* note */\n)\nb = trace(1 // note\n)\nc = trace(\"https://example.com/(x)\")\nd = trace(# annotation\n  1)\n";
     let module = pklr::parser::parse_named(&lex(source).unwrap(), source, "main.pkl").unwrap();
     let Entry::Property(a) = &module.body[0] else {
         panic!("expected property a");
@@ -755,6 +755,14 @@ fn trace_uses_the_argument_source_section() {
         panic!("expected trace");
     };
     assert_eq!(site.source, r#""https://example.com/(x)""#);
+    let Entry::Property(d) = &module.body[3] else {
+        panic!("expected property d");
+    };
+    let Some(Expr::Trace(_, site)) = &d.value else {
+        panic!("expected trace");
+    };
+    assert_eq!(site.source, "1");
+    assert_eq!(site.line, 8);
 }
 
 #[test]
