@@ -4963,8 +4963,15 @@ impl Evaluator {
             Expr::Unop(op, operand) => {
                 let v = self.eval_expr(operand, scope, depth + 1)?;
                 match op {
-                    UnOp::Neg => stdlib::negate(&v)
-                        .unwrap_or_else(|| Err(Error::Eval("cannot negate non-number".into()))),
+                    UnOp::Neg => stdlib::negate(&v).unwrap_or_else(|| {
+                        Err(stdlib::error_with_values(
+                            format!(
+                                "Operator `-` is not defined for operand type `{}`.",
+                                v.type_name()
+                            ),
+                            &[("Operand", &v)],
+                        ))
+                    }),
                     UnOp::Not => stdlib::logical_not(&v),
                     UnOp::NonNull => {
                         if is_null_value(&v) {

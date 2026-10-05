@@ -43,6 +43,11 @@ fn int_errors_match_pkl() {
             .contains("Type constraint `this.isBetween(0, 20)` violated.\nValue: 21")
     );
     assert!(eval_fails(r#"x = 9223372036854775807 + 1"#).contains("Integer overflow."));
+    assert!(eval_fails(r#"x = -"a""#).contains(
+        "Operator `-` is not defined for operand type `String`.\nOperand: \"a\""
+    ));
+    assert!(eval_fails(r#"x = 1e20 ~/ 0.5"#)
+        .contains("Cannot convert Float `1.0E20` to Int because it is too large."));
 }
 
 #[test]
@@ -192,6 +197,51 @@ value = 1.5.mb.value
     assert_eq!(json["toDecimal"], "1.048576.mb");
     assert_eq!(json["equal"], serde_json::json!([true, false, false]));
     assert_eq!(json["value"], 1.5);
+}
+
+#[test]
+fn unit_mapping_keys_normalize_and_remain_typed() {
+    let json = eval(
+        r##"
+local durations = new Mapping<Duration, String> { [1.s] = "duration" }
+local dataSizes = new Mapping<DataSize, String> { [1.kb] = "dataSize" }
+duration = durations[1000.ms]
+dataSize = dataSizes[1000.b]
+keys = List(
+  durations.keys.first.toString(), durations.keys.first.unit,
+  dataSizes.keys.first.toString(), dataSizes.keys.first.unit
+)
+"##,
+    );
+    assert_eq!(json["duration"], "duration");
+    assert_eq!(json["dataSize"], "dataSize");
+    assert_eq!(
+        json["keys"],
+        serde_json::json!(["1000000000.ns", "ns", "1000.b", "b"])
+    );
+}
+
+#[cfg(feature = "native-io")]
+#[test]
+fn unit_mapping_keys_use_typed_renderer_converters() {
+    let temp = TestTempDir::new("pklr_test_unit_mapping_key_converter");
+    let path = temp.path().join("test.pkl");
+    std::fs::write(
+        &path,
+        r##"
+m = new Mapping { [1.s] = "value"; [1.kb] = "dataSize" }
+output {
+  renderer = new JsonRenderer {
+    converters { [Duration] = (_) -> "duration-key"; [DataSize] = (_) -> "data-size-key" }
+  }
+}
+"##,
+    )
+    .unwrap();
+    assert_eq!(
+        pklr::eval_to_json(&path).unwrap(),
+        serde_json::json!({"m": {"duration-key": "value", "data-size-key": "dataSize"}})
+    );
 }
 
 #[test]

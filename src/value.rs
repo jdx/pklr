@@ -26,6 +26,20 @@ pub(crate) fn mapping_storage_key(value: &Value) -> Option<Arc<str>> {
             let identity = if *value == 0.0 { 0.0 } else { *value };
             ("float", identity.to_bits(), value.to_string())
         }
+        // Units compare in their smallest units, so use the same normalized
+        // amount for mapping identity. The display is likewise canonical:
+        // callers cannot retain a spelling such as `1.s` in the map key and
+        // also find it with its equal spelling `1000.ms`.
+        Value::Duration(value) => {
+            let value = value.value_in(DurationUnit::Nanos);
+            let value = if value == 0.0 { 0.0 } else { value };
+            ("duration", value.to_bits(), format!("{value}.ns"))
+        }
+        Value::DataSize(value) => {
+            let value = value.value_in(DataSizeUnit::Bytes);
+            let value = if value == 0.0 { 0.0 } else { value };
+            ("dataSize", value.to_bits(), format!("{value}.b"))
+        }
         other => ("display", 0, format!("{other:?}")),
     };
     Some(format!("{MAPPING_KEY_PREFIX}{kind}:{identity:016x}:{display}").into())
@@ -44,7 +58,7 @@ pub(crate) fn mapping_storage_value(key: &str) -> Value {
     let Some((kind, rest)) = key.split_once(':') else {
         return Value::String(key.into());
     };
-    let Some((_, display)) = rest.split_once(':') else {
+    let Some((identity, display)) = rest.split_once(':') else {
         return Value::String(key.into());
     };
     match kind {
@@ -60,6 +74,20 @@ pub(crate) fn mapping_storage_value(key: &str) -> Value {
         "float" => display
             .parse()
             .map(Value::Float)
+            .unwrap_or_else(|_| Value::String(display.into())),
+        "duration" => u64::from_str_radix(identity, 16)
+            .map(f64::from_bits)
+            .map(|value| Value::Duration(Duration {
+                value,
+                unit: DurationUnit::Nanos,
+            }))
+            .unwrap_or_else(|_| Value::String(display.into())),
+        "dataSize" => u64::from_str_radix(identity, 16)
+            .map(f64::from_bits)
+            .map(|value| Value::DataSize(DataSize {
+                value,
+                unit: DataSizeUnit::Bytes,
+            }))
             .unwrap_or_else(|_| Value::String(display.into())),
         _ => Value::String(display.into()),
     }

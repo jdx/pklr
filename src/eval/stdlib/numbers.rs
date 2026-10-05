@@ -11,27 +11,31 @@ fn integer_overflow() -> Error {
     Error::Eval("Integer overflow.".into())
 }
 
+const FLOAT_INT_LIMIT: f64 = 9_223_372_036_854_775_808.0;
+
+fn float_to_int_error(x: f64) -> Error {
+    if x.is_finite() {
+        Error::Eval(format!(
+            "Cannot convert Float `{}` to Int because it is too large.",
+            format_float(x)
+        ))
+    } else {
+        Error::Eval(format!(
+            "Cannot convert non-finite Float `{}` to Int.",
+            format_float(x)
+        ))
+    }
+}
+
 /// Java's `(long) x` after checking that `x` (already rounded toward zero)
 /// fits, with pkl's errors for values that don't.
 pub(super) fn float_to_int(x: f64) -> Result<i64> {
     // Every finite double in [-2^63, 2^63) converts exactly.
-    const LIMIT: f64 = 9_223_372_036_854_775_808.0;
     let z = x.trunc();
-    if z.is_finite() && (-LIMIT..LIMIT).contains(&z) {
+    if z.is_finite() && (-FLOAT_INT_LIMIT..FLOAT_INT_LIMIT).contains(&z) {
         return Ok(z as i64);
     }
-    let message = if x.is_finite() {
-        format!(
-            "Cannot convert Float `{}` to Int because it is too large.",
-            format_float(x)
-        )
-    } else {
-        format!(
-            "Cannot convert non-finite Float `{}` to Int.",
-            format_float(x)
-        )
-    };
-    Err(Error::Eval(message))
+    Err(float_to_int_error(x))
 }
 
 /// A number as `f64`, or `None` for a non-number.
@@ -395,21 +399,12 @@ fn common_data_sizes(a: &DataSize, b: &DataSize) -> (f64, f64, DataSizeUnit) {
 /// `x ~/ y` for floats: the quotient rounded toward zero, as an `Int`.
 fn truncating_divide(x: f64, y: f64) -> Result<i64> {
     let quotient = x / y;
-    if quotient.is_finite() {
-        float_to_int(quotient)
+    let truncated = quotient.trunc();
+    if truncated.is_finite() && (-FLOAT_INT_LIMIT..FLOAT_INT_LIMIT).contains(&truncated) {
+        Ok(truncated as i64)
     } else {
-        // pkl reports the dividend when the quotient does not fit.
-        Err(if x.is_finite() {
-            Error::Eval(format!(
-                "Cannot convert Float `{}` to Int because it is too large.",
-                format_float(x)
-            ))
-        } else {
-            Error::Eval(format!(
-                "Cannot convert non-finite Float `{}` to Int.",
-                format_float(x)
-            ))
-        })
+        // pkl reports the dividend rather than the overflowing quotient.
+        Err(float_to_int_error(x))
     }
 }
 
