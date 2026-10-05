@@ -1033,12 +1033,13 @@ fn same_value(a: &Value, b: &Value) -> bool {
             a.len() == b.len() && a.iter().zip(b.iter()).all(|(a, b)| same_value(a, b))
         }
         (
-            Value::Lambda(a_params, a_body, a_captured),
-            Value::Lambda(b_params, b_body, b_captured),
+            Value::Lambda(a_params, a_body, a_captured, a_guard),
+            Value::Lambda(b_params, b_body, b_captured, b_guard),
         ) => {
             Arc::ptr_eq(a_params, b_params)
                 && Arc::ptr_eq(a_body, b_body)
                 && Arc::ptr_eq(a_captured, b_captured)
+                && a_guard == b_guard
         }
         _ => false,
     }

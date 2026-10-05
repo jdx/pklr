@@ -4712,3 +4712,112 @@ instance = new Child {}
         "{err}"
     );
 }
+
+#[test]
+fn const_locals_are_lazy_and_validate_on_access_across_receivers_and_bodies() {
+    for receiver in ["res1", "this.res1", "super.res1"] {
+        for is_lambda in [false, true] {
+            let value = if is_lambda {
+                format!("() -> {receiver}")
+            } else {
+                receiver.to_string()
+            };
+            let use_value = if is_lambda { "qux.apply()" } else { "qux" };
+            let object_source = |used: bool| {
+                let use_line = if used {
+                    format!("result = {use_value}")
+                } else {
+                    String::new()
+                };
+                if receiver == "super.res1" {
+                    format!(
+                        "base = new {{ res1 = 15 }}\nfoo = (base) {{\n  const local qux = {value}\n  {use_line}\n}}"
+                    )
+                } else {
+                    format!("foo {{\n  res1 = 15\n  const local qux = {value}\n  {use_line}\n}}")
+                }
+            };
+            let class_source = |used: bool| {
+                let use_line = if used {
+                    format!("result = {use_value}")
+                } else {
+                    String::new()
+                };
+                format!(
+                    "open class Parent {{ res1 = 15 }}\nclass Child extends Parent {{\n  const local qux = {value}\n  {use_line}\n}}\ninstance = new Child {{}}"
+                )
+            };
+
+            eval(&object_source(false));
+            eval(&class_source(false));
+            for src in [object_source(true), class_source(true)] {
+                let err = eval_fails(&src);
+                assert!(
+                    err.contains(
+                        "Cannot reference property `res1` from here because it is not `const`"
+                    ),
+                    "{src}: {err}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn const_local_lambda_copies_keep_late_member_validation() {
+    for src in [
+        r#"
+foo {
+  const local f = () -> res1
+  result = f.apply()
+  res1 = 15
+}
+"#,
+        r#"
+res1 = 5
+foo {
+  const local f = () -> res1
+  local g = f
+  res1 = 15
+  result = g.apply()
+}
+"#,
+        r#"
+res1 = 5
+foo {
+  const local f = () -> res1
+  local g = f
+  when (true) {
+    res1 = 15
+  }
+  result = g.apply()
+}
+"#,
+    ] {
+        let err = eval_fails(src);
+        assert!(
+            err.contains("Cannot reference property `res1` from here because it is not `const`"),
+            "{src}: {err}"
+        );
+    }
+}
+
+#[test]
+fn const_local_lambda_ignores_untaken_generator_members() {
+    let err = eval_fails(
+        r#"
+foo {
+  const local f = () -> res1
+  when (false) {
+    res1 = 15
+  }
+  result = f.apply()
+}
+"#,
+    );
+    assert!(err.contains("res1"), "{err}");
+    assert!(
+        !err.contains("Cannot reference property `res1` from here because it is not `const`"),
+        "{err}"
+    );
+}

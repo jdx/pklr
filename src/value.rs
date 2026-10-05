@@ -1,6 +1,6 @@
 use rustc_hash::FxHashSet as HashSet;
 use std::sync::{
-    Arc,
+    Arc, RwLock,
     atomic::{AtomicU64, Ordering},
 };
 
@@ -12,6 +12,37 @@ use crate::parser::{Expr, TypeExpr};
 /// The members of an evaluated object, in declaration order. Keys are shared
 /// names so copying members between objects and scopes does not allocate.
 pub type ObjectMap = IndexMap<Arc<str>, Value, rustc_hash::FxBuildHasher>;
+
+/// A delayed evaluation error shared by every copy of one lambda value.
+///
+/// Const-local functions may be copied before their receiver finishes
+/// binding members. Once that receiver establishes a forbidden non-const
+/// dependency, all copies must fail only when invoked.
+#[doc(hidden)]
+#[derive(Debug, Clone, Default)]
+pub struct LambdaGuard(Arc<RwLock<Option<Arc<str>>>>);
+
+impl PartialEq for LambdaGuard {
+    fn eq(&self, other: &Self) -> bool {
+        self.error() == other.error()
+    }
+}
+
+impl LambdaGuard {
+    pub(crate) fn error(&self) -> Option<Arc<str>> {
+        self.0
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    pub(crate) fn set_error(&self, message: String) {
+        *self
+            .0
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(message.into());
+    }
+}
 
 // `ObjectMap` is also the backing store for Pkl Mappings.  Keep non-string
 // mapping keys disjoint from property names and from string keys that render
@@ -499,11 +530,11 @@ pub enum Value {
     /// A `List`, `Listing` or `Set` (see [`ListKind`]). The items are
     /// Arc-wrapped so cloning is O(1).
     List(ListValue),
-    /// Lambda function: param names + body expression + captured scope values.
-    /// All three are Arc-wrapped so cloning a Lambda is O(1): lambdas are
+    /// Lambda function: params, body, captured scope, and shared delayed error.
+    /// The shared fields are Arc-wrapped so cloning a Lambda is O(1): lambdas are
     /// copied whenever a scope holding them is captured, and deep-copying the
     /// body each time dominated evaluation.
-    Lambda(Arc<[String]>, Arc<Expr>, Arc<ScopeMap>),
+    Lambda(Arc<[String]>, Arc<Expr>, Arc<ScopeMap>, LambdaGuard),
     /// A compiled regular expression (`Regex(pattern)`).
     Regex(Arc<Regex>),
     /// A quantity of time (`5.min`).

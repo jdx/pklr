@@ -901,8 +901,11 @@ pub(super) fn values_eq(a: &Value, b: &Value) -> bool {
                 }
             }
         }
-        (Value::Lambda(_, a_body, a_captured), Value::Lambda(_, b_body, b_captured)) => {
-            Arc::ptr_eq(a_body, b_body) && Arc::ptr_eq(a_captured, b_captured)
+        (
+            Value::Lambda(_, a_body, a_captured, a_guard),
+            Value::Lambda(_, b_body, b_captured, b_guard),
+        ) => {
+            Arc::ptr_eq(a_body, b_body) && Arc::ptr_eq(a_captured, b_captured) && a_guard == b_guard
         }
         (a, b) => super::stdlib::units_equal(a, b).unwrap_or(false),
     }

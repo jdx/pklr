@@ -2932,19 +2932,26 @@ impl Evaluator {
         if let Some(initial) = initial_non_const_members {
             non_const_members.extend(initial.iter().cloned());
         }
-        // A direct member of this body shadows an enclosing binding even
-        // before it is evaluated. Keep that shadow local to the retry path;
-        // generator members remain governed by their existing receiver flow.
-        let pending_direct_members: HashSet<String> = entries
+        // Direct properties are known to be non-const from their declaration,
+        // even before their value binds. Generator members stay absent here
+        // until a branch actually yields them.
+        let declared_direct_non_const_members: HashSet<String> = entries
             .iter()
             .filter_map(|entry| match entry {
-                Entry::Property(prop) if !has_modifier(&prop.modifiers, Modifier::Local) => {
+                Entry::Property(prop)
+                    if !has_modifier(&prop.modifiers, Modifier::Local)
+                        && !has_modifier(&prop.modifiers, Modifier::Const) =>
+                {
                     Some(prop.name.clone())
                 }
                 _ => None,
             })
             .collect();
-        let mut bound_direct_members: HashSet<String> = HashSet::default();
+        // An own member shadows an enclosing binding even before evaluation.
+        // Include generator bodies too: an untaken branch must not make a
+        // const local capture an outer member of the same name.
+        let pending_members = body_property_names(entries);
+        let mut bound_members: HashSet<String> = HashSet::default();
 
         macro_rules! retry_failed_locals {
             () => {{
@@ -2977,9 +2984,9 @@ impl Evaluator {
                             &entry_owners,
                             own_body_scope,
                         );
-                        for name in pending_direct_members
+                        for name in pending_members
                             .iter()
-                            .filter(|name| !bound_direct_members.contains(*name))
+                            .filter(|name| !bound_members.contains(*name))
                         {
                             active_scope
                                 .poison(name.clone(), format!("undefined variable: {name}"));
@@ -3001,7 +3008,14 @@ impl Evaluator {
                                 failed_locals.swap_remove(retry_index);
                                 recovered = true;
                             }
-                            Err(Error::Eval(_)) => retry_index += 1,
+                            Err(Error::Eval(message)) => {
+                                if binds_declared(&prop.name) {
+                                    child_scope.declare_poisoned(prop.name.clone(), message);
+                                } else {
+                                    child_scope.poison(prop.name.clone(), message);
+                                }
+                                retry_index += 1;
+                            }
                             Err(error) => return Err(error),
                         }
                     }
@@ -3033,7 +3047,7 @@ impl Evaluator {
                 if !has_modifier(&prop.modifiers, Modifier::Const) {
                     non_const_members.insert(prop.name.clone());
                 }
-                bound_direct_members.insert(prop.name.clone());
+                bound_members.insert(prop.name.clone());
                 guard_const_local_lambdas(&mut child_scope, $lambdas, &non_const_members);
                 refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                 retry_failed_locals!();
@@ -3066,11 +3080,12 @@ impl Evaluator {
             );
             if matches!(entry, Entry::Property(prop)
                 if has_modifier(&prop.modifiers, Modifier::Local)
-                    && !matches!(prop.value.as_ref(), Some(Expr::Lambda(..))))
+                    && (!matches!(prop.value.as_ref(), Some(Expr::Lambda(..)))
+                        || has_modifier(&prop.modifiers, Modifier::Const)))
             {
-                for name in pending_direct_members
+                for name in pending_members
                     .iter()
-                    .filter(|name| !bound_direct_members.contains(*name))
+                    .filter(|name| !bound_members.contains(*name))
                 {
                     active_scope.poison(name.clone(), format!("undefined variable: {name}"));
                 }
@@ -3083,9 +3098,23 @@ impl Evaluator {
                     // Bind every local in declaration order so later locals and
                     // entries can reference it (e.g. a non-lambda local that
                     // calls a lambda local defined just above it).
-                    let result = match const_local_reads_non_const(prop, &non_const_members) {
-                        Some(message) => Err(Error::Eval(message)),
-                        None => self.eval_expr(expr, &active_scope, depth),
+                    let is_lambda = matches!(expr, Expr::Lambda(..));
+                    let const_message = if is_lambda {
+                        let mut lambda_non_const_members = non_const_members.clone();
+                        lambda_non_const_members
+                            .extend(declared_direct_non_const_members.iter().cloned());
+                        const_local_reads_non_const(prop, &lambda_non_const_members)
+                    } else {
+                        const_local_reads_non_const(prop, &non_const_members)
+                    };
+                    let result = if is_lambda {
+                        self.eval_expr(expr, &active_scope, depth)
+                            .map(|value| const_local_lambda_guard(value, const_message))
+                    } else {
+                        match const_message {
+                            Some(message) => Err(Error::Eval(message)),
+                            None => self.eval_expr(expr, &active_scope, depth),
+                        }
                     };
                     // Release the entry scope before binding, as for properties.
                     drop(active_scope);
@@ -3517,6 +3546,7 @@ impl Evaluator {
                                     non_const_members.insert(name.to_string());
                                 }
                             }
+                            bound_members.extend(m.keys().map(|name| name.to_string()));
                             guard_const_local_lambdas(
                                 &mut child_scope,
                                 &deferred_lambdas,
@@ -3578,6 +3608,7 @@ impl Evaluator {
                                     non_const_members.insert(name.to_string());
                                 }
                             }
+                            bound_members.extend(m.keys().map(|name| name.to_string()));
                             guard_const_local_lambdas(
                                 &mut child_scope,
                                 &deferred_lambdas,
@@ -3628,6 +3659,7 @@ impl Evaluator {
                                     non_const_members.insert(name.to_string());
                                 }
                             }
+                            bound_members.extend(m.keys().map(|name| name.to_string()));
                             guard_const_local_lambdas(
                                 &mut child_scope,
                                 &deferred_lambdas,
@@ -3815,18 +3847,6 @@ impl Evaluator {
                 }
             }
         }
-        if let Some(message) = body.iter().find_map(|entry| match entry {
-            Entry::Property(prop)
-                if has_modifier(&prop.modifiers, Modifier::Local)
-                    && !matches!(prop.value.as_ref(), Some(Expr::Lambda(..))) =>
-            {
-                const_local_reads_non_const(prop, &inherited_non_const)
-            }
-            _ => None,
-        }) {
-            return Err(Error::Eval(message));
-        }
-
         let mut child_scope = scope.child();
         if let Some(ref pv) = parent_val {
             child_scope.set("super", pv.clone());
@@ -5091,7 +5111,12 @@ impl Evaluator {
                         Arc::new(Expr::Throw(Box::new(Expr::String(message.clone().into()))))
                     })
                     .unwrap_or(body);
-                Ok(Value::Lambda(Arc::clone(params), captured_body, captured))
+                Ok(Value::Lambda(
+                    Arc::clone(params),
+                    captured_body,
+                    captured,
+                    Default::default(),
+                ))
             }
             Expr::InferredNew(ty, entries) => {
                 let (name, params) = inferred_new_type(ty, scope, 0)?;
@@ -5811,7 +5836,7 @@ impl Evaluator {
         let func_val = self.eval_expr(func_expr, scope, depth + 1)?;
 
         // Lambda call
-        if let Value::Lambda(params, body, captured) = func_val {
+        if let Value::Lambda(params, body, captured, guard) = func_val {
             let mut call_scope = Scope::for_call(&captured);
             // If we're inside a method call context (scope has `this` as an Object),
             // layer the instance's properties so local functions see overridden values
@@ -5831,6 +5856,9 @@ impl Evaluator {
                     params.len(),
                     evaled_args.len()
                 )));
+            }
+            if let Some(message) = guard.error() {
+                return Err(Error::Eval(message.to_string()));
             }
             for (param, arg) in params.iter().zip(evaled_args) {
                 call_scope.declare(param, arg);
@@ -5886,7 +5914,7 @@ impl Evaluator {
         depth: usize,
     ) -> Result<Option<Value>> {
         if let Value::Object(map, _) = obj
-            && let Some(Value::Lambda(params, body, captured)) = map.get(method)
+            && let Some(Value::Lambda(params, body, captured, guard)) = map.get(method)
         {
             if params.len() != evaled_args.len() {
                 return Err(Error::Eval(format!(
@@ -5894,6 +5922,9 @@ impl Evaluator {
                     params.len(),
                     evaled_args.len()
                 )));
+            }
+            if let Some(message) = guard.error() {
+                return Err(Error::Eval(message.to_string()));
             }
             let mut call_scope = Scope::for_call(captured);
             // Layer in all instance properties, including lambdas, so local
@@ -6130,13 +6161,16 @@ impl Evaluator {
             (Value::Bool(b), "toString") => Ok(Some(Value::String(b.to_string().into()))),
 
             // Lambda.apply()
-            (Value::Lambda(params, body, captured), "apply") => {
+            (Value::Lambda(params, body, captured, guard), "apply") => {
                 if params.len() != args.len() {
                     return Err(Error::Eval(format!(
                         "Expected {} function arguments but got {}.",
                         params.len(),
                         args.len()
                     )));
+                }
+                if let Some(message) = guard.error() {
+                    return Err(Error::Eval(message.to_string()));
                 }
                 let mut call_scope = Scope::for_call(captured);
                 for (param, arg) in params.iter().zip(args.iter()) {
@@ -6150,13 +6184,16 @@ impl Evaluator {
     }
 
     fn invoke_lambda(&mut self, lambda: &Value, args: &[Value], depth: usize) -> Result<Value> {
-        if let Value::Lambda(params, body, captured) = lambda {
+        if let Value::Lambda(params, body, captured, guard) = lambda {
             if params.len() != args.len() {
                 return Err(Error::Eval(format!(
                     "Expected {} function arguments but got {}.",
                     params.len(),
                     args.len()
                 )));
+            }
+            if let Some(message) = guard.error() {
+                return Err(Error::Eval(message.to_string()));
             }
             let mut scope = Scope::for_call(captured);
             for (param, arg) in params.iter().zip(args.iter()) {
@@ -6429,12 +6466,15 @@ impl Evaluator {
             BinOp::Pipe => {
                 // x |> f  is equivalent to  f(x)
                 match r {
-                    Value::Lambda(params, body, captured) => {
+                    Value::Lambda(params, body, captured, guard) => {
                         if params.len() != 1 {
                             return Err(Error::Eval(format!(
                                 "pipe operator requires a single-parameter function, got {}",
                                 params.len()
                             )));
+                        }
+                        if let Some(message) = guard.error() {
+                            return Err(Error::Eval(message.to_string()));
                         }
                         let mut call_scope = Scope::for_call(&captured);
                         call_scope.declare(params[0].clone(), l);
@@ -7068,8 +7108,11 @@ impl Evaluator {
                                         .iter()
                                         .any(|(blocked_name, _)| blocked_name == conv_name))
                                 && !converter_is_blocked(&blocked_root_converters, conv_name, value)
-                                && let Value::Lambda(params, body, captured) = lambda
+                                && let Value::Lambda(params, body, captured, guard) = lambda
                             {
+                                if let Some(message) = guard.error() {
+                                    return Err(Error::Eval(message.to_string()));
+                                }
                                 let mut call_scope = Scope::for_call(captured);
                                 // Bind the object as the first parameter
                                 if let Some(param) = params.first() {
@@ -7810,6 +7853,7 @@ fn builtin_function(builtin: &str, params: &[&str]) -> Value {
         params.iter().map(|param| param.to_string()).collect(),
         Arc::new(Expr::Call(Box::new(Expr::Ident(builtin.into())), args)),
         Arc::default(),
+        Default::default(),
     )
 }
 
@@ -7984,6 +8028,29 @@ fn body_member_is_non_const(entries: &[Entry], name: &str) -> bool {
     })
 }
 
+/// Names a body can define as object properties, including names in generator
+/// branches that may later bind. They must shadow enclosing bindings while a
+/// const local waits to learn whether the branch actually produces them.
+fn body_property_names(entries: &[Entry]) -> HashSet<String> {
+    let mut names = HashSet::default();
+    for entry in entries {
+        match entry {
+            Entry::Property(prop) if !has_modifier(&prop.modifiers, Modifier::Local) => {
+                names.insert(prop.name.clone());
+            }
+            Entry::ForGenerator(generator) => names.extend(body_property_names(&generator.body)),
+            Entry::WhenGenerator(generator) => {
+                names.extend(body_property_names(&generator.body));
+                if let Some(else_body) = &generator.else_body {
+                    names.extend(body_property_names(else_body));
+                }
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
 /// Pkl requires a const local to depend only on const members of its body.
 /// Bare references are collected with the evaluator's normal lexical walker;
 /// `this.member` and `super.member` need their own checks because the walker
@@ -8014,14 +8081,10 @@ fn const_local_lambda_guard(value: Value, message: Option<String>) -> Value {
     let Some(message) = message else {
         return value;
     };
-    match value {
-        Value::Lambda(params, _, captured) => Value::Lambda(
-            params,
-            Arc::new(Expr::Throw(Box::new(Expr::String(message.into())))),
-            captured,
-        ),
-        value => value,
+    if let Value::Lambda(_, _, _, guard) = &value {
+        guard.set_error(message);
     }
+    value
 }
 
 fn guard_const_local_lambdas(
