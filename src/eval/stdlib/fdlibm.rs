@@ -8,8 +8,10 @@
 //! - https://www.netlib.org/fdlibm/e_atan2.c -> atan2
 //! - https://www.netlib.org/fdlibm/s_cbrt.c -> cbrt
 //! - https://www.netlib.org/fdlibm/e_log10.c -> log10
-//! - https://www.netlib.org/fdlibm/k_cos.c -> kernel_cos
-//! - MIT Rust libm 0.2.16 -> the remaining wrappers and general cos path.
+//! - https://www.netlib.org/fdlibm/e_log.c -> log
+//! - https://www.netlib.org/fdlibm/k_sin.c, k_cos.c, s_sin.c, s_cos.c -> sin, cos
+//! - https://www.netlib.org/fdlibm/e_rem_pio2.c, k_rem_pio2.c -> trig reduction
+//! - MIT Rust libm 0.2.16 -> the remaining wrappers.
 //!
 //! The pow wrapper also states the Java-compatible NaN special cases directly.
 //!
@@ -52,8 +54,25 @@ fn with_lo(x: f64, low: i32) -> f64 {
     f64::from_bits((x.to_bits() & 0xffff_ffff_0000_0000) | u64::from(low as u32))
 }
 
-pub(crate) fn sin(x: f64) -> f64 {
-    libm::sin(x)
+// Ported from Netlib fdlibm 5.3 k_sin.c.
+fn kernel_sin(x: f64, y: f64, iy: i32) -> f64 {
+    const S1: f64 = -1.66666666666666324348e-01;
+    const S2: f64 = 8.33333333332248946124e-03;
+    const S3: f64 = -1.98412698298579493134e-04;
+    const S4: f64 = 2.75573137070700676789e-06;
+    const S5: f64 = -2.50507602534068634195e-08;
+    const S6: f64 = 1.58969099521155010221e-10;
+    if (hi(x) & 0x7fff_ffff) < 0x3e40_0000 && x as i32 == 0 {
+        return x;
+    }
+    let z = x * x;
+    let v = z * x;
+    let r = S2 + z * (S3 + z * (S4 + z * (S5 + z * S6)));
+    if iy == 0 {
+        x + v * (S1 + z * r)
+    } else {
+        x - ((z * (0.5 * y - v * r) - y) - v * S1)
+    }
 }
 // Ported from Netlib fdlibm 5.3 k_cos.c for the unreduced interval.
 fn kernel_cos(x: f64, y: f64) -> f64 {
@@ -81,10 +100,36 @@ fn kernel_cos(x: f64, y: f64) -> f64 {
     }
 }
 pub(crate) fn cos(x: f64) -> f64 {
-    if (hi(x) & 0x7fff_ffff) <= 0x3fe9_21fb {
-        kernel_cos(x, 0.0)
-    } else {
-        libm::cos(x)
+    let ix = hi(x) & 0x7fff_ffff;
+    if ix <= 0x3fe9_21fb {
+        return kernel_cos(x, 0.0);
+    }
+    if ix >= 0x7ff0_0000 {
+        return x - x;
+    }
+    let (n, y0, y1) = rem_pio2(x);
+    match n & 3 {
+        0 => kernel_cos(y0, y1),
+        1 => -kernel_sin(y0, y1, 1),
+        2 => -kernel_cos(y0, y1),
+        _ => kernel_sin(y0, y1, 1),
+    }
+}
+// Ported from Netlib fdlibm 5.3 s_sin.c.
+pub(crate) fn sin(x: f64) -> f64 {
+    let ix = hi(x) & 0x7fff_ffff;
+    if ix <= 0x3fe9_21fb {
+        return kernel_sin(x, 0.0, 0);
+    }
+    if ix >= 0x7ff0_0000 {
+        return x - x;
+    }
+    let (n, y0, y1) = rem_pio2(x);
+    match n & 3 {
+        0 => kernel_sin(y0, y1, 1),
+        1 => kernel_cos(y0, y1),
+        2 => -kernel_sin(y0, y1, 1),
+        _ => -kernel_cos(y0, y1),
     }
 }
 pub(crate) fn tan(x: f64) -> f64 {
@@ -98,6 +143,247 @@ pub(crate) fn acos(x: f64) -> f64 {
 }
 pub(crate) fn atan(x: f64) -> f64 {
     libm::atan(x)
+}
+// Ported from Netlib fdlibm 5.3 e_rem_pio2.c and k_rem_pio2.c.
+fn rem_pio2(x: f64) -> (i32, f64, f64) {
+    const TWO_OVER_PI: [i32; 66] = [
+        0xA2F983, 0x6E4E44, 0x1529FC, 0x2757D1, 0xF534DD, 0xC0DB62, 0x95993C, 0x439041, 0xFE5163,
+        0xABDEBB, 0xC561B7, 0x246E3A, 0x424DD2, 0xE00649, 0x2EEA09, 0xD1921C, 0xFE1DEB, 0x1CB129,
+        0xA73EE8, 0x8235F5, 0x2EBB44, 0x84E99C, 0x7026B4, 0x5F7E41, 0x3991D6, 0x398353, 0x39F49C,
+        0x845F8B, 0xBDF928, 0x3B1FF8, 0x97FFDE, 0x05980F, 0xEF2F11, 0x8B5A0A, 0x6D1F6D, 0x367ECF,
+        0x27CB09, 0xB74F46, 0x3F669E, 0x5FEA2D, 0x7527BA, 0xC7EBE5, 0xF17B3D, 0x0739F7, 0x8A5292,
+        0xEA6BFB, 0x5FB11F, 0x8D5D08, 0x560330, 0x46FC7B, 0x6BABF0, 0xCFBC20, 0x9AF436, 0x1DA9E3,
+        0x91615E, 0xE61B08, 0x659985, 0x5F14A0, 0x68408D, 0xFFD880, 0x4D7327, 0x310606, 0x1556CA,
+        0x73A8C9, 0x60E27B, 0xC08C6B,
+    ];
+    const NPIO2: [i32; 32] = [
+        0x3FF921FB, 0x400921FB, 0x4012D97C, 0x401921FB, 0x401F6A7A, 0x4022D97C, 0x4025FDBB,
+        0x402921FB, 0x402C463A, 0x402F6A7A, 0x4031475C, 0x4032D97C, 0x40346B9C, 0x4035FDBB,
+        0x40378FDB, 0x403921FB, 0x403AB41B, 0x403C463A, 0x403DD85A, 0x403F6A7A, 0x40407E4C,
+        0x4041475C, 0x4042106C, 0x4042D97C, 0x4043A28C, 0x40446B9C, 0x404534AC, 0x4045FDBB,
+        0x4046C6CB, 0x40478FDB, 0x404858EB, 0x404921FB,
+    ];
+    const INV: f64 = 6.36619772367581382433e-01;
+    const P1: f64 = 1.57079632673412561417e0;
+    const P1T: f64 = 6.07710050650619224932e-11;
+    const P2: f64 = 6.07710050630396597660e-11;
+    const P2T: f64 = 2.02226624879595063154e-21;
+    const P3: f64 = 2.02226624871116645580e-21;
+    const P3T: f64 = 8.47842766036889956997e-32;
+    let hx = hi(x);
+    let ix = hx & 0x7fff_ffff;
+    if ix <= 0x3fe9_21fb {
+        return (0, x, 0.0);
+    }
+    if ix < 0x4002_d97c {
+        let z = if hx > 0 { x - P1 } else { x + P1 };
+        if ix != 0x3ff9_21fb {
+            let y0 = if hx > 0 { z - P1T } else { z + P1T };
+            return (
+                if hx > 0 { 1 } else { -1 },
+                y0,
+                if hx > 0 {
+                    (z - y0) - P1T
+                } else {
+                    (z - y0) + P1T
+                },
+            );
+        }
+        let z = if hx > 0 { z - P2 } else { z + P2 };
+        let y0 = if hx > 0 { z - P2T } else { z + P2T };
+        return (
+            if hx > 0 { 1 } else { -1 },
+            y0,
+            if hx > 0 {
+                (z - y0) - P2T
+            } else {
+                (z - y0) + P2T
+            },
+        );
+    }
+    if ix <= 0x4139_21fb {
+        let t = x.abs();
+        let n = (t * INV + 0.5) as i32;
+        let fn_ = n as f64;
+        let mut r = t - fn_ * P1;
+        let mut w = fn_ * P1T;
+        let mut y0 = r - w;
+        if n >= 32 || ix == NPIO2[(n - 1) as usize] {
+            let j = ix >> 20;
+            let mut d = j - ((hi(y0) >> 20) & 0x7ff);
+            if d > 16 {
+                let t = r;
+                w = fn_ * P2;
+                r = t - w;
+                w = fn_ * P2T - ((t - r) - w);
+                y0 = r - w;
+                d = j - ((hi(y0) >> 20) & 0x7ff);
+                if d > 49 {
+                    let t = r;
+                    w = fn_ * P3;
+                    r = t - w;
+                    w = fn_ * P3T - ((t - r) - w);
+                    y0 = r - w;
+                }
+            }
+        }
+        let y1 = (r - y0) - w;
+        return if hx < 0 { (-n, -y0, -y1) } else { (n, y0, y1) };
+    }
+    if ix >= 0x7ff0_0000 {
+        let y = x - x;
+        return (0, y, y);
+    }
+    // The large reduction is the same fdlibm base-2^24 convolution.
+    let mut z = f64::from_bits(
+        (x.to_bits() & 0xffff_ffff) | (u64::from((ix - (((ix >> 20) - 1046) << 20)) as u32) << 32),
+    );
+    let e0 = (ix >> 20) - 1046;
+    let mut tx = [0.0; 3];
+    for item in tx.iter_mut().take(2) {
+        *item = (z as i32) as f64;
+        z = (z - *item) * 16777216.0;
+    }
+    tx[2] = z;
+    let mut nx = 3;
+    while tx[nx - 1] == 0.0 {
+        nx -= 1;
+    }
+    let (n, y0, y1) = kernel_rem_pio2(&tx[..nx], e0, &TWO_OVER_PI);
+    if hx < 0 { (-n, -y0, -y1) } else { (n, y0, y1) }
+}
+
+fn kernel_rem_pio2(x: &[f64], e0: i32, ipio2: &[i32]) -> (i32, f64, f64) {
+    const PIO2: [f64; 8] = [
+        1.57079625129699707031e0,
+        7.54978941586159635335e-08,
+        5.39030252995776476554e-15,
+        3.28200341580791294123e-22,
+        1.27065575308067607349e-29,
+        1.22933308981111328932e-36,
+        2.73370053816464559624e-44,
+        2.16741683877804819444e-51,
+    ];
+    let jk = 4usize;
+    let jx = x.len() - 1;
+    let jv = ((e0 - 3) / 24).max(0) as usize;
+    let mut q0 = e0 - 24 * (jv as i32 + 1);
+    let mut f = [0.0; 20];
+    for (i, slot) in f.iter_mut().enumerate().take(jx + jk + 1) {
+        let j = jv as i32 - jx as i32 + i as i32;
+        *slot = if j < 0 { 0.0 } else { ipio2[j as usize] as f64 };
+    }
+    let mut q = [0.0; 20];
+    for i in 0..=jk {
+        for j in 0..=jx {
+            q[i] += x[j] * f[jx + i - j];
+        }
+    }
+    let mut jz = jk;
+    let mut iq = [0i32; 20];
+    let (n, ih) = loop {
+        let mut z = q[jz];
+        for i in 0..jz {
+            let fw = (z * 5.9604644775390625e-8) as i32 as f64;
+            iq[i] = (z - 16777216.0 * fw) as i32;
+            z = q[jz - 1 - i] + fw;
+        }
+        let mut zz = z * 2f64.powi(q0);
+        zz -= 8.0 * (zz * 0.125).floor();
+        let mut n = zz as i32;
+        zz -= n as f64;
+        let ih = if q0 > 0 {
+            let i = iq[jz - 1] >> (24 - q0);
+            n += i;
+            iq[jz - 1] -= i << (24 - q0);
+            iq[jz - 1] >> (23 - q0)
+        } else if q0 == 0 {
+            iq[jz - 1] >> 23
+        } else if zz >= 0.5 {
+            2
+        } else {
+            0
+        };
+        if ih > 0 {
+            n += 1;
+            let mut carry = 0;
+            for item in iq.iter_mut().take(jz) {
+                let v = *item;
+                if carry == 0 && v != 0 {
+                    carry = 1;
+                    *item = 0x1000000 - v;
+                } else if carry != 0 {
+                    *item = 0xffffff - v;
+                }
+            }
+            if q0 == 1 {
+                iq[jz - 1] &= 0x7fffff;
+            } else if q0 == 2 {
+                iq[jz - 1] &= 0x3fffff;
+            }
+            if ih == 2 {
+                zz = 1.0 - zz;
+                if carry != 0 {
+                    zz -= 2f64.powi(q0);
+                }
+            }
+        }
+        if zz == 0.0 && iq[jk..jz].iter().all(|&v| v == 0) {
+            let mut k = 1;
+            while iq[jk - k] == 0 {
+                k += 1;
+            }
+            for i in (jz + 1)..=(jz + k) {
+                f[jx + i] = ipio2[jv + i] as f64;
+                for j in 0..=jx {
+                    q[i] += x[j] * f[jx + i - j];
+                }
+            }
+            jz += k;
+            continue;
+        }
+        if zz == 0.0 {
+            jz -= 1;
+            q0 -= 24;
+            while iq[jz] == 0 {
+                jz -= 1;
+                q0 -= 24;
+            }
+        } else {
+            zz *= 2f64.powi(-q0);
+            if zz >= 16777216.0 {
+                let fw = (zz * 5.9604644775390625e-8) as i32 as f64;
+                iq[jz] = (zz - 16777216.0 * fw) as i32;
+                jz += 1;
+                q0 += 24;
+                iq[jz] = fw as i32;
+            } else {
+                iq[jz] = zz as i32;
+            }
+        }
+        break (n, ih);
+    };
+    let mut fw = 2f64.powi(q0);
+    for i in (0..=jz).rev() {
+        q[i] = fw * iq[i] as f64;
+        fw *= 5.9604644775390625e-8;
+    }
+    let mut fq = [0.0; 20];
+    for i in (0..=jz).rev() {
+        for k in 0..=jk.min(jz - i) {
+            fq[jz - i] += PIO2[k] * q[i + k];
+        }
+    }
+    let mut sum = 0.0;
+    for i in (0..=jz).rev() {
+        sum += fq[i];
+    }
+    let y0 = if ih == 0 { sum } else { -sum };
+    let mut tail = fq[0] - sum;
+    for item in fq.iter().take(jz + 1).skip(1) {
+        tail += *item;
+    }
+    (n & 7, y0, if ih == 0 { tail } else { -tail })
 }
 // Ported from Netlib fdlibm 5.3 e_atan2.c.
 pub(crate) fn atan2(y: f64, x: f64) -> f64 {
@@ -210,7 +496,77 @@ pub(crate) fn exp(x: f64) -> f64 {
     libm::exp(x)
 }
 pub(crate) fn log(x: f64) -> f64 {
-    libm::log(x)
+    // Ported from Netlib fdlibm 5.3 e_log.c.
+    const LN2_HI: f64 = 6.93147180369123816490e-01;
+    const LN2_LO: f64 = 1.90821492927058770002e-10;
+    const TWO54: f64 = 1.80143985094819840000e16;
+    const LG1: f64 = 6.666666666666735130e-01;
+    const LG2: f64 = 3.999999999940941908e-01;
+    const LG3: f64 = 2.857142874366239149e-01;
+    const LG4: f64 = 2.222219843214978396e-01;
+    const LG5: f64 = 1.818357216161805012e-01;
+    const LG6: f64 = 1.531383769920937332e-01;
+    const LG7: f64 = 1.479819860511658591e-01;
+    let mut x = x;
+    let mut hx = hi(x);
+    let lx = lo(x);
+    let mut k = 0;
+    if hx < 0x0010_0000 {
+        if ((hx & 0x7fff_ffff) | lx) == 0 {
+            return -TWO54 / 0.0;
+        }
+        if hx < 0 {
+            return (x - x) / 0.0;
+        }
+        k -= 54;
+        x *= TWO54;
+        hx = hi(x);
+    }
+    if hx >= 0x7ff0_0000 {
+        return x + x;
+    }
+    k += (hx >> 20) - 1023;
+    hx &= 0x000f_ffff;
+    let i = (hx + 0x95f64) & 0x100000;
+    x = with_hi(x, hx | (i ^ 0x3ff0_0000));
+    k += i >> 20;
+    let f = x - 1.0;
+    if (0x000f_ffff & (2 + hx)) < 3 {
+        if f == 0.0 {
+            if k == 0 {
+                return 0.0;
+            }
+            let dk = k as f64;
+            return dk * LN2_HI + dk * LN2_LO;
+        }
+        let r = f * f * (0.5 - 0.33333333333333333 * f);
+        if k == 0 {
+            return f - r;
+        }
+        let dk = k as f64;
+        return dk * LN2_HI - ((r - dk * LN2_LO) - f);
+    }
+    let s = f / (2.0 + f);
+    let dk = k as f64;
+    let z = s * s;
+    let i = hx - 0x6147a;
+    let w = z * z;
+    let j = 0x6b851 - hx;
+    let t1 = w * (LG2 + w * (LG4 + w * LG6));
+    let t2 = z * (LG1 + w * (LG3 + w * (LG5 + w * LG7)));
+    let r = t2 + t1;
+    if (i | j) > 0 {
+        let hfsq = 0.5 * f * f;
+        if k == 0 {
+            f - (hfsq - s * (hfsq + r))
+        } else {
+            dk * LN2_HI - ((hfsq - (s * (hfsq + r) + dk * LN2_LO)) - f)
+        }
+    } else if k == 0 {
+        f - s * (f - r)
+    } else {
+        dk * LN2_HI - ((s * (f - r) - dk * LN2_LO) - f)
+    }
 }
 // Ported from Netlib fdlibm 5.3 e_log10.c.
 pub(crate) fn log10(mut x: f64) -> f64 {
@@ -909,5 +1265,14 @@ mod tests {
     #[test]
     fn pow_matches_java() {
         check2("pow", pow, POW);
+    }
+
+    #[test]
+    fn reduced_trig_and_log10_match_java() {
+        assert_eq!(sin(1.21).to_bits(), 0x3fed_f090_f809_278c);
+        assert_eq!(cos(6.0).to_bits(), 0x3fee_b9b7_0978_22f6);
+        assert_eq!(log(1.23).to_bits(), 0x3fca_7f70_b7a8_3a7e);
+        assert_eq!(log10(1.23).to_bits(), 0x3fb7_0405_7960_1d76);
+        assert_eq!(log10(6.0).to_bits(), 0x3fe8_e69d_7377_a7fe);
     }
 }
