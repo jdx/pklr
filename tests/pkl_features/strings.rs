@@ -441,6 +441,23 @@ starts = "abx".startsWith(Regex("(?x)ab # c"))
 }
 
 #[test]
+fn multiline_extended_comments_do_not_swallow_anchors() {
+    let json = eval(
+        r##"
+local regex = Regex("(?x)a # first\nb # last")
+matches = "ab".matches(regex)
+entire = regex.matchEntire("ab") != null
+starts = "abx".startsWith(regex)
+ends = "zab".endsWith(regex)
+"##,
+    );
+    assert_eq!(json["matches"], true);
+    assert_eq!(json["entire"], true);
+    assert_eq!(json["starts"], true);
+    assert_eq!(json["ends"], true);
+}
+
+#[test]
 fn only_trailing_extended_comments_need_an_anchor_newline() {
     let json = eval(
         r##"

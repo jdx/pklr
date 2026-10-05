@@ -162,7 +162,11 @@ fn has_trailing_extended_comment(pattern: &str) -> bool {
                 }
             }
             b'#' if extended && class_depth == 0 => {
-                return !pattern[i..].contains('\n');
+                if let Some(end) = pattern[i..].find('\n') {
+                    i += end;
+                } else {
+                    return true;
+                }
             }
             _ => {}
         }
