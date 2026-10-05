@@ -1127,6 +1127,7 @@ explicit = new Mapping<String, Listing<Int>> { ["a"] { 4 } }
 amended = (explicit) { ["a"] { 5 } }
 untyped = new Mapping { ["a"] { 6 } }
 dynamic = new Mapping<String, Dynamic> { ["a"] { 7 } }
+dynamicUnion = new Mapping<String, *Dynamic|Int> { ["a"] { 8 } }
 "#,
     );
     assert_eq!(json["examples"]["x"], serde_json::json!([2, "two"]));
@@ -1137,6 +1138,7 @@ dynamic = new Mapping<String, Dynamic> { ["a"] { 7 } }
     assert_eq!(json["amended"]["a"], serde_json::json!([4, 5]));
     assert_eq!(json["untyped"]["a"], serde_json::json!([6]));
     assert_eq!(json["dynamic"]["a"], serde_json::json!([7]));
+    assert_eq!(json["dynamicUnion"]["a"], serde_json::json!([8]));
 }
 
 #[test]

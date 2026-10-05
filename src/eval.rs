@@ -6341,15 +6341,17 @@ impl Evaluator {
                     let listing_alternative = expanded_value_type_names.iter().any(|name| {
                         name.trim_start_matches('*').split('<').next() == Some("Listing")
                     });
-                    // `Dynamic` is the one explicitly declared value type
-                    // that can still render an element-only object body as a
-                    // listing. A bare Mapping has no value type at all.
-                    let dynamic_value_type = expanded_value_type_names.as_slice() == ["Dynamic"];
+                    // As with Listing, a Dynamic union alternative can render
+                    // an element-only object body as a listing. A bare
+                    // Mapping has no value type at all.
+                    let dynamic_alternative = expanded_value_type_names
+                        .iter()
+                        .any(|name| name.trim_start_matches('*') == "Dynamic");
                     if let Expr::ObjectBody(body) = val_expr
                         && (matches!(map.get(&storage_key), Some(Value::List(_)))
                             || value_type_names == ["Listing"]
                             || ((listing_alternative
-                                || dynamic_value_type
+                                || dynamic_alternative
                                 || value_type_names.is_empty())
                                 && matches!(explicit_default, None | Some(Value::List(_)))
                                 && is_element_only_body(body)))
@@ -6374,14 +6376,14 @@ impl Evaluator {
                     // mistaken for an untyped Mapping above. That turned an
                     // entry body for `Mapping<String, Int>` (and `String`,
                     // `Any`, etc.) into a Listing. Pkl instead rejects the
-                    // scalar amendment. Keep Dynamic as the deliberate
-                    // element-capable exception.
+                    // scalar amendment. Keep Dynamic alternatives as the
+                    // deliberate element-capable exception.
                     if let Expr::ObjectBody(body) = val_expr
                         && is_element_only_body(body)
                         && type_defaults.is_empty()
                         && !value_type_names.is_empty()
                         && !listing_alternative
-                        && !dynamic_value_type
+                        && !dynamic_alternative
                     {
                         let value_type = expanded_value_type_names
                             .first()
