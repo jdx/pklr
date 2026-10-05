@@ -1019,9 +1019,25 @@ impl<'a> Parser<'a> {
         let base = match self.peek().clone() {
             TokenKind::LParen => {
                 self.advance();
-                let inner = self.parse_type()?;
+                let mut params = Vec::new();
+                if !matches!(self.peek(), TokenKind::RParen) {
+                    params.push(self.parse_type()?);
+                    while matches!(self.peek(), TokenKind::Comma) {
+                        self.advance();
+                        params.push(self.parse_type()?);
+                    }
+                }
                 self.expect(&TokenKind::RParen)?;
-                inner
+                if matches!(self.peek(), TokenKind::Arrow) {
+                    self.advance();
+                    let result = self.parse_type()?;
+                    params.push(result);
+                    TypeExpr::Generic(format!("Function{}", params.len() - 1), params)
+                } else if params.len() == 1 {
+                    params.pop().unwrap()
+                } else {
+                    return Err(self.parse_error("parenthesized type must contain one type"));
+                }
             }
             TokenKind::StringLit(s) => {
                 self.advance();

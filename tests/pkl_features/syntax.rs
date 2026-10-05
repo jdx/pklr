@@ -1781,3 +1781,17 @@ fn type_alias_cycle_check_uses_qualified_names() {
     .unwrap();
     assert_eq!(pklr::eval_to_json(&dir.join("main.pkl")).unwrap()["y"], 1);
 }
+
+#[test]
+fn trailing_semicolons_before_end_of_file() {
+    let json = eval("x = 1;\ny { a = 1; };");
+    assert_eq!(json, serde_json::json!({"x": 1, "y": {"a": 1}}));
+    let json = eval("x = \"\\(1;)\"");
+    assert_eq!(json["x"], "1");
+}
+
+#[test]
+fn function_types_are_accepted_in_type_positions() {
+    let json = eval("f: (Int) -> Int = (x) -> x\nout = f(1)");
+    assert_eq!(json["out"], 1);
+}
