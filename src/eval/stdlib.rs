@@ -6,6 +6,8 @@
 
 use super::*;
 
+#[allow(dead_code)] // Activated when the compatibility formatter is migrated.
+mod dragon;
 mod fdlibm;
 mod math;
 mod numbers;
