@@ -1,10 +1,9 @@
 //! `pkl:xml`'s `Renderer`, after pkl-core's `xml.RendererNodes`.
 
-use super::plist::escape_xml_text;
 use super::xml_names::{XML10_NAME, XML10_NAME_START, XML11_NAME, XML11_NAME_START};
 use super::{
     Kind, StringRenderer, Walk, cannot_render_non_string_key, cannot_render_type,
-    java_double_to_string, kind_of, render_directive_text, typed_class_is,
+    java_double_to_string, kind_of, render_directive_text, typed_class_is, validate_xml_characters,
 };
 use crate::error::{Error, Result};
 use crate::value::{ObjectMap, Value};
@@ -46,7 +45,8 @@ impl<'a> Xml<'a> {
         let converted = self.convert_top_level(value)?;
         if document {
             self.out.push_str("<?xml version=\"");
-            escape_xml_text(&self.version.clone(), &mut self.out);
+            let version = self.version.clone();
+            self.write_attribute_text(&version)?;
             self.out.push_str("\" encoding=\"UTF-8\"?>");
             if is_element(&converted) {
                 self.render_element(&converted)?;
@@ -149,15 +149,15 @@ impl<'a> Xml<'a> {
                     )));
                 }
             };
-            escape_xml_text(&text, &mut self.out);
+            self.write_attribute_text(&text)?;
             self.out.push('"');
         }
         self.out.push('>');
         let previous_line = self.line_number;
         self.curr_indent.push_str(&self.indent);
         if is_element(content) {
-            // An element's content is its elements, which pklr does not keep
-            // for an object that also has properties.
+            let content = element_content(content)?;
+            self.visit(&content)?;
         } else {
             self.visit(content)?;
         }
@@ -169,6 +169,37 @@ impl<'a> Xml<'a> {
         self.out.push_str("</");
         self.out.push_str(name);
         self.out.push('>');
+        Ok(())
+    }
+
+    fn write_text(&mut self, text: &str) -> Result<()> {
+        validate_xml_characters(text, &self.version, "XML text", true)?;
+        for ch in text.chars() {
+            if self.version == "1.1" && is_xml11_restricted(ch) {
+                self.out.push_str(&format!("&#x{:X};", ch as u32));
+            } else {
+                escape_xml_char(ch, &mut self.out);
+            }
+        }
+        Ok(())
+    }
+
+    fn write_attribute_text(&mut self, text: &str) -> Result<()> {
+        validate_xml_characters(text, &self.version, "XML attribute", true)?;
+        for ch in text.chars() {
+            if self.version == "1.1" && is_xml11_restricted(ch) {
+                self.out.push_str(&format!("&#x{:X};", ch as u32));
+            } else if matches!(ch, '\t' | '\n' | '\r') {
+                self.out.push_str(match ch {
+                    '\t' => "&#x9;",
+                    '\n' => "&#xA;",
+                    '\r' => "&#xD;",
+                    _ => unreachable!(),
+                });
+            } else {
+                escape_xml_char(ch, &mut self.out);
+            }
+        }
         Ok(())
     }
 
@@ -253,9 +284,12 @@ impl<'a> StringRenderer<'a> for Xml<'a> {
         };
         let text = || map.get("text").and_then(Value::as_str).unwrap_or_default();
         if is_comment(value) {
-            if text().contains("--") {
-                return Err(Error::Eval("XML comments must not contain `--`.".into()));
+            if text().contains("--") || text().ends_with('-') {
+                return Err(Error::Eval(
+                    "XML comments must not contain `--` or end with `-`.".into(),
+                ));
             }
+            validate_xml_characters(text(), &self.version, "XML comment", false)?;
             if !matches!(map.get("isBlockFormat"), Some(Value::Bool(false))) {
                 self.start_new_line();
             }
@@ -265,6 +299,7 @@ impl<'a> StringRenderer<'a> for Xml<'a> {
             return Ok(true);
         }
         if is_cdata(value) {
+            validate_xml_characters(text(), &self.version, "XML CDATA", false)?;
             self.out.push_str("<![CDATA[");
             self.out.push_str(&text().replace("]]>", "]]]]><![CDATA[>"));
             self.out.push_str("]]>");
@@ -296,8 +331,7 @@ impl<'a> StringRenderer<'a> for Xml<'a> {
     }
 
     fn visit_string(&mut self, value: &str) -> Result<()> {
-        escape_xml_text(value, &mut self.out);
-        Ok(())
+        self.write_text(value)
     }
 
     fn visit_render_directive(&mut self, text: &str) -> Result<()> {
@@ -367,4 +401,30 @@ impl<'a> StringRenderer<'a> for Xml<'a> {
     fn visit_property(&mut self, name: &str, value: &Value, _is_first: bool) -> Result<()> {
         self.visit_member(name, value, true)
     }
+}
+
+fn is_xml11_restricted(ch: char) -> bool {
+    matches!(ch as u32, 0x1..=0x8 | 0xB | 0xC | 0xE..=0x1F | 0x7F..=0x84 | 0x86..=0x9F)
+}
+
+fn escape_xml_char(ch: char, out: &mut String) {
+    match ch {
+        '"' => out.push_str("&quot;"),
+        '\'' => out.push_str("&apos;"),
+        '<' => out.push_str("&lt;"),
+        '>' => out.push_str("&gt;"),
+        '&' => out.push_str("&amp;"),
+        ch => out.push(ch),
+    }
+}
+
+fn element_content(value: &Value) -> Result<Value> {
+    let Value::Object(map, source) = value else {
+        return Err(Error::Eval("Expected an xml.Element object.".into()));
+    };
+    let mut content = (**map).clone();
+    for key in ["_isXmlElement", "name", "attributes", "isBlockFormat"] {
+        content.shift_remove(key);
+    }
+    Ok(Value::Object(content.into(), source.clone()))
 }

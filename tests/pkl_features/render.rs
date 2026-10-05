@@ -539,6 +539,42 @@ fn xml_constraints_apply_to_all_renderers() {
 }
 
 #[test]
+fn xml_renderer_preserves_element_content_and_attribute_whitespace() {
+    assert_eq!(
+        render_with_imports(
+            r#"new xml.Renderer {}.renderDocument(xml.Element("parent") { prefix = xml.Inline("before"); child = xml.Element("child") { value = "nested" }; suffix = xml.Inline("after") })"#
+        ),
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<parent>before\n  <child>\n    <value>nested</value>\n  </child>after\n</parent>\n"
+    );
+    assert_eq!(
+        render_with_imports(
+            r#"new xml.Renderer { rootElementAttributes { value = "a\tb\nc\rd" } }.renderDocument("x")"#
+        ),
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<root value=\"a&#x9;b&#xA;c&#xD;d\">x</root>\n"
+    );
+}
+
+#[test]
+fn xml_renderer_rejects_invalid_comment_and_characters() {
+    let err = eval_fails(
+        "import \"pkl:xml\"\nres = new xml.Renderer {}.renderValue(xml.Comment(\"trailing-\"))",
+    );
+    assert!(
+        err.contains("must not contain `--` or end with `-`"),
+        "{err}"
+    );
+    let err =
+        eval_fails("import \"pkl:xml\"\nres = new xml.Renderer {}.renderValue(\"bad\\u{0}\")");
+    assert!(err.contains("Invalid XML 1.0 character U+0000"), "{err}");
+    let err = eval_fails("res = new PListRenderer {}.renderValue(\"bad\\u{0}\")");
+    assert!(err.contains("Invalid XML 1.0 character U+0000"), "{err}");
+    assert_eq!(
+        render_with_imports(r#"new xml.Renderer { xmlVersion = "1.1" }.renderValue("a\u{1}b")"#),
+        "a&#x1;b"
+    );
+}
+
+#[test]
 fn nullable_indent_is_jsonnet_only() {
     assert_eq!(
         render_with_imports("new jsonnet.Renderer { indent = null }.renderValue(List(1, 2))"),
