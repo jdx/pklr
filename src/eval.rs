@@ -2767,6 +2767,12 @@ impl Evaluator {
         // `["k"] { ... }`) amends the receiver's existing member.
         receiver_members: Option<&ReceiverMembers<'_>>,
     ) -> Result<Value> {
+        // A Mapping may retain the first spelling of a native-unit key, while
+        // Pkl identity is its normalized amount. Keep that rule in the shared
+        // amendment evaluator rather than selecting a second evaluator from
+        // the key's surface syntax.
+        let mapping_entries = inherited_source
+            .is_some_and(|source| source.kind == ObjectKind::Mapping);
         let mut child_scope = scope.child();
         let entry_owners = entry_scope_owners(entries, entry_scopes, inherited_source);
         let own_body = own_body_names(entries, entry_scopes, inherited_source);
@@ -3079,13 +3085,23 @@ impl Evaluator {
                             key.as_ref().expect("non-class mapping keys are evaluated"),
                         )?,
                     };
+                    let storage_key = if mapping_entries {
+                        equivalent_mapping_key(&map, &key_str).unwrap_or_else(|| key_str.clone())
+                    } else {
+                        key_str.clone()
+                    };
                     // A body may define each key once. An object body still
                     // amends an inherited value, but it is a definition in
                     // this body and must participate in duplicate detection.
                     if track_dynamic_members {
                         let defined_by_layer = defined_by_layer.get_or_insert_default();
                         let layer = entry_layer(entry_scopes, entry_index);
-                        if !defined_by_layer.insert((layer, key_str.clone())) {
+                        let duplicate = mapping_entries
+                            && defined_by_layer.iter().any(|(defined_layer, defined_key)| {
+                                *defined_layer == layer
+                                    && crate::value::mapping_storage_keys_equal(defined_key, &key_str)
+                            });
+                        if duplicate || !defined_by_layer.insert((layer, key_str.clone())) {
                             let key = match key.as_ref() {
                                 None => key_str.to_string(),
                                 Some(Value::String(s)) => format!("{s:?}"),
@@ -3101,7 +3117,7 @@ impl Evaluator {
                     // replacing it.
                     if let Expr::ObjectBody(body) = val_expr
                         && let Some(existing @ (Value::Object(..) | Value::List(_))) = map
-                            .get(&key_str)
+                            .get(&storage_key)
                             .or_else(|| receiver_members.and_then(|members| members.get(&key_str)))
                             .cloned()
                     {
@@ -3123,10 +3139,10 @@ impl Evaluator {
                             &mut child_scope,
                             &this_aliases,
                             &mut all_props,
-                            key_str.clone(),
+                            storage_key.clone(),
                             val.clone(),
                         );
-                        map.insert(key_str, val);
+                        map.insert(storage_key, val);
                         refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                         continue;
                     }
@@ -3189,10 +3205,10 @@ impl Evaluator {
                         &mut child_scope,
                         &this_aliases,
                         &mut all_props,
-                        key_str.clone(),
+                        storage_key.clone(),
                         val.clone(),
                     );
-                    map.insert(key_str, val);
+                    map.insert(storage_key, val);
                     refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                 }
                 Entry::Spread(expr) => {
@@ -5591,16 +5607,11 @@ impl Evaluator {
                 matches!(entry, Entry::Spread(_))
                     || matches!(entry, Entry::Property(prop) if prop.name == "default")
             });
-            let has_native_unit_key = body_has(overlay_entries, &|entry| {
-                matches!(entry, Entry::DynProperty(Expr::Field(_, field), _)
-                    if crate::value::DurationUnit::parse(field).is_some()
-                        || crate::value::DataSizeUnit::parse(field).is_some())
-            });
-            if (!base_src.is_metadata_only() || !needs_mapping_evaluation) && !has_native_unit_key {
+            if !base_src.is_metadata_only() || !needs_mapping_evaluation {
                 // Unannotated mapping entries with bodies still use the general
                 // amendment path, which preserves Listing-shaped entry bodies.
             } else {
-                let (_, mut amendment_scope) =
+                let (inherited_scope, mut amendment_scope) =
                     mapping_amendment_scopes(base_src.scope(), base_src.scope_declared(), scope);
                 amendment_scope.set("super", base.clone());
                 let mut receiver_entries = base_map
@@ -5609,31 +5620,39 @@ impl Evaluator {
                     .collect::<Vec<_>>();
                 receiver_entries.extend_from_slice(overlay_entries);
                 amendment_scope.receiver_entries = Some(Arc::new(receiver_entries));
+                let value_type_defaults = base_src
+                    .mapping_value_types
+                    .iter()
+                    .filter_map(|name| {
+                        resolve_dotted(&inherited_scope, name).map(|value| (name.clone(), value))
+                    })
+                    .collect::<Vec<_>>();
+                let inherited_default =
+                    self.find_default_template(&base_src.entries, &inherited_scope, depth)?;
                 let mut amended = ObjectMap::default();
-                amended.extend(
-                    base_map
-                        .iter()
-                        .map(|(key, value)| (key.clone(), value.clone())),
-                );
+                self.eval_mapping_entries_with_type_default(
+                    &base_src.entries,
+                    &inherited_scope,
+                    depth,
+                    &mut amended,
+                    &value_type_defaults,
+                    &base_src.mapping_value_types,
+                    MappingInheritedDefault::default(),
+                )?;
+                amended.extend(base_map.iter().map(|(key, value)| (key.clone(), value.clone())));
                 self.eval_mapping_entries_with_type_default(
                     overlay_entries,
                     &amendment_scope,
                     depth,
                     &mut amended,
-                    &[],
-                    &[],
-                    MappingInheritedDefault::default(),
+                    &value_type_defaults,
+                    &base_src.mapping_value_types,
+                    MappingInheritedDefault {
+                        value: inherited_default,
+                        entries: find_default_body_entries(&base_src.entries),
+                    },
                 )?;
-                let mut source = Arc::unwrap_or_clone(Arc::clone(base_src));
-                source.entries = base_src
-                    .entries
-                    .iter()
-                    .cloned()
-                    .chain(overlay_entries.iter().cloned())
-                    .collect::<Vec<_>>()
-                    .into();
-                source.captured = SourceScope::lazy(scope, Vec::new(), Vec::new());
-                return Ok(Value::Object(Arc::new(amended), Some(Arc::new(source))));
+                return Ok(Value::Object(Arc::new(amended), Some(Arc::clone(base_src))));
             }
         }
         if let Value::List(existing) = base {
@@ -6477,6 +6496,13 @@ fn same_value_identity(a: &Value, b: &Value) -> bool {
                     .is_none_or(|(a, b)| Arc::ptr_eq(a, b))
         }
         (Value::List(a), Value::List(b)) => a.items_ptr() == b.items_ptr() && a.kind() == b.kind(),
+        // Native scalar converter arguments are copied into a lambda, so they
+        // have no allocation identity to compare. Their value identity is
+        // sufficient here: only the converter root is blocked, while a
+        // distinct nested object/list still follows its normal converter path.
+        (Value::Duration(a), Value::Duration(b)) => a == b,
+        (Value::DataSize(a), Value::DataSize(b)) => a == b,
+        (Value::Regex(a), Value::Regex(b)) => Arc::ptr_eq(a, b),
         _ => false,
     }
 }

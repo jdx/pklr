@@ -150,6 +150,7 @@ fn to_fixed(x: f64, digits: usize) -> String {
     out
 }
 
+
 /// The digits Java's `FloatingDecimal` (behind `DecimalFormat`) produces for
 /// a whole number below 2^63: the exact value, with the low digits that the
 /// double cannot distinguish rounded away (`5274019902629789696.0` prints
@@ -708,6 +709,8 @@ mod tests {
             (1e22, "10000000000000000000000"),
             (1e23, "99999999999999990000000"),
             (1.08e23, "108000000000000010000000"),
+            (1.16e23, "115999999999999990000000"),
+            (1.24e23, "124000000000000010000000"),
         ] {
             assert_eq!(to_fixed(value, 0), expected, "{value:e}");
             assert_eq!(to_fixed(-value, 0), format!("-{expected}"), "-{value:e}");

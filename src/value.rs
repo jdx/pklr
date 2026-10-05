@@ -85,6 +85,14 @@ pub(crate) fn mapping_storage_key(value: &Value) -> Option<Arc<str>> {
                 format!("{}.{}", value.value, value.unit.symbol()),
             )
         }
+        // Do not use derived `Debug` for compound keys. Native units carry an
+        // internal NaN identity, and Debug would make two equal lists such as
+        // `List(1.s)` acquire unrelated mapping identities.
+        Value::List(value) => (
+            "list",
+            mapping_compound_identity(&Value::List(value.clone())),
+            Value::List(value.clone()).to_json().to_string(),
+        ),
         other => (
             "display",
             "0000000000000000".to_string(),
@@ -92,6 +100,36 @@ pub(crate) fn mapping_storage_key(value: &Value) -> Option<Arc<str>> {
         ),
     };
     Some(format!("{MAPPING_KEY_PREFIX}{kind}:{identity}:{display}").into())
+}
+
+/// A typed, deterministic identity for a value used inside a compound mapping
+/// key. This is intentionally narrower than Pkl's full value equality: the
+/// fallback currently represents Lists, whose elements can include native
+/// units and regexes that must not inherit implementation-only Debug fields.
+fn mapping_compound_identity(value: &Value) -> String {
+    match value {
+        Value::Null => "null".into(),
+        Value::Bool(value) => format!("bool:{value}"),
+        Value::Int(value) => format!("int:{value}"),
+        Value::Float(value) => format!("float:{:016x}", value.to_bits()),
+        Value::String(value) => format!("string:{}:{value}", value.len()),
+        Value::Duration(_) | Value::DataSize(_) => mapping_storage_key(value)
+            .expect("native units have mapping keys")
+            .to_string(),
+        Value::Regex(value) => format!("regex:{}:{}", value.pattern().len(), value.pattern()),
+        Value::List(items) => {
+            let mut identity = format!("list:{:?}:[", items.kind());
+            for item in items.iter() {
+                let item = mapping_compound_identity(item);
+                identity.push_str(&format!("{}:{item}", item.len()));
+            }
+            identity.push(']');
+            identity
+        }
+        // Keep the established fallback for object/function keys until their
+        // full Pkl identity has a native representation.
+        other => format!("debug:{other:?}"),
+    }
 }
 
 /// Whether two storage keys name equal native-unit mapping keys. Their final
@@ -120,7 +158,7 @@ pub(crate) fn mapping_storage_value(key: &str) -> Value {
     let Some((kind, rest)) = key.split_once(':') else {
         return Value::String(key.into());
     };
-    let Some((_identity, display)) = rest.split_once(':') else {
+    let Some((identity, display)) = rest.split_once(':') else {
         return Value::String(key.into());
     };
     match kind {
@@ -138,10 +176,10 @@ pub(crate) fn mapping_storage_value(key: &str) -> Value {
             .map(Value::Float)
             .unwrap_or_else(|_| Value::String(display.into())),
         "duration" => parse_unit_value(display, DurationUnit::parse)
-            .map(|(value, unit)| Value::Duration(Duration::new(value, unit)))
+            .map(|(value, unit)| Value::Duration(Duration::with_nan_identity(value, unit, identity)))
             .unwrap_or_else(|| Value::String(display.into())),
         "dataSize" => parse_unit_value(display, DataSizeUnit::parse)
-            .map(|(value, unit)| Value::DataSize(DataSize::new(value, unit)))
+            .map(|(value, unit)| Value::DataSize(DataSize::with_nan_identity(value, unit, identity)))
             .unwrap_or_else(|| Value::String(display.into())),
         _ => Value::String(display.into()),
     }
@@ -492,6 +530,14 @@ impl Duration {
         }
     }
 
+    fn with_nan_identity(value: f64, unit: DurationUnit, identity: &str) -> Self {
+        let nan_identity = identity
+            .rsplit_once('-')
+            .and_then(|(_, id)| u64::from_str_radix(id, 16).ok())
+            .unwrap_or_else(|| NEXT_NAN_MAPPING_KEY.fetch_add(1, Ordering::Relaxed));
+        Self { value, unit, nan_identity }
+    }
+
     /// The value converted to `unit`.
     pub fn value_in(&self, unit: DurationUnit) -> f64 {
         self.value * self.unit.nanos() / unit.nanos()
@@ -590,6 +636,14 @@ impl DataSize {
             unit,
             nan_identity: NEXT_NAN_MAPPING_KEY.fetch_add(1, Ordering::Relaxed),
         }
+    }
+
+    fn with_nan_identity(value: f64, unit: DataSizeUnit, identity: &str) -> Self {
+        let nan_identity = identity
+            .rsplit_once('-')
+            .and_then(|(_, id)| u64::from_str_radix(id, 16).ok())
+            .unwrap_or_else(|| NEXT_NAN_MAPPING_KEY.fetch_add(1, Ordering::Relaxed));
+        Self { value, unit, nan_identity }
     }
 
     /// The value converted to `unit`.

@@ -128,6 +128,35 @@ amendedValue = amended[1.s].value
 }
 
 #[test]
+fn native_unit_mapping_amendments_use_the_shared_mapping_evaluator() {
+    let json = eval(
+        r#"
+class C { x = 1 }
+a = new Mapping { [1.s] = 1 }
+b = a { [2.s] = 2 }
+c = b { ["x"] = 3 }
+overwritten = a { [1.s] = 2 } {}
+listing = new Mapping { [1.s] = new Listing { 1 } } { [1.s] { 2 } }
+typed = new Mapping<Duration, C> {} { [1.s] {} }
+explicitDefault = new Mapping<Duration, C> { default = new C { x = 7 } } { [1.s] {} }
+values = List(c.length, overwritten.length, overwritten[1.s], listing[1.s].length, listing[1.s].first, listing[1.s].last, typed[1.s].x, explicitDefault[1.s].x)
+"#,
+    );
+    assert_eq!(json["values"], serde_json::json!([3, 1, 2, 2, 1, 2, 1, 7]));
+}
+
+#[test]
+fn compound_mapping_keys_do_not_capture_native_unit_debug_identity() {
+    let json = eval(
+        r#"
+m = Map(List(1.s), "value")
+value = m[List(1.s)]
+"#,
+    );
+    assert_eq!(json["value"], "value");
+}
+
+#[test]
 fn unit_mapping_nan_keys_do_not_collide_with_each_other_or_finite_values() {
     let json = eval(
         r#"
@@ -148,12 +177,13 @@ values = List(
   sameUnitNan.length,
   finiteAndNan.length,
   nanLookup[nanKey],
+  nanLookup[nanLookup.keys.first],
 )
 "#,
     );
     assert_eq!(
         json["values"],
-        serde_json::json!([1, "positive", 1, "second", 2, 2, 2, "found"])
+        serde_json::json!([1, "positive", 1, "second", 2, 2, 2, "found", "found"])
     );
 }
 

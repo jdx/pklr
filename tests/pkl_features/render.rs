@@ -440,6 +440,7 @@ output {
     }
   }
 }
+
 "#,
             std::path::Path::new("test.pkl"),
         )
@@ -450,6 +451,41 @@ output {
     assert_eq!(
         ev.apply_converters(value).unwrap().to_json(),
         serde_json::json!({"d": [{}]})
+    );
+}
+
+#[test]
+fn apply_converters_does_not_reenter_native_scalar_converter_roots() {
+    let mut ev = Evaluator::new();
+    let value = ev
+        .eval_source(
+            r#"
+d = 1.s
+size = 1.kb
+pattern = Regex("x")
+output {
+  renderer {
+    converters {
+      [Duration] = (value) -> List(value)
+      [DataSize] = (value) -> List(value)
+      [Regex] = (value) -> List(value)
+    }
+  }
+}
+"#,
+            std::path::Path::new("test.pkl"),
+        )
+        .unwrap();
+
+    // Each `List(value)` contains the original scalar root. Re-applying its
+    // converter would recurse forever, but unrelated converters still chain.
+    assert_eq!(
+        ev.apply_converters(value).unwrap().to_json(),
+        serde_json::json!({
+            "d": ["1.s"],
+            "size": ["1.kb"],
+            "pattern": [{"_type": "regex", "pattern": "x"}],
+        })
     );
 }
 
