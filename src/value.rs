@@ -77,17 +77,21 @@ pub(crate) fn mapping_storage_value(key: &str) -> Value {
             .unwrap_or_else(|_| Value::String(display.into())),
         "duration" => u64::from_str_radix(identity, 16)
             .map(f64::from_bits)
-            .map(|value| Value::Duration(Duration {
-                value,
-                unit: DurationUnit::Nanos,
-            }))
+            .map(|value| {
+                Value::Duration(Duration {
+                    value,
+                    unit: DurationUnit::Nanos,
+                })
+            })
             .unwrap_or_else(|_| Value::String(display.into())),
         "dataSize" => u64::from_str_radix(identity, 16)
             .map(f64::from_bits)
-            .map(|value| Value::DataSize(DataSize {
-                value,
-                unit: DataSizeUnit::Bytes,
-            }))
+            .map(|value| {
+                Value::DataSize(DataSize {
+                    value,
+                    unit: DataSizeUnit::Bytes,
+                })
+            })
             .unwrap_or_else(|_| Value::String(display.into())),
         _ => Value::String(display.into()),
     }

@@ -43,11 +43,14 @@ fn int_errors_match_pkl() {
             .contains("Type constraint `this.isBetween(0, 20)` violated.\nValue: 21")
     );
     assert!(eval_fails(r#"x = 9223372036854775807 + 1"#).contains("Integer overflow."));
-    assert!(eval_fails(r#"x = -"a""#).contains(
-        "Operator `-` is not defined for operand type `String`.\nOperand: \"a\""
-    ));
-    assert!(eval_fails(r#"x = 1e20 ~/ 0.5"#)
-        .contains("Cannot convert Float `1.0E20` to Int because it is too large."));
+    assert!(
+        eval_fails(r#"x = -"a""#)
+            .contains("Operator `-` is not defined for operand type `String`.\nOperand: \"a\"")
+    );
+    assert!(
+        eval_fails(r#"x = 1e20 ~/ 0.5"#)
+            .contains("Cannot convert Float `1.0E20` to Int because it is too large.")
+    );
 }
 
 #[test]
