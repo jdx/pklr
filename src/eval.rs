@@ -3207,20 +3207,24 @@ impl Evaluator {
                     );
                     let val = self.eval_expr(expr, &active_scope, depth)?;
                     check_iterable(&val)?;
-                    if let Value::Object(m, source) = val {
-                        drop(active_scope);
-                        entry_owners.release_this(&this_aliases);
-                        props_extend(
-                            &mut child_scope,
-                            &this_aliases,
-                            &mut all_props,
-                            m.iter().map(|(k, v)| (k.clone(), v.clone())),
-                        );
-                        map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
-                        if let Some(source) = source {
-                            elements.extend(source.elements.iter().cloned());
+                    match val {
+                        Value::Object(m, source) => {
+                            drop(active_scope);
+                            entry_owners.release_this(&this_aliases);
+                            props_extend(
+                                &mut child_scope,
+                                &this_aliases,
+                                &mut all_props,
+                                m.iter().map(|(k, v)| (k.clone(), v.clone())),
+                            );
+                            map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                            if let Some(source) = source {
+                                elements.extend(source.elements.iter().cloned());
+                            }
+                            refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                         }
-                        refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
+                        Value::List(items) => elements.extend(items.iter().cloned()),
+                        _ => unreachable!("check_iterable accepted an unsupported value"),
                     }
                 }
                 Entry::ForGenerator(fgen) => {

@@ -560,9 +560,9 @@ fn xml_renderer_preserves_element_content_and_attribute_whitespace() {
     );
     assert_eq!(
         render_with_imports(
-            r#"new xml.Renderer {}.renderDocument(xml.Element("parent") { for (v in List("before", "after")) { v }; ...new Dynamic { xml.Element("child") { "nested" } }; ignored = "property" })"#
+            r#"new xml.Renderer {}.renderDocument(xml.Element("parent") { for (v in List("before", "after")) { v }; ...List("list", "items"); ...new Listing { "listing" }; ...Set("set"); ...new Dynamic { xml.Element("child") { "nested" } }; ignored = "property" })"#
         ),
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<parent>beforeafter\n  <child>nested</child>\n</parent>\n"
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<parent>beforeafterlistitemslistingset\n  <child>nested</child>\n</parent>\n"
     );
 }
 
