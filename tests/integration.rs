@@ -708,6 +708,28 @@ value: Mapping<String, String>?(length > 0, !isEmpty)
 }
 
 #[test]
+fn trace_records_its_source_text_and_line() {
+    let source = "a = 1\nb = trace(new {\n  x = 1\n} )\nc = new Listing { trace(a) }\n";
+    let module = pklr::parser::parse_named(&lex(source).unwrap(), source, "main.pkl").unwrap();
+    let Entry::Property(b) = &module.body[1] else {
+        panic!("expected property b");
+    };
+    let Some(Expr::Trace(_, site)) = &b.value else {
+        panic!("expected trace");
+    };
+    assert_eq!(site.source, "new {\n  x = 1\n}");
+    assert_eq!(site.line, 2);
+    // `trace(...)` can start a listing element.
+    let Entry::Property(c) = &module.body[2] else {
+        panic!("expected property c");
+    };
+    let Some(Expr::New(_, body, _)) = &c.value else {
+        panic!("expected new");
+    };
+    assert!(matches!(&body[0], Entry::Elem(Expr::Trace(..))));
+}
+
+#[test]
 fn type_constraints_do_not_consume_next_line_elements() {
     let source = r#"
 items {

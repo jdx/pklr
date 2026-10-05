@@ -203,7 +203,7 @@ pub(super) fn collect_expr_import_field_uses(
         }
         Expr::Unop(_, value)
         | Expr::Throw(value)
-        | Expr::Trace(value)
+        | Expr::Trace(value, _)
         | Expr::Read(value, _)
         | Expr::ReadOrNull(value, _)
         | Expr::ReadGlob(value, _) => collect_expr_import_field_uses(value, uses, shadows),
@@ -1033,7 +1033,7 @@ pub(super) fn collect_sibling_field_refs_expr(
         Expr::Lambda(_, body) => collect_sibling_field_refs_expr(body, refs, include_this),
         Expr::Unop(_, body)
         | Expr::Throw(body)
-        | Expr::Trace(body)
+        | Expr::Trace(body, _)
         | Expr::Read(body, _)
         | Expr::ReadOrNull(body, _)
         | Expr::ReadGlob(body, _) => {
@@ -1763,7 +1763,7 @@ fn collect_field_names_expr(expr: &Expr, out: &mut HashSet<String>) {
         | Expr::As(value, _)
         | Expr::Unop(_, value)
         | Expr::Throw(value)
-        | Expr::Trace(value)
+        | Expr::Trace(value, _)
         | Expr::Read(value, _)
         | Expr::ReadOrNull(value, _)
         | Expr::ReadGlob(value, _) => collect_field_names_expr(value, out),
@@ -2337,7 +2337,7 @@ fn collect_expr_refs_in(
         }
         Expr::Unop(_, value)
         | Expr::Throw(value)
-        | Expr::Trace(value)
+        | Expr::Trace(value, _)
         | Expr::Read(value, _)
         | Expr::ReadOrNull(value, _)
         | Expr::ReadGlob(value, _) => {
@@ -2520,7 +2520,7 @@ pub(super) fn collect_unshadowed_names(expr: &Expr, names: &mut HashSet<String>)
         Expr::Lambda(_, value) => collect_unshadowed_names(value, names),
         Expr::Unop(_, value)
         | Expr::Throw(value)
-        | Expr::Trace(value)
+        | Expr::Trace(value, _)
         | Expr::Read(value, _)
         | Expr::ReadOrNull(value, _)
         | Expr::ReadGlob(value, _) => collect_unshadowed_names(value, names),
@@ -2703,7 +2703,7 @@ fn expr_mentions(expr: &Expr, name: &str) -> bool {
         Expr::Lambda(_, value) => expr_mentions(value, name),
         Expr::Unop(_, value)
         | Expr::Throw(value)
-        | Expr::Trace(value)
+        | Expr::Trace(value, _)
         | Expr::Read(value, _)
         | Expr::ReadOrNull(value, _)
         | Expr::ReadGlob(value, _) => expr_mentions(value, name),
@@ -2829,7 +2829,7 @@ impl InstanceReads {
             Expr::Lambda(_, value) => self.expr(value, depth),
             Expr::Unop(_, value)
             | Expr::Throw(value)
-            | Expr::Trace(value)
+            | Expr::Trace(value, _)
             | Expr::Read(value, _)
             | Expr::ReadOrNull(value, _)
             | Expr::ReadGlob(value, _) => self.expr(value, depth),

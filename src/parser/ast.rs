@@ -39,6 +39,15 @@ pub struct Import {
     pub is_glob: bool,
 }
 
+/// Where a `trace(...)` expression appears: the traced expression's source
+/// text, and the module path and line pkl reports with the traced value.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraceSite {
+    pub source: String,
+    pub module: String,
+    pub line: usize,
+}
+
 /// A top-level or object entry.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -129,7 +138,7 @@ pub(super) fn infer_method_return_new(expr: &mut Expr, return_type: &TypeExpr) {
             infer_method_return_new(then_expr, return_type);
             infer_method_return_new(else_expr, return_type);
         }
-        Expr::Let(_, _, body) | Expr::Trace(body) => infer_method_return_new(body, return_type),
+        Expr::Let(_, _, body) | Expr::Trace(body, _) => infer_method_return_new(body, return_type),
         _ => {}
     }
 }
@@ -177,9 +186,10 @@ pub enum Expr {
     Lambda(std::sync::Arc<[String]>, std::sync::Arc<Expr>),
     /// `throw("msg")`
     Throw(Box<Expr>),
-    /// `trace(expr)`
-    Trace(Box<Expr>),
-    /// `read("uri")`
+    /// `trace(expr)`, with where it appears for the trace message.
+    Trace(Box<Expr>, std::sync::Arc<TraceSite>),
+    /// `read("uri")`. Fields: the URI, and the path of the module the
+    /// expression was written in, which relative URIs resolve against.
     Read(Box<Expr>, String),
     /// `read?("uri")` — returns null on failure
     ReadOrNull(Box<Expr>, String),

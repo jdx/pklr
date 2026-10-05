@@ -30,6 +30,7 @@ pub(crate) mod render;
 mod resource;
 mod scope;
 pub(crate) mod stdlib;
+mod trace;
 mod types;
 
 use analysis::*;
@@ -4991,9 +4992,9 @@ impl Evaluator {
                 let msg = self.eval_expr(msg_expr, scope, depth + 1)?;
                 Err(Error::Eval(value_to_display(&msg)))
             }
-            Expr::Trace(expr) => {
+            Expr::Trace(expr, site) => {
                 let v = self.eval_expr(expr, scope, depth + 1)?;
-                eprintln!("[pklr trace] {}", value_to_display(&v));
+                self.trace(site, &v);
                 Ok(v)
             }
             Expr::Read(uri_expr, module_path) => {
