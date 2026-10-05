@@ -130,6 +130,13 @@ impl<'a> Lexer<'a> {
 
     fn read_string_token(&mut self) -> Result<TokenKind> {
         // Assumes opening quote already consumed
+        // Recursive interpolation lexing updates the shared token-start fields.
+        // Restore this string's span before returning to its enclosing tokenizer.
+        let token_start = (
+            self.token_start_line,
+            self.token_start_col,
+            self.token_start_offset,
+        );
         let mut current = String::new();
         let mut parts: Vec<StringPart> = Vec::new();
         let mut has_interpolation = false;
@@ -250,12 +257,18 @@ impl<'a> Lexer<'a> {
                 Some(c) => current.push(c),
             }
         }
-        if has_interpolation {
+        let token = if has_interpolation {
             parts.push(StringPart::Literal(current));
-            Ok(TokenKind::InterpolatedString(parts))
+            TokenKind::InterpolatedString(parts)
         } else {
-            Ok(TokenKind::StringLit(current))
-        }
+            TokenKind::StringLit(current)
+        };
+        (
+            self.token_start_line,
+            self.token_start_col,
+            self.token_start_offset,
+        ) = token_start;
+        Ok(token)
     }
 
     fn read_multiline_string(&mut self) -> Result<String> {
