@@ -96,7 +96,9 @@ pub(crate) fn mapping_storage_key(value: &Value) -> Option<Arc<str>> {
         Value::Object(map, source) => (
             "object",
             mapping_object_identity(map, source.as_deref()),
-            Value::Object(map.clone(), source.clone()).to_json().to_string(),
+            Value::Object(map.clone(), source.clone())
+                .to_json()
+                .to_string(),
         ),
         other => (
             "display",
@@ -148,11 +150,23 @@ fn mapping_object_identity(map: &ObjectMap, source: Option<&ObjectSource>) -> St
     // Mapping and Dynamic equality compare members independent of declaration
     // order. Sorting also makes this identity independent of hash/map layout.
     members.sort_unstable();
-    let kind = source.map_or("Dynamic", |source| match source.kind {
-        ObjectKind::Mapping => "Mapping",
-        ObjectKind::Object => source.type_identity.as_deref().unwrap_or("Dynamic"),
-        ObjectKind::Class => source.type_identity.as_deref().unwrap_or("Class"),
-    });
+    let kind = source.map_or_else(
+        || "Dynamic".to_string(),
+        |source| match source.kind {
+            ObjectKind::Mapping => "Mapping".to_string(),
+            // A class object and an instance intentionally share the class's
+            // definition-site identity, but they are not equal Pkl values and
+            // therefore must remain distinct when used as mapping keys.
+            ObjectKind::Object => source.type_identity.as_deref().map_or_else(
+                || "Dynamic".to_string(),
+                |identity| format!("instance:{identity}"),
+            ),
+            ObjectKind::Class => source.type_identity.as_deref().map_or_else(
+                || "Class".to_string(),
+                |identity| format!("class:{identity}"),
+            ),
+        },
+    );
     format!("object:{kind}:{}", members.join("|"))
 }
 
@@ -570,7 +584,11 @@ impl Duration {
         let (value, nan_identity) = mapping_nan_identity(identity)
             .map(|(bits, nonce)| (f64::from_bits(bits), nonce))
             .unwrap_or_else(|| (value, NEXT_NAN_MAPPING_KEY.fetch_add(1, Ordering::Relaxed)));
-        Self { value, unit, nan_identity }
+        Self {
+            value,
+            unit,
+            nan_identity,
+        }
     }
 
     /// The value converted to `unit`.
@@ -677,7 +695,11 @@ impl DataSize {
         let (value, nan_identity) = mapping_nan_identity(identity)
             .map(|(bits, nonce)| (f64::from_bits(bits), nonce))
             .unwrap_or_else(|| (value, NEXT_NAN_MAPPING_KEY.fetch_add(1, Ordering::Relaxed)));
-        Self { value, unit, nan_identity }
+        Self {
+            value,
+            unit,
+            nan_identity,
+        }
     }
 
     /// The value converted to `unit`.

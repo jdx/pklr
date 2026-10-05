@@ -2752,9 +2752,18 @@ impl Evaluator {
         let mut receiver_scope = scope.clone();
         receiver_scope.receiver_entries = Some(entries.clone());
         receiver_scope.receiver_list_base = None;
-        self.eval_entries_with_lexical_scopes(entries, &receiver_scope, depth, None, None, None)
+        self.eval_entries_with_lexical_scopes(
+            entries,
+            &receiver_scope,
+            depth,
+            None,
+            None,
+            false,
+            None,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)] // Mapping context is independent of inherited source.
     fn eval_entries_with_lexical_scopes(
         &mut self,
         entries: &Body,
@@ -2762,6 +2771,9 @@ impl Evaluator {
         depth: usize,
         entry_scopes: Option<&[Option<Arc<CapturedScope>>]>,
         inherited_source: Option<&ObjectSource>,
+        // Generator bodies do not inherit the receiver's source entries, but
+        // they do inherit its mapping-key semantics.
+        mapping_context: bool,
         // For a generator body, the members its receiver holds so far. Its
         // members are the receiver's, so a body amendment (`o { ... }` or
         // `["k"] { ... }`) amends the receiver's existing member.
@@ -2771,8 +2783,8 @@ impl Evaluator {
         // Pkl identity is its normalized amount. Keep that rule in the shared
         // amendment evaluator rather than selecting a second evaluator from
         // the key's surface syntax.
-        let mapping_entries = inherited_source
-            .is_some_and(|source| source.kind == ObjectKind::Mapping);
+        let mapping_entries = mapping_context
+            || inherited_source.is_some_and(|source| source.kind == ObjectKind::Mapping);
         let mut child_scope = scope.child();
         let entry_owners = entry_scope_owners(entries, entry_scopes, inherited_source);
         let own_body = own_body_names(entries, entry_scopes, inherited_source);
@@ -2852,7 +2864,21 @@ impl Evaluator {
         // output properties can close over the amended instance. Bind `this`
         // before locals are evaluated, then keep direct aliases synchronized as
         // properties populate the instance.
-        let mut all_props: Arc<ObjectMap> = Arc::default();
+        // A generator body is evaluated as a temporary object, but its `this`
+        // is the enclosing receiver. Seed its receiver view without copying
+        // those members into its output map.
+        let mut all_props: Arc<ObjectMap> = receiver_members.map_or_else(Arc::default, |members| {
+            let mut receiver = members
+                .outer
+                .map_or_else(ObjectMap::default, |outer| (*outer.own).clone());
+            receiver.extend(
+                members
+                    .own
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone())),
+            );
+            Arc::new(receiver)
+        });
         let mut this_aliases = Vec::new();
         refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
         // First pass: collect locals, class definitions, and type aliases in
@@ -3099,7 +3125,10 @@ impl Evaluator {
                         let duplicate = mapping_entries
                             && defined_by_layer.iter().any(|(defined_layer, defined_key)| {
                                 *defined_layer == layer
-                                    && crate::value::mapping_storage_keys_equal(defined_key, &key_str)
+                                    && crate::value::mapping_storage_keys_equal(
+                                        defined_key,
+                                        &key_str,
+                                    )
                             });
                         if duplicate || !defined_by_layer.insert((layer, key_str.clone())) {
                             let key = match key.as_ref() {
@@ -3118,7 +3147,22 @@ impl Evaluator {
                     if let Expr::ObjectBody(body) = val_expr
                         && let Some(existing @ (Value::Object(..) | Value::List(_))) = map
                             .get(&storage_key)
-                            .or_else(|| receiver_members.and_then(|members| members.get(&key_str)))
+                            .or_else(|| {
+                                receiver_members.and_then(|members| {
+                                    if mapping_entries {
+                                        equivalent_mapping_key(members.own, &key_str)
+                                            .and_then(|key| members.own.get(&key))
+                                            .or_else(|| {
+                                                members.outer.and_then(|outer| {
+                                                    equivalent_mapping_key(outer.own, &key_str)
+                                                        .and_then(|key| outer.own.get(&key))
+                                                })
+                                            })
+                                    } else {
+                                        members.get(&key_str)
+                                    }
+                                })
+                            })
                             .cloned()
                     {
                         // A listing amendment only takes elements, so a property
@@ -3225,11 +3269,12 @@ impl Evaluator {
                         Value::Object(m, source) => {
                             drop(active_scope);
                             entry_owners.release_this(&this_aliases);
-                            props_extend(
+                            props_extend_mapping(
                                 &mut child_scope,
                                 &this_aliases,
                                 &mut all_props,
                                 m.iter().map(|(k, v)| (k.clone(), v.clone())),
+                                mapping_entries,
                             );
                             extend_object_entries(&mut map, &m, mapping_entries);
                             if let Some(source) = source {
@@ -3263,6 +3308,7 @@ impl Evaluator {
                             depth,
                             None,
                             None,
+                            mapping_entries,
                             Some(&ReceiverMembers {
                                 own: &all_props,
                                 outer: receiver_members,
@@ -3275,14 +3321,16 @@ impl Evaluator {
                                     entry_layer(entry_scopes, entry_index),
                                     &m,
                                     &fgen.body,
+                                    mapping_entries,
                                 )?;
                             }
                             entry_owners.release_this(&this_aliases);
-                            props_extend(
+                            props_extend_mapping(
                                 &mut child_scope,
                                 &this_aliases,
                                 &mut all_props,
                                 m.iter().map(|(k, v)| (k.clone(), v.clone())),
+                                mapping_entries,
                             );
                             generated.extend(m.keys().cloned());
                             extend_object_entries(&mut map, &m, mapping_entries);
@@ -3309,6 +3357,7 @@ impl Evaluator {
                             depth,
                             None,
                             None,
+                            mapping_entries,
                             Some(&ReceiverMembers {
                                 own: &all_props,
                                 outer: receiver_members,
@@ -3321,14 +3370,16 @@ impl Evaluator {
                                     entry_layer(entry_scopes, entry_index),
                                     &m,
                                     &wgen.body,
+                                    mapping_entries,
                                 )?;
                             }
                             entry_owners.release_this(&this_aliases);
-                            props_extend(
+                            props_extend_mapping(
                                 &mut child_scope,
                                 &this_aliases,
                                 &mut all_props,
                                 m.iter().map(|(k, v)| (k.clone(), v.clone())),
+                                mapping_entries,
                             );
                             generated.extend(m.keys().cloned());
                             extend_object_entries(&mut map, &m, mapping_entries);
@@ -3344,6 +3395,7 @@ impl Evaluator {
                             depth,
                             None,
                             None,
+                            mapping_entries,
                             Some(&ReceiverMembers {
                                 own: &all_props,
                                 outer: receiver_members,
@@ -3356,14 +3408,16 @@ impl Evaluator {
                                     entry_layer(entry_scopes, entry_index),
                                     &m,
                                     else_body,
+                                    mapping_entries,
                                 )?;
                             }
                             entry_owners.release_this(&this_aliases);
-                            props_extend(
+                            props_extend_mapping(
                                 &mut child_scope,
                                 &this_aliases,
                                 &mut all_props,
                                 m.iter().map(|(k, v)| (k.clone(), v.clone())),
+                                mapping_entries,
                             );
                             generated.extend(m.keys().cloned());
                             extend_object_entries(&mut map, &m, mapping_entries);
@@ -4098,6 +4152,7 @@ impl Evaluator {
             depth + 1,
             Some(&merged_entry_scopes),
             Some(base_source),
+            false,
             None,
         )?;
         if let Value::Object(map, Some(source)) = result {
@@ -5639,7 +5694,11 @@ impl Evaluator {
                     &base_src.mapping_value_types,
                     MappingInheritedDefault::default(),
                 )?;
-                amended.extend(base_map.iter().map(|(key, value)| (key.clone(), value.clone())));
+                amended.extend(
+                    base_map
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone())),
+                );
                 self.eval_mapping_entries_with_type_default(
                     overlay_entries,
                     &amendment_scope,

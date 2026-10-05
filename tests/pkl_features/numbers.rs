@@ -146,7 +146,10 @@ metadataUnitAmended = metadataDefault { [1.s] {} }
 values = List(c.length, overwritten.length, overwritten[1.s], listing[1.s].length, listing[1.s].first, listing[1.s].last, typed[1.s].x, explicitDefault[1.s].x, metadataStringAmended["k"].x, metadataUnitAmended[1.s].x)
 "#,
     );
-    assert_eq!(json["values"], serde_json::json!([3, 1, 2, 2, 1, 2, 1, 7, 7, 7]));
+    assert_eq!(
+        json["values"],
+        serde_json::json!([3, 1, 2, 2, 1, 2, 1, 7, 7, 7])
+    );
 }
 
 #[test]
@@ -164,19 +167,47 @@ objectValue = object[Map("d", 1.s)]
 }
 
 #[test]
+fn class_and_instance_mapping_keys_have_distinct_identities() {
+    let json = eval(
+        r#"
+class C { x = 1 }
+m = Map(C, "class", new C {}, "instance")
+values = List(m.length, m[C], m[new C {}])
+"#,
+    );
+    assert_eq!(json["values"], serde_json::json!([2, "class", "instance"]));
+}
+
+#[test]
 fn generated_mapping_entries_use_native_unit_identity() {
     let json = eval(
         r#"
 a = new Mapping { [1.s] = 1 }
 whenAmended = a { when (true) { [1000.ms] = 2 } }
 forAmended = a { for (n in List(1000)) { [n.ms] = 2 } }
+objectAmended = new Mapping { [1.s] = new Dynamic { x = 1 } } {
+  when (true) { [1000.ms] { y = 2 } }
+}
+receiverAmended = a {
+  when (true) { [1000.ms] = 2 }
+  ["seen"] = this[1.s]
+}
 values = List(
   whenAmended.length, whenAmended[1.s], whenAmended[1000.ms],
   forAmended.length, forAmended[1.s], forAmended[1000.ms],
+  objectAmended[1.s].x, objectAmended[1.s].y,
+  receiverAmended[1.s], receiverAmended["seen"],
 )
 "#,
     );
-    assert_eq!(json["values"], serde_json::json!([1, 2, 2, 1, 2, 2]));
+    assert_eq!(
+        json["values"],
+        serde_json::json!([1, 2, 2, 1, 2, 2, 1, 2, 2, 2])
+    );
+    assert!(
+        eval_fails(r#"x = new Mapping { when (true) { [1.s] = 1; [1000.ms] = 2 } }"#)
+            .contains("Duplicate definition")
+    );
 }
 
 #[test]
@@ -209,7 +240,9 @@ values = List(
     );
     assert_eq!(
         json["values"],
-        serde_json::json!([1, "positive", 1, "second", 2, 2, 2, "found", "found", "negative"])
+        serde_json::json!([
+            1, "positive", 1, "second", 2, 2, 2, "found", "found", "negative"
+        ])
     );
 }
 

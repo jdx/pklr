@@ -79,14 +79,17 @@ fn to_fixed(x: f64, digits: usize) -> String {
         .bytes()
         .filter(|digit| *digit != b'.')
         .count();
-    let sci = if x.abs() == FLOAT_INT_LIMIT {
-        // 2^63 is an exact power of two. FloatingDecimal suppresses the
-        // insignificant low decimal digits here, unlike adjacent values.
-        format!("{:.15e}", x.abs())
-    } else if x.abs() >= FLOAT_INT_LIMIT && significant_digits > 1 {
-        format!("{:.16e}", x.abs())
-    } else if x.abs() >= FLOAT_INT_LIMIT {
-        format!("{:.15e}", x.abs())
+    let sci = if shortest_decimal_is_midpoint(x.abs(), &shortest) {
+        // A shortest decimal exactly on a binary64 interval boundary leaves
+        // both adjacent representations viable. FloatingDecimal continues
+        // digit generation in that case; the extra digit selects the same
+        // side of the interval as Java's DecimalFormat. This is deliberately
+        // an interval test rather than a magnitude-specific precision hack.
+        if significant_digits > 1 {
+            format!("{:.16e}", x.abs())
+        } else {
+            format!("{:.15e}", x.abs())
+        }
     } else {
         shortest
     };
@@ -150,6 +153,51 @@ fn to_fixed(x: f64, digits: usize) -> String {
     out
 }
 
+/// Whether Ryu's shortest decimal lies exactly halfway between `x` and an
+/// adjacent binary64 value. Whole values up to 38 decimal digits fit in
+/// `u128`; outside that range DecimalFormat's requested scale (0..20) makes
+/// the shortest representation unambiguous for this formatter path.
+fn shortest_decimal_is_midpoint(x: f64, shortest: &str) -> bool {
+    if !x.is_finite() || x < FLOAT_INT_LIMIT {
+        return false;
+    }
+    let Some((mantissa, exponent)) = shortest.split_once('e') else {
+        return false;
+    };
+    let exponent: i32 = match exponent.parse() {
+        Ok(exponent) => exponent,
+        Err(_) => return false,
+    };
+    let digits = mantissa
+        .bytes()
+        .filter(|byte| *byte != b'.')
+        .collect::<Vec<_>>();
+    let fractional = mantissa.len() - mantissa.find('.').map_or(mantissa.len(), |dot| dot + 1);
+    let Ok(significand) = std::str::from_utf8(&digits)
+        .ok()
+        .unwrap_or("")
+        .parse::<u128>()
+    else {
+        return false;
+    };
+    let decimal_power = exponent - fractional as i32;
+    if decimal_power < 0 || decimal_power as u32 >= 39 {
+        return false;
+    }
+    let Some(decimal) = significand.checked_mul(10u128.pow(decimal_power as u32)) else {
+        return false;
+    };
+    let bits = x.to_bits();
+    let binary_exponent = ((bits >> 52) & 0x7ff) as i32 - 1023;
+    let shift = binary_exponent - 52;
+    if !(0..128).contains(&shift) {
+        return false;
+    }
+    let significand = (bits & ((1u64 << 52) - 1)) | (1u64 << 52);
+    let exact = (significand as u128) << shift;
+    let half_ulp = 1u128 << (shift - 1);
+    exact.abs_diff(decimal) == half_ulp
+}
 
 /// The digits Java's `FloatingDecimal` (behind `DecimalFormat`) produces for
 /// a whole number below 2^63: the exact value, with the low digits that the
@@ -703,7 +751,10 @@ mod tests {
             (9_223_372_036_854_776_000.0, "9223372036854776000"),
             (1e18, "1000000000000000000"),
             (1e19, "10000000000000000000"),
+            (9_223_372_036_854_775_000.0, "9223372036854774800"),
             (1.0000000000000002e19, "10000000000000002000"),
+            (9_223_372_036_854_776_000.0, "9223372036854776000"),
+            (9_223_372_036_854_778_000.0, "9223372036854778000"),
             (1e20, "100000000000000000000"),
             (1e21, "1000000000000000000000"),
             (1e22, "10000000000000000000000"),
@@ -711,6 +762,7 @@ mod tests {
             (1.08e23, "108000000000000010000000"),
             (1.16e23, "115999999999999990000000"),
             (1.24e23, "124000000000000010000000"),
+            (1.03e23, "103000000000000000000000"),
         ] {
             assert_eq!(to_fixed(value, 0), expected, "{value:e}");
             assert_eq!(to_fixed(-value, 0), format!("-{expected}"), "-{value:e}");

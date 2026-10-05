@@ -554,9 +554,14 @@ pub(super) fn record_generated_members(
     layer: usize,
     members: &ObjectMap,
     body: &[Entry],
+    mapping_entries: bool,
 ) -> Result<()> {
     for name in members.keys() {
-        if !seen.insert((layer, name.clone())) {
+        let duplicate = mapping_entries
+            && seen.iter().any(|(seen_layer, seen_name)| {
+                *seen_layer == layer && crate::value::mapping_storage_keys_equal(seen_name, name)
+            });
+        if duplicate || !seen.insert((layer, name.clone())) {
             let is_property = body
                 .iter()
                 .any(|entry| matches!(entry, Entry::Property(prop) if *prop.name == **name));
