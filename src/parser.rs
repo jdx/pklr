@@ -1492,18 +1492,24 @@ impl<'a> Parser<'a> {
             TokenKind::KwTrace => {
                 self.advance();
                 self.expect(&TokenKind::LParen)?;
-                let line = self.tokens.get(self.pos).map_or(0, |token| token.line);
-                let start = self.tokens.get(self.pos).map_or(0, |token| token.offset);
+                let start = self.pos;
                 let e = self.parse_expr()?;
-                let end = self
-                    .tokens
-                    .get(self.pos)
-                    .map_or(self.source.len(), |token| token.offset);
+                let end = self.pos;
                 self.expect(&TokenKind::RParen)?;
+                let (start, end) = strip_trace_grouping_tokens(self.tokens, start, end);
+                let source_start = self.tokens.get(start).map_or(0, |token| token.offset);
+                let source_end = self
+                    .tokens
+                    .get(end.saturating_sub(1))
+                    .map_or(self.source.len(), |token| token.end);
                 let site = TraceSite {
-                    source: trace_argument_source(self.source.get(start..end).unwrap_or_default()),
+                    source: self
+                        .source
+                        .get(source_start..source_end)
+                        .unwrap_or_default()
+                        .to_string(),
                     module: self.name.to_string(),
-                    line,
+                    line: self.tokens.get(start).map_or(0, |token| token.line),
                 };
                 Ok(Expr::Trace(Box::new(e), std::sync::Arc::new(site)))
             }
@@ -1653,58 +1659,40 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// The source section Pkl assigns to a trace argument, excluding trivia after
-/// the expression and redundant grouping parentheses.
-fn trace_argument_source(source: &str) -> String {
-    let source = trim_trailing_trace_comment(source).trim();
-    strip_grouping_parentheses(source).to_string()
-}
-
-fn trim_trailing_trace_comment(mut source: &str) -> &str {
-    loop {
-        source = source.trim_end();
-        if let Some(before) = source.strip_suffix("*/") {
-            if let Some(start) = before.rfind("/*") {
-                source = &before[..start];
-                continue;
-            }
-        }
-        if let Some(start) = source.rfind("//") {
-            if !source[start + 2..].contains('\n') {
-                source = &source[..start];
-                continue;
-            }
-        }
-        return source;
-    }
-}
-
-fn strip_grouping_parentheses(mut source: &str) -> &str {
-    loop {
-        let trimmed = source.trim();
-        if !trimmed.starts_with('(') || !trimmed.ends_with(')') {
-            return trimmed;
-        }
+/// Drop grouping parentheses only when they enclose the complete trace
+/// argument. Token offsets then give the argument's exact source section,
+/// without mistaking comment-like text inside a string for a comment.
+fn strip_trace_grouping_tokens(
+    tokens: &[Token],
+    mut start: usize,
+    mut end: usize,
+) -> (usize, usize) {
+    while matches!(
+        tokens.get(start).map(|token| &token.kind),
+        Some(TokenKind::LParen)
+    ) {
         let mut depth = 0usize;
-        let mut closes_at_end = false;
-        for (index, character) in trimmed.char_indices() {
-            match character {
-                '(' => depth += 1,
-                ')' => {
+        let mut close = None;
+        for (index, token) in tokens.iter().enumerate().take(end).skip(start) {
+            match token.kind {
+                TokenKind::LParen => depth += 1,
+                TokenKind::RParen => {
                     depth -= 1;
                     if depth == 0 {
-                        closes_at_end = index + character.len_utf8() == trimmed.len();
+                        close = Some(index);
                         break;
                     }
                 }
                 _ => {}
             }
         }
-        if !closes_at_end {
-            return trimmed;
+        if close != Some(end - 1) {
+            break;
         }
-        source = &trimmed[1..trimmed.len() - 1];
+        start += 1;
+        end -= 1;
     }
+    (start, end)
 }
 
 fn mark_default_type(ty: TypeExpr) -> TypeExpr {

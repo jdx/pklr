@@ -30,6 +30,13 @@ use crate::Result;
 /// evaluator uses them for general resource reads as well as `package://`
 /// imports and the persistent package cache.
 pub trait EvalCapabilities: Send + Sync {
+    /// Whether failed canonicalization may safely fall back to the host's
+    /// native absolute path spelling. Virtual capability namespaces retain
+    /// control by keeping the default `false`.
+    fn is_native_filesystem(&self) -> bool {
+        false
+    }
+
     fn read_to_string(&mut self, path: &Path) -> Result<String>;
 
     fn path_exists(&mut self, path: &Path) -> Result<bool>;
@@ -302,6 +309,9 @@ const MAX_CONCURRENT_FETCHES: usize = 8;
 
 #[cfg(feature = "native-io")]
 impl EvalCapabilities for NativeCapabilities {
+    fn is_native_filesystem(&self) -> bool {
+        true
+    }
     fn read_to_string(&mut self, path: &Path) -> Result<String> {
         std::fs::read_to_string(path).map_err(|error| crate::Error::Io(path.to_path_buf(), error))
     }

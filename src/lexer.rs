@@ -215,6 +215,7 @@ impl<'a> Lexer<'a> {
                                     line,
                                     col,
                                     offset,
+                                    end: self.pos,
                                 });
                             }
                             // Add Eof token so the parser knows when to stop
@@ -223,6 +224,7 @@ impl<'a> Lexer<'a> {
                                 line: self.line,
                                 col: self.col,
                                 offset: self.pos,
+                                end: self.pos,
                             });
                             self.interpolation_depth -= 1;
                             parts.push(StringPart::Tokens(expr_tokens));
@@ -407,6 +409,7 @@ impl<'a> Lexer<'a> {
                         line,
                         col,
                         offset,
+                        end: offset,
                     });
                     break;
                 }
@@ -420,6 +423,7 @@ impl<'a> Lexer<'a> {
                 line,
                 col,
                 offset,
+                end: self.pos,
             });
         }
         Ok(tokens)

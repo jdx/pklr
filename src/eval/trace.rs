@@ -2,20 +2,30 @@
 //! `pkl: TRACE: <source> = <value> (<module uri>, line <n>)` on stderr.
 
 use super::*;
-use crate::eval::render::{Kind, display_value, java_double_to_string, kind_of};
-use crate::eval::stdlib::render::quote_string;
+use crate::eval::render::{Kind, display_value, kind_of};
+use crate::eval::stdlib::render::{format_float, quote_string};
 use crate::parser::TraceSite;
 use crate::value::mapping_storage_value;
 
 impl Evaluator {
     pub(super) fn trace(&mut self, site: &TraceSite, value: &Value) {
-        let uri = if site.module.contains("://") {
-            site.module.clone()
-        } else {
-            let path = self.host_absolute_path(PathBuf::from(&site.module));
-            file_uri(&path)
-        };
+        let uri = self.trace_module_uri(&site.module);
         eprintln!("{}", trace_message(site, value, &uri));
+    }
+
+    fn trace_module_uri(&mut self, module: &str) -> String {
+        if module.contains("://") {
+            return module.to_string();
+        }
+        let path = PathBuf::from(module);
+        let path = match self.canonicalize_io(&path) {
+            Ok(path) => path,
+            Err(_) if self.capabilities.is_native_filesystem() => {
+                std::path::absolute(&path).unwrap_or(path)
+            }
+            Err(_) => path,
+        };
+        file_uri(&path)
     }
 }
 
@@ -40,11 +50,18 @@ fn write_trace_value(value: &Value, out: &mut String, top: bool) {
         Value::Null => out.push_str("null"),
         Value::Bool(b) => out.push_str(&b.to_string()),
         Value::Int(n) => out.push_str(&n.to_string()),
-        Value::Float(f) => out.push_str(&java_double_to_string(*f)),
+        Value::Float(f) => out.push_str(&format_float(*f)),
         Value::String(s) => write_trace_string(s, out),
         Value::List(items) => {
             if items.kind() == ListKind::Listing {
-                out.push_str("new Listing { ");
+                if top {
+                    out.push_str("new Listing ");
+                }
+                if items.is_empty() {
+                    out.push_str("{}");
+                    return;
+                }
+                out.push_str("{ ");
             } else {
                 out.push_str(match items.kind() {
                     ListKind::List => "List(",
@@ -102,7 +119,10 @@ fn write_trace_value(value: &Value, out: &mut String, top: bool) {
                     write_trace_string(key, out);
                     out.push(']');
                 }
-                if matches!(member, Value::Object(..)) {
+                if (matches!(member, Value::Object(..))
+                    && !matches!(kind_of(member), Kind::Duration | Kind::DataSize)
+                    || matches!(member, Value::List(items) if items.kind() == ListKind::Listing))
+                {
                     out.push(' ');
                     write_trace_value(member, out, false);
                 } else {
@@ -158,6 +178,10 @@ mod tests {
         assert_eq!(trace_value(&Value::Float(2.0)), "2.0");
         assert_eq!(trace_value(&Value::Float(1e7)), "1.0E7");
         assert_eq!(
+            trace_value(&Value::Float(88_486_131_246_206.12)),
+            "8.848613124620612E13"
+        );
+        assert_eq!(
             trace_value(&Value::List(vec![Value::Int(1), Value::Int(2)].into())),
             "List(1, 2)"
         );
@@ -172,6 +196,10 @@ mod tests {
             ))),
             "new Listing { 1; 2 }"
         );
+        assert_eq!(
+            trace_value(&Value::List(ListValue::new(ListKind::Listing, Vec::new()))),
+            "new Listing {}"
+        );
         let mut mapping = ObjectMap::default();
         let key = crate::value::mapping_storage_key(&Value::Int(1)).unwrap();
         mapping.insert(key, Value::String("one".into()));
@@ -182,9 +210,17 @@ mod tests {
         let mut duration = ObjectMap::default();
         duration.insert("value".into(), Value::Int(5));
         duration.insert("unit".into(), Value::String("min".into()));
+        let duration = Value::Object(Arc::new(duration), None);
+        assert_eq!(trace_value(&duration), "5.min");
+        let mut containing = ObjectMap::default();
+        containing.insert("timeout".into(), duration);
+        containing.insert(
+            "steps".into(),
+            Value::List(ListValue::new(ListKind::Listing, vec![Value::Int(1)])),
+        );
         assert_eq!(
-            trace_value(&Value::Object(Arc::new(duration), None)),
-            "5.min"
+            trace_value(&Value::Object(Arc::new(containing), None)),
+            "new Dynamic { timeout = 5.min; steps { 1 } }"
         );
         let mut inner = ObjectMap::default();
         inner.insert("name".into(), Value::String("Parrot".into()));
