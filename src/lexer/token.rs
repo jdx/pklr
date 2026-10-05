@@ -105,4 +105,6 @@ pub struct Token {
     pub col: usize,
     /// Byte offset in the source string where this token starts.
     pub offset: usize,
+    /// Byte offset immediately after this token.
+    pub end: usize,
 }

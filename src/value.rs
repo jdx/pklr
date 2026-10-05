@@ -19,6 +19,7 @@ pub(crate) const MAPPING_KEY_PREFIX: &str = "\0pklr:mapping-key:";
 pub(crate) fn mapping_storage_key(value: &Value) -> Option<Arc<str>> {
     let (kind, identity, display) = match value {
         Value::String(_) => return None,
+        Value::Null => ("null", 0, "null".to_string()),
         Value::Bool(value) => ("bool", u64::from(*value), value.to_string()),
         Value::Int(value) => ("int", *value as u64, value.to_string()),
         Value::Float(value) => {
@@ -47,6 +48,7 @@ pub(crate) fn mapping_storage_value(key: &str) -> Value {
         return Value::String(key.into());
     };
     match kind {
+        "null" => Value::Null,
         "bool" => display
             .parse()
             .map(Value::Bool)

@@ -1490,25 +1490,26 @@ impl<'a> Parser<'a> {
                 Ok(Expr::Throw(Box::new(msg)))
             }
             TokenKind::KwTrace => {
-                let line = self.tokens[self.pos].line;
                 self.advance();
                 self.expect(&TokenKind::LParen)?;
-                let start = self.tokens.get(self.pos).map_or(0, |token| token.offset);
+                let start = self.pos;
                 let e = self.parse_expr()?;
-                let end = self
-                    .tokens
-                    .get(self.pos)
-                    .map_or(self.source.len(), |token| token.offset);
+                let end = self.pos;
                 self.expect(&TokenKind::RParen)?;
+                let (start, end) = strip_trace_grouping_tokens(self.tokens, start, end);
+                let source_start = self.tokens.get(start).map_or(0, |token| token.offset);
+                let source_end = self
+                    .tokens
+                    .get(end.saturating_sub(1))
+                    .map_or(self.source.len(), |token| token.end);
                 let site = TraceSite {
                     source: self
                         .source
-                        .get(start..end)
+                        .get(source_start..source_end)
                         .unwrap_or_default()
-                        .trim_end()
                         .to_string(),
                     module: self.name.to_string(),
-                    line,
+                    line: self.tokens.get(start).map_or(0, |token| token.line),
                 };
                 Ok(Expr::Trace(Box::new(e), std::sync::Arc::new(site)))
             }
@@ -1656,6 +1657,42 @@ impl<'a> Parser<'a> {
             )),
         }
     }
+}
+
+/// Drop grouping parentheses only when they enclose the complete trace
+/// argument. Token offsets then give the argument's exact source section,
+/// without mistaking comment-like text inside a string for a comment.
+fn strip_trace_grouping_tokens(
+    tokens: &[Token],
+    mut start: usize,
+    mut end: usize,
+) -> (usize, usize) {
+    while matches!(
+        tokens.get(start).map(|token| &token.kind),
+        Some(TokenKind::LParen)
+    ) {
+        let mut depth = 0usize;
+        let mut close = None;
+        for (index, token) in tokens.iter().enumerate().take(end).skip(start) {
+            match token.kind {
+                TokenKind::LParen => depth += 1,
+                TokenKind::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(index);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if close != Some(end - 1) {
+            break;
+        }
+        start += 1;
+        end -= 1;
+    }
+    (start, end)
 }
 
 fn mark_default_type(ty: TypeExpr) -> TypeExpr {

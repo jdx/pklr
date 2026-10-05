@@ -19,6 +19,9 @@ struct Lexer<'a> {
     pos: usize,
     line: usize,
     col: usize,
+    token_start_line: usize,
+    token_start_col: usize,
+    token_start_offset: usize,
     /// String interpolations currently open around the lexer's position.
     interpolation_depth: usize,
 }
@@ -36,6 +39,9 @@ impl<'a> Lexer<'a> {
             pos: 0,
             line: 1,
             col: 1,
+            token_start_line: 1,
+            token_start_col: 1,
+            token_start_offset: 0,
             interpolation_depth: 0,
         }
     }
@@ -70,6 +76,12 @@ impl<'a> Lexer<'a> {
             self.col += 1;
         }
         Some(ch)
+    }
+
+    fn mark_token_start(&mut self) {
+        self.token_start_line = self.line;
+        self.token_start_col = self.col;
+        self.token_start_offset = self.pos;
     }
 
     fn skip_whitespace_and_comments(&mut self) {
@@ -198,9 +210,6 @@ impl<'a> Lexer<'a> {
                                     break;
                                 }
                                 // Use the main tokenizer to get one token
-                                let line = self.line;
-                                let col = self.col;
-                                let offset = self.pos;
                                 let kind = self.read_one_token()?;
                                 if matches!(kind, TokenKind::LParen) {
                                     depth += 1;
@@ -212,9 +221,10 @@ impl<'a> Lexer<'a> {
                                 }
                                 expr_tokens.push(Token {
                                     kind,
-                                    line,
-                                    col,
-                                    offset,
+                                    line: self.token_start_line,
+                                    col: self.token_start_col,
+                                    offset: self.token_start_offset,
+                                    end: self.pos,
                                 });
                             }
                             // Add Eof token so the parser knows when to stop
@@ -223,6 +233,7 @@ impl<'a> Lexer<'a> {
                                 line: self.line,
                                 col: self.col,
                                 offset: self.pos,
+                                end: self.pos,
                             });
                             self.interpolation_depth -= 1;
                             parts.push(StringPart::Tokens(expr_tokens));
@@ -396,17 +407,16 @@ impl<'a> Lexer<'a> {
         let mut tokens = Vec::new();
         loop {
             self.skip_whitespace_and_comments();
-            let line = self.line;
-            let col = self.col;
-            let offset = self.pos;
+            self.mark_token_start();
 
             let ch = match self.peek() {
                 None => {
                     tokens.push(Token {
                         kind: TokenKind::Eof,
-                        line,
-                        col,
-                        offset,
+                        line: self.token_start_line,
+                        col: self.token_start_col,
+                        offset: self.token_start_offset,
+                        end: self.token_start_offset,
                     });
                     break;
                 }
@@ -417,9 +427,10 @@ impl<'a> Lexer<'a> {
 
             tokens.push(Token {
                 kind,
-                line,
-                col,
-                offset,
+                line: self.token_start_line,
+                col: self.token_start_col,
+                offset: self.token_start_offset,
+                end: self.pos,
             });
         }
         Ok(tokens)
@@ -427,6 +438,7 @@ impl<'a> Lexer<'a> {
 
     fn read_one_token(&mut self) -> Result<TokenKind> {
         self.skip_whitespace_and_comments();
+        self.mark_token_start();
         let ch = self
             .peek()
             .ok_or_else(|| self.lex_error("unexpected end of input"))?;
