@@ -2999,7 +2999,7 @@ impl Evaluator {
         }
 
         macro_rules! bind_object_property_value {
-            ($prop:expr, $value:expr, $generated:ident, $map:ident) => {{
+            ($prop:expr, $value:expr, $generated:ident, $map:ident, $lambdas:expr $(,)?) => {{
                 let prop = $prop;
                 let value = $value;
                 $generated.remove(prop.name.as_str());
@@ -3023,6 +3023,7 @@ impl Evaluator {
                     non_const_members.insert(prop.name.clone());
                 }
                 bound_direct_members.insert(prop.name.clone());
+                guard_const_local_lambdas(&mut child_scope, $lambdas, &non_const_members);
                 refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                 retry_failed_locals!();
             }};
@@ -3032,7 +3033,8 @@ impl Evaluator {
         // declaration order so they can reference each other correctly.
         // Non-lambda locals are evaluated eagerly; lambda locals are deferred
         // to a second pass so they capture the fully-populated scope.
-        let mut deferred_lambdas: Vec<(String, &crate::parser::Expr, usize)> = Vec::new();
+        let mut deferred_lambdas: Vec<(String, &Property, &crate::parser::Expr, usize)> =
+            Vec::new();
         for (entry_index, entry) in entries.iter().enumerate() {
             // Only locals, classes and type aliases are handled in this pass,
             // so build the entry's scope only for those.
@@ -3108,7 +3110,7 @@ impl Evaluator {
                         // does not run the body. Bind once for declaration-order
                         // visibility, then re-bind after properties for late
                         // binding of overrides.
-                        deferred_lambdas.push((prop.name.clone(), expr, entry_index));
+                        deferred_lambdas.push((prop.name.clone(), prop, expr, entry_index));
                     }
                 }
                 Entry::ClassDef(name, class_mods, parent, body) => {
@@ -3137,6 +3139,8 @@ impl Evaluator {
                 _ => {}
             }
         }
+
+        guard_const_local_lambdas(&mut child_scope, &deferred_lambdas, &non_const_members);
 
         let mut default_template: Option<Value> = None;
         for (entry_index, entry) in entries.iter().enumerate() {
@@ -3250,7 +3254,7 @@ impl Evaluator {
                     // scope's bindings, which binding the value would then copy.
                     drop(active_scope);
                     if let Some(v) = value {
-                        bind_object_property_value!(prop, v, generated, map);
+                        bind_object_property_value!(prop, v, generated, map, &deferred_lambdas,);
                     }
                 }
                 Entry::DynProperty(key_expr, val_expr) => {
@@ -3501,6 +3505,11 @@ impl Evaluator {
                                     non_const_members.insert(name.to_string());
                                 }
                             }
+                            guard_const_local_lambdas(
+                                &mut child_scope,
+                                &deferred_lambdas,
+                                &non_const_members,
+                            );
                             generated.extend(m.keys().cloned());
                             extend_object_entries(&mut map, &m, mapping_entries);
                             if let Some(source) = source {
@@ -3556,6 +3565,11 @@ impl Evaluator {
                                     non_const_members.insert(name.to_string());
                                 }
                             }
+                            guard_const_local_lambdas(
+                                &mut child_scope,
+                                &deferred_lambdas,
+                                &non_const_members,
+                            );
                             generated.extend(m.keys().cloned());
                             extend_object_entries(&mut map, &m, mapping_entries);
                             if let Some(source) = source {
@@ -3600,6 +3614,11 @@ impl Evaluator {
                                     non_const_members.insert(name.to_string());
                                 }
                             }
+                            guard_const_local_lambdas(
+                                &mut child_scope,
+                                &deferred_lambdas,
+                                &non_const_members,
+                            );
                             generated.extend(m.keys().cloned());
                             extend_object_entries(&mut map, &m, mapping_entries);
                             if let Some(source) = source {
@@ -3645,7 +3664,13 @@ impl Evaluator {
                     Ok(value) => {
                         drop(active_scope);
                         if let Some(value) = value {
-                            bind_object_property_value!(prop, value, generated, map);
+                            bind_object_property_value!(
+                                prop,
+                                value,
+                                generated,
+                                map,
+                                &deferred_lambdas,
+                            );
                         }
                         recovered_property = true;
                     }
@@ -3663,7 +3688,7 @@ impl Evaluator {
         // Evaluate deferred local lambdas (function definitions) AFTER all
         // properties so they capture overridden values (late binding).
         refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
-        for (name, expr, entry_index) in deferred_lambdas {
+        for (name, prop, expr, entry_index) in deferred_lambdas {
             let active_scope = scope_for_object_entry(
                 entry_index,
                 &child_scope,
@@ -3673,6 +3698,14 @@ impl Evaluator {
             );
             let val = self.eval_expr(expr, &active_scope, depth)?;
             drop(active_scope);
+            // Lambda construction is lazy, so const-local validation must be
+            // deferred until invocation too. At this point the final object
+            // members are known; make a forbidden lambda body fail when it is
+            // called without rejecting an otherwise unused local function.
+            let val = const_local_lambda_guard(
+                val,
+                const_local_reads_non_const(prop, &non_const_members),
+            );
             child_scope.set(name, val);
         }
         let hidden_aliases = unused_this_aliases
@@ -7942,6 +7975,39 @@ fn const_local_reads_non_const(
     Some(format!(
         "Cannot reference property `{name}` from here because it is not `const`."
     ))
+}
+
+/// Keep const-local lambdas lazy while making a known non-const member read
+/// fail at invocation. The member set contains only values that actually
+/// bound, so unused lambdas and untaken generator branches remain valid.
+fn const_local_lambda_guard(value: Value, message: Option<String>) -> Value {
+    let Some(message) = message else {
+        return value;
+    };
+    match value {
+        Value::Lambda(params, _, captured) => Value::Lambda(
+            params,
+            Arc::new(Expr::Throw(Box::new(Expr::String(message.into())))),
+            captured,
+        ),
+        value => value,
+    }
+}
+
+fn guard_const_local_lambdas(
+    scope: &mut Scope,
+    deferred_lambdas: &[(String, &Property, &Expr, usize)],
+    non_const_members: &HashSet<String>,
+) {
+    for (name, prop, _, _) in deferred_lambdas {
+        let Some(message) = const_local_reads_non_const(prop, non_const_members) else {
+            continue;
+        };
+        let Some(value) = scope.get(name).cloned() else {
+            continue;
+        };
+        scope.set(name.clone(), const_local_lambda_guard(value, Some(message)));
+    }
 }
 
 /// Return the first non-const member read through a direct `this.member`

@@ -4616,3 +4616,46 @@ foo = new Child {}
         );
     }
 }
+
+#[test]
+fn const_local_lambdas_stay_lazy_but_reject_non_const_members_when_called() {
+    let json = eval(
+        r#"
+foo {
+  res1 = 15
+  const local f = () -> res1
+}
+"#,
+    );
+    assert_eq!(json["foo"], serde_json::json!({"res1": 15}));
+
+    let err = eval_fails(
+        r#"
+foo {
+  res1 = 15
+  const local f = () -> res1
+  res2 = f.apply()
+}
+"#,
+    );
+    assert!(
+        err.contains("Cannot reference property `res1` from here because it is not `const`"),
+        "{err}"
+    );
+
+    let err = eval_fails(
+        r#"
+foo {
+  const local f = () -> res1
+  when (true) {
+    res1 = 15
+  }
+  res2 = f.apply()
+}
+"#,
+    );
+    assert!(
+        err.contains("Cannot reference property `res1` from here because it is not `const`"),
+        "{err}"
+    );
+}
