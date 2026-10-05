@@ -215,6 +215,9 @@ fn java_integer_digits(x: f64, shortest: &str) -> Option<String> {
         return None;
     }
     if abs >= FLOAT_INT_LIMIT {
+        if shortest_decimal_is_exact(abs, shortest) {
+            return None;
+        }
         let significant_digits = shortest
             .split_once('e')?
             .0
@@ -254,6 +257,34 @@ fn java_integer_digits(x: f64, shortest: &str) -> Option<String> {
         return Some(format!("{value}{}", "0".repeat(insignificant as usize)));
     }
     Some(value.to_string())
+}
+
+fn shortest_decimal_is_exact(x: f64, shortest: &str) -> bool {
+    let Some((mantissa, exponent)) = shortest.split_once('e') else {
+        return false;
+    };
+    let Ok(exponent) = exponent.parse::<i32>() else {
+        return false;
+    };
+    let digits = mantissa.replace('.', "");
+    let Ok(significand) = digits.parse::<u128>() else {
+        return false;
+    };
+    let fractional = mantissa.len() - mantissa.find('.').map_or(mantissa.len(), |dot| dot + 1);
+    let decimal_power = exponent - fractional as i32;
+    if decimal_power < 0 || decimal_power as u32 >= 39 {
+        return false;
+    }
+    let Some(decimal) = significand.checked_mul(10u128.pow(decimal_power as u32)) else {
+        return false;
+    };
+    let bits = x.to_bits();
+    let shift = ((bits >> 52) & 0x7ff) as i32 - 1023 - 52;
+    if !(0..128).contains(&shift) {
+        return false;
+    }
+    let binary = ((bits & ((1u64 << 52) - 1)) | (1u64 << 52)) as u128;
+    (binary << shift) == decimal
 }
 
 fn shortest_significand_is_power_of_two(shortest: &str) -> bool {
@@ -844,6 +875,7 @@ mod tests {
             (2e23, "199999999999999980000000"),
             (5.902958103587057e20, "590295810358705650000"),
             (1.048576e29, "104857600000000000000000000000"),
+            (1.8014398509481984e19, "18014398509481984000"),
         ] {
             assert_eq!(to_fixed(value, 0), expected, "{value:e}");
             assert_eq!(to_fixed(-value, 0), format!("-{expected}"), "-{value:e}");
