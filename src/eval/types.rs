@@ -593,6 +593,7 @@ pub(super) fn value_type_name(v: &Value) -> &'static str {
         Value::Int(_) => "Int",
         Value::Float(_) => "Float",
         Value::String(_) => "String",
+        Value::Regex(_) => "Regex",
         Value::Object(..) => "Object",
         Value::List(_) => "List",
         Value::Lambda(..) => "Function",
@@ -612,20 +613,23 @@ pub(super) fn value_to_key(v: &Value) -> Result<Arc<str>> {
     match v {
         Value::String(s) => Ok(Arc::clone(s)),
         Value::Int(_) | Value::Bool(_) | Value::Float(_) => unreachable!(),
-        Value::Object(_, _) | Value::List(_) | Value::Lambda(..) | Value::Null => {
-            Ok(value_to_display(v).into())
-        }
+        Value::Object(_, _)
+        | Value::List(_)
+        | Value::Lambda(..)
+        | Value::Regex(_)
+        | Value::Null => Ok(value_to_display(v).into()),
     }
 }
 
 pub(super) fn value_to_display(v: &Value) -> String {
     match v {
-        Value::Null => "null".into(),
-        Value::Bool(b) => b.to_string(),
-        Value::Int(n) => n.to_string(),
-        Value::Float(f) => f.to_string(),
         Value::String(s) => s.to_string(),
-        _ => format!("{v:?}"),
+        Value::Object(map, Some(source))
+            if source.type_identity.as_deref() == Some("pkl:base#RegexMatch") =>
+        {
+            map.get("value").map(value_to_display).unwrap_or_default()
+        }
+        _ => super::stdlib::render_value(v),
     }
 }
 
@@ -674,6 +678,7 @@ pub(super) fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
             "Float" => matches!(val, Value::Float(_)),
             "Number" => matches!(val, Value::Int(_) | Value::Float(_)),
             "String" => matches!(val, Value::String(_)),
+            "Regex" => matches!(val, Value::Regex(_)),
             "List" | "Listing" | "Set" => matches!(val, Value::List(_)),
             "Map" | "Mapping" | "Object" | "Dynamic" => matches!(val, Value::Object(..)),
             "Function" => matches!(val, Value::Lambda(..)),
@@ -690,6 +695,7 @@ pub(super) fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
             match name.as_str() {
                 "List" | "Listing" | "Set" => matches!(val, Value::List(_)),
                 "Map" | "Mapping" => matches!(val, Value::Object(..)),
+                "Regex" => matches!(val, Value::Regex(_)),
                 "Function" | "Function0" | "Function1" | "Function2" | "Function3"
                 | "Function4" | "Function5" => matches!(val, Value::Lambda(..)),
                 _ => matches!(val, Value::Object(..)),
@@ -818,6 +824,8 @@ pub(super) fn values_eq(a: &Value, b: &Value) -> bool {
         (Value::Int(a), Value::Float(b)) => (*a as f64) == *b,
         (Value::Float(a), Value::Int(b)) => *a == (*b as f64),
         (Value::String(a), Value::String(b)) => a == b,
+        // Regexes are equal when their patterns are.
+        (Value::Regex(a), Value::Regex(b)) => a == b,
         (Value::List(a), Value::List(b)) => {
             a.kind() == b.kind()
                 && a.len() == b.len()
@@ -958,7 +966,7 @@ pub(super) fn add_values(l: Value, r: Value) -> Result<Value> {
             Arc::make_mut(&mut a).extend(b.iter().map(|(k, v)| (k.clone(), v.clone())));
             Ok(Value::Object(a, None))
         }
-        (l, r) => Err(Error::Eval(format!("cannot add {:?} and {:?}", l, r))),
+        (l, r) => Err(Error::Eval(format!("cannot add {l:?} and {r:?}"))),
     }
 }
 
@@ -974,8 +982,7 @@ pub(super) fn arithmetic(
         (Value::Int(a), Value::Float(b)) => Ok(Value::Float(ff(a as f64, b)?)),
         (Value::Float(a), Value::Int(b)) => Ok(Value::Float(ff(a, b as f64)?)),
         (l, r) => Err(Error::Eval(format!(
-            "arithmetic type mismatch: {:?} vs {:?}",
-            l, r
+            "arithmetic type mismatch: {l:?} vs {r:?}"
         ))),
     }
 }
@@ -1002,7 +1009,7 @@ pub(super) fn value_cmp(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
             .partial_cmp(&(*y as f64))
             .unwrap_or(std::cmp::Ordering::Equal)),
         (Value::String(x), Value::String(y)) => Ok(x.cmp(y)),
-        _ => Err(Error::Eval(format!("cannot compare {:?} and {:?}", a, b))),
+        _ => Err(Error::Eval(format!("cannot compare {a:?} and {b:?}"))),
     }
 }
 

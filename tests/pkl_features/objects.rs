@@ -3417,11 +3417,10 @@ hooks = new {
     let start = std::time::Instant::now();
     let val = pklr::eval_to_json(&path).unwrap();
     let elapsed = start.elapsed();
-    eprintln!("eval_amends_perf: {:?}", elapsed);
+    eprintln!("eval_amends_perf: {elapsed:?}");
     assert!(
         elapsed.as_secs() < 5,
-        "amends eval took too long: {:?}",
-        elapsed
+        "amends eval took too long: {elapsed:?}"
     );
     assert!(val["hooks"]["pre-commit"]["fix"] == true);
 }

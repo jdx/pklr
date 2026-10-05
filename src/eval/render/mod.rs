@@ -292,6 +292,7 @@ pub(crate) fn kind_of(value: &Value) -> Kind {
         Value::Int(_) => Kind::Int,
         Value::Float(_) => Kind::Float,
         Value::String(_) => Kind::String,
+        Value::Regex(_) => Kind::Regex,
         Value::Lambda(..) => Kind::Function,
         Value::List(_) => Kind::Listing,
         Value::Object(map, None) => {
@@ -1066,12 +1067,7 @@ pub(crate) fn display_value(value: &Value) -> String {
             let unit = map.get("unit").and_then(Value::as_str).unwrap_or_default();
             format!("{number}.{unit}")
         }
-        (Kind::Regex, Value::Object(map, _)) => format!(
-            "Regex({:?})",
-            map.get("pattern")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-        ),
+        (Kind::Regex, Value::Regex(regex)) => format!("Regex({:?})", regex.pattern()),
         (kind @ Kind::Function, _) => format!("new {} {{}}", kind.pkl_class(value)),
         (_, Value::Object(map, _)) => match map.keys().next() {
             Some(key) => match class_key_name(key) {

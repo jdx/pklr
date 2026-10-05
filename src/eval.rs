@@ -28,6 +28,7 @@ mod prefetch;
 mod remote;
 pub(crate) mod render;
 mod scope;
+pub(crate) mod stdlib;
 mod types;
 
 use analysis::*;
@@ -190,8 +191,8 @@ fn eval_simple_expr(
         // object-body amendment, which need the evaluator. `&&`, `||` keep
         // short-circuiting; the depth mirrors `eval_binop`'s `depth + 1`.
         Expr::Binop(op, left, right)
-            if !matches!(op, BinOp::Pipe)
-                && !(matches!(op, BinOp::Add) && matches!(right.as_ref(), Expr::ObjectBody(_))) =>
+            if !(matches!(op, BinOp::Pipe)
+                || matches!(op, BinOp::Add) && matches!(right.as_ref(), Expr::ObjectBody(_))) =>
         {
             if !is_simple_expr(left) || !is_simple_expr(right) {
                 return None;
@@ -234,8 +235,8 @@ fn is_simple_expr(expr: &Expr) -> bool {
         | Expr::String(_)
         | Expr::Ident(_) => true,
         Expr::Binop(op, left, right) => {
-            !matches!(op, BinOp::Pipe)
-                && !(matches!(op, BinOp::Add) && matches!(right.as_ref(), Expr::ObjectBody(_)))
+            !(matches!(op, BinOp::Pipe)
+                || matches!(op, BinOp::Add) && matches!(right.as_ref(), Expr::ObjectBody(_)))
                 && is_simple_expr(left)
                 && is_simple_expr(right)
         }
@@ -318,11 +319,11 @@ fn apply_binop(op: BinOp, l: Value, r: Value) -> Result<Value> {
     }
 }
 
-fn regex_value(pattern: Value) -> Value {
-    let mut map = ObjectMap::default();
-    map.insert("_type".into(), Value::String("regex".into()));
-    map.insert("pattern".into(), pattern);
-    Value::Object(Arc::new(map), None)
+fn regex_value(pattern: Value) -> Result<Value> {
+    match pattern {
+        Value::String(pattern) => Ok(Value::Regex(Arc::new(stdlib::compile_regex(&pattern)?))),
+        other => Err(stdlib::type_mismatch("String", &other)),
+    }
 }
 
 #[cfg(feature = "native-io")]
@@ -4488,7 +4489,7 @@ impl Evaluator {
                         StringInterpPart::Literal(s) => result.push_str(s),
                         StringInterpPart::Expr(e) => {
                             let val = self.eval_expr(e, scope, depth + 1)?;
-                            result.push_str(&value_to_display(&val));
+                            result.push_str(&self.value_to_string(&val, depth + 1)?);
                         }
                     }
                 }
@@ -4711,8 +4712,7 @@ impl Evaluator {
                                             if !base_names.contains(&**key) =>
                                         {
                                             return Err(Error::Eval(format!(
-                                                "cannot add property '{}' to non-open class",
-                                                key
+                                                "cannot add property '{key}' to non-open class"
                                             )));
                                         }
                                         _ => {}
@@ -4821,6 +4821,9 @@ impl Evaluator {
                     return Ok(value);
                 }
                 let obj = self.eval_field_base(obj_expr, field, scope, depth)?;
+                if let Some(result) = self.stdlib_property(&obj, field) {
+                    return result;
+                }
                 // Built-in properties
                 match (&obj, field.as_str()) {
                     (Value::List(items), "length") => return Ok(Value::Int(items.len() as i64)),
@@ -4895,6 +4898,9 @@ impl Evaluator {
                 let obj = self.eval_field_base(obj_expr, field, scope, depth)?;
                 match &obj {
                     Value::Null => Ok(Value::Null),
+                    _ if self.stdlib_property(&obj, field).is_some() => {
+                        self.stdlib_property(&obj, field).unwrap()
+                    }
                     Value::Object(map, source) => {
                         if !map.contains_key(field.as_str())
                             && let Some(message) =
@@ -4933,6 +4939,9 @@ impl Evaluator {
                 }
                 let obj = self.eval_expr(obj_expr, scope, depth + 1)?;
                 let key = self.eval_expr(key_expr, scope, depth + 1)?;
+                if let Some(result) = stdlib::index(&obj, &key) {
+                    return result;
+                }
                 let key_str = value_to_key(&key)?;
                 match obj {
                     Value::Object(map, source) => map.get(&key_str).cloned().ok_or_else(|| {
@@ -5171,7 +5180,7 @@ impl Evaluator {
                 "Regex" => {
                     if let Some(arg) = args.first() {
                         let val = self.eval_expr(arg, scope, depth + 1)?;
-                        return Ok(regex_value(val));
+                        return regex_value(val);
                     }
                     return Err(Error::Eval("Regex() requires a pattern argument".into()));
                 }
@@ -5237,7 +5246,7 @@ impl Evaluator {
             && let Some(arg) = args.first()
         {
             let val = self.eval_expr(arg, scope, depth + 1)?;
-            return Ok(regex_value(val));
+            return regex_value(val);
         }
 
         // Plain call with no args on an object — return the object
@@ -5261,7 +5270,7 @@ impl Evaluator {
                 && &**name == "Regex"
                 && let Some(arg) = evaled_args.first()
             {
-                return Ok(Some(regex_value(arg.clone())));
+                return Ok(Some(regex_value(arg.clone())?));
             }
             if evaled_args.is_empty() {
                 return Ok(Some(func_val));
@@ -5305,6 +5314,9 @@ impl Evaluator {
         args: &[Value],
         depth: usize,
     ) -> Result<Option<Value>> {
+        if let Some(result) = self.stdlib_method(obj, method, args, depth) {
+            return result.map(Some);
+        }
         match (obj, method) {
             // String methods
             (Value::String(s), "contains") => {

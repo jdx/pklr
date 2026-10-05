@@ -362,6 +362,21 @@ output {
     );
 }
 
+#[test]
+fn eval_to_json_decodes_non_string_mapping_keys() {
+    let mut evaluator = Evaluator::new();
+    let value = evaluator
+        .eval_source(
+            r#"m = new Mapping { [1] = "value" }"#,
+            std::path::Path::new("test.pkl"),
+        )
+        .unwrap();
+    assert_eq!(
+        value.try_to_json().unwrap(),
+        serde_json::json!({"m": {"1": "value"}})
+    );
+}
+
 #[cfg(feature = "native-io")]
 #[test]
 fn typed_entry_key_conversion_updates_the_value_path() {
