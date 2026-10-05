@@ -1126,6 +1126,7 @@ fromLocal = m
 explicit = new Mapping<String, Listing<Int>> { ["a"] { 4 } }
 amended = (explicit) { ["a"] { 5 } }
 untyped = new Mapping { ["a"] { 6 } }
+dynamic = new Mapping<String, Dynamic> { ["a"] { 7 } }
 "#,
     );
     assert_eq!(json["examples"]["x"], serde_json::json!([2, "two"]));
@@ -1135,6 +1136,16 @@ untyped = new Mapping { ["a"] { 6 } }
     assert_eq!(json["explicit"]["a"], serde_json::json!([4]));
     assert_eq!(json["amended"]["a"], serde_json::json!([4, 5]));
     assert_eq!(json["untyped"]["a"], serde_json::json!([6]));
+    assert_eq!(json["dynamic"]["a"], serde_json::json!([7]));
+}
+
+#[test]
+fn typed_scalar_mapping_entry_body_is_not_a_listing() {
+    let err = eval_fails(r#"x = new Mapping<String, Int> { ["a"] { 1 } }"#);
+    assert!(
+        err.contains("Object of type `Int` cannot have an element."),
+        "{err}"
+    );
 }
 
 #[test]

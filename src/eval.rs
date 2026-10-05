@@ -6336,13 +6336,21 @@ impl Evaluator {
                     // a union containing `Listing` when the body has only
                     // elements. An untyped element-only body is a Dynamic
                     // rendered as a listing.
-                    let listing_alternative = value_type_names.iter().any(|name| {
+                    let expanded_value_type_names =
+                        expand_type_alias_names(value_type_names, &entry_scope);
+                    let listing_alternative = expanded_value_type_names.iter().any(|name| {
                         name.trim_start_matches('*').split('<').next() == Some("Listing")
                     });
+                    // `Dynamic` is the one explicitly declared value type
+                    // that can still render an element-only object body as a
+                    // listing. A bare Mapping has no value type at all.
+                    let dynamic_value_type = expanded_value_type_names.as_slice() == ["Dynamic"];
                     if let Expr::ObjectBody(body) = val_expr
                         && (matches!(map.get(&storage_key), Some(Value::List(_)))
                             || value_type_names == ["Listing"]
-                            || ((listing_alternative || type_defaults.is_empty())
+                            || ((listing_alternative
+                                || dynamic_value_type
+                                || value_type_names.is_empty())
                                 && matches!(explicit_default, None | Some(Value::List(_)))
                                 && is_element_only_body(body)))
                     {
@@ -6361,6 +6369,27 @@ impl Evaluator {
                         let val = self.eval_value_amendment(base, body, &entry_scope, depth)?;
                         map.insert(storage_key, val);
                         continue;
+                    }
+                    // A value type without a class template used to be
+                    // mistaken for an untyped Mapping above. That turned an
+                    // entry body for `Mapping<String, Int>` (and `String`,
+                    // `Any`, etc.) into a Listing. Pkl instead rejects the
+                    // scalar amendment. Keep Dynamic as the deliberate
+                    // element-capable exception.
+                    if let Expr::ObjectBody(body) = val_expr
+                        && is_element_only_body(body)
+                        && type_defaults.is_empty()
+                        && !value_type_names.is_empty()
+                        && !listing_alternative
+                        && !dynamic_value_type
+                    {
+                        let value_type = expanded_value_type_names
+                            .first()
+                            .map(String::as_str)
+                            .unwrap_or("Mapping value");
+                        return Err(Error::Eval(format!(
+                            "Object of type `{value_type}` cannot have an element."
+                        )));
                     }
                     let type_default = match val_expr {
                         Expr::ObjectBody(body) => select_mapping_type_default(type_defaults, body)
