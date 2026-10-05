@@ -1490,9 +1490,9 @@ impl<'a> Parser<'a> {
                 Ok(Expr::Throw(Box::new(msg)))
             }
             TokenKind::KwTrace => {
-                let line = self.tokens[self.pos].line;
                 self.advance();
                 self.expect(&TokenKind::LParen)?;
+                let line = self.tokens.get(self.pos).map_or(0, |token| token.line);
                 let start = self.tokens.get(self.pos).map_or(0, |token| token.offset);
                 let e = self.parse_expr()?;
                 let end = self
@@ -1501,12 +1501,7 @@ impl<'a> Parser<'a> {
                     .map_or(self.source.len(), |token| token.offset);
                 self.expect(&TokenKind::RParen)?;
                 let site = TraceSite {
-                    source: self
-                        .source
-                        .get(start..end)
-                        .unwrap_or_default()
-                        .trim_end()
-                        .to_string(),
+                    source: trace_argument_source(self.source.get(start..end).unwrap_or_default()),
                     module: self.name.to_string(),
                     line,
                 };
@@ -1655,6 +1650,60 @@ impl<'a> Parser<'a> {
                 format!("expected identifier, got {other:?}"),
             )),
         }
+    }
+}
+
+/// The source section Pkl assigns to a trace argument, excluding trivia after
+/// the expression and redundant grouping parentheses.
+fn trace_argument_source(source: &str) -> String {
+    let source = trim_trailing_trace_comment(source).trim();
+    strip_grouping_parentheses(source).to_string()
+}
+
+fn trim_trailing_trace_comment(mut source: &str) -> &str {
+    loop {
+        source = source.trim_end();
+        if let Some(before) = source.strip_suffix("*/") {
+            if let Some(start) = before.rfind("/*") {
+                source = &before[..start];
+                continue;
+            }
+        }
+        if let Some(start) = source.rfind("//") {
+            if !source[start + 2..].contains('\n') {
+                source = &source[..start];
+                continue;
+            }
+        }
+        return source;
+    }
+}
+
+fn strip_grouping_parentheses(mut source: &str) -> &str {
+    loop {
+        let trimmed = source.trim();
+        if !trimmed.starts_with('(') || !trimmed.ends_with(')') {
+            return trimmed;
+        }
+        let mut depth = 0usize;
+        let mut closes_at_end = false;
+        for (index, character) in trimmed.char_indices() {
+            match character {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        closes_at_end = index + character.len_utf8() == trimmed.len();
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !closes_at_end {
+            return trimmed;
+        }
+        source = &trimmed[1..trimmed.len() - 1];
     }
 }
 

@@ -730,6 +730,27 @@ fn trace_records_its_source_text_and_line() {
 }
 
 #[test]
+fn trace_uses_the_argument_source_section() {
+    let source = "a = trace(\n  ((1)) /* note */\n)\nb = trace(1 // note\n)\n";
+    let module = pklr::parser::parse_named(&lex(source).unwrap(), source, "main.pkl").unwrap();
+    let Entry::Property(a) = &module.body[0] else {
+        panic!("expected property a");
+    };
+    let Some(Expr::Trace(_, site)) = &a.value else {
+        panic!("expected trace");
+    };
+    assert_eq!(site.source, "1");
+    assert_eq!(site.line, 2);
+    let Entry::Property(b) = &module.body[1] else {
+        panic!("expected property b");
+    };
+    let Some(Expr::Trace(_, site)) = &b.value else {
+        panic!("expected trace");
+    };
+    assert_eq!(site.source, "1");
+}
+
+#[test]
 fn type_constraints_do_not_consume_next_line_elements() {
     let source = r#"
 items {

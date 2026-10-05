@@ -174,14 +174,19 @@ impl Evaluator {
     }
 
     /// Give native paths their canonical absolute spelling while leaving a
-    /// capability's virtual relative namespace untouched. Native
-    /// canonicalization produces an absolute path; sandbox capabilities can
-    /// return their own virtual path unchanged.
+    /// capability's virtual relative namespace untouched. For an unsaved
+    /// native path, use the host's absolute spelling when canonicalization
+    /// cannot succeed yet.
     pub(super) fn host_absolute_path(&mut self, path: PathBuf) -> PathBuf {
         if path.is_absolute() {
-            path
-        } else {
-            self.canonicalize_io(&path).unwrap_or(path)
+            return path;
+        }
+        match self.canonicalize_io(&path) {
+            Ok(path) => path,
+            Err(_) if self.base_path == Path::new(".") => {
+                std::path::absolute(&path).unwrap_or(path)
+            }
+            Err(_) => path,
         }
     }
 
