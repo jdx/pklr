@@ -4503,3 +4503,34 @@ d2 = (d) { l { 2 } }
     assert_eq!(result["b3"]["l"], serde_json::json!([1, 2, 3]));
     assert_eq!(result["d2"]["l"], serde_json::json!([1, 2]));
 }
+
+#[test]
+fn untyped_new_uses_declared_and_inherited_property_types() {
+    let json = eval(
+        r#"
+class P { a = 1; b = 2 }
+open class C { l: Listing<Int> = new { 1 }; p: P = new { a = 5 } }
+open class D extends C { l = new { 2 }; p = new { b = 3 } }
+class E extends D { p = new { b = 9 } }
+typed: Mapping<String, Int> = new { ["k"] = 1 }
+d = new D { l = new { 3 } }
+e = new E {}
+"#,
+    );
+    assert_eq!(json["typed"], serde_json::json!({"k": 1}));
+    assert_eq!(json["d"]["l"], serde_json::json!([2, 3]));
+    assert_eq!(json["d"]["p"], serde_json::json!({"a": 1, "b": 3}));
+    assert_eq!(json["e"]["p"], serde_json::json!({"a": 1, "b": 9}));
+}
+
+#[test]
+fn dynamic_generator_kind_follows_taken_branch() {
+    let json = eval(
+        r#"
+a = new { when (true) { 1 } else { p = 2 } }
+b = new { when (false) { 1 } else { p = 2 } }
+"#,
+    );
+    assert_eq!(json["a"], serde_json::json!([1]));
+    assert_eq!(json["b"], serde_json::json!({"p": 2}));
+}

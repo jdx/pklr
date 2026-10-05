@@ -627,6 +627,7 @@ fn module_object(map: &Arc<ObjectMap>, path: &Path) -> Value {
         poisoned_members: None,
         kind: crate::value::ObjectKind::Object,
         is_parsed_json: false,
+        prototype: None,
     };
     Value::Object(Arc::clone(map), Some(Arc::new(source)))
 }

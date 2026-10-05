@@ -392,6 +392,7 @@ pub(super) fn mapping_source() -> ObjectSource {
         poisoned_members: None,
         kind: ObjectKind::Mapping,
         is_parsed_json: false,
+        prototype: None,
     }
 }
 

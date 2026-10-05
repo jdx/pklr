@@ -441,6 +441,33 @@ pub(super) fn type_is_listing(ty: &crate::parser::TypeExpr) -> bool {
     }
 }
 
+/// `Any` (optionally nullable) gives an untyped `new` no parent to infer.
+pub(super) fn type_is_any(ty: &crate::parser::TypeExpr) -> bool {
+    use crate::parser::TypeExpr;
+    match ty {
+        TypeExpr::Named(name) => name == "Any",
+        TypeExpr::Nullable(inner) => type_is_any(inner),
+        _ => false,
+    }
+}
+
+/// Whether `entries`, including generator bodies, define a named member.
+pub(super) fn entries_define_members(entries: &[Entry]) -> bool {
+    entries.iter().any(|entry| match entry {
+        Entry::Property(prop) => !has_modifier(&prop.modifiers, crate::parser::Modifier::Local),
+        Entry::DynProperty(..) => true,
+        Entry::ForGenerator(generator) => entries_define_members(&generator.body),
+        Entry::WhenGenerator(generator) => {
+            entries_define_members(&generator.body)
+                || generator
+                    .else_body
+                    .as_deref()
+                    .is_some_and(|body| entries_define_members(body))
+        }
+        _ => false,
+    })
+}
+
 pub(super) fn entries_are_listing_amendment(entries: &[Entry]) -> bool {
     entries.iter().any(|entry| match entry {
         Entry::Elem(_) => true,
