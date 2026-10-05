@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use super::render::{Converters, Invoke, Kind, PathPart, kind_of};
 use crate::error::{Error, Result};
-use crate::value::{ListKind, ListValue, ObjectMap, Value};
+use crate::value::{ListKind, ListValue, ObjectKind, ObjectMap, ObjectSource, Value};
 
 /// Parse `text` as a JSON document. Objects become `Dynamic`s, or
 /// `Mapping`s with `use_mapping`; arrays become `Listing`s.
@@ -24,6 +24,7 @@ pub(crate) fn parse_json(
         converters,
         invoke,
         path: vec![PathPart::TopLevel],
+        depth: 0,
     };
     parser.skip_whitespace();
     let value = parser.value()?;
@@ -42,15 +43,21 @@ struct JsonParser<'a> {
     converters: &'a Converters,
     invoke: &'a mut dyn Invoke,
     path: Vec<PathPart>,
+    depth: usize,
 }
 
 impl JsonParser<'_> {
+    // The upstream parser caps nesting at 1,000. This recursive Rust parser
+    // reaches the platform stack limit first, so use a conservative bound to
+    // make malformed input return an error rather than aborting the process.
+    const MAX_NESTING: usize = 128;
+
     fn error(&self, message: &str) -> Error {
-        let line = self.text[..self.pos.min(self.text.len())]
-            .bytes()
-            .filter(|&b| b == b'\n')
-            .count()
-            + 1;
+        let mut end = self.pos.min(self.text.len());
+        while end > 0 && !self.text.is_char_boundary(end) {
+            end -= 1;
+        }
+        let line = self.text[..end].bytes().filter(|&b| b == b'\n').count() + 1;
         Error::Eval(format!(
             "Error parsing JSON document.\n\n{message} at line {line}."
         ))
@@ -184,12 +191,20 @@ impl JsonParser<'_> {
                     let ch = if (0xD800..0xDC00).contains(&high)
                         && self.src[self.pos..].starts_with(b"\\u")
                     {
+                        let next_escape = self.pos;
                         self.pos += 2;
                         let low = self.hex4()?;
-                        char::decode_utf16([high, low])
-                            .next()
-                            .and_then(|c| c.ok())
-                            .unwrap_or(char::REPLACEMENT_CHARACTER)
+                        if (0xDC00..0xE000).contains(&low) {
+                            char::decode_utf16([high, low])
+                                .next()
+                                .and_then(|c| c.ok())
+                                .unwrap_or(char::REPLACEMENT_CHARACTER)
+                        } else {
+                            // The following escape belongs to the next code
+                            // unit; leave it for the next loop iteration.
+                            self.pos = next_escape;
+                            char::REPLACEMENT_CHARACTER
+                        }
                     } else {
                         char::from_u32(u32::from(high)).unwrap_or(char::REPLACEMENT_CHARACTER)
                     };
@@ -202,9 +217,13 @@ impl JsonParser<'_> {
 
     fn hex4(&mut self) -> Result<u16> {
         let digits = self
-            .text
+            .src
             .get(self.pos..self.pos + 4)
             .ok_or_else(|| self.error("Expected hexadecimal digit"))?;
+        if !digits.iter().all(u8::is_ascii_hexdigit) {
+            return Err(self.error("Expected hexadecimal digit"));
+        }
+        let digits = std::str::from_utf8(digits).expect("ASCII hexadecimal digits");
         let value = u16::from_str_radix(digits, 16)
             .map_err(|_| self.error("Expected hexadecimal digit"))?;
         self.pos += 4;
@@ -212,6 +231,10 @@ impl JsonParser<'_> {
     }
 
     fn array(&mut self) -> Result<Value> {
+        if self.depth >= Self::MAX_NESTING {
+            return Err(self.error("Maximum nesting depth exceeded"));
+        }
+        self.depth += 1;
         self.pos += 1;
         // Elements are matched by `[*]`, whatever their index.
         self.path.push(PathPart::Element(0));
@@ -236,10 +259,15 @@ impl JsonParser<'_> {
             }
         }
         self.path.pop();
+        self.depth -= 1;
         Ok(Value::List(ListValue::new(ListKind::Listing, items)))
     }
 
     fn object(&mut self) -> Result<Value> {
+        if self.depth >= Self::MAX_NESTING {
+            return Err(self.error("Maximum nesting depth exceeded"));
+        }
+        self.depth += 1;
         self.pos += 1;
         let mut map = ObjectMap::default();
         self.skip_whitespace();
@@ -275,6 +303,29 @@ impl JsonParser<'_> {
             }
         }
         // The object itself is converted by its parent (or as the document).
-        Ok(Value::Object(Arc::new(map), None))
+        let source = ObjectSource {
+            entries: Vec::new().into(),
+            captured: super::SourceScope::default(),
+            body_members: Default::default(),
+            is_open: true,
+            is_abstract: false,
+            type_name: None,
+            type_identity: None,
+            parent_type_names: Vec::new(),
+            parent_type_identities: Vec::new(),
+            entry_scopes: Vec::new(),
+            evaluated_properties: Vec::new(),
+            elements: Vec::new(),
+            mapping_value_types: Vec::new(),
+            deprecated: Default::default(),
+            poisoned_members: None,
+            kind: if self.use_mapping {
+                ObjectKind::Mapping
+            } else {
+                ObjectKind::Object
+            },
+        };
+        self.depth -= 1;
+        Ok(Value::Object(Arc::new(map), Some(Arc::new(source))))
     }
 }

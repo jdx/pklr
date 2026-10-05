@@ -631,11 +631,16 @@ fn json_parser_converters_and_errors() {
         r##"import "pkl:json"
 local parser = new json.Parser { converters { [Int] = (it) -> it + 1; [String] = (it) -> it + "x"; ["tags[*]"] = (_) -> "element" } }
 a = parser.parse(#"{ "n": 1, "s": "a", "tags": [1, 2] }"#)
+durationLike = new JsonRenderer {}.renderValue(new json.Parser {}.parse(#"{ "value": 1, "unit": "s" }"#))
 "##,
     );
     assert_eq!(
         json["a"],
         serde_json::json!({"n": 2, "s": "ax", "tags": ["element", "element"]})
+    );
+    assert_eq!(
+        json["durationLike"],
+        "{\n  \"value\": 1,\n  \"unit\": \"s\"\n}"
     );
     for doc in ["0123", "0x1A3", "", "[1,]", "{\"a\" 1}"] {
         let err = eval_fails(&format!(
@@ -643,4 +648,23 @@ a = parser.parse(#"{ "n": 1, "s": "a", "tags": [1, 2] }"#)
         ));
         assert!(err.contains("Error parsing JSON document."), "{doc}: {err}");
     }
+    let err = eval_fails("import \"pkl:json\"\nres = new json.Parser {}.parse(\"\\\"\\\\é\")");
+    assert!(err.contains("Error parsing JSON document."), "{err}");
+    for doc in [r#""\u+123""#, r#""\u12é4""#] {
+        let err = eval_fails(&format!(
+            "import \"pkl:json\"\nres = new json.Parser {{}}.parse(#{doc:?}#)"
+        ));
+        assert!(err.contains("Error parsing JSON document."), "{doc}: {err}");
+    }
+    let json = eval(
+        r#"import "pkl:json"
+res = new json.Parser {}.parse("\"\\uD800\\u0041\"")
+"#,
+    );
+    assert_eq!(json["res"], "�A");
+    let nested = format!("{}0{}", "[".repeat(1_001), "]".repeat(1_001));
+    let err = eval_fails(&format!(
+        "import \"pkl:json\"\nres = new json.Parser {{}}.parse({nested:?})"
+    ));
+    assert!(err.contains("Maximum nesting depth exceeded"), "{err}");
 }
