@@ -465,7 +465,7 @@ value = import(uri)
 "#,
     );
     assert!(
-        err.contains("import() requires a string literal URI"),
+        err.contains("Unexpected token `uri`. Expected `\"`"),
         "{err}"
     );
 }
@@ -479,7 +479,7 @@ value = import*(pattern)
 "#,
     );
     assert!(
-        err.contains("import*() requires a string literal URI"),
+        err.contains("Unexpected token `pattern`. Expected `\"`"),
         "{err}"
     );
 }
@@ -1636,7 +1636,7 @@ x = Builtins.toMap().toMapping()
 #[test]
 fn top_level_bare_elements_are_invalid() {
     let err = eval_fails("BROKEN SYNTAX");
-    assert!(err.contains("expected identifier"), "{err}");
+    assert!(err.contains("Invalid property definition"), "{err}");
 }
 
 #[test]
@@ -2038,7 +2038,7 @@ fn indexed_ordinary_import_is_evaluated_whole() {
     .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"dep.pkl\" as Dep\nout = Dep[\"result\"]\n",
+        "import \"dep.pkl\" as Dep\n`out` = Dep[\"result\"]\n",
     )
     .unwrap();
 
@@ -2087,7 +2087,7 @@ fn narrowed_import_follows_type_alias_constraints() {
     .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"dep.pkl\" as Dep\ntypealias IsTrue = Boolean(this == Dep.result)\nok = true is IsTrue\nout = Dep.result\n",
+        "import \"dep.pkl\" as Dep\ntypealias IsTrue = Boolean(this == Dep.result)\nok = true is IsTrue\n`out` = Dep.result\n",
     )
     .unwrap();
 
@@ -2109,12 +2109,12 @@ fn narrowed_import_follows_module_reads_in_class_defaults() {
     .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"dep.pkl\" as D\nout = D.result\n",
+        "import \"dep.pkl\" as D\n`out` = D.result\n",
     )
     .unwrap();
     std::fs::write(
         dir.join("class.pkl"),
-        "import \"dep.pkl\" as D\nout = new D.Bar {}\n",
+        "import \"dep.pkl\" as D\n`out` = new D.Bar {}\n",
     )
     .unwrap();
 
@@ -2159,12 +2159,12 @@ fn narrowed_import_follows_module_reads_named_like_inherited_properties() {
     // must still be refreshed once the module's `min` exists.
     std::fs::write(
         dir.join("dep.pkl"),
-        "min = 1\nopen class Parent { min = 2 }\nclass Child extends Parent { a = min }\nout = new Child {}\n",
+        "min = 1\nopen class Parent { min = 2 }\nclass Child extends Parent { a = min }\n`out` = new Child {}\n",
     )
     .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"dep.pkl\" as D\nout = D.out\n",
+        "import \"dep.pkl\" as D\n`out` = D.`out`\n",
     )
     .unwrap();
 
@@ -2455,7 +2455,7 @@ fn narrowed_import_respects_aliases_redeclared_in_nested_bodies() {
     .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"dep.pkl\" as Dep\nimport \"dep_string.pkl\" as DepString\nimport \"dep_order.pkl\" as DepOrder\nimport \"dep_followed.pkl\" as DepFollowed\nimport \"dep_followed_same.pkl\" as DepFollowedSame\nimport \"dep_followed_shadowed.pkl\" as DepFollowedShadowed\nimport \"dep_shadowed.pkl\" as DepShadowed\nimport \"dep_unrelated.pkl\" as DepUnrelated\nimport \"dep_followed_unrelated.pkl\" as DepFollowedUnrelated\nout = Dep.result.ok\noutString = DepString.result.ok\noutOrder = DepOrder.result.ok\noutFollowed = DepFollowed.result.ok\noutFollowedSame = DepFollowedSame.result.ok\noutFollowedShadowed = DepFollowedShadowed.result.ok\noutShadowed = DepShadowed.result.ok\noutUnrelated = DepUnrelated.result.ok\noutFollowedUnrelated = DepFollowedUnrelated.result.ok\n",
+        "import \"dep.pkl\" as Dep\nimport \"dep_string.pkl\" as DepString\nimport \"dep_order.pkl\" as DepOrder\nimport \"dep_followed.pkl\" as DepFollowed\nimport \"dep_followed_same.pkl\" as DepFollowedSame\nimport \"dep_followed_shadowed.pkl\" as DepFollowedShadowed\nimport \"dep_shadowed.pkl\" as DepShadowed\nimport \"dep_unrelated.pkl\" as DepUnrelated\nimport \"dep_followed_unrelated.pkl\" as DepFollowedUnrelated\n`out` = Dep.result.ok\noutString = DepString.result.ok\noutOrder = DepOrder.result.ok\noutFollowed = DepFollowed.result.ok\noutFollowedSame = DepFollowedSame.result.ok\noutFollowedShadowed = DepFollowedShadowed.result.ok\noutShadowed = DepShadowed.result.ok\noutUnrelated = DepUnrelated.result.ok\noutFollowedUnrelated = DepFollowedUnrelated.result.ok\n",
     )
     .unwrap();
 
@@ -2484,7 +2484,7 @@ fn narrowed_import_resolves_aliases_in_followed_class_bodies() {
     .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"dep.pkl\" as Dep\nout = Dep.result.name\n",
+        "import \"dep.pkl\" as Dep\n`out` = Dep.result.name\n",
     )
     .unwrap();
 
@@ -2538,7 +2538,7 @@ fn imported_class_reading_missing_module_property_reports_error() {
     .unwrap();
     std::fs::write(
         dir.join("amend.pkl"),
-        "import \"depx.pkl\" as dep\nresult = (dep) { y = 2 }\nr2 = dep { y = 3 }\n",
+        "import \"depx.pkl\" as dep\nresult = (dep) { y = 2 }\nr2 = (dep) { y = 3 }\n",
     )
     .unwrap();
     let val = pklr::eval_to_json(&dir.join("amend.pkl")).unwrap();
@@ -2577,7 +2577,7 @@ fn narrowed_import_follows_locals_with_module_aliases() {
     .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"dep.pkl\"\nout = dep.result.v\n",
+        "import \"dep.pkl\"\n`out` = dep.result.v\n",
     )
     .unwrap();
 
@@ -2606,7 +2606,7 @@ fn narrowed_import_reads_qualified_type_roots_and_nested_classes() {
     .unwrap();
     std::fs::write(
         dir.join("main.pkl"),
-        "import \"dep.pkl\" as Dep\nimport \"dep_class.pkl\" as DepClass\nout = Dep.result\noutClass = DepClass.result.inst\n",
+        "import \"dep.pkl\" as Dep\nimport \"dep_class.pkl\" as DepClass\n`out` = Dep.result\noutClass = DepClass.result.inst\n",
     )
     .unwrap();
 

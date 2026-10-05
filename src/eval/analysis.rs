@@ -17,6 +17,7 @@ pub(super) fn analysis_entries_for_requested_fields(
             // These entries are still evaluated outside the property output
             // filter, so their imports must remain visible to the analysis.
             Entry::DynProperty(..)
+            | Entry::Predicate(..)
             | Entry::Spread(_)
             | Entry::ForGenerator(_)
             | Entry::WhenGenerator(_)
@@ -94,7 +95,7 @@ pub(super) fn collect_entry_import_field_uses(
                     collect_entry_import_field_uses(body, uses, &entry_shadows);
                 }
             }
-            Entry::DynProperty(key, value) => {
+            Entry::DynProperty(key, value) | Entry::Predicate(key, value) => {
                 collect_expr_import_field_uses(key, uses, &entry_shadows);
                 collect_expr_import_field_uses(value, uses, &entry_shadows);
             }
@@ -612,7 +613,7 @@ pub(super) fn collect_sibling_field_refs_entries(entries: &[Entry], refs: &mut H
                     collect_sibling_field_refs_entries(body, refs);
                 }
             }
-            Entry::DynProperty(key, value) => {
+            Entry::DynProperty(key, value) | Entry::Predicate(key, value) => {
                 collect_sibling_field_refs_expr(key, refs, false);
                 collect_sibling_field_refs_expr(value, refs, false);
             }
@@ -1675,7 +1676,7 @@ fn collect_field_names_entries(entries: &[Entry], out: &mut HashSet<String>) {
                     collect_field_names_entries(body, out);
                 }
             }
-            Entry::DynProperty(key, value) => {
+            Entry::DynProperty(key, value) | Entry::Predicate(key, value) => {
                 collect_field_names_expr(key, out);
                 collect_field_names_expr(value, out);
             }
@@ -2210,7 +2211,7 @@ fn collect_entry_refs_unnarrowed(
                     collect_entry_refs_in(body, refs, &entry_shadows, aliases, definitions);
                 }
             }
-            Entry::DynProperty(key, value) => {
+            Entry::DynProperty(key, value) | Entry::Predicate(key, value) => {
                 collect_expr_refs_in(key, refs, &entry_shadows, aliases, definitions);
                 collect_expr_refs_in(value, refs, &entry_shadows, aliases, definitions);
             }
@@ -2560,7 +2561,7 @@ fn collect_unshadowed_entry_names(entries: &[Entry], names: &mut HashSet<String>
                     collect_unshadowed_entry_names(body, names);
                 }
             }
-            Entry::DynProperty(key, value) => {
+            Entry::DynProperty(key, value) | Entry::Predicate(key, value) => {
                 collect_unshadowed_names(key, names);
                 collect_unshadowed_names(value, names);
             }
@@ -2640,7 +2641,9 @@ fn property_mentions(prop: &Property, name: &str) -> bool {
 fn entry_mentions(entry: &Entry, name: &str) -> bool {
     match entry {
         Entry::Property(prop) => property_mentions(prop, name),
-        Entry::DynProperty(key, value) => expr_mentions(key, name) || expr_mentions(value, name),
+        Entry::DynProperty(key, value) | Entry::Predicate(key, value) => {
+            expr_mentions(key, name) || expr_mentions(value, name)
+        }
         Entry::ForGenerator(fgen) => {
             expr_mentions(&fgen.collection, name) || entries_mention(&fgen.body, name)
         }
@@ -2759,7 +2762,7 @@ impl InstanceReads {
                         self.entries(body, depth + 1);
                     }
                 }
-                Entry::DynProperty(key, value) => {
+                Entry::DynProperty(key, value) | Entry::Predicate(key, value) => {
                     self.expr(key, depth);
                     self.expr(value, depth);
                 }

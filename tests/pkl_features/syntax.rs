@@ -70,6 +70,16 @@ fn primitives_underscored_int() {
     assert_eq!(json["x"], 1_000_000);
 }
 
+#[test]
+fn minimum_int_requires_a_unary_minus() {
+    let json = eval("x = -9223372036854775808");
+    assert_eq!(json["x"], i64::MIN);
+    for src in ["x = 9223372036854775808", "x = 1 - 9223372036854775808"] {
+        let err = eval_fails(src);
+        assert!(err.contains("too large"), "{src}: {err}");
+    }
+}
+
 // ============================================================
 // NaN and Infinity
 // ============================================================
@@ -126,35 +136,43 @@ fn string_escapes() {
 fn string_multiline() {
     let src = "x = \"\"\"\n  hello\n  world\n  \"\"\"";
     let json = eval(src);
-    assert_eq!(json["x"], "hello\nworld\n");
+    assert_eq!(json["x"], "hello\nworld");
 }
 
 #[test]
 fn string_multiline_with_crlf_line_endings() {
     let src = "x = \"\"\"\r\n  hello\r\n  world\r\n  \"\"\"";
     let json = eval(src);
-    assert_eq!(json["x"], "hello\nworld\n");
+    assert_eq!(json["x"], "hello\nworld");
 }
 
 #[test]
 fn string_raw_multiline() {
     let src = "x = #\"\"\"\n  hello\\n\n  world\n  \"\"\"#";
     let json = eval(src);
-    assert_eq!(json["x"], "hello\\n\nworld\n");
+    assert_eq!(json["x"], "hello\\n\nworld");
 }
 
 #[test]
 fn string_raw_multiline_with_crlf_line_endings() {
     let src = "x = #\"\"\"\r\n  hello\\n\r\n  world\r\n  \"\"\"#";
     let json = eval(src);
-    assert_eq!(json["x"], "hello\\n\nworld\n");
+    assert_eq!(json["x"], "hello\\n\nworld");
 }
 
 #[test]
 fn string_multiline_strips_only_one_opening_newline() {
     let src = "x = \"\"\"\n\n  hello\n  \"\"\"";
     let json = eval(src);
-    assert_eq!(json["x"], "\nhello\n");
+    assert_eq!(json["x"], "\nhello");
+}
+
+#[test]
+fn string_multiline_allows_closing_after_line_continuation() {
+    let json = eval("x = \"\"\"\n  hello\\\n  \"\"\"");
+    assert_eq!(json["x"], "hello");
+    let json = eval("x = \"\"\"\nhello\\\n\"\"\"");
+    assert_eq!(json["x"], "hello");
 }
 
 #[test]
@@ -167,7 +185,7 @@ fn string_multi_hash_raw() {
 fn string_multi_hash_raw_multiline() {
     let src = "x = ##\"\"\"\n  hello \"\"\"#\n  world\n  \"\"\"##";
     let json = eval(src);
-    assert_eq!(json["x"], "hello \"\"\"#\nworld\n");
+    assert_eq!(json["x"], "hello \"\"\"#\nworld");
 }
 
 #[test]
@@ -207,6 +225,16 @@ x = "2 + 2 = \(2 + 2)"
 "#,
     );
     assert_eq!(json["x"], "2 + 2 = 4");
+}
+
+#[test]
+fn string_interpolation_rejects_extra_tokens() {
+    let err = eval_fails(
+        r#"a = 1
+x = "\(a a)"
+"#,
+    );
+    assert!(err.contains("Unexpected token `a`. Expected `)`."), "{err}");
 }
 
 // ============================================================
@@ -513,6 +541,20 @@ ne = x != new Listing { "one" }
     assert_eq!(json["withDefault"], true);
     assert_eq!(json["withLocal"], true);
     assert_eq!(json["ne"], true);
+}
+
+#[test]
+fn amendments_require_a_parenthesized_parent() {
+    for src in [
+        "local value = new Dynamic {}\nx = value { a = 1 }\n",
+        "local make = () -> new Dynamic {}\nx = make() { a = 1 }\n",
+    ] {
+        let err = eval_fails(src);
+        assert!(
+            err.contains("wrap the parent in parentheses"),
+            "{src}: {err}"
+        );
+    }
 }
 
 #[test]
@@ -829,7 +871,7 @@ x = b
 fn object_nested() {
     let json = eval(
         r#"
-outer {
+`outer` {
     inner {
         value = 42
     }
@@ -1115,7 +1157,7 @@ local src = new Mapping {
     ["x"] = 1
     ["y"] = 2
 }
-out {
+`out` {
     for (k, v in src) {
         [k] = v
     }
@@ -1603,7 +1645,7 @@ fn amending_module_member_rules() {
         ),
         (
             "amends \"base.pkl\"\nfunction foo() = 1\n",
-            "Method needs a `local` modifier.",
+            "Method needs a `local` modifier because it is defined in an object, not a class.",
         ),
         (
             "amends \"base.pkl\"\nclass Other\n",
@@ -1780,4 +1822,100 @@ fn type_alias_cycle_check_uses_qualified_names() {
     )
     .unwrap();
     assert_eq!(pklr::eval_to_json(&dir.join("main.pkl")).unwrap()["y"], 1);
+}
+
+#[test]
+fn trailing_semicolons_before_end_of_file() {
+    let json = eval("x = 1;\ny { a = 1; };");
+    assert_eq!(json, serde_json::json!({"x": 1, "y": {"a": 1}}));
+    let json = eval("x = \"\\(1;)\"");
+    assert_eq!(json["x"], "1");
+}
+
+#[test]
+fn function_types_are_accepted_in_type_positions() {
+    let json = eval(
+        "zero: () -> Int = () -> 1\none: (Int,) -> String = (x) -> x.toString()\ntwo: (Int, String) -> String = (x, y) -> y\nnested: ((Int) -> Int) -> Int = (f) -> f(2)\nresult = List(zero(), one(3), two(0, \"x\"), nested((x) -> x + 1))",
+    );
+    assert_eq!(json["result"], serde_json::json!([1, "3", "x", 3]));
+}
+
+#[test]
+fn function_types_support_aliases_unions_generics_and_method_returns() {
+    let json = eval(
+        r#"
+typealias Unary = (Int,) -> Int
+typealias OptionalUnary = Unary|Null
+local increment: Unary = (x) -> x + 1
+local maybe: OptionalUnary = increment
+local callbacks: Listing<(Int) -> String> = new Listing { (x) -> x.toString() }
+function makeFormatter(): (Int) -> String = (x) -> x.toString()
+function applyTwice(f: (Int) -> Int): Int = f.apply(f.apply(1))
+result = List(
+  applyTwice(increment),
+  callbacks.length,
+  makeFormatter().apply(5),
+  ((f: (Int) -> Int) -> f.apply(6)).apply(increment),
+)
+"#,
+    );
+    assert_eq!(json["result"], serde_json::json!([3, 1, "5", 7]));
+}
+
+#[test]
+fn function_types_reject_non_lambdas_and_invalid_parenthesized_forms() {
+    let err = eval_fails("bad: (Int) -> Int = 1");
+    assert!(err.contains("Function1"), "{err}");
+
+    for src in [
+        "bad: () = () -> 1",
+        "bad: (Int, String) = (x, y) -> x",
+        "bad: (Int,,) -> Int = (x) -> x",
+    ] {
+        assert!(!eval_fails(src).is_empty(), "{src}");
+    }
+}
+
+#[test]
+fn const_members_only_read_const_members() {
+    let err = eval_fails("x = 1\nconst y = x + 1\n");
+    assert!(err.contains("Cannot reference property `x`"), "{err}");
+    let err = eval_fails("x = 1\nconst y { z = x }\n");
+    assert!(err.contains("Cannot reference property `x`"), "{err}");
+    let err = eval_fails("x = 1\nconst y: Int(this == x) = 1\n");
+    assert!(err.contains("Cannot reference property `x`"), "{err}");
+    let err = eval_fails("x = 1\nconst y = 1 is Int(this == x)\n");
+    assert!(err.contains("Cannot reference property `x`"), "{err}");
+    let err = eval_fails("x = 1\ncontainer { local const y = x }\n");
+    assert!(err.contains("Cannot reference property `x`"), "{err}");
+    let err = eval_fails("x = 1\nclass Child extends Missing { const y = module.x }\n");
+    assert!(err.contains("Cannot reference property `x`"), "{err}");
+    let json = eval("x = 5\nconst y = let (x = 2) x + 1\nconst z = 1\nconst w = z + 1\n");
+    assert_eq!(json["y"], 3);
+    assert_eq!(json["w"], 2);
+}
+
+#[test]
+fn lambda_calls_require_the_declared_arity() {
+    for src in [
+        "f = (x) -> x\nresult = f()",
+        "obj { f = (x) -> x }\nresult = obj.f()",
+        "result = List(1).map((x, y) -> x)",
+    ] {
+        let err = eval_fails(src);
+        assert!(err.contains("Expected"), "{src}: {err}");
+        assert!(err.contains("function arguments"), "{src}: {err}");
+    }
+}
+
+#[test]
+fn member_predicates_are_reported_as_unsupported() {
+    for src in [
+        "base { 1 2 }\nres = (base) { [[this == 1]] = 3 }\n",
+        "base = new Listing { 1 2 }\nres = (base) { [[this == 1]] = 3 }\n",
+        "base = new Mapping { [\"a\"] = 1 }\nres = (base) { [[this == 1]] = 3 }\n",
+    ] {
+        let err = eval_fails(src);
+        assert!(err.contains("member predicates"), "{src}: {err}");
+    }
 }
