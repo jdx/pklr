@@ -220,10 +220,7 @@ keys = List(
     );
     assert_eq!(json["duration"], "duration");
     assert_eq!(json["dataSize"], "dataSize");
-    assert_eq!(
-        json["keys"],
-        serde_json::json!(["1.s", "s", "1.kb", "kb"])
-    );
+    assert_eq!(json["keys"], serde_json::json!(["1.s", "s", "1.kb", "kb"]));
 }
 
 #[test]

@@ -37,7 +37,11 @@ pub(crate) fn mapping_storage_key(value: &Value) -> Option<Arc<str>> {
             } else {
                 identity.to_bits()
             };
-            ("duration", bits, format!("{}.{}", value.value, value.unit.symbol()))
+            (
+                "duration",
+                bits,
+                format!("{}.{}", value.value, value.unit.symbol()),
+            )
         }
         Value::DataSize(value) => {
             let identity = value.value_in(DataSizeUnit::Bytes);
@@ -47,7 +51,11 @@ pub(crate) fn mapping_storage_key(value: &Value) -> Option<Arc<str>> {
             } else {
                 identity.to_bits()
             };
-            ("dataSize", bits, format!("{}.{}", value.value, value.unit.symbol()))
+            (
+                "dataSize",
+                bits,
+                format!("{}.{}", value.value, value.unit.symbol()),
+            )
         }
         other => ("display", 0, format!("{other:?}")),
     };
