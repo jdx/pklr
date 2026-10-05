@@ -76,6 +76,7 @@ ceilFloor = List(2.1.ceil, 2.9.floor)
 toFixed = List(0.125.toFixed(2), 1.005.toFixed(2), 123456789.12345679.toFixed(9), (-0.001).toFixed(2))
 nan = List((0.0 / 0.0).isNaN, (1.0 / 0.0).isInfinite, 1.5.isFinite)
 strings = List(1.0.toString(), 1e21.toString(), 0.0001.toString(), (-0.0).toString())
+largeFixed = 1e23.toFixed(0)
 "##,
     );
     assert_eq!(json["round"], serde_json::json!([2.0, 4.0, -2.0]));
@@ -91,6 +92,7 @@ strings = List(1.0.toString(), 1e21.toString(), 0.0001.toString(), (-0.0).toStri
         json["strings"],
         serde_json::json!(["1.0", "1.0E21", "1.0E-4", "-0.0"])
     );
+    assert_eq!(json["largeFixed"], "99999999999999990000000");
     assert!(
         eval_fails(r#"x = 1e300.toInt()"#)
             .contains("Cannot convert Float `1.0E300` to Int because it is too large.")
@@ -220,8 +222,20 @@ keys = List(
     assert_eq!(json["dataSize"], "dataSize");
     assert_eq!(
         json["keys"],
-        serde_json::json!(["1000000000.ns", "ns", "1000.b", "b"])
+        serde_json::json!(["1.s", "s", "1.kb", "kb"])
     );
+}
+
+#[test]
+fn nan_unit_mapping_keys_do_not_alias_across_units() {
+    let json = eval(
+        r##"
+local nan = 0.0 / 0.0
+local m = new Mapping { [nan.ns] = "first"; [nan.s] = "second" }
+n = m.length
+"##,
+    );
+    assert_eq!(json["n"], 2);
 }
 
 #[cfg(feature = "native-io")]

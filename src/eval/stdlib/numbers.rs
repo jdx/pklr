@@ -71,7 +71,11 @@ fn to_fixed(x: f64, digits: usize) -> String {
         };
         return format!("{sign}{integer}{fraction}");
     }
-    let sci = format!("{:e}", x.abs());
+    let sci = if x.abs() >= 9_223_372_036_854_775_808.0 {
+        format!("{:.15e}", x.abs())
+    } else {
+        format!("{:e}", x.abs())
+    };
     let (mantissa, exponent) = sci.split_once('e').expect("`{:e}` has an exponent");
     let exponent: i64 = exponent.parse().expect("`{:e}` exponent is an integer");
     let mut sig: Vec<u8> = mantissa.bytes().filter(|b| *b != b'.').collect();

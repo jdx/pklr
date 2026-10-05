@@ -26,23 +26,45 @@ pub(crate) fn mapping_storage_key(value: &Value) -> Option<Arc<str>> {
             let identity = if *value == 0.0 { 0.0 } else { *value };
             ("float", identity.to_bits(), value.to_string())
         }
-        // Units compare in their smallest units, so use the same normalized
-        // amount for mapping identity. The display is likewise canonical:
-        // callers cannot retain a spelling such as `1.s` in the map key and
-        // also find it with its equal spelling `1000.ms`.
+        // Units compare in their smallest units. Keep that normalized amount
+        // as identity, but retain the inserted spelling for `keys` and
+        // converters.
         Value::Duration(value) => {
-            let value = value.value_in(DurationUnit::Nanos);
-            let value = if value == 0.0 { 0.0 } else { value };
-            ("duration", value.to_bits(), format!("{value}.ns"))
+            let identity = value.value_in(DurationUnit::Nanos);
+            let identity = if identity == 0.0 { 0.0 } else { identity };
+            let bits = if identity.is_nan() {
+                value.value.to_bits() ^ ((value.unit as u64) << 56)
+            } else {
+                identity.to_bits()
+            };
+            ("duration", bits, format!("{}.{}", value.value, value.unit.symbol()))
         }
         Value::DataSize(value) => {
-            let value = value.value_in(DataSizeUnit::Bytes);
-            let value = if value == 0.0 { 0.0 } else { value };
-            ("dataSize", value.to_bits(), format!("{value}.b"))
+            let identity = value.value_in(DataSizeUnit::Bytes);
+            let identity = if identity == 0.0 { 0.0 } else { identity };
+            let bits = if identity.is_nan() {
+                value.value.to_bits() ^ ((value.unit as u64) << 56)
+            } else {
+                identity.to_bits()
+            };
+            ("dataSize", bits, format!("{}.{}", value.value, value.unit.symbol()))
         }
         other => ("display", 0, format!("{other:?}")),
     };
     Some(format!("{MAPPING_KEY_PREFIX}{kind}:{identity:016x}:{display}").into())
+}
+
+/// Whether two storage keys name equal native-unit mapping keys. Their final
+/// display component deliberately differs when equivalent units were spelled
+/// differently at insertion and lookup time.
+pub(crate) fn mapping_storage_keys_equal(a: &str, b: &str) -> bool {
+    fn parts(key: &str) -> Option<(&str, &str)> {
+        let key = key.strip_prefix(MAPPING_KEY_PREFIX)?;
+        let (kind, rest) = key.split_once(':')?;
+        let (identity, _) = rest.split_once(':')?;
+        matches!(kind, "duration" | "dataSize").then_some((kind, identity))
+    }
+    parts(a).zip(parts(b)).is_some_and(|(a, b)| a == b)
 }
 
 pub(crate) fn display_storage_key(key: &str) -> &str {
@@ -58,7 +80,7 @@ pub(crate) fn mapping_storage_value(key: &str) -> Value {
     let Some((kind, rest)) = key.split_once(':') else {
         return Value::String(key.into());
     };
-    let Some((identity, display)) = rest.split_once(':') else {
+    let Some((_identity, display)) = rest.split_once(':') else {
         return Value::String(key.into());
     };
     match kind {
@@ -75,26 +97,19 @@ pub(crate) fn mapping_storage_value(key: &str) -> Value {
             .parse()
             .map(Value::Float)
             .unwrap_or_else(|_| Value::String(display.into())),
-        "duration" => u64::from_str_radix(identity, 16)
-            .map(f64::from_bits)
-            .map(|value| {
-                Value::Duration(Duration {
-                    value,
-                    unit: DurationUnit::Nanos,
-                })
-            })
-            .unwrap_or_else(|_| Value::String(display.into())),
-        "dataSize" => u64::from_str_radix(identity, 16)
-            .map(f64::from_bits)
-            .map(|value| {
-                Value::DataSize(DataSize {
-                    value,
-                    unit: DataSizeUnit::Bytes,
-                })
-            })
-            .unwrap_or_else(|_| Value::String(display.into())),
+        "duration" => parse_unit_value(display, DurationUnit::parse)
+            .map(|(value, unit)| Value::Duration(Duration { value, unit }))
+            .unwrap_or_else(|| Value::String(display.into())),
+        "dataSize" => parse_unit_value(display, DataSizeUnit::parse)
+            .map(|(value, unit)| Value::DataSize(DataSize { value, unit }))
+            .unwrap_or_else(|| Value::String(display.into())),
         _ => Value::String(display.into()),
     }
+}
+
+fn parse_unit_value<U>(display: &str, unit: impl FnOnce(&str) -> Option<U>) -> Option<(f64, U)> {
+    let (value, unit_name) = display.rsplit_once('.')?;
+    Some((value.parse().ok()?, unit(unit_name)?))
 }
 
 /// Captured lexical bindings. The same type as [`ObjectMap`], so a scope can

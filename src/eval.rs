@@ -4935,7 +4935,11 @@ impl Evaluator {
                 }
                 let key_str = value_to_key(&key)?;
                 match obj {
-                    Value::Object(map, source) => map.get(&key_str).cloned().ok_or_else(|| {
+                    Value::Object(map, source) => map.get(&key_str).cloned().or_else(|| {
+                        map.iter()
+                            .find(|(stored, _)| crate::value::mapping_storage_keys_equal(stored, &key_str))
+                            .map(|(_, value)| value.clone())
+                    }).ok_or_else(|| {
                         Error::Eval(
                             missing_member_error(&source, obj_expr, &key_str, scope)
                                 .unwrap_or_else(|| format!("key not found: {key_str}")),
