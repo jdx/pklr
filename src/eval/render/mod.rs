@@ -18,7 +18,7 @@ use rustc_hash::FxHashSet as HashSet;
 use super::mapping::type_names_match;
 use crate::error::{Error, Result};
 use crate::parser::{Entry, Modifier};
-use crate::value::{ListValue, ObjectMap, ObjectSource, Value};
+use crate::value::{ListValue, ObjectKind, ObjectMap, ObjectSource, Value};
 
 pub(crate) mod json;
 pub(crate) mod jsonnet;
@@ -306,7 +306,9 @@ pub(crate) fn kind_of(value: &Value) -> Kind {
             Some("Dynamic") => Kind::Dynamic,
             Some("Mapping" | "Map") => Kind::Mapping,
             Some(_) => Kind::Typed,
+            None if source.kind == ObjectKind::Mapping => Kind::Mapping,
             None if source.is_metadata_only() => Kind::Typed,
+            None if source.is_parsed_json || source.kind == ObjectKind::Object => Kind::Dynamic,
             None => Kind::Dynamic,
         },
     }

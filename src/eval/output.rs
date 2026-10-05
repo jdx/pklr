@@ -124,6 +124,14 @@ class ImportStrClass { path: String }
 class ExtVarClass { name: String }
 "#;
 
+/// `pkl:json`, as Pkl source.
+const JSON_MODULE: &str = r#"
+class Parser {
+  useMapping: Boolean = false
+  converters = new Mapping {}
+}
+"#;
+
 /// `pkl:xml`, as Pkl source.
 const XML_MODULE: &str = r#"
 class Renderer {
@@ -191,6 +199,7 @@ impl Evaluator {
     /// The value of the standard library module `pkl:name`.
     pub(super) fn stdlib_module(&mut self, name: &str, depth: usize) -> Result<Value> {
         let (key, source) = match name {
+            "json" => ("pkl:json", JSON_MODULE),
             "jsonnet" => ("pkl:jsonnet", JSONNET_MODULE),
             "xml" => ("pkl:xml", XML_MODULE),
             _ => return Ok(super::stdlib_module(name)),
@@ -245,6 +254,9 @@ impl Evaluator {
         args: &[Value],
         depth: usize,
     ) -> Result<Option<Value>> {
+        if method == "parse" && render::typed_class_is(renderer, "pkl:json", "Parser") {
+            return self.eval_json_parse(renderer, args, depth).map(Some);
+        }
         let document = match method {
             "renderDocument" => true,
             "renderValue" => false,
@@ -262,6 +274,33 @@ impl Evaluator {
         let settings = Settings::read(kind, renderer)?;
         let text = settings.render(value, document, None, &mut Invoker(self, depth))?;
         Ok(Some(Value::String(text.into())))
+    }
+
+    /// `json.Parser.parse(source)`, where `source` is a string or a resource.
+    fn eval_json_parse(&mut self, parser: &Value, args: &[Value], depth: usize) -> Result<Value> {
+        let Value::Object(settings, _) = parser else {
+            return Err(Error::Eval("expected a json.Parser".into()));
+        };
+        let text = match args {
+            [Value::String(text)] => text.clone(),
+            [Value::Object(resource, _)] => match resource.get("text") {
+                Some(Value::String(text)) => text.clone(),
+                _ => {
+                    return Err(Error::Eval(
+                        "Expected a `String` or `Resource` to parse.".into(),
+                    ));
+                }
+            },
+            _ => {
+                return Err(Error::Eval(format!(
+                    "parse() expects 1 argument of type `String` or `Resource`, got {}",
+                    args.len()
+                )));
+            }
+        };
+        let use_mapping = matches!(settings.get("useMapping"), Some(Value::Bool(true)));
+        let converters = Converters::from_mapping(settings.get("converters"))?;
+        super::parsers::parse_json(&text, use_mapping, &converters, &mut Invoker(self, depth))
     }
 
     /// Evaluate the top-level module's `output`: the `output` properties of
@@ -587,6 +626,7 @@ fn module_object(map: &Arc<ObjectMap>, path: &Path) -> Value {
         deprecated: Default::default(),
         poisoned_members: None,
         kind: crate::value::ObjectKind::Object,
+        is_parsed_json: false,
     };
     Value::Object(Arc::clone(map), Some(Arc::new(source)))
 }

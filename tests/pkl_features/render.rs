@@ -606,3 +606,74 @@ json = new JsonRenderer { indent = "" }.renderValue(m)"#,
     assert_eq!(json["res"], "key: value\n🔑: 42");
     assert_eq!(json["json"], r#"{"key":"value",🔑:42}"#);
 }
+
+#[test]
+fn json_parser() {
+    let json = eval(
+        r##"import "pkl:json"
+local parser = new json.Parser {}
+a = parser.parse(#"{ "name": "Pigeon", "tags": ["a", 1, 2.5, true, null], "nested": { "x": "é\n" } }"#)
+b = parser.parse("123.0")
+c = new json.Parser { useMapping = true }.parse(#"{ "k": 1 }"#).length
+dynamicAmended = (new json.Parser {}.parse(#"{ "x": 1 }"#)) { y = 2 }
+dynamicSuper = (new json.Parser {}.parse(#"{ "x": 1 }"#)) { fromSuper = super.x; fromSuperLength = super.length }
+mappingAmended = (new json.Parser { useMapping = true }.parse(#"{ "x": 1 }"#)) { ["y"] = 2 }
+"##,
+    );
+    assert_eq!(
+        json["a"],
+        serde_json::json!({"name": "Pigeon", "tags": ["a", 1, 2.5, true, null], "nested": {"x": "é\n"}})
+    );
+    assert_eq!(json["b"], serde_json::json!(123.0));
+    assert_eq!(json["c"], 1);
+    assert_eq!(json["dynamicAmended"], serde_json::json!({"x": 1, "y": 2}));
+    assert_eq!(
+        json["dynamicSuper"],
+        serde_json::json!({"x": 1, "fromSuper": 1, "fromSuperLength": 1})
+    );
+    assert_eq!(json["mappingAmended"], serde_json::json!({"x": 1, "y": 2}));
+}
+
+#[test]
+fn json_parser_converters_and_errors() {
+    let json = eval(
+        r##"import "pkl:json"
+local parser = new json.Parser { converters { [Int] = (it) -> it + 1; [String] = (it) -> it + "x"; ["tags[*]"] = (_) -> "element" } }
+a = parser.parse(#"{ "n": 1, "s": "a", "tags": [1, 2] }"#)
+durationLike = new JsonRenderer {}.renderValue(new json.Parser {}.parse(#"{ "value": 1, "unit": "s" }"#))
+"##,
+    );
+    assert_eq!(
+        json["a"],
+        serde_json::json!({"n": 2, "s": "ax", "tags": ["element", "element"]})
+    );
+    assert_eq!(
+        json["durationLike"],
+        "{\n  \"value\": 1,\n  \"unit\": \"s\"\n}"
+    );
+    for doc in ["0123", "0x1A3", "", "[1,]", "{\"a\" 1}"] {
+        let err = eval_fails(&format!(
+            "import \"pkl:json\"\nres = new json.Parser {{}}.parse({doc:?})"
+        ));
+        assert!(err.contains("Error parsing JSON document."), "{doc}: {err}");
+    }
+    let err = eval_fails("import \"pkl:json\"\nres = new json.Parser {}.parse(\"\\\"\\\\é\")");
+    assert!(err.contains("Error parsing JSON document."), "{err}");
+    for doc in [r#""\u+123""#, r#""\u12é4""#] {
+        let err = eval_fails(&format!(
+            "import \"pkl:json\"\nres = new json.Parser {{}}.parse({doc:?})"
+        ));
+        assert!(err.contains("Expected hexadecimal digit"), "{doc}: {err}");
+    }
+    let json = eval(
+        r#"import "pkl:json"
+res = new json.Parser {}.parse("\"\\uD800\\u0041\"")
+"#,
+    );
+    assert_eq!(json["res"], "�A");
+    let nested = format!("{}0{}", "[".repeat(1_001), "]".repeat(1_001));
+    let err = eval_fails(&format!(
+        "import \"pkl:json\"\nres = new json.Parser {{}}.parse({nested:?})"
+    ));
+    assert!(err.contains("Maximum nesting depth exceeded"), "{err}");
+}
