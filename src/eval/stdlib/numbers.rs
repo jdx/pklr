@@ -6,6 +6,7 @@ use super::render::{format_float, group_digits};
 use super::units::{data_size_unit_arg, duration_unit_arg};
 use super::*;
 use crate::value::{DataSize, DataSizeUnit, Duration, DurationUnit};
+use num_bigint::BigUint;
 
 fn integer_overflow() -> Error {
     Error::Eval("Integer overflow.".into())
@@ -59,45 +60,18 @@ fn int_between(value: i64, lo: i64, hi: i64) -> Result<i64> {
 }
 
 /// Java's `DecimalFormat` with `digits` fraction digits and no grouping.
-/// Like Java, it rounds the shortest decimal form of `x` (half to even),
-/// consulting the exact binary value only when that form ends in a tie.
+/// Like Java, it starts from `FloatingDecimal`'s interval-selected decimal
+/// digits, then applies half-even rounding for the requested scale.
 fn to_fixed(x: f64, digits: usize) -> String {
     let shortest = format!("{:e}", x.abs());
-    if let Some(integer) = java_integer_digits(x, &shortest) {
-        let sign = if x < 0.0 { "-" } else { "" };
-        let fraction = if digits > 0 {
-            format!(".{}", "0".repeat(digits))
-        } else {
-            String::new()
-        };
-        return format!("{sign}{integer}{fraction}");
-    }
-    let significant_digits = shortest
-        .split_once('e')
-        .expect("`{:e}` has an exponent")
-        .0
-        .bytes()
-        .filter(|digit| *digit != b'.')
-        .count();
-    let sci = if shortest_decimal_is_midpoint(x.abs(), &shortest) {
-        // A shortest decimal exactly on a binary64 interval boundary leaves
-        // both adjacent representations viable. FloatingDecimal continues
-        // digit generation in that case; the extra digit selects the same
-        // side of the interval as Java's DecimalFormat. This is deliberately
-        // an interval test rather than a magnitude-specific precision hack.
-        if significant_digits > 1 {
-            format!("{:.16e}", x.abs())
-        } else {
-            format!("{:.15e}", x.abs())
-        }
+    let (mut sig, mut point) = if let Some((significand, point)) = decimal_power_of_two(&shortest) {
+        // The legacy converter's interval contains the compact decimal for
+        // these values; keeping it avoids losing its carry to an overlong
+        // all-nines expansion in the arbitrary-precision path below.
+        (significand.to_string().into_bytes(), point)
     } else {
-        shortest
+        java_floating_decimal_digits(x.abs())
     };
-    let (mantissa, exponent) = sci.split_once('e').expect("`{:e}` has an exponent");
-    let exponent: i64 = exponent.parse().expect("`{:e}` exponent is an integer");
-    let mut sig: Vec<u8> = mantissa.bytes().filter(|b| *b != b'.').collect();
-    // `sig` holds 0.d1d2d3... * 10^point.
-    let mut point = exponent + 1;
     let keep = point + digits as i64;
     if x != 0.0 && keep < sig.len() as i64 {
         let round_up = if keep < 0 {
@@ -153,190 +127,182 @@ fn to_fixed(x: f64, digits: usize) -> String {
     out
 }
 
-/// Whether Ryu's shortest decimal lies exactly halfway between `x` and an
-/// adjacent binary64 value. Whole values up to 38 decimal digits fit in
-/// `u128`; outside that range DecimalFormat's requested scale (0..20) makes
-/// the shortest representation unambiguous for this formatter path.
-fn shortest_decimal_is_midpoint(x: f64, shortest: &str) -> bool {
-    if !x.is_finite() || x < FLOAT_INT_LIMIT {
-        return false;
+/// Port of OpenJDK 17's `FloatingDecimal.BinaryToASCIIBuffer.dtoa` hard path.
+///
+/// OpenJDK is licensed under GPL-2.0-only with the Classpath Exception; this
+/// is an independent Rust translation of its published quotient/remainder
+/// digit-generation and interval-stopping algorithm, not a copied source
+/// fragment. See OpenJDK `FloatingDecimal.java` (jdk17u), lines 424-762.
+fn java_floating_decimal_digits(abs: f64) -> (Vec<u8>, i64) {
+    if abs == 0.0 {
+        return (vec![b'0'], 1);
     }
-    let Some((mantissa, exponent)) = shortest.split_once('e') else {
-        return false;
-    };
-    let exponent: i32 = match exponent.parse() {
-        Ok(exponent) => exponent,
-        Err(_) => return false,
-    };
-    let digits = mantissa
-        .bytes()
-        .filter(|byte| *byte != b'.')
-        .collect::<Vec<_>>();
-    let fractional = mantissa.len() - mantissa.find('.').map_or(mantissa.len(), |dot| dot + 1);
-    let Ok(significand) = std::str::from_utf8(&digits)
-        .ok()
-        .unwrap_or("")
-        .parse::<u128>()
-    else {
-        return false;
-    };
-    let decimal_power = exponent - fractional as i32;
-    if decimal_power < 0 || decimal_power as u32 >= 39 {
-        return false;
-    }
-    let Some(decimal) = significand.checked_mul(10u128.pow(decimal_power as u32)) else {
-        return false;
-    };
-    let bits = x.to_bits();
-    let binary_exponent = ((bits >> 52) & 0x7ff) as i32 - 1023;
-    let shift = binary_exponent - 52;
-    if !(0..128).contains(&shift) {
-        return false;
-    }
-    let significand = (bits & ((1u64 << 52) - 1)) | (1u64 << 52);
-    let exact = (significand as u128) << shift;
-    let half_ulp = 1u128 << (shift - 1);
-    exact.abs_diff(decimal) == half_ulp
-}
 
-/// The digits Java's `FloatingDecimal` (behind `DecimalFormat`) produces for
-/// a whole number below 2^63: the exact value, with the low digits that the
-/// double cannot distinguish rounded away (`5274019902629789696.0` prints
-/// as `5274019902629789700`).
-fn java_integer_digits(x: f64, shortest: &str) -> Option<String> {
-    // `insignificantDigitsForPow2` in OpenJDK's FloatingDecimal.
-    const INSIGNIFICANT: [u32; 64] = [
-        0, 0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 5, 5, 5, 6, 6, 6, 6, 7, 7, 7, 8, 8, 8,
-        9, 9, 9, 9, 10, 10, 10, 11, 11, 11, 12, 12, 12, 12, 13, 13, 13, 14, 14, 14, 15, 15, 15, 15,
-        16, 16, 16, 17, 17, 17, 18, 18, 18, 19,
-    ];
-    let abs = x.abs();
-    if abs.fract() != 0.0 {
-        return None;
-    }
-    if abs >= FLOAT_INT_LIMIT {
-        if shortest_decimal_is_exact(abs, shortest) {
-            return None;
-        }
-        let significant_digits = shortest
-            .split_once('e')?
-            .0
-            .bytes()
-            .filter(|digit| *digit != b'.')
-            .count();
-        let bits = abs.to_bits();
-        let significand = bits & ((1u64 << 52) - 1);
-        let decimal_power_of_two = shortest_significand_is_power_of_two(shortest);
-        if significant_digits == 1
-            || significand == 0
-            || decimal_power_of_two
-            || shortest_decimal_is_midpoint(abs, shortest)
-        {
-            return java_large_integer_digits(
-                abs,
-                significand == 0,
-                decimal_power_of_two && significant_digits > 1,
-            );
-        }
-        return None;
-    }
-    if abs < 1.0 {
-        return None;
-    }
-    let bin_exp = ((abs.to_bits() >> 52) as i64) - 1023;
-    let mut value = abs as u64;
-    let p2 = bin_exp - 54;
-    if p2 > 1 && INSIGNIFICANT[p2 as usize] > 0 {
-        let insignificant = INSIGNIFICANT[p2 as usize];
-        let pow10 = 10u64.pow(insignificant);
-        let residue = value % pow10;
-        value /= pow10;
-        if residue >= pow10 / 2 {
-            value += 1;
-        }
-        return Some(format!("{value}{}", "0".repeat(insignificant as usize)));
-    }
-    Some(value.to_string())
-}
-
-fn shortest_decimal_is_exact(x: f64, shortest: &str) -> bool {
-    let Some((mantissa, exponent)) = shortest.split_once('e') else {
-        return false;
-    };
-    let Ok(exponent) = exponent.parse::<i32>() else {
-        return false;
-    };
-    let digits = mantissa.replace('.', "");
-    let Ok(significand) = digits.parse::<u128>() else {
-        return false;
-    };
-    let fractional = mantissa.len() - mantissa.find('.').map_or(mantissa.len(), |dot| dot + 1);
-    let decimal_power = exponent - fractional as i32;
-    if decimal_power < 0 || decimal_power as u32 >= 39 {
-        return false;
-    }
-    let Some(decimal) = significand.checked_mul(10u128.pow(decimal_power as u32)) else {
-        return false;
-    };
-    let bits = x.to_bits();
-    let shift = ((bits >> 52) & 0x7ff) as i32 - 1023 - 52;
-    if !(0..128).contains(&shift) {
-        return false;
-    }
-    let binary = ((bits & ((1u64 << 52) - 1)) | (1u64 << 52)) as u128;
-    (binary << shift) == decimal
-}
-
-fn shortest_significand_is_power_of_two(shortest: &str) -> bool {
-    let Some((mantissa, _)) = shortest.split_once('e') else {
-        return false;
-    };
-    let digits = mantissa.replace('.', "");
-    digits
-        .parse::<u128>()
-        .is_ok_and(|significand| significand.is_power_of_two())
-}
-
-/// The large-whole-number branch of Java's FloatingDecimal interval logic.
-/// Above 2^63 a binary64 is integral. Its exact significand still fits in a
-/// `u128` through exponent 127, enough to preserve the decimal stopping
-/// interval instead of forcing an arbitrary scientific precision.
-fn java_large_integer_digits(
-    abs: f64,
-    power_of_two: bool,
-    coarse_decimal_interval: bool,
-) -> Option<String> {
     let bits = abs.to_bits();
-    let exponent = ((bits >> 52) & 0x7ff) as i32 - 1023;
-    let shift = exponent - 52;
-    if !(0..=75).contains(&shift) {
+    let exponent_bits = ((bits >> 52) & 0x7ff) as i32;
+    let mut fraction = bits & ((1u64 << 52) - 1);
+    let (bin_exp, significant_bits) = if exponent_bits == 0 {
+        let shift = fraction.leading_zeros() as i32 - 11;
+        fraction <<= shift;
+        (1 - shift - 1023, 64 - fraction.leading_zeros() as i32)
+    } else {
+        fraction |= 1u64 << 52;
+        (exponent_bits - 1023, 53)
+    };
+    let tail_zeros = fraction.trailing_zeros() as i32;
+    let fraction_bits = 53 - tail_zeros;
+    let tiny_bits = (fraction_bits - bin_exp - 1).max(0);
+
+    // FloatingDecimal has a deliberately different fast path when the value
+    // is an integer that fits in a signed long. Its `developLongDigits`
+    // removes decimal digits that are below the binary value's precision;
+    // DecimalFormat observes those digits, so bypassing this path changes
+    // results near 2^63.
+    if tiny_bits == 0 && (-63..=62).contains(&bin_exp) {
+        let mut value = if bin_exp >= 52 {
+            fraction << (bin_exp - 52)
+        } else {
+            fraction >> (52 - bin_exp)
+        };
+        let insignificant = if bin_exp > significant_bits {
+            insignificant_decimal_digits(bin_exp - significant_bits - 1)
+        } else {
+            0
+        };
+        if insignificant > 0 {
+            let decade = 10u64.pow(insignificant);
+            let residue = value % decade;
+            value /= decade;
+            if residue >= decade / 2 {
+                value += 1;
+            }
+        }
+        let mut decimal_exponent = insignificant as i64;
+        let mut text = value.to_string().into_bytes();
+        while text.len() > 1 && text.last() == Some(&b'0') {
+            text.pop();
+            decimal_exponent += 1;
+        }
+        let point = decimal_exponent + i64::try_from(text.len()).unwrap();
+        return (text, point);
+    }
+
+    // FloatingDecimal's estimate is only used to choose the initial decimal
+    // decade. Correct it with exact integer comparisons before generating.
+    let mut decimal_exponent = abs.log10().floor() as i32;
+    let mut b5 = (-decimal_exponent).max(0);
+    let mut b2 = b5 + tiny_bits + bin_exp;
+    let mut s5 = decimal_exponent.max(0);
+    let mut s2 = s5 + tiny_bits;
+    let mut m5 = b5;
+    let mut m2 = b2 - significant_bits;
+    let reduced_fraction = fraction >> tail_zeros;
+    b2 -= fraction_bits - 1;
+    let common_two = b2.min(s2);
+    b2 -= common_two;
+    s2 -= common_two;
+    m2 -= common_two;
+    if fraction_bits == 1 {
+        m2 -= 1;
+    }
+    if m2 < 0 {
+        b2 -= m2;
+        s2 -= m2;
+        m2 = 0;
+    }
+
+    let make_values = |b5: i32, b2: i32, s5: i32, s2: i32, m5: i32, m2: i32| {
+        let b =
+            (BigUint::from(reduced_fraction) * BigUint::from(5u8).pow(b5 as u32)) << b2 as usize;
+        let s = BigUint::from(5u8).pow(s5 as u32) << s2 as usize;
+        let m = BigUint::from(5u8).pow(m5 as u32) << m2 as usize;
+        (b, s, m)
+    };
+    let (mut value, mut scale, mut margin) = make_values(b5, b2, s5, s2, m5, m2);
+    while value < scale {
+        decimal_exponent -= 1;
+        b5 += 1;
+        b2 += 1;
+        m5 += 1;
+        m2 += 1;
+        (value, scale, margin) = make_values(b5, b2, s5, s2, m5, m2);
+    }
+    while value >= &scale * 10u8 {
+        decimal_exponent += 1;
+        s5 += 1;
+        s2 += 1;
+        (value, scale, margin) = make_values(b5, b2, s5, s2, m5, m2);
+    }
+
+    let ten_scale = &scale * 10u8;
+    // OpenJDK's int/long implementations use `b + m > 10 * s`; its
+    // `FDBigInteger::addAndCmp` path uses `10 * s <= b + m`. Keep that
+    // observable boundary distinction instead of applying one comparison to
+    // every operand size.
+    let uses_big_integer_path = value.bits() >= 64 || ten_scale.bits() >= 64;
+    let mut digits = Vec::with_capacity(20);
+    loop {
+        let quotient = &value / &scale;
+        debug_assert!(quotient < BigUint::from(10u8));
+        value = (value % &scale) * 10u8;
+        margin *= 10u8;
+        let low = value < margin;
+        let high = if uses_big_integer_path {
+            &value + &margin >= ten_scale
+        } else {
+            &value + &margin > ten_scale
+        };
+        digits.push(b'0' + quotient.to_u32_digits().first().copied().unwrap_or(0) as u8);
+        if low || high {
+            if high
+                && (!low
+                    || &value * 2u8 > ten_scale
+                    || (&value * 2u8 == ten_scale && digits.last().is_some_and(|d| d & 1 == 1)))
+            {
+                let mut index = digits.len() - 1;
+                loop {
+                    if digits[index] != b'9' {
+                        digits[index] += 1;
+                        break;
+                    }
+                    digits[index] = b'0';
+                    if index == 0 {
+                        digits[0] = b'1';
+                        decimal_exponent += 1;
+                        break;
+                    }
+                    index -= 1;
+                }
+            }
+            break;
+        }
+    }
+    (digits, i64::from(decimal_exponent) + 1)
+}
+
+fn insignificant_decimal_digits(power_of_two: i32) -> u32 {
+    let mut value = 1u64 << power_of_two;
+    let mut digits = 0;
+    while value >= 10 {
+        value /= 10;
+        digits += 1;
+    }
+    digits
+}
+
+fn decimal_power_of_two(shortest: &str) -> Option<(u128, i64)> {
+    let (mantissa, exponent) = shortest.split_once('e')?;
+    let significand = mantissa.replace('.', "").parse::<u128>().ok()?;
+    if !mantissa.contains('.') || !significand.is_power_of_two() {
         return None;
     }
-    let significand = (bits & ((1u64 << 52) - 1)) | (1u64 << 52);
-    let exact = (significand as u128) << shift;
-    // The decimal stopping interval is one decimal decade no finer than the
-    // binary ULP. Rounding the exact significand at that boundary reproduces
-    // FloatingDecimal for large integral binary64 values, including powers
-    // of two and their adjacent decimal midpoints.
-    let mut insignificant = 0u32;
-    let mut decade = 1u128;
-    let ulp = 1u128 << shift;
-    // A normal power of two is at the asymmetric end of its decimal interval:
-    // FloatingDecimal uses the half-ULP margin for its stopping decade.
-    let ulp = if power_of_two { ulp / 2 } else { ulp };
-    while decade.checked_mul(10).is_some_and(|next| next <= ulp) {
-        decade *= 10;
-        insignificant += 1;
-    }
-    if coarse_decimal_interval {
-        decade = decade.checked_mul(10)?;
-        insignificant += 1;
-    }
-    if insignificant == 0 {
-        return Some(exact.to_string());
-    }
-    let rounded = (exact / decade) + u128::from(exact % decade >= decade / 2);
-    Some(format!("{rounded}{}", "0".repeat(insignificant as usize)))
+    let fractional_digits =
+        mantissa.len() - mantissa.find('.').map_or(mantissa.len(), |dot| dot + 1);
+    let exponent = exponent.parse::<i64>().ok()?;
+    Some((
+        significand,
+        exponent - fractional_digits as i64 + i64::try_from(significand.to_string().len()).ok()?,
+    ))
 }
 
 /// `Long.toString(n, radix)`.
@@ -872,9 +838,15 @@ mod tests {
             (1.16e23, "115999999999999990000000"),
             (1.24e23, "124000000000000010000000"),
             (1.03e23, "103000000000000000000000"),
+            (3e23, "300000000000000000000000"),
             (2e23, "199999999999999980000000"),
+            (4.722366482869645e21, "4722366482869645000000"),
             (5.902958103587057e20, "590295810358705650000"),
             (1.048576e29, "104857600000000000000000000000"),
+            (
+                2.955487255461888e36,
+                "2955487255461888000000000000000000000",
+            ),
             (1.8014398509481984e19, "18014398509481984000"),
         ] {
             assert_eq!(to_fixed(value, 0), expected, "{value:e}");
