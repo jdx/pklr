@@ -2578,6 +2578,7 @@ impl Evaluator {
                 poisoned_members: (!poisoned_members.is_empty())
                     .then(|| Arc::new(poisoned_members)),
                 kind: ObjectKind::Object,
+                is_parsed_json: false,
             }))
         };
         let mut effective_late_properties = IndexMap::new();
@@ -3174,6 +3175,7 @@ impl Evaluator {
                                     deprecated: merge_deprecated(&src.deprecated, body),
                                     poisoned_members: None,
                                     kind: ObjectKind::Object,
+                                    is_parsed_json: false,
                                 },
                             };
                             *result_src = Some(std::sync::Arc::new(new_src));
@@ -3421,6 +3423,7 @@ impl Evaluator {
             deprecated: collect_deprecated(entries),
             poisoned_members: None,
             kind: ObjectKind::Object,
+            is_parsed_json: false,
         };
         Ok(Value::Object(Arc::new(map), Some(Arc::new(source))))
     }
@@ -4637,6 +4640,7 @@ impl Evaluator {
                             deprecated,
                             poisoned_members: None,
                             kind: ObjectKind::Mapping,
+                            is_parsed_json: false,
                         };
                         Ok(Value::Object(Arc::new(map), Some(Arc::new(source))))
                     }
@@ -4751,6 +4755,7 @@ impl Evaluator {
                                         deprecated: merge_deprecated(&base_src.deprecated, entries),
                                         poisoned_members: None,
                                         kind: ObjectKind::Object,
+                                        is_parsed_json: false,
                                     }
                                 };
                                 *src_slot = Some(Arc::new(new_src));
@@ -4791,6 +4796,7 @@ impl Evaluator {
                                 deprecated,
                                 poisoned_members: None,
                                 kind: ObjectKind::Object,
+                                is_parsed_json: false,
                             };
                             Ok(Value::Object(Arc::new(merged), Some(Arc::new(src))))
                         } else {
@@ -5616,6 +5622,7 @@ impl Evaluator {
         }
         if let Value::Object(base_map, Some(base_src)) = &base
             && !base_src.is_metadata_only()
+            && !base_src.is_parsed_json
         {
             check_no_elements(base_src, overlay_entries)?;
             let has_mapping_default = base_src
@@ -5677,6 +5684,7 @@ impl Evaluator {
             for (name, value) in existing.iter() {
                 amendment_scope.set(name, value.clone());
             }
+            amendment_scope.set("super", base.clone());
         }
         let overlay = self.eval_entries(overlay_entries, &amendment_scope, depth + 1)?;
         Ok(merge_values(base, overlay))
@@ -6032,6 +6040,7 @@ impl Evaluator {
                                         deprecated: merge_deprecated(&src.deprecated, body),
                                         poisoned_members: None,
                                         kind: ObjectKind::Object,
+                                        is_parsed_json: false,
                                     },
                                 };
                                 *result_src = Some(std::sync::Arc::new(new_src));

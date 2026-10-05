@@ -307,8 +307,8 @@ pub(crate) fn kind_of(value: &Value) -> Kind {
             Some("Mapping" | "Map") => Kind::Mapping,
             Some(_) => Kind::Typed,
             None if source.kind == ObjectKind::Mapping => Kind::Mapping,
-            None if source.kind == ObjectKind::Object => Kind::Dynamic,
             None if source.is_metadata_only() => Kind::Typed,
+            None if source.is_parsed_json || source.kind == ObjectKind::Object => Kind::Dynamic,
             None => Kind::Dynamic,
         },
     }

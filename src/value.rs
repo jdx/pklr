@@ -141,6 +141,10 @@ pub struct ObjectSource {
     pub(crate) poisoned_members: Option<Arc<IndexMap<String, PoisonedMember>>>,
     /// Whether this is a `Mapping`, a class, or another object.
     pub(crate) kind: ObjectKind,
+    /// Whether this object was materialized from JSON rather than evaluated
+    /// from a Pkl body. Such objects retain their evaluated members when
+    /// amended, but still render as Dynamics.
+    pub(crate) is_parsed_json: bool,
 }
 
 /// What an object with an [`ObjectSource`] is, beyond its members. Objects
@@ -213,8 +217,7 @@ impl ObjectSource {
     pub(crate) fn is_metadata_only(&self) -> bool {
         (self.poisoned_members.is_some()
             || self.is_abstract
-            || (matches!(self.kind, ObjectKind::Mapping | ObjectKind::Object)
-                && self.mapping_value_types.is_empty()))
+            || (matches!(self.kind, ObjectKind::Mapping) && self.mapping_value_types.is_empty()))
             && self.entries.is_empty()
             && self.evaluated_properties.is_empty()
             && self.type_name.is_none()

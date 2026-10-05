@@ -324,6 +324,7 @@ impl JsonParser<'_> {
             } else {
                 ObjectKind::Object
             },
+            is_parsed_json: true,
         };
         self.depth -= 1;
         Ok(Value::Object(Arc::new(map), Some(Arc::new(source))))
