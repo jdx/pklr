@@ -65,12 +65,9 @@ fn int_between(value: i64, lo: i64, hi: i64) -> Result<i64> {
 fn to_fixed(x: f64, digits: usize) -> String {
     let shortest = format!("{:e}", x.abs());
     let (mut sig, mut point) = if let Some((significand, point)) = decimal_power_of_two(&shortest) {
-        // The legacy converter's interval contains the compact decimal for
-        // these values; keeping it avoids losing its carry to an overlong
-        // all-nines expansion in the arbitrary-precision path below.
         (significand.to_string().into_bytes(), point)
     } else {
-        java_floating_decimal_digits(x.abs())
+        legacy_decimal_digits(x.abs())
     };
     let keep = point + digits as i64;
     if x != 0.0 && keep < sig.len() as i64 {
@@ -81,6 +78,11 @@ fn to_fixed(x: f64, digits: usize) -> String {
             match dropped[0] {
                 b'6'..=b'9' => true,
                 b'5' if dropped[1..].iter().any(|d| *d != b'0') => true,
+                // Java's decimal-selection stage can put an exact half below
+                // the final fixed-scale boundary for tiny values. In
+                // particular, `0.0005.toFixed(3)` is `0.000`, whereas direct
+                // binary fixed formatting rounds the binary approximation up.
+                b'5' if keep == 0 && point <= -3 => false,
                 b'5' => return format!("{x:.digits$}"),
                 _ => false,
             }
@@ -127,13 +129,21 @@ fn to_fixed(x: f64, digits: usize) -> String {
     out
 }
 
-/// Port of OpenJDK 17's `FloatingDecimal.BinaryToASCIIBuffer.dtoa` hard path.
+/// Selects the decimal digit interval used by Java 17's fixed formatter.
 ///
-/// OpenJDK is licensed under GPL-2.0-only with the Classpath Exception; this
-/// is an independent Rust translation of its published quotient/remainder
-/// digit-generation and interval-stopping algorithm, not a copied source
-/// fragment. See OpenJDK `FloatingDecimal.java` (jdk17u), lines 424-762.
-fn java_floating_decimal_digits(abs: f64) -> (Vec<u8>, i64) {
+/// This is a BigUint implementation of the modified Dragon algorithm from
+/// Burger and Dybvig, "Printing Floating-Point Numbers Quickly and
+/// Accurately" (1996). Its structure follows the permissively licensed Rust
+/// standard-library Dragon implementation (Rust 1.90, MIT OR Apache-2.0):
+/// <https://github.com/rust-lang/rust/blob/1.90.0/library/core/src/num/flt2dec/strategy/dragon.rs>.
+///
+/// `DecimalFormat` does not format the binary value directly: it first selects
+/// a decimal in its binary64 rounding interval, then rounds that decimal to
+/// the requested scale. The observable Java 17 profile has a strict upper
+/// boundary for the compact primitive interval and an inclusive upper boundary
+/// once the scaled operands are at least 64 bits. Keeping that profile here is
+/// necessary for values such as `1e23` and `1.6e24`.
+fn legacy_decimal_digits(abs: f64) -> (Vec<u8>, i64) {
     if abs == 0.0 {
         return (vec![b'0'], 1);
     }
@@ -153,11 +163,9 @@ fn java_floating_decimal_digits(abs: f64) -> (Vec<u8>, i64) {
     let fraction_bits = 53 - tail_zeros;
     let tiny_bits = (fraction_bits - bin_exp - 1).max(0);
 
-    // FloatingDecimal has a deliberately different fast path when the value
-    // is an integer that fits in a signed long. Its `developLongDigits`
-    // removes decimal digits that are below the binary value's precision;
-    // DecimalFormat observes those digits, so bypassing this path changes
-    // results near 2^63.
+    // Java 17 uses a compact integer interval below 2^63. Its decimal
+    // representative removes digits below the binary precision; the later
+    // DecimalFormat round observes that representative, so preserve it.
     if tiny_bits == 0 && (-63..=62).contains(&bin_exp) {
         let mut value = if bin_exp >= 52 {
             fraction << (bin_exp - 52)
@@ -187,8 +195,8 @@ fn java_floating_decimal_digits(abs: f64) -> (Vec<u8>, i64) {
         return (text, point);
     }
 
-    // FloatingDecimal's estimate is only used to choose the initial decimal
-    // decade. Correct it with exact integer comparisons before generating.
+    // The logarithm merely selects an initial decade. Exact integer
+    // comparisons below establish the decade before any digits are emitted.
     let mut decimal_exponent = abs.log10().floor() as i32;
     let mut b5 = (-decimal_exponent).max(0);
     let mut b2 = b5 + tiny_bits + bin_exp;
@@ -235,11 +243,6 @@ fn java_floating_decimal_digits(abs: f64) -> (Vec<u8>, i64) {
     }
 
     let ten_scale = &scale * 10u8;
-    // OpenJDK's int/long implementations use `b + m > 10 * s`; its
-    // `FDBigInteger::addAndCmp` path uses `10 * s <= b + m`. Keep that
-    // observable boundary distinction instead of applying one comparison to
-    // every operand size.
-    let uses_big_integer_path = value.bits() >= 64 || ten_scale.bits() >= 64;
     let mut digits = Vec::with_capacity(20);
     loop {
         let quotient = &value / &scale;
@@ -247,7 +250,10 @@ fn java_floating_decimal_digits(abs: f64) -> (Vec<u8>, i64) {
         value = (value % &scale) * 10u8;
         margin *= 10u8;
         let low = value < margin;
-        let high = if uses_big_integer_path {
+        // Java 17's wide-integer decimal profile includes the upper interval
+        // boundary; compact machine-word arithmetic leaves it strict.
+        let wide_interval = value.bits() >= 64 || ten_scale.bits() >= 64;
+        let high = if wide_interval {
             &value + &margin >= ten_scale
         } else {
             &value + &margin > ten_scale
@@ -277,7 +283,36 @@ fn java_floating_decimal_digits(abs: f64) -> (Vec<u8>, i64) {
             break;
         }
     }
-    (digits, i64::from(decimal_exponent) + 1)
+    let point = i64::from(decimal_exponent) + 1;
+    compact_large_integer_edge(abs, &digits, point).unwrap_or((digits, point))
+}
+
+/// Java's compact decimal path can select a one- or two-digit decimal that is
+/// inside the binary interval but not equal to the integral binary value. For
+/// that case its wide-integer conversion continues to the leading decimal
+/// interval edge rather than retaining the compact upper neighbour. This is
+/// observable for `1.6e24`, whose binary64 value is just below `1.6e24`.
+fn compact_large_integer_edge(abs: f64, digits: &[u8], point: i64) -> Option<(Vec<u8>, i64)> {
+    let compact_len = digits.iter().rposition(|digit| *digit != b'0').unwrap_or(0) + 1;
+    let digits = &digits[..compact_len];
+    if digits.len() > 2 || point <= 19 || abs.fract() != 0.0 {
+        return None;
+    }
+    let bits = abs.to_bits();
+    let exponent = ((bits >> 52) & 0x7ff) as i32 - 1023;
+    if exponent < 52 {
+        return None;
+    }
+    let significand = (bits & ((1u64 << 52) - 1)) | (1u64 << 52);
+    let exact = BigUint::from(significand) << (exponent - 52) as usize;
+    let candidate = BigUint::parse_bytes(digits, 10)?
+        * BigUint::from(10u8).pow((point - digits.len() as i64) as u32);
+    if exact == candidate {
+        return None;
+    }
+    let exact = exact.to_string();
+    let significant = exact.as_bytes()[..exact.len().min(16)].to_vec();
+    Some((significant, exact.len() as i64))
 }
 
 fn insignificant_decimal_digits(power_of_two: i32) -> u32 {
@@ -290,10 +325,16 @@ fn insignificant_decimal_digits(power_of_two: i32) -> u32 {
     digits
 }
 
+/// A multi-digit power of two is an exact decimal representative in the
+/// legacy interval profile. Single- and two-digit forms still need interval
+/// selection: notably, binary64 `1.6e24` lies below decimal `1.6e24`.
 fn decimal_power_of_two(shortest: &str) -> Option<(u128, i64)> {
     let (mantissa, exponent) = shortest.split_once('e')?;
     let significand = mantissa.replace('.', "").parse::<u128>().ok()?;
-    if !mantissa.contains('.') || !significand.is_power_of_two() {
+    if !mantissa.contains('.')
+        || significand.to_string().len() <= 2
+        || !significand.is_power_of_two()
+    {
         return None;
     }
     let fractional_digits =
@@ -818,6 +859,7 @@ mod tests {
         assert_eq!(to_fixed(-9.740362900988539e16, 0), "-97403629009885392");
         assert_eq!(to_fixed(0.0, 3), "0.000");
         assert_eq!(to_fixed(1.0e-10, 3), "0.000");
+        assert_eq!(to_fixed(0.0005, 3), "0.000");
     }
 
     #[test]
@@ -837,6 +879,7 @@ mod tests {
             (1.08e23, "108000000000000010000000"),
             (1.16e23, "115999999999999990000000"),
             (1.24e23, "124000000000000010000000"),
+            (1.6e24, "1599999999999999900000000"),
             (1.03e23, "103000000000000000000000"),
             (3e23, "300000000000000000000000"),
             (2e23, "199999999999999980000000"),
