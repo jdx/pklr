@@ -132,6 +132,28 @@ pub(super) fn type_expr_runtime_name(ty: &TypeExpr) -> String {
     }
 }
 
+/// Whether `new { ... }` assigned to a property declared `ty` should build
+/// `ty`: a Mapping or Listing (with or without type arguments), possibly
+/// nullable or constrained, or a class or alias name resolved at evaluation.
+pub(super) fn infers_new(ty: &TypeExpr) -> bool {
+    match ty {
+        TypeExpr::Generic(name, _) => matches!(name.as_str(), "Mapping" | "Listing"),
+        TypeExpr::Nullable(inner) => infers_new(inner),
+        TypeExpr::Constrained(base, _) => {
+            let base = base.trim_end_matches('?');
+            matches!(base.split('<').next(), Some("Mapping" | "Listing"))
+        }
+        TypeExpr::Named(name) => {
+            name.starts_with(|c: char| c.is_ascii_uppercase())
+                && !matches!(
+                    name.as_str(),
+                    "Dynamic" | "Any" | "Map" | "List" | "Set" | "Object"
+                )
+        }
+        TypeExpr::Union(_) => false,
+    }
+}
+
 /// Whether `expr` has an untyped `new { ... }` in a result position.
 pub(crate) fn has_untyped_result_new(expr: &Expr) -> bool {
     match expr {

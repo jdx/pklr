@@ -6330,6 +6330,38 @@ impl Evaluator {
                         map.insert(storage_key, val);
                         continue;
                     }
+                    // An entry body of a `Listing` value amends a listing: an
+                    // inherited entry's, else the mapping's `default`, else an
+                    // empty one. The declared value type decides: `Listing`, or
+                    // a union containing `Listing` when the body has only
+                    // elements. An untyped element-only body is a Dynamic
+                    // rendered as a listing.
+                    let listing_alternative = value_type_names.iter().any(|name| {
+                        name.trim_start_matches('*').split('<').next() == Some("Listing")
+                    });
+                    if let Expr::ObjectBody(body) = val_expr
+                        && (matches!(map.get(&storage_key), Some(Value::List(_)))
+                            || value_type_names == ["Listing"]
+                            || ((listing_alternative || type_defaults.is_empty())
+                                && matches!(explicit_default, None | Some(Value::List(_)))
+                                && is_element_only_body(body)))
+                    {
+                        if find_listing_body_property(body).is_some() {
+                            return Err(Error::Eval(
+                                "Object of type `Listing` cannot have a property (other than \
+                                 `default`)."
+                                    .into(),
+                            ));
+                        }
+                        let base = match (map.get(&storage_key), &explicit_default) {
+                            (Some(existing @ Value::List(_)), _) => existing.clone(),
+                            (_, Some(default @ Value::List(_))) => default.clone(),
+                            _ => Value::List(Vec::new().into()),
+                        };
+                        let val = self.eval_value_amendment(base, body, &entry_scope, depth)?;
+                        map.insert(storage_key, val);
+                        continue;
+                    }
                     let type_default = match val_expr {
                         Expr::ObjectBody(body) => select_mapping_type_default(type_defaults, body)
                             .map(|(name, value)| (Some(name.as_str()), value)),

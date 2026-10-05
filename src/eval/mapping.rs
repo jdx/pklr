@@ -536,6 +536,27 @@ pub(super) fn validate_new_object_body(
     Ok(())
 }
 
+/// Whether `entries` (including what their generators produce) consist of
+/// elements only, with no properties or keyed entries.
+pub(super) fn is_element_only_body(entries: &[Entry]) -> bool {
+    fn has_members(entries: &[Entry]) -> bool {
+        entries.iter().any(|entry| match entry {
+            Entry::DynProperty(..) => true,
+            Entry::Property(prop) => !has_modifier(&prop.modifiers, Modifier::Local),
+            Entry::ForGenerator(generator) => has_members(&generator.body),
+            Entry::WhenGenerator(generator) => {
+                has_members(&generator.body)
+                    || generator
+                        .else_body
+                        .as_deref()
+                        .is_some_and(|body| has_members(body))
+            }
+            _ => false,
+        })
+    }
+    entries_are_listing_amendment(entries) && !has_members(entries)
+}
+
 /// Finds a property (other than `local`s and `default`) that a listing body
 /// assigns, including inside `for` and `when` generators.
 pub(super) fn find_listing_body_property(entries: &[Entry]) -> Option<&str> {

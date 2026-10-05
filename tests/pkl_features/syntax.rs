@@ -1106,6 +1106,111 @@ hooks: Mapping<String, Hook> = (hooksFor(base)) {
     assert_eq!(json["hooks"]["check"]["steps"]["beta"]["check"], "b");
 }
 
+#[test]
+fn mapping_entry_bodies_of_listings_keep_their_elements() {
+    // The shape of pkl:test's `facts` and `examples`.
+    let json = eval(
+        r#"
+examples: Mapping<String, Listing<Any>> = new {
+  ["x"] {
+    1 + 1
+    "two"
+  }
+  ["y"] {
+    for (i in List(1, 2)) { i }
+  }
+}
+typed: Mapping<String, Listing<Int>> = new { ["a"] { 1; 2 } }
+local m: Mapping<String, Listing<Int>> = new { ["a"] { 3 } }
+fromLocal = m
+explicit = new Mapping<String, Listing<Int>> { ["a"] { 4 } }
+amended = (explicit) { ["a"] { 5 } }
+untyped = new Mapping { ["a"] { 6 } }
+"#,
+    );
+    assert_eq!(json["examples"]["x"], serde_json::json!([2, "two"]));
+    assert_eq!(json["examples"]["y"], serde_json::json!([1, 2]));
+    assert_eq!(json["typed"]["a"], serde_json::json!([1, 2]));
+    assert_eq!(json["fromLocal"]["a"], serde_json::json!([3]));
+    assert_eq!(json["explicit"]["a"], serde_json::json!([4]));
+    assert_eq!(json["amended"]["a"], serde_json::json!([4, 5]));
+    assert_eq!(json["untyped"]["a"], serde_json::json!([6]));
+}
+
+#[test]
+fn listing_mapping_entries_amend_the_default() {
+    let json = eval(
+        r#"
+withDefault = new Mapping<String, Listing<Int>> { default { 0 }; ["a"] { 1 } }
+local base = new Mapping<String, Listing<Int>> { default { 0 } }
+inherited = (base) { ["b"] { 2 } }
+"#,
+    );
+    assert_eq!(json["withDefault"]["a"], serde_json::json!([0, 1]));
+    assert_eq!(json["inherited"]["b"], serde_json::json!([0, 2]));
+}
+
+#[test]
+fn listing_mapping_entry_cannot_have_a_property() {
+    let msg = eval_fails(r#"x = new Mapping<String, Listing<Int>> { ["a"] { 1; foo = 2 } }"#);
+    assert!(
+        msg.contains("Object of type `Listing` cannot have a property (other than `default`).")
+    );
+}
+
+#[test]
+fn untyped_mapping_entry_with_generated_property_stays_an_object() {
+    let json = eval(r#"x = new Mapping { ["a"] { when (true) { y = 1 } } }"#);
+    assert_eq!(json["x"]["a"], serde_json::json!({ "y": 1 }));
+}
+
+#[test]
+fn new_builds_wrapped_declared_types() {
+    let json = eval(
+        r#"
+typealias LM = Mapping<String, Listing<Int>>
+nullable: Mapping<String, Listing<Int>>? = new { ["a"] { 1 } }
+aliased: LM = new { ["a"] { 2 } }
+constrained: Mapping<String, Listing<Int>>(length > 0) = new { ["a"] { 3 } }
+class Foo { a = 1; b = 2 }
+local foo: Foo? = new { a = 5 }
+fromLocal = foo
+"#,
+    );
+    assert_eq!(json["nullable"]["a"], serde_json::json!([1]));
+    assert_eq!(json["aliased"]["a"], serde_json::json!([2]));
+    assert_eq!(json["constrained"]["a"], serde_json::json!([3]));
+    assert_eq!(json["fromLocal"], serde_json::json!({ "a": 5, "b": 2 }));
+}
+
+#[test]
+fn new_builds_bare_listing_and_mapping() {
+    let json = eval(
+        r#"
+listing: Listing = new { 1 }
+mapping: Mapping = new { ["a"] = 1 }
+"#,
+    );
+    assert_eq!(json["listing"], serde_json::json!([1]));
+    assert_eq!(json["mapping"], serde_json::json!({ "a": 1 }));
+}
+
+#[test]
+fn listing_entries_follow_the_declared_value_type() {
+    let json = eval(
+        r#"
+class Bird { name = "b" }
+union = new Mapping<String, *Listing<Int>|Bird> { ["a"] { 1 } }
+unionClass = new Mapping<String, Listing<Int>|*Bird> { ["a"] { name = "x" } }
+local d = new Mapping { default { 0 }; ["a"] { x = 1 } }
+untypedWithListDefault = d["a"].x
+"#,
+    );
+    assert_eq!(json["union"]["a"], serde_json::json!([1]));
+    assert_eq!(json["unionClass"]["a"], serde_json::json!({ "name": "x" }));
+    assert_eq!(json["untypedWithListDefault"], 1);
+}
+
 // ============================================================
 // Spread operator
 // ============================================================
