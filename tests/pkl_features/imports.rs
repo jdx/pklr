@@ -2740,3 +2740,27 @@ d = new D {}
     let json = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(json["d"]["p"], serde_json::json!({"a": 1, "b": 3}));
 }
+
+#[test]
+fn untyped_new_amendment_resolves_imported_type_where_declared() {
+    let temp = TestTempDir::new("pklr_test_untyped_new_imported_amendment_type");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Lib.pkl"),
+        "class F { a = 1; b = 3 }\nclass H { f: F }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "Lib.pkl"
+class F { a = 99 }
+h = new Lib.H { f = new { b = 10 } }
+h2 = (h) { f = new { a = 7 } }
+"#,
+    )
+    .unwrap();
+    let json = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
+    assert_eq!(json["h"]["f"], serde_json::json!({"a": 1, "b": 10}));
+    assert_eq!(json["h2"]["f"], serde_json::json!({"a": 7, "b": 3}));
+}

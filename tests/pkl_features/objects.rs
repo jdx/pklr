@@ -4534,3 +4534,38 @@ b = new { when (false) { 1 } else { p = 2 } }
     assert_eq!(json["a"], serde_json::json!([1]));
     assert_eq!(json["b"], serde_json::json!({"p": 2}));
 }
+
+#[test]
+fn typed_untyped_new_covers_alias_nullable_and_mapping_values() {
+    let json = eval(
+        r#"
+class F { a = 1; b = 3 }
+x: F = new { a = 2 }
+v: F? = new { a = 7 }
+typealias L = Listing<String>
+u: L = new { "s" }
+m: Mapping<String, F> = new { ["k"] { a = 0 } }
+"#,
+    );
+    assert_eq!(json["x"], serde_json::json!({"a": 2, "b": 3}));
+    assert_eq!(json["v"], serde_json::json!({"a": 7, "b": 3}));
+    assert_eq!(json["u"], serde_json::json!(["s"]));
+    assert_eq!(json["m"], serde_json::json!({"k": {"a": 0, "b": 3}}));
+}
+
+#[test]
+fn untyped_new_amendment_uses_declared_type_default() {
+    let json = eval(
+        r#"
+class F { a = 1; b = 3 }
+class H { f: F = new { a = 5 } }
+class H2 { f: F }
+h = new H { f = new { b = 10 } }
+h2 = new H2 { f = new { b = 10 } }
+h3 = (h) { f = new { a = 7 } }
+"#,
+    );
+    assert_eq!(json["h"]["f"], serde_json::json!({"a": 5, "b": 10}));
+    assert_eq!(json["h2"]["f"], serde_json::json!({"a": 1, "b": 10}));
+    assert_eq!(json["h3"]["f"], serde_json::json!({"a": 7, "b": 3}));
+}
