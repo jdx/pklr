@@ -770,9 +770,10 @@ fn trace_source_keeps_the_enclosing_interpolated_string_span() {
     for source in [
         "x = trace(\"a \\(1)\")\n",
         "x = trace(\"outer \\(\"inner \\(1)\")\")\n",
-        "x = trace(\"first\\n  \\(1)\\nlast\")\n",
+        "x = trace(\"first\n  \\(1)\nlast\")\n",
     ] {
-        let module = pklr::parser::parse_named(&lex(source).unwrap(), source, "main.pkl").unwrap();
+        let tokens = lex(source).unwrap();
+        let module = pklr::parser::parse_named(&tokens, source, "main.pkl").unwrap();
         let Entry::Property(x) = &module.body[0] else {
             panic!("expected property x");
         };
@@ -782,6 +783,14 @@ fn trace_source_keeps_the_enclosing_interpolated_string_span() {
         let start = source.find('"').unwrap();
         let end = source.rfind('"').unwrap() + 1;
         assert_eq!(site.source, &source[start..end]);
+        assert_eq!(site.line, 1);
+        let token = tokens
+            .iter()
+            .find(|token| matches!(token.kind, pklr::lexer::TokenKind::InterpolatedString(_)))
+            .unwrap();
+        assert_eq!(token.offset, start);
+        assert_eq!(token.end, end);
+        assert_eq!(token.line, 1);
     }
 }
 

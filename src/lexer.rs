@@ -263,7 +263,11 @@ impl<'a> Lexer<'a> {
         } else {
             TokenKind::StringLit(current)
         };
-        (self.token_start_line, self.token_start_col, self.token_start_offset) = token_start;
+        (
+            self.token_start_line,
+            self.token_start_col,
+            self.token_start_offset,
+        ) = token_start;
         Ok(token)
     }
 
