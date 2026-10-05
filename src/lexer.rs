@@ -662,6 +662,9 @@ impl<'a> Lexer<'a> {
                 } else if ident == "read" && self.peek() == Some('?') {
                     self.advance();
                     TokenKind::KwReadOrNull
+                } else if ident == "read" && self.peek() == Some('*') {
+                    self.advance();
+                    TokenKind::KwReadGlob
                 } else {
                     keyword_or_ident(ident)
                 }
@@ -748,6 +751,7 @@ fn keyword_or_ident(s: &str) -> TokenKind {
         "trace" => TokenKind::KwTrace,
         "read" => TokenKind::KwRead,
         "read?" => TokenKind::KwReadOrNull,
+        "read*" => TokenKind::KwReadGlob,
         "for" => TokenKind::KwFor,
         "in" => TokenKind::KwIn,
         "true" => TokenKind::BoolLit(true),

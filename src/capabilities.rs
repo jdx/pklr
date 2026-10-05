@@ -60,6 +60,13 @@ pub trait EvalCapabilities: Send + Sync {
 
     fn read_env(&mut self, name: &str) -> Result<Option<String>>;
 
+    /// Every environment variable, used by `read*("env:...")`. Capability
+    /// implementations that do not wish to expose enumeration can keep the
+    /// safe default of no entries.
+    fn env_vars(&mut self) -> Result<Vec<(String, String)>> {
+        Ok(Vec::new())
+    }
+
     fn fetch_text(&mut self, url: &str) -> Result<String>;
 
     fn fetch_bytes(&mut self, url: &str) -> Result<Vec<u8>>;
@@ -310,6 +317,12 @@ impl EvalCapabilities for NativeCapabilities {
 
     fn read_env(&mut self, name: &str) -> Result<Option<String>> {
         Ok(std::env::var(name).ok())
+    }
+
+    fn env_vars(&mut self) -> Result<Vec<(String, String)>> {
+        Ok(std::env::vars_os()
+            .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+            .collect())
     }
 
     fn fetch_text(&mut self, url: &str) -> Result<String> {

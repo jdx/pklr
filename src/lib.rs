@@ -85,6 +85,9 @@ pub struct EvaluatorBuilder {
     http_rewrites: Vec<String>,
     package_cache_dir: Option<std::path::PathBuf>,
     offline: bool,
+    allowed_resources: Option<Vec<String>>,
+    environment: Option<std::collections::BTreeMap<String, String>>,
+    external_properties: std::collections::BTreeMap<String, String>,
     preloaded_packages: Vec<PreloadedPackage>,
 }
 
@@ -135,6 +138,30 @@ impl EvaluatorBuilder {
         self
     }
 
+    /// Restrict resource reads to URI prefixes.
+    pub fn allowed_resources(mut self, resources: impl IntoIterator<Item = String>) -> Self {
+        self.allowed_resources = Some(resources.into_iter().collect());
+        self
+    }
+
+    /// Replace the environment visible through `env:` resources.
+    pub fn environment_variables(
+        mut self,
+        vars: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        self.environment = Some(vars.into_iter().collect());
+        self
+    }
+
+    /// Add properties visible through `prop:` resources.
+    pub fn external_properties(
+        mut self,
+        properties: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        self.external_properties.extend(properties);
+        self
+    }
+
     /// Seed the package cache with content the host already has, instead of
     /// fetching it. Requires [`package_cache_dir`](Self::package_cache_dir).
     pub fn preload_package(
@@ -175,6 +202,13 @@ impl EvaluatorBuilder {
             evaluator.set_package_cache_dir(cache_dir);
         }
         evaluator.set_offline(self.offline);
+        if let Some(resources) = self.allowed_resources {
+            evaluator.set_allowed_resources(resources);
+        }
+        if let Some(environment) = self.environment {
+            evaluator.set_environment_variables(environment);
+        }
+        evaluator.set_external_properties(self.external_properties);
         for package in &self.preloaded_packages {
             let _ = evaluator.preload_package(&package.url, &package.extension, &package.bytes);
         }

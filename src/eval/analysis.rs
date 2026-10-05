@@ -204,8 +204,9 @@ pub(super) fn collect_expr_import_field_uses(
         Expr::Unop(_, value)
         | Expr::Throw(value)
         | Expr::Trace(value)
-        | Expr::Read(value)
-        | Expr::ReadOrNull(value) => collect_expr_import_field_uses(value, uses, shadows),
+        | Expr::Read(value, _)
+        | Expr::ReadOrNull(value, _)
+        | Expr::ReadGlob(value, _) => collect_expr_import_field_uses(value, uses, shadows),
         Expr::InferredNew(ty, entries) => {
             collect_type_import_field_uses(ty, uses, shadows);
             collect_entry_import_field_uses(entries, uses, shadows);
@@ -1033,8 +1034,9 @@ pub(super) fn collect_sibling_field_refs_expr(
         Expr::Unop(_, body)
         | Expr::Throw(body)
         | Expr::Trace(body)
-        | Expr::Read(body)
-        | Expr::ReadOrNull(body) => {
+        | Expr::Read(body, _)
+        | Expr::ReadOrNull(body, _)
+        | Expr::ReadGlob(body, _) => {
             collect_sibling_field_refs_expr(body, refs, include_this);
         }
         Expr::StringInterpolation(parts) => {
@@ -1762,8 +1764,9 @@ fn collect_field_names_expr(expr: &Expr, out: &mut HashSet<String>) {
         | Expr::Unop(_, value)
         | Expr::Throw(value)
         | Expr::Trace(value)
-        | Expr::Read(value)
-        | Expr::ReadOrNull(value) => collect_field_names_expr(value, out),
+        | Expr::Read(value, _)
+        | Expr::ReadOrNull(value, _)
+        | Expr::ReadGlob(value, _) => collect_field_names_expr(value, out),
         Expr::StringInterpolation(parts) => {
             for part in parts {
                 if let StringInterpPart::Expr(expr) = part {
@@ -2335,8 +2338,9 @@ fn collect_expr_refs_in(
         Expr::Unop(_, value)
         | Expr::Throw(value)
         | Expr::Trace(value)
-        | Expr::Read(value)
-        | Expr::ReadOrNull(value) => {
+        | Expr::Read(value, _)
+        | Expr::ReadOrNull(value, _)
+        | Expr::ReadGlob(value, _) => {
             collect_expr_refs_in(value, refs, shadows, aliases, definitions)
         }
         Expr::InferredNew(ty, entries) => {
@@ -2517,8 +2521,9 @@ pub(super) fn collect_unshadowed_names(expr: &Expr, names: &mut HashSet<String>)
         Expr::Unop(_, value)
         | Expr::Throw(value)
         | Expr::Trace(value)
-        | Expr::Read(value)
-        | Expr::ReadOrNull(value) => collect_unshadowed_names(value, names),
+        | Expr::Read(value, _)
+        | Expr::ReadOrNull(value, _)
+        | Expr::ReadGlob(value, _) => collect_unshadowed_names(value, names),
         Expr::InferredNew(ty, entries) => {
             collect_unshadowed_type_names(ty, names);
             collect_unshadowed_entry_names(entries, names);
@@ -2699,8 +2704,9 @@ fn expr_mentions(expr: &Expr, name: &str) -> bool {
         Expr::Unop(_, value)
         | Expr::Throw(value)
         | Expr::Trace(value)
-        | Expr::Read(value)
-        | Expr::ReadOrNull(value) => expr_mentions(value, name),
+        | Expr::Read(value, _)
+        | Expr::ReadOrNull(value, _)
+        | Expr::ReadGlob(value, _) => expr_mentions(value, name),
         Expr::StringInterpolation(parts) => parts.iter().any(|part| match part {
             StringInterpPart::Expr(expr) => expr_mentions(expr, name),
             StringInterpPart::Literal(_) => false,
@@ -2824,8 +2830,9 @@ impl InstanceReads {
             Expr::Unop(_, value)
             | Expr::Throw(value)
             | Expr::Trace(value)
-            | Expr::Read(value)
-            | Expr::ReadOrNull(value) => self.expr(value, depth),
+            | Expr::Read(value, _)
+            | Expr::ReadOrNull(value, _)
+            | Expr::ReadGlob(value, _) => self.expr(value, depth),
             Expr::StringInterpolation(parts) => {
                 for part in parts {
                     if let StringInterpPart::Expr(expr) = part {

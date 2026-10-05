@@ -180,9 +180,11 @@ pub enum Expr {
     /// `trace(expr)`
     Trace(Box<Expr>),
     /// `read("uri")`
-    Read(Box<Expr>),
+    Read(Box<Expr>, String),
     /// `read?("uri")` — returns null on failure
-    ReadOrNull(Box<Expr>),
+    ReadOrNull(Box<Expr>, String),
+    /// `read*("glob")`
+    ReadGlob(Box<Expr>, String),
     /// `import("uri")` — evaluates the imported module as a value.
     /// Fields: the URI, and the path of the module the expression was written in,
     /// which relative URIs resolve against.

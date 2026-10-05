@@ -90,6 +90,7 @@ pub enum TokenKind {
     KwTrace,
     KwRead,
     KwReadOrNull,
+    KwReadGlob,
     KwFor,
     KwIn,
 

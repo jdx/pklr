@@ -2858,7 +2858,7 @@ x = read("readme.txt")
     let path = base.join("test_read.pkl");
     let val = ev.eval_source(src, &path).unwrap();
     let json = val.to_json();
-    assert_eq!(json["x"], "Hello from pklr!\n");
+    assert_eq!(json["x"]["text"], "Hello from pklr!\n");
 }
 
 #[test]
@@ -2876,7 +2876,7 @@ x = read("file://{}")
     let path = base.join("test_read_file.pkl");
     let val = ev.eval_source(&src, &path).unwrap();
     let json = val.to_json();
-    assert_eq!(json["x"], "Hello from pklr!\n");
+    assert_eq!(json["x"]["text"], "Hello from pklr!\n");
 }
 
 #[test]
@@ -2904,6 +2904,87 @@ x = "hello \(read("env:PKLR_NAME"))"
 // ============================================================
 // Set() deduplication
 // ============================================================
+
+// ============================================================
+// Resources
+// ============================================================
+
+#[test]
+fn resources_are_module_relative_and_preserve_bytes() {
+    let temp = TestTempDir::new("pklr_test_resources_relative");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("nested")).unwrap();
+    std::fs::write(dir.join("nested/data.bin"), [0, 255, b'x']).unwrap();
+    std::fs::write(dir.join("nested/main.pkl"), "value = read(\"data.bin\")\n").unwrap();
+    let value = pklr::eval_to_json(&dir.join("nested/main.pkl")).unwrap();
+    assert_eq!(value["value"]["base64"], "AP94");
+    assert!(
+        value["value"]["uri"]
+            .as_str()
+            .unwrap()
+            .ends_with("nested/data.bin")
+    );
+}
+
+#[test]
+fn resource_read_question_only_suppresses_missing_resources() {
+    let temp = TestTempDir::new("pklr_test_resources_denied");
+    let path = temp.path().join("main.pkl");
+    std::fs::write(
+        &path,
+        "missing = read?(\"missing.txt\")\ndenied = read?(\"env:HOME\")\n",
+    )
+    .unwrap();
+    let error = pklr::EvaluatorBuilder::new()
+        .allowed_resources(vec!["file:".to_string()])
+        .eval_to_json(&path)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("Refusing to read resource `env:HOME`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn resource_allowlist_normalizes_paths_before_io() {
+    let temp = TestTempDir::new("pklr_test_resources_allowlist");
+    let dir = temp.path();
+    std::fs::create_dir_all(dir.join("allowed")).unwrap();
+    std::fs::write(dir.join("secret.txt"), "nope").unwrap();
+    let path = dir.join("allowed/main.pkl");
+    std::fs::write(&path, "x = read(\"../secret.txt\")\n").unwrap();
+    let allowed = format!("file://{}/allowed/", dir.display());
+    let error = pklr::EvaluatorBuilder::new()
+        .allowed_resources(vec![allowed])
+        .eval_to_json(&path)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Refusing to read resource"), "{error}");
+}
+
+#[test]
+fn resource_env_prop_and_file_globs() {
+    let temp = TestTempDir::new("pklr_test_resources_glob");
+    let dir = temp.path();
+    std::fs::write(dir.join("a.txt"), "a").unwrap();
+    std::fs::write(dir.join("b.txt"), "b").unwrap();
+    let path = dir.join("main.pkl");
+    std::fs::write(
+        &path,
+        "envs = read*(\"env:APP_*\")\nprops = read*(\"prop:app*\")\nfiles = read*(\"*.txt\")\n",
+    )
+    .unwrap();
+    let value = pklr::EvaluatorBuilder::new()
+        .environment_variables(vec![("APP_MODE".to_string(), "test".to_string())])
+        .external_properties(vec![("apple".to_string(), "pie".to_string())])
+        .eval_to_json(&path)
+        .unwrap();
+    assert_eq!(value["envs"]["env:APP_MODE"], "test");
+    assert_eq!(value["props"]["prop:apple"], "pie");
+    assert_eq!(value["files"]["a.txt"]["text"], "a");
+    assert_eq!(value["files"]["b.txt"]["text"], "b");
+}
 
 #[test]
 fn set_deduplicates() {
