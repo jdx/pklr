@@ -616,7 +616,7 @@ a = parser.parse(#"{ "name": "Pigeon", "tags": ["a", 1, 2.5, true, null], "neste
 b = parser.parse("123.0")
 c = new json.Parser { useMapping = true }.parse(#"{ "k": 1 }"#).length
 dynamicAmended = (new json.Parser {}.parse(#"{ "x": 1 }"#)) { y = 2 }
-dynamicSuper = (new json.Parser {}.parse(#"{ "x": 1 }"#)) { fromSuper = super.x }
+dynamicSuper = (new json.Parser {}.parse(#"{ "x": 1 }"#)) { fromSuper = super.x; fromSuperLength = super.length }
 mappingAmended = (new json.Parser { useMapping = true }.parse(#"{ "x": 1 }"#)) { ["y"] = 2 }
 "##,
     );
@@ -629,7 +629,7 @@ mappingAmended = (new json.Parser { useMapping = true }.parse(#"{ "x": 1 }"#)) {
     assert_eq!(json["dynamicAmended"], serde_json::json!({"x": 1, "y": 2}));
     assert_eq!(
         json["dynamicSuper"],
-        serde_json::json!({"x": 1, "fromSuper": 1})
+        serde_json::json!({"x": 1, "fromSuper": 1, "fromSuperLength": 1})
     );
     assert_eq!(json["mappingAmended"], serde_json::json!({"x": 1, "y": 2}));
 }

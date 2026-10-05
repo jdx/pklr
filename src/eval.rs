@@ -1383,7 +1383,9 @@ impl Evaluator {
                         .is_none_or(|source| source.type_name.is_none()) =>
             {
                 let mut keys = IndexMap::new();
-                if let Some(entries) = &scope.receiver_entries {
+                if source.as_ref().is_some_and(|source| source.is_parsed_json) {
+                    keys.extend(map.keys().map(|key| (key.clone(), ())));
+                } else if let Some(entries) = &scope.receiver_entries {
                     self.eval_receiver_keys(entries, scope, depth + 1, &mut keys)?;
                 } else {
                     keys.extend(map.keys().map(|key| (key.clone(), ())));
