@@ -615,6 +615,8 @@ local parser = new json.Parser {}
 a = parser.parse(#"{ "name": "Pigeon", "tags": ["a", 1, 2.5, true, null], "nested": { "x": "é\n" } }"#)
 b = parser.parse("123.0")
 c = new json.Parser { useMapping = true }.parse(#"{ "k": 1 }"#).length
+dynamicAmended = (new json.Parser {}.parse(#"{ "x": 1 }"#)) { y = 2 }
+mappingAmended = (new json.Parser { useMapping = true }.parse(#"{ "x": 1 }"#)) { ["y"] = 2 }
 "##,
     );
     assert_eq!(
@@ -623,6 +625,8 @@ c = new json.Parser { useMapping = true }.parse(#"{ "k": 1 }"#).length
     );
     assert_eq!(json["b"], serde_json::json!(123.0));
     assert_eq!(json["c"], 1);
+    assert_eq!(json["dynamicAmended"], serde_json::json!({"x": 1, "y": 2}));
+    assert_eq!(json["mappingAmended"], serde_json::json!({"x": 1, "y": 2}));
 }
 
 #[test]
@@ -652,9 +656,9 @@ durationLike = new JsonRenderer {}.renderValue(new json.Parser {}.parse(#"{ "val
     assert!(err.contains("Error parsing JSON document."), "{err}");
     for doc in [r#""\u+123""#, r#""\u12é4""#] {
         let err = eval_fails(&format!(
-            "import \"pkl:json\"\nres = new json.Parser {{}}.parse(#{doc:?}#)"
+            "import \"pkl:json\"\nres = new json.Parser {{}}.parse({doc:?})"
         ));
-        assert!(err.contains("Error parsing JSON document."), "{doc}: {err}");
+        assert!(err.contains("Expected hexadecimal digit"), "{doc}: {err}");
     }
     let json = eval(
         r#"import "pkl:json"
