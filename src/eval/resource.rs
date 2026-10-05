@@ -161,6 +161,7 @@ impl Evaluator {
         match uri_scheme(pattern) {
             Some("env") | Some("prop") => {
                 self.check_resource_allowed(pattern)?;
+                let glob = GlobPart::compile(pattern, pattern)?;
                 let env = uri_scheme(pattern) == Some("env");
                 let entries: Vec<(String, String)> = if env {
                     match &self.environment {
@@ -184,7 +185,7 @@ impl Evaluator {
                         if env { "env" } else { "prop" },
                         percent_encode(&name)
                     );
-                    if glob_matches(pattern, &key) {
+                    if glob.matches(&key) {
                         out.insert(key.into(), Value::String(value.into()));
                     }
                 }

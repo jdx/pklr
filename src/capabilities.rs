@@ -309,7 +309,14 @@ impl EvalCapabilities for NativeCapabilities {
     fn path_exists(&mut self, path: &Path) -> Result<bool> {
         match std::fs::metadata(path) {
             Ok(_) => Ok(true),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput
+                ) =>
+            {
+                Ok(false)
+            }
             Err(error) => Err(crate::Error::Io(path.to_path_buf(), error)),
         }
     }
