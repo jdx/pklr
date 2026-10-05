@@ -2709,8 +2709,9 @@ impl Evaluator {
                         .mapping_value_types
                         .iter()
                         .filter_map(|name| {
+                            let name = mapping_value_type_base(name);
                             resolve_dotted(&inherited_scope, name)
-                                .map(|value| (name.clone(), value))
+                                .map(|value| (name.to_string(), value))
                         })
                         .collect::<Vec<_>>();
                     let inherited_default =
@@ -4887,7 +4888,8 @@ impl Evaluator {
                             .iter()
                             .skip(1)
                             .filter_map(|name| {
-                                resolve_dotted(scope, name).map(|value| (name.clone(), value))
+                                let name = mapping_value_type_base(name);
+                                resolve_dotted(scope, name).map(|value| (name.to_string(), value))
                             })
                             .collect::<Vec<_>>();
                         let mut map = ObjectMap::default();
@@ -4910,7 +4912,7 @@ impl Evaluator {
                                 .any(|e| matches!(e, Entry::Property(p) if p.name == "default"))
                         {
                             // Inject a synthetic default property referencing the value type
-                            let vt_name = generic_params[1].clone();
+                            let vt_name = mapping_value_type_base(&generic_params[1]).to_string();
                             src_entries.push(Entry::Property(Arc::new(Property {
                                 annotations: vec![],
                                 modifiers: vec![],
@@ -5949,7 +5951,9 @@ impl Evaluator {
                     .mapping_value_types
                     .iter()
                     .filter_map(|name| {
-                        resolve_dotted(&inherited_scope, name).map(|value| (name.clone(), value))
+                        let name = mapping_value_type_base(name);
+                        resolve_dotted(&inherited_scope, name)
+                            .map(|value| (name.to_string(), value))
                     })
                     .collect::<Vec<_>>();
                 let inherited_default =
@@ -6044,7 +6048,9 @@ impl Evaluator {
                     .mapping_value_types
                     .iter()
                     .filter_map(|name| {
-                        resolve_dotted(&inherited_scope, name).map(|value| (name.clone(), value))
+                        let name = mapping_value_type_base(name);
+                        resolve_dotted(&inherited_scope, name)
+                            .map(|value| (name.to_string(), value))
                     })
                     .collect::<Vec<_>>();
                 let inherited_default =
@@ -6329,6 +6335,74 @@ impl Evaluator {
                         )?;
                         map.insert(storage_key, val);
                         continue;
+                    }
+                    // An entry body of a `Listing` value amends a listing: an
+                    // inherited entry's, else the mapping's `default`, else an
+                    // empty one. The declared value type decides: `Listing`, or
+                    // a union containing `Listing` when the body has only
+                    // elements. An untyped element-only body is a Dynamic
+                    // rendered as a listing.
+                    let expanded_value_type_names =
+                        expand_type_alias_names(value_type_names, &entry_scope);
+                    let selected_value_type = |name: &String| {
+                        expanded_value_type_names.len() == 1 || name.starts_with('*')
+                    };
+                    let listing_value_type = expanded_value_type_names.iter().any(|name| {
+                        selected_value_type(name)
+                            && mapping_value_type_base(name).split('<').next() == Some("Listing")
+                    });
+                    // A selected Dynamic alternative can render an
+                    // element-only object body as a listing. A bare Mapping
+                    // has no value type at all.
+                    let dynamic_value_type = expanded_value_type_names.iter().any(|name| {
+                        selected_value_type(name) && mapping_value_type_base(name) == "Dynamic"
+                    });
+                    if let Expr::ObjectBody(body) = val_expr
+                        && (matches!(map.get(&storage_key), Some(Value::List(_)))
+                            || listing_value_type
+                            || ((dynamic_value_type || value_type_names.is_empty())
+                                && matches!(explicit_default, None | Some(Value::List(_)))
+                                && is_element_only_body(body)))
+                    {
+                        if find_listing_body_property(body).is_some() {
+                            return Err(Error::Eval(
+                                "Object of type `Listing` cannot have a property (other than \
+                                 `default`)."
+                                    .into(),
+                            ));
+                        }
+                        let base = match (map.get(&storage_key), &explicit_default) {
+                            (Some(existing @ Value::List(_)), _) => existing.clone(),
+                            (_, Some(default @ Value::List(_))) => default.clone(),
+                            _ => Value::List(Vec::new().into()),
+                        };
+                        let val = self.eval_value_amendment(base, body, &entry_scope, depth)?;
+                        map.insert(storage_key, val);
+                        continue;
+                    }
+                    // An element-only entry body is valid only for an
+                    // untyped Mapping or a selected Listing/Dynamic value
+                    // type. Otherwise Pkl tries to amend the selected value
+                    // type and rejects the element, rather than silently
+                    // constructing a Dynamic object.
+                    if let Expr::ObjectBody(body) = val_expr
+                        && is_element_only_body(body)
+                        && !value_type_names.is_empty()
+                        && !listing_value_type
+                        && !dynamic_value_type
+                        // A user class keeps the normal amendment path so
+                        // it can report the class's qualified name.
+                        && !type_defaults.iter().any(|(_, value)| {
+                            matches!(value, Value::Object(_, Some(source)) if source.type_identity.is_some())
+                        })
+                    {
+                        let value_type = expanded_value_type_names
+                            .first()
+                            .map(String::as_str)
+                            .unwrap_or("Mapping value");
+                        return Err(Error::Eval(format!(
+                            "Object of type `{value_type}` cannot have an element."
+                        )));
                     }
                     let type_default = match val_expr {
                         Expr::ObjectBody(body) => select_mapping_type_default(type_defaults, body)

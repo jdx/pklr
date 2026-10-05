@@ -118,7 +118,10 @@ pub(super) fn apply_mapping_entry_template(
     let Some(actual) = value_src.type_name.as_deref() else {
         return Ok(merge(value));
     };
-    let allowed = expand_type_alias_names(value_type_names, scope);
+    let allowed = expand_type_alias_names(value_type_names, scope)
+        .into_iter()
+        .map(|name| mapping_value_type_base(&name).to_string())
+        .collect::<Vec<_>>();
     if allowed.is_empty() {
         return Ok(merge(value));
     }
@@ -203,16 +206,30 @@ pub(super) fn expand_type_alias_name(
     out: &mut Vec<String>,
     depth: usize,
 ) {
+    let is_default = name.starts_with('*');
     let base = name.trim_start_matches('*').trim_end_matches('?');
     if depth < 8
         && let Some(alias) = scope.get_type_alias(base)
     {
+        let offset = out.len();
         let alias = alias.clone();
         collect_type_expr_class_names(&alias, scope, out, depth + 1);
+        if is_default {
+            for name in &mut out[offset..] {
+                if !name.starts_with('*') {
+                    *name = format!("*{name}");
+                }
+            }
+        }
         return;
     }
-    if !out.iter().any(|existing| existing == base) {
-        out.push(base.to_string());
+    let name = if is_default {
+        format!("*{base}")
+    } else {
+        base.to_string()
+    };
+    if !out.iter().any(|existing| existing == &name) {
+        out.push(name);
     }
 }
 
@@ -226,11 +243,7 @@ pub(super) fn collect_type_expr_class_names(
     match ty {
         TypeExpr::Named(name) => expand_type_alias_name(name, scope, out, depth),
         TypeExpr::Constrained(base, _) => expand_type_alias_name(base, scope, out, depth),
-        TypeExpr::Generic(name, _) => {
-            if !out.iter().any(|existing| existing == name) {
-                out.push(name.clone());
-            }
-        }
+        TypeExpr::Generic(name, _) => expand_type_alias_name(name, scope, out, depth),
         TypeExpr::Nullable(inner) => collect_type_expr_class_names(inner, scope, out, depth),
         TypeExpr::Union(variants) => {
             for variant in variants {
@@ -238,6 +251,12 @@ pub(super) fn collect_type_expr_class_names(
             }
         }
     }
+}
+
+/// The runtime name of a Mapping value-type alternative. `*` marks the
+/// selected alternative of a union but is not part of the type's name.
+pub(super) fn mapping_value_type_base(name: &str) -> &str {
+    name.trim_start_matches('*')
 }
 
 pub(super) fn select_mapping_type_default<'a>(
@@ -447,7 +466,6 @@ pub(super) fn mapping_value_type_from_name(name: &str) -> Option<String> {
                         .split('<')
                         .next()
                         .unwrap_or(value_type)
-                        .trim_start_matches('*')
                         .trim_end_matches('?')
                         .to_string(),
                 );
@@ -534,6 +552,27 @@ pub(super) fn validate_new_object_body(
     }
 
     Ok(())
+}
+
+/// Whether `entries` (including what their generators produce) consist of
+/// elements only, with no properties or keyed entries.
+pub(super) fn is_element_only_body(entries: &[Entry]) -> bool {
+    fn has_members(entries: &[Entry]) -> bool {
+        entries.iter().any(|entry| match entry {
+            Entry::DynProperty(..) => true,
+            Entry::Property(prop) => !has_modifier(&prop.modifiers, Modifier::Local),
+            Entry::ForGenerator(generator) => has_members(&generator.body),
+            Entry::WhenGenerator(generator) => {
+                has_members(&generator.body)
+                    || generator
+                        .else_body
+                        .as_deref()
+                        .is_some_and(|body| has_members(body))
+            }
+            _ => false,
+        })
+    }
+    entries_are_listing_amendment(entries) && !has_members(entries)
 }
 
 /// Finds a property (other than `local`s and `default`) that a listing body

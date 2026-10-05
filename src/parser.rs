@@ -4,12 +4,12 @@ use crate::lexer::{StringPart, Token, TokenKind};
 mod ast;
 mod validate;
 
-use ast::type_expr_runtime_name;
 pub use ast::{
     Annotation, BinOp, Body, Entry, Expr, ForGenerator, Import, Modifier, Module, Property,
     StringInterpPart, TraceSite, TypeExpr, UnOp, WhenGenerator,
 };
 pub(crate) use ast::{has_untyped_result_new, infer_method_return_new, rewrite_untyped_result_new};
+use ast::{infers_new, type_expr_runtime_name};
 
 /// Collect all import URIs from a token stream (fast path, no full parse needed).
 pub fn collect_imports(tokens: &[Token]) -> Vec<String> {
@@ -1269,7 +1269,7 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        let (value, body) = match self.peek() {
+        let (mut value, body) = match self.peek() {
             TokenKind::Equals => {
                 self.advance();
                 (Some(self.parse_expr()?), None)
@@ -1300,6 +1300,14 @@ impl<'a> Parser<'a> {
                 (None, None)
             }
         };
+        // A declared Mapping, Listing, class, or alias makes an untyped
+        // `new { ... }` construct that declared type, so nested entry bodies
+        // retain their value-type semantics.
+        if let (Some(value), Some(ty)) = (&mut value, &type_ann)
+            && infers_new(ty)
+        {
+            infer_method_return_new(value, ty);
+        }
         Ok(Entry::Property(std::sync::Arc::new(Property {
             annotations: header.annotations.clone(),
             modifiers: header.modifiers(),
@@ -1698,7 +1706,7 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        let (value, body) = if type_ann.is_some() || matches!(self.peek(), TokenKind::Equals) {
+        let (mut value, body) = if type_ann.is_some() || matches!(self.peek(), TokenKind::Equals) {
             self.expect(&TokenKind::Equals, "=")?;
             (Some(self.parse_expr()?), None)
         } else {
@@ -1707,6 +1715,14 @@ impl<'a> Parser<'a> {
             }
             self.parse_property_bodies(&name)?
         };
+        // A declared Mapping, Listing, class, or alias makes an untyped
+        // `new { ... }` construct that declared type, so nested entry bodies
+        // retain their value-type semantics.
+        if let (Some(value), Some(ty)) = (&mut value, &type_ann)
+            && infers_new(ty)
+        {
+            infer_method_return_new(value, ty);
+        }
         Ok(Entry::Property(std::sync::Arc::new(Property {
             modifiers: header.modifiers(),
             annotations: header.annotations,
@@ -2392,7 +2408,10 @@ fn amend_expr(parent: Expr, body: ObjectBody) -> Expr {
 fn generic_param_names(ty: &TypeExpr, out: &mut Vec<String>) {
     match ty {
         TypeExpr::Named(name) | TypeExpr::Generic(name, _) => {
-            out.push(name.trim_start_matches('*').to_string());
+            // Retain `*` on a union's selected alternative. Mapping entry
+            // bodies use it to distinguish the default type from another
+            // merely permitted alternative.
+            out.push(name.clone());
         }
         TypeExpr::Constrained(name, _) => {
             out.push(name.trim_end_matches('?').to_string());
