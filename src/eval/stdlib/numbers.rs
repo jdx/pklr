@@ -72,12 +72,6 @@ fn to_fixed(x: f64, digits: usize) -> String {
         return format!("{sign}{integer}{fraction}");
     }
     let shortest = format!("{:e}", x.abs());
-    // Rust's shortest formatter is normally what we need.  Java's legacy
-    // FloatingDecimal, used by Pkl's DecimalFormat path, expands a large
-    // one-significant-digit shortest value to its nearest decimal boundary
-    // (notably `1e23` -> `9.999999999999999e22`).  Only that ambiguous form
-    // needs expansion: values whose shortest form already carries 17 digits
-    // must keep them (for example `1.0000000000000002e19`).
     let significant_digits = shortest
         .split_once('e')
         .expect("`{:e}` has an exponent")
@@ -85,7 +79,13 @@ fn to_fixed(x: f64, digits: usize) -> String {
         .bytes()
         .filter(|digit| *digit != b'.')
         .count();
-    let sci = if x.abs() >= FLOAT_INT_LIMIT && significant_digits == 1 {
+    let sci = if x.abs() == FLOAT_INT_LIMIT {
+        // 2^63 is an exact power of two. FloatingDecimal suppresses the
+        // insignificant low decimal digits here, unlike adjacent values.
+        format!("{:.15e}", x.abs())
+    } else if x.abs() >= FLOAT_INT_LIMIT && significant_digits > 1 {
+        format!("{:.16e}", x.abs())
+    } else if x.abs() >= FLOAT_INT_LIMIT {
         format!("{:.15e}", x.abs())
     } else {
         shortest
@@ -202,9 +202,9 @@ fn to_radix_string(n: i64, radix: u32) -> String {
 /// The duration or data size `n.<unit>`.
 fn unit_value(n: f64, name: &str) -> Option<Value> {
     if let Some(unit) = DurationUnit::parse(name) {
-        return Some(Value::Duration(Duration { value: n, unit }));
+        return Some(Value::Duration(Duration::new(n, unit)));
     }
-    DataSizeUnit::parse(name).map(|unit| Value::DataSize(DataSize { value: n, unit }))
+    DataSizeUnit::parse(name).map(|unit| Value::DataSize(DataSize::new(n, unit)))
 }
 
 pub(super) fn int_property(n: i64, name: &str) -> Option<Result<Value>> {
@@ -303,14 +303,12 @@ pub(super) fn int_method(n: i64, name: &str, args: &[Value]) -> Option<Result<Va
                     Value::String(format!("{n}.{}", "0".repeat(digits)).into())
                 }
             }
-            "toDuration" => Value::Duration(Duration {
-                value: n as f64,
-                unit: duration_unit_arg(a.value(0)?)?,
-            }),
-            "toDataSize" => Value::DataSize(DataSize {
-                value: n as f64,
-                unit: data_size_unit_arg(a.value(0)?)?,
-            }),
+            "toDuration" => {
+                Value::Duration(Duration::new(n as f64, duration_unit_arg(a.value(0)?)?))
+            }
+            "toDataSize" => {
+                Value::DataSize(DataSize::new(n as f64, data_size_unit_arg(a.value(0)?)?))
+            }
             "isBetween" => number_is_between(n as f64, Some(n), &a)?,
             "toRadixString" => {
                 let radix = int_between(a.int(0)?, 2, 36)? as u32;
@@ -353,14 +351,8 @@ pub(super) fn float_method(f: f64, name: &str, args: &[Value]) -> Option<Result<
                     format_float(f).into()
                 })
             }
-            "toDuration" => Value::Duration(Duration {
-                value: f,
-                unit: duration_unit_arg(a.value(0)?)?,
-            }),
-            "toDataSize" => Value::DataSize(DataSize {
-                value: f,
-                unit: data_size_unit_arg(a.value(0)?)?,
-            }),
+            "toDuration" => Value::Duration(Duration::new(f, duration_unit_arg(a.value(0)?)?)),
+            "toDataSize" => Value::DataSize(DataSize::new(f, data_size_unit_arg(a.value(0)?)?)),
             "isBetween" => number_is_between(f, None, &a)?,
             _ => unreachable!("arity table covers {name}"),
         })
@@ -494,8 +486,8 @@ pub(crate) fn binary_op(op: BinOp, l: &Value, r: &Value) -> Option<Result<Value>
             _ => ordering != Some(Ordering::Less),
         }))
     };
-    let duration = |value, unit| Ok(Value::Duration(Duration { value, unit }));
-    let data_size = |value, unit| Ok(Value::DataSize(DataSize { value, unit }));
+    let duration = |value, unit| Ok(Value::Duration(Duration::new(value, unit)));
+    let data_size = |value, unit| Ok(Value::DataSize(DataSize::new(value, unit)));
     Some(match (l, r) {
         (Value::Int(a), Value::Int(b)) => {
             let (a, b) = (*a, *b);
@@ -656,14 +648,8 @@ pub(crate) fn negate(value: &Value) -> Option<Result<Value>> {
     Some(match value {
         Value::Int(n) => n.checked_neg().map(Value::Int).ok_or_else(integer_overflow),
         Value::Float(f) => Ok(Value::Float(-f)),
-        Value::Duration(d) => Ok(Value::Duration(Duration {
-            value: -d.value,
-            unit: d.unit,
-        })),
-        Value::DataSize(d) => Ok(Value::DataSize(DataSize {
-            value: -d.value,
-            unit: d.unit,
-        })),
+        Value::Duration(d) => Ok(Value::Duration(Duration::new(-d.value, d.unit))),
+        Value::DataSize(d) => Ok(Value::DataSize(DataSize::new(-d.value, d.unit))),
         _ => return None,
     })
 }
@@ -721,6 +707,7 @@ mod tests {
             (1e21, "1000000000000000000000"),
             (1e22, "10000000000000000000000"),
             (1e23, "99999999999999990000000"),
+            (1.08e23, "108000000000000010000000"),
         ] {
             assert_eq!(to_fixed(value, 0), expected, "{value:e}");
             assert_eq!(to_fixed(-value, 0), format!("-{expected}"), "-{value:e}");

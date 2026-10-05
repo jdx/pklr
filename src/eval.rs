@@ -5591,18 +5591,12 @@ impl Evaluator {
                 matches!(entry, Entry::Spread(_))
                     || matches!(entry, Entry::Property(prop) if prop.name == "default")
             });
-            // The general late-binding amendment path matches members by their
-            // storage spelling. A plain Mapping with an explicit dynamic key
-            // needs the mapping path instead: `1.s` and `1000.ms` name the
-            // same member but deliberately retain different display text.
-            let has_dynamic_mapping_key = base_src.mapping_value_types.is_empty()
-                && body_has(
-                    overlay_entries,
-                    &|entry| matches!(entry, Entry::DynProperty(key, _) if is_native_unit_key(key)),
-                );
-            if (!needs_mapping_evaluation || !base_src.is_metadata_only())
-                && !has_dynamic_mapping_key
-            {
+            let has_native_unit_key = body_has(overlay_entries, &|entry| {
+                matches!(entry, Entry::DynProperty(Expr::Field(_, field), _)
+                    if crate::value::DurationUnit::parse(field).is_some()
+                        || crate::value::DataSizeUnit::parse(field).is_some())
+            });
+            if (!base_src.is_metadata_only() || !needs_mapping_evaluation) && !has_native_unit_key {
                 // Unannotated mapping entries with bodies still use the general
                 // amendment path, which preserves Listing-shaped entry bodies.
             } else {
@@ -5631,7 +5625,13 @@ impl Evaluator {
                     MappingInheritedDefault::default(),
                 )?;
                 let mut source = Arc::unwrap_or_clone(Arc::clone(base_src));
-                source.entries = overlay_entries.to_vec().into();
+                source.entries = base_src
+                    .entries
+                    .iter()
+                    .cloned()
+                    .chain(overlay_entries.iter().cloned())
+                    .collect::<Vec<_>>()
+                    .into();
                 source.captured = SourceScope::lazy(scope, Vec::new(), Vec::new());
                 return Ok(Value::Object(Arc::new(amended), Some(Arc::new(source))));
             }
@@ -6251,7 +6251,7 @@ impl Evaluator {
         let converters = self.converters.clone();
         let mut memo = ConverterMemo::default();
         Ok(self
-            .apply_converters_recursive(&value, &converters, Vec::new(), &mut memo)?
+            .apply_converters_recursive(&value, &converters, Vec::new(), false, &mut memo)?
             .unwrap_or(value))
     }
 
@@ -6262,7 +6262,8 @@ impl Evaluator {
         &mut self,
         value: &Value,
         converters: &[(String, Value)],
-        blocked_root_converters: Vec<String>,
+        blocked_root_converters: Vec<(String, Value)>,
+        blocked_at_root: bool,
         memo: &mut ConverterMemo,
     ) -> Result<Option<Value>> {
         // A shared object or list (one mapping referenced from several places,
@@ -6283,8 +6284,13 @@ impl Evaluator {
         {
             return Ok(converted.clone());
         }
-        let converted =
-            self.apply_converters_uncached(value, converters, blocked_root_converters, memo)?;
+        let converted = self.apply_converters_uncached(
+            value,
+            converters,
+            blocked_root_converters,
+            blocked_at_root,
+            memo,
+        )?;
         if let Some(key) = key {
             // The original is kept so its address is not reused by another
             // value while the memo is alive.
@@ -6297,7 +6303,8 @@ impl Evaluator {
         &mut self,
         value: &Value,
         converters: &[(String, Value)],
-        blocked_root_converters: Vec<String>,
+        blocked_root_converters: Vec<(String, Value)>,
+        blocked_at_root: bool,
         memo: &mut ConverterMemo,
     ) -> Result<Option<Value>> {
         match value {
@@ -6317,7 +6324,11 @@ impl Evaluator {
                     for type_name in type_names {
                         for (conv_name, lambda) in converters {
                             if type_names_match(conv_name, type_name)
-                                && !blocked_root_converters.contains(conv_name)
+                                && !(blocked_at_root
+                                    && blocked_root_converters
+                                        .iter()
+                                        .any(|(blocked_name, _)| blocked_name == conv_name))
+                                && !converter_is_blocked(&blocked_root_converters, conv_name, value)
                                 && let Value::Lambda(params, body, captured) = lambda
                             {
                                 let mut call_scope = Scope::for_call(captured);
@@ -6327,9 +6338,9 @@ impl Evaluator {
                                 }
                                 let result = self.eval_expr(body, &call_scope, 0)?;
                                 let mut blocked = blocked_root_converters;
-                                blocked.push(conv_name.clone());
+                                blocked.push((conv_name.clone(), value.clone()));
                                 let converted = self.apply_converters_recursive(
-                                    &result, converters, blocked, memo,
+                                    &result, converters, blocked, true, memo,
                                 )?;
                                 return Ok(Some(converted.unwrap_or(result)));
                             }
@@ -6340,14 +6351,14 @@ impl Evaluator {
                 // No converter matched — recurse into children
                 let mut new_map: Option<ObjectMap> = None;
                 for (index, (k, v)) in map.iter().enumerate() {
-                    // A converter can return a container containing the value it
-                    // was handed. Keep the root converter blocked all the way
-                    // through that result; otherwise `D -> List(D)` recurses
-                    // forever when the list visits its child.
+                    // Keep blocked roots while walking converter output. The
+                    // block applies only to that exact value, so a distinct
+                    // nested value of the same class can still convert.
                     let converted = self.apply_converters_recursive(
                         v,
                         converters,
                         blocked_root_converters.clone(),
+                        false,
                         memo,
                     )?;
                     match (&mut new_map, converted) {
@@ -6375,6 +6386,7 @@ impl Evaluator {
                         item,
                         converters,
                         blocked_root_converters.clone(),
+                        false,
                         memo,
                     )?;
                     match (&mut new_items, converted) {
@@ -6397,13 +6409,17 @@ impl Evaluator {
                 let class_name = value.type_name();
                 for (conv_name, lambda) in converters {
                     if type_names_match(conv_name, class_name)
-                        && !blocked_root_converters.contains(conv_name)
+                        && !(blocked_at_root
+                            && blocked_root_converters
+                                .iter()
+                                .any(|(blocked_name, _)| blocked_name == conv_name))
+                        && !converter_is_blocked(&blocked_root_converters, conv_name, value)
                     {
                         let result = self.invoke_lambda(lambda, std::slice::from_ref(value), 0)?;
                         let mut blocked = blocked_root_converters;
-                        blocked.push(conv_name.clone());
-                        let converted =
-                            self.apply_converters_recursive(&result, converters, blocked, memo)?;
+                        blocked.push((conv_name.clone(), value.clone()));
+                        let converted = self
+                            .apply_converters_recursive(&result, converters, blocked, true, memo)?;
                         return Ok(Some(converted.unwrap_or(result)));
                     }
                 }
@@ -6427,15 +6443,6 @@ fn equivalent_mapping_key(map: &ObjectMap, key: &str) -> Option<Arc<str>> {
         })
 }
 
-fn is_native_unit_key(expr: &Expr) -> bool {
-    matches!(
-        expr,
-        Expr::Field(_, field)
-            if crate::value::DurationUnit::parse(field).is_some()
-                || crate::value::DataSizeUnit::parse(field).is_some()
-    )
-}
-
 fn insert_mapping_key(keys: &mut HashSet<Arc<str>>, key: &Arc<str>) -> bool {
     if keys.contains(key)
         || keys
@@ -6452,6 +6459,26 @@ fn insert_mapping_key(keys: &mut HashSet<Arc<str>>, key: &Arc<str>) -> bool {
 fn insert_mapping_entry(map: &mut ObjectMap, key: Arc<str>, value: Value) {
     let storage_key = equivalent_mapping_key(map, &key).unwrap_or(key);
     map.insert(storage_key, value);
+}
+
+fn converter_is_blocked(blocked: &[(String, Value)], name: &str, value: &Value) -> bool {
+    blocked
+        .iter()
+        .any(|(blocked_name, root)| blocked_name == name && same_value_identity(root, value))
+}
+
+fn same_value_identity(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Object(a, a_source), Value::Object(b, b_source)) => {
+            Arc::ptr_eq(a, b)
+                && a_source
+                    .as_ref()
+                    .zip(b_source.as_ref())
+                    .is_none_or(|(a, b)| Arc::ptr_eq(a, b))
+        }
+        (Value::List(a), Value::List(b)) => a.items_ptr() == b.items_ptr() && a.kind() == b.kind(),
+        _ => false,
+    }
 }
 
 /// Converted values by the address of the object or list they came from (see

@@ -117,10 +117,7 @@ pub(super) fn duration_method(d: &Duration, name: &str, args: &[Value]) -> Optio
         Ok(match name {
             "toUnit" => {
                 let unit = duration_unit_arg(&args[0])?;
-                Value::Duration(Duration {
-                    value: d.value_in(unit),
-                    unit,
-                })
+                Value::Duration(Duration::new(d.value_in(unit), unit))
             }
             _ => {
                 let this = Value::Duration(*d);
@@ -143,12 +140,7 @@ pub(super) fn data_size_method(d: &DataSize, name: &str, args: &[Value]) -> Opti
         _ => return None,
     };
     Some(check_arity(args, arity).and_then(|()| {
-        let convert = |unit| {
-            Value::DataSize(DataSize {
-                value: d.value_in(unit),
-                unit,
-            })
-        };
+        let convert = |unit| Value::DataSize(DataSize::new(d.value_in(unit), unit));
         use DataSizeUnit::*;
         Ok(match name {
             "toUnit" => convert(data_size_unit_arg(&args[0])?),
@@ -195,7 +187,7 @@ mod tests {
     use super::*;
 
     fn iso(value: f64, unit: DurationUnit) -> String {
-        iso_string(&Duration { value, unit }).unwrap()
+        iso_string(&Duration::new(value, unit)).unwrap()
     }
 
     #[test]

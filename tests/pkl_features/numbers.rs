@@ -137,6 +137,8 @@ local infinity = Map((1.0 / 0.0).s, "first", (1.0 / 0.0).ms, "second")
 local crossUnitNan = Map(nan.ns, "nanos", nan.ms, "millis")
 local sameUnitNan = Map(nan.ns, "first", nan.ns, "second")
 local finiteAndNan = Map(nan.ns, "nan", 9.580033485766655e293.ns, "finite")
+local nanKey = nan.s
+local nanLookup = Map(nanKey, "found")
 values = List(
   signedZero.length,
   signedZero[0.ns],
@@ -145,12 +147,13 @@ values = List(
   crossUnitNan.length,
   sameUnitNan.length,
   finiteAndNan.length,
+  nanLookup[nanKey],
 )
 "#,
     );
     assert_eq!(
         json["values"],
-        serde_json::json!([1, "positive", 1, "second", 2, 2, 2])
+        serde_json::json!([1, "positive", 1, "second", 2, 2, 2, "found"])
     );
 }
 

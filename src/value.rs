@@ -55,7 +55,7 @@ pub(crate) fn mapping_storage_key(value: &Value) -> Option<Arc<str>> {
                     "nan-{:02x}-{:016x}-{:016x}",
                     value.unit as u8,
                     value.value.to_bits(),
-                    NEXT_NAN_MAPPING_KEY.fetch_add(1, Ordering::Relaxed),
+                    value.nan_identity,
                 )
             } else {
                 format!("finite-{:016x}", identity.to_bits())
@@ -74,7 +74,7 @@ pub(crate) fn mapping_storage_key(value: &Value) -> Option<Arc<str>> {
                     "nan-{:02x}-{:016x}-{:016x}",
                     value.unit as u8,
                     value.value.to_bits(),
-                    NEXT_NAN_MAPPING_KEY.fetch_add(1, Ordering::Relaxed),
+                    value.nan_identity,
                 )
             } else {
                 format!("finite-{:016x}", identity.to_bits())
@@ -138,10 +138,10 @@ pub(crate) fn mapping_storage_value(key: &str) -> Value {
             .map(Value::Float)
             .unwrap_or_else(|_| Value::String(display.into())),
         "duration" => parse_unit_value(display, DurationUnit::parse)
-            .map(|(value, unit)| Value::Duration(Duration { value, unit }))
+            .map(|(value, unit)| Value::Duration(Duration::new(value, unit)))
             .unwrap_or_else(|| Value::String(display.into())),
         "dataSize" => parse_unit_value(display, DataSizeUnit::parse)
-            .map(|(value, unit)| Value::DataSize(DataSize { value, unit }))
+            .map(|(value, unit)| Value::DataSize(DataSize::new(value, unit)))
             .unwrap_or_else(|| Value::String(display.into())),
         _ => Value::String(display.into()),
     }
@@ -476,16 +476,31 @@ impl DurationUnit {
 }
 
 /// A pkl `Duration`. Like pkl, the value is kept as a float in its unit.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy)]
 pub struct Duration {
     pub value: f64,
     pub unit: DurationUnit,
+    nan_identity: u64,
 }
 
 impl Duration {
+    pub(crate) fn new(value: f64, unit: DurationUnit) -> Self {
+        Self {
+            value,
+            unit,
+            nan_identity: NEXT_NAN_MAPPING_KEY.fetch_add(1, Ordering::Relaxed),
+        }
+    }
+
     /// The value converted to `unit`.
     pub fn value_in(&self, unit: DurationUnit) -> f64 {
         self.value * self.unit.nanos() / unit.nanos()
+    }
+}
+
+impl PartialEq for Duration {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value && self.unit == other.unit
     }
 }
 
@@ -561,16 +576,31 @@ impl DataSizeUnit {
 }
 
 /// A pkl `DataSize`. Like pkl, the value is kept as a float in its unit.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy)]
 pub struct DataSize {
     pub value: f64,
     pub unit: DataSizeUnit,
+    nan_identity: u64,
 }
 
 impl DataSize {
+    pub(crate) fn new(value: f64, unit: DataSizeUnit) -> Self {
+        Self {
+            value,
+            unit,
+            nan_identity: NEXT_NAN_MAPPING_KEY.fetch_add(1, Ordering::Relaxed),
+        }
+    }
+
     /// The value converted to `unit`.
     pub fn value_in(&self, unit: DataSizeUnit) -> f64 {
         self.value * self.unit.bytes() as f64 / unit.bytes() as f64
+    }
+}
+
+impl PartialEq for DataSize {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value && self.unit == other.unit
     }
 }
 
