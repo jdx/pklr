@@ -57,6 +57,11 @@ fn resolve_glob_parts(
     let Some(((literal, part), rest)) = parts.split_first() else {
         return Ok(());
     };
+    // `**/` may consume no directory components, so try the remaining
+    // segments in the current directory before descending.
+    if part.as_ref().is_some_and(|part| part.globstar) {
+        resolve_glob_parts(rest, dir, key, listed, results)?;
+    }
     let Some(part) = part else {
         let path = dir.join(literal);
         let key = join_glob_key(key, literal);
