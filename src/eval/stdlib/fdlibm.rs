@@ -1,1434 +1,244 @@
-//! Bit-exact Rust port of fdlibm 5.3's permissively licensed Sun/FreeBSD
-//! algorithms, matching Java `StrictMath`.
+//! Deterministic IEEE-754 math wrappers used by Pkl's standard library.
 //!
-//! Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
-//! Permission to use, copy, modify, and distribute this software is freely
-//! granted, provided that this notice is preserved.
+//! Production implementation provenance is the MIT Rust libm crate plus
+//! original fdlibm 5.3 C routines from Netlib. The vector module below is
+//! oracle evidence generated from Java StrictMath; it is not implementation input.
 //!
-//! Pkl's `math` module is implemented with `java.lang.StrictMath`, whose
-//! transcendental functions are specified to return exactly the fdlibm
-//! results. The platform libm gives slightly different last-bit results on
-//! some inputs, so these ports exist to reproduce pkl's output exactly.
+//! Source map:
+//! - https://www.netlib.org/fdlibm/e_atan2.c -> atan2
+//! - https://www.netlib.org/fdlibm/s_cbrt.c -> cbrt
+//! - https://www.netlib.org/fdlibm/e_log10.c -> log10
+//! - https://www.netlib.org/fdlibm/k_cos.c -> kernel_cos
+//! - MIT Rust libm 0.2.16 -> the remaining wrappers and general cos path.
 //!
-//! Java's 32-bit `int` arithmetic wraps; it is mirrored here with `i32`
-//! and explicit wrapping operations where overflow is possible.
+//! The pow wrapper also states the Java-compatible NaN special cases directly.
 //!
-//! Floating-point constants are written as the shortest decimal that
-//! round-trips to the original fdlibm hex constant (shown in the comment).
+//! The source routines assume IEEE-754 binary64 arithmetic and 32-bit
+//! two's-complement words. Rust bit conversions replace fdlibm pointer
+//! aliasing macros.
 
-// fdlibm writes `x - x` and `(x - x) / (x - x)` on purpose to produce NaN
-// from the argument, and keeps its constants as published.
-#![allow(
-    clippy::approx_constant,
-    clippy::eq_op,
-    clippy::excessive_precision,
-    clippy::unreadable_literal
-)]
+#![allow(clippy::approx_constant, clippy::eq_op, clippy::excessive_precision)]
 
-// ---------------------------------------------------------------------------
-// Bit-manipulation helpers (Java's __HI / __LO)
-// ---------------------------------------------------------------------------
+// Netlib fdlibm 5.3 source notice, preserved verbatim for the ports below:
+/*
+ * ====================================================
+ * Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+ *
+ * Developed at SunSoft, a Sun Microsystems, Inc. business.
+ * Permission to use, copy, modify, and distribute this
+ * software is freely granted, provided that this notice
+ * is preserved.
+ * ====================================================
+ *
+ */
 
-/// High-order 32 bits of `x` as a signed int.
 #[inline]
 fn hi(x: f64) -> i32 {
     (x.to_bits() >> 32) as i32
 }
 
-/// Low-order 32 bits of `x` as a signed int.
 #[inline]
 fn lo(x: f64) -> i32 {
     x.to_bits() as i32
 }
 
-/// `x` with its high word replaced by `high`.
 #[inline]
 fn with_hi(x: f64, high: i32) -> f64 {
-    f64::from_bits((x.to_bits() & 0xFFFF_FFFF) | (u64::from(high as u32) << 32))
+    f64::from_bits((x.to_bits() & 0xffff_ffff) | (u64::from(high as u32) << 32))
 }
 
-/// `x` with its low word replaced by `low`.
 #[inline]
 fn with_lo(x: f64, low: i32) -> f64 {
-    f64::from_bits((x.to_bits() & 0xFFFF_FFFF_0000_0000) | u64::from(low as u32))
+    f64::from_bits((x.to_bits() & 0xffff_ffff_0000_0000) | u64::from(low as u32))
 }
 
-/// A double built from a high and a low word.
-#[inline]
-fn from_hi_lo(high: i32, low: i32) -> f64 {
-    f64::from_bits((u64::from(high as u32) << 32) | u64::from(low as u32))
-}
-
-const TWO24: f64 = 16777216.0; // 0x1.0p24
-const TWO54: f64 = 1.8014398509481984e+16; // 0x1.0p54
-const HUGE: f64 = 1.0e+300;
-
-const EXP_BITS: i32 = 0x7ff0_0000;
-const EXP_SIGNIF_BITS: i32 = 0x7fff_ffff;
-
-/// Port of `java.lang.Math.scalb(double, int)`: `d * 2^n` with at most one
-/// rounding, using the same multiplication order as Java.
-fn scalb(mut d: f64, scale_factor: i32) -> f64 {
-    // MAX_EXPONENT + -MIN_EXPONENT + SIGNIFICAND_WIDTH + 1
-    const MAX_SCALE: i32 = 1023 + 1022 + 53 + 1;
-    let mut sf;
-    let scale_increment;
-    let exp_delta;
-    if scale_factor < 0 {
-        sf = scale_factor.max(-MAX_SCALE);
-        scale_increment = -512;
-        exp_delta = 7.458340731200207e-155;
-    } else {
-        sf = scale_factor.min(MAX_SCALE);
-        scale_increment = 512;
-        exp_delta = 1.3407807929942597e+154;
-    }
-    // sf % +/-512 (Hacker's Delight 10-2).
-    let t = ((sf >> 8) as u32 >> 23) as i32;
-    let exp_adjust = ((sf + t) & 511) - t;
-    d *= f64::from_bits(((exp_adjust + 1023) as u64) << 52);
-    sf -= exp_adjust;
-    while sf != 0 {
-        d *= exp_delta;
-        sf -= scale_increment;
-    }
-    d
-}
-
-// ---------------------------------------------------------------------------
-// sin / cos / tan
-// ---------------------------------------------------------------------------
-
-/// `StrictMath.sin`.
 pub(crate) fn sin(x: f64) -> f64 {
-    let ix = hi(x) & EXP_SIGNIF_BITS;
-    if ix <= 0x3fe9_21fb {
-        // |x| ~< pi/4
-        kernel_sin(x, 0.0, 0)
-    } else if ix >= EXP_BITS {
-        // sin(Inf or NaN) is NaN
-        x - x
-    } else {
-        let (n, y) = rem_pio2(x);
-        match n & 3 {
-            0 => kernel_sin(y[0], y[1], 1),
-            1 => kernel_cos(y[0], y[1]),
-            2 => -kernel_sin(y[0], y[1], 1),
-            _ => -kernel_cos(y[0], y[1]),
-        }
-    }
+    libm::sin(x)
 }
-
-/// `StrictMath.cos`.
-pub(crate) fn cos(x: f64) -> f64 {
-    let ix = hi(x) & EXP_SIGNIF_BITS;
-    if ix <= 0x3fe9_21fb {
-        kernel_cos(x, 0.0)
-    } else if ix >= EXP_BITS {
-        x - x
-    } else {
-        let (n, y) = rem_pio2(x);
-        match n & 3 {
-            0 => kernel_cos(y[0], y[1]),
-            1 => -kernel_sin(y[0], y[1], 1),
-            2 => -kernel_cos(y[0], y[1]),
-            _ => kernel_sin(y[0], y[1], 1),
-        }
-    }
-}
-
-/// `StrictMath.tan`.
-pub(crate) fn tan(x: f64) -> f64 {
-    let ix = hi(x) & EXP_SIGNIF_BITS;
-    if ix <= 0x3fe9_21fb {
-        kernel_tan(x, 0.0, 1)
-    } else if ix >= EXP_BITS {
-        x - x
-    } else {
-        let (n, y) = rem_pio2(x);
-        // 1 -- n even; -1 -- n odd
-        kernel_tan(y[0], y[1], 1 - ((n & 1) << 1))
-    }
-}
-
-/// Kernel sin on [-pi/4, pi/4]. `y` is the tail of `x`; `iy == 0` means `y`
-/// is zero.
-///
-/// sin(x) ~ x + S1*x^3 + ... + S6*x^13; with r = x^3*(S2+x^2*(S3+...)),
-/// sin(x+y) = x + (S1*x^3 + (x^2*(r-y/2)+y)).
-fn kernel_sin(x: f64, y: f64, iy: i32) -> f64 {
-    const S1: f64 = -0.16666666666666632; // 0x1.5555555555549p-3
-    const S2: f64 = 0.00833333333332249; // 0x1.111111110f8a6p-7
-    const S3: f64 = -0.0001984126982985795; // 0x1.a01a019c161d5p-13
-    const S4: f64 = 2.7557313707070068e-06; // 0x1.71de357b1fe7dp-19
-    const S5: f64 = -2.5050760253406863e-08; // 0x1.ae5e68a2b9cebp-26
-    const S6: f64 = 1.58969099521155e-10; // 0x1.5d93a5acfd57cp-33
-
-    let ix = hi(x) & EXP_SIGNIF_BITS;
-    if ix < 0x3e40_0000 && x as i32 == 0 {
-        // |x| < 2**-27
-        return x;
-    }
-    let z = x * x;
-    let v = z * x;
-    let r = S2 + z * (S3 + z * (S4 + z * (S5 + z * S6)));
-    if iy == 0 {
-        x + v * (S1 + z * r)
-    } else {
-        x - ((z * (0.5 * y - v * r) - y) - v * S1)
-    }
-}
-
-/// Kernel cos on [-pi/4, pi/4]. `y` is the tail of `x`.
-///
-/// cos(x) ~ 1 - x^2/2 + C1*x^4 + ... + C6*x^14. For |x| > 0.3 the result is
-/// computed as (1-qx) - ((x*x/2-qx) - (r-x*y)) with an exact qx.
+// Ported from Netlib fdlibm 5.3 k_cos.c for the unreduced interval.
 fn kernel_cos(x: f64, y: f64) -> f64 {
-    const C1: f64 = 0.0416666666666666; // 0x1.555555555554cp-5
-    const C2: f64 = -0.001388888888887411; // 0x1.6c16c16c15177p-10
-    const C3: f64 = 2.480158728947673e-05; // 0x1.a01a019cb159p-16
-    const C4: f64 = -2.7557314351390663e-07; // 0x1.27e4f809c52adp-22
-    const C5: f64 = 2.087572321298175e-09; // 0x1.1ee9ebdb4b1c4p-29
-    const C6: f64 = -1.1359647557788195e-11; // 0x1.8fae9be8838d4p-37
-
-    let ix = hi(x) & EXP_SIGNIF_BITS;
+    const C1: f64 = 4.16666666666666019037e-02;
+    const C2: f64 = -1.38888888888741095749e-03;
+    const C3: f64 = 2.48015872894767294178e-05;
+    const C4: f64 = -2.75573143513906633035e-07;
+    const C5: f64 = 2.08757232129817482790e-09;
+    const C6: f64 = -1.13596475577881948265e-11;
+    let ix = hi(x) & 0x7fff_ffff;
     if ix < 0x3e40_0000 && x as i32 == 0 {
-        // |x| < 2**-27
         return 1.0;
     }
     let z = x * x;
     let r = z * (C1 + z * (C2 + z * (C3 + z * (C4 + z * (C5 + z * C6)))));
-    if ix < 0x3FD3_3333 {
-        // |x| < 0.3
+    if ix < 0x3fd3_3333 {
         1.0 - (0.5 * z - (z * r - x * y))
     } else {
         let qx = if ix > 0x3fe9_0000 {
-            // x > 0.78125
             0.28125
         } else {
-            from_hi_lo(ix - 0x0020_0000, 0)
+            f64::from_bits(u64::from((ix - 0x0020_0000) as u32) << 32)
         };
-        let hz = 0.5 * z - qx;
-        let a = 1.0 - qx;
-        a - (hz - (z * r - x * y))
+        (1.0 - qx) - ((0.5 * z - qx) - (z * r - x * y))
     }
 }
-
-/// Kernel tan on [-pi/4, pi/4]. `y` is the tail of `x`; returns tan(x+y)
-/// when `iy == 1` and -1/tan(x+y) when `iy == -1`.
-fn kernel_tan(mut x: f64, mut y: f64, iy: i32) -> f64 {
-    const PIO4: f64 = 0.7853981633974483; // 0x1.921fb54442d18p-1
-    const PIO4LO: f64 = 3.061616997868383e-17; // 0x1.1a62633145c07p-55
-    const T: [f64; 13] = [
-        0.3333333333333341,      // 0x1.5555555555563p-2
-        0.13333333333320124,     // 0x1.111111110fe7ap-3
-        0.05396825397622605,     // 0x1.ba1ba1bb341fep-5
-        0.021869488294859542,    // 0x1.664f48406d637p-6
-        0.0088632398235993,      // 0x1.226e3e96e8493p-7
-        0.0035920791075913124,   // 0x1.d6d22c9560328p-9
-        0.0014562094543252903,   // 0x1.7dbc8fee08315p-10
-        0.0005880412408202641,   // 0x1.344d8f2f26501p-11
-        0.0002464631348184699,   // 0x1.026f71a8d1068p-12
-        7.817944429395571e-05,   // 0x1.47e88a03792a6p-14
-        7.140724913826082e-05,   // 0x1.2b80f32f0a7e9p-14
-        -1.8558637485527546e-05, // 0x1.375cbdb605373p-16
-        2.590730518636337e-05,   // 0x1.b2a7074bf7ad4p-16
-    ];
-
-    let hx = hi(x);
-    let ix = hx & EXP_SIGNIF_BITS;
-    if ix < 0x3e30_0000 && x as i32 == 0 {
-        // |x| < 2**-28
-        if ((ix | lo(x)) | (iy + 1)) == 0 {
-            return 1.0 / x.abs();
-        } else if iy == 1 {
-            return x;
-        } else {
-            // compute -1 / (x+y) carefully
-            let w = x + y;
-            let z = with_lo(w, 0);
-            let v = y - (z - x);
-            let a = -1.0 / w;
-            let t = with_lo(a, 0);
-            let s = 1.0 + t * z;
-            return t + a * (s + t * v);
-        }
-    }
-    if ix >= 0x3FE5_9428 {
-        // |x| >= 0.6744
-        if hx < 0 {
-            x = -x;
-            y = -y;
-        }
-        let z = PIO4 - x;
-        let w = PIO4LO - y;
-        x = z + w;
-        y = 0.0;
-    }
-    let z = x * x;
-    let w = z * z;
-    // Break x^5*(T[1]+x^2*T[2]+...) into
-    //   x^5(T[1]+x^4*T[3]+...+x^20*T[11]) +
-    //   x^5(x^2*(T[2]+x^4*T[4]+...+x^22*[T12]))
-    let mut r = T[1] + w * (T[3] + w * (T[5] + w * (T[7] + w * (T[9] + w * T[11]))));
-    let v = z * (T[2] + w * (T[4] + w * (T[6] + w * (T[8] + w * (T[10] + w * T[12])))));
-    let s = z * x;
-    r = y + z * (s * (r + v) + y);
-    r += T[0] * s;
-    let w = x + r;
-    if ix >= 0x3FE5_9428 {
-        let v = f64::from(iy);
-        return f64::from(1 - ((hx >> 30) & 2)) * (v - 2.0 * (x - (w * w / (w + v) - r)));
-    }
-    if iy == 1 {
-        w
+pub(crate) fn cos(x: f64) -> f64 {
+    if (hi(x) & 0x7fff_ffff) <= 0x3fe9_21fb {
+        kernel_cos(x, 0.0)
     } else {
-        // compute -1.0/(x + r) accurately
-        let z = with_lo(w, 0);
-        let v = r - (z - x); // z + v = r + x
-        let a = -1.0 / w;
-        let t = with_lo(a, 0);
-        let s = 1.0 + t * z;
-        t + a * (s + t * v)
+        libm::cos(x)
     }
 }
-
-// ---------------------------------------------------------------------------
-// Argument reduction
-// ---------------------------------------------------------------------------
-
-/// 396 hex digits (476 decimal) of 2/pi, in 24-bit chunks.
-const TWO_OVER_PI: [i32; 66] = [
-    0xA2F983, 0x6E4E44, 0x1529FC, 0x2757D1, 0xF534DD, 0xC0DB62, 0x95993C, 0x439041, 0xFE5163,
-    0xABDEBB, 0xC561B7, 0x246E3A, 0x424DD2, 0xE00649, 0x2EEA09, 0xD1921C, 0xFE1DEB, 0x1CB129,
-    0xA73EE8, 0x8235F5, 0x2EBB44, 0x84E99C, 0x7026B4, 0x5F7E41, 0x3991D6, 0x398353, 0x39F49C,
-    0x845F8B, 0xBDF928, 0x3B1FF8, 0x97FFDE, 0x05980F, 0xEF2F11, 0x8B5A0A, 0x6D1F6D, 0x367ECF,
-    0x27CB09, 0xB74F46, 0x3F669E, 0x5FEA2D, 0x7527BA, 0xC7EBE5, 0xF17B3D, 0x0739F7, 0x8A5292,
-    0xEA6BFB, 0x5FB11F, 0x8D5D08, 0x560330, 0x46FC7B, 0x6BABF0, 0xCFBC20, 0x9AF436, 0x1DA9E3,
-    0x91615E, 0xE61B08, 0x659985, 0x5F14A0, 0x68408D, 0xFFD880, 0x4D7327, 0x310606, 0x1556CA,
-    0x73A8C9, 0x60E27B, 0xC08C6B,
-];
-
-const NPIO2_HW: [i32; 32] = [
-    0x3FF921FB, 0x400921FB, 0x4012D97C, 0x401921FB, 0x401F6A7A, 0x4022D97C, 0x4025FDBB, 0x402921FB,
-    0x402C463A, 0x402F6A7A, 0x4031475C, 0x4032D97C, 0x40346B9C, 0x4035FDBB, 0x40378FDB, 0x403921FB,
-    0x403AB41B, 0x403C463A, 0x403DD85A, 0x403F6A7A, 0x40407E4C, 0x4041475C, 0x4042106C, 0x4042D97C,
-    0x4043A28C, 0x40446B9C, 0x404534AC, 0x4045FDBB, 0x4046C6CB, 0x40478FDB, 0x404858EB, 0x404921FB,
-];
-
-/// `__ieee754_rem_pio2`: returns `n` and `y[0] + y[1] = x - n*pi/2`.
-fn rem_pio2(x: f64) -> (i32, [f64; 2]) {
-    const INVPIO2: f64 = 0.6366197723675814; // 0x1.45f306dc9c883p-1, 53 bits of 2/pi
-    const PIO2_1: f64 = 1.5707963267341256; // 0x1.921fb544p0, first 33 bits of pi/2
-    const PIO2_1T: f64 = 6.077100506506192e-11; // 0x1.0b4611a626331p-34, pi/2 - PIO2_1
-    const PIO2_2: f64 = 6.077100506303966e-11; // 0x1.0b4611a6p-34, second 33 bits of pi/2
-    const PIO2_2T: f64 = 2.0222662487959506e-21; // 0x1.3198a2e037073p-69, pi/2 - (PIO2_1+PIO2_2)
-    const PIO2_3: f64 = 2.0222662487111665e-21; // 0x1.3198a2ep-69, third 33 bits of pi/2
-    const PIO2_3T: f64 = 8.4784276603689e-32; // 0x1.b839a252049c1p-104, pi/2 - (PIO2_1+PIO2_2+PIO2_3)
-
-    let mut y = [0.0f64; 2];
-    let hx = hi(x);
-    let ix = hx & EXP_SIGNIF_BITS;
-    if ix <= 0x3fe9_21fb {
-        // |x| ~<= pi/4, no need for reduction
-        y[0] = x;
-        y[1] = 0.0;
-        return (0, y);
-    }
-    if ix < 0x4002_d97c {
-        // |x| < 3pi/4, special case with n=+-1
-        if hx > 0 {
-            let mut z = x - PIO2_1;
-            if ix != 0x3ff9_21fb {
-                // 33+53 bit pi is good enough
-                y[0] = z - PIO2_1T;
-                y[1] = (z - y[0]) - PIO2_1T;
-            } else {
-                // near pi/2, use 33+33+53 bit pi
-                z -= PIO2_2;
-                y[0] = z - PIO2_2T;
-                y[1] = (z - y[0]) - PIO2_2T;
-            }
-            return (1, y);
-        } else {
-            let mut z = x + PIO2_1;
-            if ix != 0x3ff9_21fb {
-                y[0] = z + PIO2_1T;
-                y[1] = (z - y[0]) + PIO2_1T;
-            } else {
-                z += PIO2_2;
-                y[0] = z + PIO2_2T;
-                y[1] = (z - y[0]) + PIO2_2T;
-            }
-            return (-1, y);
-        }
-    }
-    if ix <= 0x4139_21fb {
-        // |x| ~<= 2^19*(pi/2), medium size
-        let mut t = x.abs();
-        let n = (t * INVPIO2 + 0.5) as i32;
-        let fn_ = f64::from(n);
-        let mut r = t - fn_ * PIO2_1;
-        let mut w = fn_ * PIO2_1T; // 1st round good to 85 bit
-        if n < 32 && ix != NPIO2_HW[(n - 1) as usize] {
-            y[0] = r - w; // quick check no cancellation
-        } else {
-            let j = ix >> 20;
-            y[0] = r - w;
-            let i = j - ((hi(y[0]) >> 20) & 0x7ff);
-            if i > 16 {
-                // 2nd iteration needed, good to 118
-                t = r;
-                w = fn_ * PIO2_2;
-                r = t - w;
-                w = fn_ * PIO2_2T - ((t - r) - w);
-                y[0] = r - w;
-                let i = j - ((hi(y[0]) >> 20) & 0x7ff);
-                if i > 49 {
-                    // 3rd iteration need, 151 bits acc
-                    t = r;
-                    w = fn_ * PIO2_3;
-                    r = t - w;
-                    w = fn_ * PIO2_3T - ((t - r) - w);
-                    y[0] = r - w;
-                }
-            }
-        }
-        y[1] = (r - y[0]) - w;
-        if hx < 0 {
-            y[0] = -y[0];
-            y[1] = -y[1];
-            return (-n, y);
-        }
-        return (n, y);
-    }
-    // all other (large) arguments
-    if ix >= EXP_BITS {
-        // x is inf or NaN
-        y[0] = x - x;
-        y[1] = y[0];
-        return (0, y);
-    }
-    // set z = scalbn(|x|, ilogb(x)-23)
-    let mut z = from_hi_lo(0, lo(x));
-    let e0 = (ix >> 20) - 1046; // e0 = ilogb(z) - 23
-    z = with_hi(z, ix - (e0 << 20));
-    let mut tx = [0.0f64; 3];
-    for t in tx.iter_mut().take(2) {
-        *t = f64::from(z as i32);
-        z = (z - *t) * TWO24;
-    }
-    tx[2] = z;
-    let mut nx = 3;
-    while tx[nx - 1] == 0.0 {
-        // skip zero term
-        nx -= 1;
-    }
-    let n = kernel_rem_pio2(&tx[..nx], &mut y, e0);
-    if hx < 0 {
-        y[0] = -y[0];
-        y[1] = -y[1];
-        return (-n, y);
-    }
-    (n, y)
+pub(crate) fn tan(x: f64) -> f64 {
+    libm::tan(x)
 }
-
-/// `__kernel_rem_pio2` specialized to `prec = 2` (the only precision used by
-/// `rem_pio2`). `x` holds the input broken into 24-bit pieces with exponent
-/// `e0` for `x[0]`. Returns the last three bits of `N` with `y = x - N*pi/2`.
-fn kernel_rem_pio2(x: &[f64], y: &mut [f64; 2], e0: i32) -> i32 {
-    // pi/2 cut into 24-bit chunks.
-    const PIO2: [f64; 8] = [
-        1.570796251296997,      // 0x1.921fb4p0
-        7.549789415861596e-08,  // 0x1.4442dp-24
-        5.390302529957765e-15,  // 0x1.846988p-48
-        3.282003415807913e-22,  // 0x1.8cc516p-72
-        1.270655753080676e-29,  // 0x1.01b838p-96
-        1.2293330898111133e-36, // 0x1.a25204p-120
-        2.7337005381646456e-44, // 0x1.382228p-145
-        2.1674168387780482e-51, // 0x1.9f31dp-169
-    ];
-    const TWON24: f64 = 5.960464477539063e-08; // 0x1.0p-24
-    const JK: usize = 4; // init_jk[prec = 2]
-    const JP: usize = JK;
-    let ipio2 = &TWO_OVER_PI;
-
-    let mut iq = [0i32; 20];
-    let mut f = [0.0f64; 20];
-    let mut fq = [0.0f64; 20];
-    let mut q = [0.0f64; 20];
-
-    // determine jx, jv, q0, note that 3 > q0
-    let jx = x.len() - 1;
-    let jv = ((e0 - 3) / 24).max(0);
-    let mut q0 = e0 - 24 * (jv + 1);
-    let jv = jv as usize;
-
-    // set up f[0] to f[jx+jk] where f[jx+jk] = ipio2[jv+jk]
-    let first = jv as isize - jx as isize;
-    for (j, fi) in (first..).zip(f.iter_mut().take(jx + JK + 1)) {
-        *fi = if j < 0 {
-            0.0
-        } else {
-            f64::from(ipio2[j as usize])
-        };
-    }
-
-    // compute q[0],q[1],...q[jk]
-    for i in 0..=JK {
-        let mut fw = 0.0;
-        for j in 0..=jx {
-            fw += x[j] * f[jx + i - j];
-        }
-        q[i] = fw;
-    }
-
-    let mut jz = JK;
-    let mut z;
-    let mut n;
-    let mut ih;
-    loop {
-        // distill q[] into iq[] reversingly
-        z = q[jz];
-        let mut i = 0;
-        let mut j = jz;
-        while j > 0 {
-            let fw = f64::from((TWON24 * z) as i32);
-            iq[i] = (z - TWO24 * fw) as i32;
-            z = q[j - 1] + fw;
-            i += 1;
-            j -= 1;
-        }
-
-        // compute n
-        z = scalb(z, q0); // actual value of z
-        z -= 8.0 * (z * 0.125).floor(); // trim off integer >= 8
-        n = z as i32;
-        z -= f64::from(n);
-        ih = 0;
-        if q0 > 0 {
-            // need iq[jz-1] to determine n
-            let i = iq[jz - 1] >> (24 - q0);
-            n += i;
-            iq[jz - 1] -= i << (24 - q0);
-            ih = iq[jz - 1] >> (23 - q0);
-        } else if q0 == 0 {
-            ih = iq[jz - 1] >> 23;
-        } else if z >= 0.5 {
-            ih = 2;
-        }
-
-        if ih > 0 {
-            // q > 0.5
-            n += 1;
-            let mut carry = 0;
-            for v in iq.iter_mut().take(jz) {
-                // compute 1-q
-                let j = *v;
-                if carry == 0 {
-                    if j != 0 {
-                        carry = 1;
-                        *v = 0x100_0000 - j;
-                    }
-                } else {
-                    *v = 0xff_ffff - j;
-                }
-            }
-            if q0 > 0 {
-                // rare case: chance is 1 in 12
-                match q0 {
-                    1 => iq[jz - 1] &= 0x7f_ffff,
-                    2 => iq[jz - 1] &= 0x3f_ffff,
-                    _ => {}
-                }
-            }
-            if ih == 2 {
-                z = 1.0 - z;
-                if carry != 0 {
-                    z -= scalb(1.0, q0);
-                }
-            }
-        }
-
-        // check if recomputation is needed
-        if z == 0.0 {
-            let mut j = 0;
-            for &v in &iq[JK..jz] {
-                j |= v;
-            }
-            if j == 0 {
-                // need recomputation
-                let mut k = 1;
-                while iq[JK - k] == 0 {
-                    k += 1; // k = no. of terms needed
-                }
-                for i in jz + 1..=jz + k {
-                    // add q[jz+1] to q[jz+k]
-                    f[jx + i] = f64::from(ipio2[jv + i]);
-                    let mut fw = 0.0;
-                    for j in 0..=jx {
-                        fw += x[j] * f[jx + i - j];
-                    }
-                    q[i] = fw;
-                }
-                jz += k;
-                continue;
-            }
-        }
-        break;
-    }
-
-    // chop off zero terms
-    if z == 0.0 {
-        jz -= 1;
-        q0 -= 24;
-        while iq[jz] == 0 {
-            jz -= 1;
-            q0 -= 24;
-        }
-    } else {
-        // break z into 24-bit if necessary
-        z = scalb(z, -q0);
-        if z >= TWO24 {
-            let fw = f64::from((TWON24 * z) as i32);
-            iq[jz] = (z - TWO24 * fw) as i32;
-            jz += 1;
-            q0 += 24;
-            iq[jz] = fw as i32;
-        } else {
-            iq[jz] = z as i32;
-        }
-    }
-
-    // convert integer "bit" chunk to floating-point value
-    let mut fw = scalb(1.0, q0);
-    for i in (0..=jz).rev() {
-        q[i] = fw * f64::from(iq[i]);
-        fw *= TWON24;
-    }
-
-    // compute PIo2[0,...,jp]*q[jz,...,0]
-    for i in (0..=jz).rev() {
-        let mut fw = 0.0;
-        let mut k = 0;
-        while k <= JP && k <= jz - i {
-            fw += PIO2[k] * q[i + k];
-            k += 1;
-        }
-        fq[jz - i] = fw;
-    }
-
-    // compress fq[] into y[]
-    let mut fw = 0.0;
-    for i in (0..=jz).rev() {
-        fw += fq[i];
-    }
-    y[0] = if ih == 0 { fw } else { -fw };
-    fw = fq[0] - fw;
-    for v in &fq[1..=jz] {
-        fw += *v;
-    }
-    y[1] = if ih == 0 { fw } else { -fw };
-    n & 7
-}
-
-// ---------------------------------------------------------------------------
-// asin / acos / atan / atan2
-// ---------------------------------------------------------------------------
-
-const PIO2_HI: f64 = 1.5707963267948966; // 0x1.921fb54442d18p0
-const PIO2_LO: f64 = 6.123233995736766e-17; // 0x1.1a62633145c07p-54
-// Coefficients of the rational approximation R(x^2) of (asin(x)-x)/x^3.
-const PS0: f64 = 0.16666666666666666; // 0x1.5555555555555p-3
-const PS1: f64 = -0.3255658186224009; // 0x1.4d61203eb6f7dp-2
-const PS2: f64 = 0.20121253213486293; // 0x1.9c1550e884455p-3
-const PS3: f64 = -0.04005553450067941; // 0x1.48228b5688f3bp-5
-const PS4: f64 = 0.0007915349942898145; // 0x1.9efe07501b288p-11
-const PS5: f64 = 3.479331075960212e-05; // 0x1.23de10dfdf709p-15
-const QS1: f64 = -2.403394911734414; // 0x1.33a271c8a2d4bp1
-const QS2: f64 = 2.0209457602335057; // 0x1.02ae59c598ac8p1
-const QS3: f64 = -0.6882839716054533; // 0x1.6066c1b8d0159p-1
-const QS4: f64 = 0.07703815055590194; // 0x1.3b8c5b12e9282p-4
-
-/// `StrictMath.asin`.
-///
-/// asin(x) = x + x*x^2*R(x^2) on [0, 0.5]; for x in [0.5, 1],
-/// asin(x) = pi/2 - 2*asin(sqrt((1-x)/2)).
 pub(crate) fn asin(x: f64) -> f64 {
-    const PIO4_HI: f64 = 0.7853981633974483; // 0x1.921fb54442d18p-1
-
-    let hx = hi(x);
-    let ix = hx & EXP_SIGNIF_BITS;
-    if ix >= 0x3ff0_0000 {
-        // |x| >= 1
-        if ((ix - 0x3ff0_0000) | lo(x)) == 0 {
-            // asin(1) = +-pi/2 with inexact
-            return x * PIO2_HI + x * PIO2_LO;
-        }
-        return (x - x) / (x - x); // asin(|x| > 1) is NaN
-    } else if ix < 0x3fe0_0000 {
-        // |x| < 0.5
-        let mut t = 0.0;
-        if ix < 0x3e40_0000 {
-            // |x| < 2**-27
-            if HUGE + x > 1.0 {
-                return x;
-            }
-        } else {
-            t = x * x;
-        }
-        let p = t * (PS0 + t * (PS1 + t * (PS2 + t * (PS3 + t * (PS4 + t * PS5)))));
-        let q = 1.0 + t * (QS1 + t * (QS2 + t * (QS3 + t * QS4)));
-        let w = p / q;
-        return x + x * w;
-    }
-    // 1 > |x| >= 0.5
-    let w = 1.0 - x.abs();
-    let t = w * 0.5;
-    let p = t * (PS0 + t * (PS1 + t * (PS2 + t * (PS3 + t * (PS4 + t * PS5)))));
-    let q = 1.0 + t * (QS1 + t * (QS2 + t * (QS3 + t * QS4)));
-    let s = t.sqrt();
-    let t = if ix >= 0x3FEF_3333 {
-        // |x| > 0.975
-        let w = p / q;
-        PIO2_HI - (2.0 * (s + s * w) - PIO2_LO)
-    } else {
-        let w = with_lo(s, 0);
-        let c = (t - w * w) / (s + w);
-        let r = p / q;
-        let p = 2.0 * s * r - (PIO2_LO - 2.0 * c);
-        let q = PIO4_HI - 2.0 * w;
-        PIO4_HI - (p - q)
-    };
-    if hx > 0 { t } else { -t }
+    libm::asin(x)
 }
-
-/// `StrictMath.acos`.
-///
-/// acos(x) = pi/2 - asin(x), computed piecewise as in fdlibm's e_acos.c.
 pub(crate) fn acos(x: f64) -> f64 {
-    use std::f64::consts::PI;
-
-    let hx = hi(x);
-    let ix = hx & EXP_SIGNIF_BITS;
-    if ix >= 0x3ff0_0000 {
-        // |x| >= 1
-        if ((ix - 0x3ff0_0000) | lo(x)) == 0 {
-            // |x| == 1
-            if hx > 0 {
-                return 0.0; // acos(1) = 0
-            } else {
-                return PI + 2.0 * PIO2_LO; // acos(-1) = pi
-            }
-        }
-        return (x - x) / (x - x); // acos(|x| > 1) is NaN
-    }
-    if ix < 0x3fe0_0000 {
-        // |x| < 0.5
-        if ix <= 0x3c60_0000 {
-            // |x| < 2**-57
-            return PIO2_HI + PIO2_LO;
-        }
-        let z = x * x;
-        let p = z * (PS0 + z * (PS1 + z * (PS2 + z * (PS3 + z * (PS4 + z * PS5)))));
-        let q = 1.0 + z * (QS1 + z * (QS2 + z * (QS3 + z * QS4)));
-        let r = p / q;
-        PIO2_HI - (x - (PIO2_LO - x * r))
-    } else if hx < 0 {
-        // x < -0.5
-        let z = (1.0 + x) * 0.5;
-        let p = z * (PS0 + z * (PS1 + z * (PS2 + z * (PS3 + z * (PS4 + z * PS5)))));
-        let q = 1.0 + z * (QS1 + z * (QS2 + z * (QS3 + z * QS4)));
-        let s = z.sqrt();
-        let r = p / q;
-        let w = r * s - PIO2_LO;
-        PI - 2.0 * (s + w)
-    } else {
-        // x > 0.5
-        let z = (1.0 - x) * 0.5;
-        let s = z.sqrt();
-        let df = with_lo(s, 0);
-        let c = (z - df * df) / (s + df);
-        let p = z * (PS0 + z * (PS1 + z * (PS2 + z * (PS3 + z * (PS4 + z * PS5)))));
-        let q = 1.0 + z * (QS1 + z * (QS2 + z * (QS3 + z * QS4)));
-        let r = p / q;
-        let w = r * s + c;
-        2.0 * (df + w)
-    }
+    libm::acos(x)
 }
-
-/// `StrictMath.atan`.
-///
-/// The argument is reduced to one of [0,7/16], [7/16,11/16], [11/16,19/16],
-/// [19/16,39/16], [39/16,INF] and evaluated against atan(0), atan(1/2),
-/// atan(1), atan(3/2) or atan(INF) plus a polynomial correction.
-pub(crate) fn atan(mut x: f64) -> f64 {
-    const ATANHI: [f64; 4] = [
-        0.4636476090008061, // 0x1.dac670561bb4fp-2, atan(0.5)hi
-        0.7853981633974483, // 0x1.921fb54442d18p-1, atan(1.0)hi
-        0.982793723247329,  // 0x1.f730bd281f69bp-1, atan(1.5)hi
-        1.5707963267948966, // 0x1.921fb54442d18p0, atan(inf)hi
-    ];
-    const ATANLO: [f64; 4] = [
-        2.2698777452961687e-17, // 0x1.a2b7f222f65e2p-56, atan(0.5)lo
-        3.061616997868383e-17,  // 0x1.1a62633145c07p-55, atan(1.0)lo
-        1.3903311031230998e-17, // 0x1.007887af0cbbdp-56, atan(1.5)lo
-        6.123233995736766e-17,  // 0x1.1a62633145c07p-54, atan(inf)lo
-    ];
-    const AT: [f64; 11] = [
-        0.3333333333333293,    // 0x1.555555555550dp-2
-        -0.19999999999876483,  // 0x1.999999998ebc4p-3
-        0.14285714272503466,   // 0x1.24924920083ffp-3
-        -0.11111110405462356,  // 0x1.c71c6fe231671p-4
-        0.09090887133436507,   // 0x1.745cdc54c206ep-4
-        -0.0769187620504483,   // 0x1.3b0f2af749a6dp-4
-        0.06661073137387531,   // 0x1.10d66a0d03d51p-4
-        -0.058335701337905735, // 0x1.dde2d52defd9ap-5
-        0.049768779946159324,  // 0x1.97b4b24760debp-5
-        -0.036531572744216916, // 0x1.2b4442c6a6c2fp-5
-        0.016285820115365782,  // 0x1.0ad3ae322da11p-6
-    ];
-
-    let hx = hi(x);
-    let ix = hx & EXP_SIGNIF_BITS;
-    let id: i32;
-    if ix >= 0x4410_0000 {
-        // |x| >= 2^66
-        if ix > EXP_BITS || (ix == EXP_BITS && lo(x) != 0) {
-            return x + x; // NaN
-        }
-        if hx > 0 {
-            return ATANHI[3] + ATANLO[3];
-        } else {
-            return -ATANHI[3] - ATANLO[3];
-        }
-    }
-    if ix < 0x3fdc_0000 {
-        // |x| < 0.4375
-        if ix < 0x3e20_0000 && HUGE + x > 1.0 {
-            // |x| < 2^-29, raise inexact
-            return x;
-        }
-        id = -1;
-    } else {
-        x = x.abs();
-        if ix < 0x3ff3_0000 {
-            // |x| < 1.1875
-            if ix < 0x3fe6_0000 {
-                // 7/16 <= |x| < 11/16
-                id = 0;
-                x = (2.0 * x - 1.0) / (2.0 + x);
-            } else {
-                // 11/16 <= |x| < 19/16
-                id = 1;
-                x = (x - 1.0) / (x + 1.0);
-            }
-        } else if ix < 0x4003_8000 {
-            // |x| < 2.4375
-            id = 2;
-            x = (x - 1.5) / (1.0 + 1.5 * x);
-        } else {
-            // 2.4375 <= |x| < 2^66
-            id = 3;
-            x = -1.0 / x;
-        }
-    }
-    // end of argument reduction
-    let z = x * x;
-    let w = z * z;
-    // break sum from i=0 to 10 aT[i]z**(i+1) into odd and even poly
-    let s1 = z * (AT[0] + w * (AT[2] + w * (AT[4] + w * (AT[6] + w * (AT[8] + w * AT[10])))));
-    let s2 = w * (AT[1] + w * (AT[3] + w * (AT[5] + w * (AT[7] + w * AT[9]))));
-    if id < 0 {
-        x - x * (s1 + s2)
-    } else {
-        let id = id as usize;
-        let z = ATANHI[id] - ((x * (s1 + s2) - ATANLO[id]) - x);
-        if hx < 0 { -z } else { z }
-    }
+pub(crate) fn atan(x: f64) -> f64 {
+    libm::atan(x)
 }
-
-/// `StrictMath.atan2(y, x)`.
+// Ported from Netlib fdlibm 5.3 e_atan2.c.
 pub(crate) fn atan2(y: f64, x: f64) -> f64 {
-    use std::f64::consts::PI;
-    const TINY: f64 = 1.0e-300;
-    const PI_O_4: f64 = 0.7853981633974483; // 0x1.921fb54442d18p-1
-    const PI_O_2: f64 = 1.5707963267948966; // 0x1.921fb54442d18p0
-    const PI_LO: f64 = 1.2246467991473532e-16; // 0x1.1a62633145c07p-53
-
-    let hx = hi(x);
-    let ix = hx & EXP_SIGNIF_BITS;
-    let lx = lo(x);
-    let hy = hi(y);
-    let iy = hy & EXP_SIGNIF_BITS;
-    let ly = lo(y);
+    const PI: f64 = 3.1415926535897931160e0;
+    const PI_LO: f64 = 1.2246467991473531772e-16;
     if x.is_nan() || y.is_nan() {
         return x + y;
     }
+    let hx = hi(x);
+    let lx = lo(x);
+    let hy = hi(y);
+    let ly = lo(y);
     if (hx.wrapping_sub(0x3ff0_0000) | lx) == 0 {
-        // x = 1.0
         return atan(y);
     }
-    let m = ((hy >> 31) & 1) | ((hx >> 30) & 2); // 2*sign(x) + sign(y)
-
-    // when y = 0
+    let ix = hx & 0x7fff_ffff;
+    let iy = hy & 0x7fff_ffff;
+    let m = ((hy >> 31) & 1) | ((hx >> 30) & 2);
     if (iy | ly) == 0 {
-        match m {
-            0 | 1 => return y,      // atan(+/-0, +anything) = +/-0
-            2 => return PI + TINY,  // atan(+0, -anything) = pi
-            _ => return -PI - TINY, // atan(-0, -anything) = -pi
-        }
+        return match m {
+            0 | 1 => y,
+            2 => PI,
+            _ => -PI,
+        };
     }
-    // when x = 0
     if (ix | lx) == 0 {
-        return if hy < 0 {
-            -PI_O_2 - TINY
-        } else {
-            PI_O_2 + TINY
-        };
+        return if hy < 0 { -PI / 2.0 } else { PI / 2.0 };
     }
-
-    // when x is INF
-    if ix == EXP_BITS {
-        if iy == EXP_BITS {
+    if ix == 0x7ff0_0000 {
+        if iy == 0x7ff0_0000 {
             return match m {
-                0 => PI_O_4 + TINY,        // atan(+INF, +INF)
-                1 => -PI_O_4 - TINY,       // atan(-INF, +INF)
-                2 => 3.0 * PI_O_4 + TINY,  // atan(+INF, -INF)
-                _ => -3.0 * PI_O_4 - TINY, // atan(-INF, -INF)
-            };
-        } else {
-            return match m {
-                0 => 0.0,        // atan(+..., +INF)
-                1 => -0.0,       // atan(-..., +INF)
-                2 => PI + TINY,  // atan(+..., -INF)
-                _ => -PI - TINY, // atan(-..., -INF)
+                0 => PI / 4.0,
+                1 => -PI / 4.0,
+                2 => 3.0 * PI / 4.0,
+                _ => -3.0 * PI / 4.0,
             };
         }
-    }
-    // when y is INF
-    if iy == EXP_BITS {
-        return if hy < 0 {
-            -PI_O_2 - TINY
-        } else {
-            PI_O_2 + TINY
+        return match m {
+            0 => 0.0,
+            1 => -0.0,
+            2 => PI,
+            _ => -PI,
         };
     }
-
-    // compute y/x
+    if iy == 0x7ff0_0000 {
+        return if hy < 0 { -PI / 2.0 } else { PI / 2.0 };
+    }
     let k = (iy - ix) >> 20;
     let z = if k > 60 {
-        // |y/x| > 2**60
-        PI_O_2 + 0.5 * PI_LO
+        PI / 2.0 + 0.5 * PI_LO
     } else if hx < 0 && k < -60 {
-        // |y|/x < -2**60
         0.0
     } else {
-        // safe to do y/x
         atan((y / x).abs())
     };
     match m {
-        0 => z,                // atan(+, +)
-        1 => -z,               // atan(-, +)
-        2 => PI - (z - PI_LO), // atan(+, -)
-        _ => (z - PI_LO) - PI, // atan(-, -)
+        0 => z,
+        1 => -z,
+        2 => PI - (z - PI_LO),
+        _ => (z - PI_LO) - PI,
     }
 }
-
-// ---------------------------------------------------------------------------
-// cbrt
-// ---------------------------------------------------------------------------
-
-/// `StrictMath.cbrt`.
-pub(crate) fn cbrt(x: f64) -> f64 {
-    const B1: i32 = 715094163; // (682-0.03306235651)*2**20
-    const B2: i32 = 696219795; // (664-0.03306235651)*2**20
-    const C: f64 = 0.5428571428571428; // 0x1.15f15f15f15f1p-1, 19/35
-    const D: f64 = -0.7053061224489796; // 0x1.691de2532c834p-1, -864/1225
-    const E: f64 = 1.4142857142857144; // 0x1.6a0ea0ea0ea0fp0, 99/70
-    const F: f64 = 1.6071428571428572; // 0x1.9b6db6db6db6ep0, 45/28
-    const G: f64 = 0.35714285714285715; // 0x1.6db6db6db6db7p-2, 5/14
-
-    if x == 0.0 || !x.is_finite() {
-        return x; // handles signed zeros properly
+// Ported from Netlib fdlibm 5.3 s_cbrt.c.
+pub(crate) fn cbrt(mut x: f64) -> f64 {
+    const B1: i32 = 715094163;
+    const B2: i32 = 696219795;
+    const C: f64 = 5.42857142857142815906e-01;
+    const D: f64 = -7.05306122448979611050e-01;
+    const E: f64 = 1.41428571428571436819e0;
+    const F: f64 = 1.60714285714285720630e0;
+    const G: f64 = 3.57142857142857150787e-01;
+    let mut hx = hi(x);
+    let sign = hx & i32::MIN;
+    hx ^= sign;
+    if hx >= 0x7ff0_0000 {
+        return x + x;
     }
-    let sign = if x < 0.0 { -1.0 } else { 1.0 };
-    let x = x.abs();
-
-    // rough cbrt to 5 bits
-    let mut t;
-    if x < 2.2250738585072014e-308 {
-        // subnormal number
-        t = TWO54;
-        t *= x;
-        t = with_hi(t, hi(t) / 3 + B2);
+    if (hx | lo(x)) == 0 {
+        return x;
+    }
+    x = with_hi(x, hx);
+    let mut t = if hx < 0x0010_0000 {
+        let mut scaled = with_hi(0.0, 0x4350_0000) * x;
+        scaled = with_hi(scaled, hi(scaled) / 3 + B2);
+        scaled
     } else {
-        t = with_hi(0.0, hi(x) / 3 + B1);
-    }
-
-    // new cbrt to 23 bits
+        with_hi(0.0, hx / 3 + B1)
+    };
     let r = t * t / x;
     let s = C + r * t;
     t *= G + F / (s + E + D / s);
-
-    // chopped to 20 bits and make it larger than cbrt(x)
     t = with_lo(t, 0);
     t = with_hi(t, hi(t) + 1);
-
-    // one step newton iteration to 53 bits with error less than 0.667 ulps
-    let s = t * t; // t*t is exact
+    let s = t * t;
     let r = x / s;
     let w = t + t;
-    let r = (r - t) / (w + r); // r-s is exact
-    t += t * r;
-
-    sign * t
+    t += t * ((r - t) / (w + r));
+    with_hi(t, hi(t) | sign)
 }
-
-// ---------------------------------------------------------------------------
-// pow
-// ---------------------------------------------------------------------------
-
-/// `StrictMath.pow(x, y)`.
-///
-/// Computes log2(x) in extra precision as t1 + t2, multiplies by y split
-/// into y1 + y2, and evaluates 2^(y*log2(x)) with an exp-style kernel.
 pub(crate) fn pow(x: f64, y: f64) -> f64 {
-    const INFINITY: f64 = f64::INFINITY;
-
-    // y == zero: x**0 = 1
-    if y == 0.0 {
-        return 1.0;
-    }
-    // +/-NaN return x + y to propagate NaN significands
-    if x.is_nan() || y.is_nan() {
-        return x + y;
-    }
-
-    let y_abs = y.abs();
-    let mut x_abs = x.abs();
-    // Special values of y
-    if y == 2.0 {
-        return x * x;
-    } else if y == 0.5 {
-        if x >= -f64::MAX {
-            // handle x == -infinity later
-            return (x + 0.0).sqrt(); // add 0.0 to properly handle x == -0.0
-        }
-    } else if y_abs == 1.0 {
-        return if y == 1.0 { x } else { 1.0 / x };
-    } else if y_abs == INFINITY {
-        if x_abs == 1.0 {
-            return y - y; // inf**+/-1 is NaN
-        } else if x_abs > 1.0 {
-            // (|x| > 1)**+/-inf = inf, 0
-            return if y >= 0.0 { y } else { 0.0 };
-        } else {
-            // (|x| < 1)**-/+inf = inf, 0
-            return if y < 0.0 { -y } else { 0.0 };
-        }
-    }
-
-    let hx = hi(x);
-    let mut ix = hx & EXP_SIGNIF_BITS;
-
-    // When x < 0, determine if y is an odd integer:
-    // 0 ... y is not an integer, 1 ... odd int, 2 ... even int
-    let mut y_is_int = 0;
-    if hx < 0 {
-        if y_abs >= 9007199254740992.0 {
-            y_is_int = 2; // even, since ulp(2^53) = 2.0
-        } else if y_abs >= 1.0 {
-            let y_abs_as_long = y_abs as i64;
-            if y_abs_as_long as f64 == y_abs {
-                y_is_int = 2 - (y_abs_as_long & 1) as i32;
-            }
-        }
-    }
-
-    // Special value of x
-    if x_abs == 0.0 || x_abs == INFINITY || x_abs == 1.0 {
-        let mut z = x_abs; // x is +/-0, +/-inf, +/-1
-        if y < 0.0 {
-            z = 1.0 / z; // z = (1/|x|)
-        }
-        if hx < 0 {
-            if ((ix - 0x3ff00000) | y_is_int) == 0 {
-                z = (z - z) / (z - z); // (-1)**non-int is NaN
-            } else if y_is_int == 1 {
-                z = -z; // (x < 0)**odd = -(|x|**odd)
-            }
-        }
-        return z;
-    }
-
-    let mut n = (hx >> 31) + 1;
-
-    // (x < 0)**(non-int) is NaN
-    if (n | y_is_int) == 0 {
-        return (x - x) / (x - x);
-    }
-
-    // s (sign of result -ve**odd) = -1 else = 1
-    let s = if (n | (y_is_int - 1)) == 0 { -1.0 } else { 1.0 };
-
-    let (t1, t2) = if y_abs > 2147485695.9999995 {
-        // |y| is huge (> ~2**31)
-        const INV_LN2: f64 = 1.4426950408889634; // 0x1.71547652b82fep0, 1/ln2
-        const INV_LN2_H: f64 = 1.4426950216293335; // 0x1.715476p0, 24 bits of 1/ln2
-        const INV_LN2_L: f64 = 1.9259629911266175e-08; // 0x1.4ae0bf85ddf44p-26, 1/ln2 tail
-
-        // Over/underflow if x is not close to one
-        if x_abs < 0.9999995231628418 {
-            return if y < 0.0 { s * INFINITY } else { s * 0.0 };
-        }
-        if x_abs > 1.0000009536743162 {
-            return if y > 0.0 { s * INFINITY } else { s * 0.0 };
-        }
-        // now |1-x| is tiny <= 2**-20, sufficient to compute
-        // log(x) by x - x^2/2 + x^3/3 - x^4/4
-        let t = x_abs - 1.0; // t has 20 trailing zeros
-        let w = (t * t) * (0.5 - t * (0.3333333333333333333333 - t * 0.25));
-        let u = INV_LN2_H * t; // INV_LN2_H has 21 sig. bits
-        let v = t * INV_LN2_L - w * INV_LN2;
-        let t1 = with_lo(u + v, 0);
-        (t1, v - (t1 - u))
+    if y.is_nan() {
+        x + y
+    } else if x.abs() == 1.0 && y.is_infinite() {
+        f64::NAN
     } else {
-        const CP: f64 = 0.9617966939259756; // 0x1.ec709dc3a03fdp-1, 2/(3ln2)
-        const CP_H: f64 = 0.9617967009544373; // 0x1.ec709ep-1, (float)cp
-        const CP_L: f64 = -7.028461650952758e-09; // 0x1.e2fe0145b01f5p-28, tail of CP_H
-
-        const BP: [f64; 2] = [1.0, 1.5];
-        const DP_H: [f64; 2] = [0.0, 0.5849624872207642]; // 0x1.2b8034p-1
-        const DP_L: [f64; 2] = [0.0, 1.350039202129749e-08]; // 0x1.cfdeb43cfd006p-27
-
-        // Poly coefs for (3/2)*(log(x)-2s-2/3*s**3
-        const L1: f64 = 0.5999999999999946; // 0x1.3333333333303p-1
-        const L2: f64 = 0.4285714285785502; // 0x1.b6db6db6fabffp-2
-        const L3: f64 = 0.33333332981837743; // 0x1.55555518f264dp-2
-        const L4: f64 = 0.272728123808534; // 0x1.17460a91d4101p-2
-        const L5: f64 = 0.23066074577556175; // 0x1.d864a93c9db65p-3
-        const L6: f64 = 0.20697501780033842; // 0x1.a7e284a454eefp-3
-
-        n = 0;
-        // Take care of subnormal numbers
-        if ix < 0x00100000 {
-            x_abs *= 9007199254740992.0;
-            n -= 53;
-            ix = hi(x_abs);
-        }
-        n += (ix >> 20) - 0x3ff;
-        let j = ix & 0x000fffff;
-        // Determine interval
-        ix = j | 0x3ff00000; // normalize ix
-        let k: usize;
-        if j <= 0x3988E {
-            k = 0; // |x| < sqrt(3/2)
-        } else if j < 0xBB67A {
-            k = 1; // |x| < sqrt(3)
-        } else {
-            k = 0;
-            n += 1;
-            ix -= 0x00100000;
-        }
-        x_abs = with_hi(x_abs, ix);
-
-        // Compute ss = s_h + s_l = (x-1)/(x+1) or (x-1.5)/(x+1.5)
-        let u = x_abs - BP[k];
-        let v = 1.0 / (x_abs + BP[k]);
-        let ss = u * v;
-        let s_h = with_lo(ss, 0);
-        // t_h = x_abs + BP[k] High
-        let t_h = from_hi_lo(
-            ((ix >> 1) | 0x20000000) + 0x00080000 + ((k as i32) << 18),
-            0,
-        );
-        let t_l = x_abs - (t_h - BP[k]);
-        let s_l = v * ((u - s_h * t_h) - s_h * t_l);
-        // Compute log(x_abs)
-        let mut s2 = ss * ss;
-        let mut r = s2 * s2 * (L1 + s2 * (L2 + s2 * (L3 + s2 * (L4 + s2 * (L5 + s2 * L6)))));
-        r += s_l * (s_h + ss);
-        s2 = s_h * s_h;
-        let t_h = with_lo(3.0 + s2 + r, 0);
-        let t_l = r - ((t_h - 3.0) - s2);
-        // u+v = ss*(1+...)
-        let u = s_h * t_h;
-        let v = s_l * t_h + t_l * ss;
-        // 2/(3log2)*(ss + ...)
-        let p_h = with_lo(u + v, 0);
-        let p_l = v - (p_h - u);
-        let z_h = CP_H * p_h; // CP_H + CP_L = 2/(3*log2)
-        let z_l = CP_L * p_h + p_l * CP + DP_L[k];
-        // log2(x_abs) = (ss + ..)*2/(3*log2) = n + DP_H + z_h + z_l
-        let t = f64::from(n);
-        let t1 = with_lo(((z_h + z_l) + DP_H[k]) + t, 0);
-        (t1, z_l - (((t1 - t) - DP_H[k]) - z_h))
-    };
-
-    // Split up y into (y1 + y2) and compute (y1 + y2) * (t1 + t2)
-    let y1 = with_lo(y, 0);
-    let p_l = (y - y1) * t1 + y * t2;
-    let mut p_h = y1 * t1;
-    let mut z = p_l + p_h;
-    let mut j = hi(z);
-    let i = lo(z);
-    if j >= 0x40900000 {
-        // z >= 1024
-        if ((j - 0x40900000) | i) != 0 {
-            return s * INFINITY; // overflow
-        } else {
-            const OVT: f64 = 8.0085662595372944372e-0017; // -(1024-log2(ovfl+.5ulp))
-            if p_l + OVT > z - p_h {
-                return s * INFINITY; // overflow
-            }
-        }
-    } else if (j & EXP_SIGNIF_BITS) >= 0x4090cc00 {
-        // z <= -1075
-        // z < -1075, or z == -1075 and p_l rounds it down
-        if (j.wrapping_sub(0xc090cc00_u32 as i32) | i) != 0 || p_l <= z - p_h {
-            return s * 0.0; // underflow
-        }
-    }
-
-    // Compute 2**(p_h+p_l)
-    const P1: f64 = 0.16666666666666602; // 0x1.555555555553ep-3
-    const P2: f64 = -0.0027777777777015593; // 0x1.6c16c16bebd93p-9
-    const P3: f64 = 6.613756321437934e-05; // 0x1.1566aaf25de2cp-14
-    const P4: f64 = -1.6533902205465252e-06; // 0x1.bbd41c5d26bf1p-20
-    const P5: f64 = 4.1381367970572385e-08; // 0x1.6376972bea4d0p-25
-    const LG2: f64 = 0.6931471805599453; // 0x1.62e42fefa39efp-1
-    const LG2_H: f64 = 0.6931471824645996; // 0x1.62e43p-1
-    const LG2_L: f64 = -1.904654299957768e-09; // 0x1.05c610ca86c39p-29
-    let i = j & EXP_SIGNIF_BITS;
-    let mut k = (i >> 20) - 0x3ff;
-    let mut n = 0;
-    if i > 0x3fe00000 {
-        // if |z| > 0.5, set n = [z + 0.5]
-        n = j.wrapping_add(0x00100000 >> (k + 1));
-        k = ((n & EXP_SIGNIF_BITS) >> 20) - 0x3ff; // new k for n
-        let t = from_hi_lo(n & !(0x000fffff >> k), 0);
-        n = ((n & 0x000fffff) | 0x00100000) >> (20 - k);
-        if j < 0 {
-            n = -n;
-        }
-        p_h -= t;
-    }
-    let t = with_lo(p_l + p_h, 0);
-    let u = t * LG2_H;
-    let v = (p_l - (t - p_h)) * LG2 + t * LG2_L;
-    z = u + v;
-    let w = v - (z - u);
-    let t = z * z;
-    let t1 = z - t * (P1 + t * (P2 + t * (P3 + t * (P4 + t * P5))));
-    let r = (z * t1) / (t1 - 2.0) - (w + z * w);
-    z = 1.0 - (r - z);
-    j = hi(z);
-    j = j.wrapping_add(n << 20);
-    if (j >> 20) <= 0 {
-        z = scalb(z, n); // subnormal output
-    } else {
-        z = with_hi(z, hi(z).wrapping_add(n << 20));
-    }
-    s * z
-}
-
-// ---------------------------------------------------------------------------
-// exp / log / log10
-// ---------------------------------------------------------------------------
-
-/// `StrictMath.exp`.
-///
-/// Reduces x = k*ln2 + r with |r| <= 0.5*ln2, approximates exp(r) with a
-/// degree-5 rational kernel, and scales back by 2^k.
-pub(crate) fn exp(mut x: f64) -> f64 {
-    const HALF: [f64; 2] = [0.5, -0.5];
-    const TWOM1000: f64 = 9.332636185032189e-302; // 0x1.0p-1000
-    const O_THRESHOLD: f64 = 709.782712893384; // 0x1.62e42fefa39efp9
-    const U_THRESHOLD: f64 = -745.1332191019411; // 0x1.74910d52d3051p9
-    const LN2HI: [f64; 2] = [0.6931471803691238, -0.6931471803691238];
-    const LN2LO: [f64; 2] = [1.9082149292705877e-10, -1.9082149292705877e-10];
-    const INVLN2: f64 = 1.4426950408889634; // 0x1.71547652b82fep0
-    const P1: f64 = 0.16666666666666602; // 0x1.555555555553ep-3
-    const P2: f64 = -0.0027777777777015593; // 0x1.6c16c16bebd93p-9
-    const P3: f64 = 6.613756321437934e-05; // 0x1.1566aaf25de2cp-14
-    const P4: f64 = -1.6533902205465252e-06; // 0x1.bbd41c5d26bf1p-20
-    const P5: f64 = 4.1381367970572385e-08; // 0x1.6376972bea4d0p-25
-
-    let mut hi_part = 0.0;
-    let mut lo_part = 0.0;
-    let mut k = 0;
-
-    let mut hx = hi(x);
-    let xsb = ((hx >> 31) & 1) as usize; // sign bit of x
-    hx &= EXP_SIGNIF_BITS; // high word of |x|
-
-    // filter out non-finite argument
-    if hx >= 0x40862E42 {
-        // |x| >= 709.78...
-        if hx >= 0x7ff00000 {
-            if ((hx & 0xfffff) | lo(x)) != 0 {
-                return x + x; // NaN
-            } else {
-                return if xsb == 0 { x } else { 0.0 }; // exp(+-inf) = {inf, 0}
-            }
-        }
-        if x > O_THRESHOLD {
-            return HUGE * HUGE; // overflow
-        }
-        if x < U_THRESHOLD {
-            return TWOM1000 * TWOM1000; // underflow
-        }
-    }
-
-    // argument reduction
-    if hx > 0x3fd62e42 {
-        // |x| > 0.5 ln2
-        if hx < 0x3FF0A2B2 {
-            // and |x| < 1.5 ln2
-            hi_part = x - LN2HI[xsb];
-            lo_part = LN2LO[xsb];
-            k = 1 - xsb as i32 - xsb as i32;
-        } else {
-            k = (INVLN2 * x + HALF[xsb]) as i32;
-            let t = f64::from(k);
-            hi_part = x - t * LN2HI[0]; // t*ln2HI is exact here
-            lo_part = t * LN2LO[0];
-        }
-        x = hi_part - lo_part;
-    } else if hx < 0x3e300000 {
-        // |x| < 2**-28
-        if HUGE + x > 1.0 {
-            return 1.0 + x; // trigger inexact
-        }
-    }
-
-    // x is now in primary range
-    let t = x * x;
-    let c = x - t * (P1 + t * (P2 + t * (P3 + t * (P4 + t * P5))));
-    if k == 0 {
-        return 1.0 - ((x * c) / (c - 2.0) - x);
-    }
-    let y = 1.0 - ((lo_part - (x * c) / (2.0 - c)) - hi_part);
-    if k >= -1021 {
-        with_hi(y, hi(y).wrapping_add(k << 20)) // add k to y's exponent
-    } else {
-        with_hi(y, hi(y).wrapping_add((k + 1000) << 20)) * TWOM1000
+        libm::pow(x, y)
     }
 }
-
-/// `StrictMath.log` (natural logarithm).
-///
-/// Reduces x = 2^k * (1+f) with sqrt(2)/2 < 1+f < sqrt(2), then
-/// log(1+f) = 2s + s*R(s^2) where s = f/(2+f).
-pub(crate) fn log(mut x: f64) -> f64 {
-    const LN2_HI: f64 = 0.6931471803691238; // 0x1.62e42feep-1
-    const LN2_LO: f64 = 1.9082149292705877e-10; // 0x1.a39ef35793c76p-33
-    const LG1: f64 = 0.6666666666666735; // 0x1.5555555555593p-1
-    const LG2: f64 = 0.3999999999940942; // 0x1.999999997fa04p-2
-    const LG3: f64 = 0.2857142874366239; // 0x1.2492494229359p-2
-    const LG4: f64 = 0.22222198432149784; // 0x1.c71c51d8e78afp-3
-    const LG5: f64 = 0.1818357216161805; // 0x1.7466496cb03dep-3
-    const LG6: f64 = 0.15313837699209373; // 0x1.39a09d078c69fp-3
-    const LG7: f64 = 0.14798198605116586; // 0x1.2f112df3e5244p-3
-
-    let mut hx = hi(x);
-    let lx = lo(x);
-
-    let mut k = 0;
-    if hx < 0x0010_0000 {
-        // x < 2**-1022
-        if ((hx & EXP_SIGNIF_BITS) | lx) == 0 {
-            return -TWO54 / 0.0; // log(+-0) = -inf
-        }
-        if hx < 0 {
-            return (x - x) / 0.0; // log(-#) = NaN
-        }
-        k -= 54;
-        x *= TWO54; // subnormal number, scale up x
-        hx = hi(x);
-    }
-    if hx >= EXP_BITS {
-        return x + x;
-    }
-    k += (hx >> 20) - 1023;
-    hx &= 0x000f_ffff;
-    let i = (hx + 0x9_5f64) & 0x10_0000;
-    x = with_hi(x, hx | (i ^ 0x3ff0_0000)); // normalize x or x/2
-    k += i >> 20;
-    let f = x - 1.0;
-    if (0x000f_ffff & (2 + hx)) < 3 {
-        // |f| < 2**-20
-        if f == 0.0 {
-            if k == 0 {
-                return 0.0;
-            }
-            let dk = f64::from(k);
-            return dk * LN2_HI + dk * LN2_LO;
-        }
-        let r = f * f * (0.5 - 0.33333333333333333 * f);
-        if k == 0 {
-            return f - r;
-        }
-        let dk = f64::from(k);
-        return dk * LN2_HI - ((r - dk * LN2_LO) - f);
-    }
-    let s = f / (2.0 + f);
-    let dk = f64::from(k);
-    let z = s * s;
-    let mut i = hx - 0x6_147a;
-    let w = z * z;
-    let j = 0x6b851 - hx;
-    let t1 = w * (LG2 + w * (LG4 + w * LG6));
-    let t2 = z * (LG1 + w * (LG3 + w * (LG5 + w * LG7)));
-    i |= j;
-    let r = t2 + t1;
-    if i > 0 {
-        let hfsq = 0.5 * f * f;
-        if k == 0 {
-            f - (hfsq - s * (hfsq + r))
-        } else {
-            dk * LN2_HI - ((hfsq - (s * (hfsq + r) + dk * LN2_LO)) - f)
-        }
-    } else if k == 0 {
-        f - s * (f - r)
-    } else {
-        dk * LN2_HI - ((s * (f - r) - dk * LN2_LO) - f)
-    }
+pub(crate) fn exp(x: f64) -> f64 {
+    libm::exp(x)
 }
-
-/// `StrictMath.log10`.
-///
-/// log10(x) = n*log10_2hi + (n*log10_2lo + ivln10*log(x/2^n)).
+pub(crate) fn log(x: f64) -> f64 {
+    libm::log(x)
+}
+// Ported from Netlib fdlibm 5.3 e_log10.c.
 pub(crate) fn log10(mut x: f64) -> f64 {
-    const IVLN10: f64 = 0.4342944819032518; // 0x1.bcb7b1526e50ep-2
-    const LOG10_2HI: f64 = 0.30102999566361177; // 0x1.34413509f6p-2
-    const LOG10_2LO: f64 = 3.694239077158931e-13; // 0x1.9fef311f12b36p-42
-
+    const TWO54: f64 = 1.80143985094819840000e16;
+    const IVLN10: f64 = 4.34294481903251816668e-01;
+    const LOG10_2HI: f64 = 3.01029995663611771306e-01;
+    const LOG10_2LO: f64 = 3.69423907715893078616e-13;
     let mut hx = hi(x);
     let lx = lo(x);
-
     let mut k = 0;
     if hx < 0x0010_0000 {
-        // x < 2**-1022
-        if ((hx & EXP_SIGNIF_BITS) | lx) == 0 {
-            return -TWO54 / 0.0; // log(+-0) = -inf
+        if ((hx & 0x7fff_ffff) | lx) == 0 {
+            return -TWO54 / 0.0;
         }
         if hx < 0 {
-            return (x - x) / 0.0; // log(-#) = NaN
+            return (x - x) / 0.0;
         }
         k -= 54;
-        x *= TWO54; // subnormal number, scale up x
+        x *= TWO54;
         hx = hi(x);
     }
-    if hx >= EXP_BITS {
+    if hx >= 0x7ff0_0000 {
         return x + x;
     }
     k += (hx >> 20) - 1023;
-    let i = ((k as u32) >> 31) as i32; // unsigned shift
-    hx = (hx & 0x000f_ffff) | ((0x3ff - i) << 20);
+    let i = ((k as u32) >> 31) as i32;
+    x = with_hi(x, (hx & 0x000f_ffff) | ((0x3ff - i) << 20));
     let y = f64::from(k + i);
-    x = with_hi(x, hx);
     let z = y * LOG10_2LO + IVLN10 * log(x);
     z + y * LOG10_2HI
 }
