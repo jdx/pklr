@@ -1128,6 +1128,8 @@ amended = (explicit) { ["a"] { 5 } }
 untyped = new Mapping { ["a"] { 6 } }
 dynamic = new Mapping<String, Dynamic> { ["a"] { 7 } }
 dynamicUnion = new Mapping<String, *Dynamic|Int> { ["a"] { 8 } }
+typealias DynamicDefault = *Dynamic|Int
+dynamicAlias = new Mapping<String, DynamicDefault> { ["a"] { 9 } }
 "#,
     );
     assert_eq!(json["examples"]["x"], serde_json::json!([2, "two"]));
@@ -1139,6 +1141,7 @@ dynamicUnion = new Mapping<String, *Dynamic|Int> { ["a"] { 8 } }
     assert_eq!(json["untyped"]["a"], serde_json::json!([6]));
     assert_eq!(json["dynamic"]["a"], serde_json::json!([7]));
     assert_eq!(json["dynamicUnion"]["a"], serde_json::json!([8]));
+    assert_eq!(json["dynamicAlias"]["a"], serde_json::json!([9]));
 }
 
 #[test]
@@ -1148,6 +1151,19 @@ fn typed_scalar_mapping_entry_body_is_not_a_listing() {
         err.contains("Object of type `Int` cannot have an element."),
         "{err}"
     );
+}
+
+#[test]
+fn unselected_dynamic_mapping_union_entry_body_is_not_a_listing() {
+    for value_type in ["Dynamic|Int", "*Int|Dynamic"] {
+        let err = eval_fails(&format!(
+            "x = new Mapping<String, {value_type}> {{ [\"a\"] {{ 1 }} }}"
+        ));
+        assert!(
+            err.contains("cannot have an element"),
+            "{value_type}: {err}"
+        );
+    }
 }
 
 #[test]

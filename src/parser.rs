@@ -2408,7 +2408,10 @@ fn amend_expr(parent: Expr, body: ObjectBody) -> Expr {
 fn generic_param_names(ty: &TypeExpr, out: &mut Vec<String>) {
     match ty {
         TypeExpr::Named(name) | TypeExpr::Generic(name, _) => {
-            out.push(name.trim_start_matches('*').to_string());
+            // Retain `*` on a union's selected alternative. Mapping entry
+            // bodies use it to distinguish the default type from another
+            // merely permitted alternative.
+            out.push(name.clone());
         }
         TypeExpr::Constrained(name, _) => {
             out.push(name.trim_end_matches('?').to_string());
