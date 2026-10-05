@@ -1,5 +1,8 @@
 use rustc_hash::FxHashSet as HashSet;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use indexmap::IndexMap;
 use serde_json::json;
@@ -16,15 +19,27 @@ pub type ObjectMap = IndexMap<Arc<str>, Value, rustc_hash::FxBuildHasher>;
 // user-facing spelling for JSON/object rendering.
 pub(crate) const MAPPING_KEY_PREFIX: &str = "\0pklr:mapping-key:";
 
+// NaN does not equal itself, so each occurrence must be a different map key.
+// This ID is internal-only: the stored key still renders from `display`.
+static NEXT_NAN_MAPPING_KEY: AtomicU64 = AtomicU64::new(0);
+
 pub(crate) fn mapping_storage_key(value: &Value) -> Option<Arc<str>> {
     let (kind, identity, display) = match value {
         Value::String(_) => return None,
-        Value::Null => ("null", 0, "null".to_string()),
-        Value::Bool(value) => ("bool", u64::from(*value), value.to_string()),
-        Value::Int(value) => ("int", *value as u64, value.to_string()),
+        Value::Null => ("null", "0000000000000000".to_string(), "null".to_string()),
+        Value::Bool(value) => (
+            "bool",
+            format!("{:016x}", u64::from(*value)),
+            value.to_string(),
+        ),
+        Value::Int(value) => ("int", format!("{:016x}", *value as u64), value.to_string()),
         Value::Float(value) => {
             let identity = if *value == 0.0 { 0.0 } else { *value };
-            ("float", identity.to_bits(), value.to_string())
+            (
+                "float",
+                format!("{:016x}", identity.to_bits()),
+                value.to_string(),
+            )
         }
         // Units compare in their smallest units. Keep that normalized amount
         // as identity, but retain the inserted spelling for `keys` and
@@ -32,34 +47,51 @@ pub(crate) fn mapping_storage_key(value: &Value) -> Option<Arc<str>> {
         Value::Duration(value) => {
             let identity = value.value_in(DurationUnit::Nanos);
             let identity = if identity == 0.0 { 0.0 } else { identity };
-            let bits = if identity.is_nan() {
-                value.value.to_bits() ^ ((value.unit as u64) << 56)
+            let identity = if identity.is_nan() {
+                // Keep NaNs in a namespace which cannot collide with a finite
+                // normalized amount.  Do not XOR the unit into the bits: that
+                // can turn a NaN payload into a finite amount.
+                format!(
+                    "nan-{:02x}-{:016x}-{:016x}",
+                    value.unit as u8,
+                    value.value.to_bits(),
+                    NEXT_NAN_MAPPING_KEY.fetch_add(1, Ordering::Relaxed),
+                )
             } else {
-                identity.to_bits()
+                format!("finite-{:016x}", identity.to_bits())
             };
             (
                 "duration",
-                bits,
+                identity,
                 format!("{}.{}", value.value, value.unit.symbol()),
             )
         }
         Value::DataSize(value) => {
             let identity = value.value_in(DataSizeUnit::Bytes);
             let identity = if identity == 0.0 { 0.0 } else { identity };
-            let bits = if identity.is_nan() {
-                value.value.to_bits() ^ ((value.unit as u64) << 56)
+            let identity = if identity.is_nan() {
+                format!(
+                    "nan-{:02x}-{:016x}-{:016x}",
+                    value.unit as u8,
+                    value.value.to_bits(),
+                    NEXT_NAN_MAPPING_KEY.fetch_add(1, Ordering::Relaxed),
+                )
             } else {
-                identity.to_bits()
+                format!("finite-{:016x}", identity.to_bits())
             };
             (
                 "dataSize",
-                bits,
+                identity,
                 format!("{}.{}", value.value, value.unit.symbol()),
             )
         }
-        other => ("display", 0, format!("{other:?}")),
+        other => (
+            "display",
+            "0000000000000000".to_string(),
+            format!("{other:?}"),
+        ),
     };
-    Some(format!("{MAPPING_KEY_PREFIX}{kind}:{identity:016x}:{display}").into())
+    Some(format!("{MAPPING_KEY_PREFIX}{kind}:{identity}:{display}").into())
 }
 
 /// Whether two storage keys name equal native-unit mapping keys. Their final
@@ -766,7 +798,17 @@ impl Value {
             (Value::Object(base, _), Value::Object(overlay, _)) => {
                 let base_map = Arc::make_mut(base);
                 for (k, v) in overlay.iter() {
-                    base_map.insert(k.clone(), v.clone());
+                    let storage_key = base_map
+                        .get_key_value(k)
+                        .map(|(key, _)| key.clone())
+                        .or_else(|| {
+                            base_map
+                                .keys()
+                                .find(|stored| mapping_storage_keys_equal(stored, k))
+                                .cloned()
+                        })
+                        .unwrap_or_else(|| k.clone());
+                    base_map.insert(storage_key, v.clone());
                 }
             }
             (s, other) => *s = other,

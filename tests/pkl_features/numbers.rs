@@ -77,6 +77,7 @@ toFixed = List(0.125.toFixed(2), 1.005.toFixed(2), 123456789.12345679.toFixed(9)
 nan = List((0.0 / 0.0).isNaN, (1.0 / 0.0).isInfinite, 1.5.isFinite)
 strings = List(1.0.toString(), 1e21.toString(), 0.0001.toString(), (-0.0).toString())
 largeFixed = 1e23.toFixed(0)
+largeFixed17 = 1.0000000000000002e19.toFixed(0)
 "##,
     );
     assert_eq!(json["round"], serde_json::json!([2.0, 4.0, -2.0]));
@@ -93,9 +94,63 @@ largeFixed = 1e23.toFixed(0)
         serde_json::json!(["1.0", "1.0E21", "1.0E-4", "-0.0"])
     );
     assert_eq!(json["largeFixed"], "99999999999999990000000");
+    assert_eq!(json["largeFixed17"], "10000000000000002000");
     assert!(
         eval_fails(r#"x = 1e300.toInt()"#)
             .contains("Cannot convert Float `1.0E300` to Int because it is too large.")
+    );
+}
+
+#[test]
+fn unit_mapping_keys_share_identity_without_losing_first_spelling() {
+    let json = eval(
+        r#"
+first = new Mapping { [1.s] = new Dynamic { value = "old" } }
+second = new Mapping { [1000.ms] = new Dynamic { value = "old" } }
+overwritten = Map(1.s, "old", 1000.ms, "new")
+amended = first { [1000.ms] = new Dynamic { value = "new" } }
+same = first == second
+firstKey = first.keys.first
+overwrittenLength = overwritten.length
+overwrittenValues = List(overwritten[1.s], overwritten[1000.ms])
+amendedValue = amended[1.s].value
+"#,
+    );
+    assert_eq!(json["same"], true);
+    assert_eq!(json["firstKey"], "1.s");
+    assert_eq!(json["overwrittenLength"], 1);
+    assert_eq!(json["overwrittenValues"], serde_json::json!(["new", "new"]));
+    assert_eq!(json["amendedValue"], "new");
+    assert!(
+        eval_fails(r#"x = new Mapping { [1.s] = 1; [1000.ms] = 2 }"#)
+            .contains("Duplicate definition")
+    );
+}
+
+#[test]
+fn unit_mapping_nan_keys_do_not_collide_with_each_other_or_finite_values() {
+    let json = eval(
+        r#"
+local nan = 0.0 / 0.0
+local signedZero = Map((-0.0).ns, "negative", 0.0.ns, "positive")
+local infinity = Map((1.0 / 0.0).s, "first", (1.0 / 0.0).ms, "second")
+local crossUnitNan = Map(nan.ns, "nanos", nan.ms, "millis")
+local sameUnitNan = Map(nan.ns, "first", nan.ns, "second")
+local finiteAndNan = Map(nan.ns, "nan", 9.580033485766655e293.ns, "finite")
+values = List(
+  signedZero.length,
+  signedZero[0.ns],
+  infinity.length,
+  infinity[(1.0 / 0.0).s],
+  crossUnitNan.length,
+  sameUnitNan.length,
+  finiteAndNan.length,
+)
+"#,
+    );
+    assert_eq!(
+        json["values"],
+        serde_json::json!([1, "positive", 1, "second", 2, 2, 2])
     );
 }
 

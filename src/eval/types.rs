@@ -855,8 +855,17 @@ pub(super) fn values_eq(a: &Value, b: &Value) -> bool {
                 None => {
                     // Methods are not members, so they take no part.
                     members(a_map, a_src).count() == members(b_map, b_src).count()
-                        && members(a_map, a_src)
-                            .all(|(key, a)| b_map.get(key).is_some_and(|b| values_eq(a, b)))
+                        && members(a_map, a_src).all(|(key, a)| {
+                            b_map
+                                .get(key)
+                                .or_else(|| {
+                                    b_map.iter().find_map(|(stored, value)| {
+                                        crate::value::mapping_storage_keys_equal(stored, key)
+                                            .then_some(value)
+                                    })
+                                })
+                                .is_some_and(|b| values_eq(a, b))
+                        })
                 }
             }
         }
@@ -1041,10 +1050,20 @@ pub(super) fn merge_values(base: Value, overlay: Value) -> Value {
         (Value::Object(mut b, base_src), Value::Object(o, overlay_src)) => {
             let b_map = Arc::make_mut(&mut b);
             for (k, v) in o.iter() {
-                if let Some(existing) = b_map.shift_remove(k) {
-                    b_map.insert(k.clone(), merge_values(existing, v.clone()));
+                let storage_key = b_map
+                    .get_key_value(k)
+                    .map(|(key, _)| key.clone())
+                    .or_else(|| {
+                        b_map
+                            .keys()
+                            .find(|stored| crate::value::mapping_storage_keys_equal(stored, k))
+                            .cloned()
+                    })
+                    .unwrap_or_else(|| k.clone());
+                if let Some(existing) = b_map.shift_remove(&storage_key) {
+                    b_map.insert(storage_key, merge_values(existing, v.clone()));
                 } else {
-                    b_map.insert(k.clone(), v.clone());
+                    b_map.insert(storage_key, v.clone());
                 }
             }
             // Keep the base's source (entries/scope for late binding), but when it

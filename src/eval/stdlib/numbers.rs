@@ -71,10 +71,24 @@ fn to_fixed(x: f64, digits: usize) -> String {
         };
         return format!("{sign}{integer}{fraction}");
     }
-    let sci = if x.abs() >= 9_223_372_036_854_775_808.0 {
+    let shortest = format!("{:e}", x.abs());
+    // Rust's shortest formatter is normally what we need.  Java's legacy
+    // FloatingDecimal, used by Pkl's DecimalFormat path, expands a large
+    // one-significant-digit shortest value to its nearest decimal boundary
+    // (notably `1e23` -> `9.999999999999999e22`).  Only that ambiguous form
+    // needs expansion: values whose shortest form already carries 17 digits
+    // must keep them (for example `1.0000000000000002e19`).
+    let significant_digits = shortest
+        .split_once('e')
+        .expect("`{:e}` has an exponent")
+        .0
+        .bytes()
+        .filter(|digit| *digit != b'.')
+        .count();
+    let sci = if x.abs() >= FLOAT_INT_LIMIT && significant_digits == 1 {
         format!("{:.15e}", x.abs())
     } else {
-        format!("{:e}", x.abs())
+        shortest
     };
     let (mantissa, exponent) = sci.split_once('e').expect("`{:e}` has an exponent");
     let exponent: i64 = exponent.parse().expect("`{:e}` exponent is an integer");
@@ -694,5 +708,22 @@ mod tests {
         assert_eq!(to_fixed(-9.740362900988539e16, 0), "-97403629009885392");
         assert_eq!(to_fixed(0.0, 3), "0.000");
         assert_eq!(to_fixed(1.0e-10, 3), "0.000");
+    }
+
+    #[test]
+    fn to_fixed_matches_pkl_for_large_binary64_values() {
+        for (value, expected) in [
+            (9_223_372_036_854_776_000.0, "9223372036854776000"),
+            (1e18, "1000000000000000000"),
+            (1e19, "10000000000000000000"),
+            (1.0000000000000002e19, "10000000000000002000"),
+            (1e20, "100000000000000000000"),
+            (1e21, "1000000000000000000000"),
+            (1e22, "10000000000000000000000"),
+            (1e23, "99999999999999990000000"),
+        ] {
+            assert_eq!(to_fixed(value, 0), expected, "{value:e}");
+            assert_eq!(to_fixed(-value, 0), format!("-{expected}"), "-{value:e}");
+        }
     }
 }

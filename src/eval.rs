@@ -5211,7 +5211,8 @@ impl Evaluator {
                     }
                     for pair in evaled.chunks(2) {
                         if let [k, v] = pair {
-                            map.insert(value_to_key(k)?, v.clone());
+                            let key = value_to_key(k)?;
+                            insert_mapping_entry(&mut map, key, v.clone());
                         }
                     }
                     return Ok(Value::Object(Arc::new(map), None));
@@ -5590,7 +5591,18 @@ impl Evaluator {
                 matches!(entry, Entry::Spread(_))
                     || matches!(entry, Entry::Property(prop) if prop.name == "default")
             });
-            if !base_src.is_metadata_only() || !needs_mapping_evaluation {
+            // The general late-binding amendment path matches members by their
+            // storage spelling. A plain Mapping with an explicit dynamic key
+            // needs the mapping path instead: `1.s` and `1000.ms` name the
+            // same member but deliberately retain different display text.
+            let has_dynamic_mapping_key = base_src.mapping_value_types.is_empty()
+                && body_has(
+                    overlay_entries,
+                    &|entry| matches!(entry, Entry::DynProperty(key, _) if is_native_unit_key(key)),
+                );
+            if (!needs_mapping_evaluation || !base_src.is_metadata_only())
+                && !has_dynamic_mapping_key
+            {
                 // Unannotated mapping entries with bodies still use the general
                 // amendment path, which preserves Listing-shaped entry bodies.
             } else {
@@ -5899,7 +5911,9 @@ impl Evaluator {
                     // and `"1"` are distinct mapping keys.
                     // Object-body entries may amend an earlier value from this
                     // body.
-                    if !defined_keys.insert(key_str.clone()) {
+                    let storage_key =
+                        equivalent_mapping_key(map, &key_str).unwrap_or_else(|| key_str.clone());
+                    if !insert_mapping_key(defined_keys, &key_str) {
                         let key = match key.as_ref() {
                             None => key_str.to_string(),
                             Some(Value::String(s)) => format!("{s:?}"),
@@ -5909,7 +5923,8 @@ impl Evaluator {
                             "Duplicate definition of member `{key}`."
                         )));
                     }
-                    if let Some(Value::Object(existing_map, Some(existing_src))) = map.get(&key_str)
+                    if let Some(Value::Object(existing_map, Some(existing_src))) =
+                        map.get(&storage_key)
                         && let Expr::ObjectBody(body) = val_expr
                     {
                         let val = self.eval_amended_object(
@@ -5919,7 +5934,7 @@ impl Evaluator {
                             &entry_scope,
                             depth,
                         )?;
-                        map.insert(key_str, val);
+                        map.insert(storage_key, val);
                         continue;
                     }
                     let type_default = match val_expr {
@@ -6074,7 +6089,7 @@ impl Evaluator {
                                 &entry_scope,
                             )?
                         };
-                    map.insert(key_str, val);
+                    map.insert(storage_key, val);
                 }
                 Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {}
                 Entry::Property(prop)
@@ -6090,7 +6105,9 @@ impl Evaluator {
                         ));
                     }
                     if let Value::Object(m, _) = val {
-                        map.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+                        for (key, value) in m.iter() {
+                            insert_mapping_entry(map, key.clone(), value.clone());
+                        }
                     }
                 }
                 Entry::ForGenerator(fgen) => {
@@ -6323,8 +6340,16 @@ impl Evaluator {
                 // No converter matched — recurse into children
                 let mut new_map: Option<ObjectMap> = None;
                 for (index, (k, v)) in map.iter().enumerate() {
-                    let converted =
-                        self.apply_converters_recursive(v, converters, Vec::new(), memo)?;
+                    // A converter can return a container containing the value it
+                    // was handed. Keep the root converter blocked all the way
+                    // through that result; otherwise `D -> List(D)` recurses
+                    // forever when the list visits its child.
+                    let converted = self.apply_converters_recursive(
+                        v,
+                        converters,
+                        blocked_root_converters.clone(),
+                        memo,
+                    )?;
                     match (&mut new_map, converted) {
                         (Some(new_map), converted) => {
                             new_map.insert(k.clone(), converted.unwrap_or_else(|| v.clone()));
@@ -6346,8 +6371,12 @@ impl Evaluator {
             Value::List(items) => {
                 let mut new_items: Option<Vec<Value>> = None;
                 for (index, item) in items.iter().enumerate() {
-                    let converted =
-                        self.apply_converters_recursive(item, converters, Vec::new(), memo)?;
+                    let converted = self.apply_converters_recursive(
+                        item,
+                        converters,
+                        blocked_root_converters.clone(),
+                        memo,
+                    )?;
                     match (&mut new_items, converted) {
                         (Some(new_items), converted) => {
                             new_items.push(converted.unwrap_or_else(|| item.clone()));
@@ -6383,6 +6412,46 @@ impl Evaluator {
             _ => Ok(None),
         }
     }
+}
+
+/// The backing map retains the first spelling of a native-unit key so `keys`
+/// and renderer converters see the source unit. Every mapping operation,
+/// however, resolves equivalent normalized amounts to that stored key.
+fn equivalent_mapping_key(map: &ObjectMap, key: &str) -> Option<Arc<str>> {
+    map.get_key_value(key)
+        .map(|(key, _)| key.clone())
+        .or_else(|| {
+            map.keys()
+                .find(|stored| crate::value::mapping_storage_keys_equal(stored, key))
+                .cloned()
+        })
+}
+
+fn is_native_unit_key(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Field(_, field)
+            if crate::value::DurationUnit::parse(field).is_some()
+                || crate::value::DataSizeUnit::parse(field).is_some()
+    )
+}
+
+fn insert_mapping_key(keys: &mut HashSet<Arc<str>>, key: &Arc<str>) -> bool {
+    if keys.contains(key)
+        || keys
+            .iter()
+            .any(|stored| crate::value::mapping_storage_keys_equal(stored, key))
+    {
+        false
+    } else {
+        keys.insert(key.clone());
+        true
+    }
+}
+
+fn insert_mapping_entry(map: &mut ObjectMap, key: Arc<str>, value: Value) {
+    let storage_key = equivalent_mapping_key(map, &key).unwrap_or(key);
+    map.insert(storage_key, value);
 }
 
 /// Converted values by the address of the object or list they came from (see
