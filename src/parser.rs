@@ -2127,6 +2127,12 @@ impl<'a> Parser<'a> {
                         StringPart::Tokens(tokens) => {
                             let mut nested = Parser::new(&tokens, self.source, self.name);
                             let expr = nested.parse_expr()?;
+                            if !nested.at_eof() {
+                                let text = nested.token_text(nested.peek_tok());
+                                return Err(nested.parse_error(format!(
+                                    "Unexpected token `{text}`. Expected `)`."
+                                )));
+                            }
                             self.import_exprs.append(&mut nested.import_exprs);
                             interp_parts.push(StringInterpPart::Expr(expr));
                         }
@@ -2210,7 +2216,7 @@ impl<'a> Parser<'a> {
                     return Err(self.keyword_error(&keyword));
                 }
                 self.advance();
-                return Ok((self.parse_call_args(Expr::Ident(name))?, true));
+                return Ok((self.parse_call_args(Expr::Ident(name))?, false));
             }
             TokenKind::KwThis => {
                 self.advance();

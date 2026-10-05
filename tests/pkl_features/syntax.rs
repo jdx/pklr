@@ -227,6 +227,16 @@ x = "2 + 2 = \(2 + 2)"
     assert_eq!(json["x"], "2 + 2 = 4");
 }
 
+#[test]
+fn string_interpolation_rejects_extra_tokens() {
+    let err = eval_fails(
+        r#"a = 1
+x = "\(a a)"
+"#,
+    );
+    assert!(err.contains("Unexpected token `a`. Expected `)`."), "{err}");
+}
+
 // ============================================================
 // Arithmetic
 // ============================================================
@@ -531,6 +541,20 @@ ne = x != new Listing { "one" }
     assert_eq!(json["withDefault"], true);
     assert_eq!(json["withLocal"], true);
     assert_eq!(json["ne"], true);
+}
+
+#[test]
+fn amendments_require_a_parenthesized_parent() {
+    for src in [
+        "local value = new Dynamic {}\nx = value { a = 1 }\n",
+        "local make = () -> new Dynamic {}\nx = make() { a = 1 }\n",
+    ] {
+        let err = eval_fails(src);
+        assert!(
+            err.contains("wrap the parent in parentheses"),
+            "{src}: {err}"
+        );
+    }
 }
 
 #[test]

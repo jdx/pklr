@@ -108,7 +108,7 @@ fn unit_mapping_keys_share_identity_without_losing_first_spelling() {
 first = new Mapping { [1.s] = new Dynamic { value = "old" } }
 second = new Mapping { [1000.ms] = new Dynamic { value = "old" } }
 overwritten = Map(1.s, "old", 1000.ms, "new")
-amended = first { [1000.ms] = new Dynamic { value = "new" } }
+amended = (first) { [1000.ms] = new Dynamic { value = "new" } }
 same = first == second
 firstKey = first.keys.first
 overwrittenLength = overwritten.length
@@ -133,16 +133,16 @@ fn native_unit_mapping_amendments_use_the_shared_mapping_evaluator() {
         r#"
 class C { x = 1 }
 a = new Mapping { [1.s] = 1 }
-b = a { [2.s] = 2 }
-c = b { ["x"] = 3 }
-overwritten = a { [1.s] = 2 } {}
+b = (a) { [2.s] = 2 }
+c = (b) { ["x"] = 3 }
+overwritten = (a) { [1.s] = 2 } {}
 listing = new Mapping { [1.s] = new Listing { 1 } } { [1.s] { 2 } }
 typed = new Mapping<Duration, C> {} { [1.s] {} }
 explicitDefault = new Mapping<Duration, C> { default = new C { x = 7 } } { [1.s] {} }
 metadataBase = new Mapping {}
-metadataDefault = metadataBase { default { x = 7 } }
-metadataStringAmended = metadataDefault { ["k"] {} }
-metadataUnitAmended = metadataDefault { [1.s] {} }
+metadataDefault = (metadataBase) { default { x = 7 } }
+metadataStringAmended = (metadataDefault) { ["k"] {} }
+metadataUnitAmended = (metadataDefault) { [1.s] {} }
 values = List(c.length, overwritten.length, overwritten[1.s], listing[1.s].length, listing[1.s].first, listing[1.s].last, typed[1.s].x, explicitDefault[1.s].x, metadataStringAmended["k"].x, metadataUnitAmended[1.s].x)
 "#,
     );
@@ -183,16 +183,16 @@ fn generated_mapping_entries_use_native_unit_identity() {
     let json = eval(
         r#"
 a = new Mapping { [1.s] = 1 }
-whenAmended = a { when (true) { [1000.ms] = 2 } }
-forAmended = a { for (n in List(1000)) { [n.ms] = 2 } }
+whenAmended = (a) { when (true) { [1000.ms] = 2 } }
+forAmended = (a) { for (n in List(1000)) { [n.ms] = 2 } }
 objectAmended = new Mapping { [1.s] = new Dynamic { x = 1 } } {
   when (true) { [1000.ms] { y = 2 } }
 }
-receiverAmended = a {
+receiverAmended = (a) {
   when (true) { [1000.ms] = 2 }
   ["seen"] = this[1.s]
 }
-receiverBodyAmended = a {
+receiverBodyAmended = (a) {
   when (true) {
     [1000.ms] = 2
     ["seen"] = this[1.s]

@@ -2538,7 +2538,7 @@ fn imported_class_reading_missing_module_property_reports_error() {
     .unwrap();
     std::fs::write(
         dir.join("amend.pkl"),
-        "import \"depx.pkl\" as dep\nresult = (dep) { y = 2 }\nr2 = dep { y = 3 }\n",
+        "import \"depx.pkl\" as dep\nresult = (dep) { y = 2 }\nr2 = (dep) { y = 3 }\n",
     )
     .unwrap();
     let val = pklr::eval_to_json(&dir.join("amend.pkl")).unwrap();
