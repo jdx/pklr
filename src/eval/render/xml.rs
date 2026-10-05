@@ -6,7 +6,7 @@ use super::{
     java_double_to_string, kind_of, render_directive_text, typed_class_is, validate_xml_characters,
 };
 use crate::error::{Error, Result};
-use crate::value::{ObjectMap, Value};
+use crate::value::{ListKind, ListValue, ObjectMap, Value};
 
 pub(crate) struct Xml<'a> {
     walk: Walk<'a>,
@@ -189,11 +189,15 @@ impl<'a> Xml<'a> {
         for ch in text.chars() {
             if self.version == "1.1" && is_xml11_restricted(ch) {
                 self.out.push_str(&format!("&#x{:X};", ch as u32));
-            } else if matches!(ch, '\t' | '\n' | '\r') {
+            } else if matches!(ch, '\t' | '\n' | '\r')
+                || (self.version == "1.1" && matches!(ch, '\u{85}' | '\u{2028}'))
+            {
                 self.out.push_str(match ch {
                     '\t' => "&#x9;",
                     '\n' => "&#xA;",
                     '\r' => "&#xD;",
+                    '\u{85}' => "&#x85;",
+                    '\u{2028}' => "&#x2028;",
                     _ => unreachable!(),
                 });
             } else {
@@ -419,12 +423,11 @@ fn escape_xml_char(ch: char, out: &mut String) {
 }
 
 fn element_content(value: &Value) -> Result<Value> {
-    let Value::Object(map, source) = value else {
+    let Value::Object(_, Some(source)) = value else {
         return Err(Error::Eval("Expected an xml.Element object.".into()));
     };
-    let mut content = (**map).clone();
-    for key in ["_isXmlElement", "name", "attributes", "isBlockFormat"] {
-        content.shift_remove(key);
-    }
-    Ok(Value::Object(content.into(), source.clone()))
+    Ok(Value::List(ListValue::new(
+        ListKind::Listing,
+        source.elements.clone(),
+    )))
 }

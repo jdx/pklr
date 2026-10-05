@@ -122,6 +122,9 @@ pub struct ObjectSource {
     /// Kept separate from `scope`, which can contain unrelated same-named
     /// lexical bindings.
     pub(crate) evaluated_properties: Vec<String>,
+    /// Bare element values of a Dynamic body, in source order. These are
+    /// distinct from named properties and are consumed by `xml.Element`.
+    pub(crate) elements: Vec<Value>,
     /// Possible value type names for mapping entries, e.g. `Step | Group` from
     /// `Mapping<String, Step | Group>`. Used when amending mappings so bare
     /// entries inherit the right class template.

@@ -582,6 +582,7 @@ fn module_object(map: &Arc<ObjectMap>, path: &Path) -> Value {
         parent_type_identities: Vec::new(),
         entry_scopes: Vec::new(),
         evaluated_properties: Vec::new(),
+        elements: Vec::new(),
         mapping_value_types: Vec::new(),
         deprecated: Default::default(),
         poisoned_members: None,

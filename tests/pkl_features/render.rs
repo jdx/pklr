@@ -542,15 +542,27 @@ fn xml_constraints_apply_to_all_renderers() {
 fn xml_renderer_preserves_element_content_and_attribute_whitespace() {
     assert_eq!(
         render_with_imports(
-            r#"new xml.Renderer {}.renderDocument(xml.Element("parent") { prefix = xml.Inline("before"); child = xml.Element("child") { value = "nested" }; suffix = xml.Inline("after") })"#
+            r#"new xml.Renderer {}.renderDocument(xml.Element("parent") { "before"; xml.Element("child") { "nested" }; "after"; ignored = "property" })"#
         ),
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<parent>before\n  <child>\n    <value>nested</value>\n  </child>after\n</parent>\n"
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<parent>before\n  <child>nested</child>after\n</parent>\n"
     );
     assert_eq!(
         render_with_imports(
             r#"new xml.Renderer { rootElementAttributes { value = "a\tb\nc\rd" } }.renderDocument("x")"#
         ),
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<root value=\"a&#x9;b&#xA;c&#xD;d\">x</root>\n"
+    );
+    assert_eq!(
+        render_with_imports(
+            r#"new xml.Renderer { xmlVersion = "1.1"; rootElementAttributes { value = "a\u{85}b\u{2028}c" } }.renderDocument("x")"#
+        ),
+        "<?xml version=\"1.1\" encoding=\"UTF-8\"?>\n<root value=\"a&#x85;b&#x2028;c\">x</root>\n"
+    );
+    assert_eq!(
+        render_with_imports(
+            r#"new xml.Renderer {}.renderDocument(xml.Element("parent") { for (v in List("before", "after")) { v }; ...new Dynamic { xml.Element("child") { "nested" } }; ignored = "property" })"#
+        ),
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<parent>beforeafter\n  <child>nested</child>\n</parent>\n"
     );
 }
 

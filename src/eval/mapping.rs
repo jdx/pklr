@@ -357,6 +357,7 @@ pub(super) fn mapping_source() -> ObjectSource {
         parent_type_identities: Vec::new(),
         entry_scopes: Vec::new(),
         evaluated_properties: Vec::new(),
+        elements: Vec::new(),
         mapping_value_types: Vec::new(),
         deprecated: IndexMap::new(),
         poisoned_members: None,
