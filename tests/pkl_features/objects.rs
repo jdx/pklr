@@ -4576,6 +4576,11 @@ fn object_locals_retry_after_body_members_bind() {
     let json = eval("foo { local a = b; local c = a + 1; d = c; b = 2 }");
     assert_eq!(json["foo"], serde_json::json!({"d": 3, "b": 2}));
 
+    // Retry until the chain reaches a fixed point, not just once after `c`
+    // binds. The property that depended on the chain is then retried too.
+    let json = eval("foo { local a = b; local b = c; d = a; c = 2 }");
+    assert_eq!(json["foo"], serde_json::json!({"d": 2, "c": 2}));
+
     // A local that never resolves remains lazy and fails only when read.
     let err = eval_fails("foo { local a = missing; b = a }");
     assert!(err.contains("missing"), "{err}");
@@ -4604,6 +4609,14 @@ foo {
 open class Parent { res1 = 15 }
 class Child extends Parent {
   const local qux = res1
+  res2 = qux
+}
+foo = new Child {}
+"#,
+        r#"
+open class Parent { res1 = 15 }
+class Child extends Parent {
+  const local qux = super.res1
   res2 = qux
 }
 foo = new Child {}
@@ -4652,6 +4665,46 @@ foo {
   }
   res2 = f.apply()
 }
+"#,
+    );
+    assert!(
+        err.contains("Cannot reference property `res1` from here because it is not `const`"),
+        "{err}"
+    );
+}
+
+#[test]
+fn class_const_local_lambdas_defer_inherited_non_const_validation() {
+    let json = eval(
+        r#"
+open class Parent { res1 = 15 }
+class Child extends Parent {
+  const local f = () -> res1
+}
+result = 1
+"#,
+    );
+    assert_eq!(json, serde_json::json!({"result": 1}));
+
+    let json = eval(
+        r#"
+open class Parent { res1 = 15 }
+class Child extends Parent {
+  const local f = () -> res1
+}
+result = new Child {}
+"#,
+    );
+    assert_eq!(json, serde_json::json!({"result": {"res1": 15}}));
+
+    let err = eval_fails(
+        r#"
+open class Parent { res1 = 15 }
+class Child extends Parent {
+  const local f = () -> res1
+  result = f.apply()
+}
+instance = new Child {}
 "#,
     );
     assert!(

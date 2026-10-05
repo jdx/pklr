@@ -2785,6 +2785,7 @@ impl Evaluator {
             depth,
             None,
             None,
+            None,
             false,
             None,
         )
@@ -2798,6 +2799,7 @@ impl Evaluator {
         depth: usize,
         entry_scopes: Option<&[Option<Arc<CapturedScope>>]>,
         inherited_source: Option<&ObjectSource>,
+        initial_non_const_members: Option<&HashSet<String>>,
         // Generator bodies do not inherit the receiver's source entries, but
         // they do inherit its mapping-key semantics.
         mapping_context: bool,
@@ -2927,6 +2929,9 @@ impl Evaluator {
                 }
             }
         }
+        if let Some(initial) = initial_non_const_members {
+            non_const_members.extend(initial.iter().cloned());
+        }
         // A direct member of this body shadows an enclosing binding even
         // before it is evaluated. Keep that shadow local to the retry path;
         // generator members remain governed by their existing receiver flow.
@@ -2943,56 +2948,62 @@ impl Evaluator {
 
         macro_rules! retry_failed_locals {
             () => {{
-                let mut retry_index = 0;
-                while retry_index < failed_locals.len() {
-                    let entry_index = failed_locals[retry_index];
-                    let Entry::Property(prop) = &entries[entry_index] else {
-                        unreachable!("only local properties are retried");
-                    };
-                    let Some(expr) = &prop.value else {
-                        unreachable!("only valued local properties are retried");
-                    };
-                    if let Some(message) = const_local_reads_non_const(prop, &non_const_members)
-                    {
-                        if binds_declared(&prop.name) {
-                            child_scope.declare_poisoned(prop.name.clone(), message);
-                        } else {
-                            child_scope.poison(prop.name.clone(), message);
-                        }
-                        failed_locals.swap_remove(retry_index);
-                        continue;
-                    }
-                    let mut active_scope = scope_for_object_entry(
-                        entry_index,
-                        &child_scope,
-                        entry_scopes,
-                        &entry_owners,
-                        own_body_scope,
-                    );
-                    for name in pending_direct_members
-                        .iter()
-                        .filter(|name| !bound_direct_members.contains(*name))
-                    {
-                        active_scope.poison(name.clone(), format!("undefined variable: {name}"));
-                    }
-                    let result = self.eval_expr(expr, &active_scope, depth);
-                    drop(active_scope);
-                    match result {
-                        Ok(value) => {
+                let mut recovered = true;
+                while recovered {
+                    recovered = false;
+                    let mut retry_index = 0;
+                    while retry_index < failed_locals.len() {
+                        let entry_index = failed_locals[retry_index];
+                        let Entry::Property(prop) = &entries[entry_index] else {
+                            unreachable!("only local properties are retried");
+                        };
+                        let Some(expr) = &prop.value else {
+                            unreachable!("only valued local properties are retried");
+                        };
+                        if let Some(message) = const_local_reads_non_const(prop, &non_const_members)
+                        {
                             if binds_declared(&prop.name) {
-                                child_scope.declare(&prop.name, value);
+                                child_scope.declare_poisoned(prop.name.clone(), message);
                             } else {
-                                child_scope.set(&prop.name, value);
-                            }
-                            if matches!(expr, Expr::Ident(name) if name == "this" || this_aliases.contains(name))
-                            {
-                                this_aliases.push(prop.name.clone());
-                                child_scope.mark_this_alias(&prop.name);
+                                child_scope.poison(prop.name.clone(), message);
                             }
                             failed_locals.swap_remove(retry_index);
+                            continue;
                         }
-                        Err(Error::Eval(_)) => retry_index += 1,
-                        Err(error) => return Err(error),
+                        let mut active_scope = scope_for_object_entry(
+                            entry_index,
+                            &child_scope,
+                            entry_scopes,
+                            &entry_owners,
+                            own_body_scope,
+                        );
+                        for name in pending_direct_members
+                            .iter()
+                            .filter(|name| !bound_direct_members.contains(*name))
+                        {
+                            active_scope
+                                .poison(name.clone(), format!("undefined variable: {name}"));
+                        }
+                        let result = self.eval_expr(expr, &active_scope, depth);
+                        drop(active_scope);
+                        match result {
+                            Ok(value) => {
+                                if binds_declared(&prop.name) {
+                                    child_scope.declare(&prop.name, value);
+                                } else {
+                                    child_scope.set(&prop.name, value);
+                                }
+                                if matches!(expr, Expr::Ident(name) if name == "this" || this_aliases.contains(name))
+                                {
+                                    this_aliases.push(prop.name.clone());
+                                    child_scope.mark_this_alias(&prop.name);
+                                }
+                                failed_locals.swap_remove(retry_index);
+                                recovered = true;
+                            }
+                            Err(Error::Eval(_)) => retry_index += 1,
+                            Err(error) => return Err(error),
+                        }
                     }
                 }
             }};
@@ -3476,6 +3487,7 @@ impl Evaluator {
                             depth,
                             None,
                             None,
+                            None,
                             mapping_entries,
                             Some(&ReceiverMembers {
                                 own: &all_props,
@@ -3536,6 +3548,7 @@ impl Evaluator {
                             depth,
                             None,
                             None,
+                            None,
                             mapping_entries,
                             Some(&ReceiverMembers {
                                 own: &all_props,
@@ -3583,6 +3596,7 @@ impl Evaluator {
                             else_body,
                             &active_scope,
                             depth,
+                            None,
                             None,
                             None,
                             mapping_entries,
@@ -3791,23 +3805,26 @@ impl Evaluator {
         };
 
         // Class defaults are built before their parent source is merged into
-        // the child body. Preserve that flow, but reject a const local's read
-        // of an inherited non-const member with Pkl's dedicated diagnostic.
+        // the child body. Keep its actual non-const members available for
+        // local validation without eagerly rejecting a lazy local lambda.
+        let mut inherited_non_const: HashSet<String> = HashSet::default();
         if let Some(Value::Object(_, Some(parent_source))) = &parent_val {
-            let mut inherited_non_const: HashSet<String> = HashSet::default();
             for name in &parent_source.evaluated_properties {
                 if body_member_is_non_const(&parent_source.entries, name) {
                     inherited_non_const.insert(name.clone());
                 }
             }
-            if let Some(message) = body.iter().find_map(|entry| match entry {
-                Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {
-                    const_local_reads_non_const(prop, &inherited_non_const)
-                }
-                _ => None,
-            }) {
-                return Err(Error::Eval(message));
+        }
+        if let Some(message) = body.iter().find_map(|entry| match entry {
+            Entry::Property(prop)
+                if has_modifier(&prop.modifiers, Modifier::Local)
+                    && !matches!(prop.value.as_ref(), Some(Expr::Lambda(..))) =>
+            {
+                const_local_reads_non_const(prop, &inherited_non_const)
             }
+            _ => None,
+        }) {
+            return Err(Error::Eval(message));
         }
 
         let mut child_scope = scope.child();
@@ -3826,7 +3843,19 @@ impl Evaluator {
         };
         let body = typed_body.as_ref().unwrap_or(body);
 
-        let child_defaults = self.eval_entries(body, &child_scope, depth + 1)?;
+        let mut child_receiver_scope = child_scope.clone();
+        child_receiver_scope.receiver_entries = Some(body.clone());
+        child_receiver_scope.receiver_list_base = None;
+        let child_defaults = self.eval_entries_with_lexical_scopes(
+            body,
+            &child_receiver_scope,
+            depth + 1,
+            None,
+            None,
+            Some(&inherited_non_const),
+            false,
+            None,
+        )?;
         if let Some(Value::Object(parent_map, parent_src)) = parent_val {
             // Merge: parent defaults first, child overrides on top
             let mut merged: ObjectMap = (*parent_map).clone();
@@ -4598,6 +4627,7 @@ impl Evaluator {
             depth + 1,
             Some(&merged_entry_scopes),
             Some(base_source),
+            None,
             false,
             None,
         )?;
@@ -7956,8 +7986,8 @@ fn body_member_is_non_const(entries: &[Entry], name: &str) -> bool {
 
 /// Pkl requires a const local to depend only on const members of its body.
 /// Bare references are collected with the evaluator's normal lexical walker;
-/// `this.member` needs its own check because the walker records `this` as the
-/// root rather than the selected member.
+/// `this.member` and `super.member` need their own checks because the walker
+/// records the receiver as the root rather than the selected member.
 fn const_local_reads_non_const(
     prop: &Property,
     non_const_members: &HashSet<String>,
@@ -8010,13 +8040,13 @@ fn guard_const_local_lambdas(
     }
 }
 
-/// Return the first non-const member read through a direct `this.member`
-/// expression. Nested object bodies have their own `this`, so this deliberately
-/// does not descend into them.
+/// Return the first non-const member read through a direct `this.member` or
+/// `super.member` expression. Nested object bodies have their own receiver,
+/// so this deliberately does not descend into them.
 fn this_member_reads_non_const(expr: &Expr, non_const_members: &HashSet<String>) -> Option<String> {
     match expr {
         Expr::Field(base, name) | Expr::NullSafeField(base, name)
-            if matches!(base.as_ref(), Expr::Ident(root) if root == "this")
+            if matches!(base.as_ref(), Expr::Ident(root) if root == "this" || root == "super")
                 && non_const_members.contains(name) =>
         {
             Some(name.clone())
