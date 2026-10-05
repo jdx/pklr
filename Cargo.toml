@@ -20,7 +20,7 @@ default = [
 ]
 # The evaluator without any host IO. Embedders supply their own
 # `EvalCapabilities`.
-eval-core = ["dep:indexmap", "dep:rustc-hash", "dep:serde_json", "dep:url"]
+eval-core = ["dep:fancy-regex", "dep:indexmap", "dep:md-5", "dep:rustc-hash", "dep:serde_json", "dep:sha1", "dep:sha2", "dep:url"]
 # `NativeCapabilities`: std file system and environment access.
 native-io = ["eval-core"]
 # HTTP imports and packages for `NativeCapabilities`, via ureq and rustls.
@@ -33,10 +33,14 @@ miette-diagnostics = ["dep:miette"]
 async = ["http", "dep:reqwest", "dep:tokio"]
 
 [dependencies]
+fancy-regex = { version = "0.18", optional = true }
 indexmap    = { version = "2", optional = true }
+md-5       = { version = "0.10", optional = true }
 miette     = { version = "7", features = ["derive"], optional = true }
 rustc-hash = { version = "2", optional = true }
 serde_json = { version = "1", optional = true }
+sha1       = { version = "0.10", optional = true }
+sha2       = { version = "0.10", optional = true }
 thiserror  = "2"
 reqwest         = { version = "0.13", default-features = false, features = ["rustls"], optional = true }
 rustls          = { version = "0.23", default-features = false, features = ["aws-lc-rs", "tls12"], optional = true }

@@ -209,6 +209,11 @@ pub(crate) fn is_regular_identifier(name: &str) -> bool {
 pub(crate) fn to_pkl_string(value: &Value) -> String {
     match value {
         Value::String(s) => s.to_string(),
+        Value::Object(map, Some(source))
+            if source.type_identity.as_deref() == Some("pkl:base#RegexMatch") =>
+        {
+            map.get("value").map(to_pkl_string).unwrap_or_default()
+        }
         _ => render_value(value),
     }
 }

@@ -386,7 +386,7 @@ pub(super) fn is_glob_pattern(pattern: &str) -> bool {
 }
 
 /// `s[index]`: the character at a code point index.
-pub(super) fn subscript(s: &Arc<str>, index: &Value) -> Result<Value> {
+pub(crate) fn subscript(s: &Arc<str>, index: &Value) -> Result<Value> {
     let Value::Int(index) = index else {
         return Err(operator_not_defined(
             "[]",

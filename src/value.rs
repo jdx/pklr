@@ -434,7 +434,7 @@ impl Value {
             Value::Regex(_) => Err(crate::Error::Eval(format!(
                 "Cannot render value of type `{}` as JSON.\nValue: {}",
                 self.type_name(),
-                crate::eval::render_value(self)
+                crate::eval::stdlib::render_value(self)
             ))),
             Value::Object(map, _) => {
                 let mut obj = serde_json::Map::new();

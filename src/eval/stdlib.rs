@@ -8,7 +8,7 @@ use super::*;
 
 mod regex;
 pub(crate) mod render;
-mod string;
+pub(crate) mod string;
 
 pub(crate) use regex::compile as compile_regex;
 pub(crate) use render::render_value;
@@ -39,15 +39,19 @@ pub(super) fn typed_object(type_name: &str, members: ObjectMap) -> Value {
         captured: SourceScope::default(),
         body_members: HashSet::default(),
         is_open: false,
+        is_abstract: false,
         type_name: Some(type_name.to_string()),
-        type_identity: None,
+        type_identity: (type_name == "RegexMatch").then(|| "pkl:base#RegexMatch".to_string()),
         parent_type_names: Vec::new(),
         parent_type_identities: Vec::new(),
         entry_scopes: Vec::new(),
         evaluated_properties: members.keys().map(|k| k.to_string()).collect(),
+        elements: Vec::new(),
         mapping_value_types: Vec::new(),
         deprecated: IndexMap::new(),
         poisoned_members: None,
+        kind: ObjectKind::Object,
+        is_parsed_json: false,
     };
     Value::Object(Arc::new(members), Some(Arc::new(source)))
 }

@@ -65,5 +65,7 @@ mod imports;
 mod objects;
 #[path = "pkl_features/render.rs"]
 mod render;
+#[path = "pkl_features/strings.rs"]
+mod strings;
 #[path = "pkl_features/syntax.rs"]
 mod syntax;

@@ -28,6 +28,7 @@ mod prefetch;
 mod remote;
 pub(crate) mod render;
 mod scope;
+pub(crate) mod stdlib;
 mod types;
 
 use analysis::*;
@@ -318,11 +319,11 @@ fn apply_binop(op: BinOp, l: Value, r: Value) -> Result<Value> {
     }
 }
 
-fn regex_value(pattern: Value) -> Value {
-    let mut map = ObjectMap::default();
-    map.insert("_type".into(), Value::String("regex".into()));
-    map.insert("pattern".into(), pattern);
-    Value::Object(Arc::new(map), None)
+fn regex_value(pattern: Value) -> Result<Value> {
+    match pattern {
+        Value::String(pattern) => Ok(Value::Regex(Arc::new(stdlib::compile_regex(&pattern)?))),
+        other => Err(stdlib::type_mismatch("String", &other)),
+    }
 }
 
 #[cfg(feature = "native-io")]
@@ -4821,6 +4822,9 @@ impl Evaluator {
                     return Ok(value);
                 }
                 let obj = self.eval_field_base(obj_expr, field, scope, depth)?;
+                if let Some(result) = self.stdlib_property(&obj, field) {
+                    return result;
+                }
                 // Built-in properties
                 match (&obj, field.as_str()) {
                     (Value::List(items), "length") => return Ok(Value::Int(items.len() as i64)),
@@ -4933,6 +4937,9 @@ impl Evaluator {
                 }
                 let obj = self.eval_expr(obj_expr, scope, depth + 1)?;
                 let key = self.eval_expr(key_expr, scope, depth + 1)?;
+                if let Some(result) = stdlib::index(&obj, &key) {
+                    return result;
+                }
                 let key_str = value_to_key(&key)?;
                 match obj {
                     Value::Object(map, source) => map.get(&key_str).cloned().ok_or_else(|| {
@@ -5171,7 +5178,7 @@ impl Evaluator {
                 "Regex" => {
                     if let Some(arg) = args.first() {
                         let val = self.eval_expr(arg, scope, depth + 1)?;
-                        return Ok(regex_value(val));
+                        return regex_value(val);
                     }
                     return Err(Error::Eval("Regex() requires a pattern argument".into()));
                 }
@@ -5237,7 +5244,7 @@ impl Evaluator {
             && let Some(arg) = args.first()
         {
             let val = self.eval_expr(arg, scope, depth + 1)?;
-            return Ok(regex_value(val));
+            return regex_value(val);
         }
 
         // Plain call with no args on an object — return the object
@@ -5261,7 +5268,7 @@ impl Evaluator {
                 && &**name == "Regex"
                 && let Some(arg) = evaled_args.first()
             {
-                return Ok(Some(regex_value(arg.clone())));
+                return Ok(Some(regex_value(arg.clone())?));
             }
             if evaled_args.is_empty() {
                 return Ok(Some(func_val));
@@ -5305,6 +5312,9 @@ impl Evaluator {
         args: &[Value],
         depth: usize,
     ) -> Result<Option<Value>> {
+        if let Some(result) = self.stdlib_method(obj, method, args, depth) {
+            return result.map(Some);
+        }
         match (obj, method) {
             // String methods
             (Value::String(s), "contains") => {

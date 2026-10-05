@@ -593,6 +593,7 @@ pub(super) fn value_type_name(v: &Value) -> &'static str {
         Value::Int(_) => "Int",
         Value::Float(_) => "Float",
         Value::String(_) => "String",
+        Value::Regex(_) => "Regex",
         Value::Object(..) => "Object",
         Value::List(_) => "List",
         Value::Lambda(..) => "Function",
@@ -612,20 +613,23 @@ pub(super) fn value_to_key(v: &Value) -> Result<Arc<str>> {
     match v {
         Value::String(s) => Ok(Arc::clone(s)),
         Value::Int(_) | Value::Bool(_) | Value::Float(_) => unreachable!(),
-        Value::Object(_, _) | Value::List(_) | Value::Lambda(..) | Value::Null => {
-            Ok(value_to_display(v).into())
-        }
+        Value::Object(_, _)
+        | Value::List(_)
+        | Value::Lambda(..)
+        | Value::Regex(_)
+        | Value::Null => Ok(value_to_display(v).into()),
     }
 }
 
 pub(super) fn value_to_display(v: &Value) -> String {
     match v {
-        Value::Null => "null".into(),
-        Value::Bool(b) => b.to_string(),
-        Value::Int(n) => n.to_string(),
-        Value::Float(f) => f.to_string(),
         Value::String(s) => s.to_string(),
-        _ => format!("{v:?}"),
+        Value::Object(map, Some(source))
+            if source.type_identity.as_deref() == Some("pkl:base#RegexMatch") =>
+        {
+            map.get("value").map(value_to_display).unwrap_or_default()
+        }
+        _ => super::stdlib::render_value(v),
     }
 }
 
