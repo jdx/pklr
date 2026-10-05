@@ -307,7 +307,11 @@ impl EvalCapabilities for NativeCapabilities {
     }
 
     fn path_exists(&mut self, path: &Path) -> Result<bool> {
-        Ok(path.exists())
+        match std::fs::metadata(path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(crate::Error::Io(path.to_path_buf(), error)),
+        }
     }
 
     fn canonicalize(&mut self, path: &Path) -> Result<PathBuf> {

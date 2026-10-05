@@ -42,7 +42,7 @@ impl Evaluator {
             }
             Target::Remote(uri) => Ok(Some(resource_value(
                 &uri,
-                self.read_remote_resource(&uri)?.as_bytes(),
+                &self.read_remote_resource(&uri)?,
             ))),
             Target::Unreadable => Ok(None),
         };
@@ -54,17 +54,22 @@ impl Evaluator {
         }
     }
 
-    fn read_remote_resource(&mut self, uri: &str) -> Result<String> {
+    fn read_remote_resource(&mut self, uri: &str) -> Result<Vec<u8>> {
         if !uri.starts_with("package://") {
-            return self.fetch_source(uri);
+            if self.offline {
+                return Err(Error::Eval(format!(
+                    "offline mode prevented HTTP fetch for {uri}"
+                )));
+            }
+            return self.fetch_bytes_io(self.rewrite_url(uri).as_ref());
         }
         match resolve_package_uri(uri)? {
-            PackageSource::Direct { url, root } => self.fetch_direct_package_source(&url, &root),
+            PackageSource::Direct { url, .. } => self.fetch_package_bytes(&url, "pkl"),
             PackageSource::Zip(zip_url, entry) => {
                 #[cfg(feature = "package-zip")]
                 {
                     let dir = self.extract_package_zip(&zip_url)?;
-                    self.read_to_string_io(&dir.join(entry))
+                    self.read_bytes_io(&dir.join(entry))
                 }
                 #[cfg(not(feature = "package-zip"))]
                 {
@@ -78,6 +83,18 @@ impl Evaluator {
     }
 
     fn resolve_resource(&mut self, uri: &str, module: &Path) -> Result<Target> {
+        // Parse and normalize explicit file URIs before their allowlist check.
+        // Checking the spelling first would let `/safe/../secret` (including
+        // percent-encoded dot segments) escape an allowed directory.
+        if uri_scheme(uri) == Some("file") {
+            let path = absolute_clean(&file_uri_path(uri)?);
+            let normalized = file_uri(&path);
+            self.check_resource_allowed(&normalized)?;
+            return Ok(Target::File {
+                path,
+                uri: normalized,
+            });
+        }
         let absolute = match uri_scheme(uri) {
             Some(_) => uri.to_string(),
             None => match resolve_remote_relative(module, uri) {
@@ -133,6 +150,13 @@ impl Evaluator {
     }
 
     pub(super) fn eval_read_glob(&mut self, pattern: &str, module: &Path) -> Result<Value> {
+        // Relative resources in an HTTP/package module are remote-relative,
+        // never paths in the evaluator process' filesystem namespace.
+        let resolved_remote = uri_scheme(pattern)
+            .is_none()
+            .then(|| resolve_remote_relative(module, pattern))
+            .flatten();
+        let pattern = resolved_remote.as_deref().unwrap_or(pattern);
         let mut out = ObjectMap::default();
         match uri_scheme(pattern) {
             Some("env") | Some("prop") => {
@@ -152,6 +176,9 @@ impl Evaluator {
                         .collect()
                 };
                 for (name, value) in entries {
+                    if env {
+                        self.env_reads.insert(name.clone(), Some(value.clone()));
+                    }
                     let key = format!(
                         "{}:{}",
                         if env { "env" } else { "prop" },
@@ -163,7 +190,7 @@ impl Evaluator {
                 }
             }
             None | Some("file") => {
-                let (base, glob, key_prefix) = if uri_scheme(pattern) == Some("file") {
+                let (base, glob, file_keys) = if uri_scheme(pattern) == Some("file") {
                     let path = file_uri_path(pattern)?;
                     let normalized = file_uri(&absolute_clean(&path));
                     self.check_resource_allowed(&normalized)?;
@@ -173,19 +200,25 @@ impl Evaluator {
                             .unwrap_or(&path)
                             .to_string_lossy()
                             .to_string(),
-                        "file:".to_string(),
+                        true,
                     )
                 } else {
                     let base = module_dir(module.parent().unwrap_or(Path::new("."))).to_path_buf();
                     // Validate the resolved, normalized pattern before globbing.
                     self.check_resource_allowed(&file_uri(&absolute_clean(&base.join(pattern))))?;
-                    (base, pattern.to_string(), String::new())
+                    (base, pattern.to_string(), false)
                 };
                 for path in self.glob_io(&base, &glob)? {
                     let path = absolute_clean(&path);
                     let uri = file_uri(&path);
                     self.check_resource_allowed(&uri)?;
-                    let key = format!("{key_prefix}{}", pathdiff_or_full(&path, &base));
+                    // Pkl keys explicit file globs by the same normalized,
+                    // percent-encoded URI exposed by the resource itself.
+                    let key = if file_keys {
+                        uri.clone()
+                    } else {
+                        pathdiff_or_full(&path, &base)
+                    };
                     out.insert(
                         key.into(),
                         resource_value(&uri, &self.read_bytes_io(&path)?),
@@ -275,8 +308,9 @@ fn percent_decode(text: &str) -> String {
     while i < bytes.len() {
         if bytes[i] == b'%'
             && i + 2 < bytes.len()
-            && let Ok(b) = u8::from_str_radix(&text[i + 1..i + 3], 16)
+            && let (Some(high), Some(low)) = (hex(bytes[i + 1]), hex(bytes[i + 2]))
         {
+            let b = high << 4 | low;
             out.push(b);
             i += 3;
         } else {
@@ -285,6 +319,15 @@ fn percent_decode(text: &str) -> String {
         }
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 fn absolute_clean(path: &Path) -> PathBuf {
     let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
