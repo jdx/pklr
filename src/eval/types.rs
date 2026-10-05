@@ -620,6 +620,8 @@ pub(super) fn value_to_key(v: &Value) -> Result<Arc<str>> {
         | Value::List(_)
         | Value::Lambda(..)
         | Value::Regex(_)
+        | Value::Duration(_)
+        | Value::DataSize(_)
         | Value::Null => Ok(value_to_display(v).into()),
     }
 }

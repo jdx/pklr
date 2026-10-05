@@ -292,6 +292,8 @@ pub(crate) fn kind_of(value: &Value) -> Kind {
         Value::Int(_) => Kind::Int,
         Value::Float(_) => Kind::Float,
         Value::String(_) => Kind::String,
+        Value::Duration(_) => Kind::Duration,
+        Value::DataSize(_) => Kind::DataSize,
         Value::Regex(_) => Kind::Regex,
         Value::Lambda(..) => Kind::Function,
         Value::List(_) => Kind::Listing,
@@ -315,8 +317,7 @@ pub(crate) fn kind_of(value: &Value) -> Kind {
     }
 }
 
-/// pklr represents durations and data sizes as `{value, unit}` objects and
-/// regexes as `{_type = "regex", pattern}` objects without a source.
+/// Recognize legacy built-in objects without a source.
 fn builtin_object_kind(map: &ObjectMap) -> Option<Kind> {
     if map.len() == 1 && map.contains_key(DIRECTIVE_TEXT) {
         return Some(Kind::RenderDirective);

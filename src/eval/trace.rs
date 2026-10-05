@@ -52,6 +52,9 @@ fn write_trace_value(value: &Value, out: &mut String, top: bool) {
         Value::Int(n) => out.push_str(&n.to_string()),
         Value::Float(f) => out.push_str(&format_float(*f)),
         Value::String(s) => write_trace_string(s, out),
+        Value::Duration(_) | Value::DataSize(_) => {
+            out.push_str(&crate::eval::stdlib::render_value(value))
+        }
         Value::List(items) => {
             if items.kind() == ListKind::Listing {
                 if top {
