@@ -4978,3 +4978,52 @@ fn only_open_or_abstract_modules_can_be_extended() {
         "{err}"
     );
 }
+
+#[test]
+fn constraint_reads_unbound_names_from_the_checked_value() {
+    let source = "class Address { street: String }\nclass Person { address: Address(street.endsWith(\"St.\")) }\n";
+    let json = eval(&format!(
+        "{source}result = new Person {{ address {{ street = \"Hampton St.\" }} }}"
+    ));
+    assert_eq!(json["result"]["address"]["street"], "Hampton St.");
+
+    let error = eval_fails(&format!(
+        "{source}result = new Person {{ address {{ street = \"Garlic Blvd.\" }} }}"
+    ));
+    assert!(error.contains("property 'address'"), "{error}");
+
+    // A bare call in a constraint is a call on the checked value. Lambda
+    // parameters still resolve lexically instead of becoming `this.it`.
+    let json = eval("values: List(every((it) -> it < 0)) = List(-1, -2)");
+    assert_eq!(json["values"], serde_json::json!([-1, -2]));
+    let error = eval_fails("values: List(every((it) -> it < 0)) = List(1)");
+    assert!(error.contains("property 'values'"), "{error}");
+
+    // `read?` also receives a rewritten URI expression; the missing resource
+    // is deliberately nullable.
+    let json = eval(
+        "class Resource { path: String }\nresult: Resource(read?(path) == null) = new Resource { path = \"missing-resource.txt\" }",
+    );
+    assert_eq!(json["result"]["path"], "missing-resource.txt");
+}
+
+#[test]
+fn constraint_reads_the_instance_members_around_it() {
+    let source = "class Gauge { min: Int; max: Int(this >= min) }\n";
+    let json = eval(&format!(
+        "{source}result = new Gauge {{ min = 4; max = 6 }}"
+    ));
+    assert_eq!(json["result"], serde_json::json!({"min": 4, "max": 6}));
+
+    let error = eval_fails(&format!(
+        "{source}result = new Gauge {{ min = 4; max = 3 }}"
+    ));
+    assert!(error.contains("property 'max'"), "{error}");
+
+    // A finished object's saved scope also retains hidden members, which are
+    // not present in its rendered map but remain visible to the constraint.
+    let json = eval(
+        "class HiddenGauge { hidden min: Int; max: Int(this >= min) }\nresult = new HiddenGauge { min = 4; max = 6 }",
+    );
+    assert_eq!(json["result"], serde_json::json!({"max": 6}));
+}

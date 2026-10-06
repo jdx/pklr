@@ -260,6 +260,135 @@ fn expr_reads_module_super(expr: &Expr) -> bool {
     }
 }
 
+/// Calls the evaluator handles as constructors rather than methods of a
+/// constrained value.
+const CONSTRAINT_BUILTIN_CALLS: &[&str] = &[
+    "List", "Listing", "Set", "Map", "Regex", "IntSeq", "Pair", "Mapping",
+];
+
+/// Rewrite the unbound value names in a constraint to read from its implicit
+/// receiver. In Pkl, `Address(street.endsWith("St."))` reads `street` from
+/// the address being checked, and `List(every(...))` invokes the checked
+/// list's `every` method. Names bound by the surrounding scope, `let`, or a
+/// lambda keep their normal meaning.
+fn with_constraint_receiver(constraint: &Expr, scope: &Scope) -> Option<Expr> {
+    use std::cell::Cell;
+
+    fn unbound(name: &str, scope: &Scope, bound: &[String]) -> bool {
+        !matches!(name, "this" | "module" | "outer" | "super")
+            && !bound.iter().any(|bound| bound == name)
+            && scope.get(name).is_none()
+            // Pkl resolves a type alias before an identically named member in
+            // this expression, so it must not become `this.name`.
+            && scope.get_type_alias(name).is_none()
+            && scope.poison_of(name).is_none()
+    }
+
+    fn receiver(name: &str) -> Expr {
+        Expr::Field(Box::new(Expr::Ident("this".into())), name.into())
+    }
+
+    fn rewrite(expr: &Expr, scope: &Scope, bound: &mut Vec<String>, changed: &Cell<bool>) -> Expr {
+        let go =
+            |expr: &Expr, bound: &mut Vec<String>| Box::new(rewrite(expr, scope, bound, changed));
+        match expr {
+            Expr::Ident(name) if unbound(name, scope, bound) => {
+                changed.set(true);
+                receiver(name)
+            }
+            Expr::Call(callee, args) => {
+                let callee = match callee.as_ref() {
+                    Expr::Ident(name) if CONSTRAINT_BUILTIN_CALLS.contains(&name.as_str()) => {
+                        callee.clone()
+                    }
+                    Expr::Ident(name) if unbound(name, scope, bound) => {
+                        changed.set(true);
+                        Box::new(receiver(name))
+                    }
+                    other => go(other, bound),
+                };
+                let args = args.iter().map(|arg| *go(arg, bound)).collect();
+                Expr::Call(callee, args)
+            }
+            Expr::Field(base, field) => Expr::Field(go(base, bound), field.clone()),
+            Expr::NullSafeField(base, field) => Expr::NullSafeField(go(base, bound), field.clone()),
+            Expr::Index(base, key) => Expr::Index(go(base, bound), go(key, bound)),
+            Expr::If(condition, then_expr, else_expr) => Expr::If(
+                go(condition, bound),
+                go(then_expr, bound),
+                go(else_expr, bound),
+            ),
+            Expr::Let(name, value, body) => {
+                let value = go(value, bound);
+                bound.push(name.clone());
+                let body = go(body, bound);
+                bound.pop();
+                Expr::Let(name.clone(), value, body)
+            }
+            Expr::Is(value, ty) => Expr::Is(go(value, bound), ty.clone()),
+            Expr::As(value, ty) => Expr::As(go(value, bound), ty.clone()),
+            Expr::Binop(op, left, right) => Expr::Binop(*op, go(left, bound), go(right, bound)),
+            Expr::Unop(op, value) => Expr::Unop(*op, go(value, bound)),
+            Expr::Lambda(params, body) => {
+                let before = bound.len();
+                bound.extend(params.iter().cloned());
+                let body = Arc::new(rewrite(body, scope, bound, changed));
+                bound.truncate(before);
+                Expr::Lambda(params.clone(), body)
+            }
+            Expr::StringInterpolation(parts) => Expr::StringInterpolation(
+                parts
+                    .iter()
+                    .map(|part| match part {
+                        StringInterpPart::Expr(expr) => StringInterpPart::Expr(*go(expr, bound)),
+                        literal => literal.clone(),
+                    })
+                    .collect(),
+            ),
+            Expr::Throw(value) => Expr::Throw(go(value, bound)),
+            Expr::Trace(value, site) => Expr::Trace(go(value, bound), Arc::clone(site)),
+            Expr::Read(value, module_path) => Expr::Read(go(value, bound), module_path.clone()),
+            Expr::ReadOrNull(value, module_path) => {
+                Expr::ReadOrNull(go(value, bound), module_path.clone())
+            }
+            Expr::ReadGlob(value, module_path) => {
+                Expr::ReadGlob(go(value, bound), module_path.clone())
+            }
+            // Object bodies and `new` establish their own implicit receivers.
+            other => other.clone(),
+        }
+    }
+
+    let changed = Cell::new(false);
+    let rewritten = rewrite(constraint, scope, &mut Vec::new(), &changed);
+    changed.get().then_some(rewritten)
+}
+
+/// Whether a type, after resolving visible aliases, contains a constraint.
+fn type_has_constraint(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
+    fn visit(ty: &crate::parser::TypeExpr, scope: &Scope, aliases: &mut HashSet<String>) -> bool {
+        use crate::parser::TypeExpr;
+
+        match ty {
+            TypeExpr::Constrained(..) => true,
+            TypeExpr::Named(name) => scope
+                .get_type_alias(name)
+                .is_some_and(|alias| aliases.insert(name.clone()) && visit(alias, scope, aliases)),
+            TypeExpr::Nullable(inner) => visit(inner, scope, aliases),
+            TypeExpr::Union(variants) => variants
+                .iter()
+                .any(|variant| visit(variant, scope, aliases)),
+            TypeExpr::Generic(name, args) => {
+                scope.get_type_alias(name).is_some_and(|alias| {
+                    aliases.insert(name.clone()) && visit(alias, scope, aliases)
+                }) || args.iter().any(|arg| visit(arg, scope, aliases))
+            }
+        }
+    }
+
+    visit(ty, scope, &mut HashSet::default())
+}
+
 /// The value of a literal or a plain name, or `None` for any expression that
 /// needs the full evaluator. Must agree with `Evaluator::eval_expr_boxed`.
 fn eval_simple_expr(
@@ -4548,6 +4677,8 @@ impl Evaluator {
                     }
                     _ => {}
                 }
+                let receiver_constraint = with_constraint_receiver(constraint, &constraint_scope);
+                let constraint = receiver_constraint.as_ref().unwrap_or(constraint);
                 let result = self.eval_expr(constraint, &constraint_scope, depth + 1)?;
                 Ok(is_truthy(&result))
             }
@@ -5015,6 +5146,7 @@ impl Evaluator {
             })
             .collect::<HashSet<_>>();
         if let Value::Object(map, source) = &result {
+            let mut member_scope: Option<Scope> = None;
             for entry in base_entries.iter() {
                 let Entry::Property(prop) = entry else {
                     continue;
@@ -5035,8 +5167,30 @@ impl Evaluator {
                 let Some(value) = value else {
                     continue;
                 };
-                if type_is_runtime_checkable(type_ann, &eval_scope)
-                    && !self.eval_type_check(value, type_ann, &eval_scope, depth + 1)?
+                let check_scope: &Scope = if type_has_constraint(type_ann, &eval_scope) {
+                    member_scope.get_or_insert_with(|| {
+                        let mut members = eval_scope.child();
+                        // `map` omits hidden members, while an object's saved
+                        // scope keeps their final values. Both are visible to
+                        // a property constraint on this instance.
+                        if let Some(source) = source {
+                            let object_scope = source.scope();
+                            for name in &source.evaluated_properties {
+                                if let Some(value) = object_scope.get(name.as_str()) {
+                                    members.set(name, value.clone());
+                                }
+                            }
+                        }
+                        for (name, value) in map.iter() {
+                            members.set_name(Arc::clone(name), value.clone());
+                        }
+                        members
+                    })
+                } else {
+                    &eval_scope
+                };
+                if type_is_runtime_checkable(type_ann, check_scope)
+                    && !self.eval_type_check(value, type_ann, check_scope, depth + 1)?
                 {
                     return Err(Error::Eval(format!(
                         "property '{}' expected {}, got {}",
