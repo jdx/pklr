@@ -623,6 +623,11 @@ impl Evaluator {
     }
 
     fn begin_evaluation(&mut self) {
+        // Lambda values can outlive an evaluation, so retain guards for every
+        // capture map that is still reachable through one. Dead capture maps
+        // are otherwise only held here weakly; drop their registry entries at
+        // each evaluation boundary.
+        self.prune_lambda_guards();
         self.env_reads.clear();
         self.import_cache.clear();
         self.imports_in_flight.clear();
@@ -8267,7 +8272,20 @@ fn const_local_reads_non_const(
 /// fail at invocation. The member set contains only values that actually
 /// bound, so unused lambdas and untaken generator branches remain valid.
 impl Evaluator {
+    /// Remove guards for lambdas which have no remaining value holding their
+    /// capture map. Keeping live guards is necessary because callers may keep
+    /// a lambda returned by an earlier evaluation and invoke it after reusing
+    /// this evaluator.
+    fn prune_lambda_guards(&mut self) {
+        self.lambda_guards
+            .retain(|_, entry| entry.captured.upgrade().is_some());
+    }
+
     fn register_lambda_guard(&mut self, captured: &Arc<ScopeMap>) {
+        // A single evaluation can create and immediately discard many
+        // closures. Pruning here, as well as at its start, keeps that pattern
+        // from making the weak-entry registry grow with every closure.
+        self.prune_lambda_guards();
         self.lambda_guards.insert(
             Arc::as_ptr(captured) as usize,
             LambdaGuardEntry {
@@ -8412,6 +8430,75 @@ mod auto_trait_tests {
         fn assert_sync<T: Sync>() {}
 
         assert_sync::<Evaluator>();
+    }
+}
+
+#[cfg(all(test, feature = "native-io"))]
+mod lambda_guard_tests {
+    use std::{path::Path, sync::Arc};
+
+    use super::Evaluator;
+    use crate::{Value, value::ScopeMap};
+
+    #[test]
+    fn lambda_guards_prune_dead_captures_but_keep_live_diagnostics() {
+        let mut evaluator = Evaluator::default();
+
+        // Registering transient closures during one evaluation must not keep a
+        // weak registry entry for each closure that has already been dropped.
+        for _ in 0..64 {
+            let captured = Arc::new(ScopeMap::default());
+            evaluator.register_lambda_guard(&captured);
+        }
+        assert!(
+            evaluator.lambda_guards.len() <= 1,
+            "dead lambda guard entries accumulated: {}",
+            evaluator.lambda_guards.len()
+        );
+
+        // A returned lambda remains live across evaluator reuse, so its
+        // delayed const-local diagnostic must survive the next evaluation.
+        let value = evaluator
+            .eval_source(
+                r#"
+foo {
+  const local f = () -> res1
+  res1 = 15
+  result = f
+}
+"#,
+                Path::new("lambda-guard.pkl"),
+            )
+            .unwrap();
+        let Value::Object(module, _) = &value else {
+            panic!("expected module object");
+        };
+        let Value::Object(foo, _) = &module["foo"] else {
+            panic!("expected foo object");
+        };
+        let Value::Lambda(_, _, captured) = &foo["result"] else {
+            panic!("expected result lambda");
+        };
+        let lambda = foo["result"].clone();
+        let expected = "Cannot reference property `res1` from here because it is not `const`.";
+        assert_eq!(
+            evaluator.lambda_guard_error(captured).as_deref(),
+            Some(expected)
+        );
+        drop(value);
+
+        evaluator
+            .eval_source("next = 1\n", Path::new("next-evaluation.pkl"))
+            .unwrap();
+        let error = evaluator
+            .invoke_lambda(&lambda, &[], 0)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "unexpected lambda error: {error}");
+
+        drop(lambda);
+        evaluator.begin_evaluation();
+        assert!(evaluator.lambda_guards.is_empty());
     }
 }
 
