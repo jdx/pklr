@@ -391,9 +391,70 @@ pub(super) fn type_default_value(ty: &crate::parser::TypeExpr, scope: &Scope) ->
     }
 }
 
+/// The deferred error of a class requested as an implicit property default.
+/// This deliberately follows only the branch [`type_default_value`] selects:
+/// nullable and built-in collection defaults remain non-fallible, while a
+/// poisoned user class (including through an alias) reports its original
+/// error when the property is actually evaluated.
+pub(super) fn type_default_error(ty: &crate::parser::TypeExpr, scope: &Scope) -> Option<String> {
+    fn named_error(name: &str, scope: &Scope, seen: &mut Vec<String>) -> Option<String> {
+        let name = name.trim_start_matches('*').trim_end_matches('?');
+        let base = name.split('<').next().unwrap_or(name);
+        if let Some(alias) = scope.get_type_alias(base) {
+            if seen.iter().any(|seen| seen == base) {
+                return None;
+            }
+            seen.push(base.to_string());
+            let error = visit(alias, scope, seen);
+            seen.pop();
+            return error;
+        }
+        // A qualified class can be absent from an imported module's rendered
+        // map because evaluating its definition failed. Walk the dotted path
+        // so its ObjectSource poison is still reported when this default is
+        // actually materialized.
+        poisoned_member(scope, base)
+    }
+
+    fn visit(
+        ty: &crate::parser::TypeExpr,
+        scope: &Scope,
+        seen: &mut Vec<String>,
+    ) -> Option<String> {
+        use crate::parser::TypeExpr;
+
+        match ty {
+            TypeExpr::Constrained(base, _) if !base.ends_with('?') => {
+                named_error(base, scope, seen)
+            }
+            TypeExpr::Constrained(..) | TypeExpr::Nullable(_) => None,
+            TypeExpr::Named(name) if name != "Null" => named_error(name, scope, seen),
+            TypeExpr::Named(_) => None,
+            TypeExpr::Generic(name, _) => match name.as_str() {
+                "Collection" | "List" | "Set" | "Listing" | "Mapping" | "Map" => None,
+                _ => named_error(name, scope, seen),
+            },
+            TypeExpr::Union(variants) => variants
+                .iter()
+                .find(|variant| is_default_type(variant))
+                .and_then(|variant| visit(variant, scope, seen)),
+        }
+    }
+
+    visit(ty, scope, &mut Vec::new())
+}
+
 pub(super) fn type_default_for_name(name: &str, scope: &Scope) -> Option<Value> {
     let name = name.trim_start_matches('*').trim_end_matches('?');
     let base_name = name.split('<').next().unwrap_or(name);
+    // A class declaration shadows the built-in type with the same name.
+    // Check it before the built-in default cases, whose scope bindings are
+    // marker strings rather than class objects.
+    if let Some(value) = resolve_dotted(scope, base_name)
+        && matches!(&value, Value::Object(_, Some(source)) if source.kind == ObjectKind::Class)
+    {
+        return Some(as_instance(value));
+    }
     match base_name {
         "Null" => Some(Value::Null),
         "Collection" | "List" | "Set" | "Listing" => Some(empty_collection(base_name)),
@@ -499,8 +560,28 @@ pub(super) fn has_modifier(mods: &[Modifier], target: Modifier) -> bool {
     mods.contains(&target)
 }
 
+/// The error for assigning or amending an inherited `const` or `fixed`
+/// property without redeclaring that modifier.
+pub(super) fn immutable_member_error(prop: &Property, inherited: &Property) -> Option<String> {
+    if prop.value.is_none() && prop.body.is_none() {
+        return None;
+    }
+    let verb = if prop.value.is_some() {
+        "assign to"
+    } else {
+        "amend"
+    };
+    [(Modifier::Const, "const"), (Modifier::Fixed, "fixed")]
+        .into_iter()
+        .find(|(modifier, _)| {
+            has_modifier(&inherited.modifiers, modifier.clone())
+                && !has_modifier(&prop.modifiers, modifier.clone())
+        })
+        .map(|(_, kind)| format!("Cannot {verb} {kind} property `{}`.", prop.name))
+}
+
 pub(super) fn should_render_property_value(prop: &Property, value: &Value) -> bool {
-    prop.value.is_some() || prop.body.is_some() || !matches!(value, Value::Null | Value::Object(..))
+    prop.value.is_some() || prop.body.is_some() || !matches!(value, Value::Null)
 }
 
 pub(super) fn module_is_abstract(module: &Module) -> bool {
