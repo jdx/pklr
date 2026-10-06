@@ -4586,6 +4586,17 @@ fn object_locals_retry_after_body_members_bind() {
     let json = eval("d = 1\nfoo { local a = c; d = a; e = d; c = 2 }");
     assert_eq!(json["foo"], serde_json::json!({"d": 2, "e": 2, "c": 2}));
 
+    // The same deferred dependency can appear in a generated body. Once the
+    // local resolves, the generated member must retry rather than surfacing
+    // the temporary poison from the earlier property.
+    let json = eval("foo { local a = c; d = a; when (true) { e = d }; c = 2 }");
+    assert_eq!(json["foo"], serde_json::json!({"d": 2, "e": 2, "c": 2}));
+
+    // Dynamic entries also bind their keys into `this`, so a local can retry
+    // after a later key becomes available.
+    let json = eval(r#"foo { local a = this["c"]; ["d"] = a; ["c"] = 2 }"#);
+    assert_eq!(json["foo"], serde_json::json!({"d": 2, "c": 2}));
+
     // When the deferred property recovers, it returns to source order rather
     // than remaining appended after members that bound while it was pending.
     let json = eval(
@@ -4596,6 +4607,18 @@ fn object_locals_retry_after_body_members_bind() {
     let second = rendered.find("second = 2").unwrap();
     let c = rendered.find("c = 1").unwrap();
     assert!(first < second && second < c, "{rendered}");
+
+    // A child entry may overwrite an inherited member without moving that
+    // member's existing slot. A recovered property belongs after that slot,
+    // even though the overwrite itself appears later in the child body.
+    let json = eval(
+        "base = new { old = 1 }\nfoo = (base) { local a = c; deferred = a; old = 2; c = 3 }\nrendered = new PcfRenderer {}.renderDocument(foo)",
+    );
+    let rendered = json["rendered"].as_str().unwrap();
+    let old = rendered.find("old = 2").unwrap();
+    let deferred = rendered.find("deferred = 3").unwrap();
+    let c = rendered.find("c = 3").unwrap();
+    assert!(old < deferred && deferred < c, "{rendered}");
 
     // A local that never resolves remains lazy and fails only when read.
     let err = eval_fails("foo { local a = missing; b = a }");

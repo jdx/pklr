@@ -2950,6 +2950,10 @@ impl Evaluator {
         // narrower than a general object retry: only value properties that
         // failed while a local was pending are revisited.
         let mut failed_properties: Vec<(usize, String)> = Vec::new();
+        // Generators and other output entries can also read one of those
+        // deferred properties. Keep the whole entry for the same retry phase
+        // instead of treating the temporary poison as its final error.
+        let mut failed_entries: Vec<(usize, String)> = Vec::new();
         // A const local may only read const members. Seed this with actual
         // inherited members, then add own and generated members as they bind.
         let mut non_const_members: HashSet<String> = HashSet::default();
@@ -3301,22 +3305,24 @@ impl Evaluator {
         // generators makes direct-before-generator and generator-before-direct
         // checks symmetric.
         let mut defined_by_layer: Option<HashSet<(usize, Arc<str>)>> = None;
-        for (entry_index, entry) in entries.iter().enumerate() {
+        macro_rules! eval_output_entry {
+            ($entry_index:expr, $entry:expr) => {{
+                (|entry_index: usize, entry: &Entry| -> Result<()> {
             match entry {
                 Entry::Property(prop) => {
                     let mods = &prop.modifiers;
                     if has_modifier(mods, Modifier::Local) {
-                        continue;
+                        return Ok(());
                     }
                     // Skip the `default` property — it's a template, not an output entry
                     if prop.name == "default" && default_template.is_some() {
-                        continue;
+                        return Ok(());
                     }
                     if has_modifier(mods, Modifier::Abstract)
                         && prop.value.is_none()
                         && prop.body.is_none()
                     {
-                        continue; // abstract without value — skip (must be overridden)
+                        return Ok(()); // abstract without value — skip (must be overridden)
                     }
                     // The first entry of a re-evaluated inherited member starts
                     // its amendment chain. Amending the parent's final value
@@ -3364,7 +3370,7 @@ impl Evaluator {
                                 child_scope.poison(prop.name.clone(), message.clone());
                             }
                             failed_properties.push((entry_index, message));
-                            continue;
+                            return Ok(());
                         }
                         Err(error) => return Err(error),
                     };
@@ -3482,7 +3488,8 @@ impl Evaluator {
                         member_entry_indices.insert(storage_key.clone(), entry_index);
                         map.insert(storage_key, val);
                         refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
-                        continue;
+                        retry_failed_locals!();
+                        return Ok(());
                     }
                     let val = if let Some(Value::Object(template_map, Some(src))) =
                         &default_template
@@ -3551,6 +3558,7 @@ impl Evaluator {
                     member_entry_indices.insert(storage_key.clone(), entry_index);
                     map.insert(storage_key, val);
                     refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
+                    retry_failed_locals!();
                 }
                 Entry::Spread(expr) => {
                     let active_scope = scope_for_object_entry(
@@ -3785,6 +3793,45 @@ impl Evaluator {
                 Entry::ClassDef(..) | Entry::TypeAlias(..) => {} // handled in scope setup
                 Entry::Predicate(..) => return Err(member_predicates_unsupported()),
             }
+                    Ok(())
+                })($entry_index, $entry)
+            }};
+        }
+
+        for (entry_index, entry) in entries.iter().enumerate() {
+            let child_scope_before = child_scope.clone();
+            let all_props_before = all_props.clone();
+            let map_before = map.clone();
+            let elements_before = elements.clone();
+            let generated_before = generated.clone();
+            let member_entry_indices_before = member_entry_indices.clone();
+            let non_const_members_before = non_const_members.clone();
+            let bound_members_before = bound_members.clone();
+            let failed_locals_before = failed_locals.clone();
+            let failed_properties_before = failed_properties.clone();
+            let this_aliases_before = this_aliases.clone();
+            let inherited_seeded_before = inherited_seeded.clone();
+            let defined_by_layer_before = defined_by_layer.clone();
+            match eval_output_entry!(entry_index, entry) {
+                Ok(()) => {}
+                Err(Error::Eval(message)) if !failed_locals.is_empty() => {
+                    child_scope = child_scope_before;
+                    all_props = all_props_before;
+                    map = map_before;
+                    elements = elements_before;
+                    generated = generated_before;
+                    member_entry_indices = member_entry_indices_before;
+                    non_const_members = non_const_members_before;
+                    bound_members = bound_members_before;
+                    failed_locals = failed_locals_before;
+                    failed_properties = failed_properties_before;
+                    this_aliases = this_aliases_before;
+                    inherited_seeded = inherited_seeded_before;
+                    defined_by_layer = defined_by_layer_before;
+                    failed_entries.push((entry_index, message));
+                }
+                Err(error) => return Err(error),
+            }
         }
         // Revisit only the ordinary value properties deferred because they
         // read a still-pending local. Once no deferred property recovers, the
@@ -3829,6 +3876,53 @@ impl Evaluator {
             }
             if !recovered_property {
                 return Err(Error::Eval(failed_properties[0].1.clone()));
+            }
+        }
+        // Retry non-property output entries only after ordinary properties
+        // have had a chance to resolve their deferred local dependencies.
+        // This includes nested generator bodies, spreads, elements, and
+        // dynamic entries that encountered a temporary poisoned property.
+        while !failed_entries.is_empty() {
+            let mut retrying = std::mem::take(&mut failed_entries);
+            let mut recovered_entry = false;
+            for (entry_index, _) in retrying.drain(..) {
+                let entry = &entries[entry_index];
+                let child_scope_before = child_scope.clone();
+                let all_props_before = all_props.clone();
+                let map_before = map.clone();
+                let elements_before = elements.clone();
+                let generated_before = generated.clone();
+                let member_entry_indices_before = member_entry_indices.clone();
+                let non_const_members_before = non_const_members.clone();
+                let bound_members_before = bound_members.clone();
+                let failed_locals_before = failed_locals.clone();
+                let failed_properties_before = failed_properties.clone();
+                let this_aliases_before = this_aliases.clone();
+                let inherited_seeded_before = inherited_seeded.clone();
+                let defined_by_layer_before = defined_by_layer.clone();
+                match eval_output_entry!(entry_index, entry) {
+                    Ok(()) => recovered_entry = true,
+                    Err(Error::Eval(message)) => {
+                        child_scope = child_scope_before;
+                        all_props = all_props_before;
+                        map = map_before;
+                        elements = elements_before;
+                        generated = generated_before;
+                        member_entry_indices = member_entry_indices_before;
+                        non_const_members = non_const_members_before;
+                        bound_members = bound_members_before;
+                        failed_locals = failed_locals_before;
+                        failed_properties = failed_properties_before;
+                        this_aliases = this_aliases_before;
+                        inherited_seeded = inherited_seeded_before;
+                        defined_by_layer = defined_by_layer_before;
+                        failed_entries.push((entry_index, message));
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            if !recovered_entry {
+                return Err(Error::Eval(failed_entries[0].1.clone()));
             }
         }
         // Evaluate deferred local lambdas (function definitions) AFTER all
