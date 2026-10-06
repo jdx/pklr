@@ -56,7 +56,8 @@ const DYNAMIC_SIBLING_REF: &str = "\0pklr:dynamic-sibling";
 // It is an impossible user identifier and is captured by output-body lambdas.
 const MODULE_OUTPUT_TEXT_CONTEXT: &str = "\0pklr:module-output-text-context";
 /// The smallest number of weak lambda-guard entries retained between cleanup
-/// passes. Larger live sets use a doubling threshold for amortized cleanup.
+/// passes. Larger live sets use a doubling threshold for amortized cleanup;
+/// an evaluation boundary always removes dropped entries.
 const LAMBDA_GUARD_PRUNE_MIN: usize = 64;
 
 /// A delayed evaluation error shared by every copy of one lambda value.
@@ -8304,8 +8305,9 @@ impl Evaluator {
     fn register_lambda_guard(&mut self, captured: &Arc<ScopeMap>) {
         // A single evaluation can create and immediately discard many
         // closures. Clean periodically rather than before every registration:
-        // dead entries stay bounded by the live set (plus a small minimum),
-        // while long-lived closure construction stays amortized linear.
+        // dead entries stay bounded by the registry's recent high-water mark,
+        // and evaluation boundaries remove them all. Long-lived closure
+        // construction therefore stays amortized linear.
         if self.lambda_guards.len() >= self.lambda_guard_prune_at {
             self.prune_lambda_guards();
         }
@@ -8541,6 +8543,31 @@ foo {
             evaluator.lambda_guard_prune_scans <= count * 2,
             "cleanup scanned {} entries while retaining {count} closures",
             evaluator.lambda_guard_prune_scans
+        );
+    }
+
+    #[test]
+    fn lambda_guard_cleanup_reclaims_dropped_high_water_mark_at_next_evaluation() {
+        let mut evaluator = Evaluator::default();
+        let mut captures = Vec::new();
+
+        for _ in 0..LAMBDA_GUARD_PRUNE_MIN * 2 {
+            let captured = Arc::new(ScopeMap::default());
+            evaluator.register_lambda_guard(&captured);
+            captures.push(captured);
+        }
+        let survivor = captures.pop().unwrap();
+        evaluator
+            .lambda_guard(&survivor)
+            .unwrap()
+            .set_error("survives cleanup".into());
+        drop(captures);
+
+        evaluator.begin_evaluation();
+        assert_eq!(evaluator.lambda_guards.len(), 1);
+        assert_eq!(
+            evaluator.lambda_guard_error(&survivor).as_deref(),
+            Some("survives cleanup")
         );
     }
 }
