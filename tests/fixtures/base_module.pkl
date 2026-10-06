@@ -1,3 +1,5 @@
+open module base_module
+
 class Config {
     debug: Boolean = false
     port: Int = 8080

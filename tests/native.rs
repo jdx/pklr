@@ -624,7 +624,7 @@ fn amends_and_import_expressions_are_prefetched_in_the_first_batch() {
 #[test]
 fn extends_and_imports_are_prefetched_in_the_first_batch() {
     let server = delayed(&[
-        ("/Base.pkl", "base = 0\n"),
+        ("/Base.pkl", "open module base\nbase = 0\n"),
         ("/A.pkl", "value = 1\n"),
         ("/B.pkl", "value = 2\n"),
     ]);
@@ -651,7 +651,7 @@ fn every_import_form_of_a_fetched_module_is_in_one_batch() {
             "/Main.pkl",
             "extends \"Base.pkl\"\nimport \"Y.pkl\"\nx = import(\"X.pkl\").value\ny = Y.value\n",
         ),
-        ("/Base.pkl", "base = 0\n"),
+        ("/Base.pkl", "open module base\nbase = 0\n"),
         ("/X.pkl", "value = 1\n"),
         ("/Y.pkl", "value = 2\n"),
     ]);

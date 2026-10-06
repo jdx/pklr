@@ -1,3 +1,5 @@
+open module base_with_class
+
 class Script {
   linux: String?
   macos: String?

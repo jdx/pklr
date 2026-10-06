@@ -1300,7 +1300,12 @@ fn imported_amends_and_extends_bases_keep_separate_values() {
     let temp = TestTempDir::new("pklr_test_imported_dual_inherited_bases");
     let dir = temp.path();
     std::fs::write(dir.join("AmendsBase.pkl"), r#"amendsName = meta.name"#).unwrap();
-    std::fs::write(dir.join("ExtendsBase.pkl"), r#"extendsName = meta.name"#).unwrap();
+    std::fs::write(
+        dir.join("ExtendsBase.pkl"),
+        r#"open module ExtendsBase
+extendsName = meta.name"#,
+    )
+    .unwrap();
     std::fs::write(dir.join("meta.pkl"), r#"name = "hk""#).unwrap();
     std::fs::write(
         dir.join("child.pkl"),
