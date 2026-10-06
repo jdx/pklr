@@ -544,7 +544,9 @@ fn type_constraint_has_explicit_throw(ty: &crate::parser::TypeExpr, scope: &Scop
 /// pklr does not implement yet. Keep that evaluator limitation deferred; it
 /// is distinct from a user `throw` reached by a supported predicate.
 fn is_deferred_constraint_evaluator_error(message: &str) -> bool {
-    message.starts_with("Operator `&&` is not defined for operand types `Boolean` and `Function")
+    message.starts_with("Operator `")
+        && message.contains(" is not defined for operand types `")
+        && message.contains("Function")
 }
 
 /// The value of a literal or a plain name, or `None` for any expression that
@@ -3150,19 +3152,34 @@ impl Evaluator {
             }
 
             // Values are evaluated before these late inherited checks. Carry a
-            // constrained member's failure through direct and transitive property
-            // references so a dependent output cannot retain a stale value.
+            // constrained member's failure through direct and transitive reads
+            // so a dependent output cannot retain a stale value. Probe the
+            // expression with failed members hidden rather than relying on a
+            // syntactic reference list: an unselected `if` branch, or a
+            // caught failed read, must remain usable.
             while !inherited_type_failures.is_empty() {
                 let mut added = false;
+                let mut probe_scope = scope.child();
+                let mut probe_properties = (*all_props).clone();
+                for (name, message) in &inherited_type_failures {
+                    probe_scope.poison(name.clone(), message.clone());
+                    probe_scope.set_member_poison(name, Some(message.clone()));
+                    probe_properties.shift_remove(name.as_str());
+                }
+                let probe_snapshot = Value::Object(Arc::new(probe_properties), None);
+                probe_scope.set("this", probe_snapshot.clone());
+                probe_scope.set("module", probe_snapshot);
                 for prop in &effective_properties {
                     if has_modifier(&prop.modifiers, Modifier::Local)
                         || inherited_type_failures.contains_key(prop.name.as_str())
                     {
                         continue;
                     }
-                    if let Some(message) = property_reference_names(prop)
-                        .iter()
-                        .find_map(|name| inherited_type_failures.get(name.as_str()))
+                    if let Err(Error::Eval(message)) =
+                        self.eval_property(prop, &probe_scope, depth + 1)
+                        && inherited_type_failures
+                            .values()
+                            .any(|failure| failure == &message)
                     {
                         inherited_type_failures.insert(prop.name.clone(), message.clone());
                         added = true;
@@ -5023,12 +5040,8 @@ impl Evaluator {
         // mapping, not independently for each entry. A nested union remains
         // part of its key or value type and is handled by eval_type_check.
         for (key_ty, value_ty) in &pairs {
-            if !type_is_runtime_checkable(key_ty, scope)
-                || !type_is_runtime_checkable(value_ty, scope)
-            {
-                // pklr cannot disprove an alternative it cannot model.
-                return Ok(());
-            }
+            let key_checkable = type_is_runtime_checkable(key_ty, scope);
+            let value_checkable = type_is_runtime_checkable(value_ty, scope);
             let mut alternative_matches = true;
             for (stored_key, entry) in entries.iter() {
                 let key = self
@@ -5036,8 +5049,9 @@ impl Evaluator {
                     .get(stored_key)
                     .cloned()
                     .unwrap_or_else(|| crate::value::mapping_storage_value(stored_key));
-                if !self.eval_type_check(&key, key_ty, scope, depth + 1)?
-                    || !self.eval_type_check(entry, value_ty, scope, depth + 1)?
+                if (key_checkable && !self.eval_type_check(&key, key_ty, scope, depth + 1)?)
+                    || (value_checkable
+                        && !self.eval_type_check(entry, value_ty, scope, depth + 1)?)
                 {
                     alternative_matches = false;
                     break;
@@ -5071,6 +5085,10 @@ impl Evaluator {
     }
 
     fn remember_mapping_key(&mut self, storage_key: Arc<str>, value: &Value) {
+        // An amendment can replace an equal key with a differently-spelled
+        // native unit (`[1.s]` with `[1000.ms]`). Pkl evaluates constraints
+        // against the replacement expression, so the most recent key value
+        // is authoritative even though map storage keeps the normalized key.
         self.mapping_key_values.insert(storage_key, value.clone());
     }
 
@@ -5941,6 +5959,35 @@ impl Evaluator {
             return Ok(None);
         }
 
+        // Property annotations belong to the definition site of the class.
+        // An imported class's aliases and sibling classes may not be visible
+        // in the scope that amends one of its instances.
+        let mut type_scope = Scope {
+            type_namespace: object_source_type_namespace(base_source),
+            ..Scope::default()
+        };
+        let base_scope = base_source.scope();
+        if !base_scope.is_empty() {
+            type_scope.vars = Arc::new(base_scope.clone());
+            let declared = base_source.scope_declared();
+            if !declared.is_empty() {
+                type_scope.declared = Arc::new(
+                    declared
+                        .iter()
+                        .filter(|name| base_scope.contains_key(&***name))
+                        .cloned()
+                        .collect(),
+                );
+            }
+        }
+        for (name, identity) in base_source.scope_module_identities() {
+            type_scope.set_module_identity(name.clone(), identity.clone());
+        }
+        let aliases = base_source.scope_type_aliases();
+        if !aliases.is_empty() {
+            type_scope.type_aliases = Arc::new(aliases.clone());
+        }
+
         let base_properties = base_source
             .entries
             .iter()
@@ -5979,7 +6026,7 @@ impl Evaluator {
                 Entry::Property(prop) => {
                     prop.type_ann
                         .as_ref()
-                        .is_some_and(|ty| type_has_constraint(ty, current_scope))
+                        .is_some_and(|ty| type_has_constraint(ty, &type_scope))
                         || (!overlays.contains_key(prop.name.as_str())
                             && property_reference_names(prop).iter().any(|name| {
                                 name == DYNAMIC_SIBLING_REF || overlays.contains_key(name.as_str())
@@ -6023,7 +6070,7 @@ impl Evaluator {
             let value = self
                 .eval_property(&prop, current_scope, depth)?
                 .expect("valued overlay properties evaluate to a value");
-            self.check_declared_property_type(&prop, &value, current_scope, depth)?;
+            self.check_declared_property_type(&prop, &value, &type_scope, depth)?;
             map.insert(prop.name.clone().into(), value);
             entries[*index] = Entry::Property(Arc::new(prop));
             entry_scopes[*index] = Some(Arc::clone(&overlay_scope));

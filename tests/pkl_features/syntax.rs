@@ -1843,6 +1843,31 @@ other = 42
 }
 
 #[test]
+fn inherited_constraint_failure_does_not_poison_an_unselected_branch() {
+    let temp = TestTempDir::new("pklr_inherited_constraint_unselected_branch");
+    std::fs::write(
+        temp.path().join("Base.pkl"),
+        r#"
+hidden checks: Listing(throw("branch constraint boom")) = new { 1 }
+summary = if (false) checks.length else 42
+"#,
+    )
+    .unwrap();
+    let child = temp.path().join("Child.pkl");
+    std::fs::write(&child, "amends \"Base.pkl\"\nchecks { 2 }\n").unwrap();
+    let read = temp.path().join("Read.pkl");
+    std::fs::write(
+        &read,
+        "import \"Child.pkl\" as child\nresult = child.summary\n",
+    )
+    .unwrap();
+    assert_eq!(
+        pklr::eval_to_json(&read).unwrap(),
+        serde_json::json!({ "result": 42 })
+    );
+}
+
+#[test]
 fn inherited_named_constraint_errors_stay_lazy_but_surface_when_read() {
     let temp = TestTempDir::new("pklr_inherited_named_constraint_error_laziness");
     std::fs::write(
@@ -2072,6 +2097,99 @@ fn amending_module_inherited_mapping_preserves_compound_keys_and_union_selection
     assert!(
         pklr::eval_to_json(&mixed).is_err(),
         "one inherited Mapping must satisfy a single declared union alternative"
+    );
+
+    std::fs::write(
+        temp.path().join("ObjectUnionBase.pkl"),
+        "typed: Mapping<String, Int> | Object = new Mapping {}\n",
+    )
+    .unwrap();
+    let object_union = temp.path().join("ObjectUnion.pkl");
+    std::fs::write(
+        &object_union,
+        "amends \"ObjectUnionBase.pkl\"\ntyped { [\"x\"] = \"not Int\" }\n",
+    )
+    .unwrap();
+    assert!(
+        pklr::eval_to_json(&object_union).is_err(),
+        "a constructed Mapping selects its Mapping union arm, whose entry types apply"
+    );
+
+    std::fs::write(
+        temp.path().join("DurationBase.pkl"),
+        r#"
+typed: Mapping<Duration(this.unit == "s"), Int> = new Mapping { [1.s] = 1 }
+"#,
+    )
+    .unwrap();
+    let duration = temp.path().join("Duration.pkl");
+    std::fs::write(
+        &duration,
+        "amends \"DurationBase.pkl\"\ntyped { [1000.ms] = 2 }\n",
+    )
+    .unwrap();
+    let duration_read = temp.path().join("DurationRead.pkl");
+    std::fs::write(
+        &duration_read,
+        "import \"Duration.pkl\" as child\nresult = child.typed.length\n",
+    )
+    .unwrap();
+    assert!(
+        pklr::eval_to_json(&duration_read).is_err(),
+        "an equal unit Mapping key amendment must be checked using its new spelling"
+    );
+
+    std::fs::write(
+        temp.path().join("UnknownKeyBase.pkl"),
+        "typed: Mapping<UnknownKey, Int> = new {}\n",
+    )
+    .unwrap();
+    let unknown_key = temp.path().join("UnknownKey.pkl");
+    std::fs::write(
+        &unknown_key,
+        "amends \"UnknownKeyBase.pkl\"\ntyped { [\"key\"] = \"not Int\" }\n",
+    )
+    .unwrap();
+    assert!(
+        pklr::eval_to_json(&unknown_key).is_err(),
+        "an uncheckable Mapping key type must not disable a checkable value type"
+    );
+}
+
+#[test]
+fn simple_class_amendments_resolve_definition_site_type_aliases() {
+    let temp = TestTempDir::new("pklr_simple_class_amendment_definition_alias");
+    std::fs::write(
+        temp.path().join("Types.pkl"),
+        r#"
+typealias Port = Int(this > 0)
+class Item {
+  port: Port = 1
+  enabled: Boolean = true
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("Base.pkl"),
+        r#"
+import "Types.pkl" as types
+items: Mapping<String, types.Item> = new {}
+"#,
+    )
+    .unwrap();
+    let child = temp.path().join("Child.pkl");
+    std::fs::write(
+        &child,
+        r#"
+amends "Base.pkl"
+items { ["bad"] { port = -1 } }
+"#,
+    )
+    .unwrap();
+    assert!(
+        pklr::eval_to_json(&child).is_err(),
+        "a simple imported class amendment must enforce its definition-site alias"
     );
 }
 
