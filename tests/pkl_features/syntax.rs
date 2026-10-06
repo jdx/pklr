@@ -1821,21 +1821,64 @@ other = 42
         serde_json::json!({ "result": 42 })
     );
 
-    for source in [child.clone(), {
-        let read = temp.path().join("Read.pkl");
-        std::fs::write(
-            &read,
-            "import \"Child.pkl\" as child\nresult = child.checks\n",
-        )
-        .unwrap();
-        read
-    }] {
+    let read = temp.path().join("Read.pkl");
+    std::fs::write(
+        &read,
+        "import \"Child.pkl\" as child\nresult = child.checks\n",
+    )
+    .unwrap();
+    let dependent = temp.path().join("ReadDependent.pkl");
+    std::fs::write(
+        &dependent,
+        "import \"Child.pkl\" as child\nresult = child.summary\n",
+    )
+    .unwrap();
+    for source in [child.clone(), read, dependent] {
         let error = pklr::eval_to_json(&source).unwrap_err().to_string();
         assert!(
             error.contains("constraint boom"),
             "the constraint failure should surface only when requested, got {error:?}"
         );
     }
+}
+
+#[test]
+fn inherited_named_constraint_errors_stay_lazy_but_surface_when_read() {
+    let temp = TestTempDir::new("pklr_inherited_named_constraint_error_laziness");
+    std::fs::write(
+        temp.path().join("Base.pkl"),
+        r#"
+local function invalid(_) = throw("indirect constraint boom")
+hidden checks: Listing(invalid) = new { 1 }
+other = 42
+"#,
+    )
+    .unwrap();
+    let child = temp.path().join("Child.pkl");
+    std::fs::write(&child, "amends \"Base.pkl\"\nchecks { 2 }\n").unwrap();
+
+    let unused = temp.path().join("Unused.pkl");
+    std::fs::write(
+        &unused,
+        "import \"Child.pkl\" as child\nresult = child.other\n",
+    )
+    .unwrap();
+    assert_eq!(
+        pklr::eval_to_json(&unused).unwrap(),
+        serde_json::json!({ "result": 42 })
+    );
+
+    let read = temp.path().join("Read.pkl");
+    std::fs::write(
+        &read,
+        "import \"Child.pkl\" as child\nresult = child.checks\n",
+    )
+    .unwrap();
+    let error = pklr::eval_to_json(&read).unwrap_err().to_string();
+    assert!(
+        error.contains("indirect constraint boom"),
+        "the indirect constraint failure should surface when requested, got {error:?}"
+    );
 }
 
 #[test]
@@ -1887,6 +1930,68 @@ typedMap { ["bad"] = "wrong" }
     assert!(
         read.is_err(),
         "reading the invalid inherited Mapping should fail, got {read:?}"
+    );
+}
+
+#[test]
+fn amending_module_inherited_mapping_checks_keys_and_late_values() {
+    let temp = TestTempDir::new("pklr_amending_module_inherited_mapping_key_and_late_types");
+    std::fs::write(
+        temp.path().join("KeyBase.pkl"),
+        "typed: Mapping<String, Int> = new {}\n",
+    )
+    .unwrap();
+    let bad_key = temp.path().join("BadKey.pkl");
+    std::fs::write(&bad_key, "amends \"KeyBase.pkl\"\ntyped { [1] = 1 }\n").unwrap();
+    assert!(
+        pklr::eval_to_json(&bad_key).is_err(),
+        "an inherited Mapping key outside its declaration should fail"
+    );
+
+    std::fs::write(
+        temp.path().join("LateBase.pkl"),
+        r#"
+source = 1
+value = source
+typed: Mapping<String, Int> = new {}
+other = 42
+"#,
+    )
+    .unwrap();
+    let late = temp.path().join("Late.pkl");
+    std::fs::write(
+        &late,
+        r#"
+amends "LateBase.pkl"
+source = "wrong"
+typed = new { ["x"] = value }
+"#,
+    )
+    .unwrap();
+
+    let unused = temp.path().join("LateUnused.pkl");
+    std::fs::write(
+        &unused,
+        "import \"Late.pkl\" as child\nresult = child.other\n",
+    )
+    .unwrap();
+    assert_eq!(
+        pklr::eval_to_json(&unused).unwrap(),
+        serde_json::json!({ "result": 42 })
+    );
+    assert!(
+        pklr::eval_to_json(&late).is_err(),
+        "a late-recomputed inherited Mapping value outside its declaration should fail"
+    );
+    let read = temp.path().join("LateRead.pkl");
+    std::fs::write(
+        &read,
+        "import \"Late.pkl\" as child\nresult = child.typed\n",
+    )
+    .unwrap();
+    assert!(
+        pklr::eval_to_json(&read).is_err(),
+        "reading the late-invalid inherited Mapping should fail"
     );
 }
 

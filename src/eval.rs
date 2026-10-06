@@ -425,37 +425,70 @@ fn type_has_constraint(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
 }
 
 /// A constraint whose evaluated branch explicitly throws has a meaningful Pkl
-/// failure to preserve. Other evaluator errors remain conservatively deferred:
-/// some package predicates use language features pklr cannot yet model.
+/// failure to preserve. This follows named predicate lambdas too; other
+/// evaluator errors remain conservatively deferred because some package
+/// predicates use language features pklr cannot yet model.
 fn type_constraint_has_explicit_throw(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
-    fn expr_has_throw(expr: &Expr) -> bool {
+    fn lambda_has_throw(value: &Value, scope: &Scope, seen: &mut HashSet<usize>) -> bool {
+        let Value::Lambda(_, body, captured) = value else {
+            return false;
+        };
+        if !seen.insert(Arc::as_ptr(body) as usize) {
+            return false;
+        }
+        expr_has_throw(body, scope, Some(captured), seen)
+    }
+
+    fn expr_has_throw(
+        expr: &Expr,
+        scope: &Scope,
+        captured: Option<&ScopeMap>,
+        seen: &mut HashSet<usize>,
+    ) -> bool {
+        let value_has_throw = |name: &str, seen: &mut HashSet<usize>| {
+            captured
+                .and_then(|bindings| bindings.get(name))
+                .or_else(|| scope.get(name))
+                .is_some_and(|value| lambda_has_throw(value, scope, seen))
+        };
         match expr {
             Expr::Throw(_) => true,
+            Expr::Ident(name) => value_has_throw(name, seen),
             Expr::Field(value, _)
             | Expr::NullSafeField(value, _)
             | Expr::Unop(_, value)
             | Expr::Trace(value, _)
             | Expr::Read(value, _)
             | Expr::ReadOrNull(value, _)
-            | Expr::ReadGlob(value, _) => expr_has_throw(value),
+            | Expr::ReadGlob(value, _) => expr_has_throw(value, scope, captured, seen),
             Expr::Index(left, right) | Expr::Binop(_, left, right) => {
-                expr_has_throw(left) || expr_has_throw(right)
+                expr_has_throw(left, scope, captured, seen)
+                    || expr_has_throw(right, scope, captured, seen)
             }
-            Expr::Call(callee, args) => expr_has_throw(callee) || args.iter().any(expr_has_throw),
+            Expr::Call(callee, args) => {
+                expr_has_throw(callee, scope, captured, seen)
+                    || args
+                        .iter()
+                        .any(|arg| expr_has_throw(arg, scope, captured, seen))
+            }
             Expr::If(condition, then_expr, else_expr) => {
-                expr_has_throw(condition) || expr_has_throw(then_expr) || expr_has_throw(else_expr)
+                expr_has_throw(condition, scope, captured, seen)
+                    || expr_has_throw(then_expr, scope, captured, seen)
+                    || expr_has_throw(else_expr, scope, captured, seen)
             }
-            Expr::Let(_, value, body) => expr_has_throw(value) || expr_has_throw(body),
-            Expr::Lambda(_, body) => expr_has_throw(body),
-            Expr::StringInterpolation(parts) => parts
-                .iter()
-                .any(|part| matches!(part, StringInterpPart::Expr(expr) if expr_has_throw(expr))),
+            Expr::Let(_, value, body) => {
+                expr_has_throw(value, scope, captured, seen)
+                    || expr_has_throw(body, scope, captured, seen)
+            }
+            Expr::Lambda(_, body) => expr_has_throw(body, scope, captured, seen),
+            Expr::StringInterpolation(parts) => parts.iter().any(|part| {
+                matches!(part, StringInterpPart::Expr(expr) if expr_has_throw(expr, scope, captured, seen))
+            }),
             Expr::Null
             | Expr::Bool(_)
             | Expr::Int(_)
             | Expr::Float(_)
             | Expr::String(_)
-            | Expr::Ident(_)
             | Expr::New(..)
             | Expr::InferredNew(..)
             | Expr::Is(..)
@@ -470,7 +503,9 @@ fn type_constraint_has_explicit_throw(ty: &crate::parser::TypeExpr, scope: &Scop
         use crate::parser::TypeExpr;
 
         match ty {
-            TypeExpr::Constrained(_, constraint) => expr_has_throw(constraint),
+            TypeExpr::Constrained(_, constraint) => {
+                expr_has_throw(constraint, scope, None, &mut HashSet::default())
+            }
             TypeExpr::Named(name) | TypeExpr::Generic(name, _) => scope
                 .get_type_alias(name)
                 .is_some_and(|alias| aliases.insert(name.clone()) && visit(alias, scope, aliases)),
@@ -482,6 +517,13 @@ fn type_constraint_has_explicit_throw(ty: &crate::parser::TypeExpr, scope: &Scop
     }
 
     visit(ty, scope, &mut HashSet::default())
+}
+
+/// Some pantry constraints use Pkl's predicate-composition semantics, which
+/// pklr does not implement yet. Keep that evaluator limitation deferred; it
+/// is distinct from a user `throw` reached by a supported predicate.
+fn is_deferred_constraint_evaluator_error(message: &str) -> bool {
+    message.starts_with("Operator `&&` is not defined for operand types `Boolean` and `Function")
 }
 
 /// The value of a literal or a plain name, or `None` for any expression that
@@ -2964,7 +3006,20 @@ impl Evaluator {
                 }
             }
             for prop in &late_child_properties {
-                match self.eval_property(prop, &scope, depth) {
+                if requested_eval_fields
+                    .as_ref()
+                    .is_some_and(|fields| !fields.contains(&prop.name))
+                {
+                    continue;
+                }
+                match self.eval_property(prop, &scope, depth).and_then(|value| {
+                    if synthesized_inherited_types.contains(prop.name.as_str())
+                        && let (Some(value), Some(ty)) = (&value, &prop.type_ann)
+                    {
+                        self.check_inherited_mapping_value_types(value, ty, &scope, depth)?;
+                    }
+                    Ok(value)
+                }) {
                     Ok(Some(value)) => {
                         scope.set(&prop.name, value.clone());
                         if has_modifier(&prop.modifiers, Modifier::Local) {
@@ -3012,6 +3067,19 @@ impl Evaluator {
         // Check declarations only after this module's final scope is complete:
         // constraints and aliases may refer to members declared later.
         if !evaluated_as_base {
+            // These are the effective non-local properties after an amendment:
+            // an override in this body replaces its inherited declaration.
+            // Dependents may themselves be inherited, so error propagation must
+            // consider both sets rather than only the child body below.
+            let effective_properties = late_inherited_properties
+                .iter()
+                .map(|prop| prop.as_ref())
+                .filter(|prop| !child_property_names.contains(prop.name.as_str()))
+                .chain(body.iter().filter_map(|entry| match entry {
+                    Entry::Property(prop) => Some(prop.as_ref()),
+                    _ => None,
+                }))
+                .collect::<Vec<_>>();
             let mut inherited_type_failures = IndexMap::new();
             for entry in body.iter() {
                 if let Entry::Property(prop) = entry
@@ -3039,7 +3107,8 @@ impl Evaluator {
                                 // member is materialized. Keep other evaluator
                                 // limitations deferred, as before.
                                 Err(Error::Eval(message))
-                                    if type_constraint_has_explicit_throw(ty, &scope) =>
+                                    if type_constraint_has_explicit_throw(ty, &scope)
+                                        && !is_deferred_constraint_evaluator_error(&message) =>
                                 {
                                     Some(message)
                                 }
@@ -3063,10 +3132,7 @@ impl Evaluator {
             // references so a dependent output cannot retain a stale value.
             while !inherited_type_failures.is_empty() {
                 let mut added = false;
-                for entry in body.iter() {
-                    let Entry::Property(prop) = entry else {
-                        continue;
-                    };
+                for prop in &effective_properties {
                     if has_modifier(&prop.modifiers, Modifier::Local)
                         || inherited_type_failures.contains_key(prop.name.as_str())
                     {
@@ -3084,10 +3150,7 @@ impl Evaluator {
                     break;
                 }
             }
-            for entry in body.iter() {
-                let Entry::Property(prop) = entry else {
-                    continue;
-                };
+            for prop in effective_properties {
                 if let Some(message) = inherited_type_failures.get(prop.name.as_str()) {
                     let rendered = !has_modifier(&prop.modifiers, Modifier::Hidden)
                         && requested_output_fields
@@ -4881,11 +4944,11 @@ impl Evaluator {
         scope: &Scope,
         depth: usize,
     ) -> Result<()> {
-        fn value_types(
+        fn mapping_type_pairs(
             ty: &crate::parser::TypeExpr,
             scope: &Scope,
             aliases: &mut HashSet<String>,
-            out: &mut Vec<crate::parser::TypeExpr>,
+            out: &mut Vec<(crate::parser::TypeExpr, crate::parser::TypeExpr)>,
         ) {
             use crate::parser::TypeExpr;
 
@@ -4894,30 +4957,30 @@ impl Evaluator {
                     if let Some(alias) = scope.get_type_alias(name)
                         && aliases.insert(name.clone())
                     {
-                        value_types(alias, scope, aliases, out);
+                        mapping_type_pairs(alias, scope, aliases, out);
                     }
                 }
-                TypeExpr::Nullable(inner) => value_types(inner, scope, aliases, out),
+                TypeExpr::Nullable(inner) => mapping_type_pairs(inner, scope, aliases, out),
                 TypeExpr::Union(variants) => {
                     for variant in variants {
-                        value_types(variant, scope, aliases, out);
+                        mapping_type_pairs(variant, scope, aliases, out);
                     }
                 }
                 TypeExpr::Generic(name, params) if name == "Mapping" || name == "Map" => {
-                    if let Some(value) = params.get(1) {
-                        out.push(value.clone());
+                    if let [key, value, ..] = params.as_slice() {
+                        out.push((key.clone(), value.clone()));
                     }
                 }
                 TypeExpr::Constrained(base, _) => {
                     if let Ok(base) = parser::parse_type_name(base) {
-                        value_types(&base, scope, aliases, out);
+                        mapping_type_pairs(&base, scope, aliases, out);
                     }
                 }
                 TypeExpr::Generic(name, _) => {
                     if let Some(alias) = scope.get_type_alias(name)
                         && aliases.insert(name.clone())
                     {
-                        value_types(alias, scope, aliases, out);
+                        mapping_type_pairs(alias, scope, aliases, out);
                     }
                 }
             }
@@ -4926,32 +4989,43 @@ impl Evaluator {
         let Value::Object(entries, _) = value else {
             return Ok(());
         };
-        let mut types = Vec::new();
-        value_types(ty, scope, &mut HashSet::default(), &mut types);
-        if types.is_empty() {
+        let mut pairs = Vec::new();
+        mapping_type_pairs(ty, scope, &mut HashSet::default(), &mut pairs);
+        if pairs.is_empty() {
             return Ok(());
         }
-        for entry in entries.values() {
+        for (stored_key, entry) in entries.iter() {
+            let key = crate::value::mapping_storage_value(stored_key);
             let mut uncheckable = false;
             let mut valid = false;
-            for ty in &types {
-                if !type_is_runtime_checkable(ty, scope) {
+            for (key_ty, value_ty) in &pairs {
+                if !type_is_runtime_checkable(key_ty, scope)
+                    || !type_is_runtime_checkable(value_ty, scope)
+                {
                     uncheckable = true;
                     continue;
                 }
-                if self.eval_type_check(entry, ty, scope, depth + 1)? {
+                if self.eval_type_check(&key, key_ty, scope, depth + 1)?
+                    && self.eval_type_check(entry, value_ty, scope, depth + 1)?
+                {
                     valid = true;
                     break;
                 }
             }
             if !valid && !uncheckable {
                 return Err(Error::Eval(format!(
-                    "Expected value of type `{}`, but got type `{}`.",
-                    types
+                    "Expected Mapping entry of type `{} -> {}`, but got `{}` -> `{}`.",
+                    pairs
                         .iter()
-                        .map(display_type_expr)
+                        .map(|(key, _)| display_type_expr(key))
                         .collect::<Vec<_>>()
                         .join(" | "),
+                    pairs
+                        .iter()
+                        .map(|(_, value)| display_type_expr(value))
+                        .collect::<Vec<_>>()
+                        .join(" | "),
+                    value_type_name(&key),
                     value_type_name(entry)
                 )));
             }
