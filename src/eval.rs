@@ -2479,13 +2479,46 @@ impl Evaluator {
                 }
             }
         }
+        // An amending module cannot repeat a non-local property's type
+        // annotation. Keep the inherited declaration on its replacement so
+        // an untyped `new` continues to amend the base property's default
+        // rather than constructing a Dynamic object. This is the module
+        // counterpart of `inherit_property_types` for classes.
+        let typed_body = module.amends.as_ref().and_then(|_| {
+            self.inherit_module_property_types(&module.body, &late_inherited_properties, &mut scope)
+        });
+        let body = typed_body.as_ref().unwrap_or(&module.body);
+        // These annotations were reconstructed from the amended module, not
+        // written in this body. They guide `new` and body evaluation above,
+        // but must not turn an existing module overlay into a new eager
+        // constraint check (which Pkl keeps lazy through the inherited
+        // property value).
+        let synthesized_inherited_types: HashSet<&str> = typed_body
+            .as_ref()
+            .map(|typed| {
+                module
+                    .body
+                    .iter()
+                    .zip(typed.iter())
+                    .filter_map(|(original, typed)| match (original, typed) {
+                        (Entry::Property(original), Entry::Property(typed))
+                            if original.type_ann.is_none() && typed.type_ann.is_some() =>
+                        {
+                            Some(typed.name.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let requested_eval_fields = requested_output_fields.as_ref().map(|fields| {
             let mut dependency_entries = late_inherited_properties
                 .iter()
                 .cloned()
                 .map(Entry::Property)
                 .collect::<Vec<_>>();
-            dependency_entries.extend(module.body.iter().cloned());
+            dependency_entries.extend(body.iter().cloned());
             expand_requested_fields(&dependency_entries, fields, &inherited_builtins)
         });
 
@@ -2510,13 +2543,8 @@ impl Evaluator {
         let plan = Arc::clone(
             &self
                 .plan_cache
-                .entry(Arc::as_ptr(&module.body) as usize)
-                .or_insert_with(|| {
-                    (
-                        Arc::clone(&module.body),
-                        Arc::new(module_evaluation_plan(&module.body)),
-                    )
-                })
+                .entry(Arc::as_ptr(body) as usize)
+                .or_insert_with(|| (Arc::clone(body), Arc::new(module_evaluation_plan(body))))
                 .1,
         );
         let mut todo = plan.order.clone();
@@ -2527,7 +2555,7 @@ impl Evaluator {
         let mut previous_failures: Option<HashMap<&str, String>> = None;
         for _ in 0..=plan.order.len() {
             for index in todo {
-                let entry = &module.body[index];
+                let entry = &body[index];
                 if let Some(name) = module_member_name(entry) {
                     failed.remove(name);
                     failed_indices.remove(&index);
@@ -2702,7 +2730,7 @@ impl Evaluator {
         // failed property that would be rendered fails the module.
         let mut out = base_obj;
         let mut poisoned_members = IndexMap::new();
-        for entry in module.body.iter() {
+        for entry in body.iter() {
             if let Entry::ClassDef(name, ..) = entry {
                 if let Some(value) = scope.get(name) {
                     out.insert(name.as_str().into(), value.clone());
@@ -2717,7 +2745,7 @@ impl Evaluator {
                 }
             }
         }
-        for entry in module.body.iter() {
+        for entry in body.iter() {
             let Entry::Property(prop) = entry else {
                 continue;
             };
@@ -2755,8 +2783,7 @@ impl Evaluator {
         // Pkl properties are late-bound. Re-evaluate inherited expressions after
         // child overrides have populated the scope (for example `uses` derived
         // from an action module's overridden `action` and `version`).
-        let child_property_names: HashSet<&str> = module
-            .body
+        let child_property_names: HashSet<&str> = body
             .iter()
             .filter_map(|entry| match entry {
                 Entry::Property(prop) => Some(prop.name.as_str()),
@@ -2778,8 +2805,7 @@ impl Evaluator {
                 path.display()
             )));
         }
-        let child_candidates = module
-            .body
+        let child_candidates = body
             .iter()
             .filter_map(|entry| match entry {
                 Entry::Property(prop)
@@ -2914,11 +2940,12 @@ impl Evaluator {
         // Check declarations only after this module's final scope is complete:
         // constraints and aliases may refer to members declared later.
         if !evaluated_as_base {
-            for entry in module.body.iter() {
+            for entry in body.iter() {
                 if let Entry::Property(prop) = entry
                     && !has_modifier(&prop.modifiers, Modifier::Local)
                     && (prop.value.is_some() || prop.body.is_some())
                     && prop.type_ann.is_some()
+                    && !synthesized_inherited_types.contains(prop.name.as_str())
                     && scope.is_declared(&prop.name)
                     && let Some(value) = scope.get(&prop.name)
                 {
@@ -2952,7 +2979,7 @@ impl Evaluator {
         // access can warn lazily. Modules without @Deprecated keep `None`
         // source to avoid changing amend behavior in the common case.
         // An abstract module also keeps a source, so `new` can reject it.
-        let deprecated = collect_deprecated(&module.body);
+        let deprecated = collect_deprecated(body);
         let is_abstract = module_is_abstract(module);
         let source = if deprecated.is_empty() && poisoned_members.is_empty() && !is_abstract {
             None
@@ -2983,7 +3010,7 @@ impl Evaluator {
         let mut effective_late_properties = IndexMap::new();
         for prop in late_inherited_properties
             .iter()
-            .chain(module.body.iter().filter_map(|entry| match entry {
+            .chain(body.iter().filter_map(|entry| match entry {
                 Entry::Property(prop)
                     if !has_modifier(&prop.modifiers, Modifier::Local) && prop.name != "output" =>
                 {
@@ -4876,6 +4903,72 @@ impl Evaluator {
         self.body_roots_cache
             .insert(key, (Arc::clone(body), Arc::clone(&roots)));
         roots
+    }
+
+    /// Give each property an amending module redefines without a type the
+    /// inherited declaration's type. An amending module may not repeat a
+    /// non-local annotation, but it still inherits its type and its default
+    /// when assigning an untyped `new`.
+    fn inherit_module_property_types(
+        &self,
+        body: &Body,
+        inherited: &[Arc<Property>],
+        child_scope: &mut Scope,
+    ) -> Option<Body> {
+        let parent_type = |name: &str| {
+            inherited.iter().rev().find_map(|prop| {
+                (prop.name == name && !has_modifier(&prop.modifiers, Modifier::Local))
+                    .then_some(prop.type_ann.as_ref())
+                    .flatten()
+            })
+        };
+        let needs_type = |entry: &Entry| match entry {
+            Entry::Property(prop)
+                if prop.type_ann.is_none()
+                    && !has_modifier(&prop.modifiers, Modifier::Local)
+                    && (prop.body.is_some()
+                        || prop
+                            .value
+                            .as_ref()
+                            .is_some_and(parser::has_untyped_result_new)) =>
+            {
+                parent_type(&prop.name)
+            }
+            _ => None,
+        };
+        if !body.iter().any(|entry| needs_type(entry).is_some()) {
+            return None;
+        }
+
+        let mut typed = Vec::with_capacity(body.len());
+        for entry in body.iter() {
+            let (Entry::Property(prop), Some(ty)) = (entry, needs_type(entry)) else {
+                typed.push(entry.clone());
+                continue;
+            };
+            let mut prop = (**prop).clone();
+            prop.type_ann = Some(ty.clone());
+            if let Some(expr) = &mut prop.value
+                && parser::has_untyped_result_new(expr)
+                && !type_is_any(ty)
+                && let Some(default) = child_scope
+                    .get(&prop.name)
+                    .filter(|value| matches!(value, Value::Object(..) | Value::List(_)))
+                    .cloned()
+            {
+                let binding = format!("#parent:{}", prop.name);
+                child_scope.set(&binding, default);
+                parser::rewrite_untyped_result_new(expr, &mut |entries| {
+                    Expr::Binop(
+                        BinOp::Add,
+                        Box::new(Expr::Ident(binding.clone())),
+                        Box::new(Expr::ObjectBody(entries)),
+                    )
+                });
+            }
+            typed.push(Entry::Property(Arc::new(prop)));
+        }
+        Some(typed.into())
     }
 
     /// Give each property a child class redefines without a type the parent's

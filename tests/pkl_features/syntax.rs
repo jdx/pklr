@@ -1697,6 +1697,27 @@ name = "override"
 }
 
 #[test]
+fn amending_module_inherits_property_type_and_default() {
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    for child in [
+        fixtures.join("amending_property_default_child.pkl"),
+        fixtures.join("amending_property_default_new_child.pkl"),
+    ] {
+        assert_eq!(
+            pklr::eval_to_json(&child).unwrap(),
+            serde_json::json!({
+                "hooks": {
+                    "pre": {
+                        "label": "default",
+                        "steps": { "one": { "a": 3, "b": 2 } },
+                    },
+                },
+            })
+        );
+    }
+}
+
+#[test]
 fn amends_strips_inherited_class_definitions() {
     let mut ev = pklr::eval::Evaluator::new();
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
