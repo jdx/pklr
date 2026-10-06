@@ -1868,6 +1868,48 @@ summary = if (false) checks.length else 42
 }
 
 #[test]
+fn inherited_constraint_probes_do_not_evaluate_unrequested_child_members() {
+    let temp = TestTempDir::new("pklr_inherited_constraint_probe_laziness");
+    std::fs::write(
+        temp.path().join("Base.pkl"),
+        r#"
+hidden checks: Listing(throw("constraint boom")) = new { 1 }
+summary = if (false) checks.length else 42
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("Child.pkl"),
+        r#"
+amends "Base.pkl"
+
+checks { 2 }
+noisy = read("env:PKLR_UNREQUESTED_PROBE")
+"#,
+    )
+    .unwrap();
+    let read = temp.path().join("Read.pkl");
+    std::fs::write(
+        &read,
+        "import \"Child.pkl\" as child\nresult = child.summary\n",
+    )
+    .unwrap();
+
+    let outcome = pklr::EvaluatorBuilder::new()
+        .environment_variables([(
+            "PKLR_UNREQUESTED_PROBE".to_string(),
+            "must stay unread".to_string(),
+        )])
+        .eval(&read)
+        .unwrap();
+    assert_eq!(outcome.json, serde_json::json!({ "result": 42 }));
+    assert!(
+        !outcome.env_reads.contains_key("PKLR_UNREQUESTED_PROBE"),
+        "a failure-propagation probe must not evaluate unrelated narrowed members"
+    );
+}
+
+#[test]
 fn inherited_named_constraint_errors_stay_lazy_but_surface_when_read() {
     let temp = TestTempDir::new("pklr_inherited_named_constraint_error_laziness");
     std::fs::write(

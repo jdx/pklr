@@ -3172,6 +3172,12 @@ impl Evaluator {
                 for prop in &effective_properties {
                     if has_modifier(&prop.modifiers, Modifier::Local)
                         || inherited_type_failures.contains_key(prop.name.as_str())
+                        || requested_eval_fields
+                            .as_ref()
+                            .is_some_and(|fields| !fields.contains(&prop.name))
+                        || !property_reference_names(prop)
+                            .iter()
+                            .any(|name| inherited_type_failures.contains_key(name.as_str()))
                     {
                         continue;
                     }
