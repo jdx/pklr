@@ -1435,6 +1435,25 @@ x = add.apply(1, 2, 3)
 }
 
 #[test]
+fn function_apply_to_list_rejects_listing_and_set() {
+    let listing = eval_fails(
+        r#"
+local f = (x) -> x
+result = f.applyToList(new Listing { 1 })
+"#,
+    );
+    assert!(listing.contains("Expected value of type List, but got type Listing."));
+
+    let set = eval_fails(
+        r#"
+local f = (x) -> x
+result = f?.applyToList(Set(1))
+"#,
+    );
+    assert!(set.contains("Expected value of type List, but got type Set."));
+}
+
+#[test]
 fn module_function_reads_module_properties() {
     let json = eval(
         r#"

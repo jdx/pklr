@@ -655,6 +655,11 @@ fn object_class_name(
 pub(super) fn pkl_class_name(value: &Value) -> String {
     match value {
         Value::Object(_, source) => object_class_name(source.as_deref(), None),
+        Value::List(items) => match items.kind() {
+            ListKind::List => "List".to_string(),
+            ListKind::Listing => "Listing".to_string(),
+            ListKind::Set => "Set".to_string(),
+        },
         Value::Lambda(params, ..) => format!("Function{}", params.len()),
         Value::Bool(_) => "Boolean".to_string(),
         value => value_type_name(value).to_string(),

@@ -6469,8 +6469,8 @@ impl Evaluator {
                     ("apply", _) => {
                         return self.apply_function(&obj, &evaled_args, scope, depth);
                     }
-                    ("applyToList", [Value::List(items)]) => {
-                        return self.apply_function(&obj, items, scope, depth);
+                    ("applyToList", _) => {
+                        return self.apply_to_list(&obj, &evaled_args, scope, depth);
                     }
                     _ => {}
                 }
@@ -6507,8 +6507,8 @@ impl Evaluator {
                     ("apply", _) => {
                         return self.apply_function(&obj, &evaled_args, scope, depth);
                     }
-                    ("applyToList", [Value::List(items)]) => {
-                        return self.apply_function(&obj, items, scope, depth);
+                    ("applyToList", _) => {
+                        return self.apply_to_list(&obj, &evaled_args, scope, depth);
                     }
                     _ => {}
                 }
@@ -6941,10 +6941,6 @@ impl Evaluator {
                 }
                 Ok(Some(self.eval_expr(body, &call_scope, depth + 1)?))
             }
-            (Value::Lambda(..), "applyToList") => match args {
-                [Value::List(items)] => Ok(Some(self.invoke_lambda(obj, items, depth)?)),
-                _ => Err(Error::Eval("applyToList() expects a List argument".into())),
-            },
             (Value::Lambda(..), "toString") => Ok(Some(Value::String(pkl_value_text(obj).into()))),
 
             _ => Ok(None), // not a known method
@@ -6987,6 +6983,33 @@ impl Evaluator {
             call_scope.declare(param, arg.clone());
         }
         self.eval_expr(body, &call_scope, depth + 1)
+    }
+
+    /// `Function.applyToList` accepts a `List`, but not the distinct `Listing`
+    /// and `Set` collection kinds.
+    fn apply_to_list(
+        &mut self,
+        function: &Value,
+        args: &[Value],
+        caller: &Scope,
+        depth: usize,
+    ) -> Result<Value> {
+        let [arg] = args else {
+            return Err(Error::Eval("applyToList() expects a List argument".into()));
+        };
+        let Value::List(items) = arg else {
+            return Err(Error::Eval(format!(
+                "Expected value of type List, but got type {}.",
+                pkl_class_name(arg)
+            )));
+        };
+        if items.kind() != ListKind::List {
+            return Err(Error::Eval(format!(
+                "Expected value of type List, but got type {}.",
+                pkl_class_name(arg)
+            )));
+        }
+        self.apply_function(function, items, caller, depth)
     }
 
     fn invoke_lambda(&mut self, lambda: &Value, args: &[Value], depth: usize) -> Result<Value> {
