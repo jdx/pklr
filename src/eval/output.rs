@@ -7,7 +7,10 @@ use std::sync::Arc;
 use super::remote::resolve_remote_relative;
 use super::render::{self, Converters, Invoke, Kind, RendererKind, Settings};
 use super::types::resolve_dotted;
-use super::{Evaluator, MODULE_OUTPUT_TEXT_CONTEXT, Scope, SourceScope, seed_builtins};
+use super::{
+    Evaluator, MODULE_OUTPUT_TEXT_CONTEXT, Scope, SourceScope, entries_mention,
+    property_reference_names, seed_builtins,
+};
 use crate::error::{Error, Result};
 use crate::lexer;
 use crate::parser::{self, Entry, Expr, Modifier, Module, Property, TypeExpr};
@@ -232,6 +235,17 @@ impl Evaluator {
             {
                 Some(render::class_key(last))
             }
+            // A function may share a builtin's spelling while the name in a
+            // converter key remains a type.  `hk.Config`, for example,
+            // re-exports `base.Regex` through a function named `Regex` and
+            // still declares a `[Regex]` converter.  In that type position
+            // Pkl resolves the builtin class, rather than treating the
+            // function value as a mapping key.
+            Some(Value::Lambda(..))
+                if !dotted.contains('.') && render::BASE_CLASS_NAMES.contains(&last) =>
+            {
+                Some(render::class_key(last))
+            }
             // A class: its template carries the class name.
             Some(Value::Object(_, Some(source)))
                 if source
@@ -345,7 +359,7 @@ impl Evaluator {
             let base_scope;
             let scope = match base {
                 Some(base) => {
-                    base_scope = self.base_module_scope(scope, base);
+                    base_scope = self.base_module_scope(scope, base, prop);
                     &base_scope
                 }
                 None => scope,
@@ -383,15 +397,29 @@ impl Evaluator {
                 // The body reads the members it amends (`renderer`,
                 // `value`) by name.
                 let mut body_scope = scope.child();
-                body_scope.set(
-                    MODULE_OUTPUT_TEXT_CONTEXT,
-                    module_output_text_context(
-                        &output,
-                        output_value_is_explicit,
-                        &default_value,
-                        &default_renderer,
-                    ),
-                );
+                // `ModuleOutput.text` is available only through a `super`
+                // expression.  Do not put its context in ordinary output
+                // bodies: a renderer converter may capture its defining
+                // scope for type resolution, and that otherwise retains the
+                // implicit module object (and all of its amended state) even
+                // when no code can read `super.text`.
+                //
+                // Search nested bodies as well as direct expressions.  This
+                // is deliberately conservative: a nested object's `super`
+                // does not need the module-output context, but retaining it
+                // there preserves the existing behavior without letting a
+                // real module-super read lose its lazy renderer context.
+                if entries_mention(body, "super") {
+                    body_scope.set(
+                        MODULE_OUTPUT_TEXT_CONTEXT,
+                        module_output_text_context(
+                            &output,
+                            output_value_is_explicit,
+                            &default_value,
+                            &default_renderer,
+                        ),
+                    );
+                }
                 if let Value::Object(map, _) = &output {
                     for (name, value) in map.iter() {
                         body_scope.set_name(name.clone(), value.clone());
@@ -483,24 +511,54 @@ impl Evaluator {
         Ok(levels.into_iter().rev().flatten().collect())
     }
 
-    /// The scope a base module's `output` is evaluated in: the amending
-    /// module's, where the module's properties have their final values, with
-    /// the base module's own lexical bindings (locals, imports, classes) over
-    /// it, so the amending module cannot shadow them.
-    fn base_module_scope(&mut self, scope: &Scope, base: &BaseModule) -> Scope {
-        let mut base_scope = scope.child();
+    /// The scope a base module's `output` is evaluated in. Base-module
+    /// lexicals (locals, imports, classes, and aliases) shadow the amending
+    /// module, while names the output actually reads see the final amended
+    /// values. Keep that scope detached: renderer lambdas that construct a
+    /// value capture a whole scope for type resolution, and retaining every
+    /// final module binding for each converted value is unbounded in practice.
+    fn base_module_scope(&mut self, scope: &Scope, base: &BaseModule, output: &Property) -> Scope {
+        let mut base_scope = Scope {
+            type_namespace: scope.type_namespace.clone(),
+            ..Scope::default()
+        };
+        seed_builtins(&mut base_scope);
+        let output_refs = property_reference_names(output);
         let key = self
             .canonicalize_io(&base.path)
             .ok()
             .filter(|key| self.module_scopes.contains_key(key))
             .unwrap_or_else(|| base.path.clone());
-        if let Some(snapshot) = self.module_scopes.get(&key) {
-            for (name, value) in &snapshot.values {
-                if base.lexical.iter().any(|lexical| lexical == &**name)
-                    || scope.get(name).is_none()
-                {
-                    base_scope.set_name(name.clone(), value.clone());
-                }
+        let snapshot = self.module_scopes.get(&key);
+        for name in output_refs {
+            let base_lexical = base.lexical.iter().any(|lexical| lexical == &name);
+            let value = if base_lexical {
+                snapshot.and_then(|snapshot| snapshot.values.get(name.as_str()))
+            } else {
+                scope.get(&name)
+            };
+            if let Some(value) = value {
+                base_scope.set(name.clone(), value.clone());
+            }
+            let alias = if base_lexical {
+                snapshot
+                    .and_then(|snapshot| snapshot.type_aliases.get(name.as_str()))
+                    .cloned()
+            } else {
+                scope
+                    .get_type_alias(&name)
+                    .map(|alias| Arc::new(alias.clone()))
+            };
+            if let Some(alias) = alias {
+                base_scope.set_type_alias(name.clone(), alias);
+            }
+            let identity = if base_lexical {
+                snapshot.and_then(|snapshot| snapshot.module_identities.get(&name))
+            } else {
+                scope.module_identity(&name)
+            };
+            if let Some(identity) = identity {
+                base_scope.set_module_identity(name, identity.clone());
             }
         }
         base_scope
