@@ -4581,6 +4581,22 @@ fn object_locals_retry_after_body_members_bind() {
     let json = eval("foo { local a = b; local b = c; d = a; c = 2 }");
     assert_eq!(json["foo"], serde_json::json!({"d": 2, "c": 2}));
 
+    // A deferred property shadows an outer binding while it waits for its
+    // local. Its dependent must retry rather than capture that outer value.
+    let json = eval("d = 1\nfoo { local a = c; d = a; e = d; c = 2 }");
+    assert_eq!(json["foo"], serde_json::json!({"d": 2, "e": 2, "c": 2}));
+
+    // When the deferred property recovers, it returns to source order rather
+    // than remaining appended after members that bound while it was pending.
+    let json = eval(
+        "foo { local a = c; first = a; second = 2; c = 1 }\nrendered = new PcfRenderer {}.renderDocument(foo)",
+    );
+    let rendered = json["rendered"].as_str().unwrap();
+    let first = rendered.find("first = 1").unwrap();
+    let second = rendered.find("second = 2").unwrap();
+    let c = rendered.find("c = 1").unwrap();
+    assert!(first < second && second < c, "{rendered}");
+
     // A local that never resolves remains lazy and fails only when read.
     let err = eval_fails("foo { local a = missing; b = a }");
     assert!(err.contains("missing"), "{err}");

@@ -55,6 +55,20 @@ pub(super) fn props_insert(
     Arc::make_mut(properties).insert(key.into(), value);
 }
 
+/// Insert a recovered property at its declaration position after later body
+/// members have already populated the receiver snapshot.
+pub(super) fn props_shift_insert(
+    scope: &mut Scope,
+    aliases: &[String],
+    properties: &mut Arc<ObjectMap>,
+    index: usize,
+    key: impl Into<Arc<str>>,
+    value: Value,
+) {
+    release_this_aliases(scope, aliases);
+    Arc::make_mut(properties).shift_insert(index, key.into(), value);
+}
+
 /// Insert a receiver member while preserving Mapping key identity for `this`
 /// reads that occur later in the same generated body.
 pub(super) fn props_insert_mapping(

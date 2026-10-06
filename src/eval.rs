@@ -3055,9 +3055,10 @@ impl Evaluator {
         }
 
         macro_rules! bind_object_property_value {
-            ($prop:expr, $value:expr, $generated:ident, $map:ident, $lambdas:expr $(,)?) => {{
+            ($prop:expr, $value:expr, $entry_index:expr, $recovered:expr, $generated:ident, $map:ident, $member_indices:ident, $lambdas:expr $(,)?) => {{
                 let prop = $prop;
                 let value = $value;
+                let entry_index = $entry_index;
                 $generated.remove(prop.name.as_str());
                 if binds_declared(&prop.name) {
                     child_scope.declare(&prop.name, value.clone());
@@ -3065,16 +3066,48 @@ impl Evaluator {
                     child_scope.set(&prop.name, value.clone());
                 }
                 entry_owners.release_this(&this_aliases);
-                props_insert(
-                    &mut child_scope,
-                    &this_aliases,
-                    &mut all_props,
-                    prop.name.clone(),
-                    value.clone(),
-                );
-                if !has_modifier(&prop.modifiers, Modifier::Hidden) {
-                    $map.insert(prop.name.as_str().into(), value);
+                if $recovered {
+                    let index = all_props
+                        .iter()
+                        .position(|(key, _)| {
+                            $member_indices
+                                .get(key)
+                                .is_some_and(|existing| *existing > entry_index)
+                        })
+                        .unwrap_or_else(|| all_props.len());
+                    props_shift_insert(
+                        &mut child_scope,
+                        &this_aliases,
+                        &mut all_props,
+                        index,
+                        prop.name.clone(),
+                        value.clone(),
+                    );
+                } else {
+                    props_insert(
+                        &mut child_scope,
+                        &this_aliases,
+                        &mut all_props,
+                        prop.name.clone(),
+                        value.clone(),
+                    );
                 }
+                if !has_modifier(&prop.modifiers, Modifier::Hidden) {
+                    if $recovered {
+                        let index = $map
+                            .iter()
+                            .position(|(key, _)| {
+                                $member_indices
+                                    .get(key)
+                                    .is_some_and(|existing| *existing > entry_index)
+                            })
+                            .unwrap_or_else(|| $map.len());
+                        $map.shift_insert(index, prop.name.as_str().into(), value);
+                    } else {
+                        $map.insert(prop.name.as_str().into(), value);
+                    }
+                }
+                $member_indices.insert(prop.name.as_str().into(), entry_index);
                 if !has_modifier(&prop.modifiers, Modifier::Const) {
                     non_const_members.insert(prop.name.clone());
                 }
@@ -3235,6 +3268,10 @@ impl Evaluator {
         }
 
         let mut map: ObjectMap = ObjectMap::default();
+        // Source entry positions for members already emitted. A property that
+        // recovers after its local becomes available uses these to return to
+        // its declaration position instead of remaining appended at the end.
+        let mut member_entry_indices: HashMap<Arc<str>, usize> = HashMap::default();
         // A Dynamic body can contain bare elements as well as named members.
         // Keep the former separately so XML elements can render precisely the
         // values Pkl gives them, in source order.
@@ -3316,6 +3353,16 @@ impl Evaluator {
                         Err(Error::Eval(message))
                             if prop.value.is_some() && !failed_locals.is_empty() =>
                         {
+                            // This body declaration shadows an enclosing or
+                            // inherited property even while its local
+                            // dependency is unresolved. Keep later members
+                            // from binding that stale value before retry.
+                            drop(active_scope);
+                            if binds_declared(&prop.name) {
+                                child_scope.declare_poisoned(prop.name.clone(), message.clone());
+                            } else {
+                                child_scope.poison(prop.name.clone(), message.clone());
+                            }
                             failed_properties.push((entry_index, message));
                             continue;
                         }
@@ -3325,7 +3372,16 @@ impl Evaluator {
                     // scope's bindings, which binding the value would then copy.
                     drop(active_scope);
                     if let Some(v) = value {
-                        bind_object_property_value!(prop, v, generated, map, &deferred_lambdas,);
+                        bind_object_property_value!(
+                            prop,
+                            v,
+                            entry_index,
+                            false,
+                            generated,
+                            map,
+                            member_entry_indices,
+                            &deferred_lambdas,
+                        );
                     }
                 }
                 Entry::DynProperty(key_expr, val_expr) => {
@@ -3423,6 +3479,7 @@ impl Evaluator {
                             val.clone(),
                             mapping_entries,
                         );
+                        member_entry_indices.insert(storage_key.clone(), entry_index);
                         map.insert(storage_key, val);
                         refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                         continue;
@@ -3491,6 +3548,7 @@ impl Evaluator {
                         val.clone(),
                         mapping_entries,
                     );
+                    member_entry_indices.insert(storage_key.clone(), entry_index);
                     map.insert(storage_key, val);
                     refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                 }
@@ -3516,6 +3574,8 @@ impl Evaluator {
                                 mapping_entries,
                             );
                             extend_object_entries(&mut map, &m, mapping_entries);
+                            member_entry_indices
+                                .extend(m.keys().cloned().map(|key| (key, entry_index)));
                             if let Some(source) = source {
                                 elements.extend(source.elements.iter().cloned());
                             }
@@ -3585,6 +3645,8 @@ impl Evaluator {
                             );
                             generated.extend(m.keys().cloned());
                             extend_object_entries(&mut map, &m, mapping_entries);
+                            member_entry_indices
+                                .extend(m.keys().cloned().map(|key| (key, entry_index)));
                             if let Some(source) = source {
                                 elements.extend(source.elements.iter().cloned());
                             }
@@ -3647,6 +3709,8 @@ impl Evaluator {
                             );
                             generated.extend(m.keys().cloned());
                             extend_object_entries(&mut map, &m, mapping_entries);
+                            member_entry_indices
+                                .extend(m.keys().cloned().map(|key| (key, entry_index)));
                             if let Some(source) = source {
                                 elements.extend(source.elements.iter().cloned());
                             }
@@ -3698,6 +3762,8 @@ impl Evaluator {
                             );
                             generated.extend(m.keys().cloned());
                             extend_object_entries(&mut map, &m, mapping_entries);
+                            member_entry_indices
+                                .extend(m.keys().cloned().map(|key| (key, entry_index)));
                             if let Some(source) = source {
                                 elements.extend(source.elements.iter().cloned());
                             }
@@ -3744,8 +3810,11 @@ impl Evaluator {
                             bind_object_property_value!(
                                 prop,
                                 value,
+                                entry_index,
+                                true,
                                 generated,
                                 map,
+                                member_entry_indices,
                                 &deferred_lambdas,
                             );
                         }
