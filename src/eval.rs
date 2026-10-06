@@ -2725,12 +2725,12 @@ impl Evaluator {
                         }
                         let property_result =
                             self.eval_property(prop, &scope, depth).and_then(|value| {
-                                if synthesized_inherited_types.contains(prop.name.as_str()) {
-                                    if let (Some(value), Some(ty)) = (&value, &prop.type_ann) {
-                                        self.check_inherited_mapping_value_types(
-                                            value, ty, &scope, depth,
-                                        )?;
-                                    }
+                                if synthesized_inherited_types.contains(prop.name.as_str())
+                                    && let (Some(value), Some(ty)) = (&value, &prop.type_ann)
+                                {
+                                    self.check_inherited_mapping_value_types(
+                                        value, ty, &scope, depth,
+                                    )?;
                                 }
                                 Ok(value)
                             });
