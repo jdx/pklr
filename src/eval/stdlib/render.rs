@@ -303,6 +303,7 @@ fn render(value: &Value, explicit: bool, out: &mut String) {
             out.push_str(value.type_name());
             out.push_str(" {}");
         }
+        Value::LambdaGuard(_) => out.push_str("<lambda guard>"),
         Value::Regex(regex) => {
             out.push_str("Regex(");
             out.push_str(&quote_string(regex.pattern(), true));

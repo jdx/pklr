@@ -630,6 +630,7 @@ pub(super) fn value_type_name(v: &Value) -> &'static str {
         Value::Object(..) => "Object",
         Value::List(_) => "List",
         Value::Lambda(..) => "Function",
+        Value::LambdaGuard(_) => "Function",
         Value::Duration(_) => "Duration",
         Value::DataSize(_) => "DataSize",
     }
@@ -651,6 +652,7 @@ pub(super) fn value_to_key(v: &Value) -> Result<Arc<str>> {
         Value::Object(_, _)
         | Value::List(_)
         | Value::Lambda(..)
+        | Value::LambdaGuard(_)
         | Value::Regex(_)
         | Value::Duration(_)
         | Value::DataSize(_)
@@ -901,11 +903,8 @@ pub(super) fn values_eq(a: &Value, b: &Value) -> bool {
                 }
             }
         }
-        (
-            Value::Lambda(_, a_body, a_captured, a_guard),
-            Value::Lambda(_, b_body, b_captured, b_guard),
-        ) => {
-            Arc::ptr_eq(a_body, b_body) && Arc::ptr_eq(a_captured, b_captured) && a_guard == b_guard
+        (Value::Lambda(_, a_body, a_captured), Value::Lambda(_, b_body, b_captured)) => {
+            Arc::ptr_eq(a_body, b_body) && Arc::ptr_eq(a_captured, b_captured)
         }
         (a, b) => super::stdlib::units_equal(a, b).unwrap_or(false),
     }

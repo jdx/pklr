@@ -530,11 +530,14 @@ pub enum Value {
     /// A `List`, `Listing` or `Set` (see [`ListKind`]). The items are
     /// Arc-wrapped so cloning is O(1).
     List(ListValue),
-    /// Lambda function: params, body, captured scope, and shared delayed error.
+    /// Lambda function: params, body and captured scope.
     /// The shared fields are Arc-wrapped so cloning a Lambda is O(1): lambdas are
     /// copied whenever a scope holding them is captured, and deep-copying the
     /// body each time dominated evaluation.
-    Lambda(Arc<[String]>, Arc<Expr>, Arc<ScopeMap>, LambdaGuard),
+    Lambda(Arc<[String]>, Arc<Expr>, Arc<ScopeMap>),
+    /// An internal delayed error retained in a lambda's captured scope.
+    #[doc(hidden)]
+    LambdaGuard(LambdaGuard),
     /// A compiled regular expression (`Regex(pattern)`).
     Regex(Arc<Regex>),
     /// A quantity of time (`5.min`).
@@ -845,6 +848,7 @@ impl Value {
                 4 => "Function4",
                 _ => "Function5",
             },
+            Value::LambdaGuard(_) => "Function0",
             Value::Regex(_) => "Regex",
             Value::Duration(_) => "Duration",
             Value::DataSize(_) => "DataSize",
@@ -944,6 +948,7 @@ impl Value {
                 serde_json::Value::Array(items.iter().map(|v| v.to_json()).collect())
             }
             Value::Lambda(..) => json!("<lambda>"),
+            Value::LambdaGuard(_) => json!("<lambda guard>"),
             Value::Regex(regex) => json!({ "_type": "regex", "pattern": regex.pattern() }),
             Value::Duration(_) | Value::DataSize(_) => {
                 json!(crate::eval::stdlib::render_value(self))

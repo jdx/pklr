@@ -14,7 +14,7 @@ use crate::parser::{
     self, BinOp, Body, Entry, Expr, Modifier, Module, Property, StringInterpPart, UnOp,
 };
 use crate::value::{
-    CapturedScope, ListKind, ListValue, NameSet, ObjectKind, ObjectMap, ObjectSource,
+    CapturedScope, LambdaGuard, ListKind, ListValue, NameSet, ObjectKind, ObjectMap, ObjectSource,
     PoisonedMember, ScopeMap, TypeAliasMap, Value,
 };
 
@@ -5092,17 +5092,6 @@ impl Evaluator {
                 // object built in the body sees its enclosing bindings through
                 // `outer`, so a body that mentions `outer` keeps everything, as
                 // does a body that names a type (see `NAMES_A_TYPE`).
-                let captured =
-                    Arc::new(if names.contains("outer") || names.contains(NAMES_A_TYPE) {
-                        scope.flatten()
-                    } else {
-                        scope.flatten_names(names.iter().map(String::as_str).chain([
-                            "this",
-                            "module",
-                            "super",
-                            MODULE_OUTPUT_TEXT_CONTEXT,
-                        ]))
-                    });
                 let captured_body = refs
                     .iter()
                     .filter(|name| scope.get(name).is_none())
@@ -5111,11 +5100,24 @@ impl Evaluator {
                         Arc::new(Expr::Throw(Box::new(Expr::String(message.clone().into()))))
                     })
                     .unwrap_or(body);
+                let mut captured = if names.contains("outer") || names.contains(NAMES_A_TYPE) {
+                    scope.flatten()
+                } else {
+                    scope.flatten_names(names.iter().map(String::as_str).chain([
+                        "this",
+                        "module",
+                        "super",
+                        MODULE_OUTPUT_TEXT_CONTEXT,
+                    ]))
+                };
+                captured.insert(
+                    lambda_guard_key(&captured_body),
+                    Value::LambdaGuard(Default::default()),
+                );
                 Ok(Value::Lambda(
                     Arc::clone(params),
                     captured_body,
-                    captured,
-                    Default::default(),
+                    Arc::new(captured),
                 ))
             }
             Expr::InferredNew(ty, entries) => {
@@ -5836,7 +5838,7 @@ impl Evaluator {
         let func_val = self.eval_expr(func_expr, scope, depth + 1)?;
 
         // Lambda call
-        if let Value::Lambda(params, body, captured, guard) = func_val {
+        if let Value::Lambda(params, body, captured) = func_val {
             let mut call_scope = Scope::for_call(&captured);
             // If we're inside a method call context (scope has `this` as an Object),
             // layer the instance's properties so local functions see overridden values
@@ -5857,7 +5859,7 @@ impl Evaluator {
                     evaled_args.len()
                 )));
             }
-            if let Some(message) = guard.error() {
+            if let Some(message) = lambda_guard_error(&captured, &body) {
                 return Err(Error::Eval(message.to_string()));
             }
             for (param, arg) in params.iter().zip(evaled_args) {
@@ -5914,7 +5916,7 @@ impl Evaluator {
         depth: usize,
     ) -> Result<Option<Value>> {
         if let Value::Object(map, _) = obj
-            && let Some(Value::Lambda(params, body, captured, guard)) = map.get(method)
+            && let Some(Value::Lambda(params, body, captured)) = map.get(method)
         {
             if params.len() != evaled_args.len() {
                 return Err(Error::Eval(format!(
@@ -5923,7 +5925,7 @@ impl Evaluator {
                     evaled_args.len()
                 )));
             }
-            if let Some(message) = guard.error() {
+            if let Some(message) = lambda_guard_error(captured, body) {
                 return Err(Error::Eval(message.to_string()));
             }
             let mut call_scope = Scope::for_call(captured);
@@ -6161,7 +6163,7 @@ impl Evaluator {
             (Value::Bool(b), "toString") => Ok(Some(Value::String(b.to_string().into()))),
 
             // Lambda.apply()
-            (Value::Lambda(params, body, captured, guard), "apply") => {
+            (Value::Lambda(params, body, captured), "apply") => {
                 if params.len() != args.len() {
                     return Err(Error::Eval(format!(
                         "Expected {} function arguments but got {}.",
@@ -6169,7 +6171,7 @@ impl Evaluator {
                         args.len()
                     )));
                 }
-                if let Some(message) = guard.error() {
+                if let Some(message) = lambda_guard_error(captured, body) {
                     return Err(Error::Eval(message.to_string()));
                 }
                 let mut call_scope = Scope::for_call(captured);
@@ -6184,7 +6186,7 @@ impl Evaluator {
     }
 
     fn invoke_lambda(&mut self, lambda: &Value, args: &[Value], depth: usize) -> Result<Value> {
-        if let Value::Lambda(params, body, captured, guard) = lambda {
+        if let Value::Lambda(params, body, captured) = lambda {
             if params.len() != args.len() {
                 return Err(Error::Eval(format!(
                     "Expected {} function arguments but got {}.",
@@ -6192,7 +6194,7 @@ impl Evaluator {
                     args.len()
                 )));
             }
-            if let Some(message) = guard.error() {
+            if let Some(message) = lambda_guard_error(captured, body) {
                 return Err(Error::Eval(message.to_string()));
             }
             let mut scope = Scope::for_call(captured);
@@ -6466,14 +6468,14 @@ impl Evaluator {
             BinOp::Pipe => {
                 // x |> f  is equivalent to  f(x)
                 match r {
-                    Value::Lambda(params, body, captured, guard) => {
+                    Value::Lambda(params, body, captured) => {
                         if params.len() != 1 {
                             return Err(Error::Eval(format!(
                                 "pipe operator requires a single-parameter function, got {}",
                                 params.len()
                             )));
                         }
-                        if let Some(message) = guard.error() {
+                        if let Some(message) = lambda_guard_error(&captured, &body) {
                             return Err(Error::Eval(message.to_string()));
                         }
                         let mut call_scope = Scope::for_call(&captured);
@@ -7108,9 +7110,9 @@ impl Evaluator {
                                         .iter()
                                         .any(|(blocked_name, _)| blocked_name == conv_name))
                                 && !converter_is_blocked(&blocked_root_converters, conv_name, value)
-                                && let Value::Lambda(params, body, captured, guard) = lambda
+                                && let Value::Lambda(params, body, captured) = lambda
                             {
-                                if let Some(message) = guard.error() {
+                                if let Some(message) = lambda_guard_error(captured, body) {
                                     return Err(Error::Eval(message.to_string()));
                                 }
                                 let mut call_scope = Scope::for_call(captured);
@@ -7853,7 +7855,6 @@ fn builtin_function(builtin: &str, params: &[&str]) -> Value {
         params.iter().map(|param| param.to_string()).collect(),
         Arc::new(Expr::Call(Box::new(Expr::Ident(builtin.into())), args)),
         Arc::default(),
-        Default::default(),
     )
 }
 
@@ -8081,10 +8082,29 @@ fn const_local_lambda_guard(value: Value, message: Option<String>) -> Value {
     let Some(message) = message else {
         return value;
     };
-    if let Value::Lambda(_, _, _, guard) = &value {
+    if let Value::Lambda(_, body, captured) = &value
+        && let Some(guard) = lambda_guard(captured, body)
+    {
         guard.set_error(message);
     }
     value
+}
+
+const LAMBDA_GUARD_PREFIX: &str = "\0pklr:lambda-guard:";
+
+fn lambda_guard_key(body: &Arc<Expr>) -> Arc<str> {
+    format!("{LAMBDA_GUARD_PREFIX}{:p}", Arc::as_ptr(body)).into()
+}
+
+fn lambda_guard(captured: &Arc<ScopeMap>, body: &Arc<Expr>) -> Option<LambdaGuard> {
+    match captured.get(&lambda_guard_key(body)) {
+        Some(Value::LambdaGuard(guard)) => Some(guard.clone()),
+        _ => None,
+    }
+}
+
+fn lambda_guard_error(captured: &Arc<ScopeMap>, body: &Arc<Expr>) -> Option<Arc<str>> {
+    lambda_guard(captured, body).and_then(|guard| guard.error())
 }
 
 fn guard_const_local_lambdas(
