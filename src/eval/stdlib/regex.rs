@@ -294,7 +294,7 @@ impl RegexExt for Regex {
     }
 }
 
-fn groups_of(caps: &fancy_regex::Captures<'_>) -> Groups {
+fn groups_of(caps: &fancy_regex::Captures<'_, str>) -> Groups {
     (0..caps.len())
         .map(|i| caps.get(i).map(|m| (m.start(), m.end())))
         .collect()
