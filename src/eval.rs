@@ -55,6 +55,9 @@ const DYNAMIC_SIBLING_REF: &str = "\0pklr:dynamic-sibling";
 // Scoped context for lazily materializing an inherited `ModuleOutput.text`.
 // It is an impossible user identifier and is captured by output-body lambdas.
 const MODULE_OUTPUT_TEXT_CONTEXT: &str = "\0pklr:module-output-text-context";
+/// The smallest number of weak lambda-guard entries retained between cleanup
+/// passes. Larger live sets use a doubling threshold for amortized cleanup.
+const LAMBDA_GUARD_PRUNE_MIN: usize = 64;
 
 /// A delayed evaluation error shared by every copy of one lambda value.
 #[derive(Debug, Clone, Default)]
@@ -113,6 +116,11 @@ pub struct Evaluator {
     plan_cache: HashMap<usize, (crate::parser::Body, Arc<EvaluationPlan>)>,
     /// Delayed errors for const-local lambdas, keyed by their capture map.
     lambda_guards: HashMap<usize, LambdaGuardEntry>,
+    /// Guard registry size at which the next weak-entry cleanup runs.
+    lambda_guard_prune_at: usize,
+    #[cfg(test)]
+    /// Total entries visited by guard-registry cleanup, for amortization tests.
+    lambda_guard_prune_scans: usize,
     /// Resources read in this run, by URI. As in Pkl, reading a resource again
     /// returns the first result, so reads are deterministic.
     resource_cache: HashMap<String, Value>,
@@ -467,6 +475,9 @@ impl Evaluator {
             body_roots_cache: HashMap::default(),
             plan_cache: HashMap::default(),
             lambda_guards: HashMap::default(),
+            lambda_guard_prune_at: LAMBDA_GUARD_PRUNE_MIN,
+            #[cfg(test)]
+            lambda_guard_prune_scans: 0,
             resource_cache: HashMap::default(),
             allowed_resources: DEFAULT_ALLOWED_RESOURCES
                 .iter()
@@ -8277,15 +8288,27 @@ impl Evaluator {
     /// a lambda returned by an earlier evaluation and invoke it after reusing
     /// this evaluator.
     fn prune_lambda_guards(&mut self) {
+        #[cfg(test)]
+        {
+            self.lambda_guard_prune_scans += self.lambda_guards.len();
+        }
         self.lambda_guards
             .retain(|_, entry| entry.captured.upgrade().is_some());
+        self.lambda_guard_prune_at = self
+            .lambda_guards
+            .len()
+            .saturating_mul(2)
+            .max(LAMBDA_GUARD_PRUNE_MIN);
     }
 
     fn register_lambda_guard(&mut self, captured: &Arc<ScopeMap>) {
         // A single evaluation can create and immediately discard many
-        // closures. Pruning here, as well as at its start, keeps that pattern
-        // from making the weak-entry registry grow with every closure.
-        self.prune_lambda_guards();
+        // closures. Clean periodically rather than before every registration:
+        // dead entries stay bounded by the live set (plus a small minimum),
+        // while long-lived closure construction stays amortized linear.
+        if self.lambda_guards.len() >= self.lambda_guard_prune_at {
+            self.prune_lambda_guards();
+        }
         self.lambda_guards.insert(
             Arc::as_ptr(captured) as usize,
             LambdaGuardEntry {
@@ -8437,7 +8460,7 @@ mod auto_trait_tests {
 mod lambda_guard_tests {
     use std::{path::Path, sync::Arc};
 
-    use super::Evaluator;
+    use super::{Evaluator, LAMBDA_GUARD_PRUNE_MIN};
     use crate::{Value, value::ScopeMap};
 
     #[test]
@@ -8446,12 +8469,12 @@ mod lambda_guard_tests {
 
         // Registering transient closures during one evaluation must not keep a
         // weak registry entry for each closure that has already been dropped.
-        for _ in 0..64 {
+        for _ in 0..LAMBDA_GUARD_PRUNE_MIN {
             let captured = Arc::new(ScopeMap::default());
             evaluator.register_lambda_guard(&captured);
         }
         assert!(
-            evaluator.lambda_guards.len() <= 1,
+            evaluator.lambda_guards.len() <= LAMBDA_GUARD_PRUNE_MIN,
             "dead lambda guard entries accumulated: {}",
             evaluator.lambda_guards.len()
         );
@@ -8499,6 +8522,26 @@ foo {
         drop(lambda);
         evaluator.begin_evaluation();
         assert!(evaluator.lambda_guards.is_empty());
+    }
+
+    #[test]
+    fn lambda_guard_cleanup_is_amortized_for_retained_closures() {
+        let mut evaluator = Evaluator::default();
+        let mut retained = Vec::new();
+        let count = LAMBDA_GUARD_PRUNE_MIN * 16 + 1;
+
+        for _ in 0..count {
+            let captured = Arc::new(ScopeMap::default());
+            evaluator.register_lambda_guard(&captured);
+            retained.push(captured);
+        }
+
+        assert_eq!(evaluator.lambda_guards.len(), retained.len());
+        assert!(
+            evaluator.lambda_guard_prune_scans <= count * 2,
+            "cleanup scanned {} entries while retaining {count} closures",
+            evaluator.lambda_guard_prune_scans
+        );
     }
 }
 
