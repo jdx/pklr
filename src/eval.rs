@@ -181,6 +181,10 @@ pub struct Evaluator {
     /// defaults. This makes self- and mutually-recursive defaults fail
     /// cleanly instead of exhausting the process stack.
     active_typed_defaults: HashSet<String>,
+    /// Original values for Mapping keys created in this evaluation. Mapping
+    /// storage keys preserve equality and rendering, but compound keys cannot
+    /// be faithfully reconstructed from that string representation alone.
+    mapping_key_values: HashMap<Arc<str>, Value>,
     /// Names declared by `module a.b.C` headers, by module identity (see
     /// `module_type_namespace`), for error messages.
     module_names: HashMap<String, String>,
@@ -439,24 +443,41 @@ fn type_constraint_has_explicit_throw(ty: &crate::parser::TypeExpr, scope: &Scop
         expr_has_throw(body, scope, Some(captured), seen)
     }
 
+    fn static_value<'a>(
+        expr: &Expr,
+        scope: &'a Scope,
+        captured: Option<&'a ScopeMap>,
+    ) -> Option<&'a Value> {
+        match expr {
+            Expr::Ident(name) => captured
+                .and_then(|bindings| bindings.get(name.as_str()))
+                .or_else(|| scope.get(name.as_str())),
+            Expr::Field(receiver, field) | Expr::NullSafeField(receiver, field) => {
+                let Value::Object(members, _) = static_value(receiver, scope, captured)? else {
+                    return None;
+                };
+                members.get(field.as_str())
+            }
+            _ => None,
+        }
+    }
+
     fn expr_has_throw(
         expr: &Expr,
         scope: &Scope,
         captured: Option<&ScopeMap>,
         seen: &mut HashSet<usize>,
     ) -> bool {
-        let value_has_throw = |name: &str, seen: &mut HashSet<usize>| {
-            captured
-                .and_then(|bindings| bindings.get(name))
-                .or_else(|| scope.get(name))
-                .is_some_and(|value| lambda_has_throw(value, scope, seen))
-        };
         match expr {
             Expr::Throw(_) => true,
-            Expr::Ident(name) => value_has_throw(name, seen),
-            Expr::Field(value, _)
-            | Expr::NullSafeField(value, _)
-            | Expr::Unop(_, value)
+            Expr::Ident(_) => static_value(expr, scope, captured)
+                .is_some_and(|value| lambda_has_throw(value, scope, seen)),
+            Expr::Field(value, _) | Expr::NullSafeField(value, _) => {
+                expr_has_throw(value, scope, captured, seen)
+                    || static_value(expr, scope, captured)
+                        .is_some_and(|value| lambda_has_throw(value, scope, seen))
+            }
+            Expr::Unop(_, value)
             | Expr::Trace(value, _)
             | Expr::Read(value, _)
             | Expr::ReadOrNull(value, _)
@@ -824,6 +845,7 @@ impl Evaluator {
             output_format: render::RendererKind::Json,
             warned_deprecated: std::collections::HashSet::default(),
             active_typed_defaults: HashSet::default(),
+            mapping_key_values: HashMap::default(),
             module_names: HashMap::default(),
         }
     }
@@ -4063,6 +4085,9 @@ impl Evaluator {
                     } else {
                         key_str.clone()
                     };
+                    if mapping_entries && let Some(key) = key.as_ref() {
+                        self.remember_mapping_key(storage_key.clone(), key);
+                    }
                     // A body may define each key once. An object body still
                     // amends an inherited value, but it is a definition in
                     // this body and must participate in duplicate detection.
@@ -4994,43 +5019,59 @@ impl Evaluator {
         if pairs.is_empty() {
             return Ok(());
         }
-        for (stored_key, entry) in entries.iter() {
-            let key = crate::value::mapping_storage_value(stored_key);
-            let mut uncheckable = false;
-            let mut valid = false;
-            for (key_ty, value_ty) in &pairs {
-                if !type_is_runtime_checkable(key_ty, scope)
-                    || !type_is_runtime_checkable(value_ty, scope)
+        // An outer Mapping union selects one alternative for the whole
+        // mapping, not independently for each entry. A nested union remains
+        // part of its key or value type and is handled by eval_type_check.
+        for (key_ty, value_ty) in &pairs {
+            if !type_is_runtime_checkable(key_ty, scope)
+                || !type_is_runtime_checkable(value_ty, scope)
+            {
+                // pklr cannot disprove an alternative it cannot model.
+                return Ok(());
+            }
+            let mut alternative_matches = true;
+            for (stored_key, entry) in entries.iter() {
+                let key = self
+                    .mapping_key_values
+                    .get(stored_key)
+                    .cloned()
+                    .unwrap_or_else(|| crate::value::mapping_storage_value(stored_key));
+                if !self.eval_type_check(&key, key_ty, scope, depth + 1)?
+                    || !self.eval_type_check(entry, value_ty, scope, depth + 1)?
                 {
-                    uncheckable = true;
-                    continue;
-                }
-                if self.eval_type_check(&key, key_ty, scope, depth + 1)?
-                    && self.eval_type_check(entry, value_ty, scope, depth + 1)?
-                {
-                    valid = true;
+                    alternative_matches = false;
                     break;
                 }
             }
-            if !valid && !uncheckable {
-                return Err(Error::Eval(format!(
-                    "Expected Mapping entry of type `{} -> {}`, but got `{}` -> `{}`.",
-                    pairs
-                        .iter()
-                        .map(|(key, _)| display_type_expr(key))
-                        .collect::<Vec<_>>()
-                        .join(" | "),
-                    pairs
-                        .iter()
-                        .map(|(_, value)| display_type_expr(value))
-                        .collect::<Vec<_>>()
-                        .join(" | "),
-                    value_type_name(&key),
-                    value_type_name(entry)
-                )));
+            if alternative_matches {
+                return Ok(());
             }
         }
-        Ok(())
+        let (stored_key, entry) = entries.iter().next().expect("non-empty Mapping mismatch");
+        let key = self
+            .mapping_key_values
+            .get(stored_key)
+            .cloned()
+            .unwrap_or_else(|| crate::value::mapping_storage_value(stored_key));
+        Err(Error::Eval(format!(
+            "Expected Mapping entry of type `{} -> {}`, but got `{}` -> `{}`.",
+            pairs
+                .iter()
+                .map(|(key, _)| display_type_expr(key))
+                .collect::<Vec<_>>()
+                .join(" | "),
+            pairs
+                .iter()
+                .map(|(_, value)| display_type_expr(value))
+                .collect::<Vec<_>>()
+                .join(" | "),
+            value_type_name(&key),
+            value_type_name(entry)
+        )))
+    }
+
+    fn remember_mapping_key(&mut self, storage_key: Arc<str>, value: &Value) {
+        self.mapping_key_values.insert(storage_key, value.clone());
     }
 
     /// Check a concrete property value after its defining scope is complete.
@@ -7172,7 +7213,10 @@ impl Evaluator {
                     for pair in evaled.chunks(2) {
                         if let [k, v] = pair {
                             let key = value_to_key(k)?;
-                            insert_mapping_entry(&mut map, key, v.clone());
+                            let storage_key =
+                                equivalent_mapping_key(&map, &key).unwrap_or_else(|| key.clone());
+                            self.remember_mapping_key(storage_key.clone(), k);
+                            map.insert(storage_key, v.clone());
                         }
                     }
                     return Ok(Value::Object(Arc::new(map), None));
@@ -8036,6 +8080,9 @@ impl Evaluator {
                     // body.
                     let storage_key =
                         equivalent_mapping_key(map, &key_str).unwrap_or_else(|| key_str.clone());
+                    if let Some(key) = key.as_ref() {
+                        self.remember_mapping_key(storage_key.clone(), key);
+                    }
                     if !insert_mapping_key(defined_keys, &key_str) {
                         let key = match key.as_ref() {
                             None => key_str.to_string(),

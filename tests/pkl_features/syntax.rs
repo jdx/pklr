@@ -1882,6 +1882,50 @@ other = 42
 }
 
 #[test]
+fn inherited_qualified_constraint_errors_stay_lazy_but_surface_when_read() {
+    let temp = TestTempDir::new("pklr_inherited_qualified_constraint_error_laziness");
+    std::fs::write(
+        temp.path().join("Predicates.pkl"),
+        "function invalid(_) = throw(\"qualified constraint boom\")\n",
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("Base.pkl"),
+        r#"
+import "Predicates.pkl" as predicates
+hidden checks: Listing(predicates.invalid) = new { 1 }
+other = 42
+"#,
+    )
+    .unwrap();
+    let child = temp.path().join("Child.pkl");
+    std::fs::write(&child, "amends \"Base.pkl\"\nchecks { 2 }\n").unwrap();
+
+    let unused = temp.path().join("Unused.pkl");
+    std::fs::write(
+        &unused,
+        "import \"Child.pkl\" as child\nresult = child.other\n",
+    )
+    .unwrap();
+    assert_eq!(
+        pklr::eval_to_json(&unused).unwrap(),
+        serde_json::json!({ "result": 42 })
+    );
+
+    let read = temp.path().join("Read.pkl");
+    std::fs::write(
+        &read,
+        "import \"Child.pkl\" as child\nresult = child.checks\n",
+    )
+    .unwrap();
+    let error = pklr::eval_to_json(&read).unwrap_err().to_string();
+    assert!(
+        error.contains("qualified constraint boom"),
+        "the qualified constraint failure should surface when requested, got {error:?}"
+    );
+}
+
+#[test]
 fn amending_module_inherited_mapping_value_types_remain_lazy_until_requested() {
     let temp = TestTempDir::new("pklr_amending_module_inherited_mapping_types");
     std::fs::write(
@@ -1992,6 +2036,42 @@ typed = new { ["x"] = value }
     assert!(
         pklr::eval_to_json(&read).is_err(),
         "reading the late-invalid inherited Mapping should fail"
+    );
+}
+
+#[test]
+fn amending_module_inherited_mapping_preserves_compound_keys_and_union_selection() {
+    let temp = TestTempDir::new("pklr_amending_module_inherited_mapping_compound_keys");
+    std::fs::write(
+        temp.path().join("CompoundBase.pkl"),
+        "typed: Mapping<List<Int>, Int> = new {}\n",
+    )
+    .unwrap();
+    let compound = temp.path().join("Compound.pkl");
+    std::fs::write(
+        &compound,
+        "amends \"CompoundBase.pkl\"\ntyped { [List(1)] = 1 }\n",
+    )
+    .unwrap();
+    assert!(
+        pklr::eval_to_json(&compound).is_ok(),
+        "a valid compound Mapping key should retain its runtime type"
+    );
+
+    std::fs::write(
+        temp.path().join("UnionBase.pkl"),
+        "typed: Mapping<String, Int> | Mapping<Int, String> = new {}\n",
+    )
+    .unwrap();
+    let mixed = temp.path().join("Mixed.pkl");
+    std::fs::write(
+        &mixed,
+        "amends \"UnionBase.pkl\"\ntyped { [\"a\"] = 1; [1] = \"b\" }\n",
+    )
+    .unwrap();
+    assert!(
+        pklr::eval_to_json(&mixed).is_err(),
+        "one inherited Mapping must satisfy a single declared union alternative"
     );
 }
 
