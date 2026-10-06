@@ -2489,10 +2489,11 @@ impl Evaluator {
         });
         let body = typed_body.as_ref().unwrap_or(&module.body);
         // These annotations were reconstructed from the amended module, not
-        // written in this body. They guide `new` and body evaluation above,
-        // but must not turn an existing module overlay into a new eager
-        // constraint check (which Pkl keeps lazy through the inherited
-        // property value).
+        // written in this body. They guide `new` and body evaluation above.
+        // A failed check remains attached to its member rather than eagerly
+        // rejecting an import that reads a different property, matching Pkl's
+        // lazy evaluation of inherited property values. A constraint that
+        // cannot yet be evaluated stays lazy too.
         let synthesized_inherited_types: HashSet<&str> = typed_body
             .as_ref()
             .map(|typed| {
@@ -2945,11 +2946,43 @@ impl Evaluator {
                     && !has_modifier(&prop.modifiers, Modifier::Local)
                     && (prop.value.is_some() || prop.body.is_some())
                     && prop.type_ann.is_some()
-                    && !synthesized_inherited_types.contains(prop.name.as_str())
                     && scope.is_declared(&prop.name)
                     && let Some(value) = scope.get(&prop.name)
                 {
-                    self.check_declared_property_type(prop, value, &scope, depth)?;
+                    if synthesized_inherited_types.contains(prop.name.as_str()) {
+                        let ty = prop.type_ann.as_ref().expect("checked above");
+                        let valid = if type_is_runtime_checkable(ty, &scope) {
+                            match self.eval_type_check(value, ty, &scope, depth + 1) {
+                                Ok(valid) => Some(valid),
+                                Err(Error::Eval(_)) => None,
+                                Err(error) => return Err(error),
+                            }
+                        } else {
+                            None
+                        };
+                        if valid == Some(false) {
+                            let message = format!(
+                                "property '{}' expected {}, got {}",
+                                prop.name,
+                                display_type_expr(ty),
+                                value_type_name(value)
+                            );
+                            let rendered = !has_modifier(&prop.modifiers, Modifier::Hidden)
+                                && requested_output_fields
+                                    .as_ref()
+                                    .is_none_or(|fields| fields.contains(&prop.name));
+                            if rendered && depth == 0 {
+                                return Err(Error::Eval(message));
+                            }
+                            out.shift_remove(prop.name.as_str());
+                            scope.set_member_poison(&prop.name, Some(message.clone()));
+                            self.rendered_member_failed |= rendered;
+                            poisoned_members
+                                .insert(prop.name.clone(), PoisonedMember { message, rendered });
+                        }
+                    } else {
+                        self.check_declared_property_type(prop, value, &scope, depth)?;
+                    }
                 }
             }
         }

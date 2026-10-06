@@ -1718,6 +1718,167 @@ fn amending_module_inherits_property_type_and_default() {
 }
 
 #[test]
+fn amending_module_inherited_types_remain_lazy_until_requested() {
+    let temp = TestTempDir::new("pklr_amending_module_inherited_type_laziness");
+    std::fs::write(
+        temp.path().join("Base.pkl"),
+        r#"
+checks: Listing(this.length == 1) = new { 1 }
+other = 42
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("BodyChild.pkl"),
+        r#"
+amends "Base.pkl"
+
+checks { 2 }
+other = 43
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("NewChild.pkl"),
+        r#"
+amends "Base.pkl"
+
+checks = new { 2 }
+other = 43
+"#,
+    )
+    .unwrap();
+
+    for child in ["BodyChild", "NewChild"] {
+        let unused = temp.path().join(format!("{child}Unused.pkl"));
+        std::fs::write(
+            &unused,
+            format!("import \"{child}.pkl\" as child\nresult = child.other\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            pklr::eval_to_json(&unused).unwrap(),
+            serde_json::json!({ "result": 43 })
+        );
+
+        let read = temp.path().join(format!("{child}Read.pkl"));
+        std::fs::write(
+            &read,
+            format!("import \"{child}.pkl\" as child\nresult = child.checks\n"),
+        )
+        .unwrap();
+        let result = pklr::eval_to_json(&read);
+        assert!(
+            result.is_err(),
+            "reading the invalid inherited property should fail for {child}, got {result:?}"
+        );
+    }
+}
+
+#[test]
+fn amending_module_defaults_cover_aliases_nullable_listings_and_multiple_levels() {
+    let temp = TestTempDir::new("pklr_amending_module_inherited_default_forms");
+    std::fs::write(
+        temp.path().join("AliasBase.pkl"),
+        r#"
+class Step {
+  value: Int = 1
+  label: String = "base"
+}
+typealias StepMap = Mapping<String, Step>
+typealias OptionalStepMap = StepMap?
+
+steps: OptionalStepMap = new { ["base"] {} }
+"#,
+    )
+    .unwrap();
+    let alias_child = temp.path().join("AliasChild.pkl");
+    std::fs::write(
+        &alias_child,
+        r#"
+amends "AliasBase.pkl"
+
+steps { ["child"] { value = 2 } }
+"#,
+    )
+    .unwrap();
+    assert_eq!(
+        pklr::eval_to_json(&alias_child).unwrap(),
+        serde_json::json!({
+            "steps": {
+                "base": { "value": 1, "label": "base" },
+                "child": { "value": 2, "label": "base" },
+            },
+        })
+    );
+
+    std::fs::write(
+        temp.path().join("ListingBase.pkl"),
+        "values: Listing<Int> = new { 1; 2 }\n",
+    )
+    .unwrap();
+    for (child, source) in [
+        (
+            "ListingBodyChild.pkl",
+            "amends \"ListingBase.pkl\"\nvalues { 3 }\n",
+        ),
+        (
+            "ListingNewChild.pkl",
+            "amends \"ListingBase.pkl\"\nvalues = new { 3 }\n",
+        ),
+    ] {
+        let child = temp.path().join(child);
+        std::fs::write(&child, source).unwrap();
+        assert_eq!(
+            pklr::eval_to_json(&child).unwrap(),
+            serde_json::json!({ "values": [1, 2, 3] })
+        );
+    }
+
+    std::fs::write(
+        temp.path().join("Base.pkl"),
+        r#"
+class Step {
+  value: Int = 1
+  label: String = "base"
+}
+
+steps: Mapping<String, Step> = new { ["base"] {} }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("Mid.pkl"),
+        r#"
+amends "Base.pkl"
+
+steps { ["mid"] { value = 2 } }
+"#,
+    )
+    .unwrap();
+    let leaf = temp.path().join("Leaf.pkl");
+    std::fs::write(
+        &leaf,
+        r#"
+amends "Mid.pkl"
+
+steps { ["leaf"] { value = 3 } }
+"#,
+    )
+    .unwrap();
+    assert_eq!(
+        pklr::eval_to_json(&leaf).unwrap(),
+        serde_json::json!({
+            "steps": {
+                "base": { "value": 1, "label": "base" },
+                "mid": { "value": 2, "label": "base" },
+                "leaf": { "value": 3, "label": "base" },
+            },
+        })
+    );
+}
+
+#[test]
 fn amends_strips_inherited_class_definitions() {
     let mut ev = pklr::eval::Evaluator::new();
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
