@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock, Weak};
 
 use indexmap::IndexMap;
 use std::path::{Path, PathBuf};
@@ -55,6 +55,38 @@ const DYNAMIC_SIBLING_REF: &str = "\0pklr:dynamic-sibling";
 // Scoped context for lazily materializing an inherited `ModuleOutput.text`.
 // It is an impossible user identifier and is captured by output-body lambdas.
 const MODULE_OUTPUT_TEXT_CONTEXT: &str = "\0pklr:module-output-text-context";
+/// The smallest number of weak lambda-guard entries retained between cleanup
+/// passes. Larger live sets use a doubling threshold for amortized cleanup;
+/// an evaluation boundary always removes dropped entries.
+const LAMBDA_GUARD_PRUNE_MIN: usize = 64;
+
+/// A delayed evaluation error shared by every copy of one lambda value.
+#[derive(Debug, Clone, Default)]
+struct LambdaGuard(Arc<RwLock<Option<Arc<str>>>>);
+
+impl LambdaGuard {
+    fn error(&self) -> Option<Arc<str>> {
+        self.0
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn set_error(&self, message: String) {
+        *self
+            .0
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(message.into());
+    }
+}
+
+/// Guard state stays in the evaluator rather than a lambda's captured scope,
+/// so it cannot become observable through `outer`.
+struct LambdaGuardEntry {
+    captured: Weak<ScopeMap>,
+    guard: LambdaGuard,
+}
+
 /// Evaluates pkl source files to [`Value`].
 pub struct Evaluator {
     base_path: PathBuf,
@@ -83,6 +115,13 @@ pub struct Evaluator {
     /// like `body_roots_cache`. A narrowed import can evaluate one body more
     /// than once, but its dependency graph is stable.
     plan_cache: HashMap<usize, (crate::parser::Body, Arc<EvaluationPlan>)>,
+    /// Delayed errors for const-local lambdas, keyed by their capture map.
+    lambda_guards: HashMap<usize, LambdaGuardEntry>,
+    /// Guard registry size at which the next weak-entry cleanup runs.
+    lambda_guard_prune_at: usize,
+    #[cfg(test)]
+    /// Total entries visited by guard-registry cleanup, for amortization tests.
+    lambda_guard_prune_scans: usize,
     /// Resources read in this run, by URI. As in Pkl, reading a resource again
     /// returns the first result, so reads are deterministic.
     resource_cache: HashMap<String, Value>,
@@ -436,6 +475,10 @@ impl Evaluator {
             parse_cache: HashMap::default(),
             body_roots_cache: HashMap::default(),
             plan_cache: HashMap::default(),
+            lambda_guards: HashMap::default(),
+            lambda_guard_prune_at: LAMBDA_GUARD_PRUNE_MIN,
+            #[cfg(test)]
+            lambda_guard_prune_scans: 0,
             resource_cache: HashMap::default(),
             allowed_resources: DEFAULT_ALLOWED_RESOURCES
                 .iter()
@@ -592,6 +635,11 @@ impl Evaluator {
     }
 
     fn begin_evaluation(&mut self) {
+        // Lambda values can outlive an evaluation, so retain guards for every
+        // capture map that is still reachable through one. Dead capture maps
+        // are otherwise only held here weakly; drop their registry entries at
+        // each evaluation boundary.
+        self.prune_lambda_guards();
         self.env_reads.clear();
         self.import_cache.clear();
         self.imports_in_flight.clear();
@@ -2785,6 +2833,7 @@ impl Evaluator {
             depth,
             None,
             None,
+            None,
             false,
             None,
         )
@@ -2798,6 +2847,7 @@ impl Evaluator {
         depth: usize,
         entry_scopes: Option<&[Option<Arc<CapturedScope>>]>,
         inherited_source: Option<&ObjectSource>,
+        initial_non_const_members: Option<&HashSet<String>>,
         // Generator bodies do not inherit the receiver's source entries, but
         // they do inherit its mapping-key semantics.
         mapping_context: bool,
@@ -2908,11 +2958,193 @@ impl Evaluator {
         });
         let mut this_aliases = Vec::new();
         refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
+        // Locals run before properties, so an untyped local may initially be
+        // unable to read a member of this body. Keep only those locals for a
+        // later retry as members bind; typed locals retain their existing
+        // failure behavior.
+        let mut failed_locals: Vec<usize> = Vec::new();
+        // A property may depend on one of those locals. This is deliberately
+        // narrower than a general object retry: only value properties that
+        // failed while a local was pending are revisited.
+        let mut failed_properties: Vec<(usize, String)> = Vec::new();
+        // Generators and other output entries can also read one of those
+        // deferred properties. Keep the whole entry for the same retry phase
+        // instead of treating the temporary poison as its final error.
+        let mut failed_entries: Vec<(usize, String)> = Vec::new();
+        // A const local may only read const members. Seed this with actual
+        // inherited members, then add own and generated members as they bind.
+        let mut non_const_members: HashSet<String> = HashSet::default();
+        if let Some(source) = inherited_source {
+            for name in &source.evaluated_properties {
+                if body_member_is_non_const(&source.entries, name) {
+                    non_const_members.insert(name.clone());
+                }
+            }
+        }
+        if let Some(initial) = initial_non_const_members {
+            non_const_members.extend(initial.iter().cloned());
+        }
+        // Direct properties are known to be non-const from their declaration,
+        // even before their value binds. Generator members stay absent here
+        // until a branch actually yields them.
+        let declared_direct_non_const_members: HashSet<String> = entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Property(prop)
+                    if !has_modifier(&prop.modifiers, Modifier::Local)
+                        && !has_modifier(&prop.modifiers, Modifier::Const) =>
+                {
+                    Some(prop.name.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        // An own member shadows an enclosing binding even before evaluation.
+        // Include generator bodies too: an untaken branch must not make a
+        // const local capture an outer member of the same name.
+        let pending_members = body_property_names(entries);
+        let mut bound_members: HashSet<String> = HashSet::default();
+
+        macro_rules! retry_failed_locals {
+            () => {{
+                let mut recovered = true;
+                while recovered {
+                    recovered = false;
+                    let mut retry_index = 0;
+                    while retry_index < failed_locals.len() {
+                        let entry_index = failed_locals[retry_index];
+                        let Entry::Property(prop) = &entries[entry_index] else {
+                            unreachable!("only local properties are retried");
+                        };
+                        let Some(expr) = &prop.value else {
+                            unreachable!("only valued local properties are retried");
+                        };
+                        if let Some(message) = const_local_reads_non_const(prop, &non_const_members)
+                        {
+                            if binds_declared(&prop.name) {
+                                child_scope.declare_poisoned(prop.name.clone(), message);
+                            } else {
+                                child_scope.poison(prop.name.clone(), message);
+                            }
+                            failed_locals.swap_remove(retry_index);
+                            continue;
+                        }
+                        let mut active_scope = scope_for_object_entry(
+                            entry_index,
+                            &child_scope,
+                            entry_scopes,
+                            &entry_owners,
+                            own_body_scope,
+                        );
+                        for name in pending_members
+                            .iter()
+                            .filter(|name| !bound_members.contains(*name))
+                        {
+                            active_scope
+                                .poison(name.clone(), format!("undefined variable: {name}"));
+                        }
+                        let result = self.eval_expr(expr, &active_scope, depth);
+                        drop(active_scope);
+                        match result {
+                            Ok(value) => {
+                                if binds_declared(&prop.name) {
+                                    child_scope.declare(&prop.name, value);
+                                } else {
+                                    child_scope.set(&prop.name, value);
+                                }
+                                if matches!(expr, Expr::Ident(name) if name == "this" || this_aliases.contains(name))
+                                {
+                                    this_aliases.push(prop.name.clone());
+                                    child_scope.mark_this_alias(&prop.name);
+                                }
+                                failed_locals.swap_remove(retry_index);
+                                recovered = true;
+                            }
+                            Err(Error::Eval(message)) => {
+                                if binds_declared(&prop.name) {
+                                    child_scope.declare_poisoned(prop.name.clone(), message);
+                                } else {
+                                    child_scope.poison(prop.name.clone(), message);
+                                }
+                                retry_index += 1;
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
+                }
+            }};
+        }
+
+        macro_rules! bind_object_property_value {
+            ($prop:expr, $value:expr, $entry_index:expr, $recovered:expr, $generated:ident, $map:ident, $member_indices:ident, $lambdas:expr $(,)?) => {{
+                let prop = $prop;
+                let value = $value;
+                let entry_index = $entry_index;
+                $generated.remove(prop.name.as_str());
+                if binds_declared(&prop.name) {
+                    child_scope.declare(&prop.name, value.clone());
+                } else {
+                    child_scope.set(&prop.name, value.clone());
+                }
+                entry_owners.release_this(&this_aliases);
+                if $recovered {
+                    let index = all_props
+                        .iter()
+                        .position(|(key, _)| {
+                            $member_indices
+                                .get(key)
+                                .is_some_and(|existing| *existing > entry_index)
+                        })
+                        .unwrap_or_else(|| all_props.len());
+                    props_shift_insert(
+                        &mut child_scope,
+                        &this_aliases,
+                        &mut all_props,
+                        index,
+                        prop.name.clone(),
+                        value.clone(),
+                    );
+                } else {
+                    props_insert(
+                        &mut child_scope,
+                        &this_aliases,
+                        &mut all_props,
+                        prop.name.clone(),
+                        value.clone(),
+                    );
+                }
+                if !has_modifier(&prop.modifiers, Modifier::Hidden) {
+                    if $recovered {
+                        let index = $map
+                            .iter()
+                            .position(|(key, _)| {
+                                $member_indices
+                                    .get(key)
+                                    .is_some_and(|existing| *existing > entry_index)
+                            })
+                            .unwrap_or_else(|| $map.len());
+                        $map.shift_insert(index, prop.name.as_str().into(), value);
+                    } else {
+                        $map.insert(prop.name.as_str().into(), value);
+                    }
+                }
+                $member_indices.insert(prop.name.as_str().into(), entry_index);
+                if !has_modifier(&prop.modifiers, Modifier::Const) {
+                    non_const_members.insert(prop.name.clone());
+                }
+                bound_members.insert(prop.name.clone());
+                self.guard_const_local_lambdas(&mut child_scope, $lambdas, &non_const_members);
+                refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
+                retry_failed_locals!();
+            }};
+        }
+
         // First pass: collect locals, class definitions, and type aliases in
         // declaration order so they can reference each other correctly.
         // Non-lambda locals are evaluated eagerly; lambda locals are deferred
         // to a second pass so they capture the fully-populated scope.
-        let mut deferred_lambdas: Vec<(String, &crate::parser::Expr, usize)> = Vec::new();
+        let mut deferred_lambdas: Vec<(String, &Property, &crate::parser::Expr, usize)> =
+            Vec::new();
         for (entry_index, entry) in entries.iter().enumerate() {
             // Only locals, classes and type aliases are handled in this pass,
             // so build the entry's scope only for those.
@@ -2924,13 +3156,25 @@ impl Evaluator {
             {
                 continue;
             }
-            let active_scope = scope_for_object_entry(
+            let mut active_scope = scope_for_object_entry(
                 entry_index,
                 &child_scope,
                 entry_scopes,
                 &entry_owners,
                 own_body_scope,
             );
+            if matches!(entry, Entry::Property(prop)
+                if has_modifier(&prop.modifiers, Modifier::Local)
+                    && (!matches!(prop.value.as_ref(), Some(Expr::Lambda(..)))
+                        || has_modifier(&prop.modifiers, Modifier::Const)))
+            {
+                for name in pending_members
+                    .iter()
+                    .filter(|name| !bound_members.contains(*name))
+                {
+                    active_scope.poison(name.clone(), format!("undefined variable: {name}"));
+                }
+            }
             match entry {
                 Entry::Property(prop)
                     if has_modifier(&prop.modifiers, Modifier::Local) && prop.value.is_some() =>
@@ -2939,7 +3183,24 @@ impl Evaluator {
                     // Bind every local in declaration order so later locals and
                     // entries can reference it (e.g. a non-lambda local that
                     // calls a lambda local defined just above it).
-                    let result = self.eval_expr(expr, &active_scope, depth);
+                    let is_lambda = matches!(expr, Expr::Lambda(..));
+                    let const_message = if is_lambda {
+                        let mut lambda_non_const_members = non_const_members.clone();
+                        lambda_non_const_members
+                            .extend(declared_direct_non_const_members.iter().cloned());
+                        const_local_reads_non_const(prop, &lambda_non_const_members)
+                    } else {
+                        const_local_reads_non_const(prop, &non_const_members)
+                    };
+                    let result = if is_lambda {
+                        self.eval_expr(expr, &active_scope, depth)
+                            .map(|value| self.const_local_lambda_guard(value, const_message))
+                    } else {
+                        match const_message {
+                            Some(message) => Err(Error::Eval(message)),
+                            None => self.eval_expr(expr, &active_scope, depth),
+                        }
+                    };
                     // Release the entry scope before binding, as for properties.
                     drop(active_scope);
                     match result {
@@ -2955,10 +3216,18 @@ impl Evaluator {
                                 child_scope.mark_this_alias(&prop.name);
                             }
                         }
-                        Err(Error::Eval(message)) if binds_declared(&prop.name) => {
-                            child_scope.declare_poisoned(prop.name.clone(), message)
+                        Err(Error::Eval(message)) => {
+                            if prop.type_ann.is_none()
+                                && const_local_reads_non_const(prop, &non_const_members).is_none()
+                            {
+                                failed_locals.push(entry_index);
+                            }
+                            if binds_declared(&prop.name) {
+                                child_scope.declare_poisoned(prop.name.clone(), message);
+                            } else {
+                                child_scope.poison(prop.name.clone(), message);
+                            }
                         }
-                        Err(Error::Eval(message)) => child_scope.poison(prop.name.clone(), message),
                         Err(error) => return Err(error),
                     }
                     if matches!(expr, crate::parser::Expr::Lambda(..)) {
@@ -2966,7 +3235,7 @@ impl Evaluator {
                         // does not run the body. Bind once for declaration-order
                         // visibility, then re-bind after properties for late
                         // binding of overrides.
-                        deferred_lambdas.push((prop.name.clone(), expr, entry_index));
+                        deferred_lambdas.push((prop.name.clone(), prop, expr, entry_index));
                     }
                 }
                 Entry::ClassDef(name, class_mods, parent, body) => {
@@ -2996,6 +3265,8 @@ impl Evaluator {
             }
         }
 
+        self.guard_const_local_lambdas(&mut child_scope, &deferred_lambdas, &non_const_members);
+
         let mut default_template: Option<Value> = None;
         for (entry_index, entry) in entries.iter().enumerate() {
             let Entry::Property(prop) = entry else {
@@ -3018,6 +3289,10 @@ impl Evaluator {
         }
 
         let mut map: ObjectMap = ObjectMap::default();
+        // Source entry positions for members already emitted. A property that
+        // recovers after its local becomes available uses these to return to
+        // its declaration position instead of remaining appended at the end.
+        let mut member_entry_indices: HashMap<Arc<str>, usize> = HashMap::default();
         // A Dynamic body can contain bare elements as well as named members.
         // Keep the former separately so XML elements can render precisely the
         // values Pkl gives them, in source order.
@@ -3047,22 +3322,24 @@ impl Evaluator {
         // generators makes direct-before-generator and generator-before-direct
         // checks symmetric.
         let mut defined_by_layer: Option<HashSet<(usize, Arc<str>)>> = None;
-        for (entry_index, entry) in entries.iter().enumerate() {
+        macro_rules! eval_output_entry {
+            ($entry_index:expr, $entry:expr) => {{
+                (|entry_index: usize, entry: &Entry| -> Result<()> {
             match entry {
                 Entry::Property(prop) => {
                     let mods = &prop.modifiers;
                     if has_modifier(mods, Modifier::Local) {
-                        continue;
+                        return Ok(());
                     }
                     // Skip the `default` property — it's a template, not an output entry
                     if prop.name == "default" && default_template.is_some() {
-                        continue;
+                        return Ok(());
                     }
                     if has_modifier(mods, Modifier::Abstract)
                         && prop.value.is_none()
                         && prop.body.is_none()
                     {
-                        continue; // abstract without value — skip (must be overridden)
+                        return Ok(()); // abstract without value — skip (must be overridden)
                     }
                     // The first entry of a re-evaluated inherited member starts
                     // its amendment chain. Amending the parent's final value
@@ -3094,29 +3371,40 @@ impl Evaluator {
                     {
                         active_scope.set(&prop.name, existing.clone());
                     }
-                    let value = self.eval_property(prop, &active_scope, depth)?;
+                    let value = match self.eval_property(prop, &active_scope, depth) {
+                        Ok(value) => value,
+                        Err(Error::Eval(message))
+                            if prop.value.is_some() && !failed_locals.is_empty() =>
+                        {
+                            // This body declaration shadows an enclosing or
+                            // inherited property even while its local
+                            // dependency is unresolved. Keep later members
+                            // from binding that stale value before retry.
+                            drop(active_scope);
+                            if binds_declared(&prop.name) {
+                                child_scope.declare_poisoned(prop.name.clone(), message.clone());
+                            } else {
+                                child_scope.poison(prop.name.clone(), message.clone());
+                            }
+                            failed_properties.push((entry_index, message));
+                            return Ok(());
+                        }
+                        Err(error) => return Err(error),
+                    };
                     // Release the entry scope first: it may share the object
                     // scope's bindings, which binding the value would then copy.
                     drop(active_scope);
                     if let Some(v) = value {
-                        generated.remove(prop.name.as_str());
-                        if binds_declared(&prop.name) {
-                            child_scope.declare(&prop.name, v.clone());
-                        } else {
-                            child_scope.set(&prop.name, v.clone());
-                        }
-                        entry_owners.release_this(&this_aliases);
-                        props_insert(
-                            &mut child_scope,
-                            &this_aliases,
-                            &mut all_props,
-                            prop.name.clone(),
-                            v.clone(),
+                        bind_object_property_value!(
+                            prop,
+                            v,
+                            entry_index,
+                            false,
+                            generated,
+                            map,
+                            member_entry_indices,
+                            &deferred_lambdas,
                         );
-                        if !has_modifier(mods, Modifier::Hidden) {
-                            map.insert(prop.name.as_str().into(), v);
-                        }
-                        refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                     }
                 }
                 Entry::DynProperty(key_expr, val_expr) => {
@@ -3214,9 +3502,11 @@ impl Evaluator {
                             val.clone(),
                             mapping_entries,
                         );
+                        member_entry_indices.insert(storage_key.clone(), entry_index);
                         map.insert(storage_key, val);
                         refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
-                        continue;
+                        retry_failed_locals!();
+                        return Ok(());
                     }
                     let val = if let Some(Value::Object(template_map, Some(src))) =
                         &default_template
@@ -3282,8 +3572,10 @@ impl Evaluator {
                         val.clone(),
                         mapping_entries,
                     );
+                    member_entry_indices.insert(storage_key.clone(), entry_index);
                     map.insert(storage_key, val);
                     refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
+                    retry_failed_locals!();
                 }
                 Entry::Spread(expr) => {
                     let active_scope = scope_for_object_entry(
@@ -3307,6 +3599,8 @@ impl Evaluator {
                                 mapping_entries,
                             );
                             extend_object_entries(&mut map, &m, mapping_entries);
+                            member_entry_indices
+                                .extend(m.keys().cloned().map(|key| (key, entry_index)));
                             if let Some(source) = source {
                                 elements.extend(source.elements.iter().cloned());
                             }
@@ -3338,6 +3632,7 @@ impl Evaluator {
                             depth,
                             None,
                             None,
+                            None,
                             mapping_entries,
                             Some(&ReceiverMembers {
                                 own: &all_props,
@@ -3362,12 +3657,26 @@ impl Evaluator {
                                 m.iter().map(|(k, v)| (k.clone(), v.clone())),
                                 mapping_entries,
                             );
+                            for name in m.keys() {
+                                if body_member_is_non_const(&fgen.body, name) {
+                                    non_const_members.insert(name.to_string());
+                                }
+                            }
+                            bound_members.extend(m.keys().map(|name| name.to_string()));
+                            self.guard_const_local_lambdas(
+                                &mut child_scope,
+                                &deferred_lambdas,
+                                &non_const_members,
+                            );
                             generated.extend(m.keys().cloned());
                             extend_object_entries(&mut map, &m, mapping_entries);
+                            member_entry_indices
+                                .extend(m.keys().cloned().map(|key| (key, entry_index)));
                             if let Some(source) = source {
                                 elements.extend(source.elements.iter().cloned());
                             }
                             refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
+                            retry_failed_locals!();
                         }
                     }
                 }
@@ -3385,6 +3694,7 @@ impl Evaluator {
                             &wgen.body,
                             &active_scope,
                             depth,
+                            None,
                             None,
                             None,
                             mapping_entries,
@@ -3411,18 +3721,33 @@ impl Evaluator {
                                 m.iter().map(|(k, v)| (k.clone(), v.clone())),
                                 mapping_entries,
                             );
+                            for name in m.keys() {
+                                if body_member_is_non_const(&wgen.body, name) {
+                                    non_const_members.insert(name.to_string());
+                                }
+                            }
+                            bound_members.extend(m.keys().map(|name| name.to_string()));
+                            self.guard_const_local_lambdas(
+                                &mut child_scope,
+                                &deferred_lambdas,
+                                &non_const_members,
+                            );
                             generated.extend(m.keys().cloned());
                             extend_object_entries(&mut map, &m, mapping_entries);
+                            member_entry_indices
+                                .extend(m.keys().cloned().map(|key| (key, entry_index)));
                             if let Some(source) = source {
                                 elements.extend(source.elements.iter().cloned());
                             }
                             refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
+                            retry_failed_locals!();
                         }
                     } else if let Some(else_body) = &wgen.else_body {
                         let else_val = self.eval_entries_with_lexical_scopes(
                             else_body,
                             &active_scope,
                             depth,
+                            None,
                             None,
                             None,
                             mapping_entries,
@@ -3449,12 +3774,26 @@ impl Evaluator {
                                 m.iter().map(|(k, v)| (k.clone(), v.clone())),
                                 mapping_entries,
                             );
+                            for name in m.keys() {
+                                if body_member_is_non_const(else_body, name) {
+                                    non_const_members.insert(name.to_string());
+                                }
+                            }
+                            bound_members.extend(m.keys().map(|name| name.to_string()));
+                            self.guard_const_local_lambdas(
+                                &mut child_scope,
+                                &deferred_lambdas,
+                                &non_const_members,
+                            );
                             generated.extend(m.keys().cloned());
                             extend_object_entries(&mut map, &m, mapping_entries);
+                            member_entry_indices
+                                .extend(m.keys().cloned().map(|key| (key, entry_index)));
                             if let Some(source) = source {
                                 elements.extend(source.elements.iter().cloned());
                             }
                             refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
+                            retry_failed_locals!();
                         }
                     }
                 }
@@ -3471,11 +3810,142 @@ impl Evaluator {
                 Entry::ClassDef(..) | Entry::TypeAlias(..) => {} // handled in scope setup
                 Entry::Predicate(..) => return Err(member_predicates_unsupported()),
             }
+                    Ok(())
+                })($entry_index, $entry)
+            }};
+        }
+
+        for (entry_index, entry) in entries.iter().enumerate() {
+            let child_scope_before = child_scope.clone();
+            let all_props_before = all_props.clone();
+            let map_before = map.clone();
+            let elements_before = elements.clone();
+            let generated_before = generated.clone();
+            let member_entry_indices_before = member_entry_indices.clone();
+            let non_const_members_before = non_const_members.clone();
+            let bound_members_before = bound_members.clone();
+            let failed_locals_before = failed_locals.clone();
+            let failed_properties_before = failed_properties.clone();
+            let this_aliases_before = this_aliases.clone();
+            let inherited_seeded_before = inherited_seeded.clone();
+            let defined_by_layer_before = defined_by_layer.clone();
+            match eval_output_entry!(entry_index, entry) {
+                Ok(()) => {}
+                Err(Error::Eval(message)) if !failed_locals.is_empty() => {
+                    child_scope = child_scope_before;
+                    all_props = all_props_before;
+                    map = map_before;
+                    elements = elements_before;
+                    generated = generated_before;
+                    member_entry_indices = member_entry_indices_before;
+                    non_const_members = non_const_members_before;
+                    bound_members = bound_members_before;
+                    failed_locals = failed_locals_before;
+                    failed_properties = failed_properties_before;
+                    this_aliases = this_aliases_before;
+                    inherited_seeded = inherited_seeded_before;
+                    defined_by_layer = defined_by_layer_before;
+                    failed_entries.push((entry_index, message));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        // Revisit only the ordinary value properties deferred because they
+        // read a still-pending local. Once no deferred property recovers, the
+        // first current error is the one Pkl surfaces.
+        while !failed_properties.is_empty() {
+            let mut retrying = std::mem::take(&mut failed_properties);
+            let mut recovered_property = false;
+            for (entry_index, _) in retrying.drain(..) {
+                let Entry::Property(prop) = &entries[entry_index] else {
+                    unreachable!("only properties are deferred");
+                };
+                let active_scope = scope_for_object_entry(
+                    entry_index,
+                    &child_scope,
+                    entry_scopes,
+                    &entry_owners,
+                    own_body_scope,
+                );
+                match self.eval_property(prop, &active_scope, depth) {
+                    Ok(value) => {
+                        drop(active_scope);
+                        if let Some(value) = value {
+                            bind_object_property_value!(
+                                prop,
+                                value,
+                                entry_index,
+                                true,
+                                generated,
+                                map,
+                                member_entry_indices,
+                                &deferred_lambdas,
+                            );
+                        }
+                        recovered_property = true;
+                    }
+                    Err(Error::Eval(message)) => {
+                        drop(active_scope);
+                        failed_properties.push((entry_index, message));
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            if !recovered_property {
+                return Err(Error::Eval(failed_properties[0].1.clone()));
+            }
+        }
+        // Retry non-property output entries only after ordinary properties
+        // have had a chance to resolve their deferred local dependencies.
+        // This includes nested generator bodies, spreads, elements, and
+        // dynamic entries that encountered a temporary poisoned property.
+        while !failed_entries.is_empty() {
+            let mut retrying = std::mem::take(&mut failed_entries);
+            let mut recovered_entry = false;
+            for (entry_index, _) in retrying.drain(..) {
+                let entry = &entries[entry_index];
+                let child_scope_before = child_scope.clone();
+                let all_props_before = all_props.clone();
+                let map_before = map.clone();
+                let elements_before = elements.clone();
+                let generated_before = generated.clone();
+                let member_entry_indices_before = member_entry_indices.clone();
+                let non_const_members_before = non_const_members.clone();
+                let bound_members_before = bound_members.clone();
+                let failed_locals_before = failed_locals.clone();
+                let failed_properties_before = failed_properties.clone();
+                let this_aliases_before = this_aliases.clone();
+                let inherited_seeded_before = inherited_seeded.clone();
+                let defined_by_layer_before = defined_by_layer.clone();
+                match eval_output_entry!(entry_index, entry) {
+                    Ok(()) => recovered_entry = true,
+                    Err(Error::Eval(message)) => {
+                        child_scope = child_scope_before;
+                        all_props = all_props_before;
+                        map = map_before;
+                        elements = elements_before;
+                        generated = generated_before;
+                        member_entry_indices = member_entry_indices_before;
+                        non_const_members = non_const_members_before;
+                        bound_members = bound_members_before;
+                        failed_locals = failed_locals_before;
+                        failed_properties = failed_properties_before;
+                        this_aliases = this_aliases_before;
+                        inherited_seeded = inherited_seeded_before;
+                        defined_by_layer = defined_by_layer_before;
+                        failed_entries.push((entry_index, message));
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            if !recovered_entry {
+                return Err(Error::Eval(failed_entries[0].1.clone()));
+            }
         }
         // Evaluate deferred local lambdas (function definitions) AFTER all
         // properties so they capture overridden values (late binding).
         refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
-        for (name, expr, entry_index) in deferred_lambdas {
+        for (name, prop, expr, entry_index) in deferred_lambdas {
             let active_scope = scope_for_object_entry(
                 entry_index,
                 &child_scope,
@@ -3485,6 +3955,14 @@ impl Evaluator {
             );
             let val = self.eval_expr(expr, &active_scope, depth)?;
             drop(active_scope);
+            // Lambda construction is lazy, so const-local validation must be
+            // deferred until invocation too. At this point the final object
+            // members are known; make a forbidden lambda body fail when it is
+            // called without rejecting an otherwise unused local function.
+            let val = self.const_local_lambda_guard(
+                val,
+                const_local_reads_non_const(prop, &non_const_members),
+            );
             child_scope.set(name, val);
         }
         let hidden_aliases = unused_this_aliases
@@ -3569,6 +4047,17 @@ impl Evaluator {
             _ => (Vec::new(), Vec::new()),
         };
 
+        // Class defaults are built before their parent source is merged into
+        // the child body. Keep its actual non-const members available for
+        // local validation without eagerly rejecting a lazy local lambda.
+        let mut inherited_non_const: HashSet<String> = HashSet::default();
+        if let Some(Value::Object(_, Some(parent_source))) = &parent_val {
+            for name in &parent_source.evaluated_properties {
+                if body_member_is_non_const(&parent_source.entries, name) {
+                    inherited_non_const.insert(name.clone());
+                }
+            }
+        }
         let mut child_scope = scope.child();
         if let Some(ref pv) = parent_val {
             child_scope.set("super", pv.clone());
@@ -3585,7 +4074,19 @@ impl Evaluator {
         };
         let body = typed_body.as_ref().unwrap_or(body);
 
-        let child_defaults = self.eval_entries(body, &child_scope, depth + 1)?;
+        let mut child_receiver_scope = child_scope.clone();
+        child_receiver_scope.receiver_entries = Some(body.clone());
+        child_receiver_scope.receiver_list_base = None;
+        let child_defaults = self.eval_entries_with_lexical_scopes(
+            body,
+            &child_receiver_scope,
+            depth + 1,
+            None,
+            None,
+            Some(&inherited_non_const),
+            false,
+            None,
+        )?;
         if let Some(Value::Object(parent_map, parent_src)) = parent_val {
             // Merge: parent defaults first, child overrides on top
             let mut merged: ObjectMap = (*parent_map).clone();
@@ -4357,6 +4858,7 @@ impl Evaluator {
             depth + 1,
             Some(&merged_entry_scopes),
             Some(base_source),
+            None,
             false,
             None,
         )?;
@@ -4801,17 +5303,6 @@ impl Evaluator {
                 // object built in the body sees its enclosing bindings through
                 // `outer`, so a body that mentions `outer` keeps everything, as
                 // does a body that names a type (see `NAMES_A_TYPE`).
-                let captured =
-                    Arc::new(if names.contains("outer") || names.contains(NAMES_A_TYPE) {
-                        scope.flatten()
-                    } else {
-                        scope.flatten_names(names.iter().map(String::as_str).chain([
-                            "this",
-                            "module",
-                            "super",
-                            MODULE_OUTPUT_TEXT_CONTEXT,
-                        ]))
-                    });
                 let captured_body = refs
                     .iter()
                     .filter(|name| scope.get(name).is_none())
@@ -4820,6 +5311,18 @@ impl Evaluator {
                         Arc::new(Expr::Throw(Box::new(Expr::String(message.clone().into()))))
                     })
                     .unwrap_or(body);
+                let captured = if names.contains("outer") || names.contains(NAMES_A_TYPE) {
+                    scope.flatten()
+                } else {
+                    scope.flatten_names(names.iter().map(String::as_str).chain([
+                        "this",
+                        "module",
+                        "super",
+                        MODULE_OUTPUT_TEXT_CONTEXT,
+                    ]))
+                };
+                let captured = Arc::new(captured);
+                self.register_lambda_guard(&captured);
                 Ok(Value::Lambda(Arc::clone(params), captured_body, captured))
             }
             Expr::InferredNew(ty, entries) => {
@@ -5561,6 +6064,9 @@ impl Evaluator {
                     evaled_args.len()
                 )));
             }
+            if let Some(message) = self.lambda_guard_error(&captured) {
+                return Err(Error::Eval(message.to_string()));
+            }
             for (param, arg) in params.iter().zip(evaled_args) {
                 call_scope.declare(param, arg);
             }
@@ -5623,6 +6129,9 @@ impl Evaluator {
                     params.len(),
                     evaled_args.len()
                 )));
+            }
+            if let Some(message) = self.lambda_guard_error(captured) {
+                return Err(Error::Eval(message.to_string()));
             }
             let mut call_scope = Scope::for_call(captured);
             // Layer in all instance properties, including lambdas, so local
@@ -5867,6 +6376,9 @@ impl Evaluator {
                         args.len()
                     )));
                 }
+                if let Some(message) = self.lambda_guard_error(captured) {
+                    return Err(Error::Eval(message.to_string()));
+                }
                 let mut call_scope = Scope::for_call(captured);
                 for (param, arg) in params.iter().zip(args.iter()) {
                     call_scope.declare(param, arg.clone());
@@ -5886,6 +6398,9 @@ impl Evaluator {
                     params.len(),
                     args.len()
                 )));
+            }
+            if let Some(message) = self.lambda_guard_error(captured) {
+                return Err(Error::Eval(message.to_string()));
             }
             let mut scope = Scope::for_call(captured);
             for (param, arg) in params.iter().zip(args.iter()) {
@@ -6164,6 +6679,9 @@ impl Evaluator {
                                 "pipe operator requires a single-parameter function, got {}",
                                 params.len()
                             )));
+                        }
+                        if let Some(message) = self.lambda_guard_error(&captured) {
+                            return Err(Error::Eval(message.to_string()));
                         }
                         let mut call_scope = Scope::for_call(&captured);
                         call_scope.declare(params[0].clone(), l);
@@ -6799,6 +7317,9 @@ impl Evaluator {
                                 && !converter_is_blocked(&blocked_root_converters, conv_name, value)
                                 && let Value::Lambda(params, body, captured) = lambda
                             {
+                                if let Some(message) = self.lambda_guard_error(captured) {
+                                    return Err(Error::Eval(message.to_string()));
+                                }
                                 let mut call_scope = Scope::for_call(captured);
                                 // Bind the object as the first parameter
                                 if let Some(param) = params.first() {
@@ -7690,6 +8211,211 @@ fn body_has(entries: &[Entry], is_kind: &dyn Fn(&Entry) -> bool) -> bool {
     })
 }
 
+/// Whether an evaluated member of `entries` is a non-const property. A name
+/// is considered only after the entry that produced it actually ran, so a
+/// member in an untaken generator branch does not turn a const-local lookup
+/// into a const violation.
+fn body_member_is_non_const(entries: &[Entry], name: &str) -> bool {
+    entries.iter().rev().any(|entry| match entry {
+        Entry::Property(prop)
+            if prop.name == name && !has_modifier(&prop.modifiers, Modifier::Local) =>
+        {
+            !has_modifier(&prop.modifiers, Modifier::Const)
+        }
+        Entry::ForGenerator(generator) => body_member_is_non_const(&generator.body, name),
+        Entry::WhenGenerator(generator) => {
+            body_member_is_non_const(&generator.body, name)
+                || generator
+                    .else_body
+                    .as_deref()
+                    .is_some_and(|body| body_member_is_non_const(body, name))
+        }
+        _ => false,
+    })
+}
+
+/// Names a body can define as object properties, including names in generator
+/// branches that may later bind. They must shadow enclosing bindings while a
+/// const local waits to learn whether the branch actually produces them.
+fn body_property_names(entries: &[Entry]) -> HashSet<String> {
+    let mut names = HashSet::default();
+    for entry in entries {
+        match entry {
+            Entry::Property(prop) if !has_modifier(&prop.modifiers, Modifier::Local) => {
+                names.insert(prop.name.clone());
+            }
+            Entry::ForGenerator(generator) => names.extend(body_property_names(&generator.body)),
+            Entry::WhenGenerator(generator) => {
+                names.extend(body_property_names(&generator.body));
+                if let Some(else_body) = &generator.else_body {
+                    names.extend(body_property_names(else_body));
+                }
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+/// Pkl requires a const local to depend only on const members of its body.
+/// Bare references are collected with the evaluator's normal lexical walker;
+/// `this.member` and `super.member` need their own checks because the walker
+/// records the receiver as the root rather than the selected member.
+fn const_local_reads_non_const(
+    prop: &Property,
+    non_const_members: &HashSet<String>,
+) -> Option<String> {
+    if !has_modifier(&prop.modifiers, Modifier::Const) {
+        return None;
+    }
+    let expr = prop.value.as_ref()?;
+    let mut refs = HashSet::default();
+    collect_expr_refs(expr, &mut refs, &HashSet::default());
+    let name = refs
+        .into_iter()
+        .find(|name| non_const_members.contains(name))
+        .or_else(|| this_member_reads_non_const(expr, non_const_members))?;
+    Some(format!(
+        "Cannot reference property `{name}` from here because it is not `const`."
+    ))
+}
+
+/// Keep const-local lambdas lazy while making a known non-const member read
+/// fail at invocation. The member set contains only values that actually
+/// bound, so unused lambdas and untaken generator branches remain valid.
+impl Evaluator {
+    /// Remove guards for lambdas which have no remaining value holding their
+    /// capture map. Keeping live guards is necessary because callers may keep
+    /// a lambda returned by an earlier evaluation and invoke it after reusing
+    /// this evaluator.
+    fn prune_lambda_guards(&mut self) {
+        #[cfg(test)]
+        {
+            self.lambda_guard_prune_scans += self.lambda_guards.len();
+        }
+        self.lambda_guards
+            .retain(|_, entry| entry.captured.upgrade().is_some());
+        self.lambda_guard_prune_at = self
+            .lambda_guards
+            .len()
+            .saturating_mul(2)
+            .max(LAMBDA_GUARD_PRUNE_MIN);
+    }
+
+    fn register_lambda_guard(&mut self, captured: &Arc<ScopeMap>) {
+        // A single evaluation can create and immediately discard many
+        // closures. Clean periodically rather than before every registration:
+        // dead entries stay bounded by the registry's recent high-water mark,
+        // and evaluation boundaries remove them all. Long-lived closure
+        // construction therefore stays amortized linear.
+        if self.lambda_guards.len() >= self.lambda_guard_prune_at {
+            self.prune_lambda_guards();
+        }
+        self.lambda_guards.insert(
+            Arc::as_ptr(captured) as usize,
+            LambdaGuardEntry {
+                captured: Arc::downgrade(captured),
+                guard: LambdaGuard::default(),
+            },
+        );
+    }
+
+    fn lambda_guard(&self, captured: &Arc<ScopeMap>) -> Option<LambdaGuard> {
+        let entry = self.lambda_guards.get(&(Arc::as_ptr(captured) as usize))?;
+        entry
+            .captured
+            .upgrade()
+            .filter(|registered| Arc::ptr_eq(registered, captured))
+            .map(|_| entry.guard.clone())
+    }
+
+    fn lambda_guard_error(&self, captured: &Arc<ScopeMap>) -> Option<Arc<str>> {
+        self.lambda_guard(captured).and_then(|guard| guard.error())
+    }
+
+    fn const_local_lambda_guard(&self, value: Value, message: Option<String>) -> Value {
+        let Some(message) = message else {
+            return value;
+        };
+        if let Value::Lambda(_, _, captured) = &value
+            && let Some(guard) = self.lambda_guard(captured)
+        {
+            guard.set_error(message);
+        }
+        value
+    }
+
+    fn guard_const_local_lambdas(
+        &self,
+        scope: &mut Scope,
+        deferred_lambdas: &[(String, &Property, &Expr, usize)],
+        non_const_members: &HashSet<String>,
+    ) {
+        for (name, prop, _, _) in deferred_lambdas {
+            let Some(message) = const_local_reads_non_const(prop, non_const_members) else {
+                continue;
+            };
+            let Some(value) = scope.get(name).cloned() else {
+                continue;
+            };
+            scope.set(
+                name.clone(),
+                self.const_local_lambda_guard(value, Some(message)),
+            );
+        }
+    }
+}
+
+/// Return the first non-const member read through a direct `this.member` or
+/// `super.member` expression. Nested object bodies have their own receiver,
+/// so this deliberately does not descend into them.
+fn this_member_reads_non_const(expr: &Expr, non_const_members: &HashSet<String>) -> Option<String> {
+    match expr {
+        Expr::Field(base, name) | Expr::NullSafeField(base, name)
+            if matches!(base.as_ref(), Expr::Ident(root) if root == "this" || root == "super")
+                && non_const_members.contains(name) =>
+        {
+            Some(name.clone())
+        }
+        Expr::Field(base, _) | Expr::NullSafeField(base, _) => {
+            this_member_reads_non_const(base, non_const_members)
+        }
+        Expr::Index(base, index) | Expr::Binop(_, base, index) => {
+            this_member_reads_non_const(base, non_const_members)
+                .or_else(|| this_member_reads_non_const(index, non_const_members))
+        }
+        Expr::Call(callee, args) => {
+            this_member_reads_non_const(callee, non_const_members).or_else(|| {
+                args.iter()
+                    .find_map(|arg| this_member_reads_non_const(arg, non_const_members))
+            })
+        }
+        Expr::If(condition, then_expr, else_expr) => {
+            this_member_reads_non_const(condition, non_const_members)
+                .or_else(|| this_member_reads_non_const(then_expr, non_const_members))
+                .or_else(|| this_member_reads_non_const(else_expr, non_const_members))
+        }
+        Expr::Let(_, value, body) => this_member_reads_non_const(value, non_const_members)
+            .or_else(|| this_member_reads_non_const(body, non_const_members)),
+        Expr::Is(value, _) | Expr::As(value, _) => {
+            this_member_reads_non_const(value, non_const_members)
+        }
+        Expr::Lambda(_, value) => this_member_reads_non_const(value, non_const_members),
+        Expr::Unop(_, value)
+        | Expr::Throw(value)
+        | Expr::Trace(value, _)
+        | Expr::Read(value, _)
+        | Expr::ReadOrNull(value, _)
+        | Expr::ReadGlob(value, _) => this_member_reads_non_const(value, non_const_members),
+        Expr::StringInterpolation(parts) => parts.iter().find_map(|part| match part {
+            StringInterpPart::Expr(expr) => this_member_reads_non_const(expr, non_const_members),
+            StringInterpPart::Literal(_) => None,
+        }),
+        // New and anonymous-object bodies create their own receivers.
+        Expr::New(..) | Expr::InferredNew(..) | Expr::ObjectBody(..) | _ => None,
+    }
+}
+
 /// Reject elements in the body of an object of type `type_display`, and
 /// entries too when `typed` (a class instance has only properties).
 fn check_member_kinds(type_display: &str, entries: &[Entry], typed: bool) -> Result<()> {
@@ -7729,6 +8455,120 @@ mod auto_trait_tests {
         fn assert_sync<T: Sync>() {}
 
         assert_sync::<Evaluator>();
+    }
+}
+
+#[cfg(all(test, feature = "native-io"))]
+mod lambda_guard_tests {
+    use std::{path::Path, sync::Arc};
+
+    use super::{Evaluator, LAMBDA_GUARD_PRUNE_MIN};
+    use crate::{Value, value::ScopeMap};
+
+    #[test]
+    fn lambda_guards_prune_dead_captures_but_keep_live_diagnostics() {
+        let mut evaluator = Evaluator::default();
+
+        // Registering transient closures during one evaluation must not keep a
+        // weak registry entry for each closure that has already been dropped.
+        for _ in 0..LAMBDA_GUARD_PRUNE_MIN {
+            let captured = Arc::new(ScopeMap::default());
+            evaluator.register_lambda_guard(&captured);
+        }
+        assert!(
+            evaluator.lambda_guards.len() <= LAMBDA_GUARD_PRUNE_MIN,
+            "dead lambda guard entries accumulated: {}",
+            evaluator.lambda_guards.len()
+        );
+
+        // A returned lambda remains live across evaluator reuse, so its
+        // delayed const-local diagnostic must survive the next evaluation.
+        let value = evaluator
+            .eval_source(
+                r#"
+foo {
+  const local f = () -> res1
+  res1 = 15
+  result = f
+}
+"#,
+                Path::new("lambda-guard.pkl"),
+            )
+            .unwrap();
+        let Value::Object(module, _) = &value else {
+            panic!("expected module object");
+        };
+        let Value::Object(foo, _) = &module["foo"] else {
+            panic!("expected foo object");
+        };
+        let Value::Lambda(_, _, captured) = &foo["result"] else {
+            panic!("expected result lambda");
+        };
+        let lambda = foo["result"].clone();
+        let expected = "Cannot reference property `res1` from here because it is not `const`.";
+        assert_eq!(
+            evaluator.lambda_guard_error(captured).as_deref(),
+            Some(expected)
+        );
+        drop(value);
+
+        evaluator
+            .eval_source("next = 1\n", Path::new("next-evaluation.pkl"))
+            .unwrap();
+        let error = evaluator
+            .invoke_lambda(&lambda, &[], 0)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "unexpected lambda error: {error}");
+
+        drop(lambda);
+        evaluator.begin_evaluation();
+        assert!(evaluator.lambda_guards.is_empty());
+    }
+
+    #[test]
+    fn lambda_guard_cleanup_is_amortized_for_retained_closures() {
+        let mut evaluator = Evaluator::default();
+        let mut retained = Vec::new();
+        let count = LAMBDA_GUARD_PRUNE_MIN * 16 + 1;
+
+        for _ in 0..count {
+            let captured = Arc::new(ScopeMap::default());
+            evaluator.register_lambda_guard(&captured);
+            retained.push(captured);
+        }
+
+        assert_eq!(evaluator.lambda_guards.len(), retained.len());
+        assert!(
+            evaluator.lambda_guard_prune_scans <= count * 2,
+            "cleanup scanned {} entries while retaining {count} closures",
+            evaluator.lambda_guard_prune_scans
+        );
+    }
+
+    #[test]
+    fn lambda_guard_cleanup_reclaims_dropped_high_water_mark_at_next_evaluation() {
+        let mut evaluator = Evaluator::default();
+        let mut captures = Vec::new();
+
+        for _ in 0..LAMBDA_GUARD_PRUNE_MIN * 2 {
+            let captured = Arc::new(ScopeMap::default());
+            evaluator.register_lambda_guard(&captured);
+            captures.push(captured);
+        }
+        let survivor = captures.pop().unwrap();
+        evaluator
+            .lambda_guard(&survivor)
+            .unwrap()
+            .set_error("survives cleanup".into());
+        drop(captures);
+
+        evaluator.begin_evaluation();
+        assert_eq!(evaluator.lambda_guards.len(), 1);
+        assert_eq!(
+            evaluator.lambda_guard_error(&survivor).as_deref(),
+            Some("survives cleanup")
+        );
     }
 }
 

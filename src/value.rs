@@ -499,8 +499,8 @@ pub enum Value {
     /// A `List`, `Listing` or `Set` (see [`ListKind`]). The items are
     /// Arc-wrapped so cloning is O(1).
     List(ListValue),
-    /// Lambda function: param names + body expression + captured scope values.
-    /// All three are Arc-wrapped so cloning a Lambda is O(1): lambdas are
+    /// Lambda function: params, body and captured scope.
+    /// The shared fields are Arc-wrapped so cloning a Lambda is O(1): lambdas are
     /// copied whenever a scope holding them is captured, and deep-copying the
     /// body each time dominated evaluation.
     Lambda(Arc<[String]>, Arc<Expr>, Arc<ScopeMap>),

@@ -4565,3 +4565,316 @@ h3 = (h) { f = new { a = 7 } }
     assert_eq!(json["h2"]["f"], serde_json::json!({"a": 1, "b": 10}));
     assert_eq!(json["h3"]["f"], serde_json::json!({"a": 7, "b": 3}));
 }
+
+#[test]
+fn object_locals_retry_after_body_members_bind() {
+    let json = eval("bar = 5\nfoo { bar = 1; local loc = bar; qux = loc }");
+    assert_eq!(json["foo"], serde_json::json!({"bar": 1, "qux": 1}));
+
+    // Both locals recover once `b` binds, then the earlier property that
+    // depended on them is retried.
+    let json = eval("foo { local a = b; local c = a + 1; d = c; b = 2 }");
+    assert_eq!(json["foo"], serde_json::json!({"d": 3, "b": 2}));
+
+    // Retry until the chain reaches a fixed point, not just once after `c`
+    // binds. The property that depended on the chain is then retried too.
+    let json = eval("foo { local a = b; local b = c; d = a; c = 2 }");
+    assert_eq!(json["foo"], serde_json::json!({"d": 2, "c": 2}));
+
+    // A deferred property shadows an outer binding while it waits for its
+    // local. Its dependent must retry rather than capture that outer value.
+    let json = eval("d = 1\nfoo { local a = c; d = a; e = d; c = 2 }");
+    assert_eq!(json["foo"], serde_json::json!({"d": 2, "e": 2, "c": 2}));
+
+    // The same deferred dependency can appear in a generated body. Once the
+    // local resolves, the generated member must retry rather than surfacing
+    // the temporary poison from the earlier property.
+    let json = eval("foo { local a = c; d = a; when (true) { e = d }; c = 2 }");
+    assert_eq!(json["foo"], serde_json::json!({"d": 2, "e": 2, "c": 2}));
+
+    // Dynamic entries also bind their keys into `this`, so a local can retry
+    // after a later key becomes available.
+    let json = eval(r#"foo { local a = this["c"]; ["d"] = a; ["c"] = 2 }"#);
+    assert_eq!(json["foo"], serde_json::json!({"d": 2, "c": 2}));
+
+    // When the deferred property recovers, it returns to source order rather
+    // than remaining appended after members that bound while it was pending.
+    let json = eval(
+        "foo { local a = c; first = a; second = 2; c = 1 }\nrendered = new PcfRenderer {}.renderDocument(foo)",
+    );
+    let rendered = json["rendered"].as_str().unwrap();
+    let first = rendered.find("first = 1").unwrap();
+    let second = rendered.find("second = 2").unwrap();
+    let c = rendered.find("c = 1").unwrap();
+    assert!(first < second && second < c, "{rendered}");
+
+    // A child entry may overwrite an inherited member without moving that
+    // member's existing slot. A recovered property belongs after that slot,
+    // even though the overwrite itself appears later in the child body.
+    let json = eval(
+        "base = new { old = 1 }\nfoo = (base) { local a = c; deferred = a; old = 2; c = 3 }\nrendered = new PcfRenderer {}.renderDocument(foo)",
+    );
+    let rendered = json["rendered"].as_str().unwrap();
+    let old = rendered.find("old = 2").unwrap();
+    let deferred = rendered.find("deferred = 3").unwrap();
+    let c = rendered.find("c = 3").unwrap();
+    assert!(old < deferred && deferred < c, "{rendered}");
+
+    // A local that never resolves remains lazy and fails only when read.
+    let err = eval_fails("foo { local a = missing; b = a }");
+    assert!(err.contains("missing"), "{err}");
+}
+
+#[test]
+fn const_locals_reject_non_const_members_that_are_actually_bound() {
+    for src in [
+        r#"
+foo {
+  res1 = 15
+  const local qux = this.res1
+  res2 = qux
+}
+"#,
+        r#"
+foo {
+  when (true) {
+    res1 = 15
+  }
+  const local qux = res1
+  res2 = qux
+}
+"#,
+        r#"
+open class Parent { res1 = 15 }
+class Child extends Parent {
+  const local qux = res1
+  res2 = qux
+}
+foo = new Child {}
+"#,
+        r#"
+open class Parent { res1 = 15 }
+class Child extends Parent {
+  const local qux = super.res1
+  res2 = qux
+}
+foo = new Child {}
+"#,
+    ] {
+        let err = eval_fails(src);
+        assert!(
+            err.contains("Cannot reference property `res1` from here because it is not `const`"),
+            "{src}: {err}"
+        );
+    }
+}
+
+#[test]
+fn const_local_lambdas_stay_lazy_but_reject_non_const_members_when_called() {
+    let json = eval(
+        r#"
+foo {
+  res1 = 15
+  const local f = () -> res1
+}
+"#,
+    );
+    assert_eq!(json["foo"], serde_json::json!({"res1": 15}));
+
+    let err = eval_fails(
+        r#"
+foo {
+  res1 = 15
+  const local f = () -> res1
+  res2 = f.apply()
+}
+"#,
+    );
+    assert!(
+        err.contains("Cannot reference property `res1` from here because it is not `const`"),
+        "{err}"
+    );
+
+    let err = eval_fails(
+        r#"
+foo {
+  const local f = () -> res1
+  when (true) {
+    res1 = 15
+  }
+  res2 = f.apply()
+}
+"#,
+    );
+    assert!(
+        err.contains("Cannot reference property `res1` from here because it is not `const`"),
+        "{err}"
+    );
+}
+
+#[test]
+fn class_const_local_lambdas_defer_inherited_non_const_validation() {
+    let json = eval(
+        r#"
+open class Parent { res1 = 15 }
+class Child extends Parent {
+  const local f = () -> res1
+}
+result = 1
+"#,
+    );
+    assert_eq!(json, serde_json::json!({"result": 1}));
+
+    let json = eval(
+        r#"
+open class Parent { res1 = 15 }
+class Child extends Parent {
+  const local f = () -> res1
+}
+result = new Child {}
+"#,
+    );
+    assert_eq!(json, serde_json::json!({"result": {"res1": 15}}));
+
+    let err = eval_fails(
+        r#"
+open class Parent { res1 = 15 }
+class Child extends Parent {
+  const local f = () -> res1
+  result = f.apply()
+}
+instance = new Child {}
+"#,
+    );
+    assert!(
+        err.contains("Cannot reference property `res1` from here because it is not `const`"),
+        "{err}"
+    );
+}
+
+#[test]
+fn const_locals_are_lazy_and_validate_on_access_across_receivers_and_bodies() {
+    for receiver in ["res1", "this.res1", "super.res1"] {
+        for is_lambda in [false, true] {
+            let value = if is_lambda {
+                format!("() -> {receiver}")
+            } else {
+                receiver.to_string()
+            };
+            let use_value = if is_lambda { "qux.apply()" } else { "qux" };
+            let object_source = |used: bool| {
+                let use_line = if used {
+                    format!("result = {use_value}")
+                } else {
+                    String::new()
+                };
+                if receiver == "super.res1" {
+                    format!(
+                        "base = new {{ res1 = 15 }}\nfoo = (base) {{\n  const local qux = {value}\n  {use_line}\n}}"
+                    )
+                } else {
+                    format!("foo {{\n  res1 = 15\n  const local qux = {value}\n  {use_line}\n}}")
+                }
+            };
+            let class_source = |used: bool| {
+                let use_line = if used {
+                    format!("result = {use_value}")
+                } else {
+                    String::new()
+                };
+                format!(
+                    "open class Parent {{ res1 = 15 }}\nclass Child extends Parent {{\n  const local qux = {value}\n  {use_line}\n}}\ninstance = new Child {{}}"
+                )
+            };
+
+            eval(&object_source(false));
+            eval(&class_source(false));
+            for src in [object_source(true), class_source(true)] {
+                let err = eval_fails(&src);
+                assert!(
+                    err.contains(
+                        "Cannot reference property `res1` from here because it is not `const`"
+                    ),
+                    "{src}: {err}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn const_local_lambda_copies_keep_late_member_validation() {
+    for src in [
+        r#"
+foo {
+  const local f = () -> res1
+  result = f.apply()
+  res1 = 15
+}
+"#,
+        r#"
+res1 = 5
+foo {
+  const local f = () -> res1
+  local g = f
+  res1 = 15
+  result = g.apply()
+}
+"#,
+        r#"
+res1 = 5
+foo {
+  const local f = () -> res1
+  local g = f
+  when (true) {
+    res1 = 15
+  }
+  result = g.apply()
+}
+"#,
+    ] {
+        let err = eval_fails(src);
+        assert!(
+            err.contains("Cannot reference property `res1` from here because it is not `const`"),
+            "{src}: {err}"
+        );
+    }
+}
+
+#[test]
+fn const_local_lambda_ignores_untaken_generator_members() {
+    let err = eval_fails(
+        r#"
+foo {
+  const local f = () -> res1
+  when (false) {
+    res1 = 15
+  }
+  result = f.apply()
+}
+"#,
+    );
+    assert!(err.contains("res1"), "{err}");
+    assert!(
+        !err.contains("Cannot reference property `res1` from here because it is not `const`"),
+        "{err}"
+    );
+}
+
+#[test]
+fn const_local_lambda_guard_is_not_exposed_through_outer() {
+    let json = eval(
+        r#"
+foo {
+  const local f = () -> new {
+    copied = outer
+  }
+  result = f.apply()
+}
+"#,
+    );
+    assert!(
+        !json.to_string().contains("pklr:lambda-guard"),
+        "internal lambda guard leaked through outer: {json}"
+    );
+}
