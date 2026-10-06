@@ -136,7 +136,6 @@ fn write_trace_value(value: &Value, out: &mut String, top: bool) {
             out.push_str(" }");
         }
         Value::Lambda(..) => out.push_str(&crate::eval::stdlib::render_value(value)),
-        Value::LambdaGuard(_) => out.push_str("<lambda guard>"),
         Value::Regex(regex) => {
             out.push_str("Regex(");
             out.push_str(&quote_string(regex.pattern(), true));

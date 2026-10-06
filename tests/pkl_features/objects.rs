@@ -4821,3 +4821,21 @@ foo {
         "{err}"
     );
 }
+
+#[test]
+fn const_local_lambda_guard_is_not_exposed_through_outer() {
+    let json = eval(
+        r#"
+foo {
+  const local f = () -> new {
+    copied = outer
+  }
+  result = f.apply()
+}
+"#,
+    );
+    assert!(
+        !json.to_string().contains("pklr:lambda-guard"),
+        "internal lambda guard leaked through outer: {json}"
+    );
+}

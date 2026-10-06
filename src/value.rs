@@ -1,6 +1,6 @@
 use rustc_hash::FxHashSet as HashSet;
 use std::sync::{
-    Arc, RwLock,
+    Arc,
     atomic::{AtomicU64, Ordering},
 };
 
@@ -12,37 +12,6 @@ use crate::parser::{Expr, TypeExpr};
 /// The members of an evaluated object, in declaration order. Keys are shared
 /// names so copying members between objects and scopes does not allocate.
 pub type ObjectMap = IndexMap<Arc<str>, Value, rustc_hash::FxBuildHasher>;
-
-/// A delayed evaluation error shared by every copy of one lambda value.
-///
-/// Const-local functions may be copied before their receiver finishes
-/// binding members. Once that receiver establishes a forbidden non-const
-/// dependency, all copies must fail only when invoked.
-#[doc(hidden)]
-#[derive(Debug, Clone, Default)]
-pub struct LambdaGuard(Arc<RwLock<Option<Arc<str>>>>);
-
-impl PartialEq for LambdaGuard {
-    fn eq(&self, other: &Self) -> bool {
-        self.error() == other.error()
-    }
-}
-
-impl LambdaGuard {
-    pub(crate) fn error(&self) -> Option<Arc<str>> {
-        self.0
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-    }
-
-    pub(crate) fn set_error(&self, message: String) {
-        *self
-            .0
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(message.into());
-    }
-}
 
 // `ObjectMap` is also the backing store for Pkl Mappings.  Keep non-string
 // mapping keys disjoint from property names and from string keys that render
@@ -535,9 +504,6 @@ pub enum Value {
     /// copied whenever a scope holding them is captured, and deep-copying the
     /// body each time dominated evaluation.
     Lambda(Arc<[String]>, Arc<Expr>, Arc<ScopeMap>),
-    /// An internal delayed error retained in a lambda's captured scope.
-    #[doc(hidden)]
-    LambdaGuard(LambdaGuard),
     /// A compiled regular expression (`Regex(pattern)`).
     Regex(Arc<Regex>),
     /// A quantity of time (`5.min`).
@@ -848,7 +814,6 @@ impl Value {
                 4 => "Function4",
                 _ => "Function5",
             },
-            Value::LambdaGuard(_) => "Function0",
             Value::Regex(_) => "Regex",
             Value::Duration(_) => "Duration",
             Value::DataSize(_) => "DataSize",
@@ -948,7 +913,6 @@ impl Value {
                 serde_json::Value::Array(items.iter().map(|v| v.to_json()).collect())
             }
             Value::Lambda(..) => json!("<lambda>"),
-            Value::LambdaGuard(_) => json!("<lambda guard>"),
             Value::Regex(regex) => json!({ "_type": "regex", "pattern": regex.pattern() }),
             Value::Duration(_) | Value::DataSize(_) => {
                 json!(crate::eval::stdlib::render_value(self))

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock, Weak};
 
 use indexmap::IndexMap;
 use std::path::{Path, PathBuf};
@@ -14,7 +14,7 @@ use crate::parser::{
     self, BinOp, Body, Entry, Expr, Modifier, Module, Property, StringInterpPart, UnOp,
 };
 use crate::value::{
-    CapturedScope, LambdaGuard, ListKind, ListValue, NameSet, ObjectKind, ObjectMap, ObjectSource,
+    CapturedScope, ListKind, ListValue, NameSet, ObjectKind, ObjectMap, ObjectSource,
     PoisonedMember, ScopeMap, TypeAliasMap, Value,
 };
 
@@ -55,6 +55,34 @@ const DYNAMIC_SIBLING_REF: &str = "\0pklr:dynamic-sibling";
 // Scoped context for lazily materializing an inherited `ModuleOutput.text`.
 // It is an impossible user identifier and is captured by output-body lambdas.
 const MODULE_OUTPUT_TEXT_CONTEXT: &str = "\0pklr:module-output-text-context";
+
+/// A delayed evaluation error shared by every copy of one lambda value.
+#[derive(Debug, Clone, Default)]
+struct LambdaGuard(Arc<RwLock<Option<Arc<str>>>>);
+
+impl LambdaGuard {
+    fn error(&self) -> Option<Arc<str>> {
+        self.0
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn set_error(&self, message: String) {
+        *self
+            .0
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(message.into());
+    }
+}
+
+/// Guard state stays in the evaluator rather than a lambda's captured scope,
+/// so it cannot become observable through `outer`.
+struct LambdaGuardEntry {
+    captured: Weak<ScopeMap>,
+    guard: LambdaGuard,
+}
+
 /// Evaluates pkl source files to [`Value`].
 pub struct Evaluator {
     base_path: PathBuf,
@@ -83,6 +111,8 @@ pub struct Evaluator {
     /// like `body_roots_cache`. A narrowed import can evaluate one body more
     /// than once, but its dependency graph is stable.
     plan_cache: HashMap<usize, (crate::parser::Body, Arc<EvaluationPlan>)>,
+    /// Delayed errors for const-local lambdas, keyed by their capture map.
+    lambda_guards: HashMap<usize, LambdaGuardEntry>,
     /// Resources read in this run, by URI. As in Pkl, reading a resource again
     /// returns the first result, so reads are deterministic.
     resource_cache: HashMap<String, Value>,
@@ -436,6 +466,7 @@ impl Evaluator {
             parse_cache: HashMap::default(),
             body_roots_cache: HashMap::default(),
             plan_cache: HashMap::default(),
+            lambda_guards: HashMap::default(),
             resource_cache: HashMap::default(),
             allowed_resources: DEFAULT_ALLOWED_RESOURCES
                 .iter()
@@ -3048,7 +3079,7 @@ impl Evaluator {
                     non_const_members.insert(prop.name.clone());
                 }
                 bound_members.insert(prop.name.clone());
-                guard_const_local_lambdas(&mut child_scope, $lambdas, &non_const_members);
+                self.guard_const_local_lambdas(&mut child_scope, $lambdas, &non_const_members);
                 refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
                 retry_failed_locals!();
             }};
@@ -3109,7 +3140,7 @@ impl Evaluator {
                     };
                     let result = if is_lambda {
                         self.eval_expr(expr, &active_scope, depth)
-                            .map(|value| const_local_lambda_guard(value, const_message))
+                            .map(|value| self.const_local_lambda_guard(value, const_message))
                     } else {
                         match const_message {
                             Some(message) => Err(Error::Eval(message)),
@@ -3180,7 +3211,7 @@ impl Evaluator {
             }
         }
 
-        guard_const_local_lambdas(&mut child_scope, &deferred_lambdas, &non_const_members);
+        self.guard_const_local_lambdas(&mut child_scope, &deferred_lambdas, &non_const_members);
 
         let mut default_template: Option<Value> = None;
         for (entry_index, entry) in entries.iter().enumerate() {
@@ -3547,7 +3578,7 @@ impl Evaluator {
                                 }
                             }
                             bound_members.extend(m.keys().map(|name| name.to_string()));
-                            guard_const_local_lambdas(
+                            self.guard_const_local_lambdas(
                                 &mut child_scope,
                                 &deferred_lambdas,
                                 &non_const_members,
@@ -3609,7 +3640,7 @@ impl Evaluator {
                                 }
                             }
                             bound_members.extend(m.keys().map(|name| name.to_string()));
-                            guard_const_local_lambdas(
+                            self.guard_const_local_lambdas(
                                 &mut child_scope,
                                 &deferred_lambdas,
                                 &non_const_members,
@@ -3660,7 +3691,7 @@ impl Evaluator {
                                 }
                             }
                             bound_members.extend(m.keys().map(|name| name.to_string()));
-                            guard_const_local_lambdas(
+                            self.guard_const_local_lambdas(
                                 &mut child_scope,
                                 &deferred_lambdas,
                                 &non_const_members,
@@ -3748,7 +3779,7 @@ impl Evaluator {
             // deferred until invocation too. At this point the final object
             // members are known; make a forbidden lambda body fail when it is
             // called without rejecting an otherwise unused local function.
-            let val = const_local_lambda_guard(
+            let val = self.const_local_lambda_guard(
                 val,
                 const_local_reads_non_const(prop, &non_const_members),
             );
@@ -5100,7 +5131,7 @@ impl Evaluator {
                         Arc::new(Expr::Throw(Box::new(Expr::String(message.clone().into()))))
                     })
                     .unwrap_or(body);
-                let mut captured = if names.contains("outer") || names.contains(NAMES_A_TYPE) {
+                let captured = if names.contains("outer") || names.contains(NAMES_A_TYPE) {
                     scope.flatten()
                 } else {
                     scope.flatten_names(names.iter().map(String::as_str).chain([
@@ -5110,15 +5141,9 @@ impl Evaluator {
                         MODULE_OUTPUT_TEXT_CONTEXT,
                     ]))
                 };
-                captured.insert(
-                    lambda_guard_key(&captured_body),
-                    Value::LambdaGuard(Default::default()),
-                );
-                Ok(Value::Lambda(
-                    Arc::clone(params),
-                    captured_body,
-                    Arc::new(captured),
-                ))
+                let captured = Arc::new(captured);
+                self.register_lambda_guard(&captured);
+                Ok(Value::Lambda(Arc::clone(params), captured_body, captured))
             }
             Expr::InferredNew(ty, entries) => {
                 let (name, params) = inferred_new_type(ty, scope, 0)?;
@@ -5859,7 +5884,7 @@ impl Evaluator {
                     evaled_args.len()
                 )));
             }
-            if let Some(message) = lambda_guard_error(&captured, &body) {
+            if let Some(message) = self.lambda_guard_error(&captured) {
                 return Err(Error::Eval(message.to_string()));
             }
             for (param, arg) in params.iter().zip(evaled_args) {
@@ -5925,7 +5950,7 @@ impl Evaluator {
                     evaled_args.len()
                 )));
             }
-            if let Some(message) = lambda_guard_error(captured, body) {
+            if let Some(message) = self.lambda_guard_error(captured) {
                 return Err(Error::Eval(message.to_string()));
             }
             let mut call_scope = Scope::for_call(captured);
@@ -6171,7 +6196,7 @@ impl Evaluator {
                         args.len()
                     )));
                 }
-                if let Some(message) = lambda_guard_error(captured, body) {
+                if let Some(message) = self.lambda_guard_error(captured) {
                     return Err(Error::Eval(message.to_string()));
                 }
                 let mut call_scope = Scope::for_call(captured);
@@ -6194,7 +6219,7 @@ impl Evaluator {
                     args.len()
                 )));
             }
-            if let Some(message) = lambda_guard_error(captured, body) {
+            if let Some(message) = self.lambda_guard_error(captured) {
                 return Err(Error::Eval(message.to_string()));
             }
             let mut scope = Scope::for_call(captured);
@@ -6475,7 +6500,7 @@ impl Evaluator {
                                 params.len()
                             )));
                         }
-                        if let Some(message) = lambda_guard_error(&captured, &body) {
+                        if let Some(message) = self.lambda_guard_error(&captured) {
                             return Err(Error::Eval(message.to_string()));
                         }
                         let mut call_scope = Scope::for_call(&captured);
@@ -7112,7 +7137,7 @@ impl Evaluator {
                                 && !converter_is_blocked(&blocked_root_converters, conv_name, value)
                                 && let Value::Lambda(params, body, captured) = lambda
                             {
-                                if let Some(message) = lambda_guard_error(captured, body) {
+                                if let Some(message) = self.lambda_guard_error(captured) {
                                     return Err(Error::Eval(message.to_string()));
                                 }
                                 let mut call_scope = Scope::for_call(captured);
@@ -8078,48 +8103,60 @@ fn const_local_reads_non_const(
 /// Keep const-local lambdas lazy while making a known non-const member read
 /// fail at invocation. The member set contains only values that actually
 /// bound, so unused lambdas and untaken generator branches remain valid.
-fn const_local_lambda_guard(value: Value, message: Option<String>) -> Value {
-    let Some(message) = message else {
-        return value;
-    };
-    if let Value::Lambda(_, body, captured) = &value
-        && let Some(guard) = lambda_guard(captured, body)
-    {
-        guard.set_error(message);
+impl Evaluator {
+    fn register_lambda_guard(&mut self, captured: &Arc<ScopeMap>) {
+        self.lambda_guards.insert(
+            Arc::as_ptr(captured) as usize,
+            LambdaGuardEntry {
+                captured: Arc::downgrade(captured),
+                guard: LambdaGuard::default(),
+            },
+        );
     }
-    value
-}
 
-const LAMBDA_GUARD_PREFIX: &str = "\0pklr:lambda-guard:";
-
-fn lambda_guard_key(body: &Arc<Expr>) -> Arc<str> {
-    format!("{LAMBDA_GUARD_PREFIX}{:p}", Arc::as_ptr(body)).into()
-}
-
-fn lambda_guard(captured: &Arc<ScopeMap>, body: &Arc<Expr>) -> Option<LambdaGuard> {
-    match captured.get(&lambda_guard_key(body)) {
-        Some(Value::LambdaGuard(guard)) => Some(guard.clone()),
-        _ => None,
+    fn lambda_guard(&self, captured: &Arc<ScopeMap>) -> Option<LambdaGuard> {
+        let entry = self.lambda_guards.get(&(Arc::as_ptr(captured) as usize))?;
+        entry
+            .captured
+            .upgrade()
+            .filter(|registered| Arc::ptr_eq(registered, captured))
+            .map(|_| entry.guard.clone())
     }
-}
 
-fn lambda_guard_error(captured: &Arc<ScopeMap>, body: &Arc<Expr>) -> Option<Arc<str>> {
-    lambda_guard(captured, body).and_then(|guard| guard.error())
-}
+    fn lambda_guard_error(&self, captured: &Arc<ScopeMap>) -> Option<Arc<str>> {
+        self.lambda_guard(captured).and_then(|guard| guard.error())
+    }
 
-fn guard_const_local_lambdas(
-    scope: &mut Scope,
-    deferred_lambdas: &[(String, &Property, &Expr, usize)],
-    non_const_members: &HashSet<String>,
-) {
-    for (name, prop, _, _) in deferred_lambdas {
-        let Some(message) = const_local_reads_non_const(prop, non_const_members) else {
-            continue;
+    fn const_local_lambda_guard(&self, value: Value, message: Option<String>) -> Value {
+        let Some(message) = message else {
+            return value;
         };
-        let Some(value) = scope.get(name).cloned() else {
-            continue;
-        };
-        scope.set(name.clone(), const_local_lambda_guard(value, Some(message)));
+        if let Value::Lambda(_, _, captured) = &value
+            && let Some(guard) = self.lambda_guard(captured)
+        {
+            guard.set_error(message);
+        }
+        value
+    }
+
+    fn guard_const_local_lambdas(
+        &self,
+        scope: &mut Scope,
+        deferred_lambdas: &[(String, &Property, &Expr, usize)],
+        non_const_members: &HashSet<String>,
+    ) {
+        for (name, prop, _, _) in deferred_lambdas {
+            let Some(message) = const_local_reads_non_const(prop, non_const_members) else {
+                continue;
+            };
+            let Some(value) = scope.get(name).cloned() else {
+                continue;
+            };
+            scope.set(
+                name.clone(),
+                self.const_local_lambda_guard(value, Some(message)),
+            );
+        }
     }
 }
 

@@ -296,7 +296,6 @@ pub(crate) fn kind_of(value: &Value) -> Kind {
         Value::DataSize(_) => Kind::DataSize,
         Value::Regex(_) => Kind::Regex,
         Value::Lambda(..) => Kind::Function,
-        Value::LambdaGuard(_) => Kind::Function,
         Value::List(_) => Kind::Listing,
         Value::Object(map, None) => {
             if let Some(kind) = builtin_object_kind(map) {
