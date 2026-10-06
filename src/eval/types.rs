@@ -615,7 +615,19 @@ pub(super) fn missing_property_message(
             module_name_of(identity, module_names)
         );
     }
-    let type_name = match source.as_deref() {
+    format!(
+        "Cannot find property `{name}` in object of type `{}`.",
+        object_class_name(source.as_deref(), Some(module_names))
+    )
+}
+
+/// The name Pkl gives the class of an object `source` describes: `Dynamic`,
+/// or `module#Class` for an instance of a class.
+fn object_class_name(
+    source: Option<&ObjectSource>,
+    module_names: Option<&HashMap<String, String>>,
+) -> String {
+    match source {
         Some(ObjectSource {
             type_name: Some(class),
             type_identity,
@@ -624,12 +636,64 @@ pub(super) fn missing_property_message(
             .as_deref()
             .and_then(|identity| identity.strip_suffix(class.as_str())?.strip_suffix('.'))
         {
-            Some(module) => format!("{}#{class}", module_name_of(module, module_names)),
+            Some(module) => {
+                let module = module_names
+                    .and_then(|names| names.get(module).map(String::as_str))
+                    .unwrap_or_else(|| {
+                        let file = module.rsplit(['/', '\\']).next().unwrap_or(module);
+                        file.strip_suffix(".pkl").unwrap_or(file)
+                    });
+                format!("{module}#{class}")
+            }
             None => class.clone(),
         },
         _ => "Dynamic".to_string(),
-    };
-    format!("Cannot find property `{name}` in object of type `{type_name}`.")
+    }
+}
+
+/// The name of `value`'s class as Pkl writes it in error messages.
+pub(super) fn pkl_class_name(value: &Value) -> String {
+    match value {
+        Value::Object(_, source) => object_class_name(source.as_deref(), None),
+        Value::Lambda(params, ..) => format!("Function{}", params.len()),
+        Value::Bool(_) => "Boolean".to_string(),
+        value => value_type_name(value).to_string(),
+    }
+}
+
+/// `value` written on one line as Pkl writes values in error messages.
+pub(super) fn pkl_value_text(value: &Value) -> String {
+    match value {
+        Value::String(s) => format!("{s:?}"),
+        Value::List(items) => format!(
+            "List({})",
+            items
+                .iter()
+                .map(pkl_value_text)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::Object(map, source) => {
+            let class = object_class_name(source.as_deref(), None);
+            let class = class.rsplit('#').next().unwrap_or(&class);
+            if map.is_empty() {
+                return format!("new {class} {{}}");
+            }
+            let members = map
+                .iter()
+                .map(|(name, value)| {
+                    format!(
+                        "{} = {}",
+                        crate::value::display_storage_key(name),
+                        pkl_value_text(value)
+                    )
+                })
+                .collect::<Vec<_>>();
+            format!("new {class} {{ {} }}", members.join("; "))
+        }
+        Value::Lambda(params, ..) => format!("new Function{} {{}}", params.len()),
+        value => value_to_display(value),
+    }
 }
 
 /// The name of the module with identity `uri`: the one it declares, or else

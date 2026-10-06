@@ -1408,6 +1408,177 @@ result = mul.apply(5)
     assert_eq!(json["result"], 15);
 }
 
+#[test]
+fn function_methods() {
+    let json = eval(
+        r#"
+local add = (a, b) -> a + b
+applied = add.apply(1, 2)
+appliedToList = add.applyToList(List(1, 2))
+text = add.toString()
+"#,
+    );
+    assert_eq!(json["applied"], 3);
+    assert_eq!(json["appliedToList"], 3);
+    assert_eq!(json["text"], "new Function2 {}");
+}
+
+#[test]
+fn function_apply_checks_argument_count() {
+    let msg = eval_fails(
+        r#"
+local add = (a, b) -> a + b
+x = add.apply(1, 2, 3)
+"#,
+    );
+    assert!(msg.contains("Expected 2 function arguments but got 3."));
+}
+
+#[test]
+fn module_function_reads_module_properties() {
+    let json = eval(
+        r#"
+x = 2
+local addX = (y) -> y + x
+result = addX.apply(3)
+piped = 3 |> addX
+"#,
+    );
+    assert_eq!(json["result"], 5);
+    assert_eq!(json["piped"], 5);
+}
+
+#[test]
+fn null_safe_function_apply_reads_module_properties() {
+    let json = eval(
+        r#"
+x = 2
+local addX = (y) -> y + x
+result = addX?.apply(3)
+"#,
+    );
+    assert_eq!(json["result"], 5);
+}
+
+#[test]
+fn test_callback_reads_module_properties() {
+    let json = eval(
+        r#"
+import "pkl:test"
+local f = () -> x
+x = 2
+result = test.catchOrNull(f) == null
+"#,
+    );
+    assert_eq!(json["result"], true);
+}
+
+#[test]
+fn pipe_binds_tighter_than_null_coalescing() {
+    let json = eval(
+        r#"
+local add1 = (x) -> x + 1
+a = 42 ?? 21 |> add1
+b = 21 |> add1 ?? 42
+c = 1 + 2 |> add1
+"#,
+    );
+    assert_eq!(json["a"], 42);
+    assert_eq!(json["b"], 22);
+    assert_eq!(json["c"], 4);
+}
+
+#[test]
+fn pipe_into_a_non_function_fails() {
+    let msg = eval_fails("x = 42 |> 21");
+    assert!(msg.contains(
+        "Operator `|>` is not defined for operand types `Int` and `Int`. \
+         Left operand : 42 Right operand: 21"
+    ));
+}
+
+#[test]
+fn amending_a_function_amends_its_result() {
+    let json = eval(
+        r#"
+hidden make = (a) -> new Dynamic { one = a }
+hidden amended = (make) { two = 2 }
+result = amended.apply(1)
+class X {
+  hidden f = () -> new Dynamic { zero = 0 }
+  res = f.apply()
+}
+x = new X { f { amended = true } }
+"#,
+    );
+    assert_eq!(json["result"], serde_json::json!({ "one": 1, "two": 2 }));
+    assert_eq!(
+        json["x"]["res"],
+        serde_json::json!({ "zero": 0, "amended": true })
+    );
+}
+
+#[test]
+fn amending_a_list_fails() {
+    let msg = eval_fails(r#"x = (List(1)) { 2 }"#);
+    assert!(msg.contains("Cannot instantiate, or amend an instance of, external class `List`."));
+}
+
+#[test]
+fn reading_an_amended_list_property_fails() {
+    let msg = eval_fails(
+        r#"
+class C { xs = List(1) }
+result = (new C { xs { 2 } }).xs
+"#,
+    );
+    assert!(msg.contains("Cannot instantiate, or amend an instance of, external class `List`."));
+}
+
+#[test]
+fn mixin_amends_its_argument() {
+    let json = eval(
+        r#"
+local m = new Mixin { b = 2 }
+result = m.apply(new Dynamic { a = 1 })
+"#,
+    );
+    assert_eq!(json["result"], serde_json::json!({ "a": 1, "b": 2 }));
+}
+
+#[test]
+fn mapping_mixin_value_infers_new_as_mixin() {
+    let json = eval(
+        r#"
+result = new Mapping<String, Mixin<Dynamic>> {
+  ["m"] = new { b = 2 }
+}["m"].apply(new Dynamic { a = 1 })
+"#,
+    );
+    assert_eq!(json["result"], serde_json::json!({ "a": 1, "b": 2 }));
+}
+
+#[test]
+fn hidden_members_and_methods() {
+    let json = eval(
+        r#"
+class Multiplier {
+  function mult4(x) = x * 4
+  hidden mult = (x, y) -> x * y
+}
+m = new Multiplier {}
+dynamic = new Dynamic { local function f() = 1 }
+viaHidden = m.mult.apply(2, 3)
+viaMethod = m.mult4(2)
+"#,
+    );
+    assert_eq!(json["viaHidden"], 6);
+    assert_eq!(json["viaMethod"], 8);
+    // Methods and hidden members are not rendered.
+    assert_eq!(json["m"], serde_json::json!({}));
+    assert_eq!(json["dynamic"], serde_json::json!({}));
+}
+
 // ============================================================
 // Method calls on values (future)
 // ============================================================

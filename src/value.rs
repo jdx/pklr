@@ -902,9 +902,22 @@ impl Value {
             Value::Int(n) => json!(n),
             Value::Float(f) => json!(f),
             Value::String(s) => serde_json::Value::String(s.to_string()),
-            Value::Object(map, _) => {
+            Value::Object(map, source) => {
                 let mut obj = serde_json::Map::new();
+                // Methods are stored as function-valued members, but are not
+                // members of the object Pkl renders.
+                let is_method = |name: &str| {
+                    source.as_ref().is_some_and(|source| {
+                        source.entries.iter().any(|entry| {
+                            matches!(entry, crate::parser::Entry::Property(prop)
+                                if prop.is_method && prop.name == name)
+                        })
+                    })
+                };
                 for (k, v) in map.iter() {
+                    if matches!(v, Value::Lambda(..)) && is_method(k) {
+                        continue;
+                    }
                     obj.insert(display_storage_key(k).to_string(), v.to_json());
                 }
                 serde_json::Value::Object(obj)
