@@ -334,6 +334,138 @@ fn output_is_inherited_through_the_amends_chain() {
 
 #[cfg(feature = "native-io")]
 #[test]
+fn inherited_output_keeps_base_lexicals_but_reads_final_members() {
+    let dir = TestTempDir::new("pklr_render_base_output_scope");
+    std::fs::write(dir.path().join("base-lib.pkl"), "label = \"base-import\"\n").unwrap();
+    std::fs::write(
+        dir.path().join("child-lib.pkl"),
+        "label = \"child-import\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("base.pkl"),
+        r#"import "pkl:base" as pkl
+import "base-lib.pkl" as Lib
+local prefix = "base-local"
+class Marker { label = "base-class" }
+function Regex(pattern: String): Regex = pkl.Regex(pattern)
+childValue = "base-member"
+output {
+  value = prefix + ":" + Lib.label + ":" + (new Marker {}).label + ":" + childValue
+  renderer {
+    converters {
+      [Regex] = (value) -> value.pattern
+      [String] = (value) -> value + "!"
+    }
+  }
+}
+"#,
+    )
+    .unwrap();
+    let child = dir.path().join("child.pkl");
+    std::fs::write(
+        &child,
+        r#"amends "base.pkl"
+import "child-lib.pkl" as Lib
+local prefix = "child-local"
+local class Marker { label = "child-class" }
+childValue = "child-member"
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        pklr::eval_to_json(&child).unwrap(),
+        serde_json::json!("base-local:base-import:base-class:child-member!")
+    );
+}
+
+#[cfg(feature = "native-io")]
+#[test]
+fn inherited_output_captures_transitive_type_aliases() {
+    let dir = TestTempDir::new("pklr_render_inherited_output_type_aliases");
+    std::fs::write(
+        dir.path().join("base.pkl"),
+        r#"class Marker { label = "base" }
+typealias Rendered = Intermediate
+typealias Intermediate = Marker
+output {
+  renderer {
+    converters {
+      [Any] = (value) -> if (value is Rendered) "base" else "wrong"
+    }
+  }
+}
+"#,
+    )
+    .unwrap();
+    let child = dir.path().join("child.pkl");
+    std::fs::write(
+        &child,
+        "amends \"base.pkl\"\noutput { value = new Marker {} }\n",
+    )
+    .unwrap();
+
+    assert_eq!(
+        pklr::eval_to_json(&child).unwrap(),
+        serde_json::json!("base")
+    );
+}
+
+#[cfg(feature = "native-io")]
+#[test]
+fn inherited_output_aliases_keep_their_base_scope() {
+    let dir = TestTempDir::new("pklr_render_inherited_output_alias_scope");
+    std::fs::write(
+        dir.path().join("base.pkl"),
+        r#"typealias Alias = String
+output {
+  renderer {
+    converters { [String] = (value) -> value as Alias }
+  }
+}
+"#,
+    )
+    .unwrap();
+    let child = dir.path().join("child.pkl");
+    std::fs::write(
+        &child,
+        "amends \"base.pkl\"\nlocal typealias String = Int\noutput { value = \"child\" }\n",
+    )
+    .unwrap();
+
+    assert_eq!(
+        pklr::eval_to_json(&child).unwrap(),
+        serde_json::json!("child")
+    );
+}
+
+#[cfg(feature = "native-io")]
+#[test]
+fn converter_key_uses_builtin_type_when_a_function_has_its_name() {
+    let (_dir, path) = module_file(
+        "pklr_render_converter_builtin_function_name",
+        r#"import "pkl:base" as base
+function Regex(pattern: String): Regex = base.Regex(pattern)
+pattern = Regex("x")
+output {
+  renderer {
+    converters {
+      [Regex] = (value) -> value.pattern + "!"
+    }
+  }
+}
+"#,
+    );
+
+    assert_eq!(
+        pklr::eval_to_json(&path).unwrap(),
+        serde_json::json!({"pattern": "x!"})
+    );
+}
+
+#[cfg(feature = "native-io")]
+#[test]
 fn output_super_text_uses_the_inherited_value_and_renderer() {
     let dir = TestTempDir::new("pklr_render_inherited_super_text");
     std::fs::write(

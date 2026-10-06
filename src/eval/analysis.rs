@@ -2262,11 +2262,19 @@ pub(super) fn with_listing_locals(expr: &Expr, locals: &[(String, Expr)]) -> Exp
     expr
 }
 
-/// Adds to `refs` every name `ty` names as a type or its constraints read.
-fn collect_type_names(ty: &crate::parser::TypeExpr, refs: &mut HashSet<String>) {
+/// Names a type expression needs when it is resolved later in a detached
+/// scope. This includes roots named in the type itself and values read by a
+/// constraint.
+pub(super) fn type_reference_names(ty: &crate::parser::TypeExpr) -> HashSet<String> {
     let mut collected = Names::default();
     collect_type_refs(ty, &mut collected, &Names::default(), None, None);
-    collected.add_all_to(refs);
+    let mut refs = HashSet::default();
+    collected.add_all_to(&mut refs);
+    refs
+}
+
+fn collect_type_names(ty: &crate::parser::TypeExpr, refs: &mut HashSet<String>) {
+    refs.extend(type_reference_names(ty));
 }
 
 /// Adds to `refs` every name `expr` reads or names as a type.

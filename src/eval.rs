@@ -196,6 +196,7 @@ struct MappingInheritedDefault {
 struct ModuleScopeSnapshot {
     values: ScopeMap,
     type_aliases: TypeAliasMap,
+    module_identities: IndexMap<String, String>,
     late_properties: Vec<Arc<Property>>,
 }
 
@@ -2998,6 +2999,7 @@ impl Evaluator {
             ModuleScopeSnapshot {
                 values: scope.flatten(),
                 type_aliases: scope.flatten_type_aliases(),
+                module_identities: scope.flatten_module_identities(),
                 late_properties: effective_late_properties.into_values().collect(),
             },
         );
@@ -5801,15 +5803,28 @@ impl Evaluator {
                         Arc::new(Expr::Throw(Box::new(Expr::String(message.clone().into()))))
                     })
                     .unwrap_or(body);
+                // `ModuleOutput.text` is the only consumer of this hidden
+                // binding, reached through `super.text`. In particular, a
+                // renderer converter that merely constructs a typed value
+                // must not retain the output's implicit module value through
+                // its type-resolution capture.
+                let captures_output_text_context = names.contains("super");
                 let captured = if names.contains("outer") || names.contains(NAMES_A_TYPE) {
-                    scope.flatten()
+                    let mut captured = scope.flatten();
+                    if !captures_output_text_context {
+                        captured.shift_remove(MODULE_OUTPUT_TEXT_CONTEXT);
+                    }
+                    captured
                 } else {
-                    scope.flatten_names(names.iter().map(String::as_str).chain([
-                        "this",
-                        "module",
-                        "super",
-                        MODULE_OUTPUT_TEXT_CONTEXT,
-                    ]))
+                    scope.flatten_names(
+                        names
+                            .iter()
+                            .map(String::as_str)
+                            .chain(["this", "module", "super"])
+                            .chain(
+                                captures_output_text_context.then_some(MODULE_OUTPUT_TEXT_CONTEXT),
+                            ),
+                    )
                 };
                 let captured = Arc::new(captured);
                 self.register_lambda_guard(&captured);
