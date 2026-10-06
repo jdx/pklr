@@ -1572,8 +1572,8 @@ result = (base) {
 }
 
 #[test]
-fn listing_body_amendment_applies_index_updates() {
-    let json = eval(
+fn list_body_amendment_rejects_external_list() {
+    let error = eval_fails(
         r#"
 base { items = List("old", "stay") }
 result = (base) {
@@ -1584,15 +1584,12 @@ result = (base) {
 }
 "#,
     );
-    assert_eq!(
-        json["result"]["items"],
-        serde_json::json!(["new", "stay", "appended"])
-    );
+    assert!(error.contains("Cannot instantiate, or amend an instance of, external class `List`."));
 }
 
 #[test]
-fn listing_index_body_amends_existing_element() {
-    let json = eval(
+fn list_index_body_amendment_rejects_external_list() {
+    let error = eval_fails(
         r#"
 base {
   items = List(new Dynamic {
@@ -1610,10 +1607,7 @@ result = (base) {
 }
 "#,
     );
-    assert_eq!(
-        json["result"]["items"][0],
-        serde_json::json!({"kept": 1, "changed": 2, "added": 3})
-    );
+    assert!(error.contains("Cannot instantiate, or amend an instance of, external class `List`."));
 }
 
 #[test]

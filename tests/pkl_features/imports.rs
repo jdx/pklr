@@ -864,7 +864,7 @@ result = (Lib.value) {
 }
 
 #[test]
-fn repeated_default_body_amendments_apply_once() {
+fn repeated_default_body_amendments_reject_external_lists() {
     let temp = TestTempDir::new("pklr_test_repeated_default_body_amendments");
     let dir = temp.path();
     std::fs::write(
@@ -904,11 +904,10 @@ result = (Middle.value) {
     )
     .unwrap();
 
-    let json = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
-    assert_eq!(
-        json["result"]["entry"]["items"],
-        serde_json::json!(["middle", "main"])
-    );
+    let error = pklr::eval_to_json(&dir.join("main.pkl"))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Cannot instantiate, or amend an instance of, external class `List`."));
 }
 
 #[test]

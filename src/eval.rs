@@ -3054,6 +3054,26 @@ impl Evaluator {
                 .filter(|value| !is_null_value(value))
                 .or(nullable_default.as_ref())
                 .or(scoped);
+            if let Some(Value::List(items)) = amendment_base
+                && matches!(items.kind(), ListKind::List | ListKind::Set)
+            {
+                let class = if items.kind() == ListKind::List {
+                    "List"
+                } else {
+                    "Set"
+                };
+                return Err(Error::Eval(format!(
+                    "Cannot instantiate, or amend an instance of, external class `{class}`."
+                )));
+            }
+            if let Some(function @ Value::Lambda(params, ..)) = amendment_base {
+                return Ok(Some(amended_function(
+                    params.len(),
+                    function.clone(),
+                    body,
+                    scope,
+                )));
+            }
             if matches!(amendment_base, Some(Value::List(_)))
                 || (!matches!(amendment_base, Some(Value::Object(..)))
                     && (prop.type_ann.as_ref().is_some_and(type_is_listing)
@@ -5929,6 +5949,20 @@ impl Evaluator {
                         Ok(Value::Object(Arc::new(map), Some(Arc::new(source))))
                     }
                     Some("Dynamic") => self.eval_entries(entries, scope, depth + 1),
+                    // `new Mixin { body }` is a function that amends its
+                    // argument with `body`.
+                    Some("Mixin") => {
+                        let arg = "\0pklr:arg0";
+                        Ok(Value::Lambda(
+                            Arc::new([arg.to_string()]),
+                            Arc::new(Expr::Binop(
+                                BinOp::Add,
+                                Box::new(Expr::Ident(arg.into())),
+                                Box::new(Expr::ObjectBody(entries.clone())),
+                            )),
+                            Arc::new(scope.flatten()),
+                        ))
+                    }
                     _ => {
                         // Check if type name matches a class in scope (supports dotted names)
                         let base = type_name.as_ref().and_then(|name| {
@@ -6153,20 +6187,31 @@ impl Evaluator {
                         if let Some(message) = poisoned_member_error(source.as_deref(), field) {
                             return Err(Error::Eval(message));
                         }
-                        let val = map.get(field.as_str()).cloned().ok_or_else(|| {
-                            Error::Eval(
-                                missing_member_error(source, obj_expr, field, scope)
-                                    .unwrap_or_else(|| {
-                                        missing_property_message(
-                                            source,
-                                            obj_expr,
-                                            field,
-                                            scope,
-                                            &self.module_names,
-                                        )
-                                    }),
-                            )
-                        })?;
+                        let hidden = || {
+                            let source = source.as_ref()?;
+                            source
+                                .evaluated_properties
+                                .contains(field)
+                                .then(|| source.scope().get(field.as_str()).cloned())?
+                        };
+                        let val = map
+                            .get(field.as_str())
+                            .cloned()
+                            .or_else(hidden)
+                            .ok_or_else(|| {
+                                Error::Eval(
+                                    missing_member_error(source, obj_expr, field, scope)
+                                        .unwrap_or_else(|| {
+                                            missing_property_message(
+                                                source,
+                                                obj_expr,
+                                                field,
+                                                scope,
+                                                &self.module_names,
+                                            )
+                                        }),
+                                )
+                            })?;
                         self.warn_if_deprecated_access(source, field);
                         Ok(val)
                     }
@@ -6419,6 +6464,17 @@ impl Evaluator {
             for a in args {
                 evaled_args.push(self.eval_expr(a, scope, depth + 1)?);
             }
+            if let Value::Lambda(..) = obj {
+                match (method.as_str(), evaled_args.as_slice()) {
+                    ("apply", _) => {
+                        return self.apply_function(&obj, &evaled_args, scope, depth);
+                    }
+                    ("applyToList", _) => {
+                        return self.apply_to_list(&obj, &evaled_args, scope, depth);
+                    }
+                    _ => {}
+                }
+            }
             if let Some(result) = self.eval_method_call(&obj, method, &evaled_args, depth)? {
                 return Ok(result);
             }
@@ -6445,6 +6501,17 @@ impl Evaluator {
             let mut evaled_args = Vec::new();
             for a in args {
                 evaled_args.push(self.eval_expr(a, scope, depth + 1)?);
+            }
+            if let Value::Lambda(..) = obj {
+                match (method.as_str(), evaled_args.as_slice()) {
+                    ("apply", _) => {
+                        return self.apply_function(&obj, &evaled_args, scope, depth);
+                    }
+                    ("applyToList", _) => {
+                        return self.apply_to_list(&obj, &evaled_args, scope, depth);
+                    }
+                    _ => {}
+                }
             }
             if let Some(result) = self.eval_method_call(&obj, method, &evaled_args, depth)? {
                 return Ok(result);
@@ -6500,7 +6567,7 @@ impl Evaluator {
                         return Err(Error::Eval("catch() expects one argument".into()));
                     };
                     let fun = self.eval_expr(fun, scope, depth + 1)?;
-                    return match self.invoke_lambda(&fun, &[], depth) {
+                    return match self.apply_function(&fun, &[], scope, depth) {
                         Err(error) if is_evaluator_control_error(&error) => Err(error),
                         Err(error) => Ok(Value::String(caught_error_message(error).into())),
                         Ok(_) if name == TEST_CATCH => Err(Error::Eval(
@@ -6874,9 +6941,78 @@ impl Evaluator {
                 }
                 Ok(Some(self.eval_expr(body, &call_scope, depth + 1)?))
             }
+            (Value::Lambda(..), "toString") => Ok(Some(Value::String(pkl_value_text(obj).into()))),
 
             _ => Ok(None), // not a known method
         }
+    }
+
+    /// Call `function` with `args` on behalf of code evaluated in `caller`.
+    /// Like a direct call, the function sees the members of the caller's
+    /// `this` it did not capture: a module-level function created before the
+    /// module's properties were evaluated reads them from there.
+    fn apply_function(
+        &mut self,
+        function: &Value,
+        args: &[Value],
+        caller: &Scope,
+        depth: usize,
+    ) -> Result<Value> {
+        let Value::Lambda(params, body, captured) = function else {
+            return Err(Error::Eval("expected a function".into()));
+        };
+        if params.len() != args.len() {
+            return Err(Error::Eval(format!(
+                "Expected {} function arguments but got {}.",
+                params.len(),
+                args.len()
+            )));
+        }
+        if let Some(message) = self.lambda_guard_error(captured) {
+            return Err(Error::Eval(message.to_string()));
+        }
+        let mut call_scope = Scope::for_call(captured);
+        if let Some(Value::Object(this_map, _)) = caller.get("this") {
+            for (k, v) in this_map.iter() {
+                if call_scope.get(k).is_none() {
+                    call_scope.set(k, v.clone());
+                }
+            }
+        }
+        for (param, arg) in params.iter().zip(args) {
+            call_scope.declare(param, arg.clone());
+        }
+        self.eval_expr(body, &call_scope, depth + 1)
+    }
+
+    /// `Function.applyToList` accepts a `List`, but not the distinct `Listing`
+    /// and `Set` collection kinds.
+    fn apply_to_list(
+        &mut self,
+        function: &Value,
+        args: &[Value],
+        caller: &Scope,
+        depth: usize,
+    ) -> Result<Value> {
+        let [arg] = args else {
+            return Err(Error::Eval(format!(
+                "Expected 1 function arguments but got {}.",
+                args.len()
+            )));
+        };
+        let Value::List(items) = arg else {
+            return Err(Error::Eval(format!(
+                "Expected value of type `List`, but got type `{}`.",
+                pkl_class_name(arg)
+            )));
+        };
+        if items.kind() != ListKind::List {
+            return Err(Error::Eval(format!(
+                "Expected value of type `List`, but got type `{}`.",
+                pkl_class_name(arg)
+            )));
+        }
+        self.apply_function(function, items, caller, depth)
     }
 
     fn invoke_lambda(&mut self, lambda: &Value, args: &[Value], depth: usize) -> Result<Value> {
@@ -6918,12 +7054,16 @@ impl Evaluator {
                 source.type_identity.as_deref().unwrap_or_default()
             )));
         }
-        if let Value::Null
-        | Value::Int(_)
-        | Value::Float(_)
-        | Value::Bool(_)
-        | Value::String(_)
-        | Value::Lambda(..) = base
+        if let Value::Lambda(params, ..) = &base {
+            return Ok(amended_function(
+                params.len(),
+                base.clone(),
+                overlay_entries,
+                scope,
+            ));
+        }
+        if let Value::Null | Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::String(_) =
+            base
         {
             return Err(Error::Eval(format!(
                 "Cannot instantiate, or amend an instance of, external class `{}`.",
@@ -7004,6 +7144,17 @@ impl Evaluator {
                 source.captured = SourceScope::lazy(scope, Vec::new(), Vec::new());
                 return Ok(Value::Object(Arc::new(amended), Some(Arc::new(source))));
             }
+        }
+        // Values of external classes have no members to amend.
+        let external_class = match &base {
+            Value::List(items) if items.kind() == ListKind::List => Some("List"),
+            Value::List(items) if items.kind() == ListKind::Set => Some("Set"),
+            _ => None,
+        };
+        if let Some(class) = external_class {
+            return Err(Error::Eval(format!(
+                "Cannot instantiate, or amend an instance of, external class `{class}`."
+            )));
         }
         if let Value::List(existing) = base {
             if overlay_entries.iter().any(|entry| {
@@ -7112,28 +7263,8 @@ impl Evaluator {
             && let Expr::ObjectBody(overlay_entries) = right
         {
             let base = self.eval_expr(left, scope, depth + 1)?;
-            // Amending a function amends its result: `f { ... }` is
-            // `(args) -> f.apply(args) { ... }`.
             if let Value::Lambda(params, ..) = &base {
-                let function = "\0amended_function";
-                let call = Expr::Call(
-                    Box::new(Expr::Field(
-                        Box::new(Expr::Ident(function.into())),
-                        "apply".into(),
-                    )),
-                    params.iter().map(|p| Expr::Ident(p.clone())).collect(),
-                );
-                let lambda = Expr::Lambda(
-                    params.to_vec().into(),
-                    Arc::new(Expr::Binop(
-                        BinOp::Add,
-                        Box::new(call),
-                        Box::new(Expr::ObjectBody(overlay_entries.clone())),
-                    )),
-                );
-                let mut lambda_scope = scope.child();
-                lambda_scope.set(function, base);
-                return self.eval_expr(&lambda, &lambda_scope, depth + 1);
+                return Ok(amended_function(params.len(), base, overlay_entries, scope));
             }
             return self.eval_value_amendment(base, overlay_entries, scope, depth);
         }
@@ -7162,23 +7293,23 @@ impl Evaluator {
             BinOp::Pipe => {
                 // x |> f  is equivalent to  f(x)
                 match r {
-                    Value::Lambda(params, body, captured) => {
+                    Value::Lambda(ref params, ..) => {
                         if params.len() != 1 {
                             return Err(Error::Eval(format!(
                                 "pipe operator requires a single-parameter function, got {}",
                                 params.len()
                             )));
                         }
-                        if let Some(message) = self.lambda_guard_error(&captured) {
-                            return Err(Error::Eval(message.to_string()));
-                        }
-                        let mut call_scope = Scope::for_call(&captured);
-                        call_scope.declare(params[0].clone(), l);
-                        self.eval_expr(&body, &call_scope, depth + 1)
+                        self.apply_function(&r, &[l], scope, depth)
                     }
-                    _ => Err(Error::Eval(
-                        "pipe operator requires a function on the right side".into(),
-                    )),
+                    r => Err(Error::Eval(format!(
+                        "Operator `|>` is not defined for operand types `{}` and `{}`. \
+                         Left operand : {} Right operand: {}",
+                        pkl_class_name(&l),
+                        pkl_class_name(&r),
+                        pkl_value_text(&l),
+                        pkl_value_text(&r)
+                    ))),
                 }
             }
             _ => apply_binop(op, l, r),
@@ -7381,7 +7512,7 @@ impl Evaluator {
                         let base = match (map.get(&storage_key), &explicit_default) {
                             (Some(existing @ Value::List(_)), _) => existing.clone(),
                             (_, Some(default @ Value::List(_))) => default.clone(),
-                            _ => Value::List(Vec::new().into()),
+                            _ => Value::List(ListValue::new(ListKind::Listing, Vec::new())),
                         };
                         let val = self.eval_value_amendment(base, body, &entry_scope, depth)?;
                         map.insert(storage_key, val);
@@ -7410,6 +7541,17 @@ impl Evaluator {
                         return Err(Error::Eval(format!(
                             "Object of type `{value_type}` cannot have an element."
                         )));
+                    }
+                    // `new { ... }` for a `Mixin` value is a mixin, not an object.
+                    if let Expr::New(None, body, params) = val_expr
+                        && expanded_value_type_names.iter().any(|name| {
+                            selected_value_type(name) && mapping_value_type_base(name) == "Mixin"
+                        })
+                    {
+                        let mixin = Expr::New(Some("Mixin".into()), body.clone(), params.clone());
+                        let val = self.eval_expr(&mixin, &entry_scope, depth + 1)?;
+                        map.insert(storage_key, val);
+                        continue;
                     }
                     let type_default = match val_expr {
                         Expr::ObjectBody(body) => select_mapping_type_default(type_defaults, body)
@@ -8514,6 +8656,29 @@ fn inherit_stdlib_module(name: &str, base_obj: &mut ObjectMap, scope: &mut Scope
             scope.set(member, value.clone());
         }
     }
+}
+
+/// The function `(function) { body }` evaluates to: one that calls `function`
+/// with its `arity` arguments and amends the result with `body`, evaluated
+/// where the amendment is written.
+fn amended_function(arity: usize, function: Value, body: &Body, scope: &Scope) -> Value {
+    const FUNCTION: &str = "\0pklr:amended-function";
+    let params: Vec<String> = (0..arity).map(|i| format!("\0pklr:arg{i}")).collect();
+    let call = Expr::Call(
+        Box::new(Expr::Ident(FUNCTION.into())),
+        params.iter().cloned().map(Expr::Ident).collect(),
+    );
+    let mut captured = scope.flatten();
+    captured.insert(FUNCTION.into(), function);
+    Value::Lambda(
+        params.into(),
+        Arc::new(Expr::Binop(
+            BinOp::Add,
+            Box::new(call),
+            Box::new(Expr::ObjectBody(body.clone())),
+        )),
+        Arc::new(captured),
+    )
 }
 
 fn stdlib_module(name: &str) -> Value {
