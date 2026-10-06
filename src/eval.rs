@@ -177,6 +177,10 @@ pub struct Evaluator {
     /// Used to deduplicate `@Deprecated` warnings so a deprecated property
     /// referenced inside a loop or template doesn't flood stderr.
     warned_deprecated: std::collections::HashSet<(String, Option<String>)>,
+    /// Class identities currently being materialized as implicit typed
+    /// defaults. This makes self- and mutually-recursive defaults fail
+    /// cleanly instead of exhausting the process stack.
+    active_typed_defaults: HashSet<String>,
     /// Names declared by `module a.b.C` headers, by module identity (see
     /// `module_type_namespace`), for error messages.
     module_names: HashMap<String, String>,
@@ -210,12 +214,42 @@ fn rendered_member_failure(value: &Value) -> Option<&str> {
     }
 }
 
+/// Return a deferred member error when that exact member is read.
+fn poisoned_member_error(source: Option<&ObjectSource>, field: &str) -> Option<String> {
+    source
+        .and_then(|source| source.poisoned_members.as_ref())
+        .and_then(|members| members.get(field))
+        .map(|member| member.message.clone())
+}
+
 /// Whether `prop` reads the module's `super`, rather than an object's own
 /// `super` in a nested body. Inherited properties with a module-super read
 /// retain the value computed in their defining module when a child overrides
 /// other members.
 fn property_reads_module_super(prop: &Property) -> bool {
     prop.value.as_ref().is_some_and(expr_reads_module_super)
+}
+
+/// Check object members copied at runtime (by a spread or generator) against
+/// immutable members of the receiver they amend. A temporary property models
+/// the assignment performed by copying the value into the receiver.
+fn immutable_copied_member_error<'a>(
+    names: impl IntoIterator<Item = &'a Arc<str>>,
+    inherited: &ObjectSource,
+) -> Option<String> {
+    names.into_iter().find_map(|name| {
+        inherited.entries.iter().find_map(|entry| match entry {
+            Entry::Property(prop) if prop.name == **name => immutable_member_error(
+                &Property {
+                    value: Some(Expr::Null),
+                    modifiers: Vec::new(),
+                    ..prop.as_ref().clone()
+                },
+                prop,
+            ),
+            _ => None,
+        })
+    })
 }
 
 fn expr_reads_module_super(expr: &Expr) -> bool {
@@ -686,6 +720,7 @@ impl Evaluator {
             output_sets_omit_nulls: false,
             output_format: render::RendererKind::Json,
             warned_deprecated: std::collections::HashSet::default(),
+            active_typed_defaults: HashSet::default(),
             module_names: HashMap::default(),
         }
     }
@@ -838,6 +873,7 @@ impl Evaluator {
         self.output_sets_value = false;
         self.output_sets_omit_nulls = false;
         self.prefetch = prefetch::PrefetchState::new(self.cancel.clone());
+        self.active_typed_defaults.clear();
         self.module_names.clear();
     }
 
@@ -1576,6 +1612,9 @@ impl Evaluator {
             return Err(Error::Eval("undefined variable: super".into()));
         };
         if let Some(source) = source {
+            if let Some(message) = poisoned_member_error(Some(source.as_ref()), field) {
+                return Err(Error::Eval(message));
+            }
             let entry = source
                 .entries
                 .iter()
@@ -2216,11 +2255,12 @@ impl Evaluator {
                             &base_scope,
                             depth,
                         )?;
-                        scope.set(name, defaults);
-                        // Remove inherited class definitions from base output —
-                        // they were included at depth > 0 for dotted access but
-                        // should not appear in the amending module's data output.
-                        base_obj.shift_remove(name.as_str());
+                        scope.set(name, defaults.clone());
+                        if depth == 0 {
+                            base_obj.shift_remove(name.as_str());
+                        } else {
+                            base_obj.insert(name.as_str().into(), defaults.clone());
+                        }
                     }
                     // Extract converters from the base module's output block
                     // (the amending module inherits them; child overrides if present).
@@ -2309,8 +2349,12 @@ impl Evaluator {
                                     &base_scope,
                                     depth,
                                 )?;
-                                scope.set(cls_name, defaults);
-                                base_obj.shift_remove(cls_name.as_str());
+                                scope.set(cls_name, defaults.clone());
+                                if depth == 0 {
+                                    base_obj.shift_remove(cls_name.as_str());
+                                } else {
+                                    base_obj.insert(cls_name.as_str().into(), defaults.clone());
+                                }
                             }
                             Entry::TypeAlias(name, ty) => {
                                 self.eval_type_alias(name, ty, &mut scope);
@@ -2382,8 +2426,12 @@ impl Evaluator {
                             &base_scope,
                             depth,
                         )?;
-                        scope.set(cls_name, defaults);
-                        base_obj.shift_remove(cls_name.as_str());
+                        scope.set(cls_name, defaults.clone());
+                        if depth == 0 {
+                            base_obj.shift_remove(cls_name.as_str());
+                        } else {
+                            base_obj.insert(cls_name.as_str().into(), defaults.clone());
+                        }
                     }
                     if let Entry::Property(prop) = entry
                         && !has_modifier(&prop.modifiers, Modifier::Local)
@@ -2405,6 +2453,30 @@ impl Evaluator {
         let super_bound = super_members.is_some();
         if let Some(members) = super_members {
             scope.set("super", Value::Object(Arc::new(members), None));
+        }
+        // Properties of an amending module are object members. Their modifier
+        // applicability is a declaration error, so it must not depend on
+        // whether a narrowed import evaluates that property successfully.
+        if module.amends.is_some() {
+            for entry in module.body.iter() {
+                let Entry::Property(prop) = entry else {
+                    continue;
+                };
+                if has_modifier(&prop.modifiers, Modifier::Local) {
+                    continue;
+                }
+                if has_modifier(&prop.modifiers, Modifier::Fixed) {
+                    return Err(Error::Eval(
+                        "Modifier `fixed` is not applicable to object members.".into(),
+                    ));
+                }
+                if has_modifier(&prop.modifiers, Modifier::Const) {
+                    return Err(Error::Eval(
+                        "Modifier `const` can only be applied to object members that are also `local`."
+                            .into(),
+                    ));
+                }
+            }
         }
         let requested_eval_fields = requested_output_fields.as_ref().map(|fields| {
             let mut dependency_entries = late_inherited_properties
@@ -2586,20 +2658,12 @@ impl Evaluator {
                             Err(error) => return Err(error),
                         };
                         if let Some(v) = val {
-                            // const/fixed: error if overriding an immutable property from base
-                            if (has_modifier(mods, Modifier::Const)
-                                || has_modifier(mods, Modifier::Fixed))
-                                && base_obj.contains_key(prop.name.as_str())
+                            if let Some(message) = late_inherited_properties
+                                .iter()
+                                .filter(|inherited| inherited.name == prop.name)
+                                .find_map(|inherited| immutable_member_error(prop, inherited))
                             {
-                                let kind = if has_modifier(mods, Modifier::Const) {
-                                    "const"
-                                } else {
-                                    "fixed"
-                                };
-                                return Err(Error::Eval(format!(
-                                    "cannot override {kind} property '{}'",
-                                    prop.name
-                                )));
+                                return Err(Error::Eval(message));
                             }
                             // Always add to scope so other properties can reference it
                             scope.declare(&prop.name, v.clone());
@@ -2862,6 +2926,13 @@ impl Evaluator {
             }
         }
 
+        // A top-level amending or extending module renders data, not the
+        // classes it inherited. An imported module keeps those classes so
+        // dotted access (for example `child.Person`) remains available.
+        if depth == 0 {
+            out.retain(|name, _| !inherited_type_names.contains(&**name));
+        }
+
         // At the top level (depth 0), strip class definitions and lambdas from
         // the serialized output — they're schema/functions, not data.
         // Imported modules (depth > 0) keep them so dotted access works
@@ -3073,7 +3144,33 @@ impl Evaluator {
             return Ok(Some(val));
         }
         if let Some(ty) = &prop.type_ann {
+            if let Some(message) = type_default_error(ty, scope) {
+                return Err(Error::Eval(message));
+            }
             let mut default = type_default_value(ty, scope);
+            // A class used as a property's implicit default denotes a fresh
+            // instance, not its unchecked class template. Rebuild it so
+            // member failures and declared types are checked before the
+            // property can render.
+            if let Some(Value::Object(map, Some(source))) = default.as_ref()
+                && source.type_name.is_some()
+            {
+                let class_identity = source
+                    .type_identity
+                    .clone()
+                    .or_else(|| source.type_name.clone())
+                    .expect("typed class defaults always have an identity or name");
+                if !self.active_typed_defaults.insert(class_identity.clone()) {
+                    return Err(Error::Eval("recursive typed default".into()));
+                }
+                let instance = self.eval_amended_object(map, source, &[], scope, depth);
+                self.active_typed_defaults.remove(&class_identity);
+                let instance = instance?;
+                if let Some(message) = rendered_member_failure(&instance) {
+                    return Err(Error::Eval(message.to_string()));
+                }
+                default = Some(instance);
+            }
             if let Some(default) = &mut default {
                 apply_mapping_type_annotation(default, Some(ty));
             }
@@ -3856,6 +3953,12 @@ impl Evaluator {
                     check_iterable(&val)?;
                     match val {
                         Value::Object(m, source) => {
+                            if let Some(inherited) = inherited_source
+                                && let Some(message) =
+                                    immutable_copied_member_error(m.keys(), inherited)
+                            {
+                                return Err(Error::Eval(message));
+                            }
                             drop(active_scope);
                             entry_owners.release_this(&this_aliases);
                             props_extend_mapping(
@@ -3907,6 +4010,12 @@ impl Evaluator {
                             }),
                         )?;
                         if let Value::Object(m, source) = body_val {
+                            if let Some(inherited) = inherited_source
+                                && let Some(message) =
+                                    immutable_copied_member_error(m.keys(), inherited)
+                            {
+                                return Err(Error::Eval(message));
+                            }
                             if track_dynamic_members {
                                 record_generated_members(
                                     defined_by_layer.get_or_insert_default(),
@@ -3971,6 +4080,12 @@ impl Evaluator {
                             }),
                         )?;
                         if let Value::Object(m, source) = body_val {
+                            if let Some(inherited) = inherited_source
+                                && let Some(message) =
+                                    immutable_copied_member_error(m.keys(), inherited)
+                            {
+                                return Err(Error::Eval(message));
+                            }
                             if track_dynamic_members {
                                 record_generated_members(
                                     defined_by_layer.get_or_insert_default(),
@@ -4024,6 +4139,12 @@ impl Evaluator {
                             }),
                         )?;
                         if let Value::Object(m, source) = else_val {
+                            if let Some(inherited) = inherited_source
+                                && let Some(message) =
+                                    immutable_copied_member_error(m.keys(), inherited)
+                            {
+                                return Err(Error::Eval(message));
+                            }
                             if track_dynamic_members {
                                 record_generated_members(
                                     defined_by_layer.get_or_insert_default(),
@@ -4679,7 +4800,12 @@ impl Evaluator {
                 }
                 let receiver_constraint = with_constraint_receiver(constraint, &constraint_scope);
                 let constraint = receiver_constraint.as_ref().unwrap_or(constraint);
-                let result = self.eval_expr(constraint, &constraint_scope, depth + 1)?;
+                let mut result = self.eval_expr(constraint, &constraint_scope, depth + 1)?;
+                // `Listing(isSorted)` names a predicate function and applies
+                // it to the value being checked.
+                if matches!(result, Value::Lambda(..)) {
+                    result = self.invoke_lambda(&result, std::slice::from_ref(val), depth + 1)?;
+                }
                 Ok(is_truthy(&result))
             }
             TypeExpr::Nullable(inner) => {
@@ -4892,6 +5018,12 @@ impl Evaluator {
         current_scope: &Scope,
         depth: usize,
     ) -> Result<Value> {
+        // Class defaults can recursively materialize more class defaults
+        // without passing through `eval_expr`. Keep that path under the same
+        // depth ceiling as ordinary expression evaluation.
+        if depth > self.max_depth {
+            return Err(Error::Eval("maximum recursion depth exceeded".into()));
+        }
         // A module object's source can carry only error metadata. It has no
         // entries to rebuild the object from, so amend the evaluated members.
         if base_source.is_metadata_only() {
@@ -4936,6 +5068,15 @@ impl Evaluator {
             self.amend_prototype_members(prototype, overlay_entries, &mut amendment_scope)
         });
         let overlay_entries = rewritten_overlay.as_deref().unwrap_or(overlay_entries);
+        let overlay_assigned_properties = overlay_entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Property(prop) if prop.value.is_some() || prop.body.is_some() => {
+                    Some(prop.name.as_str())
+                }
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
         let amendment_captured = Arc::new(CapturedScope {
             body_members: overlay_entries
                 .iter()
@@ -4948,6 +5089,18 @@ impl Evaluator {
         let mut overlay_by_name: FxIndexMap<&str, &Entry> = FxIndexMap::default();
         for entry in overlay_entries {
             if let Entry::Property(prop) = entry {
+                if let Some(message) = base_entries
+                    .iter()
+                    .filter_map(|base| match base {
+                        Entry::Property(inherited) if inherited.name == prop.name => {
+                            Some(inherited)
+                        }
+                        _ => None,
+                    })
+                    .find_map(|inherited| immutable_member_error(prop, inherited))
+                {
+                    return Err(Error::Eval(message));
+                }
                 overlay_by_name.insert(prop.name.as_str(), entry);
             }
         }
@@ -5145,6 +5298,7 @@ impl Evaluator {
                 _ => None,
             })
             .collect::<HashSet<_>>();
+        let mut type_failures = IndexMap::new();
         if let Value::Object(map, source) = &result {
             let mut member_scope: Option<Scope> = None;
             for entry in base_entries.iter() {
@@ -5192,14 +5346,38 @@ impl Evaluator {
                 if type_is_runtime_checkable(type_ann, check_scope)
                     && !self.eval_type_check(value, type_ann, check_scope, depth + 1)?
                 {
-                    return Err(Error::Eval(format!(
+                    let message = format!(
                         "property '{}' expected {}, got {}",
                         prop.name,
                         display_type_expr(type_ann),
                         value_type_name(value)
-                    )));
+                    );
+                    if overlay_assigned_properties.contains(prop.name.as_str()) {
+                        return Err(Error::Eval(message));
+                    }
+                    type_failures.insert(
+                        prop.name.clone(),
+                        PoisonedMember {
+                            message,
+                            rendered: !has_modifier(&prop.modifiers, Modifier::Hidden),
+                        },
+                    );
                 }
             }
+        }
+        if !type_failures.is_empty()
+            && let Value::Object(map, Some(source)) = result
+        {
+            self.rendered_member_failed |= type_failures.values().any(|member| member.rendered);
+            let mut source = Arc::unwrap_or_clone(source);
+            let mut poisoned = source
+                .poisoned_members
+                .as_deref()
+                .cloned()
+                .unwrap_or_default();
+            poisoned.extend(type_failures);
+            source.poisoned_members = Some(Arc::new(poisoned));
+            result = Value::Object(map, Some(Arc::new(source)));
         }
         // Amending an object preserves its class identity (so `is Foo` and
         // output converters still match). eval_entries does not know the base
@@ -5972,6 +6150,9 @@ impl Evaluator {
                 }
                 match &obj {
                     Value::Object(map, source) => {
+                        if let Some(message) = poisoned_member_error(source.as_deref(), field) {
+                            return Err(Error::Eval(message));
+                        }
                         let val = map.get(field.as_str()).cloned().ok_or_else(|| {
                             Error::Eval(
                                 missing_member_error(source, obj_expr, field, scope)
@@ -6003,6 +6184,9 @@ impl Evaluator {
                         self.stdlib_property(&obj, field).unwrap()
                     }
                     Value::Object(map, source) => {
+                        if let Some(message) = poisoned_member_error(source.as_deref(), field) {
+                            return Err(Error::Eval(message));
+                        }
                         if !map.contains_key(field.as_str())
                             && let Some(message) =
                                 missing_member_error(source, obj_expr, field, scope)
@@ -6045,22 +6229,35 @@ impl Evaluator {
                 }
                 let key_str = value_to_key(&key)?;
                 match obj {
-                    Value::Object(map, source) => map
-                        .get(&key_str)
-                        .cloned()
-                        .or_else(|| {
-                            map.iter()
-                                .find(|(stored, _)| {
-                                    crate::value::mapping_storage_keys_equal(stored, &key_str)
-                                })
-                                .map(|(_, value)| value.clone())
-                        })
-                        .ok_or_else(|| {
-                            Error::Eval(
-                                missing_member_error(&source, obj_expr, &key_str, scope)
-                                    .unwrap_or_else(|| format!("key not found: {key_str}")),
-                            )
-                        }),
+                    Value::Object(map, source) => {
+                        if let Some(message) = poisoned_member_error(source.as_deref(), &key_str) {
+                            return Err(Error::Eval(message));
+                        }
+                        map.get(&key_str)
+                            .cloned()
+                            .or_else(|| {
+                                map.iter()
+                                    .find(|(stored, _)| {
+                                        crate::value::mapping_storage_keys_equal(stored, &key_str)
+                                    })
+                                    .map(|(_, value)| value.clone())
+                            })
+                            .ok_or_else(|| {
+                                Error::Eval(
+                                    missing_member_error(&source, obj_expr, &key_str, scope)
+                                        .unwrap_or_else(|| format!("key not found: {key_str}")),
+                                )
+                            })
+                    }
+                    Value::List(items) if items.kind() != ListKind::Set => match key {
+                        Value::Int(index) => usize::try_from(index)
+                            .ok()
+                            .and_then(|index| items.get(index))
+                            .cloned()
+                            .ok_or_else(|| Error::Eval(format!("index out of bounds: {index}"))),
+                        _ => Err(Error::Eval("listing index must be an Int".into())),
+                    },
+                    Value::List(_) => Err(Error::Eval("cannot index Set".into())),
                     _ => Err(Error::Eval("cannot index non-object".into())),
                 }
             }

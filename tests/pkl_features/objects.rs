@@ -1454,7 +1454,7 @@ mapping: Mapping<String, Int>
     assert_eq!(json["literal"], "only");
     assert_eq!(json["selected"], "second");
     assert_eq!(json["items"], serde_json::json!([]));
-    assert!(json.get("mapping").is_none());
+    assert_eq!(json["mapping"], serde_json::json!({}));
 }
 
 #[test]
@@ -1812,7 +1812,7 @@ fn aliased_module_snapshot_recomputes_after_child_override() {
 }
 
 #[test]
-fn amended_scope_only_defaults_stay_out_of_output() {
+fn amended_typed_defaults_render_as_in_pkl() {
     let temp = TestTempDir::new("pklr_amended_scope_default");
     std::fs::write(
         temp.path().join("Base.pkl"),
@@ -1822,7 +1822,7 @@ fn amended_scope_only_defaults_stay_out_of_output() {
     let child = temp.path().join("Child.pkl");
     std::fs::write(&child, "amends \"Base.pkl\"\n").unwrap();
     let json = pklr::EvaluatorBuilder::new().eval_to_json(&child).unwrap();
-    assert!(json.get("implicit").is_none());
+    assert_eq!(json["implicit"], serde_json::json!({}));
     assert_eq!(json["visible"], 0);
 }
 
@@ -3133,6 +3133,12 @@ fn set_preserves_order() {
 fn set_empty() {
     let json = eval(r#"x = Set()"#);
     assert_eq!(json["x"], serde_json::json!([]));
+}
+
+#[test]
+fn sets_cannot_be_indexed() {
+    let error = eval_fails(r#"x = Set(1, 2)[0]"#);
+    assert!(error.contains("cannot index Set"), "{error}");
 }
 
 // ============================================================
@@ -5026,4 +5032,193 @@ fn constraint_reads_the_instance_members_around_it() {
         "class HiddenGauge { hidden min: Int; max: Int(this >= min) }\nresult = new HiddenGauge { min = 4; max = 6 }",
     );
     assert_eq!(json["result"], serde_json::json!({"max": 6}));
+}
+
+#[test]
+fn typed_defaults_render_and_constraints_apply_predicates() {
+    let json = eval(
+        r#"
+class Person
+person: Person
+mapping: Mapping<String, Person>
+choice: *Person | String
+items: Listing(isShort) = new Listing { 1 }
+hidden isShort = (it) -> it.length < 2
+listItem = List(1, 2)[1]
+listingItem = (new Listing { 3; 4 })[0]
+"#,
+    );
+    assert_eq!(json["person"], serde_json::json!({}));
+    assert_eq!(json["mapping"], serde_json::json!({}));
+    assert_eq!(json["choice"], serde_json::json!({}));
+    assert_eq!(json["items"], serde_json::json!([1]));
+    assert_eq!(json["listItem"], 2);
+    assert_eq!(json["listingItem"], 3);
+}
+
+#[test]
+fn inherited_fixed_members_reject_direct_and_generated_overrides() {
+    let error = eval_fails(
+        "class Bird { fixed name: String = \"Hawk\" }\nvalue = new Bird { name = \"Eagle\" }",
+    );
+    assert!(
+        error.contains("Cannot assign to fixed property `name`."),
+        "{error}"
+    );
+
+    let error = eval_fails(
+        "class Bird { fixed name: String = \"Hawk\" }\nvalue = new Bird { when (true) { name = \"Eagle\" } }",
+    );
+    assert!(
+        error.contains("Cannot assign to fixed property `name`."),
+        "{error}"
+    );
+
+    let error = eval_fails(
+        "class Bird { fixed name: String = \"Hawk\" }\nvalue = new Bird { ...new Dynamic { name = \"Eagle\" } }",
+    );
+    assert!(
+        error.contains("Cannot assign to fixed property `name`."),
+        "{error}"
+    );
+
+    let json = eval(
+        "class Bird { fixed name: String = \"Hawk\" }\nvalue = new Bird { when (false) { name = \"Eagle\" } }",
+    );
+    assert_eq!(json["value"]["name"], "Hawk");
+}
+
+#[test]
+fn typed_class_defaults_preserve_lazy_errors_until_requested() {
+    let json = eval(
+        r#"
+class C { value = throw("boom") }
+answer = 1
+"#,
+    );
+    assert_eq!(json["answer"], 1);
+
+    for src in [
+        "class C { value = throw(\"boom\") }\nc: C",
+        "class C { value = throw(\"boom\") }\ntypealias Alias = C\nc: Alias",
+        "class C { value = throw(\"boom\") }\nc: *C|String",
+    ] {
+        let error = eval_fails(src);
+        assert!(error.contains("boom"), "{error}");
+    }
+    let error = eval_fails("class C { value: Int = \"wrong\" }\nc: C");
+    assert!(error.contains("property 'value' expected Int"), "{error}");
+
+    let json = eval("class Int { value = 1 }\nc: Int");
+    assert_eq!(json["c"], serde_json::json!({ "value": 1 }));
+    let error = eval_fails("class Int { value = throw(\"boom\") }\nc: Int");
+    assert!(error.contains("boom"), "{error}");
+
+    let json = eval(
+        r#"
+class C { value = throw("boom") }
+nullable: C?
+items: Listing<Int>
+mapping: Mapping<String, C>
+"#,
+    );
+    assert!(json.get("nullable").is_none());
+    assert_eq!(json["items"], serde_json::json!([]));
+    assert_eq!(json["mapping"], serde_json::json!({}));
+}
+
+#[test]
+fn qualified_imported_typed_defaults_materialize_deferred_class_errors() {
+    let dir = TestTempDir::new("pklr_qualified_typed_default");
+    std::fs::write(
+        dir.path().join("lib.pkl"),
+        "class C { value = throw(\"boom\") }\n",
+    )
+    .unwrap();
+    let main = dir.path().join("main.pkl");
+
+    for source in [
+        "import \"lib.pkl\" as lib\nresult: lib.C\n",
+        "import \"lib.pkl\" as lib\ntypealias Imported = lib.C\nresult: Imported\n",
+    ] {
+        std::fs::write(&main, source).unwrap();
+        let error = pklr::eval_to_json(&main).unwrap_err().to_string();
+        assert!(error.contains("boom"), "{error}");
+    }
+
+    std::fs::write(&main, "import \"lib.pkl\" as lib\nanswer = 1\n").unwrap();
+    let json = pklr::eval_to_json(&main).unwrap();
+    assert_eq!(json["answer"], 1);
+}
+
+#[test]
+fn recursive_typed_defaults_fail_cleanly() {
+    let error = eval_fails(
+        r#"
+class Node {
+  child: Node
+}
+x: Node
+"#,
+    );
+    assert!(error.contains("recursive typed default"), "{error}");
+}
+
+#[test]
+fn typed_instance_member_errors_remain_lazy() {
+    let json = eval("class C { bad: Int = \"wrong\"; ok = 1 }\nlocal c = new C {}\nres = c.ok");
+    assert_eq!(json["res"], 1);
+
+    for src in [
+        "class C { bad: Int = \"wrong\"; ok = 1 }\nlocal c = new C {}\nres = c.bad",
+        "class C { bad: Int = \"wrong\"; ok = 1 }\nc = new C {}",
+    ] {
+        let error = eval_fails(src);
+        assert!(error.contains("property 'bad' expected Int"), "{error}");
+    }
+
+    let json = eval("class C { hidden bad: Int = \"wrong\"; ok = 1 }\nc: C");
+    assert_eq!(json["c"], serde_json::json!({ "ok": 1 }));
+}
+
+#[test]
+fn imported_amending_module_exports_inherited_classes() {
+    let dir = TestTempDir::new("pklr_import_inherited_class");
+    std::fs::write(
+        dir.path.join("base.pkl"),
+        "open module base\nclass Person\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path.join("child.pkl"),
+        "extends \"base.pkl\"\nchildValue = 1\n",
+    )
+    .unwrap();
+    let main = dir.path.join("main.pkl");
+    std::fs::write(&main, "import \"child.pkl\"\nres = new child.Person {}\n").unwrap();
+
+    let json = pklr::eval_to_json(&main).unwrap();
+    assert_eq!(json["res"], serde_json::json!({}));
+}
+
+#[test]
+fn amending_module_rejects_invalid_fixed_and_const_before_member_evaluation() {
+    let dir = TestTempDir::new("pklr_amending_modifier_timing");
+    std::fs::write(dir.path.join("base.pkl"), "name = \"base\"\n").unwrap();
+    let main = dir.path.join("main.pkl");
+
+    for (member, expected) in [
+        (
+            "fixed unused = throw(\"boom\")",
+            "Modifier `fixed` is not applicable to object members.",
+        ),
+        (
+            "const unused = throw(\"boom\")",
+            "Modifier `const` can only be applied to object members that are also `local`.",
+        ),
+    ] {
+        std::fs::write(&main, format!("amends \"base.pkl\"\n{member}\n")).unwrap();
+        let error = pklr::eval_to_json(&main).unwrap_err().to_string();
+        assert!(error.contains(expected), "{error}");
+    }
 }
