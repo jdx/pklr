@@ -12,6 +12,7 @@ Files are classified as:
   mismatch     both succeed but the JSON differs
   error        pkl succeeds, pklr fails
   timeout      pklr did not finish in time
+  crash        pklr panicked or was killed (any exit other than 0 or 1)
   expected-err pkl rejects the file and pklr fails too
   missed-err   pkl rejects the file but pklr succeeds
   skipped      pkl fails for a reason outside the language: the value can't be
@@ -110,7 +111,7 @@ def normalize(v):
 # pkl errors that say nothing about whether pklr should accept the file.
 SKIP_ERRORS = re.compile(
     r"Cannot render|as JSON|no project found|Exception when making request|"
-    r"Cannot find module|has invalid syntax|Cannot find resource|I/O error"
+    r"Cannot find module|Cannot find resource|I/O error"
 )
 
 
@@ -152,20 +153,26 @@ def check(rel, inputs, exe, timeout):
         return "skipped", "pkl timed out"
     if prc != 0 and SKIP_ERRORS.search(perr):
         return "skipped", pkl_message(perr)
+    # A module with its own (non-JSON) renderer can't be compared, whatever
+    # pklr does with it, so decide that before looking at pklr's result.
+    a = None
+    if prc == 0:
+        try:
+            a = normalize(json.loads(pout))
+        except json.JSONDecodeError:
+            return "skipped", "pkl output is not JSON"
     rrc, rout, rerr = run([str(exe), path], timeout)
-    if prc != 0:
-        if rrc is None:
-            return "timeout", ""
-        return ("expected-err", "") if rrc != 0 else ("missed-err", pkl_message(perr))
     if rrc is None:
         return "timeout", ""
+    # eval_json exits 1 for an evaluation error; anything else is a crash
+    # (101 for a Rust panic, negative for a signal) and never counts as a
+    # correct rejection.
+    if rrc not in (0, 1):
+        return "crash", first_line(rerr)
+    if prc != 0:
+        return ("expected-err", "") if rrc == 1 else ("missed-err", pkl_message(perr))
     if rrc != 0:
         return "error", first_line(rerr)
-    try:
-        a = normalize(json.loads(pout))
-    except json.JSONDecodeError:
-        # The module sets its own output renderer, so pkl's output isn't JSON.
-        return "skipped", "pkl output is not JSON"
     try:
         b = normalize(json.loads(rout))
     except json.JSONDecodeError:
@@ -211,7 +218,8 @@ def main():
             if status not in ("match", "expected-err", "skipped"):
                 print(f"{status:12} {f}  {detail}")
         print()
-    order = ["match", "mismatch", "error", "timeout", "expected-err", "missed-err", "skipped"]
+    order = ["match", "mismatch", "error", "timeout", "crash", "expected-err", "missed-err",
+             "skipped"]
     print(f"pkl {version}: " + ", ".join(f"{s} {counts.get(s, 0)}" for s in order))
     comparable = sum(counts.get(s, 0) for s in order if s != "skipped")
     passing = counts.get("match", 0) + counts.get("expected-err", 0)
@@ -221,13 +229,28 @@ def main():
         Path(args.save).write_text(json.dumps({f: s for f, (s, _) in results.items()}, indent=1))
     if base is not None:
         good = {"match", "expected-err"}
-        fixed = [f for f, (s, _) in results.items() if s in good and base.get(f) not in good]
-        broke = [f for f, (s, _) in results.items() if s not in good and base.get(f) in good]
+        # Only files with a usable result in both runs say anything about
+        # pklr: a skip (e.g. pkl timing out) or a file missing from one run
+        # is reported separately instead of as fixed or broken.
+        now = {f: s for f, (s, _) in results.items()}
+        both = [f for f in now
+                if f in base and now[f] != "skipped" and base[f] != "skipped"]
+        fixed = [f for f in both if now[f] in good and base[f] not in good]
+        broke = [f for f in both if now[f] not in good and base[f] in good]
+        # Every file without a usable result in both runs: skipped in one of
+        # them, or present in only one (a filter, or a changed checkout).
+        unusable = sorted(
+            f for f in set(now) | set(base)
+            if f not in both and (now.get(f) != base.get(f) or f not in now or f not in base)
+        )
         for f in fixed:
             print(f"fixed   {f}")
         for f in broke:
             print(f"BROKE   {f}  ({results[f][0]}: {results[f][1]})")
-        print(f"{len(fixed)} fixed, {len(broke)} broken vs {args.compare}")
+        for f in unusable:
+            print(f"skipped {f}  (now {now.get(f, 'not run')}, was {base.get(f, 'not run')})")
+        print(f"{len(fixed)} fixed, {len(broke)} broken, "
+              f"{len(unusable)} skipped in only one run vs {args.compare}")
         if broke:
             sys.exit(1)
 
