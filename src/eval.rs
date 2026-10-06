@@ -2951,6 +2951,9 @@ impl Evaluator {
                 {
                     if synthesized_inherited_types.contains(prop.name.as_str()) {
                         let ty = prop.type_ann.as_ref().expect("checked above");
+                        if !type_has_constraint(ty, &scope) {
+                            continue;
+                        }
                         let valid = if type_is_runtime_checkable(ty, &scope) {
                             match self.eval_type_check(value, ty, &scope, depth + 1) {
                                 Ok(valid) => Some(valid),
