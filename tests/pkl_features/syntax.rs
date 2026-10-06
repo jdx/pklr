@@ -1442,7 +1442,7 @@ local f = (x) -> x
 result = f.applyToList(new Listing { 1 })
 "#,
     );
-    assert!(listing.contains("Expected value of type List, but got type Listing."));
+    assert!(listing.contains("Expected value of type `List`, but got type `Listing`."));
 
     let set = eval_fails(
         r#"
@@ -1450,7 +1450,18 @@ local f = (x) -> x
 result = f?.applyToList(Set(1))
 "#,
     );
-    assert!(set.contains("Expected value of type List, but got type Set."));
+    assert!(set.contains("Expected value of type `List`, but got type `Set`."));
+
+    for call in ["f.applyToList()", "f.applyToList(List(1), List(2))"] {
+        let msg = eval_fails(&format!("local f = (x) -> x\nresult = {call}"));
+        let expected = if call.ends_with("()") { 0 } else { 2 };
+        assert!(
+            msg.contains(&format!(
+                "Expected 1 function arguments but got {expected}."
+            )),
+            "{msg}"
+        );
+    }
 }
 
 #[test]

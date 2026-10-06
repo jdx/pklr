@@ -6995,17 +6995,20 @@ impl Evaluator {
         depth: usize,
     ) -> Result<Value> {
         let [arg] = args else {
-            return Err(Error::Eval("applyToList() expects a List argument".into()));
+            return Err(Error::Eval(format!(
+                "Expected 1 function arguments but got {}.",
+                args.len()
+            )));
         };
         let Value::List(items) = arg else {
             return Err(Error::Eval(format!(
-                "Expected value of type List, but got type {}.",
+                "Expected value of type `List`, but got type `{}`.",
                 pkl_class_name(arg)
             )));
         };
         if items.kind() != ListKind::List {
             return Err(Error::Eval(format!(
-                "Expected value of type List, but got type {}.",
+                "Expected value of type `List`, but got type `{}`.",
                 pkl_class_name(arg)
             )));
         }
