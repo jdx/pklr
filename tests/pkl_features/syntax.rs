@@ -1767,12 +1767,158 @@ other = 43
             format!("import \"{child}.pkl\" as child\nresult = child.checks\n"),
         )
         .unwrap();
-        let result = pklr::eval_to_json(&read);
+        let error = pklr::eval_to_json(&read).unwrap_err().to_string();
         assert!(
-            result.is_err(),
-            "reading the invalid inherited property should fail for {child}, got {result:?}"
+            error.contains("checks"),
+            "reading the invalid inherited property should report its declared type for {child}, got {error:?}"
         );
     }
+}
+
+#[test]
+fn inherited_constraint_failure_invalidates_dependent_reads() {
+    let temp = TestTempDir::new("pklr_inherited_constraint_dependent_read");
+    std::fs::write(
+        temp.path().join("Base.pkl"),
+        r#"
+hidden checks: Listing(this.length == 1) = new { 1 }
+summary = checks.length
+"#,
+    )
+    .unwrap();
+    let child = temp.path().join("Child.pkl");
+    std::fs::write(&child, "amends \"Base.pkl\"\nchecks { 2 }\n").unwrap();
+    let error = pklr::eval_to_json(&child).unwrap_err().to_string();
+    assert!(
+        error.contains("checks") || error.contains("constraint"),
+        "dependent reads should report the inherited constraint failure, got {error:?}"
+    );
+}
+
+#[test]
+fn inherited_constraint_errors_stay_lazy_but_poison_dependents() {
+    let temp = TestTempDir::new("pklr_inherited_constraint_error_laziness");
+    std::fs::write(
+        temp.path().join("Base.pkl"),
+        r#"
+hidden checks: Listing(throw("constraint boom")) = new { 1 }
+summary = checks.length
+other = 42
+"#,
+    )
+    .unwrap();
+    let child = temp.path().join("Child.pkl");
+    std::fs::write(&child, "amends \"Base.pkl\"\nchecks { 2 }\n").unwrap();
+
+    let unused = temp.path().join("Unused.pkl");
+    std::fs::write(
+        &unused,
+        "import \"Child.pkl\" as child\nresult = child.other\n",
+    )
+    .unwrap();
+    assert_eq!(
+        pklr::eval_to_json(&unused).unwrap(),
+        serde_json::json!({ "result": 42 })
+    );
+
+    for source in [child.clone(), {
+        let read = temp.path().join("Read.pkl");
+        std::fs::write(
+            &read,
+            "import \"Child.pkl\" as child\nresult = child.checks\n",
+        )
+        .unwrap();
+        read
+    }] {
+        let error = pklr::eval_to_json(&source).unwrap_err().to_string();
+        assert!(
+            error.contains("constraint boom"),
+            "the constraint failure should surface only when requested, got {error:?}"
+        );
+    }
+}
+
+#[test]
+fn amending_module_inherited_mapping_value_types_remain_lazy_until_requested() {
+    let temp = TestTempDir::new("pklr_amending_module_inherited_mapping_types");
+    std::fs::write(
+        temp.path().join("Base.pkl"),
+        r#"
+typedMap: Mapping<String, Int> = new { ["base"] = 1 }
+other = 42
+"#,
+    )
+    .unwrap();
+    let child = temp.path().join("Child.pkl");
+    std::fs::write(
+        &child,
+        r#"
+amends "Base.pkl"
+
+typedMap { ["bad"] = "wrong" }
+"#,
+    )
+    .unwrap();
+
+    let unused = temp.path().join("Unused.pkl");
+    std::fs::write(
+        &unused,
+        "import \"Child.pkl\" as child\nresult = child.other\n",
+    )
+    .unwrap();
+    assert_eq!(
+        pklr::eval_to_json(&unused).unwrap(),
+        serde_json::json!({ "result": 42 })
+    );
+
+    let direct = pklr::eval_to_json(&child);
+    assert!(
+        direct.is_err(),
+        "rendering the invalid inherited Mapping should fail, got {direct:?}"
+    );
+
+    let read = temp.path().join("Read.pkl");
+    std::fs::write(
+        &read,
+        "import \"Child.pkl\" as child\nresult = child.typedMap\n",
+    )
+    .unwrap();
+    let read = pklr::eval_to_json(&read);
+    assert!(
+        read.is_err(),
+        "reading the invalid inherited Mapping should fail, got {read:?}"
+    );
+}
+
+#[test]
+fn typed_mapping_defaults_recompute_dependents_after_an_override() {
+    let temp = TestTempDir::new("pklr_typed_mapping_default_dependencies");
+    std::fs::write(
+        temp.path().join("Base.pkl"),
+        r#"
+class Item {
+  value: Int = 1
+  doubled: Int = value * 2
+}
+items: Mapping<String, Item> = new {}
+"#,
+    )
+    .unwrap();
+    let child = temp.path().join("Child.pkl");
+    std::fs::write(
+        &child,
+        r#"
+amends "Base.pkl"
+items { ["updated"] { value = 3 } }
+"#,
+    )
+    .unwrap();
+    assert_eq!(
+        pklr::eval_to_json(&child).unwrap(),
+        serde_json::json!({
+            "items": { "updated": { "value": 3, "doubled": 6 } },
+        })
+    );
 }
 
 #[test]

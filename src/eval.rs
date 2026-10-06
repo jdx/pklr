@@ -424,6 +424,66 @@ fn type_has_constraint(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
     visit(ty, scope, &mut HashSet::default())
 }
 
+/// A constraint whose evaluated branch explicitly throws has a meaningful Pkl
+/// failure to preserve. Other evaluator errors remain conservatively deferred:
+/// some package predicates use language features pklr cannot yet model.
+fn type_constraint_has_explicit_throw(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
+    fn expr_has_throw(expr: &Expr) -> bool {
+        match expr {
+            Expr::Throw(_) => true,
+            Expr::Field(value, _)
+            | Expr::NullSafeField(value, _)
+            | Expr::Unop(_, value)
+            | Expr::Trace(value, _)
+            | Expr::Read(value, _)
+            | Expr::ReadOrNull(value, _)
+            | Expr::ReadGlob(value, _) => expr_has_throw(value),
+            Expr::Index(left, right) | Expr::Binop(_, left, right) => {
+                expr_has_throw(left) || expr_has_throw(right)
+            }
+            Expr::Call(callee, args) => expr_has_throw(callee) || args.iter().any(expr_has_throw),
+            Expr::If(condition, then_expr, else_expr) => {
+                expr_has_throw(condition) || expr_has_throw(then_expr) || expr_has_throw(else_expr)
+            }
+            Expr::Let(_, value, body) => expr_has_throw(value) || expr_has_throw(body),
+            Expr::Lambda(_, body) => expr_has_throw(body),
+            Expr::StringInterpolation(parts) => parts
+                .iter()
+                .any(|part| matches!(part, StringInterpPart::Expr(expr) if expr_has_throw(expr))),
+            Expr::Null
+            | Expr::Bool(_)
+            | Expr::Int(_)
+            | Expr::Float(_)
+            | Expr::String(_)
+            | Expr::Ident(_)
+            | Expr::New(..)
+            | Expr::InferredNew(..)
+            | Expr::Is(..)
+            | Expr::As(..)
+            | Expr::ObjectBody(_)
+            | Expr::Import(..)
+            | Expr::ImportGlob(..) => false,
+        }
+    }
+
+    fn visit(ty: &crate::parser::TypeExpr, scope: &Scope, aliases: &mut HashSet<String>) -> bool {
+        use crate::parser::TypeExpr;
+
+        match ty {
+            TypeExpr::Constrained(_, constraint) => expr_has_throw(constraint),
+            TypeExpr::Named(name) | TypeExpr::Generic(name, _) => scope
+                .get_type_alias(name)
+                .is_some_and(|alias| aliases.insert(name.clone()) && visit(alias, scope, aliases)),
+            TypeExpr::Nullable(inner) => visit(inner, scope, aliases),
+            TypeExpr::Union(variants) => variants
+                .iter()
+                .any(|variant| visit(variant, scope, aliases)),
+        }
+    }
+
+    visit(ty, scope, &mut HashSet::default())
+}
+
 /// The value of a literal or a plain name, or `None` for any expression that
 /// needs the full evaluator. Must agree with `Evaluator::eval_expr_boxed`.
 fn eval_simple_expr(
@@ -2663,7 +2723,18 @@ impl Evaluator {
                             }
                             continue;
                         }
-                        let val = match self.eval_property(prop, &scope, depth) {
+                        let property_result =
+                            self.eval_property(prop, &scope, depth).and_then(|value| {
+                                if synthesized_inherited_types.contains(prop.name.as_str()) {
+                                    if let (Some(value), Some(ty)) = (&value, &prop.type_ann) {
+                                        self.check_inherited_mapping_value_types(
+                                            value, ty, &scope, depth,
+                                        )?;
+                                    }
+                                }
+                                Ok(value)
+                            });
+                        let val = match property_result {
                             Ok(value) => value,
                             // Module properties are late-bound. Keep an unresolved
                             // template expression deferred until a consumer actually
@@ -2941,6 +3012,7 @@ impl Evaluator {
         // Check declarations only after this module's final scope is complete:
         // constraints and aliases may refer to members declared later.
         if !evaluated_as_base {
+            let mut inherited_type_failures = IndexMap::new();
             for entry in body.iter() {
                 if let Entry::Property(prop) = entry
                     && !has_modifier(&prop.modifiers, Modifier::Local)
@@ -2954,38 +3026,86 @@ impl Evaluator {
                         if !type_has_constraint(ty, &scope) {
                             continue;
                         }
-                        let valid = if type_is_runtime_checkable(ty, &scope) {
+                        let failure = if type_is_runtime_checkable(ty, &scope) {
                             match self.eval_type_check(value, ty, &scope, depth + 1) {
-                                Ok(valid) => Some(valid),
+                                Ok(true) => None,
+                                Ok(false) => Some(format!(
+                                    "property '{}' expected {}, got {}",
+                                    prop.name,
+                                    display_type_expr(ty),
+                                    value_type_name(value)
+                                )),
+                                // An explicit Pkl `throw` is observable after the
+                                // member is materialized. Keep other evaluator
+                                // limitations deferred, as before.
+                                Err(Error::Eval(message))
+                                    if type_constraint_has_explicit_throw(ty, &scope) =>
+                                {
+                                    Some(message)
+                                }
                                 Err(Error::Eval(_)) => None,
                                 Err(error) => return Err(error),
                             }
                         } else {
                             None
                         };
-                        if valid == Some(false) {
-                            let message = format!(
-                                "property '{}' expected {}, got {}",
-                                prop.name,
-                                display_type_expr(ty),
-                                value_type_name(value)
-                            );
-                            let rendered = !has_modifier(&prop.modifiers, Modifier::Hidden)
-                                && requested_output_fields
-                                    .as_ref()
-                                    .is_none_or(|fields| fields.contains(&prop.name));
-                            if rendered && depth == 0 {
-                                return Err(Error::Eval(message));
-                            }
-                            out.shift_remove(prop.name.as_str());
-                            scope.set_member_poison(&prop.name, Some(message.clone()));
-                            self.rendered_member_failed |= rendered;
-                            poisoned_members
-                                .insert(prop.name.clone(), PoisonedMember { message, rendered });
+                        if let Some(message) = failure {
+                            inherited_type_failures.insert(prop.name.clone(), message);
                         }
                     } else {
                         self.check_declared_property_type(prop, value, &scope, depth)?;
                     }
+                }
+            }
+
+            // Values are evaluated before these late inherited checks. Carry a
+            // constrained member's failure through direct and transitive property
+            // references so a dependent output cannot retain a stale value.
+            while !inherited_type_failures.is_empty() {
+                let mut added = false;
+                for entry in body.iter() {
+                    let Entry::Property(prop) = entry else {
+                        continue;
+                    };
+                    if has_modifier(&prop.modifiers, Modifier::Local)
+                        || inherited_type_failures.contains_key(prop.name.as_str())
+                    {
+                        continue;
+                    }
+                    if let Some(message) = property_reference_names(prop)
+                        .iter()
+                        .find_map(|name| inherited_type_failures.get(name.as_str()))
+                    {
+                        inherited_type_failures.insert(prop.name.clone(), message.clone());
+                        added = true;
+                    }
+                }
+                if !added {
+                    break;
+                }
+            }
+            for entry in body.iter() {
+                let Entry::Property(prop) = entry else {
+                    continue;
+                };
+                if let Some(message) = inherited_type_failures.get(prop.name.as_str()) {
+                    let rendered = !has_modifier(&prop.modifiers, Modifier::Hidden)
+                        && requested_output_fields
+                            .as_ref()
+                            .is_none_or(|fields| fields.contains(&prop.name));
+                    if rendered && depth == 0 {
+                        return Err(Error::Eval(message.clone()));
+                    }
+                    out.shift_remove(prop.name.as_str());
+                    scope.set_member_poison(&prop.name, Some(message.clone()));
+                    self.rendered_member_failed |= rendered;
+                    poisoned_members.insert(
+                        prop.name.clone(),
+                        PoisonedMember {
+                            message: message.clone(),
+                            rendered,
+                        },
+                    );
                 }
             }
         }
@@ -4747,6 +4867,98 @@ impl Evaluator {
         }
     }
 
+    /// Validate values added through an inherited typed Mapping property.
+    ///
+    /// Generic Mapping checks normally validate the Mapping container only.
+    /// For a synthesized declaration that would let an amending module insert
+    /// a value of the wrong type while preserving a lazy module-member error,
+    /// validate its completed entries here. This runs only while that member
+    /// is evaluated, so a narrowed import of an unrelated member stays lazy.
+    fn check_inherited_mapping_value_types(
+        &mut self,
+        value: &Value,
+        ty: &crate::parser::TypeExpr,
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<()> {
+        fn value_types(
+            ty: &crate::parser::TypeExpr,
+            scope: &Scope,
+            aliases: &mut HashSet<String>,
+            out: &mut Vec<crate::parser::TypeExpr>,
+        ) {
+            use crate::parser::TypeExpr;
+
+            match ty {
+                TypeExpr::Named(name) => {
+                    if let Some(alias) = scope.get_type_alias(name)
+                        && aliases.insert(name.clone())
+                    {
+                        value_types(alias, scope, aliases, out);
+                    }
+                }
+                TypeExpr::Nullable(inner) => value_types(inner, scope, aliases, out),
+                TypeExpr::Union(variants) => {
+                    for variant in variants {
+                        value_types(variant, scope, aliases, out);
+                    }
+                }
+                TypeExpr::Generic(name, params) if name == "Mapping" || name == "Map" => {
+                    if let Some(value) = params.get(1) {
+                        out.push(value.clone());
+                    }
+                }
+                TypeExpr::Constrained(base, _) => {
+                    if let Ok(base) = parser::parse_type_name(base) {
+                        value_types(&base, scope, aliases, out);
+                    }
+                }
+                TypeExpr::Generic(name, _) => {
+                    if let Some(alias) = scope.get_type_alias(name)
+                        && aliases.insert(name.clone())
+                    {
+                        value_types(alias, scope, aliases, out);
+                    }
+                }
+            }
+        }
+
+        let Value::Object(entries, _) = value else {
+            return Ok(());
+        };
+        let mut types = Vec::new();
+        value_types(ty, scope, &mut HashSet::default(), &mut types);
+        if types.is_empty() {
+            return Ok(());
+        }
+        for entry in entries.values() {
+            let mut uncheckable = false;
+            let mut valid = false;
+            for ty in &types {
+                if !type_is_runtime_checkable(ty, scope) {
+                    uncheckable = true;
+                    continue;
+                }
+                if self.eval_type_check(entry, ty, scope, depth + 1)? {
+                    valid = true;
+                    break;
+                }
+            }
+            if !valid && !uncheckable {
+                return Err(Error::Eval(format!(
+                    "Expected value of type `{}`, but got type `{}`.",
+                    types
+                        .iter()
+                        .map(display_type_expr)
+                        .collect::<Vec<_>>()
+                        .join(" | "),
+                    value_type_name(entry)
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Check a concrete property value after its defining scope is complete.
     /// Defaults and declarations without values are checked when they are
     /// materialized, not merely declared.
@@ -5185,6 +5397,15 @@ impl Evaluator {
                 depth,
             );
         }
+        if let Some(value) = self.try_eval_simple_class_amendment(
+            base_map,
+            base_source,
+            overlay_entries,
+            current_scope,
+            depth,
+        )? {
+            return Ok(value);
+        }
         // Every amendment of a class instance goes through here: `new C {}`,
         // property bodies, and entries of typed Mappings and Listings.
         check_no_elements(base_source, overlay_entries)?;
@@ -5553,6 +5774,153 @@ impl Evaluator {
             }
             (_, other) => Ok(other),
         }
+    }
+
+    /// Amend a class default without re-evaluating every unchanged member.
+    ///
+    /// Typed Mapping entries commonly start from the same class template. If
+    /// an overlay consists exclusively of direct replacements and neither the
+    /// overlay nor an unchanged base property reads a replaced member, the
+    /// already-evaluated defaults are still valid. Reusing them avoids a full
+    /// class reconstruction per mapping entry while preserving the source
+    /// metadata needed for later amendments. Anything that could require late
+    /// binding stays on the complete `eval_amended_object` path below.
+    fn try_eval_simple_class_amendment(
+        &mut self,
+        base_map: &Arc<ObjectMap>,
+        base_source: &Arc<ObjectSource>,
+        overlay_entries: &[Entry],
+        current_scope: &Scope,
+        depth: usize,
+    ) -> Result<Option<Value>> {
+        let static_default = |expr: &Expr| {
+            matches!(
+                expr,
+                Expr::Null | Expr::Bool(_) | Expr::Int(_) | Expr::Float(_) | Expr::String(_)
+            ) || matches!(
+                expr,
+                Expr::New(Some(name), body, _) if (name == "Mapping" || name == "Map") && body.is_empty()
+            ) || matches!(
+                expr,
+                Expr::Call(callee, args)
+                    if args.is_empty()
+                        && matches!(callee.as_ref(), Expr::Ident(name)
+                            if matches!(name.as_str(), "List" | "Listing" | "Set" | "Map"))
+            )
+        };
+        let reusable_default = |prop: &Property| {
+            prop.value.as_ref().is_some_and(static_default)
+                || (prop.value.is_none()
+                    && matches!(prop.type_ann, Some(crate::parser::TypeExpr::Nullable(_))))
+        };
+        if base_source.kind != ObjectKind::Class
+            || base_source.is_abstract
+            || overlay_entries.is_empty()
+            || base_source.entries.iter().any(|entry| {
+                !matches!(entry, Entry::Property(prop)
+                        if prop.modifiers.is_empty()
+                            && prop.body.is_none()
+                            && reusable_default(prop))
+            })
+        {
+            return Ok(None);
+        }
+
+        let base_properties = base_source
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| match entry {
+                Entry::Property(prop) if !has_modifier(&prop.modifiers, Modifier::Local) => {
+                    Some((prop.name.as_str(), (index, Arc::clone(prop))))
+                }
+                _ => None,
+            })
+            .collect::<HashMap<_, _>>();
+        let mut overlays = IndexMap::new();
+        for entry in overlay_entries {
+            let Entry::Property(prop) = entry else {
+                return Ok(None);
+            };
+            if prop.is_method
+                || !prop.modifiers.is_empty()
+                || prop.type_ann.is_some()
+                || prop.value.is_none()
+                || prop.body.is_some()
+                || overlays.contains_key(prop.name.as_str())
+            {
+                return Ok(None);
+            }
+            let Some((_, base_prop)) = base_properties.get(prop.name.as_str()) else {
+                return Ok(None);
+            };
+            if let Some(message) = immutable_member_error(prop, base_prop) {
+                return Err(Error::Eval(message));
+            }
+            overlays.insert(prop.name.as_str(), Arc::clone(prop));
+        }
+        if overlays.is_empty()
+            || base_source.entries.iter().any(|entry| match entry {
+                Entry::Property(prop) => {
+                    prop.type_ann
+                        .as_ref()
+                        .is_some_and(|ty| type_has_constraint(ty, current_scope))
+                        || (!overlays.contains_key(prop.name.as_str())
+                            && property_reference_names(prop).iter().any(|name| {
+                                name == DYNAMIC_SIBLING_REF || overlays.contains_key(name.as_str())
+                            }))
+                }
+                _ => true,
+            })
+            || overlay_entries.iter().any(|entry| {
+                property_reference_names(match entry {
+                    Entry::Property(prop) => prop,
+                    _ => unreachable!("overlay entries were checked above"),
+                })
+                .iter()
+                .any(|name| {
+                    name == "this"
+                        || name == "super"
+                        || name == "outer"
+                        || name == DYNAMIC_SIBLING_REF
+                        || base_properties.contains_key(name.as_str())
+                })
+            })
+        {
+            return Ok(None);
+        }
+
+        let overlay_scope = Arc::new(capture_scope(current_scope));
+        let mut map = (**base_map).clone();
+        let mut source = (**base_source).clone();
+        let entries = Arc::make_mut(&mut source.entries);
+        let entry_scopes = &mut source.entry_scopes;
+        entry_scopes.resize(entries.len(), None);
+        for (name, overlay) in overlays {
+            let (index, base_prop) = base_properties
+                .get(name)
+                .expect("eligible overlay has a base property");
+            let mut prop = (*overlay).clone();
+            prop.type_ann = base_prop.type_ann.clone();
+            if has_modifier(&base_prop.modifiers, Modifier::Hidden) {
+                prop.modifiers.push(Modifier::Hidden);
+            }
+            let value = self
+                .eval_property(&prop, current_scope, depth)?
+                .expect("valued overlay properties evaluate to a value");
+            self.check_declared_property_type(&prop, &value, current_scope, depth)?;
+            map.insert(prop.name.clone().into(), value);
+            entries[*index] = Entry::Property(Arc::new(prop));
+            entry_scopes[*index] = Some(Arc::clone(&overlay_scope));
+        }
+        source.kind = ObjectKind::Object;
+        source.prototype = base_source.prototype.clone().or_else(|| {
+            Some(Value::Object(
+                Arc::clone(base_map),
+                Some(Arc::clone(base_source)),
+            ))
+        });
+        Ok(Some(Value::Object(Arc::new(map), Some(Arc::new(source)))))
     }
 
     fn eval_object_body_over_template(
