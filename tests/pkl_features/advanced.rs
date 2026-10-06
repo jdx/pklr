@@ -1708,6 +1708,8 @@ fn converter_inherited_from_extends_base() {
     write!(
         base_file,
         r#"
+open module Base
+
 open class Step {{
     check: String = ""
 }}

@@ -210,6 +210,56 @@ fn rendered_member_failure(value: &Value) -> Option<&str> {
     }
 }
 
+/// Whether `prop` reads the module's `super`, rather than an object's own
+/// `super` in a nested body. Inherited properties with a module-super read
+/// retain the value computed in their defining module when a child overrides
+/// other members.
+fn property_reads_module_super(prop: &Property) -> bool {
+    prop.value.as_ref().is_some_and(expr_reads_module_super)
+}
+
+fn expr_reads_module_super(expr: &Expr) -> bool {
+    match expr {
+        Expr::Ident(name) => name == "super",
+        Expr::Field(value, _)
+        | Expr::NullSafeField(value, _)
+        | Expr::Unop(_, value)
+        | Expr::Throw(value)
+        | Expr::Trace(value, _)
+        | Expr::Read(value, _)
+        | Expr::ReadOrNull(value, _)
+        | Expr::ReadGlob(value, _) => expr_reads_module_super(value),
+        Expr::Index(left, right) | Expr::Binop(_, left, right) => {
+            expr_reads_module_super(left) || expr_reads_module_super(right)
+        }
+        Expr::Call(callee, args) => {
+            expr_reads_module_super(callee) || args.iter().any(expr_reads_module_super)
+        }
+        Expr::If(condition, then_expr, else_expr) => {
+            expr_reads_module_super(condition)
+                || expr_reads_module_super(then_expr)
+                || expr_reads_module_super(else_expr)
+        }
+        Expr::Let(_, value, body) => {
+            expr_reads_module_super(value) || expr_reads_module_super(body)
+        }
+        Expr::Is(value, _) | Expr::As(value, _) => expr_reads_module_super(value),
+        Expr::Lambda(_, body) => expr_reads_module_super(body),
+        Expr::StringInterpolation(parts) => parts.iter().any(
+            |part| matches!(part, StringInterpPart::Expr(expr) if expr_reads_module_super(expr)),
+        ),
+        // Each of these owns a receiver, so its `super` is not the module's.
+        Expr::New(..) | Expr::InferredNew(..) | Expr::ObjectBody(..) => false,
+        Expr::Import(..)
+        | Expr::ImportGlob(..)
+        | Expr::Null
+        | Expr::Bool(..)
+        | Expr::Int(..)
+        | Expr::Float(..)
+        | Expr::String(..) => false,
+    }
+}
+
 /// The value of a literal or a plain name, or `None` for any expression that
 /// needs the full evaluator. Must agree with `Evaluator::eval_expr_boxed`.
 fn eval_simple_expr(
@@ -1226,6 +1276,35 @@ impl Evaluator {
             .unwrap_or_default()
     }
 
+    /// The member view a derived module exposes through `super`.
+    ///
+    /// A module's rendered value omits hidden properties and methods, but Pkl
+    /// makes hidden properties available through `super`. Use the completed
+    /// module scope and its declared properties instead of its rendered object
+    /// so classes, locals, and output declarations remain absent. A module
+    /// being amended cannot invoke base supermethods, unlike one extending it.
+    fn module_super_members(
+        &self,
+        path: &Path,
+        fallback: &ObjectMap,
+        include_methods: bool,
+    ) -> ObjectMap {
+        let Some(snapshot) = self.module_scopes.get(path) else {
+            return fallback.clone();
+        };
+
+        let mut members = ObjectMap::default();
+        for prop in &snapshot.late_properties {
+            if prop.is_method && !include_methods {
+                continue;
+            }
+            if let Some(value) = snapshot.values.get(prop.name.as_str()) {
+                members.insert(prop.name.clone().into(), value.clone());
+            }
+        }
+        members
+    }
+
     /// Resolve a glob import pattern to a mapping of matched module paths to
     /// their evaluated values. Shared by `import* "glob" as Alias` declarations
     /// and `import*("glob")` expressions.
@@ -1874,6 +1953,8 @@ impl Evaluator {
             }
         }
 
+        // The base module's members, which `super` reads.
+        let mut super_members: Option<ObjectMap> = None;
         // Process amends: load base module as starting values
         let mut base_obj = ObjectMap::default();
         let mut late_inherited_properties = Vec::new();
@@ -1899,6 +1980,7 @@ impl Evaluator {
                 if let Value::Object(m, _) = base_val {
                     base_obj = (*m).clone();
                 }
+                super_members = Some(self.module_super_members(Path::new(uri), &base_obj, false));
             } else if uri.starts_with("package://") {
                 let pkg = resolve_package_uri(uri)?;
                 if let PackageSource::Zip(zip_url, entry) = &pkg {
@@ -1924,6 +2006,8 @@ impl Evaluator {
                         if let Value::Object(m, _) = base_val {
                             base_obj = (*m).clone();
                         }
+                        super_members =
+                            Some(self.module_super_members(&local_path, &base_obj, false));
                     }
                     #[cfg(not(feature = "package-zip"))]
                     {
@@ -1950,6 +2034,8 @@ impl Evaluator {
                     if let Value::Object(m, _) = base_val {
                         base_obj = (*m).clone();
                     }
+                    super_members =
+                        Some(self.module_super_members(Path::new(url.as_str()), &base_obj, false));
                 }
             } else if uri == "pkl:test" {
                 inherit_stdlib_module("test", &mut base_obj, &mut scope);
@@ -1972,6 +2058,7 @@ impl Evaluator {
                         )?;
                         base_obj = (**m).clone();
                     }
+                    super_members = Some(self.module_super_members(&amends_path, &base_obj, false));
                 }
             }
         }
@@ -2034,6 +2121,7 @@ impl Evaluator {
             let uri: &str = resolved_extends.as_deref().unwrap_or(extends_uri);
             if uri == "pkl:test" {
                 inherit_stdlib_module("test", &mut base_obj, &mut scope);
+                super_members = Some(base_obj.clone());
             }
             if !uri.contains("://") || uri.starts_with("file://") {
                 let extends_path = self.local_file_path(path, uri)?;
@@ -2054,6 +2142,20 @@ impl Evaluator {
                     let source = self.read_to_string_io(&extends_path)?;
                     let tokens = lexer::lex_named(&source, &name)?;
                     let ext_module = parser::parse_named(&tokens, &source, &name)?;
+                    if !ext_module.annotations.iter().any(|annotation| {
+                        matches!(
+                            annotation.name.as_str(),
+                            "pklr:module:Open" | "pklr:module:Abstract"
+                        )
+                    }) {
+                        return Err(Error::Eval(format!(
+                            "Cannot extend non-open module `{}`.",
+                            extends_path
+                                .file_stem()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                        )));
+                    }
                     if let Value::Object(m, _) = &ext_val {
                         self.bind_deferred_inherited_imports(
                             &deferred_inherited_imports,
@@ -2099,6 +2201,7 @@ impl Evaluator {
                             _ => {}
                         }
                     }
+                    super_members = Some(self.module_super_members(&extends_path, &base_obj, true));
                 }
             } else if uri.starts_with("https://") || uri.starts_with("http://") {
                 self.check_not_self(module, path, Path::new(uri), "extend")?;
@@ -2109,6 +2212,20 @@ impl Evaluator {
                     return Err(Error::Eval(format!(
                         "Module `{}` cannot be extended or used as type because it amends another module.",
                         self.amended_module_name(&ext_module, Path::new(uri))
+                    )));
+                }
+                if !ext_module.annotations.iter().any(|annotation| {
+                    matches!(
+                        annotation.name.as_str(),
+                        "pklr:module:Open" | "pklr:module:Abstract"
+                    )
+                }) {
+                    return Err(Error::Eval(format!(
+                        "Cannot extend non-open module `{}`.",
+                        Path::new(uri)
+                            .file_stem()
+                            .unwrap_or_default()
+                            .to_string_lossy()
                     )));
                 }
                 let ext_val = self.eval_module_with_scope(
@@ -2149,9 +2266,17 @@ impl Evaluator {
                         }
                     }
                 }
+                super_members = Some(self.module_super_members(Path::new(uri), &base_obj, true));
             }
         }
 
+        if (module.amends.is_some() || module.extends.is_some()) && super_members.is_none() {
+            super_members = Some(base_obj.clone());
+        }
+        let super_bound = super_members.is_some();
+        if let Some(members) = super_members {
+            scope.set("super", Value::Object(Arc::new(members), None));
+        }
         let requested_eval_fields = requested_output_fields.as_ref().map(|fields| {
             let mut dependency_entries = late_inherited_properties
                 .iter()
@@ -2499,9 +2624,22 @@ impl Evaluator {
             }
         }
         let late_passes = late_inherited_properties.len() + late_child_properties.len();
+        // `super` in a base module's property is that module's own base, not
+        // this module's: those keep the value the base computed.
+        let reads_super: HashSet<&str> = if super_bound {
+            late_inherited_properties
+                .iter()
+                .filter(|prop| property_reads_module_super(prop))
+                .map(|prop| prop.name.as_str())
+                .collect()
+        } else {
+            HashSet::default()
+        };
         for pass in 0..=late_passes {
             for prop in &late_inherited_properties {
-                if child_property_names.contains(prop.name.as_str()) {
+                if child_property_names.contains(prop.name.as_str())
+                    || reads_super.contains(prop.name.as_str())
+                {
                     continue;
                 }
                 match self.eval_property(prop, &scope, depth) {

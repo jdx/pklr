@@ -2800,7 +2800,11 @@ x = new Config {
 #[test]
 fn inherited_class_identity_uses_canonical_module_path() {
     let dir = TestTempDir::new("pklr_canonical_class_identity");
-    std::fs::write(dir.path.join("base.pkl"), "class Item {}\n").unwrap();
+    std::fs::write(
+        dir.path.join("base.pkl"),
+        "open module base\nclass Item {}\n",
+    )
+    .unwrap();
     std::fs::write(
         dir.path.join("wrapper.pkl"),
         "extends \"./base.pkl\"\ninstance = new Item {}\n",
@@ -4876,5 +4880,101 @@ foo {
     assert!(
         !json.to_string().contains("pklr:lambda-guard"),
         "internal lambda guard leaked through outer: {json}"
+    );
+}
+
+#[test]
+fn super_in_an_extending_module_reads_the_base_module() {
+    let temp = TestTempDir::new("pklr_module_super");
+    std::fs::write(
+        temp.path().join("base.pkl"),
+        "open module base\nhidden secret = 42\nfunction say(msg) = \"Hi \" + msg\nsameProp = \"a\"\npigeon { name = \"Pigeon\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("mid.pkl"),
+        "open module mid\nextends \"base.pkl\"\nsameProp = super.sameProp + \"b\"\nhello = super.say(\"there\")\nsecretCopy = super.secret\npigeon = (super.pigeon) { name = \"PIGEON\" }\n",
+    )
+    .unwrap();
+    let child = temp.path().join("child.pkl");
+    std::fs::write(
+        &child,
+        "extends \"mid.pkl\"\nsameProp = super.sameProp + \"c\"\n",
+    )
+    .unwrap();
+    let json = pklr::eval_to_json(&temp.path().join("mid.pkl")).unwrap();
+    assert_eq!(json["sameProp"], "ab");
+    assert_eq!(json["hello"], "Hi there");
+    assert_eq!(json["secretCopy"], 42);
+    assert_eq!(json["pigeon"]["name"], "PIGEON");
+    // A base module's property reading `super` keeps reading its own base.
+    let json = pklr::eval_to_json(&child).unwrap();
+    assert_eq!(json["sameProp"], "abc");
+}
+
+#[test]
+fn nested_object_super_does_not_freeze_inherited_module_properties() {
+    let temp = TestTempDir::new("pklr_nested_super");
+    std::fs::write(
+        temp.path().join("base.pkl"),
+        "open module base\np = 1\ntemplate { x = 10 }\nobj = (template) { x = super.x + p }\n",
+    )
+    .unwrap();
+    let child = temp.path().join("child.pkl");
+    std::fs::write(&child, "extends \"base.pkl\"\np = 2\n").unwrap();
+
+    let json = pklr::eval_to_json(&child).unwrap();
+    assert_eq!(json["obj"]["x"], 12);
+}
+
+#[test]
+fn inherited_method_keeps_its_defining_module_super() {
+    let temp = TestTempDir::new("pklr_method_module_super");
+    std::fs::write(temp.path().join("root.pkl"), "open module root\np = 1\n").unwrap();
+    std::fs::write(
+        temp.path().join("base.pkl"),
+        "open module base\nextends \"root.pkl\"\nfunction baseP() = super.p\n",
+    )
+    .unwrap();
+    let child = temp.path().join("child.pkl");
+    std::fs::write(
+        &child,
+        "extends \"base.pkl\"\np = 2\nresult = super.baseP()\n",
+    )
+    .unwrap();
+
+    assert_eq!(pklr::eval_to_json(&child).unwrap()["result"], 1);
+}
+
+#[test]
+fn amending_module_super_reads_hidden_properties_but_not_methods() {
+    let temp = TestTempDir::new("pklr_amending_module_super");
+    std::fs::write(
+        temp.path().join("base.pkl"),
+        "hidden secret = 42\ncopy = 0\nresult = 0\nfunction say(msg) = \"Hi \" + msg\n",
+    )
+    .unwrap();
+    let child = temp.path().join("child.pkl");
+    std::fs::write(&child, "amends \"base.pkl\"\ncopy = super.secret\n").unwrap();
+    assert_eq!(pklr::eval_to_json(&child).unwrap()["copy"], 42);
+
+    std::fs::write(
+        &child,
+        "amends \"base.pkl\"\nresult = super.say(\"there\")\n",
+    )
+    .unwrap();
+    assert!(pklr::eval_to_json(&child).is_err());
+}
+
+#[test]
+fn only_open_or_abstract_modules_can_be_extended() {
+    let temp = TestTempDir::new("pklr_extend_non_open");
+    std::fs::write(temp.path().join("closed.pkl"), "a = 1\n").unwrap();
+    let child = temp.path().join("child.pkl");
+    std::fs::write(&child, "extends \"closed.pkl\"\nb = 2\n").unwrap();
+    let err = pklr::eval_to_json(&child).unwrap_err().to_string();
+    assert!(
+        err.contains("Cannot extend non-open module `closed`"),
+        "{err}"
     );
 }

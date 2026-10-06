@@ -1454,7 +1454,10 @@ fn http_module_resolves_relative_extends() {
             "/cfg/Main.pkl",
             "extends \"../Base.pkl\"\nname = \"override\"\n",
         ),
-        ("/Base.pkl", "name = \"base\"\nversion = 1\n"),
+        (
+            "/Base.pkl",
+            "open module base\nname = \"base\"\nversion = 1\n",
+        ),
     ]);
     let src = format!("import \"{base}/cfg/Main.pkl\" as Main\nresult = Main\n");
 
@@ -1466,6 +1469,22 @@ fn http_module_resolves_relative_extends() {
     let json = result.unwrap().to_json();
     assert_eq!(json["result"]["name"], "override");
     assert_eq!(json["result"]["version"], 1);
+}
+
+#[test]
+fn http_module_cannot_extend_closed_base() {
+    let base = spawn_test_http_server(vec![("/Closed.pkl", "value = 1\n")]);
+    let src = format!("extends \"{base}/Closed.pkl\"\nvalue = 2\n");
+
+    let mut evaluator = pklr::Evaluator::new();
+    let error = evaluator
+        .eval_source(&src, std::path::Path::new("entry.pkl"))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("Cannot extend non-open module `Closed`"),
+        "{error}"
+    );
 }
 
 #[test]
