@@ -4,12 +4,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use rustc_hash::FxHashMap as HashMap;
+
 use super::remote::resolve_remote_relative;
 use super::render::{self, Converters, Invoke, Kind, RendererKind, Settings};
 use super::types::resolve_dotted;
 use super::{
     Evaluator, MODULE_OUTPUT_TEXT_CONTEXT, Scope, SourceScope, entries_mention,
-    property_reference_names, seed_builtins,
+    property_reference_names, seed_builtins, type_reference_names,
 };
 use crate::error::{Error, Result};
 use crate::lexer;
@@ -523,16 +525,56 @@ impl Evaluator {
             ..Scope::default()
         };
         seed_builtins(&mut base_scope);
-        let output_refs = property_reference_names(output);
+        // A name directly read by `output` follows the usual rule: a base
+        // lexical wins, otherwise use the final amended module. Names read
+        // through a captured type alias instead resolve where that alias was
+        // defined, so an amending module cannot change its meaning.
+        let mut output_refs: HashMap<_, _> = property_reference_names(output)
+            .into_iter()
+            .map(|name| {
+                let from_base = base.lexical.iter().any(|lexical| lexical == &name);
+                (name, from_base)
+            })
+            .collect();
+        let mut pending_refs: Vec<_> = output_refs.keys().cloned().collect();
         let key = self
             .canonicalize_io(&base.path)
             .ok()
             .filter(|key| self.module_scopes.contains_key(key))
             .unwrap_or_else(|| base.path.clone());
         let snapshot = self.module_scopes.get(&key);
-        for name in output_refs {
-            let base_lexical = base.lexical.iter().any(|lexical| lexical == &name);
-            let value = if base_lexical {
+        while let Some(name) = pending_refs.pop() {
+            let from_base = output_refs[&name];
+            let alias = if from_base {
+                snapshot
+                    .and_then(|snapshot| snapshot.type_aliases.get(name.as_str()))
+                    .cloned()
+            } else {
+                scope
+                    .get_type_alias(&name)
+                    .map(|alias| Arc::new(alias.clone()))
+            };
+            if let Some(alias) = alias {
+                for dependency in type_reference_names(&alias) {
+                    let needs_capture = match output_refs.get_mut(&dependency) {
+                        Some(existing) if from_base && !*existing => {
+                            *existing = true;
+                            true
+                        }
+                        Some(_) => false,
+                        None => {
+                            output_refs.insert(dependency.clone(), from_base);
+                            true
+                        }
+                    };
+                    if needs_capture {
+                        pending_refs.push(dependency);
+                    }
+                }
+            }
+        }
+        for (name, from_base) in output_refs {
+            let value = if from_base {
                 snapshot.and_then(|snapshot| snapshot.values.get(name.as_str()))
             } else {
                 scope.get(&name)
@@ -540,7 +582,7 @@ impl Evaluator {
             if let Some(value) = value {
                 base_scope.set(name.clone(), value.clone());
             }
-            let alias = if base_lexical {
+            let alias = if from_base {
                 snapshot
                     .and_then(|snapshot| snapshot.type_aliases.get(name.as_str()))
                     .cloned()
@@ -552,7 +594,7 @@ impl Evaluator {
             if let Some(alias) = alias {
                 base_scope.set_type_alias(name.clone(), alias);
             }
-            let identity = if base_lexical {
+            let identity = if from_base {
                 snapshot.and_then(|snapshot| snapshot.module_identities.get(&name))
             } else {
                 scope.module_identity(&name)

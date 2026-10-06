@@ -382,6 +382,66 @@ childValue = "child-member"
 
 #[cfg(feature = "native-io")]
 #[test]
+fn inherited_output_captures_transitive_type_aliases() {
+    let dir = TestTempDir::new("pklr_render_inherited_output_type_aliases");
+    std::fs::write(
+        dir.path().join("base.pkl"),
+        r#"class Marker { label = "base" }
+typealias Rendered = Intermediate
+typealias Intermediate = Marker
+output {
+  renderer {
+    converters {
+      [Any] = (value) -> if (value is Rendered) "base" else "wrong"
+    }
+  }
+}
+"#,
+    )
+    .unwrap();
+    let child = dir.path().join("child.pkl");
+    std::fs::write(
+        &child,
+        "amends \"base.pkl\"\noutput { value = new Marker {} }\n",
+    )
+    .unwrap();
+
+    assert_eq!(
+        pklr::eval_to_json(&child).unwrap(),
+        serde_json::json!("base")
+    );
+}
+
+#[cfg(feature = "native-io")]
+#[test]
+fn inherited_output_aliases_keep_their_base_scope() {
+    let dir = TestTempDir::new("pklr_render_inherited_output_alias_scope");
+    std::fs::write(
+        dir.path().join("base.pkl"),
+        r#"typealias Alias = String
+output {
+  renderer {
+    converters { [String] = (value) -> value as Alias }
+  }
+}
+"#,
+    )
+    .unwrap();
+    let child = dir.path().join("child.pkl");
+    std::fs::write(
+        &child,
+        "amends \"base.pkl\"\nlocal typealias String = Int\noutput { value = \"child\" }\n",
+    )
+    .unwrap();
+
+    assert_eq!(
+        pklr::eval_to_json(&child).unwrap(),
+        serde_json::json!("child")
+    );
+}
+
+#[cfg(feature = "native-io")]
+#[test]
 fn converter_key_uses_builtin_type_when_a_function_has_its_name() {
     let (_dir, path) = module_file(
         "pklr_render_converter_builtin_function_name",
