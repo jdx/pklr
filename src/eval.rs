@@ -2746,12 +2746,20 @@ impl Evaluator {
                         }
                     }
                     Entry::TypeAlias(name, ty) => {
-                        // Like a class, an alias's value is schema, not data. An
+                        self.eval_type_alias(name, ty, &mut scope);
+                        // A non-local alias to a class is a module member, like
+                        // the class, and its value is schema, not data. An
                         // inherited property of the same name stays data.
-                        if !base_obj.contains_key(name.as_str()) {
+                        if !module.local_type_aliases.contains(name)
+                            && !base_obj.contains_key(name.as_str())
+                            && matches!(
+                                scope.get(name),
+                                Some(Value::Object(_, Some(source)))
+                                    if source.kind == ObjectKind::Class
+                            )
+                        {
                             class_names.insert(name.clone());
                         }
-                        self.eval_type_alias(name, ty, &mut scope);
                     }
                     Entry::Property(prop) => {
                         let mods = &prop.modifiers;

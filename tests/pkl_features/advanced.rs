@@ -1522,6 +1522,43 @@ fn typealias_does_not_replace_inherited_property_of_same_name() {
 }
 
 #[test]
+fn only_non_local_class_typealiases_are_module_members() {
+    let temp = TestTempDir::new("pklr_test_typealias_module_members");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("lib.pkl"),
+        r#"
+module lib
+class Script { linux: String? }
+typealias Public = Script
+local typealias Hidden = Script
+typealias Pair = String | Int
+"#,
+    )
+    .unwrap();
+    let eval_main = |body: &str| {
+        std::fs::write(
+            dir.join("main.pkl"),
+            format!("import \"lib.pkl\"\n{body}\n"),
+        )
+        .unwrap();
+        pklr::eval_to_json(&dir.join("main.pkl"))
+    };
+
+    // pklr builds an untyped object for a name that is not a class member, so
+    // the class identity shows which names resolved.
+    let json = eval_main(
+        "a = new lib.Public { linux = \"a\" } is lib.Script\n\
+         b = new lib.Hidden { linux = \"a\" } is lib.Script\n\
+         c = new lib.Pair {} is lib.Script",
+    )
+    .unwrap();
+    assert_eq!(json["a"], true);
+    assert_eq!(json["b"], false);
+    assert_eq!(json["c"], false);
+}
+
+#[test]
 fn mapping_local_lambda_is_visible_to_sibling_local() {
     // A lambda local must be in scope for a later (non-lambda) local that uses it.
     let json = eval(

@@ -29,6 +29,8 @@ pub struct Module {
     pub import_exprs: Vec<String>,
     pub annotations: Vec<Annotation>,
     pub body: Body,
+    /// Names of the module's `local` type aliases, which importers cannot see.
+    pub local_type_aliases: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

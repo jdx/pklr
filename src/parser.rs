@@ -752,6 +752,7 @@ impl<'a> Parser<'a> {
             import_exprs: std::mem::take(&mut self.import_exprs),
             annotations,
             body: body.into(),
+            local_type_aliases: std::mem::take(&mut self.local_type_aliases),
         })
     }
 
