@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.0.0](https://github.com/jdx/pklr/compare/v5.1.0...v6.0.0) - 2026-10-07
+
+### Fixed
+
+- *(eval)* build the class for new through a re-exported typealias ([#300](https://github.com/jdx/pklr/pull/300))
+
 ## [5.1.0](https://github.com/jdx/pklr/compare/v5.0.1...v5.1.0) - 2026-10-07
 
 ### Added
