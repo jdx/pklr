@@ -1001,6 +1001,7 @@ impl Evaluator {
         self.output_sets_omit_nulls = false;
         self.prefetch = prefetch::PrefetchState::new(self.cancel.clone());
         self.active_typed_defaults.clear();
+        self.mapping_key_values.clear();
         self.module_names.clear();
     }
 
@@ -3204,15 +3205,16 @@ impl Evaluator {
                     let probe_snapshot = Value::Object(Arc::new(probe_properties), None);
                     probe_scope.set("this", probe_snapshot.clone());
                     probe_scope.set("module", probe_snapshot);
-                    // A local helper captures its scope when it is built.
-                    // Rebuild helpers that can reach a failed member in the
-                    // probe scope, so their captured `module` observes the
-                    // poisoned member rather than the prior successful value.
+                    // A local helper or module method captures its scope when
+                    // it is built. Rebuild lambdas that can reach a failed
+                    // member in the probe scope, so their captured `module`
+                    // observes the poisoned member rather than the prior
+                    // successful value.
                     for &index in &dependency_plan.order {
                         let Entry::Property(prop) = &dependency_entries[index] else {
                             continue;
                         };
-                        if !has_modifier(&prop.modifiers, Modifier::Local)
+                        if !matches!(prop.value.as_ref(), Some(Expr::Lambda(..)))
                             || !failure_dependents.contains(&prop.name)
                         {
                             continue;
@@ -9853,6 +9855,26 @@ mod auto_trait_tests {
         fn assert_sync<T: Sync>() {}
 
         assert_sync::<Evaluator>();
+    }
+}
+
+#[cfg(all(test, feature = "native-io"))]
+mod mapping_key_tests {
+    use std::sync::Arc;
+
+    use super::Evaluator;
+    use crate::Value;
+
+    #[test]
+    fn evaluation_boundary_clears_mapping_key_provenance() {
+        let mut evaluator = Evaluator::new();
+        evaluator
+            .mapping_key_values
+            .insert(Arc::<str>::from("key"), Value::Int(1));
+
+        evaluator.begin_evaluation();
+
+        assert!(evaluator.mapping_key_values.is_empty());
     }
 }
 
