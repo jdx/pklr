@@ -30,6 +30,17 @@ jobs:
       - run: cargo test --all-features
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo fmt --check
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo test --all-features
   msrv:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -64,7 +75,7 @@ jobs:
         with:
           baseline-rev: HEAD^1
   final:
-    needs: [test, msrv, semver]
+    needs: [test, windows, msrv, semver]
     runs-on: ubuntu-latest
     timeout-minutes: 1
     permissions: {}
@@ -74,7 +85,7 @@ jobs:
     steps:
       - name: Check CI job results
         run: |
-          results=("${{ needs.test.result }}" "${{ needs.msrv.result }}" "${{ needs.semver.result }}")
+          results=("${{ needs.test.result }}" "${{ needs.windows.result }}" "${{ needs.msrv.result }}" "${{ needs.semver.result }}")
           for r in "${results[@]}"; do
             if [ "$r" != "success" ]; then
               echo "CI job failed or was skipped"
