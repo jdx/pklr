@@ -2732,6 +2732,55 @@ fn expr_mentions(expr: &Expr, name: &str) -> bool {
     }
 }
 
+/// Whether an expression evaluated directly as a Mapping entry needs the
+/// Mapping's `this`. Nested objects bind their own receiver, while lambdas
+/// retain the direct entry's lexical receiver.
+pub(super) fn mapping_entry_mentions_this(expr: &Expr) -> bool {
+    match expr {
+        Expr::Ident(name) => name == "this",
+        Expr::Field(base, _) | Expr::NullSafeField(base, _) => mapping_entry_mentions_this(base),
+        Expr::Index(base, index) | Expr::Binop(_, base, index) => {
+            mapping_entry_mentions_this(base) || mapping_entry_mentions_this(index)
+        }
+        Expr::Call(callee, args) => {
+            mapping_entry_mentions_this(callee) || args.iter().any(mapping_entry_mentions_this)
+        }
+        Expr::If(cond, then_expr, else_expr) => {
+            mapping_entry_mentions_this(cond)
+                || mapping_entry_mentions_this(then_expr)
+                || mapping_entry_mentions_this(else_expr)
+        }
+        Expr::Let(name, value, body) => {
+            mapping_entry_mentions_this(value)
+                || (name != "this" && mapping_entry_mentions_this(body))
+        }
+        Expr::Lambda(params, body) => {
+            !params.iter().any(|param| param == "this") && mapping_entry_mentions_this(body)
+        }
+        // A constructed or amended object provides its own `this`; a type
+        // constraint likewise binds `this` to the checked value.
+        Expr::New(..) | Expr::InferredNew(..) | Expr::ObjectBody(..) => false,
+        Expr::Is(value, _) | Expr::As(value, _) => mapping_entry_mentions_this(value),
+        Expr::Unop(_, value)
+        | Expr::Throw(value)
+        | Expr::Trace(value, _)
+        | Expr::Read(value, _)
+        | Expr::ReadOrNull(value, _)
+        | Expr::ReadGlob(value, _) => mapping_entry_mentions_this(value),
+        Expr::StringInterpolation(parts) => parts.iter().any(|part| match part {
+            StringInterpPart::Expr(expr) => mapping_entry_mentions_this(expr),
+            StringInterpPart::Literal(_) => false,
+        }),
+        Expr::Null
+        | Expr::Bool(_)
+        | Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::String(_)
+        | Expr::Import(..)
+        | Expr::ImportGlob(..) => false,
+    }
+}
+
 /// How a class body's expressions reach the class instance: `this` in the
 /// body itself (and in its methods), `outer` one object body down, and
 /// `outer.outer` (and so on) further down. Names
