@@ -11,6 +11,10 @@ fn lex_kinds(src: &str) -> Vec<TokenKind> {
     lex(src).unwrap().into_iter().map(|t| t.kind).collect()
 }
 
+fn virtual_path_key(path: &Path) -> String {
+    path.display().to_string().replace('\\', "/")
+}
+
 struct MemoryCapabilities {
     modules: HashMap<String, String>,
     env: HashMap<String, String>,
@@ -32,7 +36,7 @@ impl EvalCapabilities for ResourceCapabilities {
 
     fn path_exists(&mut self, path: &Path) -> pklr::Result<bool> {
         self.io_paths.lock().unwrap().push(path.to_path_buf());
-        Ok(self.files.contains_key(&path.display().to_string()))
+        Ok(self.files.contains_key(&virtual_path_key(path)))
     }
 
     fn canonicalize(&mut self, path: &Path) -> pklr::Result<PathBuf> {
@@ -42,14 +46,15 @@ impl EvalCapabilities for ResourceCapabilities {
 
     fn read_bytes(&mut self, path: &Path) -> pklr::Result<Vec<u8>> {
         self.io_paths.lock().unwrap().push(path.to_path_buf());
-        if path == Path::new("virtual/race.txt") {
+        let key = virtual_path_key(path);
+        if key == "virtual/race.txt" {
             return Err(pklr::Error::Io(
                 path.to_path_buf(),
                 std::io::ErrorKind::NotFound.into(),
             ));
         }
         self.files
-            .get(&path.display().to_string())
+            .get(&key)
             .cloned()
             .ok_or_else(|| pklr::Error::Io(path.to_path_buf(), std::io::ErrorKind::NotFound.into()))
     }
