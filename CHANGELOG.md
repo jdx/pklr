@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.0.1](https://github.com/jdx/pklr/compare/v5.0.0...v5.0.1) - 2026-10-07
+
+### Fixed
+
+- *(eval)* resolve Windows file URIs for modules ([#295](https://github.com/jdx/pklr/pull/295))
+
 ## [5.0.0](https://github.com/jdx/pklr/compare/v4.0.0...v5.0.0) - 2026-10-07
 
 ### Added
