@@ -1532,6 +1532,8 @@ module lib
 class Script { linux: String? }
 typealias Public = Script
 local typealias Hidden = Script
+class Holder { local typealias Public2 = String }
+typealias Public2 = Script
 typealias Pair = String | Int
 "#,
     )
@@ -1550,12 +1552,15 @@ typealias Pair = String | Int
     let json = eval_main(
         "a = new lib.Public { linux = \"a\" } is lib.Script\n\
          b = new lib.Hidden { linux = \"a\" } is lib.Script\n\
-         c = new lib.Pair {} is lib.Script",
+         c = new lib.Pair {} is lib.Script\n\
+         d = new lib.Public2 { linux = \"a\" } is lib.Script",
     )
     .unwrap();
     assert_eq!(json["a"], true);
     assert_eq!(json["b"], false);
     assert_eq!(json["c"], false);
+    // A `local` alias nested in a class does not hide a module-level one.
+    assert_eq!(json["d"], true);
 }
 
 #[test]
