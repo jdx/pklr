@@ -8098,6 +8098,7 @@ impl Evaluator {
             value_type_names,
             inherited_default,
             &mut HashSet::default(),
+            true,
         )
     }
 
@@ -8116,6 +8117,7 @@ impl Evaluator {
         value_type_names: &[String],
         inherited_default: MappingInheritedDefault,
         defined_keys: &mut HashSet<Arc<str>>,
+        bind_mapping_this: bool,
     ) -> Result<()> {
         let mut entry_scope = scope.child();
         let mut deferred_lambdas: Vec<(String, &crate::parser::Expr)> = Vec::new();
@@ -8177,10 +8179,23 @@ impl Evaluator {
             match entry {
                 Entry::Predicate(..) => return Err(member_predicates_unsupported()),
                 Entry::DynProperty(key_expr, val_expr) => {
-                    let class_key = self.class_key_of(key_expr, &entry_scope);
+                    // Direct Mapping entries see a snapshot of the entries
+                    // evaluated before them through `this`. Generators retain
+                    // their lexical `this`, and the cheap single-name probe
+                    // keeps ordinary Mapping evaluation on its fast path.
+                    let mapping_scope = (bind_mapping_this
+                        && (mapping_entry_mentions_this(key_expr)
+                            || mapping_entry_mentions_this(val_expr)))
+                    .then(|| {
+                        let mut scope = entry_scope.clone();
+                        scope.set("this", Value::Object(Arc::new(map.clone()), None));
+                        scope
+                    });
+                    let entry_scope = mapping_scope.as_ref().unwrap_or(&entry_scope);
+                    let class_key = self.class_key_of(key_expr, entry_scope);
                     let key = class_key
                         .is_none()
-                        .then(|| self.eval_expr(key_expr, &entry_scope, depth + 1))
+                        .then(|| self.eval_expr(key_expr, entry_scope, depth + 1))
                         .transpose()?;
                     let key_str = match class_key {
                         Some(key) => key,
@@ -8215,7 +8230,7 @@ impl Evaluator {
                             existing_map,
                             existing_src,
                             body,
-                            &entry_scope,
+                            entry_scope,
                             depth,
                         )?;
                         map.insert(storage_key, val);
@@ -8228,7 +8243,7 @@ impl Evaluator {
                     // elements. An untyped element-only body is a Dynamic
                     // rendered as a listing.
                     let expanded_value_type_names =
-                        expand_type_alias_names(value_type_names, &entry_scope);
+                        expand_type_alias_names(value_type_names, entry_scope);
                     let selected_value_type = |name: &String| {
                         expanded_value_type_names.len() == 1 || name.starts_with('*')
                     };
@@ -8261,7 +8276,7 @@ impl Evaluator {
                             (_, Some(default @ Value::List(_))) => default.clone(),
                             _ => Value::List(ListValue::new(ListKind::Listing, Vec::new())),
                         };
-                        let val = self.eval_value_amendment(base, body, &entry_scope, depth)?;
+                        let val = self.eval_value_amendment(base, body, entry_scope, depth)?;
                         map.insert(storage_key, val);
                         continue;
                     }
@@ -8296,7 +8311,7 @@ impl Evaluator {
                         })
                     {
                         let mixin = Expr::New(Some("Mixin".into()), body.clone(), params.clone());
-                        let val = self.eval_expr(&mixin, &entry_scope, depth + 1)?;
+                        let val = self.eval_expr(&mixin, entry_scope, depth + 1)?;
                         map.insert(storage_key, val);
                         continue;
                     }
@@ -8351,7 +8366,7 @@ impl Evaluator {
                                         template_map,
                                         src,
                                         &overlay_entries,
-                                        &entry_scope,
+                                        entry_scope,
                                         depth,
                                     )?
                                 } else if !is_typed_new
@@ -8367,9 +8382,9 @@ impl Evaluator {
                                             .collect::<Vec<_>>();
                                         let expected = expand_type_alias_names(
                                             std::slice::from_ref(&expected.to_string()),
-                                            &entry_scope,
+                                            entry_scope,
                                         );
-                                        expand_type_alias_names(&chain, &entry_scope).iter().any(
+                                        expand_type_alias_names(&chain, entry_scope).iter().any(
                                             |actual| {
                                                 expected.iter().any(|expected| {
                                                     type_names_match(actual, expected)
@@ -8386,7 +8401,7 @@ impl Evaluator {
                                         explicit_map,
                                         explicit_src,
                                         body,
-                                        &entry_scope,
+                                        entry_scope,
                                         depth,
                                     )?
                                 } else if let Some(Value::Object(explicit_map, _)) =
@@ -8398,7 +8413,7 @@ impl Evaluator {
                                         src,
                                         explicit_map,
                                         body,
-                                        &entry_scope,
+                                        entry_scope,
                                         depth,
                                     )?
                                 } else {
@@ -8406,7 +8421,7 @@ impl Evaluator {
                                         template_map,
                                         src,
                                         body,
-                                        &entry_scope,
+                                        entry_scope,
                                         depth,
                                     )?
                                 };
@@ -8445,12 +8460,12 @@ impl Evaluator {
                             }
                             result
                         } else {
-                            let val = self.eval_expr(val_expr, &entry_scope, depth + 1)?;
+                            let val = self.eval_expr(val_expr, entry_scope, depth + 1)?;
                             apply_mapping_entry_template(
                                 default_template.map(|(_, template)| template),
                                 val,
                                 value_type_names,
-                                &entry_scope,
+                                entry_scope,
                             )?
                         };
                     map.insert(storage_key, val);
@@ -8494,6 +8509,7 @@ impl Evaluator {
                                 entries: explicit_default_entries.clone(),
                             },
                             defined_keys,
+                            false,
                         )?;
                     }
                 }
@@ -8518,6 +8534,7 @@ impl Evaluator {
                                 entries: explicit_default_entries.clone(),
                             },
                             defined_keys,
+                            false,
                         )?;
                     }
                 }

@@ -312,6 +312,33 @@ duplicate = test.catch(() -> new Mapping { ["a"] = 1; ["" + "a"] = 2 })
     assert_eq!(json["duplicate"], "Duplicate definition of member `\"a\"`.");
 }
 
+#[test]
+fn mapping_entry_this_reads_prior_entries() {
+    let json = eval(
+        r#"
+res = new Mapping {
+    ["one"] = 1
+    ["two"] = this["one"] + 1
+}
+"#,
+    );
+    assert_eq!(json["res"], serde_json::json!({ "one": 1, "two": 2 }));
+}
+
+#[test]
+fn mapping_entry_this_is_lexical_for_lambdas() {
+    let json = eval(
+        r#"
+local mapping = new Mapping {
+    ["one"] = 1
+    ["f"] = () -> this["one"]
+}
+result = mapping["f"].apply()
+"#,
+    );
+    assert_eq!(json["result"], 1);
+}
+
 // ============================================================
 // Null-safe access (future)
 // ============================================================
