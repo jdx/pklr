@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.1.0](https://github.com/jdx/pklr/compare/v5.0.1...v5.1.0) - 2026-10-07
+
+### Added
+
+- separate the reqwest HTTP backend feature ([#297](https://github.com/jdx/pklr/pull/297))
+
 ## [5.0.1](https://github.com/jdx/pklr/compare/v5.0.0...v5.0.1) - 2026-10-07
 
 ### Fixed
