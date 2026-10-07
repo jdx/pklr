@@ -1,0 +1,13 @@
+class Step {
+  a: Int = 1
+  b: Int = 2
+}
+class Hook {
+  label: String = "default"
+  steps: Mapping<String, Step> = new {}
+}
+hooks: Mapping<String, Hook> = new {
+  ["pre"] {
+    steps { ["one"] {} }
+  }
+}

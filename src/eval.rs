@@ -181,6 +181,10 @@ pub struct Evaluator {
     /// defaults. This makes self- and mutually-recursive defaults fail
     /// cleanly instead of exhausting the process stack.
     active_typed_defaults: HashSet<String>,
+    /// Original values for Mapping keys created in this evaluation. Mapping
+    /// storage keys preserve equality and rendering, but compound keys cannot
+    /// be faithfully reconstructed from that string representation alone.
+    mapping_key_values: HashMap<Arc<str>, Value>,
     /// Names declared by `module a.b.C` headers, by module identity (see
     /// `module_type_namespace`), for error messages.
     module_names: HashMap<String, String>,
@@ -422,6 +426,127 @@ fn type_has_constraint(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
     }
 
     visit(ty, scope, &mut HashSet::default())
+}
+
+/// A constraint whose evaluated branch explicitly throws has a meaningful Pkl
+/// failure to preserve. This follows named predicate lambdas too; other
+/// evaluator errors remain conservatively deferred because some package
+/// predicates use language features pklr cannot yet model.
+fn type_constraint_has_explicit_throw(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
+    fn lambda_has_throw(value: &Value, scope: &Scope, seen: &mut HashSet<usize>) -> bool {
+        let Value::Lambda(_, body, captured) = value else {
+            return false;
+        };
+        if !seen.insert(Arc::as_ptr(body) as usize) {
+            return false;
+        }
+        expr_has_throw(body, scope, Some(captured), seen)
+    }
+
+    fn static_value<'a>(
+        expr: &Expr,
+        scope: &'a Scope,
+        captured: Option<&'a ScopeMap>,
+    ) -> Option<&'a Value> {
+        match expr {
+            Expr::Ident(name) => captured
+                .and_then(|bindings| bindings.get(name.as_str()))
+                .or_else(|| scope.get(name.as_str())),
+            Expr::Field(receiver, field) | Expr::NullSafeField(receiver, field) => {
+                let Value::Object(members, _) = static_value(receiver, scope, captured)? else {
+                    return None;
+                };
+                members.get(field.as_str())
+            }
+            _ => None,
+        }
+    }
+
+    fn expr_has_throw(
+        expr: &Expr,
+        scope: &Scope,
+        captured: Option<&ScopeMap>,
+        seen: &mut HashSet<usize>,
+    ) -> bool {
+        match expr {
+            Expr::Throw(_) => true,
+            Expr::Ident(_) => static_value(expr, scope, captured)
+                .is_some_and(|value| lambda_has_throw(value, scope, seen)),
+            Expr::Field(value, _) | Expr::NullSafeField(value, _) => {
+                expr_has_throw(value, scope, captured, seen)
+                    || static_value(expr, scope, captured)
+                        .is_some_and(|value| lambda_has_throw(value, scope, seen))
+            }
+            Expr::Unop(_, value)
+            | Expr::Trace(value, _)
+            | Expr::Read(value, _)
+            | Expr::ReadOrNull(value, _)
+            | Expr::ReadGlob(value, _) => expr_has_throw(value, scope, captured, seen),
+            Expr::Index(left, right) | Expr::Binop(_, left, right) => {
+                expr_has_throw(left, scope, captured, seen)
+                    || expr_has_throw(right, scope, captured, seen)
+            }
+            Expr::Call(callee, args) => {
+                expr_has_throw(callee, scope, captured, seen)
+                    || args
+                        .iter()
+                        .any(|arg| expr_has_throw(arg, scope, captured, seen))
+            }
+            Expr::If(condition, then_expr, else_expr) => {
+                expr_has_throw(condition, scope, captured, seen)
+                    || expr_has_throw(then_expr, scope, captured, seen)
+                    || expr_has_throw(else_expr, scope, captured, seen)
+            }
+            Expr::Let(_, value, body) => {
+                expr_has_throw(value, scope, captured, seen)
+                    || expr_has_throw(body, scope, captured, seen)
+            }
+            Expr::Lambda(_, body) => expr_has_throw(body, scope, captured, seen),
+            Expr::StringInterpolation(parts) => parts.iter().any(|part| {
+                matches!(part, StringInterpPart::Expr(expr) if expr_has_throw(expr, scope, captured, seen))
+            }),
+            Expr::Null
+            | Expr::Bool(_)
+            | Expr::Int(_)
+            | Expr::Float(_)
+            | Expr::String(_)
+            | Expr::New(..)
+            | Expr::InferredNew(..)
+            | Expr::Is(..)
+            | Expr::As(..)
+            | Expr::ObjectBody(_)
+            | Expr::Import(..)
+            | Expr::ImportGlob(..) => false,
+        }
+    }
+
+    fn visit(ty: &crate::parser::TypeExpr, scope: &Scope, aliases: &mut HashSet<String>) -> bool {
+        use crate::parser::TypeExpr;
+
+        match ty {
+            TypeExpr::Constrained(_, constraint) => {
+                expr_has_throw(constraint, scope, None, &mut HashSet::default())
+            }
+            TypeExpr::Named(name) | TypeExpr::Generic(name, _) => scope
+                .get_type_alias(name)
+                .is_some_and(|alias| aliases.insert(name.clone()) && visit(alias, scope, aliases)),
+            TypeExpr::Nullable(inner) => visit(inner, scope, aliases),
+            TypeExpr::Union(variants) => variants
+                .iter()
+                .any(|variant| visit(variant, scope, aliases)),
+        }
+    }
+
+    visit(ty, scope, &mut HashSet::default())
+}
+
+/// Some pantry constraints use Pkl's predicate-composition semantics, which
+/// pklr does not implement yet. Keep that evaluator limitation deferred; it
+/// is distinct from a user `throw` reached by a supported predicate.
+fn is_deferred_constraint_evaluator_error(message: &str) -> bool {
+    message.starts_with("Operator `")
+        && message.contains(" is not defined for operand types `")
+        && message.contains("Function")
 }
 
 /// The value of a literal or a plain name, or `None` for any expression that
@@ -722,6 +847,7 @@ impl Evaluator {
             output_format: render::RendererKind::Json,
             warned_deprecated: std::collections::HashSet::default(),
             active_typed_defaults: HashSet::default(),
+            mapping_key_values: HashMap::default(),
             module_names: HashMap::default(),
         }
     }
@@ -875,6 +1001,7 @@ impl Evaluator {
         self.output_sets_omit_nulls = false;
         self.prefetch = prefetch::PrefetchState::new(self.cancel.clone());
         self.active_typed_defaults.clear();
+        self.mapping_key_values.clear();
         self.module_names.clear();
     }
 
@@ -2479,13 +2606,47 @@ impl Evaluator {
                 }
             }
         }
+        // An amending module cannot repeat a non-local property's type
+        // annotation. Keep the inherited declaration on its replacement so
+        // an untyped `new` continues to amend the base property's default
+        // rather than constructing a Dynamic object. This is the module
+        // counterpart of `inherit_property_types` for classes.
+        let typed_body = module.amends.as_ref().and_then(|_| {
+            self.inherit_module_property_types(&module.body, &late_inherited_properties, &mut scope)
+        });
+        let body = typed_body.as_ref().unwrap_or(&module.body);
+        // These annotations were reconstructed from the amended module, not
+        // written in this body. They guide `new` and body evaluation above.
+        // A failed check remains attached to its member rather than eagerly
+        // rejecting an import that reads a different property, matching Pkl's
+        // lazy evaluation of inherited property values. A constraint that
+        // cannot yet be evaluated stays lazy too.
+        let synthesized_inherited_types: HashSet<&str> = typed_body
+            .as_ref()
+            .map(|typed| {
+                module
+                    .body
+                    .iter()
+                    .zip(typed.iter())
+                    .filter_map(|(original, typed)| match (original, typed) {
+                        (Entry::Property(original), Entry::Property(typed))
+                            if original.type_ann.is_none() && typed.type_ann.is_some() =>
+                        {
+                            Some(typed.name.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let requested_eval_fields = requested_output_fields.as_ref().map(|fields| {
             let mut dependency_entries = late_inherited_properties
                 .iter()
                 .cloned()
                 .map(Entry::Property)
                 .collect::<Vec<_>>();
-            dependency_entries.extend(module.body.iter().cloned());
+            dependency_entries.extend(body.iter().cloned());
             expand_requested_fields(&dependency_entries, fields, &inherited_builtins)
         });
 
@@ -2510,13 +2671,8 @@ impl Evaluator {
         let plan = Arc::clone(
             &self
                 .plan_cache
-                .entry(Arc::as_ptr(&module.body) as usize)
-                .or_insert_with(|| {
-                    (
-                        Arc::clone(&module.body),
-                        Arc::new(module_evaluation_plan(&module.body)),
-                    )
-                })
+                .entry(Arc::as_ptr(body) as usize)
+                .or_insert_with(|| (Arc::clone(body), Arc::new(module_evaluation_plan(body))))
                 .1,
         );
         let mut todo = plan.order.clone();
@@ -2527,7 +2683,7 @@ impl Evaluator {
         let mut previous_failures: Option<HashMap<&str, String>> = None;
         for _ in 0..=plan.order.len() {
             for index in todo {
-                let entry = &module.body[index];
+                let entry = &body[index];
                 if let Some(name) = module_member_name(entry) {
                     failed.remove(name);
                     failed_indices.remove(&index);
@@ -2634,7 +2790,18 @@ impl Evaluator {
                             }
                             continue;
                         }
-                        let val = match self.eval_property(prop, &scope, depth) {
+                        let property_result =
+                            self.eval_property(prop, &scope, depth).and_then(|value| {
+                                if synthesized_inherited_types.contains(prop.name.as_str())
+                                    && let (Some(value), Some(ty)) = (&value, &prop.type_ann)
+                                {
+                                    self.check_inherited_mapping_value_types(
+                                        value, ty, &scope, depth,
+                                    )?;
+                                }
+                                Ok(value)
+                            });
+                        let val = match property_result {
                             Ok(value) => value,
                             // Module properties are late-bound. Keep an unresolved
                             // template expression deferred until a consumer actually
@@ -2702,7 +2869,7 @@ impl Evaluator {
         // failed property that would be rendered fails the module.
         let mut out = base_obj;
         let mut poisoned_members = IndexMap::new();
-        for entry in module.body.iter() {
+        for entry in body.iter() {
             if let Entry::ClassDef(name, ..) = entry {
                 if let Some(value) = scope.get(name) {
                     out.insert(name.as_str().into(), value.clone());
@@ -2717,7 +2884,7 @@ impl Evaluator {
                 }
             }
         }
-        for entry in module.body.iter() {
+        for entry in body.iter() {
             let Entry::Property(prop) = entry else {
                 continue;
             };
@@ -2755,8 +2922,7 @@ impl Evaluator {
         // Pkl properties are late-bound. Re-evaluate inherited expressions after
         // child overrides have populated the scope (for example `uses` derived
         // from an action module's overridden `action` and `version`).
-        let child_property_names: HashSet<&str> = module
-            .body
+        let child_property_names: HashSet<&str> = body
             .iter()
             .filter_map(|entry| match entry {
                 Entry::Property(prop) => Some(prop.name.as_str()),
@@ -2778,8 +2944,7 @@ impl Evaluator {
                 path.display()
             )));
         }
-        let child_candidates = module
-            .body
+        let child_candidates = body
             .iter()
             .filter_map(|entry| match entry {
                 Entry::Property(prop)
@@ -2866,7 +3031,20 @@ impl Evaluator {
                 }
             }
             for prop in &late_child_properties {
-                match self.eval_property(prop, &scope, depth) {
+                if requested_eval_fields
+                    .as_ref()
+                    .is_some_and(|fields| !fields.contains(&prop.name))
+                {
+                    continue;
+                }
+                match self.eval_property(prop, &scope, depth).and_then(|value| {
+                    if synthesized_inherited_types.contains(prop.name.as_str())
+                        && let (Some(value), Some(ty)) = (&value, &prop.type_ann)
+                    {
+                        self.check_inherited_mapping_value_types(value, ty, &scope, depth)?;
+                    }
+                    Ok(value)
+                }) {
                     Ok(Some(value)) => {
                         scope.set(&prop.name, value.clone());
                         if has_modifier(&prop.modifiers, Modifier::Local) {
@@ -2914,7 +3092,21 @@ impl Evaluator {
         // Check declarations only after this module's final scope is complete:
         // constraints and aliases may refer to members declared later.
         if !evaluated_as_base {
-            for entry in module.body.iter() {
+            // These are the effective non-local properties after an amendment:
+            // an override in this body replaces its inherited declaration.
+            // Dependents may themselves be inherited, so error propagation must
+            // consider both sets rather than only the child body below.
+            let effective_properties = late_inherited_properties
+                .iter()
+                .map(|prop| prop.as_ref())
+                .filter(|prop| !child_property_names.contains(prop.name.as_str()))
+                .chain(body.iter().filter_map(|entry| match entry {
+                    Entry::Property(prop) => Some(prop.as_ref()),
+                    _ => None,
+                }))
+                .collect::<Vec<_>>();
+            let mut inherited_type_failures = IndexMap::new();
+            for entry in body.iter() {
                 if let Entry::Property(prop) = entry
                     && !has_modifier(&prop.modifiers, Modifier::Local)
                     && (prop.value.is_some() || prop.body.is_some())
@@ -2922,7 +3114,167 @@ impl Evaluator {
                     && scope.is_declared(&prop.name)
                     && let Some(value) = scope.get(&prop.name)
                 {
-                    self.check_declared_property_type(prop, value, &scope, depth)?;
+                    if synthesized_inherited_types.contains(prop.name.as_str()) {
+                        let ty = prop.type_ann.as_ref().expect("checked above");
+                        if !type_has_constraint(ty, &scope) {
+                            continue;
+                        }
+                        let failure = if type_is_runtime_checkable(ty, &scope) {
+                            match self.eval_type_check(value, ty, &scope, depth + 1) {
+                                Ok(true) => None,
+                                Ok(false) => Some(format!(
+                                    "property '{}' expected {}, got {}",
+                                    prop.name,
+                                    display_type_expr(ty),
+                                    value_type_name(value)
+                                )),
+                                // An explicit Pkl `throw` is observable after the
+                                // member is materialized. Keep other evaluator
+                                // limitations deferred, as before.
+                                Err(Error::Eval(message))
+                                    if type_constraint_has_explicit_throw(ty, &scope)
+                                        && !is_deferred_constraint_evaluator_error(&message) =>
+                                {
+                                    Some(message)
+                                }
+                                Err(Error::Eval(_)) => None,
+                                Err(error) => return Err(error),
+                            }
+                        } else {
+                            None
+                        };
+                        if let Some(message) = failure {
+                            inherited_type_failures.insert(prop.name.clone(), message);
+                        }
+                    } else {
+                        self.check_declared_property_type(prop, value, &scope, depth)?;
+                    }
+                }
+            }
+
+            // Values are evaluated before these late inherited checks. Carry a
+            // constrained member's failure through direct and transitive reads
+            // so a dependent output cannot retain a stale value. Probe the
+            // expression with failed members hidden rather than relying on a
+            // syntactic reference list: an unselected `if` branch, or a
+            // caught failed read, must remain usable.
+            if !inherited_type_failures.is_empty() {
+                let mut dependency_entries = late_inherited_properties
+                    .iter()
+                    .cloned()
+                    .map(Entry::Property)
+                    .collect::<Vec<_>>();
+                dependency_entries.extend(body.iter().cloned());
+                let dependency_plan = module_evaluation_plan(&dependency_entries);
+                while !inherited_type_failures.is_empty() {
+                    // Find every member that can reach a failed member. This
+                    // follows local helpers transitively. Restricting probes
+                    // to that closure preserves narrowed evaluation's
+                    // laziness without leaving a value computed before its
+                    // inherited type check stale.
+                    let mut failure_dependents = inherited_type_failures
+                        .keys()
+                        .cloned()
+                        .collect::<HashSet<_>>();
+                    loop {
+                        let mut expanded = false;
+                        for entry in &dependency_entries {
+                            let Entry::Property(prop) = entry else {
+                                continue;
+                            };
+                            let refs = property_reference_names(prop);
+                            if refs.iter().any(|name| failure_dependents.contains(name))
+                                && failure_dependents.insert(prop.name.clone())
+                            {
+                                expanded = true;
+                            }
+                        }
+                        if !expanded {
+                            break;
+                        }
+                    }
+
+                    let mut added = false;
+                    let mut probe_scope = scope.child();
+                    let mut probe_properties = (*all_props).clone();
+                    for (name, message) in &inherited_type_failures {
+                        probe_scope.poison(name.clone(), message.clone());
+                        probe_scope.set_member_poison(name, Some(message.clone()));
+                        probe_properties.shift_remove(name.as_str());
+                    }
+                    let probe_snapshot = Value::Object(Arc::new(probe_properties), None);
+                    probe_scope.set("this", probe_snapshot.clone());
+                    probe_scope.set("module", probe_snapshot);
+                    // A local helper can retain an already-computed value,
+                    // and a method captures its scope when it is built.
+                    // Rebuild affected locals and lambdas in the probe scope,
+                    // so they observe the poisoned member rather than the
+                    // prior successful value.
+                    for &index in &dependency_plan.order {
+                        let Entry::Property(prop) = &dependency_entries[index] else {
+                            continue;
+                        };
+                        if !has_modifier(&prop.modifiers, Modifier::Local)
+                            && !matches!(prop.value.as_ref(), Some(Expr::Lambda(..)))
+                            || !failure_dependents.contains(&prop.name)
+                        {
+                            continue;
+                        }
+                        let Some(value) = &prop.value else {
+                            continue;
+                        };
+                        match self.eval_expr(value, &probe_scope, depth + 1) {
+                            Ok(value) => probe_scope.declare(&prop.name, value),
+                            Err(Error::Eval(message)) => {
+                                probe_scope.declare_poisoned(prop.name.clone(), message)
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    for prop in &effective_properties {
+                        if has_modifier(&prop.modifiers, Modifier::Local)
+                            || inherited_type_failures.contains_key(prop.name.as_str())
+                            || requested_eval_fields
+                                .as_ref()
+                                .is_some_and(|fields| !fields.contains(&prop.name))
+                            || !failure_dependents.contains(&prop.name)
+                        {
+                            continue;
+                        }
+                        if let Err(Error::Eval(message)) =
+                            self.eval_property(prop, &probe_scope, depth + 1)
+                            && inherited_type_failures
+                                .values()
+                                .any(|failure| failure == &message)
+                        {
+                            inherited_type_failures.insert(prop.name.clone(), message.clone());
+                            added = true;
+                        }
+                    }
+                    if !added {
+                        break;
+                    }
+                }
+            }
+            for prop in effective_properties {
+                if let Some(message) = inherited_type_failures.get(prop.name.as_str()) {
+                    let rendered = !has_modifier(&prop.modifiers, Modifier::Hidden)
+                        && requested_output_fields
+                            .as_ref()
+                            .is_none_or(|fields| fields.contains(&prop.name));
+                    if rendered && depth == 0 {
+                        return Err(Error::Eval(message.clone()));
+                    }
+                    out.shift_remove(prop.name.as_str());
+                    scope.set_member_poison(&prop.name, Some(message.clone()));
+                    self.rendered_member_failed |= rendered;
+                    poisoned_members.insert(
+                        prop.name.clone(),
+                        PoisonedMember {
+                            message: message.clone(),
+                            rendered,
+                        },
+                    );
                 }
             }
         }
@@ -2952,7 +3304,7 @@ impl Evaluator {
         // access can warn lazily. Modules without @Deprecated keep `None`
         // source to avoid changing amend behavior in the common case.
         // An abstract module also keeps a source, so `new` can reject it.
-        let deprecated = collect_deprecated(&module.body);
+        let deprecated = collect_deprecated(body);
         let is_abstract = module_is_abstract(module);
         let source = if deprecated.is_empty() && poisoned_members.is_empty() && !is_abstract {
             None
@@ -2983,7 +3335,7 @@ impl Evaluator {
         let mut effective_late_properties = IndexMap::new();
         for prop in late_inherited_properties
             .iter()
-            .chain(module.body.iter().filter_map(|entry| match entry {
+            .chain(body.iter().filter_map(|entry| match entry {
                 Entry::Property(prop)
                     if !has_modifier(&prop.modifiers, Modifier::Local) && prop.name != "output" =>
                 {
@@ -3817,6 +4169,9 @@ impl Evaluator {
                     } else {
                         key_str.clone()
                     };
+                    if mapping_entries && let Some(key) = key.as_ref() {
+                        self.remember_mapping_key(storage_key.clone(), key);
+                    }
                     // A body may define each key once. An object body still
                     // amends an inherited value, but it is a definition in
                     // this body and must participate in duplicate detection.
@@ -4684,6 +5039,126 @@ impl Evaluator {
         }
     }
 
+    /// Validate values added through an inherited typed Mapping property.
+    ///
+    /// Generic Mapping checks normally validate the Mapping container only.
+    /// For a synthesized declaration that would let an amending module insert
+    /// a value of the wrong type while preserving a lazy module-member error,
+    /// validate its completed entries here. This runs only while that member
+    /// is evaluated, so a narrowed import of an unrelated member stays lazy.
+    fn check_inherited_mapping_value_types(
+        &mut self,
+        value: &Value,
+        ty: &crate::parser::TypeExpr,
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<()> {
+        fn mapping_type_pairs(
+            ty: &crate::parser::TypeExpr,
+            scope: &Scope,
+            aliases: &mut HashSet<String>,
+            out: &mut Vec<(crate::parser::TypeExpr, crate::parser::TypeExpr)>,
+        ) {
+            use crate::parser::TypeExpr;
+
+            match ty {
+                TypeExpr::Named(name) => {
+                    if let Some(alias) = scope.get_type_alias(name)
+                        && aliases.insert(name.clone())
+                    {
+                        mapping_type_pairs(alias, scope, aliases, out);
+                    }
+                }
+                TypeExpr::Nullable(inner) => mapping_type_pairs(inner, scope, aliases, out),
+                TypeExpr::Union(variants) => {
+                    for variant in variants {
+                        mapping_type_pairs(variant, scope, aliases, out);
+                    }
+                }
+                TypeExpr::Generic(name, params) if name == "Mapping" || name == "Map" => {
+                    if let [key, value, ..] = params.as_slice() {
+                        out.push((key.clone(), value.clone()));
+                    }
+                }
+                TypeExpr::Constrained(base, _) => {
+                    if let Ok(base) = parser::parse_type_name(base) {
+                        mapping_type_pairs(&base, scope, aliases, out);
+                    }
+                }
+                TypeExpr::Generic(name, _) => {
+                    if let Some(alias) = scope.get_type_alias(name)
+                        && aliases.insert(name.clone())
+                    {
+                        mapping_type_pairs(alias, scope, aliases, out);
+                    }
+                }
+            }
+        }
+
+        let Value::Object(entries, _) = value else {
+            return Ok(());
+        };
+        let mut pairs = Vec::new();
+        mapping_type_pairs(ty, scope, &mut HashSet::default(), &mut pairs);
+        if pairs.is_empty() {
+            return Ok(());
+        }
+        // An outer Mapping union selects one alternative for the whole
+        // mapping, not independently for each entry. A nested union remains
+        // part of its key or value type and is handled by eval_type_check.
+        for (key_ty, value_ty) in &pairs {
+            let key_checkable = type_is_runtime_checkable(key_ty, scope);
+            let value_checkable = type_is_runtime_checkable(value_ty, scope);
+            let mut alternative_matches = true;
+            for (stored_key, entry) in entries.iter() {
+                let key = self
+                    .mapping_key_values
+                    .get(stored_key)
+                    .cloned()
+                    .unwrap_or_else(|| crate::value::mapping_storage_value(stored_key));
+                if (key_checkable && !self.eval_type_check(&key, key_ty, scope, depth + 1)?)
+                    || (value_checkable
+                        && !self.eval_type_check(entry, value_ty, scope, depth + 1)?)
+                {
+                    alternative_matches = false;
+                    break;
+                }
+            }
+            if alternative_matches {
+                return Ok(());
+            }
+        }
+        let (stored_key, entry) = entries.iter().next().expect("non-empty Mapping mismatch");
+        let key = self
+            .mapping_key_values
+            .get(stored_key)
+            .cloned()
+            .unwrap_or_else(|| crate::value::mapping_storage_value(stored_key));
+        Err(Error::Eval(format!(
+            "Expected Mapping entry of type `{} -> {}`, but got `{}` -> `{}`.",
+            pairs
+                .iter()
+                .map(|(key, _)| display_type_expr(key))
+                .collect::<Vec<_>>()
+                .join(" | "),
+            pairs
+                .iter()
+                .map(|(_, value)| display_type_expr(value))
+                .collect::<Vec<_>>()
+                .join(" | "),
+            value_type_name(&key),
+            value_type_name(entry)
+        )))
+    }
+
+    fn remember_mapping_key(&mut self, storage_key: Arc<str>, value: &Value) {
+        // An amendment can replace an equal key with a differently-spelled
+        // native unit (`[1.s]` with `[1000.ms]`). Pkl evaluates constraints
+        // against the replacement expression, so the most recent key value
+        // is authoritative even though map storage keeps the normalized key.
+        self.mapping_key_values.insert(storage_key, value.clone());
+    }
+
     /// Check a concrete property value after its defining scope is complete.
     /// Defaults and declarations without values are checked when they are
     /// materialized, not merely declared.
@@ -4878,6 +5353,72 @@ impl Evaluator {
         roots
     }
 
+    /// Give each property an amending module redefines without a type the
+    /// inherited declaration's type. An amending module may not repeat a
+    /// non-local annotation, but it still inherits its type and its default
+    /// when assigning an untyped `new`.
+    fn inherit_module_property_types(
+        &self,
+        body: &Body,
+        inherited: &[Arc<Property>],
+        child_scope: &mut Scope,
+    ) -> Option<Body> {
+        let parent_type = |name: &str| {
+            inherited.iter().rev().find_map(|prop| {
+                (prop.name == name && !has_modifier(&prop.modifiers, Modifier::Local))
+                    .then_some(prop.type_ann.as_ref())
+                    .flatten()
+            })
+        };
+        let needs_type = |entry: &Entry| match entry {
+            Entry::Property(prop)
+                if prop.type_ann.is_none()
+                    && !has_modifier(&prop.modifiers, Modifier::Local)
+                    && (prop.body.is_some()
+                        || prop
+                            .value
+                            .as_ref()
+                            .is_some_and(parser::has_untyped_result_new)) =>
+            {
+                parent_type(&prop.name)
+            }
+            _ => None,
+        };
+        if !body.iter().any(|entry| needs_type(entry).is_some()) {
+            return None;
+        }
+
+        let mut typed = Vec::with_capacity(body.len());
+        for entry in body.iter() {
+            let (Entry::Property(prop), Some(ty)) = (entry, needs_type(entry)) else {
+                typed.push(entry.clone());
+                continue;
+            };
+            let mut prop = (**prop).clone();
+            prop.type_ann = Some(ty.clone());
+            if let Some(expr) = &mut prop.value
+                && parser::has_untyped_result_new(expr)
+                && !type_is_any(ty)
+                && let Some(default) = child_scope
+                    .get(&prop.name)
+                    .filter(|value| matches!(value, Value::Object(..) | Value::List(_)))
+                    .cloned()
+            {
+                let binding = format!("#parent:{}", prop.name);
+                child_scope.set(&binding, default);
+                parser::rewrite_untyped_result_new(expr, &mut |entries| {
+                    Expr::Binop(
+                        BinOp::Add,
+                        Box::new(Expr::Ident(binding.clone())),
+                        Box::new(Expr::ObjectBody(entries)),
+                    )
+                });
+            }
+            typed.push(Entry::Property(Arc::new(prop)));
+        }
+        Some(typed.into())
+    }
+
     /// Give each property a child class redefines without a type the parent's
     /// declared type. Untyped `new` values amend a default constructed where
     /// that inherited type was declared.
@@ -5055,6 +5596,15 @@ impl Evaluator {
                 current_scope,
                 depth,
             );
+        }
+        if let Some(value) = self.try_eval_simple_class_amendment(
+            base_map,
+            base_source,
+            overlay_entries,
+            current_scope,
+            depth,
+        )? {
+            return Ok(value);
         }
         // Every amendment of a class instance goes through here: `new C {}`,
         // property bodies, and entries of typed Mappings and Listings.
@@ -5424,6 +5974,182 @@ impl Evaluator {
             }
             (_, other) => Ok(other),
         }
+    }
+
+    /// Amend a class default without re-evaluating every unchanged member.
+    ///
+    /// Typed Mapping entries commonly start from the same class template. If
+    /// an overlay consists exclusively of direct replacements and neither the
+    /// overlay nor an unchanged base property reads a replaced member, the
+    /// already-evaluated defaults are still valid. Reusing them avoids a full
+    /// class reconstruction per mapping entry while preserving the source
+    /// metadata needed for later amendments. Anything that could require late
+    /// binding stays on the complete `eval_amended_object` path below.
+    fn try_eval_simple_class_amendment(
+        &mut self,
+        base_map: &Arc<ObjectMap>,
+        base_source: &Arc<ObjectSource>,
+        overlay_entries: &[Entry],
+        current_scope: &Scope,
+        depth: usize,
+    ) -> Result<Option<Value>> {
+        let static_default = |expr: &Expr| {
+            matches!(
+                expr,
+                Expr::Null | Expr::Bool(_) | Expr::Int(_) | Expr::Float(_) | Expr::String(_)
+            ) || matches!(
+                expr,
+                Expr::New(Some(name), body, _) if (name == "Mapping" || name == "Map") && body.is_empty()
+            ) || matches!(
+                expr,
+                Expr::Call(callee, args)
+                    if args.is_empty()
+                        && matches!(callee.as_ref(), Expr::Ident(name)
+                            if matches!(name.as_str(), "List" | "Listing" | "Set" | "Map"))
+            )
+        };
+        let reusable_default = |prop: &Property| {
+            prop.value.as_ref().is_some_and(static_default)
+                || (prop.value.is_none()
+                    && matches!(prop.type_ann, Some(crate::parser::TypeExpr::Nullable(_))))
+        };
+        if base_source.kind != ObjectKind::Class
+            || base_source.is_abstract
+            || overlay_entries.is_empty()
+            || base_source.entries.iter().any(|entry| {
+                !matches!(entry, Entry::Property(prop)
+                        if prop.modifiers.is_empty()
+                            && prop.body.is_none()
+                            && reusable_default(prop))
+            })
+        {
+            return Ok(None);
+        }
+
+        // Property annotations belong to the definition site of the class.
+        // An imported class's aliases and sibling classes may not be visible
+        // in the scope that amends one of its instances.
+        let mut type_scope = Scope {
+            type_namespace: object_source_type_namespace(base_source),
+            ..Scope::default()
+        };
+        let base_scope = base_source.scope();
+        if !base_scope.is_empty() {
+            type_scope.vars = Arc::new(base_scope.clone());
+            let declared = base_source.scope_declared();
+            if !declared.is_empty() {
+                type_scope.declared = Arc::new(
+                    declared
+                        .iter()
+                        .filter(|name| base_scope.contains_key(&***name))
+                        .cloned()
+                        .collect(),
+                );
+            }
+        }
+        for (name, identity) in base_source.scope_module_identities() {
+            type_scope.set_module_identity(name.clone(), identity.clone());
+        }
+        let aliases = base_source.scope_type_aliases();
+        if !aliases.is_empty() {
+            type_scope.type_aliases = Arc::new(aliases.clone());
+        }
+
+        let base_properties = base_source
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| match entry {
+                Entry::Property(prop) if !has_modifier(&prop.modifiers, Modifier::Local) => {
+                    Some((prop.name.as_str(), (index, Arc::clone(prop))))
+                }
+                _ => None,
+            })
+            .collect::<HashMap<_, _>>();
+        let mut overlays = IndexMap::new();
+        for entry in overlay_entries {
+            let Entry::Property(prop) = entry else {
+                return Ok(None);
+            };
+            if prop.is_method
+                || !prop.modifiers.is_empty()
+                || prop.type_ann.is_some()
+                || prop.value.is_none()
+                || prop.body.is_some()
+                || overlays.contains_key(prop.name.as_str())
+            {
+                return Ok(None);
+            }
+            let Some((_, base_prop)) = base_properties.get(prop.name.as_str()) else {
+                return Ok(None);
+            };
+            if let Some(message) = immutable_member_error(prop, base_prop) {
+                return Err(Error::Eval(message));
+            }
+            overlays.insert(prop.name.as_str(), Arc::clone(prop));
+        }
+        if overlays.is_empty()
+            || base_source.entries.iter().any(|entry| match entry {
+                Entry::Property(prop) => {
+                    prop.type_ann
+                        .as_ref()
+                        .is_some_and(|ty| type_has_constraint(ty, &type_scope))
+                        || (!overlays.contains_key(prop.name.as_str())
+                            && property_reference_names(prop).iter().any(|name| {
+                                name == DYNAMIC_SIBLING_REF || overlays.contains_key(name.as_str())
+                            }))
+                }
+                _ => true,
+            })
+            || overlay_entries.iter().any(|entry| {
+                property_reference_names(match entry {
+                    Entry::Property(prop) => prop,
+                    _ => unreachable!("overlay entries were checked above"),
+                })
+                .iter()
+                .any(|name| {
+                    name == "this"
+                        || name == "super"
+                        || name == "outer"
+                        || name == DYNAMIC_SIBLING_REF
+                        || base_properties.contains_key(name.as_str())
+                })
+            })
+        {
+            return Ok(None);
+        }
+
+        let overlay_scope = Arc::new(capture_scope(current_scope));
+        let mut map = (**base_map).clone();
+        let mut source = (**base_source).clone();
+        let entries = Arc::make_mut(&mut source.entries);
+        let entry_scopes = &mut source.entry_scopes;
+        entry_scopes.resize(entries.len(), None);
+        for (name, overlay) in overlays {
+            let (index, base_prop) = base_properties
+                .get(name)
+                .expect("eligible overlay has a base property");
+            let mut prop = (*overlay).clone();
+            prop.type_ann = base_prop.type_ann.clone();
+            if has_modifier(&base_prop.modifiers, Modifier::Hidden) {
+                prop.modifiers.push(Modifier::Hidden);
+            }
+            let value = self
+                .eval_property(&prop, current_scope, depth)?
+                .expect("valued overlay properties evaluate to a value");
+            self.check_declared_property_type(&prop, &value, &type_scope, depth)?;
+            map.insert(prop.name.clone().into(), value);
+            entries[*index] = Entry::Property(Arc::new(prop));
+            entry_scopes[*index] = Some(Arc::clone(&overlay_scope));
+        }
+        source.kind = ObjectKind::Object;
+        source.prototype = base_source.prototype.clone().or_else(|| {
+            Some(Value::Object(
+                Arc::clone(base_map),
+                Some(Arc::clone(base_source)),
+            ))
+        });
+        Ok(Some(Value::Object(Arc::new(map), Some(Arc::new(source)))))
     }
 
     fn eval_object_body_over_template(
@@ -6601,7 +7327,10 @@ impl Evaluator {
                     for pair in evaled.chunks(2) {
                         if let [k, v] = pair {
                             let key = value_to_key(k)?;
-                            insert_mapping_entry(&mut map, key, v.clone());
+                            let storage_key =
+                                equivalent_mapping_key(&map, &key).unwrap_or_else(|| key.clone());
+                            self.remember_mapping_key(storage_key.clone(), k);
+                            map.insert(storage_key, v.clone());
                         }
                     }
                     return Ok(Value::Object(Arc::new(map), None));
@@ -7465,6 +8194,9 @@ impl Evaluator {
                     // body.
                     let storage_key =
                         equivalent_mapping_key(map, &key_str).unwrap_or_else(|| key_str.clone());
+                    if let Some(key) = key.as_ref() {
+                        self.remember_mapping_key(storage_key.clone(), key);
+                    }
                     if !insert_mapping_key(defined_keys, &key_str) {
                         let key = match key.as_ref() {
                             None => key_str.to_string(),
@@ -9124,6 +9856,26 @@ mod auto_trait_tests {
         fn assert_sync<T: Sync>() {}
 
         assert_sync::<Evaluator>();
+    }
+}
+
+#[cfg(all(test, feature = "native-io"))]
+mod mapping_key_tests {
+    use std::sync::Arc;
+
+    use super::Evaluator;
+    use crate::Value;
+
+    #[test]
+    fn evaluation_boundary_clears_mapping_key_provenance() {
+        let mut evaluator = Evaluator::new();
+        evaluator
+            .mapping_key_values
+            .insert(Arc::<str>::from("key"), Value::Int(1));
+
+        evaluator.begin_evaluation();
+
+        assert!(evaluator.mapping_key_values.is_empty());
     }
 }
 
