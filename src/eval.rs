@@ -2747,6 +2747,19 @@ impl Evaluator {
                     }
                     Entry::TypeAlias(name, ty) => {
                         self.eval_type_alias(name, ty, &mut scope);
+                        // A non-local alias to a class is a module member, like
+                        // the class, and its value is schema, not data. An
+                        // inherited property of the same name stays data.
+                        if !module.local_type_aliases.contains(name)
+                            && !base_obj.contains_key(name.as_str())
+                            && matches!(
+                                scope.get(name),
+                                Some(Value::Object(_, Some(source)))
+                                    if source.kind == ObjectKind::Class
+                            )
+                        {
+                            class_names.insert(name.clone());
+                        }
                     }
                     Entry::Property(prop) => {
                         let mods = &prop.modifiers;
@@ -2872,7 +2885,14 @@ impl Evaluator {
         let mut out = base_obj;
         let mut poisoned_members = IndexMap::new();
         for entry in body.iter() {
-            if let Entry::ClassDef(name, ..) = entry {
+            // A typealias to a class is a module member too, so an importer
+            // can write `new Alias.Name {}`.
+            let exported = match entry {
+                Entry::ClassDef(name, ..) => Some(name),
+                Entry::TypeAlias(name, _) if class_names.contains(name.as_str()) => Some(name),
+                _ => None,
+            };
+            if let Some(name) = exported {
                 if let Some(value) = scope.get(name) {
                     out.insert(name.as_str().into(), value.clone());
                 } else if let Some(message) = failed.get(name.as_str()) {
@@ -5014,17 +5034,18 @@ impl Evaluator {
         scope.declare(type_alias_marker(name), Value::Bool(true));
         match ty {
             crate::parser::TypeExpr::Named(target) => {
-                // Alias to a class or another alias already in scope
-                if let Some(val) = scope.get(target) {
-                    scope.declare(name, val.clone());
+                // Alias to a class or another alias already in scope, possibly
+                // qualified by an imported module (`Config.Script`)
+                if let Some(val) = resolve_dotted(scope, target) {
+                    scope.declare(name, val);
                 }
             }
             crate::parser::TypeExpr::Nullable(inner) => {
                 // typealias Foo = Bar? -- alias to the inner type
                 if let crate::parser::TypeExpr::Named(target) = inner.as_ref()
-                    && let Some(val) = scope.get(target)
+                    && let Some(val) = resolve_dotted(scope, target)
                 {
-                    scope.declare(name, val.clone());
+                    scope.declare(name, val);
                 }
             }
             crate::parser::TypeExpr::Constrained(base, _) => {
@@ -5036,7 +5057,7 @@ impl Evaluator {
     }
 
     fn bind_type_alias_value(&self, name: &str, target: &str, scope: &mut Scope) {
-        if let Some(val) = scope.get(target.trim_end_matches('?')).cloned() {
+        if let Some(val) = resolve_dotted(scope, target.trim_end_matches('?')) {
             scope.declare(name, val);
         }
     }

@@ -319,6 +319,8 @@ struct Parser<'a> {
     /// definitions are intentionally excluded from the module-level cycle
     /// check.
     local_type_aliases: std::collections::HashSet<String>,
+    /// The module-level subset of `local_type_aliases`, which importers cannot see.
+    module_local_type_aliases: std::collections::HashSet<String>,
     /// Expressions and type constraints currently nested around the cursor.
     depth: usize,
 }
@@ -338,6 +340,7 @@ impl<'a> Parser<'a> {
             new_types: Vec::new(),
             type_alias_parameters: std::collections::HashMap::new(),
             local_type_aliases: std::collections::HashSet::new(),
+            module_local_type_aliases: std::collections::HashSet::new(),
             depth: 0,
         };
         p.skip_semicolons();
@@ -752,6 +755,7 @@ impl<'a> Parser<'a> {
             import_exprs: std::mem::take(&mut self.import_exprs),
             annotations,
             body: body.into(),
+            local_type_aliases: std::mem::take(&mut self.module_local_type_aliases),
         })
     }
 
@@ -1084,7 +1088,12 @@ impl<'a> Parser<'a> {
                 entries.push(entry);
             }
             TokenKind::KwTypeAlias => {
-                entries.push(self.parse_type_alias(header)?);
+                let is_local = header.has(Modifier::Local);
+                let entry = self.parse_type_alias(header)?;
+                if let (true, Entry::TypeAlias(name, _)) = (is_local, &entry) {
+                    self.module_local_type_aliases.insert(name.clone());
+                }
+                entries.push(entry);
             }
             TokenKind::KwClass => {
                 entries.push(self.parse_class(header)?);
