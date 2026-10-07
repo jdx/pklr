@@ -28,9 +28,14 @@ http = ["native-io", "dep:rustls", "dep:ureq"]
 # `package://` zip archives.
 package-zip = ["eval-core", "dep:zip"]
 miette-diagnostics = ["dep:miette"]
-# Optional and additive: a reqwest HTTP backend that fetches on tokio, and
-# async entry points that run evaluation on tokio's blocking pool.
-async = ["http", "dep:reqwest", "dep:tokio"]
+# Optional and additive: a reqwest HTTP backend that fetches on tokio.
+# The legacy `async` feature below additionally enables async evaluation entry
+# points that run on tokio's blocking pool.
+reqwest = ["native-io", "dep:reqwest", "dep:tokio"]
+# Kept for compatibility: enable both HTTP backends and the async evaluation
+# entry points. Select `reqwest` alone when a host supplies its own client and
+# does not need ureq.
+async = ["http", "reqwest"]
 
 [dependencies]
 fancy-regex = { version = "0.19", optional = true }
@@ -51,6 +56,7 @@ tokio           = { version = "1", features = ["rt", "rt-multi-thread", "sync"],
 url             = { version = "2", optional = true }
 
 [dev-dependencies]
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "tls12"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 
 [[test]]
@@ -68,6 +74,10 @@ required-features = ["http", "package-zip"]
 [[test]]
 name = "async"
 required-features = ["async", "package-zip"]
+
+[[test]]
+name = "reqwest"
+required-features = ["reqwest"]
 
 [profile.dev]
 debug = 1
