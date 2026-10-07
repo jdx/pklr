@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.0.0](https://github.com/jdx/pklr/compare/v4.0.0...v5.0.0) - 2026-10-07
+
+### Added
+
+- *(eval)* support function values: apply, applyToList, toString, amending, Mixin and pipe errors ([#267](https://github.com/jdx/pklr/pull/267))
+- *(stdlib)* [**breaking**] implement Int, Float, Boolean, Duration, DataSize and pkl:math ([#274](https://github.com/jdx/pklr/pull/274))
+- *(eval)* [**breaking**] print trace() messages in pkl's format ([#263](https://github.com/jdx/pklr/pull/263))
+- *(stdlib)* [**breaking**] implement pkl:base String and Regex APIs ([#257](https://github.com/jdx/pklr/pull/257))
+- *(eval)* PListRenderer, pkl:jsonnet and pkl:xml renderers ([#278](https://github.com/jdx/pklr/pull/278))
+- *(eval)* [**breaking**] Pkl's JSON, YAML, properties and Pcf renderers and module output ([#264](https://github.com/jdx/pklr/pull/264))
+- *(eval)* add pkl:test's catch and catchOrNull, and match pkl's messages for errors they test ([#258](https://github.com/jdx/pklr/pull/258))
+- *(eval)* [**breaking**] evaluate members in dependency order and resolve names as Pkl does ([#251](https://github.com/jdx/pklr/pull/251))
+- *(eval)* support IntSeq ([#234](https://github.com/jdx/pklr/pull/234))
+
+### Fixed
+
+- *(eval)* bind this for direct Mapping entries ([#294](https://github.com/jdx/pklr/pull/294))
+- *(eval)* preserve inherited module property defaults ([#292](https://github.com/jdx/pklr/pull/292))
+- *(deps)* update rust crates ([#288](https://github.com/jdx/pklr/pull/288))
+- *(eval)* bound inherited output converter captures ([#290](https://github.com/jdx/pklr/pull/290))
+- *(eval)* render typed property defaults and enforce fixed/const members ([#276](https://github.com/jdx/pklr/pull/276))
+- *(eval)* resolve a constraint's unbound names on the checked value ([#277](https://github.com/jdx/pklr/pull/277))
+- *(eval)* bind super in amending and extending modules ([#279](https://github.com/jdx/pklr/pull/279))
+- *(eval)* evaluate an object's failed locals again as its properties bind ([#280](https://github.com/jdx/pklr/pull/280))
+- *(eval)* keep the elements of Listing-valued mapping entry bodies ([#266](https://github.com/jdx/pklr/pull/266))
+- *(parser)* [**breaking**] accept pkl 0.32 syntax and reject what pkl rejects ([#272](https://github.com/jdx/pklr/pull/272))
+- *(eval)* infer `new { ... }` parent from a typed property annotation ([#270](https://github.com/jdx/pklr/pull/270))
+- *(eval)* infer untyped new from declared and inherited property types ([#269](https://github.com/jdx/pklr/pull/269))
+- *(lexer)* retain enclosing string token spans ([#286](https://github.com/jdx/pklr/pull/286))
+- *(lexer)* [**breaking**] preserve trace source spans ([#285](https://github.com/jdx/pklr/pull/285))
+- *(eval)* [**breaking**] read resources, read* globs and glob patterns like pkl ([#259](https://github.com/jdx/pklr/pull/259))
+- JSON parser edge cases
+- *(xml)* preserve rendered content and valid output ([#283](https://github.com/jdx/pklr/pull/283))
+- *(eval)* amend inherited body listings once when amending an object ([#262](https://github.com/jdx/pklr/pull/262))
+- *(eval)* amend receiver members from generator bodies ([#260](https://github.com/jdx/pklr/pull/260))
+- *(eval)* resolve triple-dot module URIs like pkl ([#252](https://github.com/jdx/pklr/pull/252))
+- *(eval)* check declared property types, including alias constraints ([#235](https://github.com/jdx/pklr/pull/235))
+- *(eval)* [**breaking**] reject iterating non-collections and elements in typed objects ([#265](https://github.com/jdx/pklr/pull/265))
+- *(parser)* [**breaking**] reject cyclic type aliases, misplaced default markers and invalid annotations ([#268](https://github.com/jdx/pklr/pull/268))
+- *(eval)* [**breaking**] enforce class extension, instantiation and module version rules ([#261](https://github.com/jdx/pklr/pull/261))
+- *(parser)* [**breaking**] reject duplicate members and invalid modifiers like pkl ([#254](https://github.com/jdx/pklr/pull/254))
+- *(eval)* [**breaking**] implement Pkl equality for collections, objects, classes and functions ([#255](https://github.com/jdx/pklr/pull/255))
+- *(eval)* [**breaking**] apply class-read rules when following requested classes ([#245](https://github.com/jdx/pklr/pull/245))
+- *(eval)* merge body amendments into members produced by generators ([#253](https://github.com/jdx/pklr/pull/253))
+- *(eval)* fix main build after #242 and #244 ([#246](https://github.com/jdx/pklr/pull/246))
+- *(eval)* re-evaluate classes that read module properties by bare name ([#242](https://github.com/jdx/pklr/pull/242))
+- *(eval)* keep types and values in separate namespaces in reference analysis ([#243](https://github.com/jdx/pklr/pull/243))
+- *(eval)* follow module-level locals when narrowing imports ([#241](https://github.com/jdx/pklr/pull/241))
+- *(eval)* don't assume built-in bindings for types redeclared in nested bodies ([#239](https://github.com/jdx/pklr/pull/239))
+- *(eval)* resolve type aliases in lambda bodies ([#240](https://github.com/jdx/pklr/pull/240))
+- *(eval)* resolve `module` in class bodies to the module's properties ([#236](https://github.com/jdx/pklr/pull/236))
+- *(eval)* resolve local type aliases in constraint bases for narrowed imports ([#233](https://github.com/jdx/pklr/pull/233))
+
+### Other
+
+- *(deps)* lock file maintenance ([#284](https://github.com/jdx/pklr/pull/284))
+- [**breaking**] synchronous capabilities, concurrent prefetch and an optional async feature ([#250](https://github.com/jdx/pklr/pull/250))
+- measure instruction counts with tak and gate pull requests on them ([#282](https://github.com/jdx/pklr/pull/282))
+- compare pklr with the pkl CLI on Apple's language snippet tests ([#249](https://github.com/jdx/pklr/pull/249))
+- *(eval)* [**breaking**] cut scope copies, share AST nodes, memoize converters (hk config 11.6 ms -> 9.6 ms) ([#256](https://github.com/jdx/pklr/pull/256))
+- *(value)* [**breaking**] share object keys, strings and lists in Value (hk config 14.6 ms -> 13.1 ms) ([#248](https://github.com/jdx/pklr/pull/248))
+- *(eval)* [**breaking**] capture object scopes lazily and cut redundant work (hk config 17.2 ms -> 12.8 ms) ([#244](https://github.com/jdx/pklr/pull/244))
+- *(eval)* make the evaluator core synchronous ([#238](https://github.com/jdx/pklr/pull/238))
+- *(eval)* share lambda captures, skip unused outer, and more (hk config 26 ms -> 20 ms) ([#232](https://github.com/jdx/pklr/pull/232))
+
 ## [4.0.0](https://github.com/jdx/pklr/compare/v3.0.4...v4.0.0) - 2026-10-04
 
 ### Fixed
