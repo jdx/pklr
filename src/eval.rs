@@ -41,7 +41,8 @@ pub(crate) use package::write_atomic;
 use package::*;
 use remote::*;
 pub(crate) use remote::{parse_triple_dot_path, resolve_triple_dot};
-use resource::*;
+pub(crate) use resource::file_uri_path;
+use resource::{DEFAULT_ALLOWED_RESOURCES, file_uri};
 pub(crate) use scope::SourceScope;
 use scope::*;
 use types::*;
@@ -870,9 +871,10 @@ impl Evaluator {
     /// The local file a `file:` or relative module URI in the module at
     /// `current_path` names.
     fn local_file_path(&mut self, current_path: &Path, uri: &str) -> Result<PathBuf> {
-        match uri.strip_prefix("file://") {
-            Some(path) => Ok(PathBuf::from(path)),
-            None => self.resolve_local_path(current_path, uri),
+        if uri.starts_with("file:") {
+            file_uri_path(uri)
+        } else {
+            self.resolve_local_path(current_path, uri)
         }
     }
 
@@ -8979,7 +8981,9 @@ mod requested_field_tests {
 
 #[cfg(test)]
 mod remote_relative_tests {
-    use super::{canonical_remote_module_identity, resolve_http_relative};
+    use super::{
+        Path, canonical_remote_module_identity, resolve_http_relative, resolve_remote_relative,
+    };
 
     #[test]
     fn http_relative_resolves_against_base_directory() {
@@ -9040,6 +9044,13 @@ mod remote_relative_tests {
                 .as_deref(),
             Some("https://cdn.example/Lib.pkl")
         );
+    }
+
+    #[test]
+    fn http_relative_does_not_rewrite_file_uris() {
+        let base = Path::new("https://example.com/cfg/Main.pkl");
+        assert_eq!(resolve_remote_relative(base, "file:/tmp/Lib.pkl"), None);
+        assert_eq!(resolve_remote_relative(base, "file:///tmp/Lib.pkl"), None);
     }
 
     #[test]

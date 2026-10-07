@@ -325,8 +325,8 @@ fn analyze_imports_inner(
     let base = path.parent().unwrap_or(Path::new("."));
     for uri in imports {
         let mut local_imports = Vec::new();
-        if let Some(rel) = uri.strip_prefix("file://") {
-            local_imports.push(std::path::PathBuf::from(rel));
+        if uri.starts_with("file:") {
+            local_imports.push(eval::file_uri_path(&uri)?);
         } else if !uri.contains("://") {
             if uri.contains('*') {
                 // Expand glob patterns to actual files

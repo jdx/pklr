@@ -887,6 +887,36 @@ import "right.pkl"
 }
 
 #[test]
+fn analyze_imports_decodes_file_uri_paths() {
+    let dir = std::env::temp_dir().join(format!(
+        "pklr_test_analyze_file_uri_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let dependency = dir.join("dependency with space.pkl");
+    std::fs::write(&dependency, "answer = 42\n").unwrap();
+    let uri_path = dependency
+        .to_string_lossy()
+        .replace('\\', "/")
+        .replace(' ', "%20");
+    let uri = if uri_path.as_bytes().get(1) == Some(&b':') {
+        format!("file:///{uri_path}")
+    } else {
+        format!("file://{uri_path}")
+    };
+    let main = dir.join("main.pkl");
+    std::fs::write(&main, format!("import \"{uri}\"\n")).unwrap();
+
+    let imports = pklr::analyze_imports(&main).unwrap();
+    assert_eq!(imports, vec![dependency]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn analyze_imports_includes_import_expressions() {
     let dir = std::env::temp_dir().join(format!(
         "pklr_test_analyze_imports_expressions_{}",

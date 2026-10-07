@@ -339,7 +339,11 @@ pub(super) fn uri_scheme(uri: &str) -> Option<&str> {
     .then_some(scheme)
 }
 
-fn file_uri_path(uri: &str) -> Result<PathBuf> {
+/// Convert a Pkl `file:` URI to its host path.
+///
+/// Module resolution uses the same conversion as resources so percent escapes,
+/// Windows drive URIs, and file authorities have one consistent meaning.
+pub(crate) fn file_uri_path(uri: &str) -> Result<PathBuf> {
     let rest = uri
         .strip_prefix("file:")
         .ok_or_else(|| Error::Eval(format!("Resource URI `{uri}` has invalid syntax.")))?;
