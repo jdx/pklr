@@ -1467,6 +1467,42 @@ result = (defs.c) { extra = 1 }
 }
 
 #[test]
+fn new_through_reexported_typealias_builds_the_class() {
+    // `typealias Script = Base.Script` in one module, instantiated from
+    // another, must build a `Base.Script` that satisfies a union property.
+    let temp = TestTempDir::new("pklr_test_new_through_reexported_typealias");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Base.pkl"),
+        r#"
+module Base
+class Script { linux: String? }
+class Spec { command: String }
+open class Step { check: (String|Script|Spec)? }
+hooks: Mapping<String, Step>
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Alias.pkl"),
+        "module Alias\nimport \"Base.pkl\"\ntypealias Script = Base.Script\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+amends "Base.pkl"
+import "Alias.pkl"
+hooks { ["a"] { check = new Alias.Script { linux = "echo hi" } } }
+"#,
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
+    assert_eq!(json["hooks"]["a"]["check"]["linux"], "echo hi");
+}
+
+#[test]
 fn mapping_local_lambda_is_visible_to_sibling_local() {
     // A lambda local must be in scope for a later (non-lambda) local that uses it.
     let json = eval(

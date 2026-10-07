@@ -2746,6 +2746,8 @@ impl Evaluator {
                         }
                     }
                     Entry::TypeAlias(name, ty) => {
+                        // Like a class, an alias's value is schema, not data.
+                        class_names.insert(name.clone());
                         self.eval_type_alias(name, ty, &mut scope);
                     }
                     Entry::Property(prop) => {
@@ -2872,7 +2874,9 @@ impl Evaluator {
         let mut out = base_obj;
         let mut poisoned_members = IndexMap::new();
         for entry in body.iter() {
-            if let Entry::ClassDef(name, ..) = entry {
+            // A typealias to a class is a module member too, so an importer
+            // can write `new Alias.Name {}`.
+            if let Entry::ClassDef(name, ..) | Entry::TypeAlias(name, _) = entry {
                 if let Some(value) = scope.get(name) {
                     out.insert(name.as_str().into(), value.clone());
                 } else if let Some(message) = failed.get(name.as_str()) {
@@ -5014,17 +5018,18 @@ impl Evaluator {
         scope.declare(type_alias_marker(name), Value::Bool(true));
         match ty {
             crate::parser::TypeExpr::Named(target) => {
-                // Alias to a class or another alias already in scope
-                if let Some(val) = scope.get(target) {
-                    scope.declare(name, val.clone());
+                // Alias to a class or another alias already in scope, possibly
+                // qualified by an imported module (`Config.Script`)
+                if let Some(val) = resolve_dotted(scope, target) {
+                    scope.declare(name, val);
                 }
             }
             crate::parser::TypeExpr::Nullable(inner) => {
                 // typealias Foo = Bar? -- alias to the inner type
                 if let crate::parser::TypeExpr::Named(target) = inner.as_ref()
-                    && let Some(val) = scope.get(target)
+                    && let Some(val) = resolve_dotted(scope, target)
                 {
-                    scope.declare(name, val.clone());
+                    scope.declare(name, val);
                 }
             }
             crate::parser::TypeExpr::Constrained(base, _) => {
@@ -5036,7 +5041,7 @@ impl Evaluator {
     }
 
     fn bind_type_alias_value(&self, name: &str, target: &str, scope: &mut Scope) {
-        if let Some(val) = scope.get(target.trim_end_matches('?')).cloned() {
+        if let Some(val) = resolve_dotted(scope, target.trim_end_matches('?')) {
             scope.declare(name, val);
         }
     }
