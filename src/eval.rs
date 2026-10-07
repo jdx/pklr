@@ -10026,7 +10026,7 @@ mod package_uri_tests {
     #[cfg(all(feature = "native-io", feature = "package-zip"))]
     use std::path::PathBuf;
 
-    #[cfg(all(feature = "native-io", feature = "package-zip"))]
+    #[cfg(feature = "native-io")]
     use super::Evaluator;
     use super::{PackageSource, resolve_package_uri};
 

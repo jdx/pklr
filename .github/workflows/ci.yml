@@ -28,6 +28,14 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo test
       - run: cargo test --all-features
+      - run: cargo test --no-default-features --features native-io
+      - run: cargo test --no-default-features --features reqwest --test reqwest
+      - name: Check that reqwest-only does not select ureq
+        run: |
+          if cargo tree --no-default-features --features reqwest | grep -q '[[:space:]]ureq v'; then
+            echo "reqwest-only unexpectedly includes ureq"
+            exit 1
+          fi
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo fmt --check
   windows:
@@ -55,6 +63,10 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - uses: jdx/mise-action@9149ea85001c7435d5a66bb127d6a1b6227cb0a5 # v5.0.0
       - run: cargo msrv verify
+      - name: Test the reqwest-only HTTP backend on the MSRV
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          cargo +1.88.0 test --no-default-features --features reqwest --test reqwest
   semver:
     runs-on: ubuntu-latest
     timeout-minutes: 10

@@ -20,7 +20,7 @@ pub use value::Value;
 
 /// Re-export reqwest so consumers can build a client for
 /// [`EvaluatorBuilder::http_client`] without a separate dependency.
-#[cfg(feature = "async")]
+#[cfg(feature = "reqwest")]
 pub use reqwest;
 /// Re-export ureq so consumers can configure an HTTP agent without a separate
 /// dependency.
@@ -80,7 +80,7 @@ pub struct EvalOptions {
 pub struct EvaluatorBuilder {
     #[cfg(feature = "http")]
     agent: Option<ureq::Agent>,
-    #[cfg(feature = "async")]
+    #[cfg(feature = "reqwest")]
     client: Option<reqwest::Client>,
     http_rewrites: Vec<String>,
     package_cache_dir: Option<std::path::PathBuf>,
@@ -113,8 +113,9 @@ impl EvaluatorBuilder {
     }
 
     /// Fetch over HTTP with a `reqwest` client on tokio instead of ureq.
-    /// Takes precedence over [`http_agent`](Self::http_agent).
-    #[cfg(feature = "async")]
+    /// With both backends enabled, this takes precedence over
+    /// [`http_agent`](Self::http_agent).
+    #[cfg(feature = "reqwest")]
     pub fn http_client(mut self, client: reqwest::Client) -> Self {
         self.client = Some(client);
         self
@@ -182,19 +183,29 @@ impl EvaluatorBuilder {
     ///
     /// A package that fails to preload is skipped and fetched normally.
     pub fn build(self) -> Evaluator {
-        #[cfg(feature = "async")]
+        #[cfg(all(feature = "reqwest", feature = "http"))]
         let (capabilities, agent) = match self.client {
             Some(client) => (Some(NativeCapabilities::with_reqwest_client(client)), None),
             None => (None, self.agent),
         };
-        #[cfg(all(feature = "http", not(feature = "async")))]
-        let (capabilities, agent) = (None, self.agent);
-        #[cfg(feature = "http")]
+        #[cfg(all(feature = "reqwest", not(feature = "http")))]
+        let capabilities = match self.client {
+            Some(client) => NativeCapabilities::with_reqwest_client(client),
+            None => NativeCapabilities::new(),
+        };
+        #[cfg(all(feature = "http", not(feature = "reqwest")))]
+        let agent = self.agent;
+        #[cfg(all(feature = "http", feature = "reqwest"))]
         let capabilities = capabilities.unwrap_or_else(|| match agent {
             Some(agent) => NativeCapabilities::with_http_agent(agent),
             None => NativeCapabilities::new(),
         });
-        #[cfg(not(feature = "http"))]
+        #[cfg(all(feature = "http", not(feature = "reqwest")))]
+        let capabilities = match agent {
+            Some(agent) => NativeCapabilities::with_http_agent(agent),
+            None => NativeCapabilities::new(),
+        };
+        #[cfg(not(any(feature = "http", feature = "reqwest")))]
         let capabilities = NativeCapabilities::new();
         let mut evaluator = Evaluator::with_capabilities(capabilities);
         evaluator.set_http_rewrites(&self.http_rewrites);

@@ -26,7 +26,9 @@ println!("{}", json);
 The API is synchronous. A default build uses the standard library for files
 and [ureq](https://crates.io/crates/ureq) for HTTP, and creates no Tokio
 runtime. Use `EvaluatorBuilder::http_agent` with a custom `pklr::ureq::Agent`
-for proxy, certificate, or timeout configuration.
+for proxy, certificate, or timeout configuration. Applications that already
+configure [reqwest](https://crates.io/crates/reqwest) can instead select the
+`reqwest` feature and pass that client to `EvaluatorBuilder::http_client`.
 
 Before evaluating a module, pklr prefetches its remote `http(s)://` and
 `package://` imports, and theirs in turn, fetching each level in one batch.
@@ -41,9 +43,10 @@ results and errors are the same as fetching one module at a time.
 | `eval-core` | via the others | The evaluator, without any host IO. Supply your own `EvalCapabilities`. |
 | `native-io` | yes | `NativeCapabilities`, `EvaluatorBuilder`, `eval_to_json`, `analyze_imports` (std fs). |
 | `http` | yes | HTTP imports and package downloads through ureq and rustls. |
+| `reqwest` | no | HTTP imports and package downloads through a caller-supplied reqwest client on Tokio; does not include ureq. |
 | `package-zip` | yes | `package://` zip archives. |
 | `miette-diagnostics` | yes | Rich error diagnostics. |
-| `async` | no | A reqwest HTTP backend on Tokio and async entry points. |
+| `async` | no | Backwards-compatible additive feature: ureq, reqwest, and async evaluation entry points. |
 
 An embedder with its own IO can depend on the evaluator alone:
 
@@ -64,10 +67,28 @@ concurrently; the defaults fetch one URL after another. Both get a
 bytes to: start no request once it is spent, and drop a body that no longer
 fits.
 
-### Optional async support
+### Reqwest and optional async support
 
-The `async` feature is additive. It is for applications that already use
-reqwest, and it fetches prefetch batches concurrently on Tokio:
+To use a configured reqwest client without linking ureq, select `reqwest`:
+
+```toml
+pklr = { version = "5", default-features = false, features = ["reqwest", "package-zip"] }
+```
+
+```rust
+let client = pklr::reqwest::Client::builder()
+    .proxy(pklr::reqwest::Proxy::all("http://proxy.internal:8080")?)
+    .build()?;
+let json = pklr::EvaluatorBuilder::new()
+    .http_client(client)
+    .eval_to_json(std::path::Path::new("config.pkl"))?;
+```
+
+The `reqwest` feature enables synchronous evaluation with the supplied client;
+the default `http` behavior is unchanged. Select `async` when you also need
+the async evaluation entry points. It remains additive for compatibility.
+
+The `async` feature fetches prefetch batches concurrently on Tokio:
 
 ```toml
 pklr = { version = "5", features = ["async"] }

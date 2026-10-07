@@ -3,10 +3,11 @@
 //! Every file, environment, HTTP, temp-dir and glob access the evaluator makes
 //! goes through an [`EvalCapabilities`] implementation. `NativeCapabilities`
 //! (the `native-io` feature) uses the standard library for the file system and,
-//! with the `http` feature, a `ureq` agent for HTTP. Embedders that need a
-//! sandbox, an in-memory file system or their own HTTP stack implement the
-//! trait themselves and pass it to [`Evaluator::with_capabilities`]; that only
-//! needs the `eval-core` feature.
+//! with the `http` feature, a `ureq` agent for HTTP. The `reqwest` feature lets
+//! a host supply a reqwest client instead. Embedders that need a sandbox, an
+//! in-memory file system or their own HTTP stack implement the trait themselves
+//! and pass it to [`Evaluator::with_capabilities`]; that only needs the
+//! `eval-core` feature.
 //!
 //! The trait is synchronous. A host whose IO is asynchronous can run the
 //! evaluator on a blocking thread (for example `tokio::task::spawn_blocking`)
@@ -229,20 +230,21 @@ fn budget_spent(url: &str) -> crate::Error {
 /// Batch fetches ([`EvalCapabilities::fetch_text_many`] and
 /// [`EvalCapabilities::fetch_bytes_many`]) run up to
 /// eight requests at once on scoped threads sharing the agent. With the
-/// `async` feature, [`NativeCapabilities::with_reqwest_client`] uses a
+/// `reqwest` feature, [`NativeCapabilities::with_reqwest_client`] uses a
 /// `reqwest` client on tokio instead.
 #[cfg(feature = "native-io")]
 #[derive(Debug, Clone)]
 pub struct NativeCapabilities {
-    #[cfg(feature = "http")]
-    http: HttpBackend,
+    #[cfg(any(feature = "http", feature = "reqwest"))]
+    http: Option<HttpBackend>,
 }
 
-#[cfg(feature = "http")]
+#[cfg(any(feature = "http", feature = "reqwest"))]
 #[derive(Debug, Clone)]
 enum HttpBackend {
+    #[cfg(feature = "http")]
     Ureq(ureq::Agent),
-    #[cfg(feature = "async")]
+    #[cfg(feature = "reqwest")]
     Reqwest(reqwest::Client),
 }
 
@@ -251,7 +253,9 @@ impl NativeCapabilities {
     pub fn new() -> Self {
         Self {
             #[cfg(feature = "http")]
-            http: HttpBackend::Ureq(default_http_agent()),
+            http: Some(HttpBackend::Ureq(default_http_agent())),
+            #[cfg(all(feature = "reqwest", not(feature = "http")))]
+            http: None,
         }
     }
 
@@ -261,17 +265,17 @@ impl NativeCapabilities {
     pub fn with_http_agent(http_agent: ureq::Agent) -> Self {
         ensure_crypto_provider();
         Self {
-            http: HttpBackend::Ureq(http_agent),
+            http: Some(HttpBackend::Ureq(http_agent)),
         }
     }
 
     /// Use a `reqwest` client for HTTP. Requests run on tokio: on the
     /// caller's runtime (under `block_in_place`) when called from a
     /// multi-threaded runtime, and on a private runtime otherwise.
-    #[cfg(feature = "async")]
+    #[cfg(feature = "reqwest")]
     pub fn with_reqwest_client(client: reqwest::Client) -> Self {
         Self {
-            http: HttpBackend::Reqwest(client),
+            http: Some(HttpBackend::Reqwest(client)),
         }
     }
 }
@@ -300,11 +304,11 @@ fn default_http_agent() -> ureq::Agent {
         .into()
 }
 
-#[cfg(feature = "http")]
+#[cfg(any(feature = "http", feature = "reqwest"))]
 const HTTP_BODY_LIMIT: u64 = 64 * 1024 * 1024;
 
 /// The most HTTP requests a batch fetch runs at once.
-#[cfg(feature = "http")]
+#[cfg(any(feature = "http", feature = "reqwest"))]
 const MAX_CONCURRENT_FETCHES: usize = 8;
 
 #[cfg(feature = "native-io")]
@@ -347,65 +351,85 @@ impl EvalCapabilities for NativeCapabilities {
     }
 
     fn fetch_text(&mut self, url: &str) -> Result<String> {
-        #[cfg(feature = "http")]
-        match &self.http {
-            HttpBackend::Ureq(agent) => ureq_fetch_text(agent, url),
-            #[cfg(feature = "async")]
-            HttpBackend::Reqwest(client) => reqwest_backend::fetch_text_many(
-                client,
-                std::slice::from_ref(&url.to_string()),
-                &FetchBudget::unlimited(),
-            )
-            .pop()
-            .expect("one result per URL"),
+        #[cfg(any(feature = "http", feature = "reqwest"))]
+        match self.http.as_ref() {
+            #[cfg(feature = "http")]
+            Some(HttpBackend::Ureq(agent)) => ureq_fetch_text(agent, url),
+            #[cfg(feature = "reqwest")]
+            Some(HttpBackend::Reqwest(client)) => {
+                let url = url.to_owned();
+                reqwest_backend::fetch_text_many(
+                    client,
+                    std::slice::from_ref(&url),
+                    &FetchBudget::unlimited(),
+                )
+                .pop()
+                .expect("one result per URL")
+            }
+            None => Err(http_backend_required(url)),
         }
-        #[cfg(not(feature = "http"))]
-        Err(crate::Error::Unsupported(format!(
-            "HTTP fetch requires pklr's 'http' feature: {url}"
-        )))
+        #[cfg(not(any(feature = "http", feature = "reqwest")))]
+        Err(http_backend_required(url))
     }
 
     fn fetch_bytes(&mut self, url: &str) -> Result<Vec<u8>> {
-        #[cfg(feature = "http")]
-        match &self.http {
-            HttpBackend::Ureq(agent) => ureq_fetch_bytes(agent, url),
-            #[cfg(feature = "async")]
-            HttpBackend::Reqwest(client) => reqwest_backend::fetch_bytes_many(
-                client,
-                std::slice::from_ref(&url.to_string()),
-                &FetchBudget::unlimited(),
-            )
-            .pop()
-            .expect("one result per URL"),
+        #[cfg(any(feature = "http", feature = "reqwest"))]
+        match self.http.as_ref() {
+            #[cfg(feature = "http")]
+            Some(HttpBackend::Ureq(agent)) => ureq_fetch_bytes(agent, url),
+            #[cfg(feature = "reqwest")]
+            Some(HttpBackend::Reqwest(client)) => {
+                let url = url.to_owned();
+                reqwest_backend::fetch_bytes_many(
+                    client,
+                    std::slice::from_ref(&url),
+                    &FetchBudget::unlimited(),
+                )
+                .pop()
+                .expect("one result per URL")
+            }
+            None => Err(http_backend_required(url)),
         }
-        #[cfg(not(feature = "http"))]
-        Err(crate::Error::Unsupported(format!(
-            "HTTP byte fetch requires pklr's 'http' feature: {url}"
-        )))
+        #[cfg(not(any(feature = "http", feature = "reqwest")))]
+        Err(http_backend_required(url))
     }
 
-    #[cfg(feature = "http")]
+    #[cfg(any(feature = "http", feature = "reqwest"))]
     fn fetch_text_many(&mut self, urls: &[String], budget: &FetchBudget) -> Vec<Result<String>> {
-        match &self.http {
-            HttpBackend::Ureq(agent) => fetch_parallel(urls, budget, |url| {
+        match self.http.as_ref() {
+            #[cfg(feature = "http")]
+            Some(HttpBackend::Ureq(agent)) => fetch_parallel(urls, budget, |url| {
                 let body = ureq_fetch_within(agent, url, budget)?;
                 String::from_utf8(body).map_err(|error| {
                     crate::Error::Eval(format!("HTTP read failed for {url}: {error}"))
                 })
             }),
-            #[cfg(feature = "async")]
-            HttpBackend::Reqwest(client) => reqwest_backend::fetch_text_many(client, urls, budget),
+            #[cfg(feature = "reqwest")]
+            Some(HttpBackend::Reqwest(client)) => {
+                reqwest_backend::fetch_text_many(client, urls, budget)
+            }
+            None => urls
+                .iter()
+                .map(|url| Err(http_backend_required(url)))
+                .collect(),
         }
     }
 
-    #[cfg(feature = "http")]
+    #[cfg(any(feature = "http", feature = "reqwest"))]
     fn fetch_bytes_many(&mut self, urls: &[String], budget: &FetchBudget) -> Vec<Result<Vec<u8>>> {
-        match &self.http {
-            HttpBackend::Ureq(agent) => {
+        match self.http.as_ref() {
+            #[cfg(feature = "http")]
+            Some(HttpBackend::Ureq(agent)) => {
                 fetch_parallel(urls, budget, |url| ureq_fetch_within(agent, url, budget))
             }
-            #[cfg(feature = "async")]
-            HttpBackend::Reqwest(client) => reqwest_backend::fetch_bytes_many(client, urls, budget),
+            #[cfg(feature = "reqwest")]
+            Some(HttpBackend::Reqwest(client)) => {
+                reqwest_backend::fetch_bytes_many(client, urls, budget)
+            }
+            None => urls
+                .iter()
+                .map(|url| Err(http_backend_required(url)))
+                .collect(),
         }
     }
 
@@ -416,6 +440,13 @@ impl EvalCapabilities for NativeCapabilities {
     fn glob(&mut self, base: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
         crate::eval::expand_glob(base, pattern)
     }
+}
+
+#[cfg(feature = "native-io")]
+fn http_backend_required(url: &str) -> crate::Error {
+    crate::Error::Unsupported(format!(
+        "HTTP fetch requires pklr's 'http' feature or a client supplied through the 'reqwest' feature: {url}"
+    ))
 }
 
 /// Run `fetch` for every URL, at most [`MAX_CONCURRENT_FETCHES`] at a time,
@@ -552,8 +583,8 @@ fn http_error(url: &str, error: ureq::Error) -> crate::Error {
     }
 }
 
-/// HTTP through a `reqwest` client on tokio, for the `async` feature.
-#[cfg(feature = "async")]
+/// HTTP through a configured `reqwest` client on tokio.
+#[cfg(feature = "reqwest")]
 mod reqwest_backend {
     use std::future::Future;
     use std::sync::{Arc, OnceLock};
