@@ -11,6 +11,10 @@ fn lex_kinds(src: &str) -> Vec<TokenKind> {
     lex(src).unwrap().into_iter().map(|t| t.kind).collect()
 }
 
+fn virtual_path_key(path: &Path) -> String {
+    path.display().to_string().replace('\\', "/")
+}
+
 struct MemoryCapabilities {
     modules: HashMap<String, String>,
     env: HashMap<String, String>,
@@ -32,7 +36,7 @@ impl EvalCapabilities for ResourceCapabilities {
 
     fn path_exists(&mut self, path: &Path) -> pklr::Result<bool> {
         self.io_paths.lock().unwrap().push(path.to_path_buf());
-        Ok(self.files.contains_key(&path.display().to_string()))
+        Ok(self.files.contains_key(&virtual_path_key(path)))
     }
 
     fn canonicalize(&mut self, path: &Path) -> pklr::Result<PathBuf> {
@@ -42,14 +46,15 @@ impl EvalCapabilities for ResourceCapabilities {
 
     fn read_bytes(&mut self, path: &Path) -> pklr::Result<Vec<u8>> {
         self.io_paths.lock().unwrap().push(path.to_path_buf());
-        if path == Path::new("virtual/race.txt") {
+        let key = virtual_path_key(path);
+        if key == "virtual/race.txt" {
             return Err(pklr::Error::Io(
                 path.to_path_buf(),
                 std::io::ErrorKind::NotFound.into(),
             ));
         }
         self.files
-            .get(&path.display().to_string())
+            .get(&key)
             .cloned()
             .ok_or_else(|| pklr::Error::Io(path.to_path_buf(), std::io::ErrorKind::NotFound.into()))
     }
@@ -884,6 +889,36 @@ import "right.pkl"
         1,
         "{imports:?}"
     );
+}
+
+#[test]
+fn analyze_imports_decodes_file_uri_paths() {
+    let dir = std::env::temp_dir().join(format!(
+        "pklr_test_analyze_file_uri_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let dependency = dir.join("dependency with space.pkl");
+    std::fs::write(&dependency, "answer = 42\n").unwrap();
+    let uri_path = dependency
+        .to_string_lossy()
+        .replace('\\', "/")
+        .replace(' ', "%20");
+    let uri = if uri_path.as_bytes().get(1) == Some(&b':') {
+        format!("file:///{uri_path}")
+    } else {
+        format!("file://{uri_path}")
+    };
+    let main = dir.join("main.pkl");
+    std::fs::write(&main, format!("import \"{uri}\"\n")).unwrap();
+
+    let imports = pklr::analyze_imports(&main).unwrap();
+    assert_eq!(imports, vec![dependency]);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]

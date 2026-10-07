@@ -1,8 +1,60 @@
 use super::*;
 
+fn encoded_file_uri(path: &std::path::Path) -> String {
+    let path = path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .replace(' ', "%20");
+    if path.as_bytes().get(1) == Some(&b':') {
+        format!("file:///{path}")
+    } else {
+        format!("file://{path}")
+    }
+}
+
 // ============================================================
 // Glob imports (import*)
 // ============================================================
+
+#[test]
+fn encoded_file_uris_resolve_amends_imports_and_extends() {
+    let temp = TestTempDir::new("pklr_test_encoded_file_uri");
+    let dir = temp.path().join("uri target");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let amend_base = dir.join("Amend Base.pkl");
+    std::fs::write(&amend_base, "answer = 7\n").unwrap();
+    let amend_uri = encoded_file_uri(&amend_base);
+    let amended = dir.join("Amended.pkl");
+    std::fs::write(
+        &amended,
+        format!("amends \"{amend_uri}\"\nresult = answer\n"),
+    )
+    .unwrap();
+    assert_eq!(pklr::eval_to_json(&amended).unwrap()["result"], 7);
+
+    let import_base = dir.join("Import Base.pkl");
+    std::fs::write(&import_base, "answer = 8\n").unwrap();
+    let import_uri = encoded_file_uri(&import_base);
+    let importer = dir.join("Importer.pkl");
+    std::fs::write(
+        &importer,
+        format!("import \"{import_uri}\" as Base\nresult = Base.answer\n"),
+    )
+    .unwrap();
+    assert_eq!(pklr::eval_to_json(&importer).unwrap()["result"], 8);
+
+    let extend_base = dir.join("Extend Base.pkl");
+    std::fs::write(&extend_base, "open module ExtendBase\nanswer = 9\n").unwrap();
+    let extend_uri = encoded_file_uri(&extend_base);
+    let extended = dir.join("Extended.pkl");
+    std::fs::write(
+        &extended,
+        format!("extends \"{extend_uri}\"\nresult = answer\n"),
+    )
+    .unwrap();
+    assert_eq!(pklr::eval_to_json(&extended).unwrap()["result"], 9);
+}
 
 #[test]
 fn import_glob() {
