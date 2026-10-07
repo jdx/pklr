@@ -351,11 +351,27 @@ pub(crate) fn file_uri_path(uri: &str) -> Result<PathBuf> {
         .strip_prefix("//")
         .and_then(|s| s.find('/').map(|i| &s[i..]))
         .unwrap_or(rest);
+    // `file://server/share` identifies a UNC path on Windows. Keep the
+    // authority in that case; `localhost` remains the local host and keeps
+    // the pre-existing absolute-path interpretation. Other platforms retain
+    // their existing resource URI behavior.
+    #[cfg(windows)]
+    let path = rest
+        .strip_prefix("//")
+        .and_then(|authority_and_path| authority_and_path.split_once('/'))
+        .filter(|(authority, _)| {
+            !authority.is_empty() && !authority.eq_ignore_ascii_case("localhost")
+        })
+        .map(|(authority, path)| format!("//{authority}/{path}"))
+        .unwrap_or_else(|| path.to_owned());
     if !path.starts_with('/') {
         return Err(Error::Eval(format!(
             "Resource URI `{uri}` has invalid syntax. File URIs must have a path that starts with `/` (e.g. file:/path/to/my_resource)."
         )));
     }
+    #[cfg(windows)]
+    let path = percent_decode(&path);
+    #[cfg(not(windows))]
     let path = percent_decode(path);
     #[cfg(windows)]
     let path = path
@@ -540,4 +556,17 @@ fn base64(bytes: &[u8]) -> String {
         });
     }
     o
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn file_uri_path_preserves_unc_authority() {
+        let path = super::file_uri_path("file://server/share/Config%20One.pkl").unwrap();
+        assert_eq!(
+            path,
+            std::path::PathBuf::from(r"\\server\share\Config One.pkl")
+        );
+    }
 }
