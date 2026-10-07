@@ -1503,6 +1503,25 @@ hooks { ["a"] { check = new Alias.Script { linux = "echo hi" } } }
 }
 
 #[test]
+fn typealias_does_not_replace_inherited_property_of_same_name() {
+    let temp = TestTempDir::new("pklr_test_typealias_inherited_property_name");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("P.pkl"),
+        "open module P\nname: String = \"base\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "extends \"P.pkl\"\ntypealias name = String\n",
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
+    assert_eq!(json["name"], "base");
+}
+
+#[test]
 fn mapping_local_lambda_is_visible_to_sibling_local() {
     // A lambda local must be in scope for a later (non-lambda) local that uses it.
     let json = eval(

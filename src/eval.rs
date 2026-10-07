@@ -2746,8 +2746,11 @@ impl Evaluator {
                         }
                     }
                     Entry::TypeAlias(name, ty) => {
-                        // Like a class, an alias's value is schema, not data.
-                        class_names.insert(name.clone());
+                        // Like a class, an alias's value is schema, not data. An
+                        // inherited property of the same name stays data.
+                        if !base_obj.contains_key(name.as_str()) {
+                            class_names.insert(name.clone());
+                        }
                         self.eval_type_alias(name, ty, &mut scope);
                     }
                     Entry::Property(prop) => {
@@ -2876,7 +2879,12 @@ impl Evaluator {
         for entry in body.iter() {
             // A typealias to a class is a module member too, so an importer
             // can write `new Alias.Name {}`.
-            if let Entry::ClassDef(name, ..) | Entry::TypeAlias(name, _) = entry {
+            let exported = match entry {
+                Entry::ClassDef(name, ..) => Some(name),
+                Entry::TypeAlias(name, _) if class_names.contains(name.as_str()) => Some(name),
+                _ => None,
+            };
+            if let Some(name) = exported {
                 if let Some(value) = scope.get(name) {
                     out.insert(name.as_str().into(), value.clone());
                 } else if let Some(message) = failed.get(name.as_str()) {
