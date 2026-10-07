@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [6.0.0](https://github.com/jdx/pklr/compare/v5.1.0...v6.0.0) - 2026-10-07
+## [5.1.1](https://github.com/jdx/pklr/compare/v5.1.0...v5.1.1) - 2026-10-07
 
 ### Fixed
 
