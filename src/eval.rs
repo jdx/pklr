@@ -3157,42 +3157,100 @@ impl Evaluator {
             // expression with failed members hidden rather than relying on a
             // syntactic reference list: an unselected `if` branch, or a
             // caught failed read, must remain usable.
-            while !inherited_type_failures.is_empty() {
-                let mut added = false;
-                let mut probe_scope = scope.child();
-                let mut probe_properties = (*all_props).clone();
-                for (name, message) in &inherited_type_failures {
-                    probe_scope.poison(name.clone(), message.clone());
-                    probe_scope.set_member_poison(name, Some(message.clone()));
-                    probe_properties.shift_remove(name.as_str());
-                }
-                let probe_snapshot = Value::Object(Arc::new(probe_properties), None);
-                probe_scope.set("this", probe_snapshot.clone());
-                probe_scope.set("module", probe_snapshot);
-                for prop in &effective_properties {
-                    if has_modifier(&prop.modifiers, Modifier::Local)
-                        || inherited_type_failures.contains_key(prop.name.as_str())
-                        || requested_eval_fields
-                            .as_ref()
-                            .is_some_and(|fields| !fields.contains(&prop.name))
-                        || !property_reference_names(prop)
-                            .iter()
-                            .any(|name| inherited_type_failures.contains_key(name.as_str()))
-                    {
-                        continue;
+            if !inherited_type_failures.is_empty() {
+                let mut dependency_entries = late_inherited_properties
+                    .iter()
+                    .cloned()
+                    .map(Entry::Property)
+                    .collect::<Vec<_>>();
+                dependency_entries.extend(body.iter().cloned());
+                let dependency_plan = module_evaluation_plan(&dependency_entries);
+                while !inherited_type_failures.is_empty() {
+                    // Find every member that can reach a failed member. This
+                    // follows local helpers transitively. Restricting probes
+                    // to that closure preserves narrowed evaluation's
+                    // laziness without leaving a value computed before its
+                    // inherited type check stale.
+                    let mut failure_dependents = inherited_type_failures
+                        .keys()
+                        .cloned()
+                        .collect::<HashSet<_>>();
+                    loop {
+                        let mut expanded = false;
+                        for entry in &dependency_entries {
+                            let Entry::Property(prop) = entry else {
+                                continue;
+                            };
+                            let refs = property_reference_names(prop);
+                            if refs.iter().any(|name| failure_dependents.contains(name))
+                                && failure_dependents.insert(prop.name.clone())
+                            {
+                                expanded = true;
+                            }
+                        }
+                        if !expanded {
+                            break;
+                        }
                     }
-                    if let Err(Error::Eval(message)) =
-                        self.eval_property(prop, &probe_scope, depth + 1)
-                        && inherited_type_failures
-                            .values()
-                            .any(|failure| failure == &message)
-                    {
-                        inherited_type_failures.insert(prop.name.clone(), message.clone());
-                        added = true;
+
+                    let mut added = false;
+                    let mut probe_scope = scope.child();
+                    let mut probe_properties = (*all_props).clone();
+                    for (name, message) in &inherited_type_failures {
+                        probe_scope.poison(name.clone(), message.clone());
+                        probe_scope.set_member_poison(name, Some(message.clone()));
+                        probe_properties.shift_remove(name.as_str());
                     }
-                }
-                if !added {
-                    break;
+                    let probe_snapshot = Value::Object(Arc::new(probe_properties), None);
+                    probe_scope.set("this", probe_snapshot.clone());
+                    probe_scope.set("module", probe_snapshot);
+                    // A local helper captures its scope when it is built.
+                    // Rebuild helpers that can reach a failed member in the
+                    // probe scope, so their captured `module` observes the
+                    // poisoned member rather than the prior successful value.
+                    for &index in &dependency_plan.order {
+                        let Entry::Property(prop) = &dependency_entries[index] else {
+                            continue;
+                        };
+                        if !has_modifier(&prop.modifiers, Modifier::Local)
+                            || !failure_dependents.contains(&prop.name)
+                        {
+                            continue;
+                        }
+                        let Some(value) = &prop.value else {
+                            continue;
+                        };
+                        match self.eval_expr(value, &probe_scope, depth + 1) {
+                            Ok(value) => probe_scope.declare(&prop.name, value),
+                            Err(Error::Eval(message)) => {
+                                probe_scope.declare_poisoned(prop.name.clone(), message)
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    for prop in &effective_properties {
+                        if has_modifier(&prop.modifiers, Modifier::Local)
+                            || inherited_type_failures.contains_key(prop.name.as_str())
+                            || requested_eval_fields
+                                .as_ref()
+                                .is_some_and(|fields| !fields.contains(&prop.name))
+                            || !failure_dependents.contains(&prop.name)
+                        {
+                            continue;
+                        }
+                        if let Err(Error::Eval(message)) =
+                            self.eval_property(prop, &probe_scope, depth + 1)
+                            && inherited_type_failures
+                                .values()
+                                .any(|failure| failure == &message)
+                        {
+                            inherited_type_failures.insert(prop.name.clone(), message.clone());
+                            added = true;
+                        }
+                    }
+                    if !added {
+                        break;
+                    }
                 }
             }
             for prop in effective_properties {
