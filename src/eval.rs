@@ -3205,16 +3205,17 @@ impl Evaluator {
                     let probe_snapshot = Value::Object(Arc::new(probe_properties), None);
                     probe_scope.set("this", probe_snapshot.clone());
                     probe_scope.set("module", probe_snapshot);
-                    // A local helper or module method captures its scope when
-                    // it is built. Rebuild lambdas that can reach a failed
-                    // member in the probe scope, so their captured `module`
-                    // observes the poisoned member rather than the prior
-                    // successful value.
+                    // A local helper can retain an already-computed value,
+                    // and a method captures its scope when it is built.
+                    // Rebuild affected locals and lambdas in the probe scope,
+                    // so they observe the poisoned member rather than the
+                    // prior successful value.
                     for &index in &dependency_plan.order {
                         let Entry::Property(prop) = &dependency_entries[index] else {
                             continue;
                         };
-                        if !matches!(prop.value.as_ref(), Some(Expr::Lambda(..)))
+                        if !has_modifier(&prop.modifiers, Modifier::Local)
+                            && !matches!(prop.value.as_ref(), Some(Expr::Lambda(..)))
                             || !failure_dependents.contains(&prop.name)
                         {
                             continue;

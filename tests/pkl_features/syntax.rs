@@ -1981,6 +1981,41 @@ result = selected().length
 }
 
 #[test]
+fn inherited_constraint_probes_follow_local_value_reads() {
+    let temp = TestTempDir::new("pklr_inherited_constraint_probe_local_value");
+    std::fs::write(
+        temp.path().join("Base.pkl"),
+        r#"
+hidden checks: Listing(throw("local-value boom")) = new { 1 }
+result = 0
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("Child.pkl"),
+        r#"
+amends "Base.pkl"
+checks { 2 }
+local selected = checks
+result = selected.length
+"#,
+    )
+    .unwrap();
+    let read = temp.path().join("Read.pkl");
+    std::fs::write(
+        &read,
+        "import \"Child.pkl\" as child\nvalue = child.result\n",
+    )
+    .unwrap();
+
+    let error = pklr::eval_to_json(&read).unwrap_err().to_string();
+    assert!(
+        error.contains("local-value boom"),
+        "a local value dependent must surface the inherited constraint failure, got {error:?}"
+    );
+}
+
+#[test]
 fn inherited_named_constraint_errors_stay_lazy_but_surface_when_read() {
     let temp = TestTempDir::new("pklr_inherited_named_constraint_error_laziness");
     std::fs::write(
