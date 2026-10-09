@@ -3,7 +3,9 @@ name: perf-pr-report
 # Posts perf-pr's report as a sticky comment and a check run. Runs from the
 # default branch with a write token and executes nothing from the pull request.
 
-on: # zizmor: ignore[dangerous-triggers] checks out and runs nothing from the pull request
+# checks out and runs nothing from the pull request
+# jactionlint ignore=dangerous-triggers
+on:
   workflow_run:
     workflows: [perf-pr]
     types: [completed]
