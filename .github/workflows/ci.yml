@@ -99,8 +99,20 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@9149ea85001c7435d5a66bb127d6a1b6227cb0a5 # v5.0.0
       - run: mise x hk -- hk check --all
+  zizmor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        with:
+          advanced-security: false
   final:
-    needs: [test, windows, msrv, semver, lint]
+    needs: [test, windows, msrv, semver, lint, zizmor]
     runs-on: ubuntu-latest
     timeout-minutes: 1
     permissions: {}
@@ -110,7 +122,7 @@ jobs:
     steps:
       - name: Check CI job results
         run: |
-          results=("${{ needs.test.result }}" "${{ needs.windows.result }}" "${{ needs.msrv.result }}" "${{ needs.semver.result }}" "${{ needs.lint.result }}")
+          results=("${{ needs.test.result }}" "${{ needs.windows.result }}" "${{ needs.msrv.result }}" "${{ needs.semver.result }}" "${{ needs.lint.result }}" "${{ needs.zizmor.result }}")
           for r in "${results[@]}"; do
             if [ "$r" != "success" ]; then
               echo "CI job failed or was skipped"
