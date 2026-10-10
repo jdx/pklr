@@ -38,6 +38,7 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
+          set -o pipefail
           if ! [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error::unexpected base sha: $BASE_SHA"
             exit 1
