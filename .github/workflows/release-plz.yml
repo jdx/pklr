@@ -7,7 +7,11 @@ on:
     branches:
       - main
 
-# A release in flight must finish; a newer push waits for it.
+# A release in flight must finish, so never cancel it. Do not add `queue: max`:
+# release-plz acts on the SHA it checked out, and a stale queued run from an
+# older main would act on old state. The default (one pending run, replaced by
+# the newest push) is what we want, since the newest run releases anything
+# still unreleased.
 concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: false
@@ -16,7 +20,7 @@ jobs:
   release-plz-release:
     name: Release
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     if: ${{ github.repository_owner == 'jdx' }}
     permissions:
       contents: write
@@ -47,7 +51,7 @@ jobs:
     needs: release-plz-release
     if: ${{ needs.release-plz-release.outputs.tag != '' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     permissions:
       contents: read
     steps:
