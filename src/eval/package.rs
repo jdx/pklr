@@ -42,7 +42,7 @@ pub(super) fn validate_package_bytes(url: &str, extension: &str, bytes: &[u8]) -
             std::io::copy(&mut entry, &mut std::io::sink()).map_err(|error| {
                 Error::Eval(format!(
                     "package archive entry is invalid: {url}: {}: {error}",
-                    entry.name()
+                    String::from_utf8_lossy(entry.name_raw())
                 ))
             })?;
         }
