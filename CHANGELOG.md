@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.1.2](https://github.com/jdx/pklr/compare/v5.1.1...v5.1.2) - 2026-10-16
+
+### Other
+
+- *(deps)* cargo update and bump zip to 9 ([#311](https://github.com/jdx/pklr/pull/311))
+- *(deps)* lock file maintenance ([#305](https://github.com/jdx/pklr/pull/305))
+
 ## [5.1.1](https://github.com/jdx/pklr/compare/v5.1.0...v5.1.1) - 2026-10-07
 
 ### Fixed
