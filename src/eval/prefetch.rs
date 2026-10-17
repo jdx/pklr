@@ -242,6 +242,11 @@ impl Evaluator {
                 });
             }
         } else if uri.starts_with("package://") {
+            // Checksummed packages are verified when evaluation loads them;
+            // prefetching would extract the archive unverified.
+            if matches!(split_package_checksum(uri), Ok((_, Some(_))) | Err(_)) {
+                return;
+            }
             match resolve_package_uri(uri) {
                 Ok(PackageSource::Direct { url, root }) => {
                     if !self.http_cache.contains_key(&url) {
