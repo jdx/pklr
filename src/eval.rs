@@ -150,8 +150,8 @@ pub struct Evaluator {
     package_dirs: HashMap<String, PathBuf>,
     /// Expected metadata SHA-256 per package zip URL, from `::sha256:` URIs.
     package_checksums: HashMap<String, String>,
-    /// `(zip URL, checksum)` pairs whose archive has passed verification.
-    verified_packages: HashSet<(String, String)>,
+    /// Per zip URL, the extracted directory and checksum it was verified against.
+    verified_packages: HashMap<String, (PathBuf, String)>,
     /// Directory used to persist downloaded package content across evaluators.
     package_cache_dir: Option<PathBuf>,
     /// HTTP URL roots whose sources belong to direct-download packages.
@@ -839,7 +839,7 @@ impl Evaluator {
             #[cfg(feature = "package-zip")]
             package_dirs: HashMap::default(),
             package_checksums: HashMap::default(),
-            verified_packages: HashSet::default(),
+            verified_packages: HashMap::default(),
             package_cache_dir: None,
             package_http_roots: HashSet::default(),
             prefetch: prefetch::PrefetchState::default(),
@@ -1383,23 +1383,21 @@ impl Evaluator {
     #[cfg(feature = "package-zip")]
     fn extract_package_zip(&mut self, zip_url: &str) -> Result<PathBuf> {
         let expected = self.package_checksums.get(zip_url).cloned();
-        let needs_verification = expected.as_ref().is_some_and(|e| {
-            !self
-                .verified_packages
-                .contains(&(zip_url.to_string(), e.clone()))
-        });
         // An archive extracted earlier (by prefetch or an unchecked import)
-        // is reused only if it already passed this checksum.
-        if !needs_verification && let Some(dir) = self.package_dirs.get(zip_url) {
+        // is reused only if this exact directory passed this checksum.
+        if let Some(dir) = self.package_dirs.get(zip_url)
+            && expected.as_ref().is_none_or(|expected| {
+                self.verified_packages
+                    .get(zip_url)
+                    .is_some_and(|(verified_dir, checksum)| {
+                        verified_dir == dir && checksum == expected
+                    })
+            })
+        {
             return Ok(dir.clone());
         }
         let bytes = match &expected {
-            Some(expected) => {
-                let bytes = self.verify_package_zip(zip_url, expected)?;
-                self.verified_packages
-                    .insert((zip_url.to_string(), expected.clone()));
-                bytes
-            }
+            Some(expected) => self.verify_package_zip(zip_url, expected)?,
             None => self.fetch_package_bytes(zip_url, "zip")?,
         };
         // Extract the verified bytes afresh, replacing any earlier unchecked copy.
@@ -1407,6 +1405,15 @@ impl Evaluator {
         let dir = self.temp_dir_io(&prefix)?;
         self.extract_zip_io(bytes, &dir)?;
         self.package_dirs.insert(zip_url.to_string(), dir.clone());
+        match expected {
+            Some(expected) => {
+                self.verified_packages
+                    .insert(zip_url.to_string(), (dir.clone(), expected));
+            }
+            None => {
+                self.verified_packages.remove(zip_url);
+            }
+        }
         Ok(dir)
     }
 
