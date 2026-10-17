@@ -10177,6 +10177,10 @@ mod package_uri_tests {
             PackageSource::Zip(..) => panic!("expected direct package source"),
         }
         assert!(resolve_package_uri("package://example.com/hk@1.0::md5:abcd#/a.pkl").is_err());
+        match resolve_package_uri("package://[::1]:8080/pkg@1.0#/a.pkl").unwrap() {
+            PackageSource::Zip(zip_url, _) => assert_eq!(zip_url, "https://[::1]:8080/pkg@1.0.zip"),
+            PackageSource::Direct { .. } => panic!("expected zip package source"),
+        }
     }
 
     #[test]

@@ -97,9 +97,13 @@ fn split_package_checksum(uri: &str) -> Result<(String, Option<&str>)> {
         Some((location, fragment)) => (location, Some(fragment)),
         None => (uri, None),
     };
-    let Some((location, checksum)) = location.rsplit_once("::") else {
+    // The checksum follows the version, so search only after the last `@`;
+    // `::` can appear earlier in the host (IPv6 literals) or path.
+    let version_start = location.rfind('@').map_or(0, |at| at + 1);
+    let Some((version, checksum)) = location[version_start..].split_once("::") else {
         return Ok((uri.to_string(), None));
     };
+    let location = &location[..version_start + version.len()];
     let valid = checksum
         .strip_prefix("sha256:")
         .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()));
