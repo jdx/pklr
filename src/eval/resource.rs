@@ -73,7 +73,7 @@ impl Evaluator {
             }
             return self.fetch_bytes_io(self.rewrite_url(uri).as_ref());
         }
-        match resolve_package_uri(uri)? {
+        match self.resolve_package(uri)? {
             PackageSource::Direct { url, .. } => self.fetch_package_bytes(&url, "pkl"),
             PackageSource::Zip(zip_url, entry) => {
                 #[cfg(feature = "package-zip")]

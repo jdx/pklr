@@ -148,6 +148,8 @@ pub struct Evaluator {
     /// Extracted package zip directories (zip URL → temp dir path)
     #[cfg(feature = "package-zip")]
     package_dirs: HashMap<String, PathBuf>,
+    /// Expected metadata SHA-256 per package zip URL, from `::sha256:` URIs.
+    package_checksums: HashMap<String, String>,
     /// Directory used to persist downloaded package content across evaluators.
     package_cache_dir: Option<PathBuf>,
     /// HTTP URL roots whose sources belong to direct-download packages.
@@ -834,6 +836,7 @@ impl Evaluator {
             cancel: None,
             #[cfg(feature = "package-zip")]
             package_dirs: HashMap::default(),
+            package_checksums: HashMap::default(),
             package_cache_dir: None,
             package_http_roots: HashSet::default(),
             prefetch: prefetch::PrefetchState::default(),
@@ -1131,7 +1134,7 @@ impl Evaluator {
             return Ok(Some((source, uri.to_string())));
         }
         if uri.starts_with("package://") {
-            let pkg = resolve_package_uri(uri)?;
+            let pkg = self.resolve_package(uri)?;
             match &pkg {
                 PackageSource::Direct { url, root } => {
                     let source = self.fetch_direct_package_source(url, root)?;
@@ -1198,6 +1201,72 @@ impl Evaluator {
             self.parse_cache.insert(key, Arc::clone(&module));
         }
         Ok(Some((module, source_path)))
+    }
+
+    /// Resolve a `package://` URI, recording its `::sha256:` checksum (if any)
+    /// so the package is verified when its archive is first extracted.
+    fn resolve_package(&mut self, uri: &str) -> Result<PackageSource> {
+        let source = resolve_package_uri(uri)?;
+        if let (_, Some(checksum)) = split_package_checksum(uri)? {
+            match &source {
+                PackageSource::Zip(zip_url, _) => {
+                    let expected = checksum.trim_start_matches("sha256:").to_ascii_lowercase();
+                    match self
+                        .package_checksums
+                        .insert(zip_url.clone(), expected.clone())
+                    {
+                        Some(previous) if previous != expected => {
+                            return Err(Error::Eval(format!(
+                                "conflicting package checksums for {zip_url}"
+                            )));
+                        }
+                        _ => {}
+                    }
+                }
+                PackageSource::Direct { .. } => {
+                    return Err(Error::Unsupported(format!(
+                        "package checksums are not supported for this package host: {uri}"
+                    )));
+                }
+            }
+        }
+        Ok(source)
+    }
+
+    /// Check the package zip at `zip_url` against its `::sha256:` checksum:
+    /// the metadata next to the archive must hash to the checksum, and the
+    /// archive to the checksum the metadata lists, as the Pkl CLI does.
+    #[cfg(feature = "package-zip")]
+    fn verify_package_zip(&mut self, zip_url: &str, expected: &str) -> Result<Vec<u8>> {
+        let metadata_url = zip_url.strip_suffix(".zip").unwrap_or(zip_url);
+        let metadata = self.fetch_package_bytes(metadata_url, "json")?;
+        if sha256_hex(&metadata) != expected {
+            self.remove_package_cache(metadata_url, "json");
+            return Err(Error::Eval(format!(
+                "package metadata checksum mismatch: {metadata_url} (expected sha256:{expected})"
+            )));
+        }
+        let zip_checksum = serde_json::from_slice::<serde_json::Value>(&metadata)
+            .ok()
+            .and_then(|json| {
+                json.get("packageZipChecksums")?
+                    .get("sha256")?
+                    .as_str()
+                    .map(str::to_ascii_lowercase)
+            })
+            .ok_or_else(|| {
+                Error::Eval(format!(
+                    "package metadata has no packageZipChecksums.sha256: {metadata_url}"
+                ))
+            })?;
+        let bytes = self.fetch_package_bytes(zip_url, "zip")?;
+        if sha256_hex(&bytes) != zip_checksum {
+            self.remove_package_cache(zip_url, "zip");
+            return Err(Error::Eval(format!(
+                "package archive checksum mismatch: {zip_url} (expected sha256:{zip_checksum})"
+            )));
+        }
+        Ok(bytes)
     }
 
     fn fetch_package_source(&mut self, url: &str) -> Result<String> {
@@ -1320,7 +1389,10 @@ impl Evaluator {
         if let Some(dir) = self.package_dirs.get(zip_url) {
             return Ok(dir.clone());
         }
-        let bytes = self.fetch_package_bytes(zip_url, "zip")?;
+        let bytes = match self.package_checksums.get(zip_url).cloned() {
+            Some(expected) => self.verify_package_zip(zip_url, &expected)?,
+            None => self.fetch_package_bytes(zip_url, "zip")?,
+        };
         let prefix = format!("pklr-pkg-{}", self.package_dirs.len());
         let dir = self.temp_dir_io(&prefix)?;
         self.extract_zip_io(bytes, &dir)?;
@@ -2131,7 +2203,7 @@ impl Evaluator {
             }
 
             if uri.starts_with("package://") {
-                let pkg = resolve_package_uri(uri)?;
+                let pkg = self.resolve_package(uri)?;
                 let fragment = uri.split_once('#').map(|(_, f)| f).unwrap_or("");
                 let file_path = fragment.strip_prefix('/').unwrap_or(fragment);
                 let alias = import.alias.clone().unwrap_or_else(|| {
@@ -2280,7 +2352,7 @@ impl Evaluator {
                 }
                 super_members = Some(self.module_super_members(Path::new(uri), &base_obj, false));
             } else if uri.starts_with("package://") {
-                let pkg = resolve_package_uri(uri)?;
+                let pkg = self.resolve_package(uri)?;
                 if let PackageSource::Zip(zip_url, entry) = &pkg {
                     #[cfg(feature = "package-zip")]
                     {
@@ -10135,6 +10207,84 @@ mod package_uri_tests {
 
         assert!(std::fs::read_dir(&cache_dir).unwrap().next().is_some());
         std::fs::remove_dir_all(cache_dir).unwrap();
+    }
+
+    /// Seed a cache dir with a package zip and its metadata, returning the
+    /// evaluator and the metadata checksum. `zip_checksum` overrides the
+    /// archive checksum the metadata lists.
+    #[cfg(all(feature = "native-io", feature = "package-zip"))]
+    fn checksummed_package(name: &str, zip_checksum: Option<&str>) -> (Evaluator, String) {
+        use std::io::Write;
+
+        let mut zip = Vec::new();
+        {
+            let mut archive = zip::ZipWriter::new(std::io::Cursor::new(&mut zip));
+            archive
+                .start_file("Config.pkl", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            archive.write_all(b"answer = 42\n").unwrap();
+            archive.finish().unwrap();
+        }
+        let listed = zip_checksum.map_or_else(|| super::sha256_hex(&zip), str::to_string);
+        let metadata = format!(r#"{{"packageZipChecksums":{{"sha256":"{listed}"}}}}"#);
+        let cache_dir =
+            std::env::temp_dir().join(format!("pklr-checksum-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&cache_dir);
+        let mut evaluator = Evaluator::default();
+        evaluator.set_package_cache_dir(&cache_dir);
+        evaluator.set_offline(true);
+        evaluator
+            .preload_package("https://example.com/p@1.0.zip", "zip", &zip)
+            .unwrap();
+        evaluator
+            .preload_package("https://example.com/p@1.0", "json", metadata.as_bytes())
+            .unwrap();
+        (evaluator, super::sha256_hex(metadata.as_bytes()))
+    }
+
+    #[test]
+    #[cfg(all(feature = "native-io", feature = "package-zip"))]
+    fn checksummed_package_is_verified() {
+        let (mut evaluator, checksum) = checksummed_package("ok", None);
+        let source = format!(
+            r#"import "package://example.com/p@1.0::sha256:{checksum}#/Config.pkl" as c
+result = c.answer"#
+        );
+        let value = evaluator
+            .eval_source(&source, std::path::Path::new("main.pkl"))
+            .unwrap();
+        assert_eq!(value.to_json()["result"], 42);
+    }
+
+    #[test]
+    #[cfg(all(feature = "native-io", feature = "package-zip"))]
+    fn checksummed_package_rejects_wrong_metadata_checksum() {
+        let (mut evaluator, _) = checksummed_package("bad-meta", None);
+        let wrong = "0".repeat(64);
+        let source = format!(
+            r#"import "package://example.com/p@1.0::sha256:{wrong}#/Config.pkl" as c
+result = c.answer"#
+        );
+        let error = evaluator
+            .eval_source(&source, std::path::Path::new("main.pkl"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("metadata checksum mismatch"), "{error}");
+    }
+
+    #[test]
+    #[cfg(all(feature = "native-io", feature = "package-zip"))]
+    fn checksummed_package_rejects_wrong_archive_checksum() {
+        let (mut evaluator, checksum) = checksummed_package("bad-zip", Some(&"1".repeat(64)));
+        let source = format!(
+            r#"import "package://example.com/p@1.0::sha256:{checksum}#/Config.pkl" as c
+result = c.answer"#
+        );
+        let error = evaluator
+            .eval_source(&source, std::path::Path::new("main.pkl"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("archive checksum mismatch"), "{error}");
     }
 
     #[test]

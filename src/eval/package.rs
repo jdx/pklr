@@ -92,7 +92,7 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 /// Split the optional `::sha256:<hex>` checksum off a package URI's
 /// `name@version` part, returning the URI without it and the checksum.
-fn split_package_checksum(uri: &str) -> Result<(String, Option<&str>)> {
+pub(super) fn split_package_checksum(uri: &str) -> Result<(String, Option<&str>)> {
     let (location, fragment) = match uri.split_once('#') {
         Some((location, fragment)) => (location, Some(fragment)),
         None => (uri, None),
@@ -121,8 +121,8 @@ fn split_package_checksum(uri: &str) -> Result<(String, Option<&str>)> {
 
 /// Resolve a `package://` URI to a download source.
 ///
-/// A `::sha256:<hex>` checksum after the version is accepted and ignored
-/// when locating the package; it is not verified.
+/// A `::sha256:<hex>` checksum after the version is ignored when locating the
+/// package; see [`split_package_checksum`] and `Evaluator::resolve_package`.
 pub(super) fn resolve_package_uri(uri: &str) -> Result<PackageSource> {
     let (stripped, _checksum) = split_package_checksum(uri)?;
     let uri = stripped.as_str();
@@ -200,4 +200,13 @@ pub(super) fn resolve_package_uri(uri: &str) -> Result<PackageSource> {
         return Ok(PackageSource::Zip(zip_url, file_path));
     }
     Err(Error::Eval(format!("unsupported package URI: {uri}")))
+}
+
+/// Lowercase hex SHA-256 of `bytes`.
+pub(super) fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
