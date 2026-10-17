@@ -10156,6 +10156,30 @@ mod package_uri_tests {
     }
 
     #[test]
+    fn package_uri_checksum_is_not_part_of_the_version() {
+        let hash = "52298901b489e45a8713b7354ecaeeb603364ccf0e2db5bf17feb1c52f1f4863";
+        let uri = format!("package://example.com/v1/hk@1.0::sha256:{hash}#/Config.pkl");
+        match resolve_package_uri(&uri).unwrap() {
+            PackageSource::Zip(zip_url, entry) => {
+                assert_eq!(zip_url, "https://example.com/v1/hk@1.0.zip");
+                assert_eq!(entry, "Config.pkl");
+            }
+            PackageSource::Direct { .. } => panic!("expected zip package source"),
+        }
+        match resolve_package_uri(&format!(
+            "package://pkg.pkl-lang.org/github.com/o/r@1.0::sha256:{hash}#/a.pkl"
+        ))
+        .unwrap()
+        {
+            PackageSource::Direct { url, .. } => {
+                assert_eq!(url, "https://github.com/o/r/releases/download/1.0/a.pkl");
+            }
+            PackageSource::Zip(..) => panic!("expected direct package source"),
+        }
+        assert!(resolve_package_uri("package://example.com/hk@1.0::md5:abcd#/a.pkl").is_err());
+    }
+
+    #[test]
     fn generic_package_uri_rejects_path_traversal_entries() {
         let err = resolve_package_uri("package://example.com/pkg@1.0#/../secret.pkl")
             .unwrap_err()
