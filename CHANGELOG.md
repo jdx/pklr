@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.2.0](https://github.com/jdx/pklr/compare/v5.1.2...v5.2.0) - 2026-10-17
+
+### Added
+
+- *(package)* support and verify ::sha256: checksums in package URIs ([#313](https://github.com/jdx/pklr/pull/313))
+
 ## [5.1.2](https://github.com/jdx/pklr/compare/v5.1.1...v5.1.2) - 2026-10-16
 
 ### Other
