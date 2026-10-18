@@ -1,5 +1,17 @@
 use super::*;
 
+/// Inserts a name into a set of shared names, allocating the shared string
+/// only when the set does not already hold it. Most insertions repeat a name.
+macro_rules! insert_name {
+    ($set:expr, $name:expr) => {{
+        let name = $name;
+        let name: &str = AsRef::<str>::as_ref(&name);
+        if !$set.contains(name) {
+            $set.insert(nm(name));
+        }
+    }};
+}
+
 pub(super) fn analysis_entries_for_requested_fields(
     entries: &[Entry],
     requested_fields: Option<&HashSet<Name>>,
@@ -59,19 +71,6 @@ pub(super) fn glob_index_keys(
 }
 
 /// Marks that `Alias` is used other than as `Alias["key"]`.
-
-/// Inserts a name into a set of shared names, allocating the shared string
-/// only when the set does not already hold it. Most insertions repeat a name.
-macro_rules! insert_name {
-    ($set:expr, $name:expr) => {{
-        let name = $name;
-        let name: &str = AsRef::<str>::as_ref(&name);
-        if !$set.contains(name) {
-            $set.insert(nm(name));
-        }
-    }};
-}
-
 fn other_uses_key(alias: &str) -> String {
     format!("{alias}\0*")
 }
