@@ -2186,6 +2186,48 @@ fn narrowed_import_follows_module_reads_in_class_defaults() {
 }
 
 #[test]
+fn narrowed_import_ignores_shadowed_module_in_constraints() {
+    let temp = TestTempDir::new("pklr_test_shadowed_module_constraint");
+    let dir = temp.path();
+    let main = dir.join("main.pkl");
+    std::fs::write(
+        &main,
+        "import \"types.pkl\" as Dep\nresult = new Dep.C {}\n",
+    )
+    .unwrap();
+    // `module` bound by a let, a lambda parameter, or a for generator is not
+    // the module, so `bad` (and its missing import) is never read.
+    for constraint in [
+        "let (`module` = new Dynamic { bad = true }) `module`.bad",
+        "((`module`) -> `module`.bad).apply(new Dynamic { bad = true })",
+        "new Listing { new Dynamic { bad = true } }.toList().every((`module`) -> `module`.bad)",
+    ] {
+        std::fs::write(
+            dir.join("types.pkl"),
+            format!(
+                "bad = import(\"missing.pkl\")\ntypealias Check = Boolean({constraint})\nclass C {{ ok: Check = true }}\n"
+            ),
+        )
+        .unwrap();
+        let value =
+            pklr::eval_to_json(&main).unwrap_or_else(|error| panic!("{constraint}: {error}"));
+        assert_eq!(
+            value,
+            serde_json::json!({"result": {"ok": true}}),
+            "{constraint}"
+        );
+    }
+
+    // Without the shadow the constraint really reads `module.bad`.
+    std::fs::write(
+        dir.join("types.pkl"),
+        "bad = import(\"missing.pkl\")\ntypealias Check = Boolean(module.bad != null)\nclass C { ok: Check = true }\n",
+    )
+    .unwrap();
+    assert!(pklr::eval_to_json(&main).is_err());
+}
+
+#[test]
 fn imported_class_retains_its_type_alias_constraint_bindings() {
     let temp = TestTempDir::new("pklr_test_imported_class_constraint_scope");
     let dir = temp.path();
