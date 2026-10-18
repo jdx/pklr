@@ -275,7 +275,7 @@ impl Scope {
         if self.vars.contains_key(name) {
             self.module_identities.get(name)
         } else {
-            self.parent.as_ref()?.module_identity(name)
+            self.parent.as_ref()?.module_identity_walk(name)
         }
     }
 
