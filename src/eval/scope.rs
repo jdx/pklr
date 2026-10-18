@@ -259,10 +259,23 @@ impl Scope {
     }
 
     pub(super) fn module_identity(&self, name: &str) -> Option<&String> {
+        // Few scopes record any identity (only imports do), so look for one
+        // before hashing the name at each level.
+        let mut level = Some(self);
+        while let Some(scope) = level {
+            if !scope.module_identities.is_empty() {
+                return self.module_identity_walk(name);
+            }
+            level = scope.parent.as_deref();
+        }
+        None
+    }
+
+    fn module_identity_walk(&self, name: &str) -> Option<&String> {
         if self.vars.contains_key(name) {
             self.module_identities.get(name)
         } else {
-            self.parent.as_ref()?.module_identity(name)
+            self.parent.as_ref()?.module_identity_walk(name)
         }
     }
 
@@ -272,8 +285,10 @@ impl Scope {
             .as_ref()
             .map(|parent| parent.flatten_module_identities())
             .unwrap_or_default();
-        for name in self.vars.keys() {
-            identities.shift_remove(&**name);
+        if !identities.is_empty() {
+            for name in self.vars.keys() {
+                identities.shift_remove(&**name);
+            }
         }
         identities.extend(
             self.module_identities
