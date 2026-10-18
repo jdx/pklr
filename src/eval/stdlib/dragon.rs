@@ -232,13 +232,12 @@ impl Big {
 
     fn mul_digits(&mut self, other: &[u32]) -> &mut Self {
         let mut result = [0_u32; 40];
-        for i in 0..self.size {
+        for (i, lhs) in self.base[..self.size].iter().enumerate() {
             let mut carry = 0_u64;
             for (j, rhs) in other.iter().enumerate() {
                 let index = i + j;
                 assert!(index < result.len());
-                let value =
-                    u64::from(self.base[i]) * u64::from(*rhs) + u64::from(result[index]) + carry;
+                let value = u64::from(*lhs) * u64::from(*rhs) + u64::from(result[index]) + carry;
                 result[index] = value as u32;
                 carry = value >> 32;
             }
