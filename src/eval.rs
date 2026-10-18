@@ -5923,6 +5923,9 @@ impl Evaluator {
             }
         }
         let mut preserved_inherited_bindings = HashSet::default();
+        // Resolved once rather than walking each scope's chain per binding.
+        let base_identities = eval_scope.flatten_module_identities();
+        let current_identities = current_scope.flatten_module_identities();
         // The amendment's captured scope is `current_scope` flattened, plus
         // the `super` binding skipped here.
         for (k, v) in &amendment_captured.values {
@@ -5932,9 +5935,9 @@ impl Evaluator {
                 continue;
             }
             let (k, v) = (k.clone(), v.clone());
-            let same_module = eval_scope
-                .module_identity(&k)
-                .zip(current_scope.module_identity(&k))
+            let same_module = base_identities
+                .get(&*k)
+                .zip(current_identities.get(&*k))
                 .is_some_and(|(base, current)| base == current);
             let value = if same_module {
                 // Still the base's own import, so it keeps the base's mark.
@@ -5947,7 +5950,9 @@ impl Evaluator {
                 continue;
             } else {
                 // A use-site binding is not declared in the base's body.
-                Arc::make_mut(&mut eval_scope.declared).remove(&*k);
+                if eval_scope.declared.contains(&*k) {
+                    Arc::make_mut(&mut eval_scope.declared).remove(&*k);
+                }
                 v
             };
             eval_scope.set_name(k, value);
