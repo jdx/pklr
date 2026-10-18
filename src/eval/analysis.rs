@@ -627,9 +627,11 @@ fn collect_sibling_field_refs_entries_in(
             }
             Entry::ForGenerator(fgen) => {
                 collect_sibling_field_refs_expr_in(&fgen.collection, refs, false, shadowed);
+                // Keys are integers or strings; values hide `module` only when
+                // every one of them is certainly not the module.
                 let shadowed = shadowed
-                    || fgen.val_var == "module"
-                    || fgen.key_var.as_deref() == Some("module");
+                    || fgen.key_var.as_deref() == Some("module")
+                    || (fgen.val_var == "module" && has_only_non_module_values(&fgen.collection));
                 collect_sibling_field_refs_entries_in(&fgen.body, refs, shadowed);
             }
             Entry::WhenGenerator(wgen) => {
@@ -1060,7 +1062,7 @@ fn collect_sibling_field_refs_expr_in(
                 body,
                 refs,
                 include_this,
-                shadowed || name == "module",
+                shadowed || (name == "module" && is_proven_non_module(value)),
             );
         }
         Expr::Is(value, ty) | Expr::As(value, ty) => {
@@ -1068,12 +1070,9 @@ fn collect_sibling_field_refs_expr_in(
             // `module.field` reads in the checked type's constraints.
             collect_sibling_field_refs_type_in(ty, refs, shadowed);
         }
-        Expr::Lambda(params, body) => collect_sibling_field_refs_expr_in(
-            body,
-            refs,
-            include_this,
-            shadowed || params.iter().any(|param| param == "module"),
-        ),
+        Expr::Lambda(_, body) => {
+            collect_sibling_field_refs_expr_in(body, refs, include_this, shadowed)
+        }
         Expr::Unop(_, body)
         | Expr::Throw(body)
         | Expr::Trace(body, _)
@@ -1115,6 +1114,38 @@ pub(super) fn property_reference_names(prop: &Property) -> HashSet<String> {
         collect_sibling_field_refs_entries(body, &mut refs);
     }
     refs
+}
+
+/// Whether `expr` is certainly not the module object: a literal or a freshly
+/// built object. A binding of anything else (`module`, a call, a field read)
+/// may hold the module, so it must not hide `module` reads.
+fn is_proven_non_module(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Null
+            | Expr::Bool(_)
+            | Expr::Int(_)
+            | Expr::Float(_)
+            | Expr::String(_)
+            | Expr::StringInterpolation(_)
+            | Expr::New(..)
+            | Expr::InferredNew(..)
+            | Expr::ObjectBody(_)
+    )
+}
+
+/// Whether iterating `expr` yields only values that are certainly not the module.
+fn has_only_non_module_values(expr: &Expr) -> bool {
+    let (Expr::New(_, entries, _) | Expr::InferredNew(_, entries) | Expr::ObjectBody(entries)) =
+        expr
+    else {
+        return false;
+    };
+    entries.iter().all(|entry| match entry {
+        Entry::Elem(value) | Entry::DynProperty(_, value) => is_proven_non_module(value),
+        Entry::Property(prop) => prop.value.as_ref().is_none_or(is_proven_non_module),
+        _ => false,
+    })
 }
 
 fn is_module_name(expr: &Expr) -> bool {

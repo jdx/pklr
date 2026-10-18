@@ -2195,12 +2195,12 @@ fn narrowed_import_ignores_shadowed_module_in_constraints() {
         "import \"types.pkl\" as Dep\nresult = new Dep.C {}\n",
     )
     .unwrap();
-    // `module` bound by a let, a lambda parameter, or a for generator is not
-    // the module, so `bad` (and its missing import) is never read.
+    // A `module` bound to a fresh object, or by a `for` generator over fresh
+    // values, is not the module, so `bad` (and its missing import) is never read.
     for constraint in [
         "let (`module` = new Dynamic { bad = true }) `module`.bad",
-        "((`module`) -> `module`.bad).apply(new Dynamic { bad = true })",
-        "new Listing { new Dynamic { bad = true } }.toList().every((`module`) -> `module`.bad)",
+        "new Listing { for (`module` in new Listing { new Dynamic { bad = true } }) { `module`.bad } }.length == 1",
+        "new Listing { for (`module` in new Mapping { [\"k\"] = new Dynamic { bad = true } }) { `module`.bad } }.length == 1",
     ] {
         std::fs::write(
             dir.join("types.pkl"),
@@ -2218,13 +2218,33 @@ fn narrowed_import_ignores_shadowed_module_in_constraints() {
         );
     }
 
-    // Without the shadow the constraint really reads `module.bad`.
+    // A binding that may hold the module, or a collection read outside the
+    // shadow, still reads module members.
+    for constraint in [
+        "module.bad != null",
+        "let (`module` = module) `module`.bad != null",
+        "new Listing { for (`module` in module.bad) { `module`.x } }.length == 0",
+    ] {
+        std::fs::write(
+            dir.join("types.pkl"),
+            format!(
+                "bad = import(\"missing.pkl\")\ntypealias Check = Boolean({constraint})\nclass C {{ ok: Check = true }}\n"
+            ),
+        )
+        .unwrap();
+        assert!(pklr::eval_to_json(&main).is_err(), "{constraint}");
+    }
+
+    // An alias of the module keeps the module member it reads.
     std::fs::write(
         dir.join("types.pkl"),
-        "bad = import(\"missing.pkl\")\ntypealias Check = Boolean(module.bad != null)\nclass C { ok: Check = true }\n",
+        "bad = true\ntypealias Check = Boolean(let (`module` = module) `module`.bad)\nclass C { ok: Check = true }\n",
     )
     .unwrap();
-    assert!(pklr::eval_to_json(&main).is_err());
+    assert_eq!(
+        pklr::eval_to_json(&main).unwrap(),
+        serde_json::json!({"result": {"ok": true}})
+    );
 }
 
 #[test]
