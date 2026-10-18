@@ -7067,7 +7067,8 @@ impl Evaluator {
                             let source = source.as_ref()?;
                             source
                                 .evaluated_properties
-                                .contains(&nm(field))
+                                .iter()
+                                .any(|name| name.as_ref() == field.as_str())
                                 .then(|| source.scope().get(field.as_str()).cloned())?
                         };
                         let val = map
