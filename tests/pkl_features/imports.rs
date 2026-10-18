@@ -2613,6 +2613,61 @@ fn narrowed_import_keeps_sibling_receivers_for_generated_children() {
 }
 
 #[test]
+fn narrowed_import_keeps_reads_before_class_local_module_bindings() {
+    let temp = TestTempDir::new("pklr_test_early_class_local_module_reads");
+    let dir = temp.path();
+    let main = dir.join("main.pkl");
+    let dep = dir.join("dep.pkl");
+    std::fs::write(&main, "import \"dep.pkl\" as Dep\nresult = Dep.result\n").unwrap();
+    let mut cases = Vec::new();
+    for access in ["`module`.good", "`module`[\"good\"]"] {
+        for (declarations, value) in [
+            (format!("local captured = {access}"), "captured"),
+            (
+                format!("local captured = new Dynamic {{ value = {access} }}"),
+                "captured.value",
+            ),
+            (
+                format!("class Captured {{ fixed value = {access} }}"),
+                "(new Captured {}).value",
+            ),
+            (
+                format!("local capture = () -> {access}\nlocal captured = capture()"),
+                "captured",
+            ),
+        ] {
+            for early in [true, false] {
+                let binding = "local `module` = new Dynamic { good = false }";
+                let body = if early {
+                    format!("{declarations}\n{binding}")
+                } else {
+                    format!("{binding}\n{declarations}")
+                };
+                for result in [
+                    format!("class C {{\n{body}\nfixed ok = {value}\n}}\nresult = (new C {{}}).ok"),
+                    format!("result = (new Dynamic {{\n{body}\nvalue = {value}\n}}).value"),
+                ] {
+                    // Preserve Pklr's declaration-order behavior, which differs from official Pkl.
+                    let source = format!("good = true\n{result}\n");
+                    std::fs::write(&dep, &source).unwrap();
+                    assert_eq!(
+                        pklr::eval_to_json(&dep).unwrap()["result"],
+                        early,
+                        "{source}"
+                    );
+                    cases.push((source, early));
+                }
+            }
+        }
+    }
+    for (source, expected) in cases {
+        std::fs::write(&dep, &source).unwrap();
+        let value = pklr::eval_to_json(&main).unwrap_or_else(|error| panic!("{source}: {error}"));
+        assert_eq!(value, serde_json::json!({"result": expected}));
+    }
+}
+
+#[test]
 fn narrowed_import_acquires_fresh_class_local_module_proofs() {
     let temp = TestTempDir::new("pklr_test_class_local_module_proofs");
     let dir = temp.path();

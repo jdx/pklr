@@ -734,15 +734,18 @@ fn collect_sibling_field_refs_entries_in(
             ),
             _ => true,
         });
+    // Eager locals and classes before a local binding still use the incoming scope.
+    let mut declaration_shadowed = initializer_shadowed;
     for entry in entries {
         match entry {
             Entry::Property(prop) => {
                 // Computing the replacement may still read the inherited receiver.
-                let property_shadowed = if &*prop.name == "module" {
-                    initializer_shadowed
-                } else {
-                    shadowed
-                };
+                let property_shadowed =
+                    if &*prop.name == "module" || has_modifier(&prop.modifiers, Modifier::Local) {
+                        declaration_shadowed
+                    } else {
+                        shadowed
+                    };
                 if let Some(ty) = &prop.type_ann {
                     collect_sibling_field_refs_type_in(ty, refs, property_shadowed);
                 }
@@ -782,6 +785,12 @@ fn collect_sibling_field_refs_entries_in(
                         known_base,
                         body,
                     );
+                }
+                if &*prop.name == "module"
+                    && has_modifier(&prop.modifiers, Modifier::Local)
+                    && prop.value.is_some()
+                {
+                    declaration_shadowed = shadowed;
                 }
             }
             Entry::DynProperty(key, value) | Entry::Predicate(key, value) => {
@@ -834,9 +843,17 @@ fn collect_sibling_field_refs_entries_in(
                 collect_sibling_field_refs_expr_in(expr, refs, false, shadowed);
             }
             Entry::ClassDef(_, _, _, body) => collect_sibling_field_refs_entries_in(
-                body, refs, shadowed, false, false, None, body,
+                body,
+                refs,
+                declaration_shadowed,
+                false,
+                false,
+                None,
+                body,
             ),
-            Entry::TypeAlias(_, ty) => collect_sibling_field_refs_type_in(ty, refs, shadowed),
+            Entry::TypeAlias(_, ty) => {
+                collect_sibling_field_refs_type_in(ty, refs, declaration_shadowed);
+            }
         }
     }
 }
