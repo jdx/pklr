@@ -611,7 +611,7 @@ fn follow_definitions(definitions: &Definitions, refs: &mut Names, aliases: Opti
 }
 
 pub(super) fn collect_sibling_field_refs_entries(entries: &[Entry], refs: &mut HashSet<Name>) {
-    collect_sibling_field_refs_entries_in(entries, refs, false);
+    collect_sibling_field_refs_entries_in(entries, refs, false, false);
 }
 
 /// `shadowed` means a lexical binding named `module` hides the module object,
@@ -620,32 +620,41 @@ fn collect_sibling_field_refs_entries_in(
     entries: &[Entry],
     refs: &mut HashSet<Name>,
     shadowed: bool,
+    inherits_receiver: bool,
 ) {
     // An object that declares its own `module` property rebinds the name for
     // its entries, so an outer proof that `module` is not the module no longer
     // holds unless every such property is itself certainly not the module.
     // Anything else is treated as possibly the module rather than modeling
     // binding phases.
+    // An explicit replacement can restore the proof, but a bare `module`
+    // initializer may still resolve to the unknown inherited receiver.
     let shadowed = shadowed
+        && (!inherits_receiver
+            || entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::Property(prop) if &*prop.name == "module")))
         && entries.iter().all(|entry| match entry {
             Entry::Property(prop) if &*prop.name == "module" => prop
                 .value
                 .as_ref()
-                .is_some_and(|value| is_proven_non_module(value, shadowed)),
+                .is_some_and(|value| is_proven_non_module(value, shadowed && !inherits_receiver)),
             _ => true,
         });
     for entry in entries {
         match entry {
             Entry::Property(prop) => {
+                // Computing the replacement may still read the inherited receiver.
+                let property_shadowed = shadowed && !(inherits_receiver && &*prop.name == "module");
                 if let Some(ty) = &prop.type_ann {
-                    collect_sibling_field_refs_type_in(ty, refs, shadowed);
+                    collect_sibling_field_refs_type_in(ty, refs, property_shadowed);
                 }
                 if let Some(expr) = &prop.value {
-                    collect_sibling_field_refs_expr_in(expr, refs, false, shadowed);
+                    collect_sibling_field_refs_expr_in(expr, refs, false, property_shadowed);
                 }
                 if let Some(body) = &prop.body {
                     // The amended value can inherit a different `module` binding.
-                    collect_sibling_field_refs_entries_in(body, refs, false);
+                    collect_sibling_field_refs_entries_in(body, refs, shadowed, true);
                 }
             }
             Entry::DynProperty(key, value) | Entry::Predicate(key, value) => {
@@ -661,20 +670,20 @@ fn collect_sibling_field_refs_entries_in(
                 } else {
                     shadowed || fgen.key_var.as_deref() == Some("module")
                 };
-                collect_sibling_field_refs_entries_in(&fgen.body, refs, shadowed);
+                collect_sibling_field_refs_entries_in(&fgen.body, refs, shadowed, false);
             }
             Entry::WhenGenerator(wgen) => {
                 collect_sibling_field_refs_expr_in(&wgen.condition, refs, false, shadowed);
-                collect_sibling_field_refs_entries_in(&wgen.body, refs, shadowed);
+                collect_sibling_field_refs_entries_in(&wgen.body, refs, shadowed, false);
                 if let Some(else_body) = &wgen.else_body {
-                    collect_sibling_field_refs_entries_in(else_body, refs, shadowed);
+                    collect_sibling_field_refs_entries_in(else_body, refs, shadowed, false);
                 }
             }
             Entry::Spread(expr) | Entry::Elem(expr) => {
                 collect_sibling_field_refs_expr_in(expr, refs, false, shadowed);
             }
             Entry::ClassDef(_, _, _, body) => {
-                collect_sibling_field_refs_entries_in(body, refs, shadowed)
+                collect_sibling_field_refs_entries_in(body, refs, shadowed, false)
             }
             Entry::TypeAlias(_, ty) => collect_sibling_field_refs_type_in(ty, refs, shadowed),
         }
@@ -1054,9 +1063,17 @@ fn collect_sibling_field_refs_expr_in(
             collect_sibling_field_refs_expr_in(base, refs, include_this, shadowed);
             collect_sibling_field_refs_expr_in(index, refs, include_this, shadowed);
         }
-        Expr::Binop(_, left, right) => {
+        Expr::Binop(op, left, right) => {
             collect_sibling_field_refs_expr_in(left, refs, include_this, shadowed);
-            collect_sibling_field_refs_expr_in(right, refs, include_this, shadowed);
+            if let Expr::ObjectBody(entries) = right.as_ref()
+                && matches!(op, BinOp::Add)
+            {
+                let inherits_receiver = !matches!(left.as_ref(), Expr::New(name, entries, _)
+                    if matches!(name.as_deref(), None | Some("Dynamic")) && entries.is_empty());
+                collect_sibling_field_refs_entries_in(entries, refs, shadowed, inherits_receiver);
+            } else {
+                collect_sibling_field_refs_expr_in(right, refs, include_this, shadowed);
+            }
         }
         Expr::New(type_name, entries, _) => {
             // `new module.C {}` reads the module member `C`.
@@ -1066,14 +1083,14 @@ fn collect_sibling_field_refs_expr_in(
                 let member = rest.split('.').next().unwrap_or(rest);
                 insert_name!(refs, member);
             }
-            collect_sibling_field_refs_entries_in(entries, refs, shadowed);
+            collect_sibling_field_refs_entries_in(entries, refs, shadowed, false);
         }
         Expr::InferredNew(_, entries) => {
-            collect_sibling_field_refs_entries_in(entries, refs, shadowed);
+            collect_sibling_field_refs_entries_in(entries, refs, shadowed, false);
         }
         Expr::ObjectBody(entries) => {
             // The amendment base is unknown here; it may supply `module`.
-            collect_sibling_field_refs_entries_in(entries, refs, false);
+            collect_sibling_field_refs_entries_in(entries, refs, shadowed, true);
         }
         Expr::Call(callee, args) => {
             collect_sibling_field_refs_expr_in(callee, refs, include_this, shadowed);

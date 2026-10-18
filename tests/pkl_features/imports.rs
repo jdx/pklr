@@ -2343,6 +2343,71 @@ fn narrowed_import_keeps_module_reads_from_inherited_property_bodies() {
 }
 
 #[test]
+fn narrowed_import_keeps_explicit_non_module_amendment_bindings() {
+    let temp = TestTempDir::new("pklr_test_amendment_non_module_override");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as Dep\nresult = Dep.result\n",
+    )
+    .unwrap();
+    for local in ["local ", ""] {
+        for property_body in [false, true] {
+            let value = if property_body {
+                format!(
+                    "(new Dynamic {{ local value = new Dynamic {{}}; value {{ {local}`module` = new Dynamic {{ bad = true }}; ok = `module`.bad }} }}).value.ok"
+                )
+            } else {
+                format!(
+                    "((new Dynamic {{}}) {{ {local}`module` = new Dynamic {{ bad = true }}; ok = `module`.bad }}).ok"
+                )
+            };
+            std::fs::write(dir.join("dep.pkl"), format!("bad = import(\"missing.pkl\")\nresult = let (`module` = new Dynamic {{ bad = false }}) {value}\n")).unwrap();
+            let value = pklr::eval_to_json(&dir.join("main.pkl")).unwrap_or_else(|error| {
+                panic!("{local:?}, property body {property_body}: {error}")
+            });
+            assert_eq!(value, serde_json::json!({"result": true}));
+        }
+    }
+}
+
+#[test]
+fn narrowed_import_keeps_lexical_module_for_empty_amendment_bases() {
+    let temp = TestTempDir::new("pklr_test_empty_amendment_module_shadow");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as Dep\nresult = Dep.result\n",
+    )
+    .unwrap();
+    for constructor in ["new", "new Dynamic"] {
+        std::fs::write(dir.join("dep.pkl"), format!("bad = import(\"missing.pkl\")\nresult = let (`module` = new Dynamic {{ bad = false }}) (({constructor} {{}}) {{ ok = `module`.bad }}).ok\n")).unwrap();
+        let value = pklr::eval_to_json(&dir.join("main.pkl"))
+            .unwrap_or_else(|error| panic!("{constructor}: {error}"));
+        assert_eq!(value, serde_json::json!({"result": false}));
+    }
+}
+
+#[test]
+fn narrowed_import_keeps_amendment_reads_before_module_replacement() {
+    let temp = TestTempDir::new("pklr_test_amendment_module_initializer");
+    let dir = temp.path();
+    let main = dir.join("main.pkl");
+    let dep = dir.join("dep.pkl");
+    std::fs::write(&main, "import \"dep.pkl\" as Dep\nresult = Dep.result\n").unwrap();
+    for body in [
+        "`module` = new Dynamic { good = `module`.good }\nok = `module`.good",
+        "`module` = `module`\nok = `module`.good",
+        "local captured = `module`.good\n`module` = new Dynamic { good = false }\nok = captured",
+    ] {
+        std::fs::write(&dep, format!("good = true\nbase = let (real = module) new Dynamic {{ `module` = real }}\nresult = let (`module` = new Dynamic {{ good = false }}) ((base) {{\n{body}\n}}).ok\n")).unwrap();
+        let expected = pklr::eval_to_json(&dep).unwrap()["result"].clone();
+        let value = pklr::eval_to_json(&main).unwrap_or_else(|error| panic!("{body}: {error}"));
+        assert_eq!(value, serde_json::json!({"result": expected}));
+    }
+}
+
+#[test]
 fn imported_class_retains_its_type_alias_constraint_bindings() {
     let temp = TestTempDir::new("pklr_test_imported_class_constraint_scope");
     let dir = temp.path();
