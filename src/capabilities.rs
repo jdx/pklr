@@ -17,6 +17,8 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "reqwest")]
+use std::sync::{Arc, OnceLock};
 #[cfg(feature = "http")]
 use std::time::Duration;
 
@@ -245,7 +247,64 @@ enum HttpBackend {
     #[cfg(feature = "http")]
     Ureq(ureq::Agent),
     #[cfg(feature = "reqwest")]
-    Reqwest(reqwest::Client),
+    Reqwest(LazyClient),
+}
+
+/// A `reqwest` client built on first use, so a host whose evaluation never
+/// leaves the file system does not pay for it (building one loads the
+/// platform's root certificates).
+#[cfg(feature = "reqwest")]
+#[derive(Clone)]
+pub(crate) struct LazyClient {
+    inner: Arc<LazyClientInner>,
+}
+
+#[cfg(feature = "reqwest")]
+struct LazyClientInner {
+    client: OnceLock<std::result::Result<reqwest::Client, String>>,
+    factory: Box<dyn Fn() -> std::result::Result<reqwest::Client, String> + Send + Sync>,
+}
+
+#[cfg(feature = "reqwest")]
+impl std::fmt::Debug for LazyClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LazyClient")
+            .field("built", &self.inner.client.get().is_some())
+            .finish()
+    }
+}
+
+#[cfg(feature = "reqwest")]
+impl LazyClient {
+    pub(crate) fn ready(client: reqwest::Client) -> Self {
+        let cell = OnceLock::new();
+        let _ = cell.set(Ok(client));
+        Self {
+            inner: Arc::new(LazyClientInner {
+                client: cell,
+                factory: Box::new(|| Err("HTTP client was not built".to_owned())),
+            }),
+        }
+    }
+
+    pub(crate) fn from_factory(
+        factory: impl Fn() -> std::result::Result<reqwest::Client, String> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            inner: Arc::new(LazyClientInner {
+                client: OnceLock::new(),
+                factory: Box::new(factory),
+            }),
+        }
+    }
+
+    fn get(&self) -> Result<&reqwest::Client> {
+        self.inner
+            .client
+            .get_or_init(|| (self.inner.factory)())
+            .as_ref()
+            .map_err(|error| crate::Error::Eval(format!("failed to build HTTP client: {error}")))
+    }
 }
 
 #[cfg(feature = "native-io")]
@@ -274,6 +333,22 @@ impl NativeCapabilities {
     /// multi-threaded runtime, and on a private runtime otherwise.
     #[cfg(feature = "reqwest")]
     pub fn with_reqwest_client(client: reqwest::Client) -> Self {
+        Self::with_lazy_client(LazyClient::ready(client))
+    }
+
+    /// Like [`with_reqwest_client`](Self::with_reqwest_client), but builds the
+    /// client with `factory` on the first HTTP request. An evaluation that
+    /// reads only local files never calls it. A factory error surfaces as an
+    /// evaluation error on that first request.
+    #[cfg(feature = "reqwest")]
+    pub fn with_reqwest_client_factory(
+        factory: impl Fn() -> std::result::Result<reqwest::Client, String> + Send + Sync + 'static,
+    ) -> Self {
+        Self::with_lazy_client(LazyClient::from_factory(factory))
+    }
+
+    #[cfg(feature = "reqwest")]
+    pub(crate) fn with_lazy_client(client: LazyClient) -> Self {
         Self {
             http: Some(HttpBackend::Reqwest(client)),
         }
@@ -357,6 +432,7 @@ impl EvalCapabilities for NativeCapabilities {
             Some(HttpBackend::Ureq(agent)) => ureq_fetch_text(agent, url),
             #[cfg(feature = "reqwest")]
             Some(HttpBackend::Reqwest(client)) => {
+                let client = client.get()?;
                 let url = url.to_owned();
                 reqwest_backend::fetch_text_many(
                     client,
@@ -379,6 +455,7 @@ impl EvalCapabilities for NativeCapabilities {
             Some(HttpBackend::Ureq(agent)) => ureq_fetch_bytes(agent, url),
             #[cfg(feature = "reqwest")]
             Some(HttpBackend::Reqwest(client)) => {
+                let client = client.get()?;
                 let url = url.to_owned();
                 reqwest_backend::fetch_bytes_many(
                     client,
@@ -404,10 +481,18 @@ impl EvalCapabilities for NativeCapabilities {
                     crate::Error::Eval(format!("HTTP read failed for {url}: {error}"))
                 })
             }),
+            // A batch that sends no request must not build the client.
             #[cfg(feature = "reqwest")]
-            Some(HttpBackend::Reqwest(client)) => {
-                reqwest_backend::fetch_text_many(client, urls, budget)
+            Some(HttpBackend::Reqwest(_)) if urls.is_empty() => Vec::new(),
+            #[cfg(feature = "reqwest")]
+            Some(HttpBackend::Reqwest(_)) if budget.is_spent() => {
+                urls.iter().map(|url| Err(budget_spent(url))).collect()
             }
+            #[cfg(feature = "reqwest")]
+            Some(HttpBackend::Reqwest(client)) => match client.get() {
+                Ok(client) => reqwest_backend::fetch_text_many(client, urls, budget),
+                Err(error) => repeat_error(urls, &error),
+            },
             None => urls
                 .iter()
                 .map(|url| Err(http_backend_required(url)))
@@ -422,10 +507,18 @@ impl EvalCapabilities for NativeCapabilities {
             Some(HttpBackend::Ureq(agent)) => {
                 fetch_parallel(urls, budget, |url| ureq_fetch_within(agent, url, budget))
             }
+            // A batch that sends no request must not build the client.
             #[cfg(feature = "reqwest")]
-            Some(HttpBackend::Reqwest(client)) => {
-                reqwest_backend::fetch_bytes_many(client, urls, budget)
+            Some(HttpBackend::Reqwest(_)) if urls.is_empty() => Vec::new(),
+            #[cfg(feature = "reqwest")]
+            Some(HttpBackend::Reqwest(_)) if budget.is_spent() => {
+                urls.iter().map(|url| Err(budget_spent(url))).collect()
             }
+            #[cfg(feature = "reqwest")]
+            Some(HttpBackend::Reqwest(client)) => match client.get() {
+                Ok(client) => reqwest_backend::fetch_bytes_many(client, urls, budget),
+                Err(error) => repeat_error(urls, &error),
+            },
             None => urls
                 .iter()
                 .map(|url| Err(http_backend_required(url)))
@@ -440,6 +533,17 @@ impl EvalCapabilities for NativeCapabilities {
     fn glob(&mut self, base: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
         crate::eval::expand_glob(base, pattern)
     }
+}
+
+#[cfg(feature = "reqwest")]
+fn repeat_error<T>(urls: &[String], error: &crate::Error) -> Vec<Result<T>> {
+    let message = match error {
+        crate::Error::Eval(message) => message.clone(),
+        other => other.to_string(),
+    };
+    urls.iter()
+        .map(|_| Err(crate::Error::Eval(message.clone())))
+        .collect()
 }
 
 #[cfg(feature = "native-io")]

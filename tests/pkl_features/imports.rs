@@ -2186,6 +2186,81 @@ fn narrowed_import_follows_module_reads_in_class_defaults() {
 }
 
 #[test]
+fn narrowed_import_ignores_shadowed_module_in_constraints() {
+    let temp = TestTempDir::new("pklr_test_shadowed_module_constraint");
+    let dir = temp.path();
+    let main = dir.join("main.pkl");
+    std::fs::write(
+        &main,
+        "import \"types.pkl\" as Dep\nresult = new Dep.C {}\n",
+    )
+    .unwrap();
+    // A `module` bound to a fresh object, or by a `for` generator over fresh
+    // values, is not the module, so `bad` (and its missing import) is never read.
+    for constraint in [
+        "let (`module` = new Dynamic { bad = true }) `module`.bad",
+        "new Listing { for (`module` in new Listing { new Dynamic { bad = true } }) { `module`.bad } }.length == 1",
+        "let (`module` = new Dynamic { bad = true }) new Listing { for (`module` in new Listing { `module` }) { `module`.bad } }.length == 1",
+        "new Listing { for (`module` in new Mapping { [\"k\"] = new Dynamic { bad = true } }) { `module`.bad } }.length == 1",
+    ] {
+        std::fs::write(
+            dir.join("types.pkl"),
+            format!(
+                "bad = import(\"missing.pkl\")\ntypealias Check = Boolean({constraint})\nclass C {{ ok: Check = true }}\n"
+            ),
+        )
+        .unwrap();
+        let value =
+            pklr::eval_to_json(&main).unwrap_or_else(|error| panic!("{constraint}: {error}"));
+        assert_eq!(
+            value,
+            serde_json::json!({"result": {"ok": true}}),
+            "{constraint}"
+        );
+    }
+
+    // A binding that may hold the module, or a collection read outside the
+    // shadow, still reads module members.
+    for constraint in [
+        "module.bad != null",
+        "let (`module` = module) `module`.bad != null",
+        "new Listing { for (`module` in module.bad) { `module`.x } }.length == 0",
+    ] {
+        std::fs::write(
+            dir.join("types.pkl"),
+            format!(
+                "bad = import(\"missing.pkl\")\ntypealias Check = Boolean({constraint})\nclass C {{ ok: Check = true }}\n"
+            ),
+        )
+        .unwrap();
+        assert!(pklr::eval_to_json(&main).is_err(), "{constraint}");
+    }
+
+    // An alias of the module keeps the module member it reads, including one
+    // rebound after an outer shadow.
+    for constraint in [
+        "let (`module` = module) `module`.bad",
+        "let (real = module) let (`module` = new Dynamic { bad = false }) let (`module` = real) `module`.bad",
+        "let (real = module) let (`module` = new Dynamic { bad = false }) ((`module`) -> new Listing { for (`module` in new Listing { `module` }) { `module`.bad } }.length == 1).apply(real)",
+    ] {
+        std::fs::write(
+            dir.join("types.pkl"),
+            format!(
+                "bad = true\ntypealias Check = Boolean({constraint})\nclass C {{ ok: Check = true }}\n"
+            ),
+        )
+        .unwrap();
+        let value =
+            pklr::eval_to_json(&main).unwrap_or_else(|error| panic!("{constraint}: {error}"));
+        assert_eq!(
+            value,
+            serde_json::json!({"result": {"ok": true}}),
+            "{constraint}"
+        );
+    }
+}
+
+#[test]
 fn imported_class_retains_its_type_alias_constraint_bindings() {
     let temp = TestTempDir::new("pklr_test_imported_class_constraint_scope");
     let dir = temp.path();
