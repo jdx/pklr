@@ -2480,6 +2480,72 @@ fn narrowed_import_keeps_module_receivers_generated_in_fresh_bases() {
 }
 
 #[test]
+fn narrowed_import_keeps_const_local_fresh_property_bases() {
+    let temp = TestTempDir::new("pklr_test_const_local_fresh_bases");
+    let dir = temp.path();
+    let main = dir.join("main.pkl");
+    let dep = dir.join("dep.pkl");
+    std::fs::write(&main, "import \"dep.pkl\" as Dep\nresult = Dep.result\n").unwrap();
+    for modifiers in ["const local", "local const"] {
+        for constructor in ["new", "new Dynamic"] {
+            for access in ["`module`.bad", "`module`[\"bad\"]"] {
+                let result = format!(
+                    "result = let (`module` = new Dynamic {{ bad = true }}) (new Dynamic {{\n{modifiers} value = {constructor} {{}}\nvalue {{ ok = {access} }}\n}}).value.ok\n"
+                );
+                std::fs::write(&dep, format!("bad = false\n{result}")).unwrap();
+                assert_eq!(pklr::eval_to_json(&dep).unwrap()["result"], true);
+                std::fs::write(&dep, format!("bad = import(\"missing.pkl\")\n{result}")).unwrap();
+                let value = pklr::eval_to_json(&main).unwrap_or_else(|error| {
+                    panic!("{modifiers}, {constructor}, {access}: {error}")
+                });
+                assert_eq!(value, serde_json::json!({"result": true}));
+            }
+        }
+    }
+}
+
+#[test]
+fn narrowed_import_keeps_lexical_module_for_absent_amendment_children() {
+    let temp = TestTempDir::new("pklr_test_absent_amendment_children");
+    let dir = temp.path();
+    let main = dir.join("main.pkl");
+    let dep = dir.join("dep.pkl");
+    std::fs::write(&main, "import \"dep.pkl\" as Dep\nresult = Dep.result\n").unwrap();
+    for access in ["`module`.bad", "`module`[\"bad\"]"] {
+        for result in [
+            format!("((new Dynamic {{}}) {{ value {{ ok = {access} }} }}).value.ok"),
+            format!("((new {{}}) {{ value {{ ok = {access} }} }}).value.ok"),
+            format!("((new Dynamic {{ seed = true }}) {{ value {{ ok = {access} }} }}).value.ok"),
+            format!(
+                "((new Dynamic {{ when (true) {{ other = 1 }} }}) {{ value {{ ok = {access} }} }}).value.ok"
+            ),
+            format!(
+                "((new Dynamic {{ seed = true; for (n in List(1)) {{ n }} }}) {{ value {{ ok = {access} }} }}).value.ok"
+            ),
+            format!(
+                "((new Dynamic {{}} {{ seed = true }}) {{ value {{ ok = {access} }} }}).value.ok"
+            ),
+            format!(
+                "(new Dynamic {{ local value = new Dynamic {{}}; value {{ child {{ ok = {access} }} }} }}).value.child.ok"
+            ),
+            format!(
+                "(new Holder {{ local value = new Dynamic {{}}; value {{ child {{ ok = {access} }} }} }}).value.child.ok"
+            ),
+        ] {
+            let result = format!(
+                "class Holder {{ value: Dynamic = new Dynamic {{}} }}\nresult = let (`module` = new Dynamic {{ bad = false }}) {result}\n"
+            );
+            std::fs::write(&dep, format!("bad = true\n{result}")).unwrap();
+            assert_eq!(pklr::eval_to_json(&dep).unwrap()["result"], false);
+            std::fs::write(&dep, format!("bad = import(\"missing.pkl\")\n{result}")).unwrap();
+            let value =
+                pklr::eval_to_json(&main).unwrap_or_else(|error| panic!("{result}: {error}"));
+            assert_eq!(value, serde_json::json!({"result": false}));
+        }
+    }
+}
+
+#[test]
 fn narrowed_import_keeps_lexical_module_for_fresh_property_bases() {
     let temp = TestTempDir::new("pklr_test_fresh_property_amendment_module_shadow");
     let dir = temp.path();
@@ -2601,6 +2667,15 @@ fn narrowed_import_keeps_inherited_children_of_fresh_bases() {
         for result in [
             format!(
                 "((new Dynamic {{ value = new Dynamic {{ `module` = real }} }}) {{ value {{ ok = {access} }} }}).value.ok"
+            ),
+            format!(
+                "((new Dynamic {{ when (true) {{ value = new Dynamic {{ `module` = real }} }} }}) {{ value {{ ok = {access} }} }}).value.ok"
+            ),
+            format!(
+                "((new Dynamic {{ when (false) {{ other = 1 }} else {{ value = new Dynamic {{ `module` = real }} }} }}) {{ value {{ ok = {access} }} }}).value.ok"
+            ),
+            format!(
+                "((new Dynamic {{ for (n in List(1)) {{ [\"value\"] = new Dynamic {{ `module` = real }} }} }}) {{ value {{ ok = {access} }} }}).value.ok"
             ),
             format!(
                 "(new Dynamic {{ local value = new Dynamic {{ child = new Dynamic {{ `module` = real }} }}; value {{ child {{ ok = {access} }} }} }}).value.child.ok"

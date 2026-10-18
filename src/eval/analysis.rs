@@ -611,7 +611,24 @@ fn follow_definitions(definitions: &Definitions, refs: &mut Names, aliases: Opti
 }
 
 pub(super) fn collect_sibling_field_refs_entries(entries: &[Entry], refs: &mut HashSet<Name>) {
-    collect_sibling_field_refs_entries_in(entries, refs, false, false, false);
+    collect_sibling_field_refs_entries_in(entries, refs, false, false, false, None);
+}
+
+fn may_write_receiver(entry: &Entry, names: &[&str]) -> bool {
+    match entry {
+        Entry::Property(prop) => names.contains(&prop.name.as_ref()),
+        Entry::ForGenerator(generator) => generator
+            .body
+            .iter()
+            .any(|entry| may_write_receiver(entry, names)),
+        Entry::WhenGenerator(generator) => generator
+            .body
+            .iter()
+            .chain(generator.else_body.iter().flat_map(|body| body.iter()))
+            .any(|entry| may_write_receiver(entry, names)),
+        Entry::DynProperty(..) | Entry::Predicate(..) | Entry::Spread(_) => true,
+        _ => false,
+    }
 }
 
 // Only amendments under a proven lexical `module` shadow need this proof.
@@ -621,29 +638,13 @@ fn has_fresh_property_base(
     body: &[Entry],
     shadowed: bool,
 ) -> Option<bool> {
-    fn may_write_receiver(entry: &Entry, name: &str) -> bool {
-        match entry {
-            Entry::Property(prop) => &*prop.name == name || &*prop.name == "module",
-            Entry::ForGenerator(generator) => generator
-                .body
-                .iter()
-                .any(|entry| may_write_receiver(entry, name)),
-            Entry::WhenGenerator(generator) => generator
-                .body
-                .iter()
-                .chain(generator.else_body.iter().flat_map(|body| body.iter()))
-                .any(|entry| may_write_receiver(entry, name)),
-            Entry::DynProperty(..) | Entry::Predicate(..) | Entry::Spread(_) => true,
-            _ => false,
-        }
-    }
-
     // ponytail: prove one direct local constructor, with an O(n) scan per amendment.
     // Track proven constructors once if shadowed bodies with many amendments become hot.
     if !amended.modifiers.is_empty()
         || amended.type_ann.is_some()
         || entries.iter().chain(body).any(|entry| {
-            !matches!(entry, Entry::Property(_)) && may_write_receiver(entry, &amended.name)
+            !matches!(entry, Entry::Property(_))
+                && may_write_receiver(entry, &[&amended.name, "module"])
         })
     {
         return Some(false);
@@ -660,7 +661,11 @@ fn has_fresh_property_base(
     };
     Some(
         bases.next().is_none()
-            && base.modifiers == [Modifier::Local]
+            && has_modifier(&base.modifiers, Modifier::Local)
+            && base
+                .modifiers
+                .iter()
+                .all(|modifier| matches!(modifier, Modifier::Local | Modifier::Const))
             && base.type_ann.is_none()
             && base.body.is_none()
             && base
@@ -673,12 +678,14 @@ fn has_fresh_property_base(
 /// `shadowed` means a lexical binding named `module` hides the module object,
 /// so `module.x` there is not a module read.
 /// `fresh_receiver` has no inherited members, unlike a proven non-module base.
+/// `receiver_base` can prove individual members absent on a known native base.
 fn collect_sibling_field_refs_entries_in(
     entries: &[Entry],
     refs: &mut HashSet<Name>,
     shadowed: bool,
     inherits_receiver: bool,
     fresh_receiver: bool,
+    receiver_base: Option<&Expr>,
 ) {
     // An object that declares its own `module` property rebinds the name for
     // its entries, so an outer proof that `module` is not the module no longer
@@ -717,13 +724,30 @@ fn collect_sibling_field_refs_entries_in(
                     } else {
                         Some(false)
                     };
-                    let fresh_base = base.unwrap_or(fresh_receiver);
+                    let fresh_base = base.unwrap_or_else(|| {
+                        fresh_receiver
+                            || receiver_base
+                                .is_some_and(|base| is_fresh_without_property(base, &prop.name))
+                    });
+                    let known_base = if base == Some(true) {
+                        entries.iter().find_map(|entry| match entry {
+                            Entry::Property(base)
+                                if base.name == prop.name && !Arc::ptr_eq(base, prop) =>
+                            {
+                                base.value.as_ref()
+                            }
+                            _ => None,
+                        })
+                    } else {
+                        None
+                    };
                     collect_sibling_field_refs_entries_in(
                         body,
                         refs,
                         shadowed,
                         !fresh_base,
-                        fresh_receiver && base.is_none(),
+                        fresh_base && base.is_none(),
+                        known_base,
                     );
                 }
             }
@@ -740,20 +764,26 @@ fn collect_sibling_field_refs_entries_in(
                 } else {
                     shadowed || fgen.key_var.as_deref() == Some("module")
                 };
-                collect_sibling_field_refs_entries_in(&fgen.body, refs, shadowed, false, false);
+                collect_sibling_field_refs_entries_in(
+                    &fgen.body, refs, shadowed, false, false, None,
+                );
             }
             Entry::WhenGenerator(wgen) => {
                 collect_sibling_field_refs_expr_in(&wgen.condition, refs, false, shadowed);
-                collect_sibling_field_refs_entries_in(&wgen.body, refs, shadowed, false, false);
+                collect_sibling_field_refs_entries_in(
+                    &wgen.body, refs, shadowed, false, false, None,
+                );
                 if let Some(else_body) = &wgen.else_body {
-                    collect_sibling_field_refs_entries_in(else_body, refs, shadowed, false, false);
+                    collect_sibling_field_refs_entries_in(
+                        else_body, refs, shadowed, false, false, None,
+                    );
                 }
             }
             Entry::Spread(expr) | Entry::Elem(expr) => {
                 collect_sibling_field_refs_expr_in(expr, refs, false, shadowed);
             }
             Entry::ClassDef(_, _, _, body) => {
-                collect_sibling_field_refs_entries_in(body, refs, shadowed, false, false)
+                collect_sibling_field_refs_entries_in(body, refs, shadowed, false, false, None)
             }
             Entry::TypeAlias(_, ty) => collect_sibling_field_refs_type_in(ty, refs, shadowed),
         }
@@ -1145,6 +1175,7 @@ fn collect_sibling_field_refs_expr_in(
                     shadowed,
                     shadowed && !fresh_base,
                     false,
+                    Some(left),
                 );
             } else {
                 collect_sibling_field_refs_expr_in(right, refs, include_this, shadowed);
@@ -1164,14 +1195,15 @@ fn collect_sibling_field_refs_expr_in(
                 shadowed,
                 false,
                 matches!(type_name.as_deref(), None | Some("Dynamic")),
+                None,
             );
         }
         Expr::InferredNew(_, entries) => {
-            collect_sibling_field_refs_entries_in(entries, refs, shadowed, false, false);
+            collect_sibling_field_refs_entries_in(entries, refs, shadowed, false, false, None);
         }
         Expr::ObjectBody(entries) => {
             // The amendment base is unknown here; it may supply `module`.
-            collect_sibling_field_refs_entries_in(entries, refs, shadowed, true, false);
+            collect_sibling_field_refs_entries_in(entries, refs, shadowed, true, false, None);
         }
         Expr::Call(callee, args) => {
             collect_sibling_field_refs_expr_in(callee, refs, include_this, shadowed);
@@ -1252,6 +1284,23 @@ pub(super) fn property_reference_names(prop: &Property) -> HashSet<Name> {
         collect_sibling_field_refs_entries(body, &mut refs);
     }
     refs
+}
+
+fn is_fresh_without_property(expr: &Expr, name: &str) -> bool {
+    match expr {
+        Expr::New(type_name, entries, _) => {
+            matches!(type_name.as_deref(), None | Some("Dynamic"))
+                && !entries
+                    .iter()
+                    .any(|entry| may_write_receiver(entry, &[name]))
+        }
+        Expr::Binop(BinOp::Add, base, overlay) => {
+            is_fresh_without_property(base, name)
+                && matches!(overlay.as_ref(), Expr::ObjectBody(entries)
+                    if !entries.iter().any(|entry| may_write_receiver(entry, &[name])))
+        }
+        _ => false,
+    }
 }
 
 // Only amendments under a proven lexical `module` shadow need this proof.
