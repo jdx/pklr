@@ -369,7 +369,7 @@ impl<'a> Members<'a> {
                         .iter()
                         .filter_map(|entry| match entry {
                             Entry::Property(prop) if !prop.modifiers.contains(&Modifier::Local) => {
-                                Some(prop.name.as_str())
+                                Some(prop.name.as_ref())
                             }
                             _ => None,
                         })

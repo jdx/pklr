@@ -82,7 +82,7 @@ pub enum Entry {
 pub struct Property {
     pub annotations: Vec<Annotation>,
     pub modifiers: Vec<Modifier>,
-    pub name: String,
+    pub name: std::sync::Arc<str>,
     pub type_ann: Option<TypeExpr>,
     pub value: Option<Expr>,
     /// Object body amendment: `foo { ... }` (no `=`)

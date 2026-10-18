@@ -34,7 +34,7 @@ pub(super) fn find_const_violation(body: &[Entry]) -> Option<ConstViolation> {
         .iter()
         .filter_map(|entry| match entry {
             Entry::Property(prop) if !has(&prop.modifiers, Modifier::Const) => {
-                Some((prop.name.as_str(), prop.is_method))
+                Some((prop.name.as_ref(), prop.is_method))
             }
             _ => None,
         })
@@ -106,7 +106,7 @@ fn class_member_names(module: &[Entry], name: &str, parent: Option<&str>) -> Opt
             _ => None,
         })?;
         names.extend(body.iter().filter_map(|entry| match entry {
-            Entry::Property(prop) => Some(prop.name.clone()),
+            Entry::Property(prop) => Some(prop.name.to_string()),
             _ => None,
         }));
         current = match parent {
@@ -241,7 +241,7 @@ impl ConstChecker<'_> {
         let names: Vec<String> = entries
             .iter()
             .filter_map(|entry| match entry {
-                Entry::Property(prop) => Some(prop.name.clone()),
+                Entry::Property(prop) => Some(prop.name.to_string()),
                 _ => None,
             })
             .collect();
@@ -341,7 +341,7 @@ impl ConstChecker<'_> {
         let names: Vec<String> = entries
             .iter()
             .filter_map(|entry| match entry {
-                Entry::Property(prop) => Some(prop.name.clone()),
+                Entry::Property(prop) => Some(prop.name.to_string()),
                 _ => None,
             })
             .collect();

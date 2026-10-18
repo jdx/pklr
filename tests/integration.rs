@@ -687,7 +687,7 @@ value: Mapping<String, String>?(length > 0, !isEmpty)
     let Entry::Property(runs_on) = &module.body[0] else {
         panic!("expected runs-on property");
     };
-    assert_eq!(runs_on.name, "runs-on");
+    assert_eq!(&*runs_on.name, "runs-on");
     assert!(matches!(
         runs_on.type_ann,
         Some(TypeExpr::Union(ref members))

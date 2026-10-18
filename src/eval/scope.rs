@@ -51,7 +51,7 @@ pub(super) struct Scope {
     /// object owning this scope (`local self = this`). Unlike a property such
     /// as `me = this`, such a local is not a member, so a nested object whose
     /// body never names it can leave it out of what it captures.
-    pub(super) this_aliases: Arc<FxHashSet<String>>,
+    pub(super) this_aliases: Arc<FxHashSet<Name>>,
     pub(super) type_namespace: Option<String>,
     pub(super) receiver_entries: Option<Arc<Vec<Entry>>>,
     pub(super) receiver_list_base: Option<usize>,
@@ -67,7 +67,7 @@ struct EmptyMaps {
     type_aliases: Arc<TypeAliasMap>,
     strings: Arc<FxIndexMap<Name, String>>,
     declared: Arc<FxHashSet<Name>>,
-    this_aliases: Arc<FxHashSet<String>>,
+    this_aliases: Arc<FxHashSet<Name>>,
 }
 
 static EMPTY_MAPS: std::sync::LazyLock<EmptyMaps> = std::sync::LazyLock::new(EmptyMaps::default);
@@ -77,6 +77,11 @@ thread_local! {
     /// (members of a class, lambda parameters, `this`) are bound for every
     /// object and call, so sharing them saves an allocation per binding.
     static NAMES: RefCell<FxHashSet<Name>> = RefCell::default();
+}
+
+/// Intern-free conversion of any string-like value into a [`Name`].
+pub(super) fn nm(name: impl AsRef<str>) -> Name {
+    Name::from(name.as_ref())
 }
 
 /// A shared binding name for `name`.
@@ -167,13 +172,13 @@ impl Scope {
     /// Mark the binding of `name` in this scope as a local alias of `this`.
     pub(super) fn mark_this_alias(&mut self, name: &str) {
         if !self.this_aliases.contains(name) {
-            Arc::make_mut(&mut self.this_aliases).insert(name.to_string());
+            Arc::make_mut(&mut self.this_aliases).insert(Name::from(name));
         }
     }
 
     /// Local `this` aliases visible from this scope: names whose innermost
     /// binding is marked by [`Scope::mark_this_alias`].
-    pub(super) fn visible_this_aliases(&self) -> Vec<String> {
+    pub(super) fn visible_this_aliases(&self) -> Vec<Name> {
         // Walk the chain once, innermost first. A marked name counts only if
         // no inner level binds it; marks are few, so checking the inner levels
         // per mark stays cheap however many bindings each level holds.
@@ -184,7 +189,7 @@ impl Scope {
         while let Some(scope) = level {
             for name in scope.this_aliases.iter() {
                 if scope.binds(name)
-                    && seen.insert(name.as_str())
+                    && seen.insert(name.as_ref())
                     && !inner.iter().any(|inner| inner.binds(name))
                 {
                     names.push(name.clone());
@@ -213,8 +218,8 @@ impl Scope {
     }
 
     /// Poison a local declared in the body that owns this scope.
-    pub(super) fn declare_poisoned(&mut self, name: String, message: String) {
-        let name = Name::from(name);
+    pub(super) fn declare_poisoned(&mut self, name: impl Into<Name>, message: String) {
+        let name = name.into();
         if !self.declared.contains(&*name) {
             Arc::make_mut(&mut self.declared).insert(name.clone());
         }
@@ -249,7 +254,7 @@ impl Scope {
         declared
     }
 
-    pub(super) fn set_module_identity(&mut self, name: String, identity: String) {
+    pub(super) fn set_module_identity(&mut self, name: impl Into<Name>, identity: String) {
         Arc::make_mut(&mut self.module_identities).insert(name.into(), identity);
     }
 
@@ -297,7 +302,7 @@ impl Scope {
         }
     }
 
-    pub(super) fn poison(&mut self, name: String, message: String) {
+    pub(super) fn poison(&mut self, name: impl Into<Name>, message: String) {
         Arc::make_mut(&mut self.poisoned).insert(name.into(), message);
     }
 
@@ -723,7 +728,7 @@ pub(super) fn scope_for_object_entry(
     object: &Scope,
     entry_scopes: Option<&[Option<Arc<CapturedScope>>]>,
     entry_owners: &EntryOwners,
-    own_body: Option<(&Scope, &HashSet<String>)>,
+    own_body: Option<(&Scope, &HashSet<Name>)>,
 ) -> Scope {
     if let Some(captured) = entry_scopes
         .and_then(|scopes| scopes.get(entry_index))
@@ -753,7 +758,7 @@ pub(super) fn scope_for_object_entry(
 pub(super) struct EntryOwners {
     /// For each entry, the names declared by its body; see
     /// [`entry_scope_owners`].
-    owners: Vec<Rc<HashSet<String>>>,
+    owners: Vec<Rc<HashSet<Name>>>,
     /// Captured scopes already restored, keyed by their address. Entries from
     /// one body share a captured scope, so each is restored once rather than
     /// once per entry.
@@ -786,7 +791,7 @@ impl EntryOwners {
         key: usize,
         lexical: &Scope,
         object: &Scope,
-        owned: &HashSet<String>,
+        owned: &HashSet<Name>,
     ) -> Scope {
         let mut cache = self.bindings.borrow_mut();
         let cached = cache.entry(key).or_insert_with(|| ObjectBindings {
@@ -806,7 +811,7 @@ impl EntryOwners {
     /// generator, whose scope outlives each iteration) is left alone: the live
     /// scope holds the snapshot regardless, and releasing would only copy the
     /// cached bindings.
-    pub(super) fn release_this(&self, aliases: &[String]) {
+    pub(super) fn release_this(&self, aliases: &[Name]) {
         for cached in self.bindings.borrow_mut().values_mut() {
             if Arc::strong_count(&cached.scope.vars) == 1 {
                 release_this_aliases(&mut cached.scope, aliases);
@@ -839,7 +844,7 @@ pub(super) fn entry_scope_owners(
         .map(|source| source.entries.iter().zip(&source.entry_scopes))
         .into_iter()
         .flatten();
-    let mut groups: HashMap<*const CapturedScope, HashSet<String>> = HashMap::default();
+    let mut groups: HashMap<*const CapturedScope, HashSet<Name>> = HashMap::default();
     for (entry, captured) in entries.iter().zip(entry_scopes).chain(inherited_entries) {
         let Some(captured) = captured else {
             continue;
@@ -849,7 +854,7 @@ pub(super) fn entry_scope_owners(
             captured.body_members.clone()
         });
         if let Some(name) = entry_member_name(entry) {
-            names.insert(name.clone());
+            names.insert(name);
         }
     }
     let groups = groups
@@ -874,10 +879,10 @@ pub(super) fn entry_scope_owners(
 }
 
 /// The member name an entry declares in its body, if any.
-pub(super) fn entry_member_name(entry: &Entry) -> Option<&String> {
+pub(super) fn entry_member_name(entry: &Entry) -> Option<Name> {
     match entry {
-        Entry::Property(prop) => Some(&prop.name),
-        Entry::ClassDef(name, ..) | Entry::TypeAlias(name, _) => Some(name),
+        Entry::Property(prop) => Some(prop.name.clone()),
+        Entry::ClassDef(name, ..) | Entry::TypeAlias(name, _) => Some(Name::from(name.as_str())),
         _ => None,
     }
 }
@@ -889,17 +894,17 @@ pub(super) fn own_body_names(
     entries: &[Entry],
     entry_scopes: Option<&[Option<Arc<CapturedScope>>]>,
     inherited: Option<&ObjectSource>,
-) -> Option<HashSet<String>> {
+) -> Option<HashSet<Name>> {
     let entry_scopes = entry_scopes?;
     let own = |entries: &[Entry], scopes: &[Option<Arc<CapturedScope>>]| {
         entries
             .iter()
             .enumerate()
             .filter(|(index, _)| scopes.get(*index).is_none_or(Option::is_none))
-            .filter_map(|(_, entry)| entry_member_name(entry).cloned())
+            .filter_map(|(_, entry)| entry_member_name(entry))
             .collect::<Vec<_>>()
     };
-    let mut names: HashSet<String> = own(entries, entry_scopes).into_iter().collect();
+    let mut names: HashSet<Name> = own(entries, entry_scopes).into_iter().collect();
     if let Some(source) = inherited {
         names.extend(own(&source.entries, &source.entry_scopes));
         // Members an earlier amendment replaced are no longer in `entries`.
@@ -924,7 +929,7 @@ fn update_object_bindings(
     bindings: &mut ObjectBindings,
     lexical: &Scope,
     object: &Scope,
-    owned: &HashSet<String>,
+    owned: &HashSet<Name>,
 ) {
     let ObjectBindings {
         scope,
@@ -1124,11 +1129,11 @@ mod source_scope_tests {
         let mut outer = Scope::default();
         outer.set("a", Value::Int(1));
         outer.declare("d", Value::Int(4));
-        outer.set_module_identity("m".into(), "mod.pkl".into());
+        outer.set_module_identity("m", "mod.pkl".into());
         outer.set_type_alias("T", crate::parser::TypeExpr::Named("Int".into()));
         let mut inner = outer.child();
         inner.set("a", Value::Int(2));
-        inner.declare_poisoned("p".into(), "failed".into());
+        inner.declare_poisoned("p", "failed".into());
         let captured = SourceScope::lazy(&inner, Vec::new(), Vec::new());
         let parts = captured.parts();
         assert_eq!(parts.values, inner.flatten());
@@ -1143,7 +1148,7 @@ mod source_scope_tests {
         let mut scope = Scope::default();
         for name in ["this", "outer", "kept"] {
             scope.set(name, Value::Int(1));
-            scope.set_module_identity(name.into(), format!("{name}.pkl"));
+            scope.set_module_identity(name, format!("{name}.pkl"));
         }
         let captured = SourceScope::lazy(
             &scope,

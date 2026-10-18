@@ -780,7 +780,7 @@ impl<'a> Parser<'a> {
         for (name, offset) in &self.new_types {
             let is_property = body
                 .iter()
-                .any(|entry| matches!(entry, Entry::Property(p) if p.name == *name));
+                .any(|entry| matches!(entry, Entry::Property(p) if *p.name == **name));
             if is_property && !is_type(name) {
                 return Err(self.error_at(
                     *offset,
@@ -801,7 +801,7 @@ impl<'a> Parser<'a> {
             .filter(|annotation| annotation.name == "ModuleInfo")
             .flat_map(|annotation| &annotation.body)
             .find_map(|entry| match entry {
-                Entry::Property(property) if property.name == "minPklVersion" => {
+                Entry::Property(property) if &*property.name == "minPklVersion" => {
                     property.value.as_ref().and_then(constant_string)
                 }
                 _ => None,
@@ -888,7 +888,7 @@ impl<'a> Parser<'a> {
                     } else {
                         &mut members
                     };
-                    (!names.insert(property.name.clone())).then(|| property.name.clone())
+                    (!names.insert(property.name.to_string())).then(|| property.name.to_string())
                 }
                 Entry::ClassDef(name, ..) => (!members.insert(name.clone())).then(|| name.clone()),
                 Entry::TypeAlias(name, _) => {
@@ -1320,7 +1320,7 @@ impl<'a> Parser<'a> {
         Ok(Entry::Property(std::sync::Arc::new(Property {
             annotations: header.annotations.clone(),
             modifiers: header.modifiers(),
-            name,
+            name: name.into(),
             type_ann,
             value,
             body: body.map(Into::into),
@@ -1399,7 +1399,7 @@ impl<'a> Parser<'a> {
             infer_method_return_new(&mut body, &return_type);
         }
         Ok(Some(Entry::Property(std::sync::Arc::new(Property {
-            name,
+            name: name.into(),
             type_ann: None,
             value: Some(Expr::Lambda(params.into(), std::sync::Arc::new(body))),
             body: None,
@@ -1735,7 +1735,7 @@ impl<'a> Parser<'a> {
         Ok(Entry::Property(std::sync::Arc::new(Property {
             modifiers: header.modifiers(),
             annotations: header.annotations,
-            name,
+            name: name.into(),
             type_ann,
             value,
             body: body.map(Into::into),

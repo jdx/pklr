@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) fn refresh_this_aliases(
     scope: &mut Scope,
-    aliases: &[String],
+    aliases: &[Name],
     properties: &Arc<ObjectMap>,
 ) {
     let snapshot = Value::Object(Arc::clone(properties), None);
@@ -16,8 +16,8 @@ pub(super) fn refresh_this_aliases(
 /// Drop the scope's references to the current `this` snapshot so the property
 /// map is uniquely owned again and can grow in place instead of being copied.
 /// Callers refresh the snapshot after the insert.
-pub(super) fn release_this_aliases(scope: &mut Scope, aliases: &[String]) {
-    for name in std::iter::once("this").chain(aliases.iter().map(String::as_str)) {
+pub(super) fn release_this_aliases(scope: &mut Scope, aliases: &[Name]) {
+    for name in std::iter::once("this").chain(aliases.iter().map(|name| &**name)) {
         if scope.vars.contains_key(name)
             && let Some(slot) = Arc::make_mut(&mut scope.vars).get_mut(name)
         {
@@ -46,7 +46,7 @@ pub(super) fn module_props_insert(
 
 pub(super) fn props_insert(
     scope: &mut Scope,
-    aliases: &[String],
+    aliases: &[Name],
     properties: &mut Arc<ObjectMap>,
     key: impl Into<Arc<str>>,
     value: Value,
@@ -59,7 +59,7 @@ pub(super) fn props_insert(
 /// members have already populated the receiver snapshot.
 pub(super) fn props_shift_insert(
     scope: &mut Scope,
-    aliases: &[String],
+    aliases: &[Name],
     properties: &mut Arc<ObjectMap>,
     index: usize,
     key: impl Into<Arc<str>>,
@@ -73,7 +73,7 @@ pub(super) fn props_shift_insert(
 /// reads that occur later in the same generated body.
 pub(super) fn props_insert_mapping(
     scope: &mut Scope,
-    aliases: &[String],
+    aliases: &[Name],
     properties: &mut Arc<ObjectMap>,
     key: Arc<str>,
     value: Value,
@@ -92,7 +92,7 @@ pub(super) fn props_insert_mapping(
 /// identity for subsequent entries and `this` lookups.
 pub(super) fn props_extend_mapping(
     scope: &mut Scope,
-    aliases: &[String],
+    aliases: &[Name],
     properties: &mut Arc<ObjectMap>,
     entries: impl Iterator<Item = (Arc<str>, Value)>,
     mapping_entries: bool,
@@ -283,7 +283,7 @@ pub(super) fn select_mapping_type_default<'a>(
 
     let field_names = body.iter().filter_map(|entry| match entry {
         Entry::Property(prop) if !has_modifier(&prop.modifiers, Modifier::Local) => {
-            Some(prop.name.as_str())
+            Some(prop.name.as_ref())
         }
         Entry::DynProperty(Expr::String(name), _) => Some(&**name),
         _ => None,
@@ -533,7 +533,7 @@ pub(super) fn validate_new_object_body(
         return Ok(());
     }
 
-    let base_names: HashSet<String> = base_src
+    let base_names: HashSet<Name> = base_src
         .entries
         .iter()
         .filter_map(|entry| {
@@ -594,9 +594,9 @@ pub(super) fn is_element_only_body(entries: &[Entry]) -> bool {
 pub(super) fn find_listing_body_property(entries: &[Entry]) -> Option<&str> {
     entries.iter().find_map(|entry| match entry {
         Entry::Property(prop)
-            if prop.name != "default" && !has_modifier(&prop.modifiers, Modifier::Local) =>
+            if &*prop.name != "default" && !has_modifier(&prop.modifiers, Modifier::Local) =>
         {
-            Some(prop.name.as_str())
+            Some(prop.name.as_ref())
         }
         Entry::ForGenerator(generator) => find_listing_body_property(&generator.body),
         Entry::WhenGenerator(generator) => {
@@ -614,7 +614,7 @@ pub(super) fn find_listing_body_property(entries: &[Entry]) -> Option<&str> {
 pub(super) fn find_default_body_entries(entries: &[Entry]) -> Option<crate::parser::Body> {
     entries.iter().find_map(|entry| {
         if let Entry::Property(prop) = entry
-            && prop.name == "default"
+            && &*prop.name == "default"
             && !has_modifier(&prop.modifiers, Modifier::Local)
         {
             return prop.body.clone();
@@ -630,7 +630,7 @@ pub(super) fn object_declares_field(value: &Value, field: &str) -> bool {
     map.contains_key(field)
         || source.as_ref().is_some_and(|source| {
             source.entries.iter().any(|entry| match entry {
-                Entry::Property(prop) => prop.name == field,
+                Entry::Property(prop) => &*prop.name == field,
                 Entry::DynProperty(Expr::String(name), _) => **name == *field,
                 _ => false,
             })

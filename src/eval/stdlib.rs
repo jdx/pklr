@@ -54,7 +54,7 @@ pub(super) fn typed_object(type_name: &str, members: ObjectMap) -> Value {
         parent_type_names: Vec::new(),
         parent_type_identities: Vec::new(),
         entry_scopes: Vec::new(),
-        evaluated_properties: members.keys().map(|k| k.to_string()).collect(),
+        evaluated_properties: members.keys().cloned().collect(),
         elements: Vec::new(),
         mapping_value_types: Vec::new(),
         deprecated: IndexMap::new(),
