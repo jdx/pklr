@@ -610,11 +610,17 @@ fn collect_sibling_field_refs_entries_in(
 ) {
     // An object that declares its own `module` property rebinds the name for
     // its entries, so an outer proof that `module` is not the module no longer
-    // holds. Treat it as possibly the module rather than model binding phases.
+    // holds unless every such property is itself certainly not the module.
+    // Anything else is treated as possibly the module rather than modeling
+    // binding phases.
     let shadowed = shadowed
-        && !entries
-            .iter()
-            .any(|entry| matches!(entry, Entry::Property(prop) if prop.name == "module"));
+        && entries.iter().all(|entry| match entry {
+            Entry::Property(prop) if prop.name == "module" => prop
+                .value
+                .as_ref()
+                .is_some_and(|value| is_proven_non_module(value, shadowed)),
+            _ => true,
+        });
     for entry in entries {
         match entry {
             Entry::Property(prop) => {

@@ -2287,6 +2287,31 @@ fn narrowed_import_keeps_real_module_read_through_inner_object_shadow() {
 }
 
 #[test]
+fn narrowed_import_keeps_shadow_when_inner_module_property_is_not_the_module() {
+    let temp = TestTempDir::new("pklr_test_inner_object_non_module_shadow");
+    let dir = temp.path();
+    // Both bindings of `module` hold ordinary objects, so `bad` (and its
+    // missing import) is never read for the requested `result`.
+    for local in ["local ", ""] {
+        std::fs::write(
+            dir.join("dep.pkl"),
+            format!(
+                "import \"missing.pkl\" as Missing\nbad = Missing.value\nresult = let (`module` = new Dynamic {{ bad = false }}) (new Dynamic {{\n  {local}`module` = new Dynamic {{ bad = true }}\n  ok = `module`.bad\n}}).ok\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("main.pkl"),
+            "import \"dep.pkl\" as Dep\nresult = Dep.result\n",
+        )
+        .unwrap();
+        let value = pklr::eval_to_json(&dir.join("main.pkl"))
+            .unwrap_or_else(|error| panic!("{local:?}: {error}"));
+        assert_eq!(value, serde_json::json!({"result": true}), "{local:?}");
+    }
+}
+
+#[test]
 fn imported_class_retains_its_type_alias_constraint_bindings() {
     let temp = TestTempDir::new("pklr_test_imported_class_constraint_scope");
     let dir = temp.path();
