@@ -59,6 +59,19 @@ pub(super) fn glob_index_keys(
 }
 
 /// Marks that `Alias` is used other than as `Alias["key"]`.
+
+/// Inserts a name into a set of shared names, allocating the shared string
+/// only when the set does not already hold it. Most insertions repeat a name.
+macro_rules! insert_name {
+    ($set:expr, $name:expr) => {{
+        let name = $name;
+        let name: &str = AsRef::<str>::as_ref(&name);
+        if !$set.contains(name) {
+            $set.insert(nm(name));
+        }
+    }};
+}
+
 fn other_uses_key(alias: &str) -> String {
     format!("{alias}\0*")
 }
@@ -102,9 +115,9 @@ pub(super) fn collect_entry_import_field_uses(
             Entry::ForGenerator(fgen) => {
                 collect_expr_import_field_uses(&fgen.collection, uses, &entry_shadows);
                 let mut body_shadows = entry_shadows.clone();
-                body_shadows.insert(nm(&fgen.val_var));
+                insert_name!(body_shadows, &fgen.val_var);
                 if let Some(key_var) = &fgen.key_var {
-                    body_shadows.insert(nm(key_var));
+                    insert_name!(body_shadows, key_var);
                 }
                 collect_entry_import_field_uses(&fgen.body, uses, &body_shadows);
             }
@@ -190,7 +203,7 @@ pub(super) fn collect_expr_import_field_uses(
         Expr::Let(name, value, body) => {
             collect_expr_import_field_uses(value, uses, shadows);
             let mut body_shadows = shadows.clone();
-            body_shadows.insert(nm(name));
+            insert_name!(body_shadows, name);
             collect_expr_import_field_uses(body, uses, &body_shadows);
         }
         Expr::Is(value, ty) | Expr::As(value, ty) => {
@@ -313,7 +326,7 @@ pub(super) fn record_field_import_use(
     match uses.entry(name.to_string()) {
         std::collections::hash_map::Entry::Occupied(mut entry) => {
             if let ImportUse::Fields(fields) = entry.get_mut() {
-                fields.insert(nm(field));
+                insert_name!(fields, field);
             }
         }
         std::collections::hash_map::Entry::Vacant(entry) => {
@@ -453,7 +466,7 @@ pub(super) fn expand_requested_fields(
                     if expanded.contains(name.as_str())
                         && module_reading_definitions.contains(name.as_str()) =>
                 {
-                    refs.types.insert(nm(name));
+                    insert_name!(refs.types, name);
                 }
                 _ => continue,
             }
@@ -1013,16 +1026,16 @@ fn collect_sibling_field_refs_expr_in(
     match expr {
         Expr::Field(base, field) | Expr::NullSafeField(base, field) => {
             if is_module_sibling_ref(base, include_this) && !(shadowed && is_module_name(base)) {
-                refs.insert(nm(field));
+                insert_name!(refs, field);
             }
             collect_sibling_field_refs_expr_in(base, refs, include_this, shadowed);
         }
         Expr::Index(base, index) => {
             if is_module_sibling_ref(base, include_this) && !(shadowed && is_module_name(base)) {
                 if let Expr::String(key) = index.as_ref() {
-                    refs.insert(nm(key));
+                    insert_name!(refs, key);
                 } else {
-                    refs.insert(nm(DYNAMIC_SIBLING_REF));
+                    insert_name!(refs, DYNAMIC_SIBLING_REF);
                 }
             }
             collect_sibling_field_refs_expr_in(base, refs, include_this, shadowed);
@@ -1038,7 +1051,7 @@ fn collect_sibling_field_refs_expr_in(
                 && ((root == "module" && !shadowed) || (include_this && root == "this"))
             {
                 let member = rest.split('.').next().unwrap_or(rest);
-                refs.insert(nm(member));
+                insert_name!(refs, member);
             }
             collect_sibling_field_refs_entries_in(entries, refs, shadowed);
         }
@@ -1116,7 +1129,7 @@ pub(super) fn property_reference_names(prop: &Property) -> HashSet<Name> {
         collect_expr_refs(expr, &mut refs, &shadows);
         collect_sibling_field_refs_expr(expr, &mut refs, true);
         if has_modifier(&prop.modifiers, Modifier::Local) && is_module_sibling_ref(expr, true) {
-            refs.insert(nm(DYNAMIC_SIBLING_REF));
+            insert_name!(refs, DYNAMIC_SIBLING_REF);
         }
     }
     if let Some(body) = &prop.body {
@@ -1204,7 +1217,7 @@ fn module_member_dependencies(entry: &Entry) -> HashSet<Name> {
             if let Some((root, rest)) = parent.as_deref().and_then(|name| name.split_once('.'))
                 && root == "module"
             {
-                refs.insert(nm(rest.split('.').next().unwrap_or(rest)));
+                insert_name!(refs, rest.split('.').next().unwrap_or(rest));
             }
             for entry in body.iter() {
                 if let Entry::Property(prop) = entry {
@@ -1805,16 +1818,16 @@ fn may_be_object(expr: &Expr) -> bool {
 fn collect_field_names_expr(expr: &Expr, out: &mut HashSet<Name>) {
     match expr {
         Expr::Field(base, name) | Expr::NullSafeField(base, name) => {
-            out.insert(nm(name));
+            insert_name!(out, name);
             collect_field_names_expr(base, out);
         }
         Expr::Index(base, index) => {
             match index.as_ref() {
                 Expr::String(key) => {
-                    out.insert(nm(key));
+                    insert_name!(out, key);
                 }
                 _ => {
-                    out.insert(nm(DYNAMIC_SIBLING_REF));
+                    insert_name!(out, DYNAMIC_SIBLING_REF);
                 }
             }
             collect_field_names_expr(base, out);
@@ -1826,7 +1839,7 @@ fn collect_field_names_expr(expr: &Expr, out: &mut HashSet<Name>) {
         Expr::Binop(op, left, right) => {
             // `x |> f` passes `x` to `f` like `f(x)`.
             if matches!(op, BinOp::Pipe) && may_be_object(left) {
-                out.insert(nm(DYNAMIC_SIBLING_REF));
+                insert_name!(out, DYNAMIC_SIBLING_REF);
             }
             collect_field_names_expr(left, out);
             collect_field_names_expr(right, out);
@@ -1835,7 +1848,7 @@ fn collect_field_names_expr(expr: &Expr, out: &mut HashSet<Name>) {
             // An object passed to a call may have any of its members read
             // there.
             if args.iter().any(may_be_object) {
-                out.insert(nm(DYNAMIC_SIBLING_REF));
+                insert_name!(out, DYNAMIC_SIBLING_REF);
             }
             collect_field_names_expr(callee, out);
             for arg in args {
@@ -2044,7 +2057,7 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
                 let mut refs = referenced_roots(body);
                 let reads_module = !classes.module_reads(name, body, &refs).is_empty();
                 if reads_module {
-                    refs.insert(nm("module"));
+                    insert_name!(refs, "module");
                 }
                 // Inside a class body `this` is the instance, so only
                 // `module.C` names a module member.
@@ -2096,7 +2109,7 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
                         (*is_class && &**root == "module") || dependent.contains(root.as_ref())
                     }))
             {
-                dependent.insert(nm(name));
+                insert_name!(dependent, name);
             }
         }
         if dependent.len() == before {
@@ -2310,9 +2323,9 @@ fn collect_entry_refs_unnarrowed(
             Entry::ForGenerator(fgen) => {
                 collect_expr_refs_in(&fgen.collection, refs, &entry_shadows, aliases, definitions);
                 let mut body_shadows = entry_shadows.clone();
-                body_shadows.values.insert(nm(&fgen.val_var));
+                insert_name!(body_shadows.values, &fgen.val_var);
                 if let Some(key_var) = &fgen.key_var {
-                    body_shadows.values.insert(nm(key_var));
+                    insert_name!(body_shadows.values, key_var);
                 }
                 collect_entry_refs_in(&fgen.body, refs, &body_shadows, aliases, definitions);
             }
@@ -2387,7 +2400,7 @@ fn collect_expr_refs_in(
     match expr {
         Expr::Ident(name) => {
             if !shadows.values.contains(name.as_str()) {
-                refs.values.insert(nm(name));
+                insert_name!(refs.values, name);
             }
         }
         Expr::New(type_name, entries, generic_params) => {
@@ -2420,7 +2433,7 @@ fn collect_expr_refs_in(
         Expr::Let(name, value, body) => {
             collect_expr_refs_in(value, refs, shadows, aliases, definitions);
             let mut body_shadows = shadows.clone();
-            body_shadows.values.insert(nm(name));
+            insert_name!(body_shadows.values, name);
             collect_expr_refs_in(body, refs, &body_shadows, aliases, definitions);
         }
         Expr::Is(value, ty) | Expr::As(value, ty) => {
@@ -2511,15 +2524,15 @@ fn collect_name_root(name: &str, refs: &mut Names, shadows: &Names) {
     }
     let qualified = root.len() < name.len();
     if !shadows.types.contains(root) {
-        refs.types.insert(nm(root));
+        insert_name!(refs.types, root);
         if !qualified && !shadows.values.contains(root) {
-            refs.unbound_types.insert(nm(root));
+            insert_name!(refs.unbound_types, root);
         }
     }
     // The root of a qualified name (`Dep.Item`) is a module, which may be a
     // property holding one (`Dep = import(...)`), so it's read as a value too.
     if qualified && !shadows.values.contains(root) {
-        refs.values.insert(nm(root));
+        insert_name!(refs.values, root);
     }
 }
 
@@ -2539,11 +2552,11 @@ fn declared_entry_names(entries: &[Entry]) -> Names {
             // A class is bound as a value too (`ok = C`, `C.a`); a type alias
             // is not.
             Entry::ClassDef(name, ..) => {
-                names.types.insert(nm(name));
-                names.values.insert(nm(name));
+                insert_name!(names.types, name);
+                insert_name!(names.values, name);
             }
             Entry::TypeAlias(name, _) => {
-                names.types.insert(nm(name));
+                insert_name!(names.types, name);
             }
             Entry::Property(prop)
                 if has_modifier(&prop.modifiers, Modifier::Local)
@@ -2580,7 +2593,7 @@ pub(super) fn declared_entry_roots(entries: &[Entry]) -> HashSet<Name> {
 pub(super) fn collect_unshadowed_names(expr: &Expr, names: &mut HashSet<Name>) {
     match expr {
         Expr::Ident(name) => {
-            names.insert(nm(name));
+            insert_name!(names, name);
         }
         Expr::New(type_name, entries, generic_params) => {
             if type_name.is_some() || !generic_params.is_empty() {
@@ -2710,7 +2723,7 @@ fn collect_unshadowed_type_names(ty: &crate::parser::TypeExpr, names: &mut HashS
 pub(super) const NAMES_A_TYPE: &str = "\0type";
 
 fn mark_type_use(names: &mut HashSet<Name>) {
-    names.insert(nm(NAMES_A_TYPE));
+    insert_name!(names, NAMES_A_TYPE);
 }
 
 /// Whether `name` appears as an identifier anywhere in `entries`, including
@@ -2934,11 +2947,11 @@ impl InstanceReads {
             // The instance used as a value.
             _ if is_reference(expr) => self.escapes = true,
             Expr::Field(base, field) | Expr::NullSafeField(base, field) if is_reference(base) => {
-                self.members.insert(nm(field));
+                insert_name!(self.members, field);
             }
             Expr::Index(base, index) if is_reference(base) => match index.as_ref() {
                 Expr::String(key) => {
-                    self.members.insert(nm(key));
+                    insert_name!(self.members, key);
                 }
                 index => {
                     self.escapes = true;
