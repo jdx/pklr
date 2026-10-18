@@ -2312,6 +2312,37 @@ fn narrowed_import_keeps_shadow_when_inner_module_property_is_not_the_module() {
 }
 
 #[test]
+fn narrowed_import_keeps_module_reads_from_inherited_amendment_receivers() {
+    let temp = TestTempDir::new("pklr_test_inherited_module_receiver");
+    let dir = temp.path();
+    let main = dir.join("main.pkl");
+    let dep = dir.join("dep.pkl");
+    std::fs::write(&main, "import \"dep.pkl\" as Dep\nresult = Dep.result\n").unwrap();
+    for access in ["`module`.good", "`module`[\"good\"]"] {
+        std::fs::write(&dep, format!("good = true\nbase = let (real = module) new Dynamic {{ `module` = real }}\nresult = let (`module` = new Dynamic {{ good = false }}) ((base) {{ ok = {access} }}).ok\n")).unwrap();
+        // Narrowing must preserve the evaluator's unpruned receiver binding.
+        assert_eq!(pklr::eval_to_json(&dep).unwrap()["result"], true);
+        let value = pklr::eval_to_json(&main).unwrap_or_else(|error| panic!("{access}: {error}"));
+        assert_eq!(value, serde_json::json!({"result": true}));
+    }
+}
+
+#[test]
+fn narrowed_import_keeps_module_reads_from_inherited_property_bodies() {
+    let temp = TestTempDir::new("pklr_test_property_body_module_receiver");
+    let dir = temp.path();
+    let main = dir.join("main.pkl");
+    let dep = dir.join("dep.pkl");
+    std::fs::write(&main, "import \"dep.pkl\" as Dep\nresult = Dep.result\n").unwrap();
+    for access in ["`module`.good", "`module`[\"good\"]"] {
+        std::fs::write(&dep, format!("good = true\nresult = let (real = module) let (`module` = new Dynamic {{ good = false }}) (new Dynamic {{\nlocal value = new Dynamic {{ `module` = real }}\nvalue {{ ok = {access} }}\n}}).value.ok\n")).unwrap();
+        assert_eq!(pklr::eval_to_json(&dep).unwrap()["result"], true);
+        let value = pklr::eval_to_json(&main).unwrap_or_else(|error| panic!("{access}: {error}"));
+        assert_eq!(value, serde_json::json!({"result": true}));
+    }
+}
+
+#[test]
 fn imported_class_retains_its_type_alias_constraint_bindings() {
     let temp = TestTempDir::new("pklr_test_imported_class_constraint_scope");
     let dir = temp.path();

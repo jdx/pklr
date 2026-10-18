@@ -644,7 +644,8 @@ fn collect_sibling_field_refs_entries_in(
                     collect_sibling_field_refs_expr_in(expr, refs, false, shadowed);
                 }
                 if let Some(body) = &prop.body {
-                    collect_sibling_field_refs_entries_in(body, refs, shadowed);
+                    // The amended value can inherit a different `module` binding.
+                    collect_sibling_field_refs_entries_in(body, refs, false);
                 }
             }
             Entry::DynProperty(key, value) | Entry::Predicate(key, value) => {
@@ -1067,8 +1068,12 @@ fn collect_sibling_field_refs_expr_in(
             }
             collect_sibling_field_refs_entries_in(entries, refs, shadowed);
         }
-        Expr::InferredNew(_, entries) | Expr::ObjectBody(entries) => {
+        Expr::InferredNew(_, entries) => {
             collect_sibling_field_refs_entries_in(entries, refs, shadowed);
+        }
+        Expr::ObjectBody(entries) => {
+            // The amendment base is unknown here; it may supply `module`.
+            collect_sibling_field_refs_entries_in(entries, refs, false);
         }
         Expr::Call(callee, args) => {
             collect_sibling_field_refs_expr_in(callee, refs, include_this, shadowed);
