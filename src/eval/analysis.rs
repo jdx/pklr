@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) fn analysis_entries_for_requested_fields(
     entries: &[Entry],
-    requested_fields: Option<&HashSet<String>>,
+    requested_fields: Option<&HashSet<Name>>,
 ) -> Vec<Entry> {
     let Some(requested_fields) = requested_fields else {
         return entries.to_vec();
@@ -31,14 +31,14 @@ pub(super) fn analysis_entries_for_requested_fields(
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum ImportUse {
-    Fields(HashSet<String>),
+    Fields(HashSet<Name>),
     Whole,
 }
 
 pub(super) fn requested_fields_for_import(
     uses: &HashMap<String, ImportUse>,
     alias: &str,
-) -> Option<HashSet<String>> {
+) -> Option<HashSet<Name>> {
     match uses.get(alias) {
         Some(ImportUse::Fields(fields)) => Some(fields.clone()),
         Some(ImportUse::Whole) | None => None,
@@ -51,7 +51,7 @@ pub(super) fn requested_fields_for_import(
 pub(super) fn glob_index_keys(
     uses: &HashMap<String, ImportUse>,
     alias: &str,
-) -> Option<HashSet<String>> {
+) -> Option<HashSet<Name>> {
     if uses.contains_key(&other_uses_key(alias)) {
         return None;
     }
@@ -78,7 +78,7 @@ pub(super) fn import_field_uses(entries: &[Entry]) -> HashMap<String, ImportUse>
 pub(super) fn collect_entry_import_field_uses(
     entries: &[Entry],
     uses: &mut HashMap<String, ImportUse>,
-    shadows: &HashSet<String>,
+    shadows: &HashSet<Name>,
 ) {
     let mut entry_shadows = shadows.clone();
     entry_shadows.extend(declared_entry_roots(entries));
@@ -102,9 +102,9 @@ pub(super) fn collect_entry_import_field_uses(
             Entry::ForGenerator(fgen) => {
                 collect_expr_import_field_uses(&fgen.collection, uses, &entry_shadows);
                 let mut body_shadows = entry_shadows.clone();
-                body_shadows.insert(fgen.val_var.clone());
+                body_shadows.insert(nm(&fgen.val_var));
                 if let Some(key_var) = &fgen.key_var {
-                    body_shadows.insert(key_var.clone());
+                    body_shadows.insert(nm(key_var));
                 }
                 collect_entry_import_field_uses(&fgen.body, uses, &body_shadows);
             }
@@ -130,7 +130,7 @@ pub(super) fn collect_entry_import_field_uses(
 pub(super) fn collect_expr_import_field_uses(
     expr: &Expr,
     uses: &mut HashMap<String, ImportUse>,
-    shadows: &HashSet<String>,
+    shadows: &HashSet<Name>,
 ) {
     match expr {
         Expr::Ident(name) => record_whole_import_use(uses, shadows, name),
@@ -149,7 +149,7 @@ pub(super) fn collect_expr_import_field_uses(
                 && matches!(index.as_ref(), Expr::String(_)) =>
         {
             if let (Expr::Ident(name), Expr::String(key)) = (base.as_ref(), index.as_ref())
-                && !shadows.contains(name)
+                && !shadows.contains(name.as_str())
             {
                 uses.insert(name.clone(), ImportUse::Whole);
                 record_field_import_use(uses, shadows, &index_reads_key(name), key);
@@ -190,7 +190,7 @@ pub(super) fn collect_expr_import_field_uses(
         Expr::Let(name, value, body) => {
             collect_expr_import_field_uses(value, uses, shadows);
             let mut body_shadows = shadows.clone();
-            body_shadows.insert(name.clone());
+            body_shadows.insert(nm(name));
             collect_expr_import_field_uses(body, uses, &body_shadows);
         }
         Expr::Is(value, ty) | Expr::As(value, ty) => {
@@ -199,7 +199,7 @@ pub(super) fn collect_expr_import_field_uses(
         }
         Expr::Lambda(params, value) => {
             let mut body_shadows = shadows.clone();
-            body_shadows.extend(params.iter().cloned());
+            body_shadows.extend(params.iter().map(nm));
             collect_expr_import_field_uses(value, uses, &body_shadows);
         }
         Expr::Unop(_, value)
@@ -257,7 +257,7 @@ pub(super) fn is_intrinsic_object_method(method: &str) -> bool {
 pub(super) fn collect_type_import_field_uses(
     ty: &crate::parser::TypeExpr,
     uses: &mut HashMap<String, ImportUse>,
-    shadows: &HashSet<String>,
+    shadows: &HashSet<Name>,
 ) {
     match ty {
         crate::parser::TypeExpr::Named(name) => {
@@ -290,7 +290,7 @@ pub(super) fn collect_type_import_field_uses(
 
 pub(super) fn record_type_name_import_use(
     uses: &mut HashMap<String, ImportUse>,
-    shadows: &HashSet<String>,
+    shadows: &HashSet<Name>,
     name: &str,
 ) {
     if let Some((root, field)) = name.split_once('.') {
@@ -302,7 +302,7 @@ pub(super) fn record_type_name_import_use(
 
 pub(super) fn record_field_import_use(
     uses: &mut HashMap<String, ImportUse>,
-    shadows: &HashSet<String>,
+    shadows: &HashSet<Name>,
     name: &str,
     field: &str,
 ) {
@@ -313,18 +313,18 @@ pub(super) fn record_field_import_use(
     match uses.entry(name.to_string()) {
         std::collections::hash_map::Entry::Occupied(mut entry) => {
             if let ImportUse::Fields(fields) = entry.get_mut() {
-                fields.insert(field.to_string());
+                fields.insert(nm(field));
             }
         }
         std::collections::hash_map::Entry::Vacant(entry) => {
-            entry.insert(ImportUse::Fields(HashSet::from_iter([field.to_string()])));
+            entry.insert(ImportUse::Fields(HashSet::from_iter([nm(field)])));
         }
     }
 }
 
 pub(super) fn record_whole_import_use(
     uses: &mut HashMap<String, ImportUse>,
-    shadows: &HashSet<String>,
+    shadows: &HashSet<Name>,
     name: &str,
 ) {
     if !shadows.contains(name) {
@@ -347,10 +347,10 @@ fn mark_other_use(uses: &mut HashMap<String, ImportUse>, name: &str) {
 /// doesn't see.
 pub(super) fn expand_requested_fields(
     entries: &[Entry],
-    requested: &HashSet<String>,
+    requested: &HashSet<Name>,
     inherited_builtins: &[&str],
-) -> HashSet<String> {
-    let property_names: HashSet<String> = entries
+) -> HashSet<Name> {
+    let property_names: HashSet<Name> = entries
         .iter()
         .filter_map(|entry| match entry {
             Entry::Property(prop) if !has_modifier(&prop.modifiers, Modifier::Local) => {
@@ -387,7 +387,7 @@ pub(super) fn expand_requested_fields(
         values: entries
             .iter()
             .filter_map(|entry| match entry {
-                Entry::Property(prop) => Some(prop.name.as_str()),
+                Entry::Property(prop) => Some(prop.name.as_ref()),
                 _ => None,
             })
             .collect(),
@@ -395,7 +395,7 @@ pub(super) fn expand_requested_fields(
             .iter()
             .filter_map(|entry| match entry {
                 Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {
-                    Some((prop.name.as_str(), entry))
+                    Some((prop.name.as_ref(), entry))
                 }
                 _ => None,
             })
@@ -408,7 +408,7 @@ pub(super) fn expand_requested_fields(
     // by its definition, including the constraints of any aliases it uses.
     let module_reading_definitions = if requested
         .iter()
-        .any(|name| definitions.types.contains_key(name.as_str()))
+        .any(|name| definitions.types.contains_key(name.as_ref()))
     {
         module_dependent_members(entries)
     } else {
@@ -450,9 +450,10 @@ pub(super) fn expand_requested_fields(
                 // A requested class or alias also needs the module properties
                 // its transitive type constraints read, even without `module.`.
                 Entry::ClassDef(name, ..) | Entry::TypeAlias(name, _)
-                    if expanded.contains(name) && module_reading_definitions.contains(name) =>
+                    if expanded.contains(name.as_str())
+                        && module_reading_definitions.contains(name.as_str()) =>
                 {
-                    refs.types.insert(name.clone());
+                    refs.types.insert(nm(name));
                 }
                 _ => continue,
             }
@@ -462,7 +463,7 @@ pub(super) fn expand_requested_fields(
             // Only value reads request a property: a type reference that
             // shares a property's name names the type, not the property.
             for dep in refs.values {
-                if dep == DYNAMIC_SIBLING_REF {
+                if &*dep == DYNAMIC_SIBLING_REF {
                     for name in &property_names {
                         if expanded.insert(name.clone()) {
                             changed = true;
@@ -493,17 +494,17 @@ pub(super) fn expand_requested_fields(
 /// `refs` as a value read too.
 fn follow_definitions(definitions: &Definitions, refs: &mut Names, aliases: Option<&TypeAliases>) {
     let shadows = Names::default();
-    let types_as_values: Vec<String> = refs
+    let types_as_values: Vec<Name> = refs
         .unbound_types
         .iter()
-        .filter(|name| !definitions.types.contains_key(name.as_str()))
+        .filter(|name| !definitions.types.contains_key(name.as_ref()))
         .cloned()
         .collect();
     refs.values.extend(types_as_values);
     // Each name with whether it was reached through a local, and whether it
     // is a type reference. A name reached both through a local and not is
     // followed both ways, as the aliases may differ.
-    let mut pending: Vec<(String, bool, bool)> = refs
+    let mut pending: Vec<(Name, bool, bool)> = refs
         .types
         .iter()
         .map(|name| (name.clone(), false, true))
@@ -513,9 +514,9 @@ fn follow_definitions(definitions: &Definitions, refs: &mut Names, aliases: Opti
     while let Some((name, module_scope, is_type)) = pending.pop() {
         let definition = definitions
             .types
-            .get(name.as_str())
-            .filter(|_| is_type || !definitions.values.contains(name.as_str()));
-        let local = definitions.locals.get(name.as_str()).filter(|_| !is_type);
+            .get(name.as_ref())
+            .filter(|_| is_type || !definitions.values.contains(name.as_ref()));
+        let local = definitions.locals.get(name.as_ref()).filter(|_| !is_type);
         if (definition.is_none() && local.is_none())
             || !visited.insert((name, module_scope, is_type))
         {
@@ -538,7 +539,7 @@ fn follow_definitions(definitions: &Definitions, refs: &mut Names, aliases: Opti
             // `ModuleClasses::module_reads` says so; the rest read the
             // instance.
             if let Entry::ClassDef(class, _, _, body) = definition {
-                let reads: HashSet<String> = definitions
+                let reads: HashSet<Name> = definitions
                     .classes
                     .module_reads(class, body, &definition_refs.values)
                     .into_iter()
@@ -577,7 +578,7 @@ fn follow_definitions(definitions: &Definitions, refs: &mut Names, aliases: Opti
         }
         for (deps, module_scope) in [(definition_refs, module_scope), (local_refs, true)] {
             for dep in deps.unbound_types {
-                if !definitions.types.contains_key(dep.as_str()) && refs.values.insert(dep.clone())
+                if !definitions.types.contains_key(dep.as_ref()) && refs.values.insert(dep.clone())
                 {
                     pending.push((dep.clone(), module_scope, false));
                 }
@@ -588,7 +589,7 @@ fn follow_definitions(definitions: &Definitions, refs: &mut Names, aliases: Opti
                 pending.push((dep, module_scope, true));
             }
             for dep in deps.values {
-                if dep != "this" {
+                if &*dep != "this" {
                     refs.values.insert(dep.clone());
                     pending.push((dep, module_scope, false));
                 }
@@ -597,7 +598,7 @@ fn follow_definitions(definitions: &Definitions, refs: &mut Names, aliases: Opti
     }
 }
 
-pub(super) fn collect_sibling_field_refs_entries(entries: &[Entry], refs: &mut HashSet<String>) {
+pub(super) fn collect_sibling_field_refs_entries(entries: &[Entry], refs: &mut HashSet<Name>) {
     collect_sibling_field_refs_entries_in(entries, refs, false);
 }
 
@@ -605,7 +606,7 @@ pub(super) fn collect_sibling_field_refs_entries(entries: &[Entry], refs: &mut H
 /// so `module.x` there is not a module read.
 fn collect_sibling_field_refs_entries_in(
     entries: &[Entry],
-    refs: &mut HashSet<String>,
+    refs: &mut HashSet<Name>,
     shadowed: bool,
 ) {
     // An object that declares its own `module` property rebinds the name for
@@ -714,19 +715,19 @@ type TypeAliases<'a> = HashMap<&'a str, Option<&'a crate::parser::TypeExpr>>;
 struct Names {
     /// Value names: identifiers and `module.x`/`this.x` fields read, or
     /// locals and parameters bound.
-    values: HashSet<String>,
+    values: HashSet<Name>,
     /// Type names: roots of annotations, `new T` and class parents, or type
     /// aliases and classes declared.
-    types: HashSet<String>,
+    types: HashSet<Name>,
     /// The unqualified type names in `types` that no enclosing value binding
     /// shadows. One that names none of the module's type aliases or classes
     /// may still name a module property or local holding a class (see
     /// `follow_definitions`).
-    unbound_types: HashSet<String>,
+    unbound_types: HashSet<Name>,
 }
 
 impl Names {
-    fn values(values: &HashSet<String>) -> Self {
+    fn values(values: &HashSet<Name>) -> Self {
         Names {
             values: values.clone(),
             ..Names::default()
@@ -741,7 +742,7 @@ impl Names {
 
     /// Adds every name in either namespace to `names`, for callers that only
     /// need to know whether a binding (such as an import) is mentioned.
-    fn add_all_to(self, names: &mut HashSet<String>) {
+    fn add_all_to(self, names: &mut HashSet<Name>) {
         names.extend(self.values);
         names.extend(self.types);
     }
@@ -768,12 +769,9 @@ struct Definitions<'a> {
 impl Definitions<'_> {
     /// The names in `values` that can only mean a type alias or class: no
     /// module property has that name.
-    fn unshadowed_values<'n>(
-        &self,
-        values: &'n HashSet<String>,
-    ) -> impl Iterator<Item = &'n String> {
+    fn unshadowed_values<'n>(&self, values: &'n HashSet<Name>) -> impl Iterator<Item = &'n Name> {
         values.iter().filter(|name| {
-            self.types.contains_key(name.as_str()) && !self.values.contains(name.as_str())
+            self.types.contains_key(name.as_ref()) && !self.values.contains(name.as_ref())
         })
     }
 }
@@ -986,13 +984,13 @@ fn constraint_bound_names_resolving(
 
 /// `module.field` reads in a type's constraints, which run when a value is
 /// checked against it.
-fn collect_sibling_field_refs_type(ty: &crate::parser::TypeExpr, refs: &mut HashSet<String>) {
+fn collect_sibling_field_refs_type(ty: &crate::parser::TypeExpr, refs: &mut HashSet<Name>) {
     collect_sibling_field_refs_type_in(ty, refs, false);
 }
 
 fn collect_sibling_field_refs_type_in(
     ty: &crate::parser::TypeExpr,
-    refs: &mut HashSet<String>,
+    refs: &mut HashSet<Name>,
     shadowed: bool,
 ) {
     match ty {
@@ -1013,7 +1011,7 @@ fn collect_sibling_field_refs_type_in(
 
 pub(super) fn collect_sibling_field_refs_expr(
     expr: &Expr,
-    refs: &mut HashSet<String>,
+    refs: &mut HashSet<Name>,
     include_this: bool,
 ) {
     collect_sibling_field_refs_expr_in(expr, refs, include_this, false);
@@ -1021,23 +1019,23 @@ pub(super) fn collect_sibling_field_refs_expr(
 
 fn collect_sibling_field_refs_expr_in(
     expr: &Expr,
-    refs: &mut HashSet<String>,
+    refs: &mut HashSet<Name>,
     include_this: bool,
     shadowed: bool,
 ) {
     match expr {
         Expr::Field(base, field) | Expr::NullSafeField(base, field) => {
             if is_module_sibling_ref(base, include_this) && !(shadowed && is_module_name(base)) {
-                refs.insert(field.clone());
+                refs.insert(nm(field));
             }
             collect_sibling_field_refs_expr_in(base, refs, include_this, shadowed);
         }
         Expr::Index(base, index) => {
             if is_module_sibling_ref(base, include_this) && !(shadowed && is_module_name(base)) {
                 if let Expr::String(key) = index.as_ref() {
-                    refs.insert(key.to_string());
+                    refs.insert(nm(key));
                 } else {
-                    refs.insert(DYNAMIC_SIBLING_REF.to_string());
+                    refs.insert(nm(DYNAMIC_SIBLING_REF));
                 }
             }
             collect_sibling_field_refs_expr_in(base, refs, include_this, shadowed);
@@ -1053,7 +1051,7 @@ fn collect_sibling_field_refs_expr_in(
                 && ((root == "module" && !shadowed) || (include_this && root == "this"))
             {
                 let member = rest.split('.').next().unwrap_or(rest);
-                refs.insert(member.to_string());
+                refs.insert(nm(member));
             }
             collect_sibling_field_refs_entries_in(entries, refs, shadowed);
         }
@@ -1124,14 +1122,14 @@ fn collect_sibling_field_refs_expr_in(
     }
 }
 
-pub(super) fn property_reference_names(prop: &Property) -> HashSet<String> {
+pub(super) fn property_reference_names(prop: &Property) -> HashSet<Name> {
     let mut refs = HashSet::default();
     let shadows = HashSet::default();
     if let Some(expr) = &prop.value {
         collect_expr_refs(expr, &mut refs, &shadows);
         collect_sibling_field_refs_expr(expr, &mut refs, true);
         if has_modifier(&prop.modifiers, Modifier::Local) && is_module_sibling_ref(expr, true) {
-            refs.insert(DYNAMIC_SIBLING_REF.to_string());
+            refs.insert(nm(DYNAMIC_SIBLING_REF));
         }
     }
     if let Some(body) = &prop.body {
@@ -1199,7 +1197,7 @@ pub(super) fn module_member_name(entry: &Entry) -> Option<&str> {
 /// The other module members that evaluating `entry` can read.  This keeps
 /// the current class-scope analysis while making the dependency planner cover
 /// locals, classes, aliases, and ordinary properties uniformly.
-fn module_member_dependencies(entry: &Entry) -> HashSet<String> {
+fn module_member_dependencies(entry: &Entry) -> HashSet<Name> {
     let mut refs = referenced_roots(std::slice::from_ref(entry));
     match entry {
         Entry::Property(prop) => {
@@ -1219,7 +1217,7 @@ fn module_member_dependencies(entry: &Entry) -> HashSet<String> {
             if let Some((root, rest)) = parent.as_deref().and_then(|name| name.split_once('.'))
                 && root == "module"
             {
-                refs.insert(rest.split('.').next().unwrap_or(rest).to_string());
+                refs.insert(nm(rest.split('.').next().unwrap_or(rest)));
             }
             for entry in body.iter() {
                 if let Entry::Property(prop) = entry {
@@ -1296,7 +1294,7 @@ fn ancestor_properties<'e>(classes: &ClassMap<'e>, parent: Option<&'e str>) -> H
         }
         names.extend(body.iter().filter_map(|entry| match entry {
             Entry::Property(prop) if !has_modifier(&prop.modifiers, Modifier::Local) => {
-                Some(prop.name.as_str())
+                Some(prop.name.as_ref())
             }
             _ => None,
         }));
@@ -1319,7 +1317,7 @@ impl<'a> ModuleClasses<'a> {
                 .iter()
                 .filter_map(|entry| match entry {
                     Entry::Property(prop) if !has_modifier(&prop.modifiers, Modifier::Local) => {
-                        Some(prop.name.as_str())
+                        Some(prop.name.as_ref())
                     }
                     _ => None,
                 })
@@ -1357,8 +1355,8 @@ impl<'a> ModuleClasses<'a> {
         &self,
         class: &str,
         body: &[Entry],
-        roots: &'r HashSet<String>,
-    ) -> Vec<&'r String> {
+        roots: &'r HashSet<Name>,
+    ) -> Vec<&'r Name> {
         let mut inherited = None;
         let mut eager = None;
         roots
@@ -1374,18 +1372,18 @@ impl<'a> ModuleClasses<'a> {
                     return eager
                         .get_or_insert_with(|| EagerReads::new(body, &self.classes))
                         .upto(declared)
-                        .contains(root.as_str());
+                        .contains(root.as_ref());
                 }
                 if !inherited
                     .get_or_insert_with(|| self.inherited_properties(class))
-                    .contains(root.as_str())
+                    .contains(root.as_ref())
                 {
                     return true;
                 }
                 eager
                     .get_or_insert_with(|| EagerReads::new(body, &self.classes))
                     .all
-                    .contains(root.as_str())
+                    .contains(root.as_ref())
             })
             .collect()
     }
@@ -1413,7 +1411,7 @@ struct EagerReads<'e> {
     methods: HashSet<&'e str>,
     stored: HashMap<&'e str, &'e str>,
     /// What all of the body's defaults read.
-    all: HashSet<String>,
+    all: HashSet<Name>,
     /// The methods all of the body's defaults run.
     runs: HashSet<&'e str>,
 }
@@ -1437,7 +1435,7 @@ impl<'e> EagerReads<'e> {
             methods: body
                 .iter()
                 .filter_map(|entry| match entry {
-                    Entry::Property(prop) if Self::is_method(entry) => Some(prop.name.as_str()),
+                    Entry::Property(prop) if Self::is_method(entry) => Some(prop.name.as_ref()),
                     _ => None,
                 })
                 .collect(),
@@ -1455,21 +1453,21 @@ impl<'e> EagerReads<'e> {
 
     fn is_default(&self, entry: &Entry) -> bool {
         !Self::is_method(entry)
-            && !matches!(entry, Entry::Property(prop) if self.stored.contains_key(prop.name.as_str()))
+            && !matches!(entry, Entry::Property(prop) if self.stored.contains_key(prop.name.as_ref()))
     }
 
     /// What the entries a class property at index `upto` doesn't hide its
     /// name from read: the defaults at or before it, the locals and nested
     /// classes (evaluated before any property), and the local methods any
     /// default runs (which capture the scope the locals see).
-    fn upto(&self, upto: usize) -> HashSet<String> {
+    fn upto(&self, upto: usize) -> HashSet<Name> {
         let seeds = self
             .body
             .iter()
             .enumerate()
             .filter(|(index, entry)| match entry {
                 Entry::Property(prop) if Self::is_method(entry) => {
-                    Self::is_local(entry) && self.runs.contains(prop.name.as_str())
+                    Self::is_local(entry) && self.runs.contains(prop.name.as_ref())
                 }
                 _ => {
                     self.is_default(entry)
@@ -1487,7 +1485,7 @@ impl<'e> EagerReads<'e> {
     /// class reads only what its own defaults do (see `class_default_reads`),
     /// and once they use it, what the methods they call on it (by name, as
     /// any object's member) read from outside it.
-    fn reads(&self, seeds: Vec<&'e Entry>) -> (HashSet<String>, HashSet<&'e str>) {
+    fn reads(&self, seeds: Vec<&'e Entry>) -> (HashSet<Name>, HashSet<&'e str>) {
         let body = self.body;
         let (nested, seeds): (Vec<&Entry>, Vec<&Entry>) = seeds
             .into_iter()
@@ -1517,7 +1515,7 @@ impl<'e> EagerReads<'e> {
             let mut nested_reads = false;
             for entry in body {
                 if let Entry::ClassDef(name, _, parent, class_body) = entry
-                    && refs.contains(name)
+                    && refs.contains(name.as_str())
                     && used_keys.insert(std::ptr::from_ref(entry))
                 {
                     used.push(NestedClass {
@@ -1547,7 +1545,7 @@ impl<'e> EagerReads<'e> {
                                 (calls_all
                                     || called.contains(&prop.name)
                                     || stored.iter().any(|(property, method)| {
-                                        *method == prop.name && called.contains(*property)
+                                        *method == &*prop.name && called.contains(*property)
                                     }))
                                     && followed_nested.insert(std::ptr::from_ref(*entry))
                             }
@@ -1576,7 +1574,7 @@ impl<'e> EagerReads<'e> {
                                 refs.extend(
                                     class_default_reads(found.body, &found_scope)
                                         .into_iter()
-                                        .filter(|root| !enclosing.contains(root.as_str())),
+                                        .filter(|root| !enclosing.contains(root.as_ref())),
                                 );
                                 used.push(found);
                             }
@@ -1584,7 +1582,7 @@ impl<'e> EagerReads<'e> {
                         refs.extend(
                             roots
                                 .into_iter()
-                                .filter(|root| !shadow.contains(root.as_str())),
+                                .filter(|root| !shadow.contains(root.as_ref())),
                         );
                         nested_reads = true;
                     }
@@ -1608,7 +1606,7 @@ impl<'e> EagerReads<'e> {
                 .iter()
                 .filter(|entry| match entry {
                     Entry::Property(prop) if Self::is_method(entry) => {
-                        runs.contains(prop.name.as_str()) && followed.insert(prop.name.as_str())
+                        runs.contains(prop.name.as_ref()) && followed.insert(prop.name.as_ref())
                     }
                     _ => false,
                 })
@@ -1700,7 +1698,7 @@ fn instance_names<'e>(
 ) -> HashSet<&'e str> {
     let mut names = ancestor_properties(classes, parent);
     names.extend(body.iter().filter_map(|entry| match entry {
-        Entry::Property(prop) => Some(prop.name.as_str()),
+        Entry::Property(prop) => Some(prop.name.as_ref()),
         _ => None,
     }));
     names
@@ -1708,7 +1706,7 @@ fn instance_names<'e>(
 
 /// `referenced_roots` for entries of one body that aren't contiguous: a
 /// local or method any of them declares shadows its name in all of them.
-fn referenced_roots_of(entries: &[&Entry]) -> HashSet<String> {
+fn referenced_roots_of(entries: &[&Entry]) -> HashSet<Name> {
     let mut shadows = HashSet::default();
     for entry in entries {
         shadows.extend(declared_entry_roots(std::slice::from_ref(*entry)));
@@ -1727,7 +1725,7 @@ fn stored_methods(body: &[Entry], is_method: fn(&Entry) -> bool) -> HashMap<&str
     let methods: HashSet<&str> = body
         .iter()
         .filter_map(|entry| match entry {
-            Entry::Property(prop) if is_method(entry) => Some(prop.name.as_str()),
+            Entry::Property(prop) if is_method(entry) => Some(prop.name.as_ref()),
             _ => None,
         })
         .collect();
@@ -1743,7 +1741,7 @@ fn stored_methods(body: &[Entry], is_method: fn(&Entry) -> bool) -> HashMap<&str
                 };
                 methods
                     .contains(method.as_str())
-                    .then_some((prop.name.as_str(), method.as_str()))
+                    .then_some((prop.name.as_ref(), method.as_str()))
             }
             _ => None,
         })
@@ -1754,7 +1752,7 @@ fn stored_methods(body: &[Entry], is_method: fn(&Entry) -> bool) -> HashMap<&str
 /// they are evaluated (see `EagerReads`): those it doesn't bind itself
 /// by then. A name inherited from its parent is kept, as is one any default
 /// reads before the body's own property of that name is bound.
-fn class_default_reads<'e>(body: &'e [Entry], scope: &ClassMap<'e>) -> HashSet<String> {
+fn class_default_reads<'e>(body: &'e [Entry], scope: &ClassMap<'e>) -> HashSet<Name> {
     let eager = EagerReads::new(body, scope);
     eager
         .all
@@ -1772,7 +1770,7 @@ fn class_default_reads<'e>(body: &'e [Entry], scope: &ClassMap<'e>) -> HashSet<S
 /// `x?.name`, `x["name"]`), or `DYNAMIC_SIBLING_REF` for a computed key or a
 /// value passed to a call that may be an object (which may read any of its
 /// members).
-fn collect_field_names_entries(entries: &[Entry], out: &mut HashSet<String>) {
+fn collect_field_names_entries(entries: &[Entry], out: &mut HashSet<Name>) {
     for entry in entries {
         match entry {
             Entry::Property(prop) => {
@@ -1817,19 +1815,19 @@ fn may_be_object(expr: &Expr) -> bool {
     }
 }
 
-fn collect_field_names_expr(expr: &Expr, out: &mut HashSet<String>) {
+fn collect_field_names_expr(expr: &Expr, out: &mut HashSet<Name>) {
     match expr {
         Expr::Field(base, name) | Expr::NullSafeField(base, name) => {
-            out.insert(name.clone());
+            out.insert(nm(name));
             collect_field_names_expr(base, out);
         }
         Expr::Index(base, index) => {
             match index.as_ref() {
                 Expr::String(key) => {
-                    out.insert(key.to_string());
+                    out.insert(nm(key));
                 }
                 _ => {
-                    out.insert(DYNAMIC_SIBLING_REF.to_string());
+                    out.insert(nm(DYNAMIC_SIBLING_REF));
                 }
             }
             collect_field_names_expr(base, out);
@@ -1841,7 +1839,7 @@ fn collect_field_names_expr(expr: &Expr, out: &mut HashSet<String>) {
         Expr::Binop(op, left, right) => {
             // `x |> f` passes `x` to `f` like `f(x)`.
             if matches!(op, BinOp::Pipe) && may_be_object(left) {
-                out.insert(DYNAMIC_SIBLING_REF.to_string());
+                out.insert(nm(DYNAMIC_SIBLING_REF));
             }
             collect_field_names_expr(left, out);
             collect_field_names_expr(right, out);
@@ -1850,7 +1848,7 @@ fn collect_field_names_expr(expr: &Expr, out: &mut HashSet<String>) {
             // An object passed to a call may have any of its members read
             // there.
             if args.iter().any(may_be_object) {
-                out.insert(DYNAMIC_SIBLING_REF.to_string());
+                out.insert(nm(DYNAMIC_SIBLING_REF));
             }
             collect_field_names_expr(callee, out);
             for arg in args {
@@ -1956,7 +1954,7 @@ pub(super) fn module_evaluation_plan(entries: &[Entry]) -> EvaluationPlan {
             dynamic[index] = refs.contains(DYNAMIC_SIBLING_REF);
             let mut deps: Vec<usize> = refs
                 .iter()
-                .filter_map(|name| by_name.get(name.as_str()))
+                .filter_map(|name| by_name.get(name.as_ref()))
                 .flatten()
                 .copied()
                 .filter(|&dep| dep != index)
@@ -2035,7 +2033,7 @@ pub(super) fn module_evaluation_plan(entries: &[Entry]) -> EvaluationPlan {
 /// aliases whose constraints read module properties, and their dependents
 /// (a subclass, a type alias naming it, a local, or a module function
 /// building an instance).
-pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<String> {
+pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<Name> {
     // A member qualified through the module object (`module.C`, or `this.C`
     // where `this` is the module) is a reference to `C` like a bare `C`.
     fn qualified_member(name: &str, include_this: bool) -> Option<&str> {
@@ -2052,14 +2050,14 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
         return indexmap::IndexSet::new();
     }
     let classes = ModuleClasses::new(entries);
-    let members: Vec<(&String, bool, HashSet<String>)> = entries
+    let members: Vec<(Name, bool, HashSet<Name>)> = entries
         .iter()
         .filter_map(|entry| match entry {
             Entry::ClassDef(name, _, parent, body) => {
                 let mut refs = referenced_roots(body);
                 let reads_module = !classes.module_reads(name, body, &refs).is_empty();
                 if reads_module {
-                    refs.insert("module".to_string());
+                    refs.insert(nm("module"));
                 }
                 // Inside a class body `this` is the instance, so only
                 // `module.C` names a module member.
@@ -2068,9 +2066,9 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
                     let mut parent_refs = Names::default();
                     collect_name_root(parent, &mut parent_refs, &Names::default());
                     parent_refs.add_all_to(&mut refs);
-                    refs.extend(qualified_member(parent, false).map(str::to_string));
+                    refs.extend(qualified_member(parent, false).map(nm));
                 }
-                Some((name, true, refs))
+                Some((nm(name), true, refs))
             }
             Entry::TypeAlias(name, ty) => {
                 let mut refs = HashSet::default();
@@ -2079,9 +2077,9 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
                 // value is checked against it.
                 collect_sibling_field_refs_type(ty, &mut refs);
                 if let Some(target) = type_alias_target(ty) {
-                    refs.extend(qualified_member(target, true).map(str::to_string));
+                    refs.extend(qualified_member(target, true).map(nm));
                 }
-                Some((name, false, refs))
+                Some((nm(name), false, refs))
             }
             // Locals, and module functions (a non-local property whose value
             // is a lambda). Other module properties are evaluated in order by
@@ -2095,27 +2093,23 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
                 collect_expr_refs(value, &mut refs, &HashSet::default());
                 // At module level `this` is the module object too.
                 collect_sibling_field_refs_expr(value, &mut refs, true);
-                Some((&prop.name, false, refs))
+                Some((prop.name.clone(), false, refs))
             }
             _ => None,
         })
         .collect();
-    let mut dependent: HashSet<String> = classes
-        .properties
-        .iter()
-        .map(|name| name.to_string())
-        .collect();
+    let mut dependent: HashSet<Name> = classes.properties.iter().map(nm).collect();
     loop {
         let before = dependent.len();
         for (name, is_class, refs) in &members {
             // A dynamic `module[key]` read can reach any tracked member.
-            if !dependent.contains(name.as_str())
+            if !dependent.contains(name.as_ref())
                 && ((refs.contains(DYNAMIC_SIBLING_REF) && !dependent.is_empty())
                     || refs.iter().any(|root| {
-                        (*is_class && root == "module") || dependent.contains(root.as_str())
+                        (*is_class && &**root == "module") || dependent.contains(root.as_ref())
                     }))
             {
-                dependent.insert(name.to_string());
+                dependent.insert(nm(name));
             }
         }
         if dependent.len() == before {
@@ -2126,14 +2120,14 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
     // or class declared before a class it uses sees that class's new value.
     // Ties and cycles keep declaration order; a dynamic `module[key]` read
     // may reach any member, so it comes after the members without one.
-    let tracked: Vec<&(&String, bool, HashSet<String>)> = members
+    let tracked: Vec<&(Name, bool, HashSet<Name>)> = members
         .iter()
-        .filter(|(name, ..)| dependent.contains(name.as_str()))
+        .filter(|(name, ..)| dependent.contains(name.as_ref()))
         .collect();
     let index: HashMap<&str, usize> = tracked
         .iter()
         .enumerate()
-        .map(|(i, (name, ..))| (name.as_str(), i))
+        .map(|(i, (name, ..))| (name.as_ref(), i))
         .collect();
     let dynamic: Vec<bool> = tracked
         .iter()
@@ -2145,7 +2139,7 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
         .map(|(i, (_, _, refs))| {
             let mut deps: Vec<usize> = refs
                 .iter()
-                .filter_map(|name| index.get(name.as_str()).copied())
+                .filter_map(|name| index.get(name.as_ref()).copied())
                 .filter(|&j| j != i)
                 .collect();
             deps.sort_unstable();
@@ -2217,7 +2211,7 @@ pub(super) fn type_alias_target(ty: &crate::parser::TypeExpr) -> Option<&str> {
 
 /// Every name `entries` read or name as a type (an import used only in a
 /// type annotation, such as `x is Dep.Foo`, is still referenced).
-pub(super) fn referenced_roots(entries: &[Entry]) -> HashSet<String> {
+pub(super) fn referenced_roots(entries: &[Entry]) -> HashSet<Name> {
     let mut refs = HashSet::default();
     let shadows = HashSet::default();
     collect_entry_refs(entries, &mut refs, &shadows);
@@ -2227,8 +2221,8 @@ pub(super) fn referenced_roots(entries: &[Entry]) -> HashSet<String> {
 /// Adds to `refs` every name `entries` read or name as a type.
 pub(super) fn collect_entry_refs(
     entries: &[Entry],
-    refs: &mut HashSet<String>,
-    shadows: &HashSet<String>,
+    refs: &mut HashSet<Name>,
+    shadows: &HashSet<Name>,
 ) {
     let mut collected = Names::default();
     let shadows = Names::values(shadows);
@@ -2278,14 +2272,14 @@ fn collect_entry_refs_in(
             Some(definitions),
         );
         follow_definitions(definitions, &mut body_refs, Some(narrowed));
-        let followed: HashSet<String> = definitions
+        let followed: HashSet<Name> = definitions
             .unshadowed_values(&body_refs.values)
             .cloned()
             .collect();
         body_refs.values.retain(|name| !followed.contains(name));
         body_refs
             .types
-            .retain(|name| !definitions.types.contains_key(name.as_str()));
+            .retain(|name| !definitions.types.contains_key(name.as_ref()));
         refs.extend(body_refs);
         return;
     }
@@ -2329,9 +2323,9 @@ fn collect_entry_refs_unnarrowed(
             Entry::ForGenerator(fgen) => {
                 collect_expr_refs_in(&fgen.collection, refs, &entry_shadows, aliases, definitions);
                 let mut body_shadows = entry_shadows.clone();
-                body_shadows.values.insert(fgen.val_var.clone());
+                body_shadows.values.insert(nm(&fgen.val_var));
                 if let Some(key_var) = &fgen.key_var {
-                    body_shadows.values.insert(key_var.clone());
+                    body_shadows.values.insert(nm(key_var));
                 }
                 collect_entry_refs_in(&fgen.body, refs, &body_shadows, aliases, definitions);
             }
@@ -2365,7 +2359,7 @@ pub(super) fn with_listing_locals(expr: &Expr, locals: &[(String, Expr)]) -> Exp
     let mut refs = HashSet::default();
     collect_expr_refs(&expr, &mut refs, &HashSet::default());
     for (name, value) in locals.iter().rev() {
-        if refs.remove(name) {
+        if refs.remove(name.as_str()) {
             collect_expr_refs(value, &mut refs, &HashSet::default());
             expr = Expr::Let(name.clone(), Box::new(value.clone()), Box::new(expr));
         }
@@ -2376,7 +2370,7 @@ pub(super) fn with_listing_locals(expr: &Expr, locals: &[(String, Expr)]) -> Exp
 /// Names a type expression needs when it is resolved later in a detached
 /// scope. This includes roots named in the type itself and values read by a
 /// constraint.
-pub(super) fn type_reference_names(ty: &crate::parser::TypeExpr) -> HashSet<String> {
+pub(super) fn type_reference_names(ty: &crate::parser::TypeExpr) -> HashSet<Name> {
     let mut collected = Names::default();
     collect_type_refs(ty, &mut collected, &Names::default(), None, None);
     let mut refs = HashSet::default();
@@ -2384,16 +2378,12 @@ pub(super) fn type_reference_names(ty: &crate::parser::TypeExpr) -> HashSet<Stri
     refs
 }
 
-fn collect_type_names(ty: &crate::parser::TypeExpr, refs: &mut HashSet<String>) {
+fn collect_type_names(ty: &crate::parser::TypeExpr, refs: &mut HashSet<Name>) {
     refs.extend(type_reference_names(ty));
 }
 
 /// Adds to `refs` every name `expr` reads or names as a type.
-pub(super) fn collect_expr_refs(
-    expr: &Expr,
-    refs: &mut HashSet<String>,
-    shadows: &HashSet<String>,
-) {
+pub(super) fn collect_expr_refs(expr: &Expr, refs: &mut HashSet<Name>, shadows: &HashSet<Name>) {
     let mut collected = Names::default();
     let shadows = Names::values(shadows);
     collect_expr_refs_in(expr, &mut collected, &shadows, None, None);
@@ -2409,8 +2399,8 @@ fn collect_expr_refs_in(
 ) {
     match expr {
         Expr::Ident(name) => {
-            if !shadows.values.contains(name) {
-                refs.values.insert(name.clone());
+            if !shadows.values.contains(name.as_str()) {
+                refs.values.insert(nm(name));
             }
         }
         Expr::New(type_name, entries, generic_params) => {
@@ -2443,7 +2433,7 @@ fn collect_expr_refs_in(
         Expr::Let(name, value, body) => {
             collect_expr_refs_in(value, refs, shadows, aliases, definitions);
             let mut body_shadows = shadows.clone();
-            body_shadows.values.insert(name.clone());
+            body_shadows.values.insert(nm(name));
             collect_expr_refs_in(body, refs, &body_shadows, aliases, definitions);
         }
         Expr::Is(value, ty) | Expr::As(value, ty) => {
@@ -2452,7 +2442,7 @@ fn collect_expr_refs_in(
         }
         Expr::Lambda(params, value) => {
             let mut body_shadows = shadows.clone();
-            body_shadows.values.extend(params.iter().cloned());
+            body_shadows.values.extend(params.iter().map(nm));
             collect_expr_refs_in(value, refs, &body_shadows, aliases, definitions);
         }
         Expr::Unop(_, value)
@@ -2520,7 +2510,7 @@ fn collect_type_refs(
             constraint_shadows.values.extend(
                 constraint_bound_names_resolving(base, aliases)
                     .iter()
-                    .map(|name| name.to_string()),
+                    .map(nm),
             );
             collect_expr_refs_in(constraint, refs, &constraint_shadows, aliases, definitions);
         }
@@ -2534,15 +2524,15 @@ fn collect_name_root(name: &str, refs: &mut Names, shadows: &Names) {
     }
     let qualified = root.len() < name.len();
     if !shadows.types.contains(root) {
-        refs.types.insert(root.to_string());
+        refs.types.insert(nm(root));
         if !qualified && !shadows.values.contains(root) {
-            refs.unbound_types.insert(root.to_string());
+            refs.unbound_types.insert(nm(root));
         }
     }
     // The root of a qualified name (`Dep.Item`) is a module, which may be a
     // property holding one (`Dep = import(...)`), so it's read as a value too.
     if qualified && !shadows.values.contains(root) {
-        refs.values.insert(root.to_string());
+        refs.values.insert(nm(root));
     }
 }
 
@@ -2562,11 +2552,11 @@ fn declared_entry_names(entries: &[Entry]) -> Names {
             // A class is bound as a value too (`ok = C`, `C.a`); a type alias
             // is not.
             Entry::ClassDef(name, ..) => {
-                names.types.insert(name.clone());
-                names.values.insert(name.clone());
+                names.types.insert(nm(name));
+                names.values.insert(nm(name));
             }
             Entry::TypeAlias(name, _) => {
-                names.types.insert(name.clone());
+                names.types.insert(nm(name));
             }
             Entry::Property(prop)
                 if has_modifier(&prop.modifiers, Modifier::Local)
@@ -2580,11 +2570,11 @@ fn declared_entry_names(entries: &[Entry]) -> Names {
     names
 }
 
-pub(super) fn declared_entry_roots(entries: &[Entry]) -> HashSet<String> {
+pub(super) fn declared_entry_roots(entries: &[Entry]) -> HashSet<Name> {
     entries
         .iter()
         .filter_map(|entry| match entry {
-            Entry::ClassDef(name, ..) | Entry::TypeAlias(name, _) => Some(name.clone()),
+            Entry::ClassDef(name, ..) | Entry::TypeAlias(name, _) => Some(nm(name)),
             Entry::Property(prop)
                 if has_modifier(&prop.modifiers, Modifier::Local)
                     || matches!(prop.value, Some(Expr::Lambda(..))) =>
@@ -2600,10 +2590,10 @@ pub(super) fn declared_entry_roots(entries: &[Entry]) -> HashSet<String> {
 /// shadowing. Over-approximating is safe for deciding what a lambda captures:
 /// a local of an object built in the body may be read before it is declared,
 /// so an enclosing binding of the same name must stay reachable.
-pub(super) fn collect_unshadowed_names(expr: &Expr, names: &mut HashSet<String>) {
+pub(super) fn collect_unshadowed_names(expr: &Expr, names: &mut HashSet<Name>) {
     match expr {
         Expr::Ident(name) => {
-            names.insert(name.clone());
+            names.insert(nm(name));
         }
         Expr::New(type_name, entries, generic_params) => {
             if type_name.is_some() || !generic_params.is_empty() {
@@ -2666,7 +2656,7 @@ pub(super) fn collect_unshadowed_names(expr: &Expr, names: &mut HashSet<String>)
     }
 }
 
-fn collect_unshadowed_entry_names(entries: &[Entry], names: &mut HashSet<String>) {
+fn collect_unshadowed_entry_names(entries: &[Entry], names: &mut HashSet<Name>) {
     for entry in entries {
         match entry {
             Entry::Property(prop) => {
@@ -2707,7 +2697,7 @@ fn collect_unshadowed_entry_names(entries: &[Entry], names: &mut HashSet<String>
     }
 }
 
-fn collect_unshadowed_type_names(ty: &crate::parser::TypeExpr, names: &mut HashSet<String>) {
+fn collect_unshadowed_type_names(ty: &crate::parser::TypeExpr, names: &mut HashSet<Name>) {
     mark_type_use(names);
     // A constraint is an ordinary expression evaluated against the value.
     if let crate::parser::TypeExpr::Constrained(_, constraint) = ty {
@@ -2732,8 +2722,8 @@ fn collect_unshadowed_type_names(ty: &crate::parser::TypeExpr, names: &mut HashS
 /// whole scope.
 pub(super) const NAMES_A_TYPE: &str = "\0type";
 
-fn mark_type_use(names: &mut HashSet<String>) {
-    names.insert(NAMES_A_TYPE.to_string());
+fn mark_type_use(names: &mut HashSet<Name>) {
+    names.insert(nm(NAMES_A_TYPE));
 }
 
 /// Whether `name` appears as an identifier anywhere in `entries`, including
@@ -2899,7 +2889,7 @@ pub(super) fn mapping_entry_mentions_this(expr: &Expr) -> bool {
 /// reference (bound by a `let`, passed to a call, indexed by a computed key)
 /// sets `escapes`, after which any member may be read.
 struct InstanceReads {
-    members: HashSet<String>,
+    members: HashSet<Name>,
     escapes: bool,
 }
 
@@ -2957,11 +2947,11 @@ impl InstanceReads {
             // The instance used as a value.
             _ if is_reference(expr) => self.escapes = true,
             Expr::Field(base, field) | Expr::NullSafeField(base, field) if is_reference(base) => {
-                self.members.insert(field.clone());
+                self.members.insert(nm(field));
             }
             Expr::Index(base, index) if is_reference(base) => match index.as_ref() {
                 Expr::String(key) => {
-                    self.members.insert(key.to_string());
+                    self.members.insert(nm(key));
                 }
                 index => {
                     self.escapes = true;

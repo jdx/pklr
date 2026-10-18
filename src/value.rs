@@ -258,7 +258,7 @@ pub(crate) struct CapturedScope {
     pub declared: NameSet,
     /// Members declared by the body whose entries are evaluated in this scope,
     /// kept so an amendment that replaces one does not drop it from the body.
-    pub body_members: HashSet<String>,
+    pub body_members: HashSet<Arc<str>>,
     pub module_identities: IndexMap<String, String>,
     pub type_aliases: TypeAliasMap,
     pub type_namespace: Option<String>,
@@ -276,7 +276,7 @@ pub struct ObjectSource {
     pub(crate) captured: crate::eval::SourceScope,
     /// Members declared by the object's own definition body, including ones an
     /// amendment has since replaced.
-    pub(crate) body_members: HashSet<String>,
+    pub(crate) body_members: HashSet<Arc<str>>,
     /// Whether the class was declared `open` (allows adding new properties)
     pub(crate) is_open: bool,
     /// Whether the object is an `abstract` class, which can be extended but
@@ -298,7 +298,7 @@ pub struct ObjectSource {
     /// Property names that produced values when this object was evaluated.
     /// Kept separate from `scope`, which can contain unrelated same-named
     /// lexical bindings.
-    pub(crate) evaluated_properties: Vec<String>,
+    pub(crate) evaluated_properties: Vec<Arc<str>>,
     /// Bare element values of a Dynamic body, in source order. These are
     /// distinct from named properties and are consumed by `xml.Element`.
     pub(crate) elements: Vec<Value>,
@@ -315,7 +315,7 @@ pub struct ObjectSource {
     /// Members of a module object that failed to evaluate. Reading or
     /// instantiating such a member reports its error instead of treating it
     /// as absent, and rendering the module reports a failed output member.
-    pub(crate) poisoned_members: Option<Arc<IndexMap<String, PoisonedMember>>>,
+    pub(crate) poisoned_members: Option<Arc<IndexMap<Arc<str>, PoisonedMember>>>,
     /// Whether this is a `Mapping`, a class, or another object.
     pub(crate) kind: ObjectKind,
     /// Whether this object was materialized from JSON rather than evaluated
@@ -910,7 +910,7 @@ impl Value {
                     source.as_ref().is_some_and(|source| {
                         source.entries.iter().any(|entry| {
                             matches!(entry, crate::parser::Entry::Property(prop)
-                                if prop.is_method && prop.name == name)
+                                if prop.is_method && &*prop.name == name)
                         })
                     })
                 };

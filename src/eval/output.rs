@@ -102,7 +102,7 @@ fn lexical_names(module: &Module) -> Vec<String> {
     });
     let members = module.body.iter().filter_map(|entry| match entry {
         Entry::Property(prop) if prop.modifiers.contains(&Modifier::Local) => {
-            Some(prop.name.clone())
+            Some(prop.name.to_string())
         }
         Entry::ClassDef(name, ..) | Entry::TypeAlias(name, _) => Some(name.clone()),
         _ => None,
@@ -500,7 +500,7 @@ impl Evaluator {
                 .body
                 .iter()
                 .filter_map(|entry| match entry {
-                    Entry::Property(prop) if prop.name == "output" => {
+                    Entry::Property(prop) if &*prop.name == "output" => {
                         Some((Arc::clone(prop), Some(base_module.clone())))
                     }
                     _ => None,
@@ -532,7 +532,7 @@ impl Evaluator {
         let mut output_refs: HashMap<_, _> = property_reference_names(output)
             .into_iter()
             .map(|name| {
-                let from_base = base.lexical.iter().any(|lexical| lexical == &name);
+                let from_base = base.lexical.iter().any(|lexical| **lexical == *name);
                 (name, from_base)
             })
             .collect();
@@ -547,7 +547,7 @@ impl Evaluator {
             let from_base = output_refs[&name];
             let alias = if from_base {
                 snapshot
-                    .and_then(|snapshot| snapshot.type_aliases.get(name.as_str()))
+                    .and_then(|snapshot| snapshot.type_aliases.get(name.as_ref()))
                     .cloned()
             } else {
                 scope
@@ -575,7 +575,7 @@ impl Evaluator {
         }
         for (name, from_base) in output_refs {
             let value = if from_base {
-                snapshot.and_then(|snapshot| snapshot.values.get(name.as_str()))
+                snapshot.and_then(|snapshot| snapshot.values.get(name.as_ref()))
             } else {
                 scope.get(&name)
             };
@@ -584,7 +584,7 @@ impl Evaluator {
             }
             let alias = if from_base {
                 snapshot
-                    .and_then(|snapshot| snapshot.type_aliases.get(name.as_str()))
+                    .and_then(|snapshot| snapshot.type_aliases.get(name.as_ref()))
                     .cloned()
             } else {
                 scope
@@ -595,7 +595,7 @@ impl Evaluator {
                 base_scope.set_type_alias(name.clone(), alias);
             }
             let identity = if from_base {
-                snapshot.and_then(|snapshot| snapshot.module_identities.get(&name))
+                snapshot.and_then(|snapshot| snapshot.module_identities.get(&*name))
             } else {
                 scope.module_identity(&name)
             };
@@ -767,7 +767,7 @@ fn output_enables_null_omission(output: &Property) -> bool {
         let Entry::Property(renderer) = entry else {
             return false;
         };
-        if renderer.name != "renderer" {
+        if &*renderer.name != "renderer" {
             return false;
         }
         let entries = renderer
@@ -781,7 +781,7 @@ fn output_enables_null_omission(output: &Property) -> bool {
             entries.iter().any(|entry| {
                 matches!(entry,
                     Entry::Property(prop)
-                        if prop.name == "omitNullProperties"
+                        if &*prop.name == "omitNullProperties"
                             && prop.value.as_ref() == Some(&Expr::Bool(true))
                 )
             })

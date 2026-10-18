@@ -15,13 +15,13 @@ pub(super) fn collect_deprecated(entries: &[Entry]) -> IndexMap<String, Option<S
                 let mut message = None;
                 for e in &ann.body {
                     if let Entry::Property(p) = e
-                        && p.name == "message"
+                        && &*p.name == "message"
                         && let Some(Expr::String(s)) = &p.value
                     {
                         message = Some(s.to_string());
                     }
                 }
-                out.insert(prop.name.clone(), message);
+                out.insert(prop.name.to_string(), message);
             }
         }
     }
@@ -97,7 +97,7 @@ struct AliasResolver<'a> {
 }
 
 impl AliasResolver<'_> {
-    fn expr(&mut self, expr: &mut Expr, shadowed: &HashSet<String>) {
+    fn expr(&mut self, expr: &mut Expr, shadowed: &HashSet<Name>) {
         match expr {
             Expr::Is(value, ty) | Expr::As(value, ty) => {
                 self.expr(value, shadowed);
@@ -150,17 +150,17 @@ impl AliasResolver<'_> {
         }
     }
 
-    fn body(&mut self, entries: &mut crate::parser::Body, shadowed: &HashSet<String>) {
+    fn body(&mut self, entries: &mut crate::parser::Body, shadowed: &HashSet<Name>) {
         let declared = entries.iter().filter_map(|entry| match entry {
             Entry::TypeAlias(name, _) | Entry::ClassDef(name, ..) => Some(name),
             _ => None,
         });
-        let mut inner_shadowed = None::<HashSet<String>>;
+        let mut inner_shadowed = None::<HashSet<Name>>;
         for name in declared {
-            if !shadowed.contains(name) {
+            if !shadowed.contains(name.as_str()) {
                 inner_shadowed
                     .get_or_insert_with(|| shadowed.clone())
-                    .insert(name.clone());
+                    .insert(Name::from(name.as_str()));
             }
         }
         let shadowed = inner_shadowed.as_ref().unwrap_or(shadowed);
@@ -169,7 +169,7 @@ impl AliasResolver<'_> {
         }
     }
 
-    fn entry(&mut self, entry: &mut Entry, shadowed: &HashSet<String>) {
+    fn entry(&mut self, entry: &mut Entry, shadowed: &HashSet<Name>) {
         match entry {
             Entry::Property(prop) => {
                 let prop = Arc::make_mut(prop);
@@ -209,7 +209,7 @@ impl AliasResolver<'_> {
     fn resolved_alias(
         &mut self,
         name: &str,
-        shadowed: &HashSet<String>,
+        shadowed: &HashSet<Name>,
     ) -> Option<crate::parser::TypeExpr> {
         if shadowed.contains(name) || self.expanding.iter().any(|n| n == name) {
             return None;
@@ -223,7 +223,7 @@ impl AliasResolver<'_> {
         Some(ty)
     }
 
-    fn ty(&mut self, ty: &mut crate::parser::TypeExpr, shadowed: &HashSet<String>) {
+    fn ty(&mut self, ty: &mut crate::parser::TypeExpr, shadowed: &HashSet<Name>) {
         use crate::parser::TypeExpr;
         match ty {
             TypeExpr::Named(name) => {
@@ -1071,9 +1071,9 @@ fn members<'a>(
 
 /// Whether `name` is a method of the object `src` describes.
 fn is_method(src: &ObjectSource, name: &str) -> bool {
-    src.entries
-        .iter()
-        .any(|entry| matches!(entry, Entry::Property(prop) if prop.is_method && prop.name == name))
+    src.entries.iter().any(
+        |entry| matches!(entry, Entry::Property(prop) if prop.is_method && &*prop.name == name),
+    )
 }
 
 /// The result of a `map`, `flatMap` or `filter` on a collection of `kind`:
