@@ -700,7 +700,24 @@ fn collect_sibling_field_refs_entries_in(
     // binding phases.
     // An explicit replacement can restore the proof, but a bare `module`
     // initializer may still resolve to the unknown inherited receiver.
-    let shadowed = shadowed
+    // A direct local may establish a proof, but its initializer uses the incoming scope.
+    let initializer_shadowed = shadowed && !inherits_receiver;
+    let shadowed = (shadowed
+        || entries.iter().any(|entry| {
+            matches!(entry, Entry::Property(prop)
+            if &*prop.name == "module"
+                    && has_modifier(&prop.modifiers, Modifier::Local)
+                    && prop.modifiers.iter().all(|modifier| {
+                        matches!(modifier, Modifier::Local | Modifier::Const)
+                    })
+                    && prop.type_ann.is_none()
+                && prop.value.as_ref().is_some_and(|value| {
+                    is_proven_non_module(value, initializer_shadowed)
+                })
+                && !receiver_entries.iter().any(|entry| {
+                    may_write_receiver(entry, &["module"], Some(prop))
+                }))
+        }))
         && (!inherits_receiver
             || entries
                 .iter()
@@ -708,7 +725,7 @@ fn collect_sibling_field_refs_entries_in(
         && entries.iter().all(|entry| match entry {
             Entry::Property(prop) if &*prop.name == "module" => property_is_proven_non_module(
                 prop,
-                shadowed && !inherits_receiver,
+                initializer_shadowed,
                 prop.value.is_none()
                     && (fresh_receiver
                         || receiver_base
@@ -721,7 +738,11 @@ fn collect_sibling_field_refs_entries_in(
         match entry {
             Entry::Property(prop) => {
                 // Computing the replacement may still read the inherited receiver.
-                let property_shadowed = shadowed && !(inherits_receiver && &*prop.name == "module");
+                let property_shadowed = if &*prop.name == "module" {
+                    initializer_shadowed
+                } else {
+                    shadowed
+                };
                 if let Some(ty) = &prop.type_ann {
                     collect_sibling_field_refs_type_in(ty, refs, property_shadowed);
                 }

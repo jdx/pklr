@@ -2613,6 +2613,73 @@ fn narrowed_import_keeps_sibling_receivers_for_generated_children() {
 }
 
 #[test]
+fn narrowed_import_acquires_fresh_class_local_module_proofs() {
+    let temp = TestTempDir::new("pklr_test_class_local_module_proofs");
+    let dir = temp.path();
+    let main = dir.join("main.pkl");
+    let dep = dir.join("dep.pkl");
+    std::fs::write(
+        &main,
+        "import \"dep.pkl\" as Dep\nresult = (new Dep.C {}).ok\n",
+    )
+    .unwrap();
+    let mut expressions = Vec::new();
+    for (top_modifier, local_modifier, reader_modifier) in [
+        ("", "local", "fixed"),
+        ("const ", "local const", "const"),
+        ("const ", "const local", "const"),
+    ] {
+        for access in ["`module`.good", "`module`[\"good\"]"] {
+            for early in [true, false] {
+                let local = format!("{local_modifier} `module` = new Dynamic {{ good = true }}");
+                let reader = format!("{reader_modifier} ok = {access}");
+                let body = if early {
+                    format!("{local}\n{reader}")
+                } else {
+                    format!("{reader}\n{local}")
+                };
+                let declarations = format!("class C {{\n{body}\n}}\n");
+                std::fs::write(
+                    &dep,
+                    format!("{top_modifier}good = false\n{declarations}result = (new C {{}}).ok\n"),
+                )
+                .unwrap();
+                assert_eq!(pklr::eval_to_json(&dep).unwrap()["result"], true);
+                expressions.push(format!(
+                    "{top_modifier}good = import(\"missing.pkl\")\n{declarations}"
+                ));
+            }
+        }
+    }
+    for source in expressions {
+        std::fs::write(&dep, &source).unwrap();
+        let value = pklr::eval_to_json(&main).unwrap_or_else(|error| panic!("{source}: {error}"));
+        assert_eq!(value, serde_json::json!({"result": true}));
+    }
+}
+
+#[test]
+fn narrowed_import_keeps_class_local_module_initializer_reads() {
+    let temp = TestTempDir::new("pklr_test_class_local_module_initializer_reads");
+    let dir = temp.path();
+    let main = dir.join("main.pkl");
+    let dep = dir.join("dep.pkl");
+    std::fs::write(&main, "import \"dep.pkl\" as Dep\nresult = Dep.result\n").unwrap();
+    for initializer in ["new Dynamic { good = `module`.good }", "`module`"] {
+        for access in ["`module`.good", "`module`[\"good\"]"] {
+            let source = format!(
+                "good = true\nclass C {{\nlocal `module` = {initializer}\nfixed ok = {access}\n}}\nresult = (new C {{}}).ok\n"
+            );
+            std::fs::write(&dep, &source).unwrap();
+            assert_eq!(pklr::eval_to_json(&dep).unwrap()["result"], true);
+            let value =
+                pklr::eval_to_json(&main).unwrap_or_else(|error| panic!("{source}: {error}"));
+            assert_eq!(value, serde_json::json!({"result": true}));
+        }
+    }
+}
+
+#[test]
 fn narrowed_import_keeps_class_and_alias_property_bases() {
     let temp = TestTempDir::new("pklr_test_class_and_alias_property_bases");
     let dir = temp.path();
