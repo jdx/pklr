@@ -7,6 +7,7 @@ mod common;
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 // The CA and leaf are deliberately backdated and valid through 2036 so this
@@ -102,6 +103,70 @@ fn reqwest_only_fetches_remote_imports() {
 
     assert_eq!(json["result"], expected);
     assert_eq!(server.requests(), routes.len());
+}
+
+#[test]
+fn reqwest_client_factory_is_not_called_without_remote_imports() {
+    let path = common::write_entry("reqwest_factory_local_only", "main.pkl", "result = 1 + 1\n");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = calls.clone();
+
+    let json = pklr::EvaluatorBuilder::new()
+        .http_client_with(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok(pklr::reqwest::Client::new())
+        })
+        .eval_to_json(&path)
+        .unwrap();
+
+    assert_eq!(json["result"], 2);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn reqwest_client_factory_builds_the_client_once_for_remote_imports() {
+    let (routes, expected) = common::fan_out_routes(3);
+    let server = common::DelayedServer::start(&common::borrow_routes(&routes), common::DELAY);
+    let path = common::write_entry(
+        "reqwest_factory_remote_import",
+        "main.pkl",
+        "import \"https://example.test/Main.pkl\" as Main\nresult = Main.total\n",
+    );
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = calls.clone();
+
+    let json = pklr::EvaluatorBuilder::new()
+        .http_client_with(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok(pklr::reqwest::Client::new())
+        })
+        .http_rewrites([format!("https://example.test/={}/", server.base)])
+        .eval_to_json(&path)
+        .unwrap();
+
+    assert_eq!(json["result"], expected);
+    assert_eq!(server.requests(), routes.len());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn reqwest_client_factory_error_fails_the_remote_import() {
+    let path = common::write_entry(
+        "reqwest_factory_error",
+        "main.pkl",
+        "import \"https://example.test/Main.pkl\" as Main\nresult = Main.total\n",
+    );
+
+    let error = pklr::EvaluatorBuilder::new()
+        .http_client_with(|| Err("invalid proxy URL".to_owned()))
+        .eval_to_json(&path)
+        .unwrap_err()
+        .to_string();
+
+    assert!(
+        error.contains("failed to build HTTP client: invalid proxy URL"),
+        "{error}"
+    );
 }
 
 #[test]

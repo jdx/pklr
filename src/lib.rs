@@ -81,7 +81,7 @@ pub struct EvaluatorBuilder {
     #[cfg(feature = "http")]
     agent: Option<ureq::Agent>,
     #[cfg(feature = "reqwest")]
-    client: Option<reqwest::Client>,
+    client: Option<capabilities::LazyClient>,
     http_rewrites: Vec<String>,
     package_cache_dir: Option<std::path::PathBuf>,
     offline: bool,
@@ -117,7 +117,21 @@ impl EvaluatorBuilder {
     /// [`http_agent`](Self::http_agent).
     #[cfg(feature = "reqwest")]
     pub fn http_client(mut self, client: reqwest::Client) -> Self {
-        self.client = Some(client);
+        self.client = Some(capabilities::LazyClient::ready(client));
+        self
+    }
+
+    /// Like [`http_client`](Self::http_client), but `factory` builds the
+    /// client on the first HTTP request. Building a `reqwest` client loads the
+    /// platform's root certificates, which an evaluation that reads only local
+    /// files never needs. A factory error fails that request with an
+    /// evaluation error.
+    #[cfg(feature = "reqwest")]
+    pub fn http_client_with(
+        mut self,
+        factory: impl Fn() -> std::result::Result<reqwest::Client, String> + Send + Sync + 'static,
+    ) -> Self {
+        self.client = Some(capabilities::LazyClient::from_factory(factory));
         self
     }
 
@@ -185,12 +199,12 @@ impl EvaluatorBuilder {
     pub fn build(self) -> Evaluator {
         #[cfg(all(feature = "reqwest", feature = "http"))]
         let (capabilities, agent) = match self.client {
-            Some(client) => (Some(NativeCapabilities::with_reqwest_client(client)), None),
+            Some(client) => (Some(NativeCapabilities::with_lazy_client(client)), None),
             None => (None, self.agent),
         };
         #[cfg(all(feature = "reqwest", not(feature = "http")))]
         let capabilities = match self.client {
-            Some(client) => NativeCapabilities::with_reqwest_client(client),
+            Some(client) => NativeCapabilities::with_lazy_client(client),
             None => NativeCapabilities::new(),
         };
         #[cfg(all(feature = "http", not(feature = "reqwest")))]
