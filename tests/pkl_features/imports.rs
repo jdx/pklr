@@ -2200,6 +2200,7 @@ fn narrowed_import_ignores_shadowed_module_in_constraints() {
     for constraint in [
         "let (`module` = new Dynamic { bad = true }) `module`.bad",
         "new Listing { for (`module` in new Listing { new Dynamic { bad = true } }) { `module`.bad } }.length == 1",
+        "let (`module` = new Dynamic { bad = true }) new Listing { for (`module` in new Listing { `module` }) { `module`.bad } }.length == 1",
         "new Listing { for (`module` in new Mapping { [\"k\"] = new Dynamic { bad = true } }) { `module`.bad } }.length == 1",
     ] {
         std::fs::write(
