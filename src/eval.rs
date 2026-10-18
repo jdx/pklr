@@ -4692,35 +4692,45 @@ impl Evaluator {
         }
 
         for (entry_index, entry) in entries.iter().enumerate() {
-            let child_scope_before = child_scope.clone();
-            let all_props_before = all_props.clone();
-            let map_before = map.clone();
-            let elements_before = elements.clone();
-            let generated_before = generated.clone();
-            let member_entry_indices_before = member_entry_indices.clone();
-            let non_const_members_before = non_const_members.clone();
-            let bound_members_before = bound_members.clone();
-            let failed_locals_before = failed_locals.clone();
-            let failed_properties_before = failed_properties.clone();
-            let this_aliases_before = this_aliases.clone();
-            let inherited_seeded_before = inherited_seeded.clone();
-            let defined_by_layer_before = defined_by_layer.clone();
+            // Only a failure while locals are still pending is deferred and
+            // retried, so the state is snapshotted only then. Entries never add
+            // to `failed_locals`, so empty before means empty after and the
+            // rollback arm below cannot be taken.
+            let rollback = (!failed_locals.is_empty()).then(|| {
+                (
+                    child_scope.clone(),
+                    all_props.clone(),
+                    map.clone(),
+                    elements.clone(),
+                    generated.clone(),
+                    member_entry_indices.clone(),
+                    non_const_members.clone(),
+                    bound_members.clone(),
+                    failed_locals.clone(),
+                    failed_properties.clone(),
+                    this_aliases.clone(),
+                    inherited_seeded.clone(),
+                    defined_by_layer.clone(),
+                )
+            });
             match eval_output_entry!(entry_index, entry) {
                 Ok(()) => {}
-                Err(Error::Eval(message)) if !failed_locals.is_empty() => {
-                    child_scope = child_scope_before;
-                    all_props = all_props_before;
-                    map = map_before;
-                    elements = elements_before;
-                    generated = generated_before;
-                    member_entry_indices = member_entry_indices_before;
-                    non_const_members = non_const_members_before;
-                    bound_members = bound_members_before;
-                    failed_locals = failed_locals_before;
-                    failed_properties = failed_properties_before;
-                    this_aliases = this_aliases_before;
-                    inherited_seeded = inherited_seeded_before;
-                    defined_by_layer = defined_by_layer_before;
+                Err(Error::Eval(message)) if rollback.is_some() && !failed_locals.is_empty() => {
+                    (
+                        child_scope,
+                        all_props,
+                        map,
+                        elements,
+                        generated,
+                        member_entry_indices,
+                        non_const_members,
+                        bound_members,
+                        failed_locals,
+                        failed_properties,
+                        this_aliases,
+                        inherited_seeded,
+                        defined_by_layer,
+                    ) = rollback.expect("checked by the guard");
                     failed_entries.push((entry_index, message));
                 }
                 Err(error) => return Err(error),
