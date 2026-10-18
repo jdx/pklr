@@ -1078,9 +1078,13 @@ fn collect_sibling_field_refs_expr_in(
             // `module.field` reads in the checked type's constraints.
             collect_sibling_field_refs_type_in(ty, refs, shadowed);
         }
-        Expr::Lambda(_, body) => {
-            collect_sibling_field_refs_expr_in(body, refs, include_this, shadowed)
-        }
+        // A parameter named `module` replaces any outer shadow with an unknown value.
+        Expr::Lambda(params, body) => collect_sibling_field_refs_expr_in(
+            body,
+            refs,
+            include_this,
+            shadowed && !params.iter().any(|param| param == "module"),
+        ),
         Expr::Unop(_, body)
         | Expr::Throw(body)
         | Expr::Trace(body, _)

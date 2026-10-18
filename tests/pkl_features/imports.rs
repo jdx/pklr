@@ -2241,6 +2241,7 @@ fn narrowed_import_ignores_shadowed_module_in_constraints() {
     for constraint in [
         "let (`module` = module) `module`.bad",
         "let (real = module) let (`module` = new Dynamic { bad = false }) let (`module` = real) `module`.bad",
+        "let (real = module) let (`module` = new Dynamic { bad = false }) ((`module`) -> new Listing { for (`module` in new Listing { `module` }) { `module`.bad } }.length == 1).apply(real)",
     ] {
         std::fs::write(
             dir.join("types.pkl"),
