@@ -629,9 +629,11 @@ fn collect_sibling_field_refs_entries_in(
                 collect_sibling_field_refs_expr_in(&fgen.collection, refs, false, shadowed);
                 // Keys are integers or strings; values hide `module` only when
                 // every one of them is certainly not the module.
-                let shadowed = shadowed
-                    || fgen.key_var.as_deref() == Some("module")
-                    || (fgen.val_var == "module" && has_only_non_module_values(&fgen.collection));
+                let shadowed = if fgen.val_var == "module" {
+                    has_only_non_module_values(&fgen.collection)
+                } else {
+                    shadowed || fgen.key_var.as_deref() == Some("module")
+                };
                 collect_sibling_field_refs_entries_in(&fgen.body, refs, shadowed);
             }
             Entry::WhenGenerator(wgen) => {
@@ -1062,7 +1064,13 @@ fn collect_sibling_field_refs_expr_in(
                 body,
                 refs,
                 include_this,
-                shadowed || (name == "module" && is_proven_non_module(value)),
+                // Rebinding `module` replaces any outer shadow. Inside one, a
+                // bare `module` is itself not the module.
+                if name == "module" {
+                    is_proven_non_module(value) || (shadowed && is_module_name(value))
+                } else {
+                    shadowed
+                },
             );
         }
         Expr::Is(value, ty) | Expr::As(value, ty) => {

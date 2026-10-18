@@ -2235,16 +2235,27 @@ fn narrowed_import_ignores_shadowed_module_in_constraints() {
         assert!(pklr::eval_to_json(&main).is_err(), "{constraint}");
     }
 
-    // An alias of the module keeps the module member it reads.
-    std::fs::write(
-        dir.join("types.pkl"),
-        "bad = true\ntypealias Check = Boolean(let (`module` = module) `module`.bad)\nclass C { ok: Check = true }\n",
-    )
-    .unwrap();
-    assert_eq!(
-        pklr::eval_to_json(&main).unwrap(),
-        serde_json::json!({"result": {"ok": true}})
-    );
+    // An alias of the module keeps the module member it reads, including one
+    // rebound after an outer shadow.
+    for constraint in [
+        "let (`module` = module) `module`.bad",
+        "let (real = module) let (`module` = new Dynamic { bad = false }) let (`module` = real) `module`.bad",
+    ] {
+        std::fs::write(
+            dir.join("types.pkl"),
+            format!(
+                "bad = true\ntypealias Check = Boolean({constraint})\nclass C {{ ok: Check = true }}\n"
+            ),
+        )
+        .unwrap();
+        let value =
+            pklr::eval_to_json(&main).unwrap_or_else(|error| panic!("{constraint}: {error}"));
+        assert_eq!(
+            value,
+            serde_json::json!({"result": {"ok": true}}),
+            "{constraint}"
+        );
+    }
 }
 
 #[test]
