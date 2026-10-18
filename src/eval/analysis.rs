@@ -1068,8 +1068,14 @@ fn collect_sibling_field_refs_expr_in(
             if let Expr::ObjectBody(entries) = right.as_ref()
                 && matches!(op, BinOp::Add)
             {
-                let inherits_receiver = !matches!(left.as_ref(), Expr::New(name, entries, _)
-                    if matches!(name.as_deref(), None | Some("Dynamic")) && entries.is_empty());
+                let inherits_receiver = shadowed
+                    && !matches!(left.as_ref(), Expr::New(name, entries, _)
+                    if matches!(name.as_deref(), None | Some("Dynamic"))
+                        && !body_has(entries, &|entry| match entry {
+                            Entry::Property(prop) => &*prop.name == "module",
+                            Entry::DynProperty(..) | Entry::Predicate(..) | Entry::Spread(_) => true,
+                            _ => false,
+                        }));
                 collect_sibling_field_refs_entries_in(entries, refs, shadowed, inherits_receiver);
             } else {
                 collect_sibling_field_refs_expr_in(right, refs, include_this, shadowed);

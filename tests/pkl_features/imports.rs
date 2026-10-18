@@ -2408,6 +2408,48 @@ fn narrowed_import_keeps_amendment_reads_before_module_replacement() {
 }
 
 #[test]
+fn narrowed_import_keeps_lexical_module_for_fresh_nonempty_amendment_bases() {
+    let temp = TestTempDir::new("pklr_test_fresh_amendment_module_shadow");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as Dep\nresult = Dep.result\n",
+    )
+    .unwrap();
+    for body in [
+        "x = 1",
+        "when (true) { x = 1 }",
+        "when (true) { when (true) { x = 1 } }",
+    ] {
+        for constructor in ["new", "new Dynamic"] {
+            std::fs::write(dir.join("dep.pkl"), format!("bad = import(\"missing.pkl\")\nresult = let (`module` = new Dynamic {{ bad = false }}) (({constructor} {{ {body} }}) {{ ok = `module`.bad }}).ok\n")).unwrap();
+            let value = pklr::eval_to_json(&dir.join("main.pkl"))
+                .unwrap_or_else(|error| panic!("{constructor} {{ {body} }}: {error}"));
+            assert_eq!(value, serde_json::json!({"result": false}));
+        }
+    }
+}
+
+#[test]
+fn narrowed_import_keeps_module_receivers_generated_in_fresh_bases() {
+    let temp = TestTempDir::new("pklr_test_generated_amendment_module_receiver");
+    let dir = temp.path();
+    let main = dir.join("main.pkl");
+    let dep = dir.join("dep.pkl");
+    std::fs::write(&main, "import \"dep.pkl\" as Dep\nresult = Dep.result\n").unwrap();
+    for body in [
+        "`module` = real",
+        "when (true) { `module` = real }",
+        "for (value in List(1)) { [\"module\"] = real }",
+    ] {
+        std::fs::write(&dep, format!("good = true\nresult = let (real = module) let (`module` = new Dynamic {{ good = false }}) ((new Dynamic {{ {body} }}) {{ ok = `module`.good }}).ok\n")).unwrap();
+        let expected = pklr::eval_to_json(&dep).unwrap()["result"].clone();
+        let value = pklr::eval_to_json(&main).unwrap_or_else(|error| panic!("{body}: {error}"));
+        assert_eq!(value, serde_json::json!({"result": expected}));
+    }
+}
+
+#[test]
 fn imported_class_retains_its_type_alias_constraint_bindings() {
     let temp = TestTempDir::new("pklr_test_imported_class_constraint_scope");
     let dir = temp.path();
