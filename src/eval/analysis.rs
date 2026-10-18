@@ -616,7 +616,7 @@ fn collect_sibling_field_refs_entries_in(
     // binding phases.
     let shadowed = shadowed
         && entries.iter().all(|entry| match entry {
-            Entry::Property(prop) if prop.name == "module" => prop
+            Entry::Property(prop) if &*prop.name == "module" => prop
                 .value
                 .as_ref()
                 .is_some_and(|value| is_proven_non_module(value, shadowed)),
