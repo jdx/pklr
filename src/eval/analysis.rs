@@ -614,6 +614,40 @@ pub(super) fn collect_sibling_field_refs_entries(entries: &[Entry], refs: &mut H
     collect_sibling_field_refs_entries_in(entries, refs, false, false);
 }
 
+fn has_fresh_property_base(entries: &[Entry], amended: &Arc<Property>, body: &[Entry]) -> bool {
+    // ponytail: prove one direct local constructor, with an O(n) scan per amendment.
+    // Track proven constructors once if shadowed bodies with many amendments become hot.
+    if !amended.modifiers.is_empty()
+        || amended.type_ann.is_some()
+        || entries.iter().chain(body).any(|entry| {
+            matches!(
+                entry,
+                Entry::DynProperty(..)
+                    | Entry::Predicate(..)
+                    | Entry::Spread(_)
+                    | Entry::ForGenerator(_)
+                    | Entry::WhenGenerator(_)
+            )
+        })
+    {
+        return false;
+    }
+    let mut bases = entries.iter().filter_map(|entry| match entry {
+        Entry::Property(base) if base.name == amended.name && !Arc::ptr_eq(base, amended) => {
+            Some(base)
+        }
+        _ => None,
+    });
+    let Some(base) = bases.next() else {
+        return false;
+    };
+    bases.next().is_none()
+        && base.modifiers == [Modifier::Local]
+        && base.type_ann.is_none()
+        && base.body.is_none()
+        && base.value.as_ref().is_some_and(is_fresh_non_module_base)
+}
+
 /// `shadowed` means a lexical binding named `module` hides the module object,
 /// so `module.x` there is not a module read.
 fn collect_sibling_field_refs_entries_in(
@@ -653,8 +687,10 @@ fn collect_sibling_field_refs_entries_in(
                     collect_sibling_field_refs_expr_in(expr, refs, false, property_shadowed);
                 }
                 if let Some(body) = &prop.body {
-                    // The amended value can inherit a different `module` binding.
-                    collect_sibling_field_refs_entries_in(body, refs, shadowed, true);
+                    // A direct local constructor can prove this receiver cannot supply the module.
+                    let inherits_receiver =
+                        !shadowed || !has_fresh_property_base(entries, prop, body);
+                    collect_sibling_field_refs_entries_in(body, refs, shadowed, inherits_receiver);
                 }
             }
             Entry::DynProperty(key, value) | Entry::Predicate(key, value) => {
@@ -1068,14 +1104,7 @@ fn collect_sibling_field_refs_expr_in(
             if let Expr::ObjectBody(entries) = right.as_ref()
                 && matches!(op, BinOp::Add)
             {
-                let inherits_receiver = shadowed
-                    && !matches!(left.as_ref(), Expr::New(name, entries, _)
-                    if matches!(name.as_deref(), None | Some("Dynamic"))
-                        && !body_has(entries, &|entry| match entry {
-                            Entry::Property(prop) => &*prop.name == "module",
-                            Entry::DynProperty(..) | Entry::Predicate(..) | Entry::Spread(_) => true,
-                            _ => false,
-                        }));
+                let inherits_receiver = shadowed && !is_fresh_non_module_base(left);
                 collect_sibling_field_refs_entries_in(entries, refs, shadowed, inherits_receiver);
             } else {
                 collect_sibling_field_refs_expr_in(right, refs, include_this, shadowed);
@@ -1177,6 +1206,17 @@ pub(super) fn property_reference_names(prop: &Property) -> HashSet<Name> {
         collect_sibling_field_refs_entries(body, &mut refs);
     }
     refs
+}
+
+fn is_fresh_non_module_base(expr: &Expr) -> bool {
+    matches!(expr, Expr::New(name, entries, _)
+    if matches!(name.as_deref(), None | Some("Dynamic"))
+        && !body_has(entries, &|entry| match entry {
+            Entry::Property(prop) => &*prop.name == "module"
+                && prop.value.as_ref().is_none_or(|value| !is_proven_non_module(value, false)),
+            Entry::DynProperty(..) | Entry::Predicate(..) | Entry::Spread(_) => true,
+            _ => false,
+        }))
 }
 
 /// Whether `expr` is certainly not the module object: a literal or a freshly

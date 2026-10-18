@@ -2431,6 +2431,31 @@ fn narrowed_import_keeps_lexical_module_for_fresh_nonempty_amendment_bases() {
 }
 
 #[test]
+fn narrowed_import_keeps_proven_non_module_receivers_in_fresh_bases() {
+    let temp = TestTempDir::new("pklr_test_proven_fresh_amendment_receiver");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as Dep\nresult = Dep.result\n",
+    )
+    .unwrap();
+    for (body, expected) in [
+        ("`module` = new Dynamic { bad = true }", true),
+        ("local `module` = new Dynamic { bad = true }", true),
+        (
+            "when (true) { `module` = new Dynamic { bad = true } }",
+            false,
+        ),
+    ] {
+        // Preserve Pklr's unpruned direct/generated receiver binding.
+        std::fs::write(dir.join("dep.pkl"), format!("bad = import(\"missing.pkl\")\nresult = let (`module` = new Dynamic {{ bad = false }}) ((new Dynamic {{ {body} }}) {{ ok = `module`.bad }}).ok\n")).unwrap();
+        let value = pklr::eval_to_json(&dir.join("main.pkl"))
+            .unwrap_or_else(|error| panic!("{body}: {error}"));
+        assert_eq!(value, serde_json::json!({"result": expected}), "{body}");
+    }
+}
+
+#[test]
 fn narrowed_import_keeps_module_receivers_generated_in_fresh_bases() {
     let temp = TestTempDir::new("pklr_test_generated_amendment_module_receiver");
     let dir = temp.path();
@@ -2447,6 +2472,39 @@ fn narrowed_import_keeps_module_receivers_generated_in_fresh_bases() {
         let value = pklr::eval_to_json(&main).unwrap_or_else(|error| panic!("{body}: {error}"));
         assert_eq!(value, serde_json::json!({"result": expected}));
     }
+}
+
+#[test]
+fn narrowed_import_keeps_lexical_module_for_fresh_property_bases() {
+    let temp = TestTempDir::new("pklr_test_fresh_property_amendment_module_shadow");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as Dep\nresult = Dep.result\n",
+    )
+    .unwrap();
+    for constructor in ["new", "new Dynamic"] {
+        for base_body in ["", "seed = true", "`module` = new Dynamic { bad = true }"] {
+            std::fs::write(dir.join("dep.pkl"), format!("bad = import(\"missing.pkl\")\nresult = let (`module` = new Dynamic {{ bad = true }}) (new Dynamic {{\nlocal value = {constructor} {{ {base_body} }}\nvalue {{ ok = `module`.bad }}\n}}).value.ok\n")).unwrap();
+            let value = pklr::eval_to_json(&dir.join("main.pkl"))
+                .unwrap_or_else(|error| panic!("{constructor} {{ {base_body} }}: {error}"));
+            assert_eq!(value, serde_json::json!({"result": true}));
+        }
+    }
+}
+
+#[test]
+fn narrowed_import_keeps_receivers_from_additional_property_amendments() {
+    let temp = TestTempDir::new("pklr_test_multiple_property_amendment_receivers");
+    let dir = temp.path();
+    let main = dir.join("main.pkl");
+    let dep = dir.join("dep.pkl");
+    std::fs::write(&main, "import \"dep.pkl\" as Dep\nresult = Dep.result\n").unwrap();
+    std::fs::write(&dep, "good = true\nresult = let (real = module) let (`module` = new Dynamic { good = false }) (new Dynamic {\nlocal value = new Dynamic {}\nwhen (true) { value { `module` = real } }\nvalue { ok = `module`.good }\n}).value.ok\n").unwrap();
+    let expected = pklr::eval_to_json(&dep).unwrap()["result"].clone();
+    assert_eq!(expected, true);
+    let value = pklr::eval_to_json(&main).unwrap();
+    assert_eq!(value, serde_json::json!({"result": expected}));
 }
 
 #[test]
