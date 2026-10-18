@@ -2261,6 +2261,32 @@ fn narrowed_import_ignores_shadowed_module_in_constraints() {
 }
 
 #[test]
+fn narrowed_import_keeps_real_module_read_through_inner_object_shadow() {
+    let temp = TestTempDir::new("pklr_test_inner_object_module_shadow");
+    let dir = temp.path();
+    // An object body that declares its own `module` property rebinds the name
+    // for its entries, even though an outer binding proved `module` was not
+    // the module. `real` holds the module, so `good` is a real read.
+    for local in ["local ", ""] {
+        std::fs::write(
+            dir.join("dep.pkl"),
+            format!(
+                "good = true\nresult = let (real = module) let (`module` = new Dynamic {{ good = false }}) (new Dynamic {{\n  {local}`module` = real\n  ok = `module`.good\n}}).ok\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("main.pkl"),
+            "import \"dep.pkl\" as Dep\nresult = Dep.result\n",
+        )
+        .unwrap();
+        let value = pklr::eval_to_json(&dir.join("main.pkl"))
+            .unwrap_or_else(|error| panic!("{local:?}: {error}"));
+        assert_eq!(value, serde_json::json!({"result": true}), "{local:?}");
+    }
+}
+
+#[test]
 fn imported_class_retains_its_type_alias_constraint_bindings() {
     let temp = TestTempDir::new("pklr_test_imported_class_constraint_scope");
     let dir = temp.path();

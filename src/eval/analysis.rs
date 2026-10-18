@@ -608,6 +608,13 @@ fn collect_sibling_field_refs_entries_in(
     refs: &mut HashSet<String>,
     shadowed: bool,
 ) {
+    // An object that declares its own `module` property rebinds the name for
+    // its entries, so an outer proof that `module` is not the module no longer
+    // holds. Treat it as possibly the module rather than model binding phases.
+    let shadowed = shadowed
+        && !entries
+            .iter()
+            .any(|entry| matches!(entry, Entry::Property(prop) if prop.name == "module"));
     for entry in entries {
         match entry {
             Entry::Property(prop) => {
