@@ -2613,6 +2613,48 @@ fn narrowed_import_keeps_sibling_receivers_for_generated_children() {
 }
 
 #[test]
+fn narrowed_import_keeps_class_and_alias_property_bases() {
+    let temp = TestTempDir::new("pklr_test_class_and_alias_property_bases");
+    let dir = temp.path();
+    let main = dir.join("main.pkl");
+    let dep = dir.join("dep.pkl");
+    std::fs::write(&main, "import \"dep.pkl\" as Dep\nresult = Dep.result\n").unwrap();
+    let mut expressions = Vec::new();
+    for declarations in [
+        "class value { `module` = real }",
+        "class Payload { `module` = real }; typealias value = Payload",
+    ] {
+        for access in ["`module`.good", "`module`[\"good\"]"] {
+            for result in [
+                format!(
+                    "((new Dynamic {{ {declarations} }}) {{ value {{ ok = {access} }} }}).value.ok"
+                ),
+                format!(
+                    "((new Dynamic {{}} {{ {declarations} }}) {{ value {{ ok = {access} }} }}).value.ok"
+                ),
+            ] {
+                // Nested class declarations bind Pklr defaults; official Pkl rejects them.
+                let result = format!(
+                    "good = true\nresult = let (real = module) let (`module` = new Dynamic {{ good = false }}) {result}\n"
+                );
+                std::fs::write(&dep, &result).unwrap();
+                assert_eq!(
+                    pklr::eval_to_json(&dep).unwrap()["result"],
+                    true,
+                    "{result}"
+                );
+                expressions.push(result);
+            }
+        }
+    }
+    for result in expressions {
+        std::fs::write(&dep, &result).unwrap();
+        let value = pklr::eval_to_json(&main).unwrap_or_else(|error| panic!("{result}: {error}"));
+        assert_eq!(value, serde_json::json!({"result": true}));
+    }
+}
+
+#[test]
 fn narrowed_import_keeps_body_defined_module_receivers() {
     let temp = TestTempDir::new("pklr_test_body_defined_module_receivers");
     let dir = temp.path();

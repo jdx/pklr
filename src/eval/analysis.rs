@@ -620,6 +620,7 @@ fn may_write_receiver(entry: &Entry, names: &[&str], amended: Option<&Arc<Proper
             names.contains(&prop.name.as_ref())
                 && amended.is_none_or(|amended| !Arc::ptr_eq(prop, amended))
         }
+        Entry::ClassDef(name, ..) | Entry::TypeAlias(name, _) => names.contains(&name.as_str()),
         Entry::ForGenerator(generator) => generator
             .body
             .iter()
