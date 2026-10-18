@@ -2442,6 +2442,7 @@ fn narrowed_import_keeps_proven_non_module_receivers_in_fresh_bases() {
     for (body, expected) in [
         ("`module` = new Dynamic { bad = true }", true),
         ("local `module` = new Dynamic { bad = true }", true),
+        ("`module` = `module`", false),
         (
             "when (true) { `module` = new Dynamic { bad = true } }",
             false,
@@ -2484,7 +2485,12 @@ fn narrowed_import_keeps_lexical_module_for_fresh_property_bases() {
     )
     .unwrap();
     for constructor in ["new", "new Dynamic"] {
-        for base_body in ["", "seed = true", "`module` = new Dynamic { bad = true }"] {
+        for base_body in [
+            "",
+            "seed = true",
+            "`module` = new Dynamic { bad = true }",
+            "`module` = `module`",
+        ] {
             std::fs::write(dir.join("dep.pkl"), format!("bad = import(\"missing.pkl\")\nresult = let (`module` = new Dynamic {{ bad = true }}) (new Dynamic {{\nlocal value = {constructor} {{ {base_body} }}\nvalue {{ ok = `module`.bad }}\n}}).value.ok\n")).unwrap();
             let value = pklr::eval_to_json(&dir.join("main.pkl"))
                 .unwrap_or_else(|error| panic!("{constructor} {{ {base_body} }}: {error}"));
