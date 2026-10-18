@@ -150,6 +150,37 @@ fn reqwest_client_factory_builds_the_client_once_for_remote_imports() {
 }
 
 #[test]
+fn reqwest_client_factory_is_not_called_for_batches_that_send_nothing() {
+    use pklr::{EvalCapabilities, FetchBudget, NativeCapabilities};
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = calls.clone();
+    let mut capabilities = NativeCapabilities::with_reqwest_client_factory(move || {
+        counted.fetch_add(1, Ordering::SeqCst);
+        Ok(pklr::reqwest::Client::new())
+    });
+    let urls = vec!["https://example.test/a.pkl".to_owned()];
+
+    assert!(
+        capabilities
+            .fetch_text_many(&[], &FetchBudget::unlimited())
+            .is_empty()
+    );
+    assert!(
+        capabilities
+            .fetch_bytes_many(&[], &FetchBudget::unlimited())
+            .is_empty()
+    );
+    let spent = FetchBudget::new(0);
+    let texts = capabilities.fetch_text_many(&urls, &spent);
+    let bytes = capabilities.fetch_bytes_many(&urls, &spent);
+
+    assert!(texts.iter().all(Result::is_err) && texts.len() == urls.len());
+    assert!(bytes.iter().all(Result::is_err) && bytes.len() == urls.len());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
 fn reqwest_client_factory_error_fails_the_remote_import() {
     let path = common::write_entry(
         "reqwest_factory_error",

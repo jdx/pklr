@@ -481,6 +481,13 @@ impl EvalCapabilities for NativeCapabilities {
                     crate::Error::Eval(format!("HTTP read failed for {url}: {error}"))
                 })
             }),
+            // A batch that sends no request must not build the client.
+            #[cfg(feature = "reqwest")]
+            Some(HttpBackend::Reqwest(_)) if urls.is_empty() => Vec::new(),
+            #[cfg(feature = "reqwest")]
+            Some(HttpBackend::Reqwest(_)) if budget.is_spent() => {
+                urls.iter().map(|url| Err(budget_spent(url))).collect()
+            }
             #[cfg(feature = "reqwest")]
             Some(HttpBackend::Reqwest(client)) => match client.get() {
                 Ok(client) => reqwest_backend::fetch_text_many(client, urls, budget),
@@ -499,6 +506,13 @@ impl EvalCapabilities for NativeCapabilities {
             #[cfg(feature = "http")]
             Some(HttpBackend::Ureq(agent)) => {
                 fetch_parallel(urls, budget, |url| ureq_fetch_within(agent, url, budget))
+            }
+            // A batch that sends no request must not build the client.
+            #[cfg(feature = "reqwest")]
+            Some(HttpBackend::Reqwest(_)) if urls.is_empty() => Vec::new(),
+            #[cfg(feature = "reqwest")]
+            Some(HttpBackend::Reqwest(_)) if budget.is_spent() => {
+                urls.iter().map(|url| Err(budget_spent(url))).collect()
             }
             #[cfg(feature = "reqwest")]
             Some(HttpBackend::Reqwest(client)) => match client.get() {
