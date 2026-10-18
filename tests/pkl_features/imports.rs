@@ -2467,11 +2467,15 @@ fn narrowed_import_keeps_module_receivers_generated_in_fresh_bases() {
         "`module` = real",
         "when (true) { `module` = real }",
         "for (value in List(1)) { [\"module\"] = real }",
+        "for (`module` in List(real)) { [\"module\"] = `module` }",
     ] {
-        std::fs::write(&dep, format!("good = true\nresult = let (real = module) let (`module` = new Dynamic {{ good = false }}) ((new Dynamic {{ {body} }}) {{ ok = `module`.good }}).ok\n")).unwrap();
-        let expected = pklr::eval_to_json(&dep).unwrap()["result"].clone();
-        let value = pklr::eval_to_json(&main).unwrap_or_else(|error| panic!("{body}: {error}"));
-        assert_eq!(value, serde_json::json!({"result": expected}));
+        for base in ["new Dynamic", "new Dynamic {}"] {
+            std::fs::write(&dep, format!("good = true\nresult = let (real = module) let (`module` = new Dynamic {{ good = false }}) (({base} {{ {body} }}) {{ ok = `module`.good }}).ok\n")).unwrap();
+            let expected = pklr::eval_to_json(&dep).unwrap()["result"].clone();
+            let value = pklr::eval_to_json(&main)
+                .unwrap_or_else(|error| panic!("{base} {{ {body} }}: {error}"));
+            assert_eq!(value, serde_json::json!({"result": expected}));
+        }
     }
 }
 
@@ -2500,6 +2504,60 @@ fn narrowed_import_keeps_lexical_module_for_fresh_property_bases() {
 }
 
 #[test]
+fn narrowed_import_keeps_lexical_module_with_unrelated_property_generators() {
+    let temp = TestTempDir::new("pklr_test_unrelated_property_generators");
+    let dir = temp.path();
+    let main = dir.join("main.pkl");
+    let dep = dir.join("dep.pkl");
+    std::fs::write(&main, "import \"dep.pkl\" as Dep\nresult = Dep.result\n").unwrap();
+    for (surrounding, overlay) in [
+        ("when (true) { unrelated = 1 }", ""),
+        ("when (false) { unrelated = 1 } else { other = 2 }", ""),
+        ("for (n in List(1)) { n }", ""),
+        ("when (true) { for (n in List(1)) { n } }", ""),
+        ("", "when (true) { unrelated = 1 }"),
+        ("", "for (n in List(1)) { n }"),
+    ] {
+        for access in ["`module`.bad", "`module`[\"bad\"]"] {
+            let result = format!(
+                "result = let (`module` = new Dynamic {{ bad = true }}) (new Dynamic {{\nlocal value = new Dynamic {{}}\n{surrounding}\nvalue {{ {overlay}\nok = {access} }}\n}}).value.ok\n"
+            );
+            // The same unpruned expression supplies the receiver-binding oracle.
+            std::fs::write(&dep, format!("bad = false\n{result}")).unwrap();
+            assert_eq!(pklr::eval_to_json(&dep).unwrap()["result"], true);
+            std::fs::write(&dep, format!("bad = import(\"missing.pkl\")\n{result}")).unwrap();
+            let value = pklr::eval_to_json(&main)
+                .unwrap_or_else(|error| panic!("{surrounding:?}, {overlay:?}, {access}: {error}"));
+            assert_eq!(value, serde_json::json!({"result": true}));
+        }
+    }
+}
+
+#[test]
+fn narrowed_import_keeps_generated_property_receiver_writers() {
+    let temp = TestTempDir::new("pklr_test_generated_property_receiver_writers");
+    let dir = temp.path();
+    let main = dir.join("main.pkl");
+    let dep = dir.join("dep.pkl");
+    std::fs::write(&main, "import \"dep.pkl\" as Dep\nresult = Dep.result\n").unwrap();
+    for writer in [
+        "when (true) { value { `module` = real } }",
+        "when (false) { unrelated = 1 } else { value { `module` = real } }",
+        "for (n in List(1)) { [\"value\"] = new Dynamic { `module` = real } }",
+        "when (true) { for (n in List(1)) { [\"value\"] = new Dynamic { `module` = real } } }",
+    ] {
+        for access in ["`module`.good", "`module`[\"good\"]"] {
+            std::fs::write(&dep, format!("good = true\nresult = let (real = module) let (`module` = new Dynamic {{ good = false }}) (new Dynamic {{\nlocal value = new Dynamic {{}}\n{writer}\nvalue {{ ok = {access} }}\n}}).value.ok\n")).unwrap();
+            let expected = pklr::eval_to_json(&dep).unwrap()["result"].clone();
+            assert_eq!(expected, true, "{writer}, {access}");
+            let value = pklr::eval_to_json(&main)
+                .unwrap_or_else(|error| panic!("{writer}, {access}: {error}"));
+            assert_eq!(value, serde_json::json!({"result": expected}));
+        }
+    }
+}
+
+#[test]
 fn narrowed_import_keeps_receivers_from_additional_property_amendments() {
     let temp = TestTempDir::new("pklr_test_multiple_property_amendment_receivers");
     let dir = temp.path();
@@ -2511,6 +2569,73 @@ fn narrowed_import_keeps_receivers_from_additional_property_amendments() {
     assert_eq!(expected, true);
     let value = pklr::eval_to_json(&main).unwrap();
     assert_eq!(value, serde_json::json!({"result": expected}));
+}
+
+#[test]
+fn narrowed_import_keeps_proven_local_base_in_class_receiver() {
+    let temp = TestTempDir::new("pklr_test_class_receiver_local_base");
+    let dir = temp.path();
+    let main = dir.join("main.pkl");
+    let dep = dir.join("dep.pkl");
+    std::fs::write(&main, "import \"dep.pkl\" as Dep\nresult = Dep.result\n").unwrap();
+    for access in ["`module`.bad", "`module`[\"bad\"]"] {
+        let result = format!(
+            "class Holder {{ value: Dynamic = new Dynamic {{}} }}\nresult = let (`module` = new Dynamic {{ bad = true }}) (new Holder {{\nlocal value = new Dynamic {{}}\nvalue {{ ok = {access} }}\n}}).value.ok\n"
+        );
+        std::fs::write(&dep, format!("bad = false\n{result}")).unwrap();
+        assert_eq!(pklr::eval_to_json(&dep).unwrap()["result"], true);
+        std::fs::write(&dep, format!("bad = import(\"missing.pkl\")\n{result}")).unwrap();
+        let value = pklr::eval_to_json(&main).unwrap_or_else(|error| panic!("{access}: {error}"));
+        assert_eq!(value, serde_json::json!({"result": true}));
+    }
+}
+
+#[test]
+fn narrowed_import_keeps_inherited_children_of_fresh_bases() {
+    let temp = TestTempDir::new("pklr_test_fresh_base_inherited_children");
+    let dir = temp.path();
+    let main = dir.join("main.pkl");
+    let dep = dir.join("dep.pkl");
+    std::fs::write(&main, "import \"dep.pkl\" as Dep\nresult = Dep.result\n").unwrap();
+    for access in ["`module`.good", "`module`[\"good\"]"] {
+        for result in [
+            format!(
+                "((new Dynamic {{ value = new Dynamic {{ `module` = real }} }}) {{ value {{ ok = {access} }} }}).value.ok"
+            ),
+            format!(
+                "(new Dynamic {{ local value = new Dynamic {{ child = new Dynamic {{ `module` = real }} }}; value {{ child {{ ok = {access} }} }} }}).value.child.ok"
+            ),
+        ] {
+            std::fs::write(&dep, format!("good = true\nresult = let (real = module) let (`module` = new Dynamic {{ good = false }}) {result}\n")).unwrap();
+            assert_eq!(pklr::eval_to_json(&dep).unwrap()["result"], true);
+            let value =
+                pklr::eval_to_json(&main).unwrap_or_else(|error| panic!("{result}: {error}"));
+            assert_eq!(value, serde_json::json!({"result": true}));
+        }
+    }
+}
+
+#[test]
+fn narrowed_import_keeps_lexical_module_for_fresh_receiver_chains() {
+    let temp = TestTempDir::new("pklr_test_fresh_receiver_chains");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"dep.pkl\" as Dep\nresult = Dep.result\n",
+    )
+    .unwrap();
+    for result in [
+        "(new Dynamic { value { ok = `module`.bad } }).value.ok",
+        "(new Dynamic { value { child { ok = `module`.bad } } }).value.child.ok",
+        "((new Dynamic {} { seed = true }) { ok = `module`.bad }).ok",
+        "((new Dynamic {} { seed = true } { other = true }) { ok = `module`.bad }).ok",
+        "(new Dynamic { local value = new Dynamic {} { seed = true }; value { ok = `module`.bad } }).value.ok",
+    ] {
+        std::fs::write(dir.join("dep.pkl"), format!("bad = import(\"missing.pkl\")\nresult = let (`module` = new Dynamic {{ bad = false }}) {result}\n")).unwrap();
+        let value = pklr::eval_to_json(&dir.join("main.pkl"))
+            .unwrap_or_else(|error| panic!("{result}: {error}"));
+        assert_eq!(value, serde_json::json!({"result": false}), "{result}");
+    }
 }
 
 #[test]

@@ -20,7 +20,7 @@ default = [
 ]
 # The evaluator without any host IO. Embedders supply their own
 # `EvalCapabilities`.
-eval-core = ["dep:fancy-regex", "dep:indexmap", "dep:md-5", "dep:rustc-hash", "dep:serde_json", "dep:sha1", "dep:sha2", "dep:url"]
+eval-core = ["dep:fancy-regex", "dep:hashbrown", "dep:indexmap", "dep:md-5", "dep:rustc-hash", "dep:serde_json", "dep:sha1", "dep:sha2", "dep:url"]
 # `NativeCapabilities`: std file system and environment access.
 native-io = ["eval-core"]
 # HTTP imports and packages for `NativeCapabilities`, via ureq and rustls.
@@ -39,6 +39,8 @@ async = ["http", "reqwest"]
 
 [dependencies]
 fancy-regex = { version = "0.19", optional = true }
+# Keep IndexMap's hash-table entry path inlineable across evaluator codegen units.
+hashbrown   = { version = "0.17", default-features = false, features = ["inline-more"], optional = true }
 indexmap    = { version = "2", optional = true }
 libm        = "0.2.16"
 md-5       = { version = "0.11", optional = true }

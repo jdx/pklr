@@ -760,6 +760,7 @@ name = "pklr"
 version = "5.1.2"
 dependencies = [
  "fancy-regex",
+ "hashbrown",
  "indexmap",
  "libm",
  "md-5",
