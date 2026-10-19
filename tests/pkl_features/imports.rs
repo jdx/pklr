@@ -2913,6 +2913,60 @@ fn narrowed_import_keeps_lexical_module_with_same_named_child_writers() {
 }
 
 #[test]
+fn narrowed_import_keeps_local_property_bases_inside_generators() {
+    let temp = TestTempDir::new("pklr_test_generated_local_property_bases");
+    let dir = temp.path();
+    let main = dir.join("main.pkl");
+    let dep = dir.join("dep.pkl");
+    std::fs::write(&main, "import \"dep.pkl\" as Dep\nresult = Dep.result\n").unwrap();
+    let mut cases = Vec::new();
+    for access in ["`module`.bad", "`module`[\"bad\"]"] {
+        for modifiers in ["local", "const local"] {
+            for nested in [false, true] {
+                let reader = if nested {
+                    format!("value {{ child {{ ok = {access} }} }}")
+                } else {
+                    format!("value {{ ok = {access} }}")
+                };
+                let body = format!("{modifiers} value = new Dynamic {{}}\n{reader}");
+                for branch in [
+                    format!("when (true) {{ {body} }}"),
+                    format!("when (false) {{ other = 1 }} else {{ {body} }}"),
+                    format!("when (true) {{ when (true) {{ {body} }} }}"),
+                    format!(
+                        "when (true) {{ {modifiers} value = new Dynamic {{}}\nwhen (true) {{ {reader} }} }}"
+                    ),
+                    format!(
+                        "when (true) {{ {modifiers} value = new Dynamic {{}}\nwhen (false) {{ other = 1 }} else {{ {reader} }} }}"
+                    ),
+                ] {
+                    let field = if nested {
+                        "value.child.ok"
+                    } else {
+                        "value.ok"
+                    };
+                    let result = format!(
+                        "result = let (`module` = new Dynamic {{ bad = true }}) (new Dynamic {{ {branch} }}).{field}\n"
+                    );
+                    std::fs::write(&dep, format!("bad = false\n{result}")).unwrap();
+                    assert_eq!(
+                        pklr::eval_to_json(&dep).unwrap()["result"],
+                        true,
+                        "{result}"
+                    );
+                    cases.push(result);
+                }
+            }
+        }
+    }
+    for result in cases {
+        std::fs::write(&dep, format!("bad = import(\"missing.pkl\")\n{result}")).unwrap();
+        let value = pklr::eval_to_json(&main).unwrap_or_else(|error| panic!("{result}: {error}"));
+        assert_eq!(value, serde_json::json!({"result": true}));
+    }
+}
+
+#[test]
 fn narrowed_import_keeps_generated_property_receiver_writers() {
     let temp = TestTempDir::new("pklr_test_generated_property_receiver_writers");
     let dir = temp.path();
@@ -2926,12 +2980,22 @@ fn narrowed_import_keeps_generated_property_receiver_writers() {
         "when (true) { for (n in List(1)) { [\"value\"] = new Dynamic { `module` = real } } }",
     ] {
         for access in ["`module`.good", "`module`[\"good\"]"] {
-            std::fs::write(&dep, format!("good = true\nresult = let (real = module) let (`module` = new Dynamic {{ good = false }}) (new Dynamic {{\nlocal value = new Dynamic {{}}\n{writer}\nvalue {{ ok = {access} }}\n}}).value.ok\n")).unwrap();
-            let expected = pklr::eval_to_json(&dep).unwrap()["result"].clone();
-            assert_eq!(expected, true, "{writer}, {access}");
-            let value = pklr::eval_to_json(&main)
-                .unwrap_or_else(|error| panic!("{writer}, {access}: {error}"));
-            assert_eq!(value, serde_json::json!({"result": expected}));
+            for generated_base in [false, true] {
+                let body = format!(
+                    "local value = new Dynamic {{}}\n{writer}\nvalue {{ ok = {access} }}"
+                );
+                let body = if generated_base {
+                    format!("when (true) {{ {body} }}")
+                } else {
+                    body
+                };
+                std::fs::write(&dep, format!("good = true\nresult = let (real = module) let (`module` = new Dynamic {{ good = false }}) (new Dynamic {{\n{body}\n}}).value.ok\n")).unwrap();
+                let expected = pklr::eval_to_json(&dep).unwrap()["result"].clone();
+                assert_eq!(expected, true, "{body}");
+                let value = pklr::eval_to_json(&main)
+                    .unwrap_or_else(|error| panic!("{body}: {error}"));
+                assert_eq!(value, serde_json::json!({"result": expected}));
+            }
         }
     }
 }

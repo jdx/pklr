@@ -614,72 +614,111 @@ pub(super) fn collect_sibling_field_refs_entries(entries: &[Entry], refs: &mut H
     collect_sibling_field_refs_entries_in(entries, refs, false, false, false, None, entries);
 }
 
-fn may_write_receiver(entry: &Entry, names: &[&str], amended: Option<&Arc<Property>>) -> bool {
+fn may_write_receiver(entry: &Entry, names: &[&str], ignored: &[&Arc<Property>]) -> bool {
     match entry {
         Entry::Property(prop) => {
             names.contains(&prop.name.as_ref())
-                && amended.is_none_or(|amended| !Arc::ptr_eq(prop, amended))
+                && !ignored.iter().any(|ignored| Arc::ptr_eq(prop, ignored))
         }
         Entry::ClassDef(name, ..) | Entry::TypeAlias(name, _) => names.contains(&name.as_str()),
         Entry::ForGenerator(generator) => generator
             .body
             .iter()
-            .any(|entry| may_write_receiver(entry, names, amended)),
+            .any(|entry| may_write_receiver(entry, names, ignored)),
         Entry::WhenGenerator(generator) => generator
             .body
             .iter()
             .chain(generator.else_body.iter().flat_map(|body| body.iter()))
-            .any(|entry| may_write_receiver(entry, names, amended)),
+            .any(|entry| may_write_receiver(entry, names, ignored)),
         Entry::DynProperty(..) | Entry::Predicate(..) | Entry::Spread(_) => true,
         _ => false,
     }
 }
 
+// Select declarations only on the generator path containing this exact amendment.
+fn find_amendment_base<'a>(
+    entries: &'a [Entry],
+    amended: &Arc<Property>,
+    base: &mut Option<&'a Arc<Property>>,
+    multiple: &mut bool,
+) -> bool {
+    let contains = entries.iter().any(|entry| match entry {
+        Entry::Property(prop) => Arc::ptr_eq(prop, amended),
+        Entry::ForGenerator(generator) => {
+            let contains = find_amendment_base(&generator.body, amended, base, multiple);
+            if contains
+                && (generator.val_var == amended.name.as_ref()
+                    || generator.key_var.as_deref() == Some(amended.name.as_ref()))
+            {
+                *multiple = true;
+            }
+            contains
+        }
+        Entry::WhenGenerator(generator) => {
+            find_amendment_base(&generator.body, amended, base, multiple)
+                || generator.else_body.as_deref().is_some_and(|body| {
+                    find_amendment_base(body, amended, base, multiple)
+                })
+        }
+        _ => false,
+    });
+    if contains {
+        for entry in entries {
+            if let Entry::Property(candidate) = entry
+                && candidate.name == amended.name
+                && !Arc::ptr_eq(candidate, amended)
+            {
+                *multiple |= base.replace(candidate).is_some();
+            }
+        }
+    }
+    contains
+}
+
 // Only amendments under a proven lexical `module` shadow need this proof.
-fn has_fresh_property_base(
-    entries: &[Entry],
+// Return the selected constructor too, so nested children use the same base.
+fn has_fresh_property_base<'a>(
+    receiver_entries: &'a [Entry],
     amended: &Arc<Property>,
     body: &[Entry],
     shadowed: bool,
-) -> Option<bool> {
+) -> (Option<bool>, Option<&'a Expr>) {
     // ponytail: prove one direct local constructor, with an O(n) scan per amendment.
     // Track proven constructors once if shadowed bodies with many amendments become hot.
+    let mut base = None;
+    let mut multiple = false;
+    find_amendment_base(receiver_entries, amended, &mut base, &mut multiple);
+    // A generated branch's own base is not a competing receiver writer.
+    let ignored = [amended, base.unwrap_or(amended)];
     if !amended.modifiers.is_empty()
         || amended.type_ann.is_some()
-        || entries.iter().any(|entry| {
+        || multiple
+        || receiver_entries.iter().any(|entry| {
             !matches!(entry, Entry::Property(_))
-                && may_write_receiver(entry, &[&amended.name, "module"], Some(amended))
+                && may_write_receiver(entry, &[&amended.name, "module"], &ignored)
         })
         || body.iter().any(|entry| {
-            !matches!(entry, Entry::Property(_)) && may_write_receiver(entry, &["module"], None)
+            !matches!(entry, Entry::Property(_)) && may_write_receiver(entry, &["module"], &[])
         })
     {
-        return Some(false);
+        return (Some(false), None);
     }
-    let mut bases = entries.iter().filter_map(|entry| match entry {
-        Entry::Property(base) if base.name == amended.name && !Arc::ptr_eq(base, amended) => {
-            Some(base)
-        }
-        _ => None,
-    });
-    let Some(base) = bases.next() else {
+    let Some(base) = base else {
         // Only the absent-base case depends on the enclosing receiver's freshness.
-        return None;
+        return (None, None);
     };
-    Some(
-        bases.next().is_none()
-            && has_modifier(&base.modifiers, Modifier::Local)
-            && base
-                .modifiers
-                .iter()
-                .all(|modifier| matches!(modifier, Modifier::Local | Modifier::Const))
-            && base.type_ann.is_none()
-            && base.body.is_none()
-            && base
-                .value
-                .as_ref()
-                .is_some_and(|value| is_fresh_non_module_base(value, shadowed)),
-    )
+    let fresh = has_modifier(&base.modifiers, Modifier::Local)
+        && base
+            .modifiers
+            .iter()
+            .all(|modifier| matches!(modifier, Modifier::Local | Modifier::Const))
+        && base.type_ann.is_none()
+        && base.body.is_none()
+        && base
+            .value
+            .as_ref()
+            .is_some_and(|value| is_fresh_non_module_base(value, shadowed));
+    (Some(fresh), base.value.as_ref().filter(|_| fresh))
 }
 
 /// `shadowed` means a lexical binding named `module` hides the module object,
@@ -718,7 +757,7 @@ fn collect_sibling_field_refs_entries_in(
                     is_proven_non_module(value, initializer_shadowed)
                 })
                 && !receiver_entries.iter().any(|entry| {
-                    may_write_receiver(entry, &["module"], Some(prop))
+                    may_write_receiver(entry, &["module"], &[prop])
                 }))
         }))
         && (!inherits_receiver
@@ -757,28 +796,16 @@ fn collect_sibling_field_refs_entries_in(
                 }
                 if let Some(body) = &prop.body {
                     // A direct local constructor can prove this receiver cannot supply the module.
-                    let base = if shadowed {
+                    let (base, known_base) = if shadowed {
                         has_fresh_property_base(receiver_entries, prop, body, shadowed)
                     } else {
-                        Some(false)
+                        (Some(false), None)
                     };
                     let fresh_base = base.unwrap_or_else(|| {
                         fresh_receiver
                             || receiver_base
                                 .is_some_and(|base| is_fresh_without_property(base, &prop.name))
                     });
-                    let known_base = if base == Some(true) {
-                        receiver_entries.iter().find_map(|entry| match entry {
-                            Entry::Property(base)
-                                if base.name == prop.name && !Arc::ptr_eq(base, prop) =>
-                            {
-                                base.value.as_ref()
-                            }
-                            _ => None,
-                        })
-                    } else {
-                        None
-                    };
                     collect_sibling_field_refs_entries_in(
                         body,
                         refs,
@@ -1369,12 +1396,12 @@ fn is_fresh_without_property(expr: &Expr, name: &str) -> bool {
             matches!(type_name.as_deref(), None | Some("Dynamic"))
                 && !entries
                     .iter()
-                    .any(|entry| may_write_receiver(entry, &[name], None))
+                    .any(|entry| may_write_receiver(entry, &[name], &[]))
         }
         Expr::Binop(BinOp::Add, base, overlay) => {
             is_fresh_without_property(base, name)
                 && matches!(overlay.as_ref(), Expr::ObjectBody(entries)
-                    if !entries.iter().any(|entry| may_write_receiver(entry, &[name], None)))
+                    if !entries.iter().any(|entry| may_write_receiver(entry, &[name], &[])))
         }
         _ => false,
     }
@@ -1442,7 +1469,7 @@ fn property_is_proven_non_module(
                 && prop.body.is_some()
                 && !entries
                     .iter()
-                    .any(|entry| may_write_receiver(entry, &["module"], Some(prop)))
+                    .any(|entry| may_write_receiver(entry, &["module"], &[prop]))
         },
         |value| is_proven_non_module(value, shadowed),
     )
