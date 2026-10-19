@@ -2896,7 +2896,11 @@ fn narrowed_import_keeps_lexical_module_with_same_named_child_writers() {
                 );
                 // A child member named `value` cannot replace the enclosing amendment base.
                 std::fs::write(&dep, format!("bad = false\n{result}")).unwrap();
-                assert_eq!(pklr::eval_to_json(&dep).unwrap()["result"], true, "{result}");
+                assert_eq!(
+                    pklr::eval_to_json(&dep).unwrap()["result"],
+                    true,
+                    "{result}"
+                );
                 cases.push(result);
             }
         }
