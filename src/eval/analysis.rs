@@ -646,9 +646,12 @@ fn has_fresh_property_base(
     // Track proven constructors once if shadowed bodies with many amendments become hot.
     if !amended.modifiers.is_empty()
         || amended.type_ann.is_some()
-        || entries.iter().chain(body).any(|entry| {
+        || entries.iter().any(|entry| {
             !matches!(entry, Entry::Property(_))
                 && may_write_receiver(entry, &[&amended.name, "module"], Some(amended))
+        })
+        || body.iter().any(|entry| {
+            !matches!(entry, Entry::Property(_)) && may_write_receiver(entry, &["module"], None)
         })
     {
         return Some(false);

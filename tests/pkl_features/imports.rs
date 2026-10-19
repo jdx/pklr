@@ -2876,6 +2876,39 @@ fn narrowed_import_keeps_lexical_module_with_unrelated_property_generators() {
 }
 
 #[test]
+fn narrowed_import_keeps_lexical_module_with_same_named_child_writers() {
+    let temp = TestTempDir::new("pklr_test_same_named_child_writers");
+    let dir = temp.path();
+    let main = dir.join("main.pkl");
+    let dep = dir.join("dep.pkl");
+    std::fs::write(&main, "import \"dep.pkl\" as Dep\nresult = Dep.result\n").unwrap();
+    let mut cases = Vec::new();
+    for writer in [
+        "when (true) { value = 1 }",
+        "when (false) { other = 1 } else { value = 1 }",
+        "when (true) { when (true) { value = 1 } }",
+        "when (false) { value = 1 }",
+    ] {
+        for access in ["`module`.bad", "`module`[\"bad\"]"] {
+            for modifiers in ["local", "const local"] {
+                let result = format!(
+                    "result = let (`module` = new Dynamic {{ bad = true }}) (new Dynamic {{\n{modifiers} value = new Dynamic {{}}\nvalue {{ {writer}\nok = {access} }}\n}}).value.ok\n"
+                );
+                // A child member named `value` cannot replace the enclosing amendment base.
+                std::fs::write(&dep, format!("bad = false\n{result}")).unwrap();
+                assert_eq!(pklr::eval_to_json(&dep).unwrap()["result"], true, "{result}");
+                cases.push(result);
+            }
+        }
+    }
+    for result in cases {
+        std::fs::write(&dep, format!("bad = import(\"missing.pkl\")\n{result}")).unwrap();
+        let value = pklr::eval_to_json(&main).unwrap_or_else(|error| panic!("{result}: {error}"));
+        assert_eq!(value, serde_json::json!({"result": true}));
+    }
+}
+
+#[test]
 fn narrowed_import_keeps_generated_property_receiver_writers() {
     let temp = TestTempDir::new("pklr_test_generated_property_receiver_writers");
     let dir = temp.path();
