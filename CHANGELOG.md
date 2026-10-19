@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.2.0](https://github.com/jdx/pklr/compare/v5.1.2...v5.2.0) - 2026-10-19
+
+### Added
+
+- *(http)* build the reqwest client lazily with http_client_with ([#320](https://github.com/jdx/pklr/pull/320))
+- *(package)* support and verify ::sha256: checksums in package URIs ([#313](https://github.com/jdx/pklr/pull/313))
+
+### Fixed
+
+- *(eval)* keep module reads through an inner object that rebinds module ([#325](https://github.com/jdx/pklr/pull/325))
+- *(eval)* ignore shadowed module receivers when narrowing imports ([#318](https://github.com/jdx/pklr/pull/318))
+- *(eval)* retain imported constraint alias bindings ([#316](https://github.com/jdx/pklr/pull/316))
+
+### Other
+
+- *(deps)* lock file maintenance ([#327](https://github.com/jdx/pklr/pull/327))
+- *(eval)* allocate shared names only when new (hk config 175.1M -> 173.4M instructions) ([#323](https://github.com/jdx/pklr/pull/323))
+- *(eval)* resolve module identities once per amendment (hk config 176.4M -> 171.3M instructions) ([#322](https://github.com/jdx/pklr/pull/322))
+- *(eval)* share property names as Arc<str> (hk config 194.3M -> 176.5M instructions) ([#321](https://github.com/jdx/pklr/pull/321))
+- *(eval)* snapshot entry state only while locals are pending ([#319](https://github.com/jdx/pklr/pull/319))
+
 ## [5.1.2](https://github.com/jdx/pklr/compare/v5.1.1...v5.1.2) - 2026-10-16
 
 ### Other
