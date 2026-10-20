@@ -8,7 +8,7 @@ jactionlint = "latest"
 pkl = "0.32.1"
 # Measures tak.toml's benchmarks. Bump deliberately, in a commit that changes
 # nothing else: a new tak can move the series without pklr changing.
-tak = "0.0.14"
+tak = "v0.0.15"
 
 # Instruction-counted benchmarks (see tak.toml). Without valgrind tak reports
 # wall clock only and says so.
