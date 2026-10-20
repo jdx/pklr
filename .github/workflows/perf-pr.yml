@@ -58,7 +58,7 @@ jobs:
           fi
       # `run` executes after the action has removed every credential. Keep the
       # runner class in step with perf.yml.
-      - uses: jdx/tak-action@9096b7637c553324121c8f2b14c2db2af7fc1e55 # v0.1.1
+      - uses: jdx/tak-action@f3161f1de5a674a67a7c1c877759b4e2d552f70d # v0.1.2
         with:
           mode: compare
           version: 0.0.14 # keep in step with mise.toml
