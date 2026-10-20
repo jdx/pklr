@@ -36,7 +36,7 @@ jobs:
       # The runner class embeds the runner image and Rust versions, because
       # either can move instruction counts without pklr changing. Keep it in
       # step with perf-pr.yml.
-      - uses: jdx/tak-action@9096b7637c553324121c8f2b14c2db2af7fc1e55 # v0.1.1
+      - uses: jdx/tak-action@f3161f1de5a674a67a7c1c877759b4e2d552f70d # v0.1.2
         with:
           mode: record
           version: 0.0.14 # keep in step with mise.toml
