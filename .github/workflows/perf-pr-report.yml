@@ -21,7 +21,7 @@ jobs:
   report:
     # A cancelled run was superseded by a newer push, whose run reports.
     if: github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion != 'cancelled'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
       actions: read # download the report artifact from the perf-pr run
