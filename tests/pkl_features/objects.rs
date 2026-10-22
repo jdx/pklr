@@ -5258,3 +5258,33 @@ picked: R = scopes["x"]
     assert_eq!(result["picked"]["m"]["k"], 1);
     assert_eq!(result["scopes"]["x"]["m"]["k"], 1);
 }
+
+#[test]
+fn typed_mapping_new_entry_recomputes_class_properties() {
+    let result = eval(
+        r#"
+class R { x: Int = 1; y: Int = x + 1 }
+m: Mapping<String, R> = new {
+  ["a"] = new { x = 5 }
+}
+"#,
+    );
+    assert_eq!(result["m"]["a"]["x"], 5);
+    assert_eq!(result["m"]["a"]["y"], 6);
+}
+
+#[test]
+fn typed_mapping_new_entry_amends_the_mapping_default() {
+    let result = eval(
+        r#"
+class R { x: Int = 1 }
+m: Mapping<String, R> = new {
+  default { x = 9 }
+  ["bare"] {}
+  ["fresh"] = new {}
+}
+"#,
+    );
+    assert_eq!(result["m"]["bare"]["x"], 9);
+    assert_eq!(result["m"]["fresh"]["x"], 9);
+}
