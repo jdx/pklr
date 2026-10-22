@@ -5331,3 +5331,16 @@ fn inherited_module_union_property_without_default_fails() {
         assert!(error.contains("no selected default"), "{header}: {error}");
     }
 }
+
+#[test]
+fn typed_mapping_new_entry_with_mixed_union_value_type_stays_untyped() {
+    let result = eval(
+        r#"
+class R { x: Int = 1 }
+m: Mapping<String, R | Listing<Int>> = new {
+  ["l"] = new { 1; 2 }
+}
+"#,
+    );
+    assert_eq!(result["m"]["l"], serde_json::json!([1, 2]));
+}
