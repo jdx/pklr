@@ -8463,6 +8463,13 @@ impl Evaluator {
                             select_mapping_type_default_for_new(type_defaults, type_name)
                                 .map(|(name, value)| (Some(name.as_str()), value))
                         }
+                        // `new { ... }` takes its type from the Mapping's value
+                        // type, like a bare `[key] { ... }` body. A union of
+                        // classes has no single type to infer.
+                        Expr::New(None, body, _) if type_defaults.len() == 1 => {
+                            select_mapping_type_default(type_defaults, body)
+                                .map(|(name, value)| (Some(name.as_str()), value))
+                        }
                         Expr::New(None, _, _) => None,
                         _ => type_defaults
                             .first()
@@ -8473,7 +8480,8 @@ impl Evaluator {
                     // particular a `default` of another class (the synthetic
                     // `new Step {}` of `new Mapping<String, Step> {}`) must not
                     // turn a `new Group {}` entry into a Step.
-                    let is_typed_new = matches!(val_expr, Expr::New(Some(_), _, _));
+                    let is_typed_new = matches!(val_expr, Expr::New(Some(_), _, _))
+                        || (matches!(val_expr, Expr::New(None, _, _)) && type_default.is_some());
                     let default_template = match (type_default, explicit_default.as_ref()) {
                         (Some((type_name, type_default)), _) if is_typed_new => {
                             Some((type_name, type_default.clone()))

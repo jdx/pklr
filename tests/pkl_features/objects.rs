@@ -5243,3 +5243,18 @@ fn amending_module_rejects_invalid_fixed_and_const_before_member_evaluation() {
         assert!(error.contains(expected), "{error}");
     }
 }
+
+#[test]
+fn typed_mapping_new_entry_takes_the_value_type() {
+    let result = eval(
+        r#"
+class R { m: Mapping<String, Int> = new {} }
+scopes: Mapping<String, R> = new {
+  ["x"] = new { m { ["k"] = 1 } }
+}
+picked: R = scopes["x"]
+"#,
+    );
+    assert_eq!(result["picked"]["m"]["k"], 1);
+    assert_eq!(result["scopes"]["x"]["m"]["k"], 1);
+}
