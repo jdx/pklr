@@ -5243,3 +5243,32 @@ fn amending_module_rejects_invalid_fixed_and_const_before_member_evaluation() {
         assert!(error.contains(expected), "{error}");
     }
 }
+
+#[test]
+fn class_union_property_without_default_can_be_assigned() {
+    let json = eval(
+        r#"
+class C {
+  e: "a" | "b"
+}
+c: C = new C { e = "a" }
+"#,
+    );
+    assert_eq!(json["c"]["e"], "a");
+}
+
+#[test]
+fn inherited_module_union_property_without_default_fails() {
+    let dir = TestTempDir::new("pklr_inherited_union_default");
+    std::fs::write(
+        dir.path().join("base.pkl"),
+        "open module base\nvalue: \"a\" | \"b\"\n",
+    )
+    .unwrap();
+    for header in ["amends", "extends"] {
+        let main = dir.path().join("main.pkl");
+        std::fs::write(&main, format!("{header} \"base.pkl\"\n")).unwrap();
+        let error = pklr::eval_to_json(&main).unwrap_err().to_string();
+        assert!(error.contains("no selected default"), "{header}: {error}");
+    }
+}

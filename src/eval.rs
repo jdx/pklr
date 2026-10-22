@@ -2896,8 +2896,9 @@ impl Evaluator {
                             }
                             continue;
                         }
-                        let property_result =
-                            self.eval_property(prop, &scope, depth).and_then(|value| {
+                        let property_result = self
+                            .eval_property_with(prop, &scope, depth, true)
+                            .and_then(|value| {
                                 if synthesized_inherited_types.contains(prop.name.as_ref())
                                     && let (Some(value), Some(ty)) = (&value, &prop.type_ann)
                                 {
@@ -3114,7 +3115,7 @@ impl Evaluator {
                 {
                     continue;
                 }
-                match self.eval_property(prop, &scope, depth) {
+                match self.eval_property_with(prop, &scope, depth, true) {
                     Ok(Some(value)) => {
                         scope.set(&prop.name, value.clone());
                         module_props_insert(
@@ -3150,14 +3151,16 @@ impl Evaluator {
                 {
                     continue;
                 }
-                match self.eval_property(prop, &scope, depth).and_then(|value| {
-                    if synthesized_inherited_types.contains(prop.name.as_ref())
-                        && let (Some(value), Some(ty)) = (&value, &prop.type_ann)
-                    {
-                        self.check_inherited_mapping_value_types(value, ty, &scope, depth)?;
-                    }
-                    Ok(value)
-                }) {
+                match self
+                    .eval_property_with(prop, &scope, depth, true)
+                    .and_then(|value| {
+                        if synthesized_inherited_types.contains(prop.name.as_ref())
+                            && let (Some(value), Some(ty)) = (&value, &prop.type_ann)
+                        {
+                            self.check_inherited_mapping_value_types(value, ty, &scope, depth)?;
+                        }
+                        Ok(value)
+                    }) {
                     Ok(Some(value)) => {
                         scope.set(&prop.name, value.clone());
                         if has_modifier(&prop.modifiers, Modifier::Local) {
@@ -3484,11 +3487,24 @@ impl Evaluator {
         Ok(Value::Object(module_map, source))
     }
 
+    /// Evaluate a property declared inside a class or object body. A union
+    /// without a selected default stays undefined here, so an instance can
+    /// assign it; only a module property must have a value to render.
     fn eval_property(
         &mut self,
         prop: &Property,
         scope: &Scope,
         depth: usize,
+    ) -> Result<Option<Value>> {
+        self.eval_property_with(prop, scope, depth, false)
+    }
+
+    fn eval_property_with(
+        &mut self,
+        prop: &Property,
+        scope: &Scope,
+        depth: usize,
+        require_union_default: bool,
     ) -> Result<Option<Value>> {
         if let Some(expr) = &prop.value {
             // `x: T = new { ... }` amends T's default, so an untyped `new`
@@ -3662,7 +3678,8 @@ impl Evaluator {
             if let Some(default) = &mut default {
                 apply_mapping_type_annotation(default, Some(ty));
             }
-            if default.is_none()
+            if require_union_default
+                && default.is_none()
                 && matches!(ty, crate::parser::TypeExpr::Union(variants) if !variants.iter().any(is_default_type))
             {
                 return Err(Error::Eval(format!(
