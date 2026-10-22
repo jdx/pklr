@@ -8473,6 +8473,25 @@ impl Evaluator {
                         map.insert(storage_key, val);
                         continue;
                     }
+                    // `new { ... }` takes its type from the Mapping's value type
+                    // and amends its `default`, like a bare `[key] { ... }` body.
+                    // A builtin value type such as `Dynamic` or `Listing` keeps its
+                    // own `new` evaluation, and a union (of classes or with a
+                    // builtin) has no single type to infer.
+                    let inferred_body;
+                    let val_expr = match val_expr {
+                        Expr::New(None, body, _)
+                            if expanded_value_type_names.len() == 1
+                                && matches!(
+                                    type_defaults,
+                                    [(_, Value::Object(_, Some(source)))] if source.type_name.is_some()
+                                ) =>
+                        {
+                            inferred_body = Expr::ObjectBody(body.clone());
+                            &inferred_body
+                        }
+                        _ => val_expr,
+                    };
                     let type_default = match val_expr {
                         Expr::ObjectBody(body) => select_mapping_type_default(type_defaults, body)
                             .map(|(name, value)| (Some(name.as_str()), value)),

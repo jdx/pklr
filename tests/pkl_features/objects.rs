@@ -5245,6 +5245,65 @@ fn amending_module_rejects_invalid_fixed_and_const_before_member_evaluation() {
 }
 
 #[test]
+fn typed_mapping_new_entry_takes_the_value_type() {
+    let result = eval(
+        r#"
+class R { m: Mapping<String, Int> = new {} }
+scopes: Mapping<String, R> = new {
+  ["x"] = new { m { ["k"] = 1 } }
+}
+picked: R = scopes["x"]
+"#,
+    );
+    assert_eq!(result["picked"]["m"]["k"], 1);
+    assert_eq!(result["scopes"]["x"]["m"]["k"], 1);
+}
+
+#[test]
+fn typed_mapping_new_entry_recomputes_class_properties() {
+    let result = eval(
+        r#"
+class R { x: Int = 1; y: Int = x + 1 }
+m: Mapping<String, R> = new {
+  ["a"] = new { x = 5 }
+}
+"#,
+    );
+    assert_eq!(result["m"]["a"]["x"], 5);
+    assert_eq!(result["m"]["a"]["y"], 6);
+}
+
+#[test]
+fn typed_mapping_new_entry_amends_the_mapping_default() {
+    let result = eval(
+        r#"
+class R { x: Int = 1 }
+m: Mapping<String, R> = new {
+  default { x = 9 }
+  ["bare"] {}
+  ["fresh"] = new {}
+}
+"#,
+    );
+    assert_eq!(result["m"]["bare"]["x"], 9);
+    assert_eq!(result["m"]["fresh"]["x"], 9);
+}
+
+#[test]
+fn typed_mapping_new_entry_with_builtin_value_type_stays_untyped() {
+    let result = eval(
+        r#"
+m: Mapping<String, Dynamic> = new {
+  ["x"] = new { 1; 2 }
+  ["y"] = new { k = 1 }
+}
+"#,
+    );
+    assert_eq!(result["m"]["x"], serde_json::json!([1, 2]));
+    assert_eq!(result["m"]["y"]["k"], 1);
+}
+
+#[test]
 fn class_union_property_without_default_can_be_assigned() {
     let json = eval(
         r#"
@@ -5271,4 +5330,17 @@ fn inherited_module_union_property_without_default_fails() {
         let error = pklr::eval_to_json(&main).unwrap_err().to_string();
         assert!(error.contains("no selected default"), "{header}: {error}");
     }
+}
+
+#[test]
+fn typed_mapping_new_entry_with_mixed_union_value_type_stays_untyped() {
+    let result = eval(
+        r#"
+class R { x: Int = 1 }
+m: Mapping<String, R | Listing<Int>> = new {
+  ["l"] = new { 1; 2 }
+}
+"#,
+    );
+    assert_eq!(result["m"]["l"], serde_json::json!([1, 2]));
 }
