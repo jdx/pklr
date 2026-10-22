@@ -5243,3 +5243,16 @@ fn amending_module_rejects_invalid_fixed_and_const_before_member_evaluation() {
         assert!(error.contains(expected), "{error}");
     }
 }
+
+#[test]
+fn class_union_property_without_default_can_be_assigned() {
+    let json = eval(
+        r#"
+class C {
+  e: "a" | "b"
+}
+c: C = new C { e = "a" }
+"#,
+    );
+    assert_eq!(json["c"]["e"], "a");
+}
