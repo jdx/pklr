@@ -5288,3 +5288,17 @@ m: Mapping<String, R> = new {
     assert_eq!(result["m"]["bare"]["x"], 9);
     assert_eq!(result["m"]["fresh"]["x"], 9);
 }
+
+#[test]
+fn typed_mapping_new_entry_with_builtin_value_type_stays_untyped() {
+    let result = eval(
+        r#"
+m: Mapping<String, Dynamic> = new {
+  ["x"] = new { 1; 2 }
+  ["y"] = new { k = 1 }
+}
+"#,
+    );
+    assert_eq!(result["m"]["x"], serde_json::json!([1, 2]));
+    assert_eq!(result["m"]["y"]["k"], 1);
+}

@@ -8458,10 +8458,17 @@ impl Evaluator {
                     }
                     // `new { ... }` takes its type from the Mapping's value type
                     // and amends its `default`, like a bare `[key] { ... }` body.
-                    // A union of classes has no single type to infer.
+                    // A builtin value type such as `Dynamic` or `Listing` keeps its
+                    // own `new` evaluation, and a union of classes has no single
+                    // type to infer.
                     let inferred_body;
                     let val_expr = match val_expr {
-                        Expr::New(None, body, _) if type_defaults.len() == 1 => {
+                        Expr::New(None, body, _)
+                            if matches!(
+                                type_defaults,
+                                [(_, Value::Object(_, Some(source)))] if source.type_name.is_some()
+                            ) =>
+                        {
                             inferred_body = Expr::ObjectBody(body.clone());
                             &inferred_body
                         }
