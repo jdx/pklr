@@ -1591,3 +1591,26 @@ fn amended_mapping_default_is_kept_when_every_base_entry_is_replaced() {
     assert_eq!(json["v"]["a"]["ok"], true);
     assert_eq!(json["v"]["b"]["other"], 2);
 }
+
+#[test]
+fn amended_mapping_default_replay_keeps_replaced_values_readable() {
+    let base = common::write_entry(
+        "amend_mapping_default_replay",
+        "Template.pkl",
+        "v = new Mapping {\n  default = new {}\n  [\"a\"] = 1\n  [\"b\"] = this[\"a\"] + 1\n}\n",
+    );
+    let dir = base.parent().unwrap();
+    std::fs::write(
+        dir.join("Middle.pkl"),
+        "amends \"Template.pkl\"\nv {\n  default = new { other = 2 }\n  [\"a\"] = 3\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Config.pkl"),
+        "amends \"Middle.pkl\"\nv { [\"c\"] = 4 }\n",
+    )
+    .unwrap();
+    let json = pklr::eval_to_json(&dir.join("Config.pkl")).unwrap();
+    assert_eq!(json["v"]["a"], 3);
+    assert_eq!(json["v"]["c"], 4);
+}

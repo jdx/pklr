@@ -8228,26 +8228,58 @@ impl Evaluator {
                                 _ => None,
                             })
                             .collect();
-                        let mut source = Arc::unwrap_or_clone(Arc::clone(base_src));
-                        source.entries = base_src
+                        // A replaced entry is saved as its evaluated value, so
+                        // later replays neither rebuild the discarded body nor
+                        // let other entries read a placeholder. Other values are
+                        // blanked only if no entry reads its siblings.
+                        let reads_siblings = {
+                            let refs = property_reference_names(&Property {
+                                annotations: Vec::new(),
+                                modifiers: Vec::new(),
+                                name: "".into(),
+                                type_ann: None,
+                                value: None,
+                                body: Some(base_src.entries.clone()),
+                                is_method: false,
+                            });
+                            ["this", "module", DYNAMIC_SIBLING_REF]
+                                .iter()
+                                .any(|name| refs.contains(*name))
+                        };
+                        let mut replayable = true;
+                        let entries: Vec<Entry> = base_src
                             .entries
                             .iter()
                             .map(|entry| match entry {
                                 Entry::Property(prop) if &*prop.name == "default" => {
                                     Entry::Property(default.clone())
                                 }
-                                // An entry the amendment replaced is replayed
-                                // from the evaluated mapping, not rebuilt.
                                 Entry::DynProperty(key @ Expr::String(name), _)
                                     if replaced.contains(&**name) =>
                                 {
-                                    Entry::DynProperty(key.clone(), Expr::Null)
+                                    let literal = match amended.get(&**name) {
+                                        Some(Value::Null) => Some(Expr::Null),
+                                        Some(Value::Bool(b)) => Some(Expr::Bool(*b)),
+                                        Some(Value::Int(n)) => Some(Expr::Int(*n)),
+                                        Some(Value::Float(f)) => Some(Expr::Float(*f)),
+                                        Some(Value::String(text)) => {
+                                            Some(Expr::String(Arc::clone(text)))
+                                        }
+                                        _ => None,
+                                    };
+                                    replayable &= literal.is_some() || !reads_siblings;
+                                    Entry::DynProperty(key.clone(), literal.unwrap_or(Expr::Null))
                                 }
                                 entry => entry.clone(),
                             })
-                            .collect::<Vec<_>>()
-                            .into();
-                        Arc::new(source)
+                            .collect();
+                        if replayable {
+                            let mut source = Arc::unwrap_or_clone(Arc::clone(base_src));
+                            source.entries = entries.into();
+                            Arc::new(source)
+                        } else {
+                            Arc::clone(base_src)
+                        }
                     }
                     None => Arc::clone(base_src),
                 };
