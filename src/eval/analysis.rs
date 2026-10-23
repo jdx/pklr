@@ -216,6 +216,7 @@ pub(super) fn collect_expr_import_field_uses(
         }
         Expr::Unop(_, value)
         | Expr::Throw(value)
+        | Expr::TemplateLocals(_, value)
         | Expr::Trace(value, _)
         | Expr::Read(value, _)
         | Expr::ReadOrNull(value, _)
@@ -1110,6 +1111,7 @@ fn collect_sibling_field_refs_expr_in(
         ),
         Expr::Unop(_, body)
         | Expr::Throw(body)
+        | Expr::TemplateLocals(_, body)
         | Expr::Trace(body, _)
         | Expr::Read(body, _)
         | Expr::ReadOrNull(body, _)
@@ -1881,6 +1883,7 @@ fn collect_field_names_expr(expr: &Expr, out: &mut HashSet<Name>) {
         | Expr::As(value, _)
         | Expr::Unop(_, value)
         | Expr::Throw(value)
+        | Expr::TemplateLocals(_, value)
         | Expr::Trace(value, _)
         | Expr::Read(value, _)
         | Expr::ReadOrNull(value, _)
@@ -2459,6 +2462,7 @@ fn collect_expr_refs_in(
         }
         Expr::Unop(_, value)
         | Expr::Throw(value)
+        | Expr::TemplateLocals(_, value)
         | Expr::Trace(value, _)
         | Expr::Read(value, _)
         | Expr::ReadOrNull(value, _)
@@ -2642,6 +2646,7 @@ pub(super) fn collect_unshadowed_names(expr: &Expr, names: &mut HashSet<Name>) {
         Expr::Lambda(_, value) => collect_unshadowed_names(value, names),
         Expr::Unop(_, value)
         | Expr::Throw(value)
+        | Expr::TemplateLocals(_, value)
         | Expr::Trace(value, _)
         | Expr::Read(value, _)
         | Expr::ReadOrNull(value, _)
@@ -2827,6 +2832,7 @@ fn expr_mentions(expr: &Expr, name: &str) -> bool {
         Expr::Lambda(_, value) => expr_mentions(value, name),
         Expr::Unop(_, value)
         | Expr::Throw(value)
+        | Expr::TemplateLocals(_, value)
         | Expr::Trace(value, _)
         | Expr::Read(value, _)
         | Expr::ReadOrNull(value, _)
@@ -2876,6 +2882,7 @@ pub(super) fn mapping_entry_mentions_this(expr: &Expr) -> bool {
         Expr::Is(value, _) | Expr::As(value, _) => mapping_entry_mentions_this(value),
         Expr::Unop(_, value)
         | Expr::Throw(value)
+        | Expr::TemplateLocals(_, value)
         | Expr::Trace(value, _)
         | Expr::Read(value, _)
         | Expr::ReadOrNull(value, _)
@@ -3002,6 +3009,7 @@ impl InstanceReads {
             Expr::Lambda(_, value) => self.expr(value, depth),
             Expr::Unop(_, value)
             | Expr::Throw(value)
+            | Expr::TemplateLocals(_, value)
             | Expr::Trace(value, _)
             | Expr::Read(value, _)
             | Expr::ReadOrNull(value, _)

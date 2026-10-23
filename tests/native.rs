@@ -1377,6 +1377,89 @@ fn late_binding_keeps_going_when_only_the_entry_order_changes() {
     assert_eq!(json["result"], serde_json::json!([2, 1]));
 }
 
+fn amended_pair(name: &str, template: &str, config: &str) -> serde_json::Value {
+    let base = common::write_entry(name, "Template.pkl", template);
+    let dir = base.parent().unwrap();
+    std::fs::write(
+        dir.join("Config.pkl"),
+        format!("amends \"Template.pkl\"\n{config}"),
+    )
+    .unwrap();
+    pklr::eval_to_json(&dir.join("Config.pkl")).unwrap()
+}
+
+#[test]
+fn amendment_does_not_evaluate_the_base_members_it_overrides() {
+    let json = amended_pair(
+        "amend_overridden_throw",
+        "server = new {\n  name = throw(\"name must be set\")\n  port = 80\n}\n",
+        "server {\n  name = \"web\"\n}\n",
+    );
+    assert_eq!(
+        json,
+        serde_json::json!({ "server": { "name": "web", "port": 80 } })
+    );
+    assert_eq!(
+        json["server"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        ["name", "port"]
+    );
+
+    let json = amended_pair(
+        "amend_overridden_missing",
+        "a = new { e = missing }\n",
+        "a { e = 0 }\n",
+    );
+    assert_eq!(json, serde_json::json!({ "a": { "e": 0 } }));
+
+    let json = amended_pair(
+        "amend_overridden_mapping",
+        "p5 = 1\np4 = new Mapping { [\"a\"] = outer.p5 }\n",
+        "p4 { [\"a\"] = 6 }\n",
+    );
+    assert_eq!(json, serde_json::json!({ "p5": 1, "p4": { "a": 6 } }));
+
+    let json = amended_pair(
+        "amend_overridden_super",
+        "p = new Mapping { [\"a\"] = 1 }\nq = new { n = 1 }\n",
+        "p { [\"a\"] = super[\"a\"] + 1 }\nq { n = super.n + 1 }\n",
+    );
+    assert_eq!(
+        json,
+        serde_json::json!({ "p": { "a": 2 }, "q": { "n": 2 } })
+    );
+}
+
+#[test]
+fn amendment_skips_a_replaced_default_outside_a_mapping() {
+    let json = amended_pair(
+        "amend_dynamic_default",
+        "p = new Dynamic {\n  default = throw(\"unused\")\n  n = 1\n}\n",
+        "p { default = 0 }\n",
+    );
+    assert_eq!(json, serde_json::json!({ "p": { "n": 1 } }));
+}
+
+#[test]
+fn amended_base_reads_the_templates_locals() {
+    let json = amended_pair(
+        "amend_template_local",
+        "local k = 1\np3 = new { a = k }\n",
+        "local k = 100\np3 {\n  b = k\n}\n",
+    );
+    assert_eq!(json, serde_json::json!({ "p3": { "a": 1, "b": 100 } }));
+
+    let json = amended_pair(
+        "amend_template_local_function",
+        "local function f(x) = x + 1\na = new { v = f(1) }\n",
+        "local function f(x) = x * 100\na { b = f(1) }\n",
+    );
+    assert_eq!(json, serde_json::json!({ "a": { "v": 2, "b": 100 } }));
+}
+
 fn amended_pair_dir(name: &str, template: &str, config: &str) -> serde_json::Value {
     let base = common::write_entry(name, "Template.pkl", template);
     let dir = base.parent().unwrap();

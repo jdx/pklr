@@ -195,6 +195,7 @@ impl ConstChecker<'_> {
             | Expr::NullSafeField(base, _)
             | Expr::Unop(_, base)
             | Expr::Throw(base)
+            | Expr::TemplateLocals(_, base)
             | Expr::Trace(base, _)
             | Expr::Read(base, _)
             | Expr::ReadOrNull(base, _)
@@ -313,6 +314,7 @@ impl ConstChecker<'_> {
                 .or_else(|| self.type_expr(ty, shadow)),
             Expr::Unop(_, value)
             | Expr::Throw(value)
+            | Expr::TemplateLocals(_, value)
             | Expr::Trace(value, _)
             | Expr::Read(value, _)
             | Expr::ReadOrNull(value, _)
