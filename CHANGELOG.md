@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.2.2](https://github.com/jdx/pklr/compare/v5.2.1...v5.2.2) - 2026-10-23
+
+### Fixed
+
+- *(eval)* apply an amended Mapping default to the entries the base declared ([#345](https://github.com/jdx/pklr/pull/345))
+- *(eval)* evaluate an amended base lazily and in its template's scope ([#344](https://github.com/jdx/pklr/pull/344))
+
 ## [5.2.1](https://github.com/jdx/pklr/compare/v5.2.0...v5.2.1) - 2026-10-23
 
 ### Fixed
