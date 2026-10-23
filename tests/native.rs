@@ -1289,6 +1289,36 @@ fn a_direct_package_files_own_imports_are_prefetched_under_its_root() {
 }
 
 #[test]
+fn amended_object_sees_override_in_a_later_module() {
+    let base = common::write_entry(
+        "amended_object_late",
+        "m0.pkl",
+        "p3 = new { a = 3; b = p5 }\np5 = 3\n",
+    );
+    let dir = base.parent().unwrap();
+    std::fs::write(dir.join("m1.pkl"), "amends \"m0.pkl\"\np3 { a = 4 }\n").unwrap();
+    std::fs::write(dir.join("m2.pkl"), "amends \"m1.pkl\"\np5 = 6\n").unwrap();
+    std::fs::write(
+        dir.join("m3.pkl"),
+        "amends \"m2.pkl\"\np3 { c = 7 }\np5 = 8\n",
+    )
+    .unwrap();
+
+    std::fs::write(
+        dir.join("m2c.pkl"),
+        "amends \"m1.pkl\"\np3 { c = 7 }\np5 = 8\n",
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json(&dir.join("m2c.pkl")).unwrap();
+    assert_eq!(json["p3"], serde_json::json!({ "a": 4, "b": 8, "c": 7 }));
+    let json = pklr::eval_to_json(&dir.join("m2.pkl")).unwrap();
+    assert_eq!(json["p3"], serde_json::json!({ "a": 4, "b": 6 }));
+    let json = pklr::eval_to_json(&dir.join("m3.pkl")).unwrap();
+    assert_eq!(json["p3"], serde_json::json!({ "a": 4, "b": 8, "c": 7 }));
+}
+
+#[test]
 fn amending_a_long_template_settles_in_either_declaration_order() {
     const N: usize = 150;
     let mut forward = String::from("base = 1\n");
@@ -1317,4 +1347,18 @@ fn amending_a_long_template_settles_in_either_declaration_order() {
         assert_eq!(json["p1"], 11, "{name}");
         assert_eq!(json[format!("p{N}")], 10 + N as i64, "{name}");
     }
+}
+
+#[test]
+fn late_binding_keeps_going_when_only_the_sign_of_zero_changes() {
+    let template = common::write_entry(
+        "late_negative_zero",
+        "Template.pkl",
+        "base = 1.0\nresult = (1.0 / a) < 0\na = b\nb = c\nc = base * 0.0\n",
+    );
+    let child = template.with_file_name("Child.pkl");
+    std::fs::write(&child, "amends \"Template.pkl\"\nbase = -1.0\n").unwrap();
+
+    let json = pklr::eval_to_json(&child).unwrap();
+    assert_eq!(json["result"], true);
 }

@@ -2496,7 +2496,7 @@ impl Evaluator {
                         && !has_modifier(&prop.modifiers, Modifier::Local)
                         && &*prop.name != "output"
                     {
-                        late_inherited_properties.push(prop.clone());
+                        push_base_property(&mut late_inherited_properties, prop);
                     }
                 }
             }
@@ -2588,7 +2588,7 @@ impl Evaluator {
                                 if !has_modifier(&prop.modifiers, Modifier::Local)
                                     && &*prop.name != "output" =>
                             {
-                                late_inherited_properties.push(prop.clone());
+                                push_base_property(&mut late_inherited_properties, prop);
                                 if let Ok(Some(value)) = self.eval_property(prop, &scope, depth) {
                                     scope.set(&prop.name, value);
                                 }
@@ -2659,7 +2659,7 @@ impl Evaluator {
                         && !has_modifier(&prop.modifiers, Modifier::Local)
                         && &*prop.name != "output"
                     {
-                        late_inherited_properties.push(prop.clone());
+                        push_base_property(&mut late_inherited_properties, prop);
                         if let Ok(Some(value)) = self.eval_property(prop, &scope, depth) {
                             scope.set(&prop.name, value);
                         }
@@ -3073,7 +3073,24 @@ impl Evaluator {
             .iter()
             .map(|prop| prop.name.clone())
             .collect::<HashSet<_>>();
-        let mut late_child_properties = Vec::new();
+        // A body amending an inherited object is late-bound like the inherited
+        // expression it amends: the object is rebuilt once overrides settle.
+        let composed_amendments: Vec<Arc<Property>> = child_candidates
+            .iter()
+            .filter(|prop| prop.body.is_some() && prop.value.is_none())
+            .filter_map(|prop| {
+                let inherited = late_inherited_properties
+                    .iter()
+                    .rfind(|inherited| inherited.name == prop.name && inherited.value.is_some())?;
+                let composed = compose_amended_object(inherited, prop);
+                composed.value.is_some().then_some(composed)
+            })
+            .collect();
+        let mut late_child_properties: Vec<&Property> = Vec::new();
+        for composed in &composed_amendments {
+            late_bound_names.insert(composed.name.clone());
+            late_child_properties.push(composed);
+        }
         loop {
             let mut added = false;
             for prop in &child_candidates {
@@ -3483,7 +3500,11 @@ impl Evaluator {
                 _ => None,
             }))
         {
-            effective_late_properties.insert(prop.name.clone(), prop.clone());
+            let prop = match effective_late_properties.get(&prop.name) {
+                Some(inherited) => compose_amended_object(inherited, prop),
+                None => prop.clone(),
+            };
+            effective_late_properties.insert(prop.name.clone(), prop);
         }
         self.module_scopes.insert(
             path.to_path_buf(),
@@ -9630,9 +9651,6 @@ fn inherit_stdlib_module(name: &str, base_obj: &mut ObjectMap, scope: &mut Scope
     }
 }
 
-/// The function `(function) { body }` evaluates to: one that calls `function`
-/// with its `arity` arguments and amends the result with `body`, evaluated
-/// where the amendment is written.
 /// Whether re-evaluating a late-bound property reproduced `old`.
 ///
 /// Cheap and conservative: a lambda or an object that carries its definition
@@ -9666,11 +9684,67 @@ fn settled_eq(old: Option<&Value>, new: Option<&Value>) -> bool {
                         .zip(right.iter())
                         .all(|(left, right)| settled_eq(Some(left), Some(right)))
             }
+            (Value::Float(left), Value::Float(right)) => left.to_bits() == right.to_bits(),
             (Value::Lambda(..), _) | (_, Value::Lambda(..)) => false,
             _ => old == new,
         },
         _ => false,
     }
+}
+
+/// The function `(function) { body }` evaluates to: one that calls `function`
+/// with its `arity` arguments and amends the result with `body`, evaluated
+/// where the amendment is written.
+/// Add a property declared in a base module's source to the inherited late
+/// properties. A body-only amendment is skipped when the base's snapshot
+/// already holds the property: the snapshot has that body composed onto its
+/// base expression, and applying the raw body again would pin the object to
+/// the value it had when the base was evaluated.
+fn push_base_property(inherited: &mut Vec<Arc<Property>>, prop: &Arc<Property>) {
+    if prop.value.is_none()
+        && prop.body.is_some()
+        && inherited.iter().any(|known| known.name == prop.name)
+    {
+        return;
+    }
+    inherited.push(prop.clone());
+}
+
+/// Whether `expr` builds a fresh object, so that amending it with a body is
+/// the same as evaluating the body over that object again.
+fn builds_amendable_object(expr: &Expr) -> bool {
+    match expr {
+        Expr::New(..) | Expr::InferredNew(..) => true,
+        Expr::Binop(BinOp::Add, left, right) => {
+            matches!(right.as_ref(), Expr::ObjectBody(_)) && builds_amendable_object(left)
+        }
+        _ => false,
+    }
+}
+
+/// The late-bound form of `prop` once it amends the inherited `inherited`.
+///
+/// `foo { ... }` amends the value its base computed. A module further down
+/// the chain that overrides something `foo` reads must see that override, so
+/// the amendment keeps the base expression and layers its body on top of it:
+/// evaluating the result later rebuilds the object in the final scope.
+fn compose_amended_object(inherited: &Arc<Property>, prop: &Arc<Property>) -> Arc<Property> {
+    let (Some(base), Some(body), None) = (&inherited.value, &prop.body, &prop.value) else {
+        return prop.clone();
+    };
+    if !builds_amendable_object(base) {
+        return prop.clone();
+    }
+    Arc::new(Property {
+        type_ann: prop.type_ann.clone().or_else(|| inherited.type_ann.clone()),
+        value: Some(Expr::Binop(
+            BinOp::Add,
+            Box::new(base.clone()),
+            Box::new(Expr::ObjectBody(body.clone())),
+        )),
+        body: None,
+        ..(**prop).clone()
+    })
 }
 
 fn amended_function(arity: usize, function: Value, body: &Body, scope: &Scope) -> Value {
