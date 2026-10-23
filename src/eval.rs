@@ -8191,6 +8191,16 @@ impl Evaluator {
                 if let Value::Object(existing_map, _) = &base {
                     amended.extend(existing_map.iter().map(|(k, v)| (k.clone(), v.clone())));
                 }
+                let applied_default = self.rebase_entries_on_amended_default(
+                    base_src,
+                    overlay_entries,
+                    &inherited_scope,
+                    &amendment_scope,
+                    &value_type_defaults,
+                    inherited_default.clone(),
+                    depth,
+                    &mut amended,
+                )?;
                 self.eval_mapping_entries_with_type_default(
                     overlay_entries,
                     &amendment_scope,
@@ -8203,7 +8213,77 @@ impl Evaluator {
                         entries: find_default_body_entries(&base_src.entries),
                     },
                 )?;
-                return Ok(Value::Object(Arc::new(amended), Some(Arc::clone(base_src))));
+                // The mapping's default is now the one just applied; a later
+                // amendment compares its entries against it.
+                let source = match applied_default {
+                    Some(default) => {
+                        let replaced: HashSet<&str> = overlay_entries
+                            .iter()
+                            .filter_map(|entry| match entry {
+                                Entry::DynProperty(Expr::String(key), value)
+                                    if !matches!(value, Expr::ObjectBody(_)) =>
+                                {
+                                    Some(&**key)
+                                }
+                                _ => None,
+                            })
+                            .collect();
+                        // A replaced entry is saved as its evaluated value, so
+                        // later replays neither rebuild the discarded body nor
+                        // let other entries read a placeholder. Other values are
+                        // blanked only if no entry reads its siblings.
+                        let reads_siblings = {
+                            let refs = property_reference_names(&Property {
+                                annotations: Vec::new(),
+                                modifiers: Vec::new(),
+                                name: "".into(),
+                                type_ann: None,
+                                value: None,
+                                body: Some(base_src.entries.clone()),
+                                is_method: false,
+                            });
+                            ["this", "module", DYNAMIC_SIBLING_REF]
+                                .iter()
+                                .any(|name| refs.contains(*name))
+                        };
+                        let mut replayable = true;
+                        let entries: Vec<Entry> = base_src
+                            .entries
+                            .iter()
+                            .map(|entry| match entry {
+                                Entry::Property(prop) if &*prop.name == "default" => {
+                                    Entry::Property(default.clone())
+                                }
+                                Entry::DynProperty(key @ Expr::String(name), _)
+                                    if replaced.contains(&**name) =>
+                                {
+                                    let literal = match amended.get(&**name) {
+                                        Some(Value::Null) => Some(Expr::Null),
+                                        Some(Value::Bool(b)) => Some(Expr::Bool(*b)),
+                                        Some(Value::Int(n)) => Some(Expr::Int(*n)),
+                                        Some(Value::Float(f)) => Some(Expr::Float(*f)),
+                                        Some(Value::String(text)) => {
+                                            Some(Expr::String(Arc::clone(text)))
+                                        }
+                                        _ => None,
+                                    };
+                                    replayable &= literal.is_some() || !reads_siblings;
+                                    Entry::DynProperty(key.clone(), literal.unwrap_or(Expr::Null))
+                                }
+                                entry => entry.clone(),
+                            })
+                            .collect();
+                        if replayable {
+                            let mut source = Arc::unwrap_or_clone(Arc::clone(base_src));
+                            source.entries = entries.into();
+                            Arc::new(source)
+                        } else {
+                            Arc::clone(base_src)
+                        }
+                    }
+                    None => Arc::clone(base_src),
+                };
+                return Ok(Value::Object(Arc::new(amended), Some(source)));
             }
             return self.eval_amended_object(base_map, base_src, overlay_entries, scope, depth);
         }
@@ -8216,6 +8296,127 @@ impl Evaluator {
         }
         let overlay = self.eval_entries(overlay_entries, &amendment_scope, depth + 1)?;
         Ok(merge_values(base, overlay))
+    }
+
+    /// An amendment that assigns a new `default` also applies it to the
+    /// entries the base declared without a value of their own: pkl builds
+    /// those entries from the final default. This runs before the amendment's
+    /// own entries, so one that amends a base entry sees the rebuilt value.
+    #[allow(clippy::too_many_arguments)]
+    fn rebase_entries_on_amended_default(
+        &mut self,
+        base_src: &ObjectSource,
+        overlay_entries: &Body,
+        inherited_scope: &Scope,
+        amendment_scope: &Scope,
+        value_type_defaults: &[(String, Value)],
+        old_default: Option<Value>,
+        depth: usize,
+        amended: &mut ObjectMap,
+    ) -> Result<Option<Arc<Property>>> {
+        let assigned_default = overlay_entries.iter().find_map(|entry| match entry {
+            Entry::Property(prop)
+                if &*prop.name == "default"
+                    && prop.value.is_some()
+                    && !has_modifier(&prop.modifiers, Modifier::Local) =>
+            {
+                Some(prop.clone())
+            }
+            _ => None,
+        });
+        // Only a base made of a `default` and literal-key entries is rebuilt:
+        // locals, generators and computed keys are left as they were.
+        let plain_base = base_src.entries.iter().all(|entry| match entry {
+            Entry::Property(prop) => {
+                &*prop.name == "default" && !has_modifier(&prop.modifiers, Modifier::Local)
+            }
+            Entry::DynProperty(key, _) => matches!(key, Expr::String(_)),
+            _ => false,
+        });
+        let Some(assigned_default) = assigned_default else {
+            return Ok(None);
+        };
+        if !plain_base {
+            return Ok(None);
+        }
+        let Some(default) = self.find_default_template(overlay_entries, amendment_scope, depth)?
+        else {
+            return Ok(None);
+        };
+        let recorded = default.clone();
+        // Entries the amendment replaces outright are never built from the base.
+        let replaced: HashSet<&str> = overlay_entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::DynProperty(Expr::String(key), value)
+                    if !matches!(value, Expr::ObjectBody(_)) =>
+                {
+                    Some(&**key)
+                }
+                _ => None,
+            })
+            .collect();
+        let rebased: Vec<Entry> = base_src
+            .entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry,
+                    Entry::DynProperty(Expr::String(key), Expr::ObjectBody(_) | Expr::New(None, ..))
+                        if !replaced.contains(&**key)
+                )
+            })
+            .cloned()
+            .collect();
+        if !rebased.is_empty() {
+            // Build them apart from `amended`, whose entries already hold the old
+            // default: a body entry would amend that value instead of the default.
+            let mut fresh = ObjectMap::default();
+            self.eval_mapping_entries_with_type_default(
+                &rebased,
+                inherited_scope,
+                depth,
+                &mut fresh,
+                value_type_defaults,
+                &base_src.mapping_value_types,
+                MappingInheritedDefault {
+                    value: Some(default),
+                    entries: None,
+                },
+            )?;
+            // An entry an earlier amendment changed is no longer what the base
+            // built from its own default; keep it.
+            let mut original = ObjectMap::default();
+            self.eval_mapping_entries_with_type_default(
+                &rebased,
+                inherited_scope,
+                depth,
+                &mut original,
+                value_type_defaults,
+                &base_src.mapping_value_types,
+                MappingInheritedDefault {
+                    value: old_default,
+                    entries: None,
+                },
+            )?;
+            for (key, value) in fresh {
+                let unchanged = match (original.get(&key), amended.get(&key)) {
+                    (Some(original), Some(current)) => original.to_json() == current.to_json(),
+                    _ => false,
+                };
+                if unchanged {
+                    amended.insert(key, value);
+                }
+            }
+        }
+        // The default can only be recorded on the mapping if it also means
+        // the same thing where the mapping was declared.
+        let declared = self
+            .find_default_template(overlay_entries, inherited_scope, depth)
+            .ok()
+            .flatten();
+        let same = declared.is_some_and(|declared| declared.to_json() == recorded.to_json());
+        Ok(same.then_some(assigned_default))
     }
 
     fn eval_binop(
