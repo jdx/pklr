@@ -8318,46 +8318,45 @@ impl Evaluator {
             })
             .cloned()
             .collect();
-        if rebased.is_empty() {
-            return Ok(None);
-        }
-        // Build them apart from `amended`, whose entries already hold the old
-        // default: a body entry would amend that value instead of the default.
-        let mut fresh = ObjectMap::default();
-        self.eval_mapping_entries_with_type_default(
-            &rebased,
-            inherited_scope,
-            depth,
-            &mut fresh,
-            value_type_defaults,
-            &base_src.mapping_value_types,
-            MappingInheritedDefault {
-                value: Some(default),
-                entries: None,
-            },
-        )?;
-        // An entry an earlier amendment changed is no longer what the base
-        // built from its own default; keep it.
-        let mut original = ObjectMap::default();
-        self.eval_mapping_entries_with_type_default(
-            &rebased,
-            inherited_scope,
-            depth,
-            &mut original,
-            value_type_defaults,
-            &base_src.mapping_value_types,
-            MappingInheritedDefault {
-                value: old_default,
-                entries: None,
-            },
-        )?;
-        for (key, value) in fresh {
-            let unchanged = match (original.get(&key), amended.get(&key)) {
-                (Some(original), Some(current)) => original.to_json() == current.to_json(),
-                _ => false,
-            };
-            if unchanged {
-                amended.insert(key, value);
+        if !rebased.is_empty() {
+            // Build them apart from `amended`, whose entries already hold the old
+            // default: a body entry would amend that value instead of the default.
+            let mut fresh = ObjectMap::default();
+            self.eval_mapping_entries_with_type_default(
+                &rebased,
+                inherited_scope,
+                depth,
+                &mut fresh,
+                value_type_defaults,
+                &base_src.mapping_value_types,
+                MappingInheritedDefault {
+                    value: Some(default),
+                    entries: None,
+                },
+            )?;
+            // An entry an earlier amendment changed is no longer what the base
+            // built from its own default; keep it.
+            let mut original = ObjectMap::default();
+            self.eval_mapping_entries_with_type_default(
+                &rebased,
+                inherited_scope,
+                depth,
+                &mut original,
+                value_type_defaults,
+                &base_src.mapping_value_types,
+                MappingInheritedDefault {
+                    value: old_default,
+                    entries: None,
+                },
+            )?;
+            for (key, value) in fresh {
+                let unchanged = match (original.get(&key), amended.get(&key)) {
+                    (Some(original), Some(current)) => original.to_json() == current.to_json(),
+                    _ => false,
+                };
+                if unchanged {
+                    amended.insert(key, value);
+                }
             }
         }
         // The default can only be recorded on the mapping if it also means

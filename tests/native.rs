@@ -1555,3 +1555,25 @@ fn amended_mapping_default_rebuild_skips_replaced_entries() {
     );
     assert_eq!(json["v"]["a"]["ok"], true);
 }
+
+#[test]
+fn amended_mapping_default_is_kept_when_every_base_entry_is_replaced() {
+    let base = common::write_entry(
+        "amend_mapping_default_all_replaced",
+        "Template.pkl",
+        "v = new Mapping {\n  default = new { inherited = 1 }\n  [\"a\"] {}\n}\n",
+    );
+    let dir = base.parent().unwrap();
+    std::fs::write(
+        dir.join("Middle.pkl"),
+        "amends \"Template.pkl\"\nv {\n  default = new { inherited = 2 }\n  [\"a\"] = new { ok = true }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Config.pkl"),
+        "amends \"Middle.pkl\"\nv { [\"b\"] {} }\n",
+    )
+    .unwrap();
+    let json = pklr::eval_to_json(&dir.join("Config.pkl")).unwrap();
+    assert_eq!(json["v"]["b"]["inherited"], 2);
+}
