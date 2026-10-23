@@ -2993,3 +2993,277 @@ h2 = (h) { f = new { a = 7 } }
     assert_eq!(json["h"]["f"], serde_json::json!({"a": 1, "b": 10}));
     assert_eq!(json["h2"]["f"], serde_json::json!({"a": 7, "b": 3}));
 }
+
+// ============================================================
+// Late binding through amending modules
+// ============================================================
+
+#[test]
+fn late_binding_resolves_properties_declared_in_reverse_dependency_order() {
+    let temp = TestTempDir::new("pklr_test_late_binding_reverse_order");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Template.pkl"),
+        "c = b + 1\nb = a + 1\na = base + 1\nbase = 1\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("main.pkl"), "amends \"Template.pkl\"\nbase = 10\n").unwrap();
+
+    let json = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({"base": 10, "a": 11, "b": 12, "c": 13})
+    );
+}
+
+#[test]
+fn late_binding_resolves_forward_references_between_inherited_objects() {
+    let temp = TestTempDir::new("pklr_test_late_binding_forward_reference");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Template.pkl"),
+        r#"
+summary = new { first = items[0]; count = items.length }
+items = List(base, base + 1)
+base = 1
+"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("main.pkl"), "amends \"Template.pkl\"\nbase = 7\n").unwrap();
+
+    let json = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
+    assert_eq!(json["summary"], serde_json::json!({"first": 7, "count": 2}));
+    assert_eq!(json["items"], serde_json::json!([7, 8]));
+}
+
+#[test]
+fn late_binding_keeps_an_override_made_in_a_middle_layer() {
+    let temp = TestTempDir::new("pklr_test_late_binding_middle_override");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Template.pkl"),
+        r#"
+forward = middle + 1
+middle = base * 2
+server = new { host = name + ".example"; port = base + 1 }
+name = "template"
+base = 1
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Middle.pkl"),
+        "amends \"Template.pkl\"\nmiddle = base * 3\nname = \"middle\"\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("Leaf.pkl"), "amends \"Middle.pkl\"\nbase = 5\n").unwrap();
+
+    let json = pklr::eval_to_json(&dir.join("Leaf.pkl")).unwrap();
+    assert_eq!(json["middle"], 15);
+    assert_eq!(json["forward"], 16);
+    assert_eq!(
+        json["server"],
+        serde_json::json!({"host": "middle.example", "port": 6})
+    );
+}
+
+#[test]
+fn late_binding_recovers_from_a_property_that_fails_until_a_later_one_is_bound() {
+    let temp = TestTempDir::new("pklr_test_late_binding_early_failure");
+    let dir = temp.path();
+    // With the template's own `count`, `per` divides by zero. `report` is
+    // declared first, so it reads that failure before `per` is rebound.
+    std::fs::write(
+        dir.join("Template.pkl"),
+        "total = 20\ncount = 0\nreport = per + 1\nper = total ~/ count\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("main.pkl"), "amends \"Template.pkl\"\ncount = 4\n").unwrap();
+
+    let json = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({"total": 20, "count": 4, "report": 6, "per": 5})
+    );
+}
+
+#[test]
+fn late_binding_reports_a_failure_no_pass_resolves_unless_it_is_overridden() {
+    let temp = TestTempDir::new("pklr_test_late_binding_unresolved_failure");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("Template.pkl"),
+        "bad = throw(\"boom\")\nvalue = base + 1\nbase = 1\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("broken.pkl"),
+        "amends \"Template.pkl\"\nbase = 2\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("fixed.pkl"),
+        "amends \"Template.pkl\"\nbase = 2\nbad = 0\n",
+    )
+    .unwrap();
+
+    let error = pklr::eval_to_json(&dir.join("broken.pkl"))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("boom"), "unexpected error: {error}");
+    let json = pklr::eval_to_json(&dir.join("fixed.pkl")).unwrap();
+    assert_eq!(json, serde_json::json!({"bad": 0, "value": 3, "base": 2}));
+}
+
+/// Evaluate `main` with room for a long chain: evaluation recurses once per
+/// link, which a test thread's default stack cannot hold in a debug build.
+fn eval_chain(main: std::path::PathBuf) -> serde_json::Value {
+    std::thread::Builder::new()
+        .stack_size(64 << 20)
+        .spawn(move || pklr::eval_to_json(&main).unwrap())
+        .unwrap()
+        .join()
+        .unwrap()
+}
+
+// Each of these reads a property declared after it, through a lambda, method
+// or amended object that keeps the scope it was made in. Late binding runs in
+// passes, and an override of `base` reaches `res` through such captures one
+// pass per link, so the result depends on how many passes run.
+
+#[test]
+fn late_binding_reaches_through_a_long_chain_of_lambdas() {
+    let temp = TestTempDir::new("pklr_test_late_binding_lambda_chain");
+    let dir = temp.path();
+    let depth = 16;
+    let mut template = String::from("res = f1.apply(1)\n");
+    for n in 1..depth {
+        template.push_str(&format!("hidden f{n} = (x) -> f{}.apply(x)\n", n + 1));
+    }
+    template.push_str(&format!("hidden f{depth} = (x) -> x + r\n"));
+    template.push_str("base = 1\nr = base + 1\n");
+    std::fs::write(dir.join("Template.pkl"), template).unwrap();
+    std::fs::write(dir.join("main.pkl"), "amends \"Template.pkl\"\nbase = 10\n").unwrap();
+
+    assert_eq!(eval_chain(dir.join("main.pkl"))["res"], 12);
+}
+
+#[test]
+fn late_binding_reaches_through_a_long_chain_of_methods() {
+    let temp = TestTempDir::new("pklr_test_late_binding_method_chain");
+    let dir = temp.path();
+    let depth = 24;
+    let mut template = String::from("res = f1(1)\n");
+    for n in 1..depth {
+        template.push_str(&format!("function f{n}(x) = f{}(x)\n", n + 1));
+    }
+    template.push_str(&format!("function f{depth}(x) = x + r\n"));
+    template.push_str("base = 1\nr = base + 1\n");
+    std::fs::write(dir.join("Template.pkl"), template).unwrap();
+    std::fs::write(dir.join("main.pkl"), "amends \"Template.pkl\"\nbase = 10\n").unwrap();
+
+    assert_eq!(eval_chain(dir.join("main.pkl"))["res"], 12);
+}
+
+#[test]
+fn late_binding_reaches_through_a_long_chain_of_amended_objects() {
+    let temp = TestTempDir::new("pklr_test_late_binding_amended_object_chain");
+    let dir = temp.path();
+    let depth = 10;
+    let mut template = String::from("res = (o1) { go = true }.v\n");
+    for n in 1..depth {
+        template.push_str(&format!(
+            "o{n} = new {{ go = false; v = if (go) (o{}) {{ go = true }}.v else 0 }}\n",
+            n + 1
+        ));
+    }
+    template.push_str(&format!(
+        "o{depth} = new {{ go = false; v = if (go) r else 0 }}\n"
+    ));
+    template.push_str("base = 1\nr = base + 1\n");
+    std::fs::write(dir.join("Template.pkl"), template).unwrap();
+    std::fs::write(dir.join("main.pkl"), "amends \"Template.pkl\"\nbase = 10\n").unwrap();
+
+    assert_eq!(eval_chain(dir.join("main.pkl"))["res"], 11);
+}
+
+#[test]
+fn late_binding_reaches_through_a_recursive_lambda() {
+    let temp = TestTempDir::new("pklr_test_late_binding_recursive_lambda");
+    let dir = temp.path();
+    // Each call goes back through the version of `sum` captured by an earlier
+    // pass, so a call eight deep needs a chain of eight versions. The passes
+    // run once per property of the template, plus one, so it has enough.
+    let padding: String = (0..8).map(|n| format!("pad{n} = {n}\n")).collect();
+    std::fs::write(
+        dir.join("Template.pkl"),
+        format!("hidden sum = (x) -> if (x <= 0) first else sum.apply(x - 1) + step\nres = sum.apply(8)\nfirst = 2\nstep = 1\n{padding}"),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "amends \"Template.pkl\"\nfirst = 100\nstep = 4\n",
+    )
+    .unwrap();
+
+    assert_eq!(eval_chain(dir.join("main.pkl"))["res"], 132);
+}
+
+#[test]
+fn late_binding_reaches_through_a_long_chain_of_module_reads() {
+    let temp = TestTempDir::new("pklr_test_late_binding_module_chain");
+    let dir = temp.path();
+    let depth = 8;
+    let mut template = String::from("res = module.f1.apply(1)\n");
+    for n in 1..depth {
+        template.push_str(&format!(
+            "hidden f{n} = (x) -> module.f{}.apply(x)\n",
+            n + 1
+        ));
+    }
+    template.push_str(&format!("hidden f{depth} = (x) -> x + module.r\n"));
+    template.push_str("base = 1\nr = base + 1\n");
+    std::fs::write(dir.join("Template.pkl"), template).unwrap();
+    std::fs::write(dir.join("main.pkl"), "amends \"Template.pkl\"\nbase = 10\n").unwrap();
+
+    assert_eq!(eval_chain(dir.join("main.pkl"))["res"], 12);
+}
+
+#[test]
+fn late_binding_reaches_through_a_long_chain_of_this_reads() {
+    let temp = TestTempDir::new("pklr_test_late_binding_this_chain");
+    let dir = temp.path();
+    let depth = 8;
+    let mut template = String::from("res = this.f1.apply(1)\n");
+    for n in 1..depth {
+        template.push_str(&format!("hidden f{n} = (x) -> this.f{}.apply(x)\n", n + 1));
+    }
+    template.push_str(&format!("hidden f{depth} = (x) -> x + this.r\n"));
+    template.push_str("base = 1\nr = base + 1\n");
+    std::fs::write(dir.join("Template.pkl"), template).unwrap();
+    std::fs::write(dir.join("main.pkl"), "amends \"Template.pkl\"\nbase = 10\n").unwrap();
+
+    assert_eq!(eval_chain(dir.join("main.pkl"))["res"], 12);
+}
+
+#[test]
+fn late_binding_reaches_through_a_long_chain_of_outer_reads() {
+    let temp = TestTempDir::new("pklr_test_late_binding_outer_chain");
+    let dir = temp.path();
+    // pklr resolves `outer` inside a lambda to the enclosing module, which pkl
+    // does not; the reads must still count as reads of the module's members.
+    let depth = 8;
+    let mut template = String::new();
+    for n in 1..depth {
+        template.push_str(&format!(
+            "o{n} = new {{ f = (x) -> outer.o{}.f.apply(x) }}\n",
+            n + 1
+        ));
+    }
+    template.push_str(&format!("o{depth} = new {{ f = (x) -> x + outer.r }}\n"));
+    template.push_str("res = o1.f.apply(1)\nbase = 1\nr = base + 1\n");
+    std::fs::write(dir.join("Template.pkl"), template).unwrap();
+    std::fs::write(dir.join("main.pkl"), "amends \"Template.pkl\"\nbase = 10\n").unwrap();
+
+    assert_eq!(eval_chain(dir.join("main.pkl"))["res"], 12);
+}
