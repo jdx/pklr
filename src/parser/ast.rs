@@ -163,7 +163,9 @@ pub(crate) fn has_untyped_result_new(expr: &Expr) -> bool {
         Expr::If(_, then_expr, else_expr) => {
             has_untyped_result_new(then_expr) || has_untyped_result_new(else_expr)
         }
-        Expr::Let(_, _, body) | Expr::Trace(body, _) => has_untyped_result_new(body),
+        Expr::Let(_, _, body) | Expr::Trace(body, _) | Expr::TemplateLocals(_, body) => {
+            has_untyped_result_new(body)
+        }
         _ => false,
     }
 }
@@ -184,7 +186,9 @@ pub(crate) fn rewrite_untyped_result_new(expr: &mut Expr, rewrite: &mut impl FnM
             rewrite_untyped_result_new(then_expr, rewrite);
             rewrite_untyped_result_new(else_expr, rewrite);
         }
-        Expr::Let(_, _, body) | Expr::Trace(body, _) => rewrite_untyped_result_new(body, rewrite),
+        Expr::Let(_, _, body) | Expr::Trace(body, _) | Expr::TemplateLocals(_, body) => {
+            rewrite_untyped_result_new(body, rewrite)
+        }
         _ => {}
     }
 }
@@ -249,6 +253,21 @@ pub enum Expr {
     /// Fields: the glob pattern, and the path of the module the expression was
     /// written in, which relative patterns resolve against.
     ImportGlob(String, String),
+    /// An expression written in a module that amended objects inherit from:
+    /// the module's `local` bindings shadow whatever an amending module
+    /// declared under the same names while the expression is evaluated.
+    TemplateLocals(LocalBindings, Box<Expr>),
+}
+
+/// The values of a module's `local` members, captured when the module's
+/// scope was complete.
+#[derive(Debug, Clone)]
+pub struct LocalBindings(pub std::sync::Arc<Vec<(std::sync::Arc<str>, crate::value::Value)>>);
+
+impl PartialEq for LocalBindings {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

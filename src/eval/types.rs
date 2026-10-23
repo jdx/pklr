@@ -112,6 +112,7 @@ impl AliasResolver<'_> {
             | Expr::NullSafeField(value, _)
             | Expr::Unop(_, value)
             | Expr::Throw(value)
+            | Expr::TemplateLocals(_, value)
             | Expr::Trace(value, _)
             | Expr::Read(value, _)
             | Expr::ReadOrNull(value, _)
