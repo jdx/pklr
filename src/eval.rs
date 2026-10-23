@@ -3125,7 +3125,13 @@ impl Evaluator {
         } else {
             HashSet::default()
         };
-        for pass in 0..=late_passes {
+        // Each pass re-evaluates every late-bound property against the values
+        // the previous pass produced. Once a pass changes nothing, the next
+        // would repeat it, so stop; `late_passes` stays the upper bound.
+        let mut pass = 0;
+        loop {
+            let mut changed = false;
+            let mut errored = false;
             for prop in &late_inherited_properties {
                 if child_property_names.contains(prop.name.as_ref())
                     || reads_super.contains(prop.name.as_ref())
@@ -3134,6 +3140,8 @@ impl Evaluator {
                 }
                 match self.eval_property_with(prop, &scope, depth, true) {
                     Ok(Some(value)) => {
+                        changed |= !settled_eq(scope.get(&prop.name), Some(&value))
+                            || !settled_eq(all_props.get(prop.name.as_ref()), Some(&value));
                         scope.set(&prop.name, value.clone());
                         module_props_insert(
                             &mut scope,
@@ -3157,7 +3165,10 @@ impl Evaluator {
                     Err(Error::Eval(message))
                         if pass < late_passes
                             || (module_is_abstract(module)
-                                && is_unresolved_template_error(&message)) => {}
+                                && is_unresolved_template_error(&message)) =>
+                    {
+                        errored = true;
+                    }
                     Err(error) => return Err(error),
                 }
             }
@@ -3179,10 +3190,12 @@ impl Evaluator {
                         Ok(value)
                     }) {
                     Ok(Some(value)) => {
+                        changed |= !settled_eq(scope.get(&prop.name), Some(&value));
                         scope.set(&prop.name, value.clone());
                         if has_modifier(&prop.modifiers, Modifier::Local) {
                             continue;
                         }
+                        changed |= !settled_eq(all_props.get(prop.name.as_ref()), Some(&value));
                         module_props_insert(
                             &mut scope,
                             &mut all_props,
@@ -3205,10 +3218,19 @@ impl Evaluator {
                     Err(Error::Eval(message))
                         if pass < late_passes
                             || (module_is_abstract(module)
-                                && is_unresolved_template_error(&message)) => {}
+                                && is_unresolved_template_error(&message)) =>
+                    {
+                        errored = true;
+                    }
                     Err(error) => return Err(error),
                 }
             }
+            if pass >= late_passes || (!changed && !errored) {
+                break;
+            }
+            // Errors are only reported on the last pass, so a stable pass
+            // that still failed goes straight there.
+            pass = if changed { pass + 1 } else { late_passes };
         }
 
         if depth == 0 {
@@ -9626,6 +9648,48 @@ fn inherit_stdlib_module(name: &str, base_obj: &mut ObjectMap, scope: &mut Scope
             base_obj.insert(member.clone(), value.clone());
             scope.set(member, value.clone());
         }
+    }
+}
+
+/// Whether re-evaluating a late-bound property reproduced `old`.
+///
+/// Cheap and conservative: a lambda or an object that carries its definition
+/// scope only counts as unchanged when it is the very same allocation, since
+/// comparing the scopes they capture is as costly as the evaluation itself.
+/// A false "changed" only costs another pass.
+fn settled_eq(old: Option<&Value>, new: Option<&Value>) -> bool {
+    match (old, new) {
+        (None, None) => true,
+        (Some(old), Some(new)) => match (old, new) {
+            (Value::Object(left, left_source), Value::Object(right, right_source)) => {
+                let same_source = match (left_source, right_source) {
+                    (None, None) => true,
+                    (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                    _ => false,
+                };
+                same_source
+                    && (Arc::ptr_eq(left, right)
+                        || (left.len() == right.len()
+                            && left.iter().zip(right.iter()).all(
+                                |((left_key, left_value), (right_key, right_value))| {
+                                    left_key == right_key
+                                        && settled_eq(Some(left_value), Some(right_value))
+                                },
+                            )))
+            }
+            (Value::List(left), Value::List(right)) => {
+                left.kind() == right.kind()
+                    && left.len() == right.len()
+                    && left
+                        .iter()
+                        .zip(right.iter())
+                        .all(|(left, right)| settled_eq(Some(left), Some(right)))
+            }
+            (Value::Float(left), Value::Float(right)) => left.to_bits() == right.to_bits(),
+            (Value::Lambda(..), _) | (_, Value::Lambda(..)) => false,
+            _ => old == new,
+        },
+        _ => false,
     }
 }
 

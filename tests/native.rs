@@ -1317,3 +1317,62 @@ fn amended_object_sees_override_in_a_later_module() {
     let json = pklr::eval_to_json(&dir.join("m3.pkl")).unwrap();
     assert_eq!(json["p3"], serde_json::json!({ "a": 4, "b": 8, "c": 7 }));
 }
+
+#[test]
+fn amending_a_long_template_settles_in_either_declaration_order() {
+    const N: usize = 150;
+    let mut forward = String::from("base = 1\n");
+    let mut reverse = String::from("base = 1\n");
+    for i in 1..=N {
+        let prev = if i == 1 {
+            "base".to_string()
+        } else {
+            format!("p{}", i - 1)
+        };
+        forward.push_str(&format!("p{i} = {prev} + 1\n"));
+    }
+    for i in (1..=N).rev() {
+        let prev = if i == 1 {
+            "base".to_string()
+        } else {
+            format!("p{}", i - 1)
+        };
+        reverse.push_str(&format!("p{i} = {prev} + 1\n"));
+    }
+    for (name, template) in [("forward", forward), ("reverse", reverse)] {
+        let path = common::write_entry(&format!("late_order_{name}"), "Template.pkl", &template);
+        let child = path.with_file_name("Child.pkl");
+        std::fs::write(&child, "amends \"Template.pkl\"\nbase = 10\n").unwrap();
+        let json = pklr::eval_to_json(&child).unwrap();
+        assert_eq!(json["p1"], 11, "{name}");
+        assert_eq!(json[format!("p{N}")], 10 + N as i64, "{name}");
+    }
+}
+
+#[test]
+fn late_binding_keeps_going_when_only_the_sign_of_zero_changes() {
+    let template = common::write_entry(
+        "late_negative_zero",
+        "Template.pkl",
+        "base = 1.0\nresult = (1.0 / a) < 0\na = b\nb = c\nc = base * 0.0\n",
+    );
+    let child = template.with_file_name("Child.pkl");
+    std::fs::write(&child, "amends \"Template.pkl\"\nbase = -1.0\n").unwrap();
+
+    let json = pklr::eval_to_json(&child).unwrap();
+    assert_eq!(json["result"], true);
+}
+
+#[test]
+fn late_binding_keeps_going_when_only_the_entry_order_changes() {
+    let template = common::write_entry(
+        "late_map_order",
+        "Template.pkl",
+        "base = true\nresult = a.values\na = b\nb = c\nc = d\nd = if (base) Map(\"x\", 1, \"y\", 2) else Map(\"y\", 2, \"x\", 1)\n",
+    );
+    let child = template.with_file_name("Child.pkl");
+    std::fs::write(&child, "amends \"Template.pkl\"\nbase = false\n").unwrap();
+
+    let json = pklr::eval_to_json(&child).unwrap();
+    assert_eq!(json["result"], serde_json::json!([2, 1]));
+}
