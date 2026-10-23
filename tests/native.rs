@@ -1304,6 +1304,14 @@ fn amended_object_sees_override_in_a_later_module() {
     )
     .unwrap();
 
+    std::fs::write(
+        dir.join("m2c.pkl"),
+        "amends \"m1.pkl\"\np3 { c = 7 }\np5 = 8\n",
+    )
+    .unwrap();
+
+    let json = pklr::eval_to_json(&dir.join("m2c.pkl")).unwrap();
+    assert_eq!(json["p3"], serde_json::json!({ "a": 4, "b": 8, "c": 7 }));
     let json = pklr::eval_to_json(&dir.join("m2.pkl")).unwrap();
     assert_eq!(json["p3"], serde_json::json!({ "a": 4, "b": 6 }));
     let json = pklr::eval_to_json(&dir.join("m3.pkl")).unwrap();
