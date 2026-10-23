@@ -8217,6 +8217,17 @@ impl Evaluator {
                 // amendment compares its entries against it.
                 let source = match applied_default {
                     Some(default) => {
+                        let replaced: HashSet<&str> = overlay_entries
+                            .iter()
+                            .filter_map(|entry| match entry {
+                                Entry::DynProperty(Expr::String(key), value)
+                                    if !matches!(value, Expr::ObjectBody(_)) =>
+                                {
+                                    Some(&**key)
+                                }
+                                _ => None,
+                            })
+                            .collect();
                         let mut source = Arc::unwrap_or_clone(Arc::clone(base_src));
                         source.entries = base_src
                             .entries
@@ -8224,6 +8235,13 @@ impl Evaluator {
                             .map(|entry| match entry {
                                 Entry::Property(prop) if &*prop.name == "default" => {
                                     Entry::Property(default.clone())
+                                }
+                                // An entry the amendment replaced is replayed
+                                // from the evaluated mapping, not rebuilt.
+                                Entry::DynProperty(key @ Expr::String(name), _)
+                                    if replaced.contains(&**name) =>
+                                {
+                                    Entry::DynProperty(key.clone(), Expr::Null)
                                 }
                                 entry => entry.clone(),
                             })
