@@ -11,7 +11,8 @@ use crate::capabilities::EvalCapabilities;
 use crate::error::{Error, Result};
 use crate::lexer;
 use crate::parser::{
-    self, BinOp, Body, Entry, Expr, Modifier, Module, Property, StringInterpPart, UnOp,
+    self, BinOp, Body, Entry, Expr, LocalBindings, Modifier, Module, Property, StringInterpPart,
+    UnOp,
 };
 use crate::value::{
     CapturedScope, ListKind, ListValue, NameSet, ObjectKind, ObjectMap, ObjectSource,
@@ -269,6 +270,7 @@ fn expr_reads_module_super(expr: &Expr) -> bool {
         | Expr::NullSafeField(value, _)
         | Expr::Unop(_, value)
         | Expr::Throw(value)
+        | Expr::TemplateLocals(_, value)
         | Expr::Trace(value, _)
         | Expr::Read(value, _)
         | Expr::ReadOrNull(value, _)
@@ -476,6 +478,7 @@ fn type_constraint_has_explicit_throw(ty: &crate::parser::TypeExpr, scope: &Scop
     ) -> bool {
         match expr {
             Expr::Throw(_) => true,
+            Expr::TemplateLocals(_, inner) => expr_has_throw(inner, scope, captured, seen),
             Expr::Ident(_) => static_value(expr, scope, captured)
                 .is_some_and(|value| lambda_has_throw(value, scope, seen)),
             Expr::Field(value, _) | Expr::NullSafeField(value, _) => {
@@ -2495,6 +2498,10 @@ impl Evaluator {
                     if let Entry::Property(prop) = entry
                         && !has_modifier(&prop.modifiers, Modifier::Local)
                         && &*prop.name != "output"
+                        && !self
+                            .inherited_late_properties(Path::new(&source_path))
+                            .iter()
+                            .any(|known| known.name == prop.name)
                     {
                         push_base_property(&mut late_inherited_properties, prop);
                     }
@@ -3082,7 +3089,7 @@ impl Evaluator {
                 let inherited = late_inherited_properties
                     .iter()
                     .rfind(|inherited| inherited.name == prop.name && inherited.value.is_some())?;
-                let composed = compose_amended_object(inherited, prop);
+                let composed = compose_amended_object(inherited, prop, None);
                 composed.value.is_some().then_some(composed)
             })
             .collect();
@@ -3488,21 +3495,30 @@ impl Evaluator {
             }))
         };
         let mut effective_late_properties = IndexMap::new();
-        for prop in late_inherited_properties
+        let template_locals = module_local_bindings(body, &scope);
+        for (prop, inherited) in late_inherited_properties
             .iter()
+            .map(|prop| (prop, true))
             .chain(body.iter().filter_map(|entry| match entry {
                 Entry::Property(prop)
                     if !has_modifier(&prop.modifiers, Modifier::Local)
                         && &*prop.name != "output" =>
                 {
-                    Some(prop)
+                    Some((prop, false))
                 }
                 _ => None,
             }))
         {
+            let locals = (!inherited).then_some(template_locals.as_ref()).flatten();
             let prop = match effective_late_properties.get(&prop.name) {
-                Some(inherited) => compose_amended_object(inherited, prop),
-                None => prop.clone(),
+                Some(base) => compose_amended_object(base, prop, locals),
+                None => match (&prop.value, locals) {
+                    (Some(value), Some(_)) => Arc::new(Property {
+                        value: Some(with_template_locals(locals, prop, value.clone())),
+                        ..(**prop).clone()
+                    }),
+                    _ => prop.clone(),
+                },
             };
             effective_late_properties.insert(prop.name.clone(), prop);
         }
@@ -7306,6 +7322,13 @@ impl Evaluator {
                     )))
                 }
             }
+            Expr::TemplateLocals(locals, inner) => {
+                let mut template_scope = scope.child();
+                for (name, value) in locals.0.iter() {
+                    template_scope.set(name, value.clone());
+                }
+                self.eval_expr(inner, &template_scope, depth)
+            }
             Expr::Throw(msg_expr) => {
                 let msg = self.eval_expr(msg_expr, scope, depth + 1)?;
                 Err(Error::Eval(value_to_display(&msg)))
@@ -8205,9 +8228,17 @@ impl Evaluator {
     ) -> Result<Value> {
         // Special case: object amendment `base + ObjectBody(entries)`
         if let BinOp::Add = op
-            && let Expr::ObjectBody(overlay_entries) = right
+            && let Some((overlay_entries, locals)) = overlay_body(right)
         {
             let base = self.eval_expr(left, scope, depth + 1)?;
+            let overlay_scope = locals.map(|locals| {
+                let mut overlay_scope = scope.child();
+                for (name, value) in locals.0.iter() {
+                    overlay_scope.set(name, value.clone());
+                }
+                overlay_scope
+            });
+            let scope = overlay_scope.as_ref().unwrap_or(scope);
             if let Value::Lambda(params, ..) = &base {
                 return Ok(amended_function(params.len(), base, overlay_entries, scope));
             }
@@ -9716,10 +9747,219 @@ fn push_base_property(inherited: &mut Vec<Arc<Property>>, prop: &Arc<Property>) 
 fn builds_amendable_object(expr: &Expr) -> bool {
     match expr {
         Expr::New(..) | Expr::InferredNew(..) => true,
+        Expr::TemplateLocals(_, inner) => builds_amendable_object(inner),
         Expr::Binop(BinOp::Add, left, right) => {
-            matches!(right.as_ref(), Expr::ObjectBody(_)) && builds_amendable_object(left)
+            overlay_body(right).is_some() && builds_amendable_object(left)
         }
         _ => false,
+    }
+}
+
+/// The body of an amendment's right operand, and the template locals it was
+/// written under, if any.
+fn overlay_body(expr: &Expr) -> Option<(&Body, Option<&LocalBindings>)> {
+    match expr {
+        Expr::ObjectBody(body) => Some((body, None)),
+        Expr::TemplateLocals(locals, inner) => match inner.as_ref() {
+            Expr::ObjectBody(body) => Some((body, Some(locals))),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The `local` members of a module, as the bindings its own expressions need
+/// to keep reading when an amending module declares a local of the same name.
+fn module_local_bindings(body: &[Entry], scope: &Scope) -> Option<LocalBindings> {
+    let locals: Vec<(Name, Value)> = body
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::Property(prop)
+                if has_modifier(&prop.modifiers, Modifier::Local) && prop.value.is_some() =>
+            {
+                Some((prop.name.clone(), scope.get(&prop.name)?.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    (!locals.is_empty()).then(|| LocalBindings(Arc::new(locals)))
+}
+
+/// Wrap `expr` so it sees `locals` when `prop` reads one of them.
+fn with_template_locals(locals: Option<&LocalBindings>, prop: &Property, expr: Expr) -> Expr {
+    match locals {
+        Some(locals)
+            if {
+                let refs = property_reference_names(prop);
+                locals.0.iter().any(|(name, _)| refs.contains(name))
+            } =>
+        {
+            Expr::TemplateLocals(locals.clone(), Box::new(expr))
+        }
+        _ => expr,
+    }
+}
+
+/// Replace the base members that `body` overrides with `null`, so building the
+/// base never evaluates a value the amendment is about to replace. The member
+/// keeps its position. Nothing is replaced when another base member could read
+/// the overridden one.
+fn without_overridden_members(base: &Expr, body: &Body) -> Expr {
+    let mut properties: HashSet<&str> = HashSet::default();
+    let mut keys: HashSet<&str> = HashSet::default();
+    let reads_super = |value: &Expr| {
+        let mut refs = HashSet::default();
+        collect_expr_refs(value, &mut refs, &HashSet::default());
+        refs.contains("super")
+    };
+    for entry in body.iter() {
+        match entry {
+            Entry::Property(prop)
+                if !has_modifier(&prop.modifiers, Modifier::Local)
+                    && prop.type_ann.is_none()
+                    && prop.body.is_none()
+                    && prop.value.as_ref().is_some_and(|value| !reads_super(value)) =>
+            {
+                properties.insert(&prop.name);
+            }
+            Entry::DynProperty(Expr::String(key), value)
+                if !matches!(value, Expr::ObjectBody(_)) && !reads_super(value) =>
+            {
+                keys.insert(key);
+            }
+            _ => {}
+        }
+    }
+    if properties.is_empty() && keys.is_empty() {
+        return base.clone();
+    }
+    let mut layers = Vec::new();
+    if !collect_prunable_layers(base, &mut layers) {
+        return base.clone();
+    }
+    // A Mapping's `default` still shapes the entries the base declares.
+    if builds_mapping(base) {
+        properties.remove("default");
+    }
+    let overridden = |entry: &Entry| match entry {
+        Entry::Property(prop) => {
+            !has_modifier(&prop.modifiers, Modifier::Local)
+                && prop.type_ann.is_none()
+                && prop.body.is_none()
+                && prop.value.is_some()
+                && properties.contains(&*prop.name)
+        }
+        Entry::DynProperty(Expr::String(key), value) => {
+            !matches!(value, Expr::ObjectBody(_)) && keys.contains(&**key)
+        }
+        _ => false,
+    };
+    let mut refs = HashSet::default();
+    for layer in &layers {
+        let kept: Vec<Entry> = layer
+            .iter()
+            .filter(|entry| !overridden(entry))
+            .cloned()
+            .collect();
+        refs.extend(property_reference_names(&Property {
+            annotations: Vec::new(),
+            modifiers: Vec::new(),
+            name: "".into(),
+            type_ann: None,
+            value: None,
+            body: Some(Arc::new(kept)),
+            is_method: false,
+        }));
+    }
+    if ["this", "super", "module", DYNAMIC_SIBLING_REF]
+        .iter()
+        .any(|name| refs.contains(*name))
+        || properties.iter().any(|name| refs.contains(*name))
+    {
+        return base.clone();
+    }
+    let blank = |body: &Body| -> Body {
+        Arc::new(
+            body.iter()
+                .map(|entry| match entry {
+                    Entry::Property(prop) if overridden(entry) => {
+                        Entry::Property(Arc::new(Property {
+                            value: Some(Expr::Null),
+                            ..(**prop).clone()
+                        }))
+                    }
+                    Entry::DynProperty(key, _) if overridden(entry) => {
+                        Entry::DynProperty(key.clone(), Expr::Null)
+                    }
+                    entry => entry.clone(),
+                })
+                .collect(),
+        )
+    };
+    rebuild_layers(base, &blank)
+}
+
+fn builds_mapping(expr: &Expr) -> bool {
+    match expr {
+        Expr::New(type_name, ..) => type_name.as_deref() == Some("Mapping"),
+        Expr::TemplateLocals(_, inner) => builds_mapping(inner),
+        Expr::Binop(BinOp::Add, left, _) => builds_mapping(left),
+        _ => false,
+    }
+}
+
+/// The bodies of the object `expr` builds and of the amendments layered on it,
+/// when the object is plain enough to blank out a member of: untyped or a
+/// Dynamic, Mapping or Listing, with no generic arguments to check.
+fn collect_prunable_layers<'a>(expr: &'a Expr, layers: &mut Vec<&'a Body>) -> bool {
+    match expr {
+        Expr::New(type_name, body, generics) => {
+            layers.push(body);
+            generics.is_empty()
+                && matches!(
+                    type_name.as_deref(),
+                    None | Some("Dynamic" | "Mapping" | "Listing")
+                )
+        }
+        Expr::TemplateLocals(_, inner) => collect_prunable_layers(inner, layers),
+        Expr::Binop(BinOp::Add, left, right) => match overlay_body(right) {
+            Some((body, _)) => {
+                layers.push(body);
+                collect_prunable_layers(left, layers)
+            }
+            None => false,
+        },
+        _ => false,
+    }
+}
+
+fn rebuild_layers(expr: &Expr, blank: &dyn Fn(&Body) -> Body) -> Expr {
+    match expr {
+        Expr::New(type_name, body, generics) => {
+            Expr::New(type_name.clone(), blank(body), generics.clone())
+        }
+        Expr::TemplateLocals(locals, inner) => {
+            Expr::TemplateLocals(locals.clone(), Box::new(rebuild_layers(inner, blank)))
+        }
+        Expr::Binop(BinOp::Add, left, right) => {
+            let right = match right.as_ref() {
+                Expr::ObjectBody(body) => Expr::ObjectBody(blank(body)),
+                Expr::TemplateLocals(locals, inner) => match inner.as_ref() {
+                    Expr::ObjectBody(body) => Expr::TemplateLocals(
+                        locals.clone(),
+                        Box::new(Expr::ObjectBody(blank(body))),
+                    ),
+                    _ => right.as_ref().clone(),
+                },
+                _ => right.as_ref().clone(),
+            };
+            Expr::Binop(
+                BinOp::Add,
+                Box::new(rebuild_layers(left, blank)),
+                Box::new(right),
+            )
+        }
+        expr => expr.clone(),
     }
 }
 
@@ -9729,20 +9969,30 @@ fn builds_amendable_object(expr: &Expr) -> bool {
 /// the chain that overrides something `foo` reads must see that override, so
 /// the amendment keeps the base expression and layers its body on top of it:
 /// evaluating the result later rebuilds the object in the final scope.
-fn compose_amended_object(inherited: &Arc<Property>, prop: &Arc<Property>) -> Arc<Property> {
+///
+/// `locals` are the `local` members of the module declaring `prop`, which its
+/// body keeps reading even where an amending module declares the same names.
+fn compose_amended_object(
+    inherited: &Arc<Property>,
+    prop: &Arc<Property>,
+    locals: Option<&LocalBindings>,
+) -> Arc<Property> {
     let (Some(base), Some(body), None) = (&inherited.value, &prop.body, &prop.value) else {
         return prop.clone();
     };
     if !builds_amendable_object(base) {
         return prop.clone();
     }
+    let type_ann = prop.type_ann.clone().or_else(|| inherited.type_ann.clone());
+    let base = if type_ann.is_none() {
+        without_overridden_members(base, body)
+    } else {
+        base.clone()
+    };
+    let overlay = with_template_locals(locals, prop, Expr::ObjectBody(body.clone()));
     Arc::new(Property {
-        type_ann: prop.type_ann.clone().or_else(|| inherited.type_ann.clone()),
-        value: Some(Expr::Binop(
-            BinOp::Add,
-            Box::new(base.clone()),
-            Box::new(Expr::ObjectBody(body.clone())),
-        )),
+        type_ann,
+        value: Some(Expr::Binop(BinOp::Add, Box::new(base), Box::new(overlay))),
         body: None,
         ..(**prop).clone()
     })
@@ -10145,6 +10395,7 @@ fn this_member_reads_non_const(expr: &Expr, non_const_members: &HashSet<Name>) -
         Expr::Lambda(_, value) => this_member_reads_non_const(value, non_const_members),
         Expr::Unop(_, value)
         | Expr::Throw(value)
+        | Expr::TemplateLocals(_, value)
         | Expr::Trace(value, _)
         | Expr::Read(value, _)
         | Expr::ReadOrNull(value, _)

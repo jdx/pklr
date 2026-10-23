@@ -5,8 +5,8 @@ mod ast;
 mod validate;
 
 pub use ast::{
-    Annotation, BinOp, Body, Entry, Expr, ForGenerator, Import, Modifier, Module, Property,
-    StringInterpPart, TraceSite, TypeExpr, UnOp, WhenGenerator,
+    Annotation, BinOp, Body, Entry, Expr, ForGenerator, Import, LocalBindings, Modifier, Module,
+    Property, StringInterpPart, TraceSite, TypeExpr, UnOp, WhenGenerator,
 };
 pub(crate) use ast::{has_untyped_result_new, infer_method_return_new, rewrite_untyped_result_new};
 use ast::{infers_new, type_expr_runtime_name};
@@ -966,6 +966,7 @@ impl<'a> Parser<'a> {
             | Expr::NullSafeField(value, _)
             | Expr::Unop(_, value)
             | Expr::Throw(value)
+            | Expr::TemplateLocals(_, value)
             | Expr::Trace(value, _)
             | Expr::Read(value, _)
             | Expr::ReadOrNull(value, _)
@@ -2503,6 +2504,7 @@ fn expr_defines_type(expr: &Expr, name: &str) -> bool {
         | Expr::NullSafeField(value, _)
         | Expr::Unop(_, value)
         | Expr::Throw(value)
+        | Expr::TemplateLocals(_, value)
         | Expr::Trace(value, _)
         | Expr::Read(value, _)
         | Expr::ReadOrNull(value, _)
