@@ -9807,22 +9807,23 @@ fn with_template_locals(locals: Option<&LocalBindings>, prop: &Property, expr: E
 fn without_overridden_members(base: &Expr, body: &Body) -> Expr {
     let mut properties: HashSet<&str> = HashSet::default();
     let mut keys: HashSet<&str> = HashSet::default();
+    let reads_super = |value: &Expr| {
+        let mut refs = HashSet::default();
+        collect_expr_refs(value, &mut refs, &HashSet::default());
+        refs.contains("super")
+    };
     for entry in body.iter() {
         match entry {
             Entry::Property(prop)
                 if !has_modifier(&prop.modifiers, Modifier::Local)
                     && prop.type_ann.is_none()
                     && prop.body.is_none()
-                    && prop.value.as_ref().is_some_and(|value| {
-                        let mut refs = HashSet::default();
-                        collect_expr_refs(value, &mut refs, &HashSet::default());
-                        !refs.contains("super")
-                    }) =>
+                    && prop.value.as_ref().is_some_and(|value| !reads_super(value)) =>
             {
                 properties.insert(&prop.name);
             }
             Entry::DynProperty(Expr::String(key), value)
-                if !matches!(value, Expr::ObjectBody(_)) =>
+                if !matches!(value, Expr::ObjectBody(_)) && !reads_super(value) =>
             {
                 keys.insert(key);
             }

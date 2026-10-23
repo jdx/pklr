@@ -1421,6 +1421,16 @@ fn amendment_does_not_evaluate_the_base_members_it_overrides() {
         "p4 { [\"a\"] = 6 }\n",
     );
     assert_eq!(json, serde_json::json!({ "p5": 1, "p4": { "a": 6 } }));
+
+    let json = amended_pair(
+        "amend_overridden_super",
+        "p = new Mapping { [\"a\"] = 1 }\nq = new { n = 1 }\n",
+        "p { [\"a\"] = super[\"a\"] + 1 }\nq { n = super.n + 1 }\n",
+    );
+    assert_eq!(
+        json,
+        serde_json::json!({ "p": { "a": 2 }, "q": { "n": 2 } })
+    );
 }
 
 #[test]
