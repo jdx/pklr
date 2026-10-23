@@ -8168,6 +8168,15 @@ impl Evaluator {
                 if let Value::Object(existing_map, _) = &base {
                     amended.extend(existing_map.iter().map(|(k, v)| (k.clone(), v.clone())));
                 }
+                self.rebase_entries_on_amended_default(
+                    base_src,
+                    overlay_entries,
+                    &inherited_scope,
+                    &amendment_scope,
+                    &value_type_defaults,
+                    depth,
+                    &mut amended,
+                )?;
                 self.eval_mapping_entries_with_type_default(
                     overlay_entries,
                     &amendment_scope,
@@ -8193,6 +8202,69 @@ impl Evaluator {
         }
         let overlay = self.eval_entries(overlay_entries, &amendment_scope, depth + 1)?;
         Ok(merge_values(base, overlay))
+    }
+
+    /// An amendment that assigns a new `default` also applies it to the
+    /// entries the base declared without a value of their own: pkl builds
+    /// those entries from the final default. This runs before the amendment's
+    /// own entries, so one that amends a base entry sees the rebuilt value.
+    #[allow(clippy::too_many_arguments)]
+    fn rebase_entries_on_amended_default(
+        &mut self,
+        base_src: &ObjectSource,
+        overlay_entries: &Body,
+        inherited_scope: &Scope,
+        amendment_scope: &Scope,
+        value_type_defaults: &[(String, Value)],
+        depth: usize,
+        amended: &mut ObjectMap,
+    ) -> Result<()> {
+        let assigns_default = overlay_entries.iter().any(|entry| {
+            matches!(entry, Entry::Property(prop)
+                if &*prop.name == "default"
+                    && prop.value.is_some()
+                    && !has_modifier(&prop.modifiers, Modifier::Local))
+        });
+        if !assigns_default {
+            return Ok(());
+        }
+        let Some(default) = self.find_default_template(overlay_entries, amendment_scope, depth)?
+        else {
+            return Ok(());
+        };
+        let rebased: Vec<Entry> = base_src
+            .entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry,
+                    Entry::DynProperty(Expr::String(_), Expr::ObjectBody(_) | Expr::New(None, ..))
+                )
+            })
+            .cloned()
+            .collect();
+        if rebased.is_empty() {
+            return Ok(());
+        }
+        // Build them apart from `amended`, whose entries already hold the old
+        // default: a body entry would amend that value instead of the default.
+        let mut fresh = ObjectMap::default();
+        self.eval_mapping_entries_with_type_default(
+            &rebased,
+            inherited_scope,
+            depth,
+            &mut fresh,
+            value_type_defaults,
+            &base_src.mapping_value_types,
+            MappingInheritedDefault {
+                value: Some(default),
+                entries: None,
+            },
+        )?;
+        for (key, value) in fresh {
+            amended.insert(key, value);
+        }
+        Ok(())
     }
 
     fn eval_binop(

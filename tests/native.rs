@@ -1376,3 +1376,37 @@ fn late_binding_keeps_going_when_only_the_entry_order_changes() {
     let json = pklr::eval_to_json(&child).unwrap();
     assert_eq!(json["result"], serde_json::json!([2, 1]));
 }
+
+fn amended_pair_dir(name: &str, template: &str, config: &str) -> serde_json::Value {
+    let base = common::write_entry(name, "Template.pkl", template);
+    let dir = base.parent().unwrap();
+    std::fs::write(dir.join("Config.pkl"), config).unwrap();
+    pklr::eval_to_json(&dir.join("Config.pkl")).unwrap()
+}
+
+#[test]
+fn amended_mapping_default_applies_to_entries_the_base_declared() {
+    let template = "v = new Mapping {\n  default = new { inherited = 1 }\n  [\"a\"] {}\n  [\"b\"] { own = true }\n  [\"c\"] = new { explicit = 1 }\n}\n";
+    let json = amended_pair_dir(
+        "amend_mapping_default",
+        template,
+        "amends \"Template.pkl\"\nv { default = new { inherited = 2 } }\n",
+    );
+    assert_eq!(
+        json,
+        serde_json::json!({ "v": {
+            "a": { "inherited": 2 },
+            "b": { "inherited": 2, "own": true },
+            "c": { "inherited": 2, "explicit": 1 },
+        } })
+    );
+    let json = amended_pair_dir(
+        "amend_mapping_default_override",
+        template,
+        "amends \"Template.pkl\"\nv {\n  default = new { inherited = 2 }\n  [\"a\"] { extra = 1 }\n}\n",
+    );
+    assert_eq!(
+        json["v"]["a"],
+        serde_json::json!({ "inherited": 2, "extra": 1 })
+    );
+}
