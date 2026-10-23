@@ -8168,7 +8168,7 @@ impl Evaluator {
                 if let Value::Object(existing_map, _) = &base {
                     amended.extend(existing_map.iter().map(|(k, v)| (k.clone(), v.clone())));
                 }
-                self.rebase_entries_on_amended_default(
+                let applied_default = self.rebase_entries_on_amended_default(
                     base_src,
                     overlay_entries,
                     &inherited_scope,
@@ -8190,7 +8190,27 @@ impl Evaluator {
                         entries: find_default_body_entries(&base_src.entries),
                     },
                 )?;
-                return Ok(Value::Object(Arc::new(amended), Some(Arc::clone(base_src))));
+                // The mapping's default is now the one just applied; a later
+                // amendment compares its entries against it.
+                let source = match applied_default {
+                    Some(default) => {
+                        let mut source = Arc::unwrap_or_clone(Arc::clone(base_src));
+                        source.entries = base_src
+                            .entries
+                            .iter()
+                            .map(|entry| match entry {
+                                Entry::Property(prop) if &*prop.name == "default" => {
+                                    Entry::Property(default.clone())
+                                }
+                                entry => entry.clone(),
+                            })
+                            .collect::<Vec<_>>()
+                            .into();
+                        Arc::new(source)
+                    }
+                    None => Arc::clone(base_src),
+                };
+                return Ok(Value::Object(Arc::new(amended), Some(source)));
             }
             return self.eval_amended_object(base_map, base_src, overlay_entries, scope, depth);
         }
@@ -8220,12 +8240,16 @@ impl Evaluator {
         old_default: Option<Value>,
         depth: usize,
         amended: &mut ObjectMap,
-    ) -> Result<()> {
-        let assigns_default = overlay_entries.iter().any(|entry| {
-            matches!(entry, Entry::Property(prop)
+    ) -> Result<Option<Arc<Property>>> {
+        let assigned_default = overlay_entries.iter().find_map(|entry| match entry {
+            Entry::Property(prop)
                 if &*prop.name == "default"
                     && prop.value.is_some()
-                    && !has_modifier(&prop.modifiers, Modifier::Local))
+                    && !has_modifier(&prop.modifiers, Modifier::Local) =>
+            {
+                Some(prop.clone())
+            }
+            _ => None,
         });
         // Only a base made of a `default` and literal-key entries is rebuilt:
         // locals, generators and computed keys are left as they were.
@@ -8236,12 +8260,15 @@ impl Evaluator {
             Entry::DynProperty(key, _) => matches!(key, Expr::String(_)),
             _ => false,
         });
-        if !assigns_default || !plain_base {
-            return Ok(());
+        let Some(assigned_default) = assigned_default else {
+            return Ok(None);
+        };
+        if !plain_base {
+            return Ok(None);
         }
         let Some(default) = self.find_default_template(overlay_entries, amendment_scope, depth)?
         else {
-            return Ok(());
+            return Ok(None);
         };
         let rebased: Vec<Entry> = base_src
             .entries
@@ -8255,7 +8282,7 @@ impl Evaluator {
             .cloned()
             .collect();
         if rebased.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         // Build them apart from `amended`, whose entries already hold the old
         // default: a body entry would amend that value instead of the default.
@@ -8296,7 +8323,12 @@ impl Evaluator {
                 amended.insert(key, value);
             }
         }
-        Ok(())
+        // The default can only be recorded on the mapping if it also means
+        // the same thing where the mapping was declared.
+        Ok(self
+            .find_default_template(overlay_entries, inherited_scope, depth)
+            .is_ok()
+            .then_some(assigned_default))
     }
 
     fn eval_binop(

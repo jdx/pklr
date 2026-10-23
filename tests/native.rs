@@ -1440,3 +1440,25 @@ fn amended_mapping_default_keeps_locals_and_earlier_amendments() {
     let json = pklr::eval_to_json(&dir.join("Config.pkl")).unwrap();
     assert_eq!(json["v"]["a"]["extra"], 1);
 }
+
+#[test]
+fn successive_amended_mapping_defaults_each_apply_to_the_base_entries() {
+    let base = common::write_entry(
+        "amend_mapping_default_chain",
+        "Template.pkl",
+        "v = new Mapping {\n  default = new { inherited = 1 }\n  [\"a\"] {}\n}\n",
+    );
+    let dir = base.parent().unwrap();
+    std::fs::write(
+        dir.join("Middle.pkl"),
+        "amends \"Template.pkl\"\nv { default = new { inherited = 2 } }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Config.pkl"),
+        "amends \"Middle.pkl\"\nv { default = new { inherited = 3 } }\n",
+    )
+    .unwrap();
+    let json = pklr::eval_to_json(&dir.join("Config.pkl")).unwrap();
+    assert_eq!(json["v"]["a"]["inherited"], 3);
+}
