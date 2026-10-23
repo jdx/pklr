@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.2.1](https://github.com/jdx/pklr/compare/v5.2.0...v5.2.1) - 2026-10-23
+
+### Fixed
+
+- *(eval)* rebuild an amended inherited object when a later module overrides what it reads ([#339](https://github.com/jdx/pklr/pull/339))
+- *(eval)* infer class type for new { } entries in a typed Mapping ([#334](https://github.com/jdx/pklr/pull/334))
+- *(eval)* allow assigning a class's union property that has no default ([#335](https://github.com/jdx/pklr/pull/335))
+
+### Other
+
+- *(eval)* stop the late-binding passes once the values settle ([#340](https://github.com/jdx/pklr/pull/340))
+
 ## [5.2.0](https://github.com/jdx/pklr/compare/v5.1.2...v5.2.0) - 2026-10-19
 
 ### Added
