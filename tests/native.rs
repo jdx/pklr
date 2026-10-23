@@ -1287,3 +1287,34 @@ fn a_direct_package_files_own_imports_are_prefetched_under_its_root() {
     assert_eq!(server.requests(), 3);
     assert_eq!(server.peak_in_flight(), 2);
 }
+
+#[test]
+fn amending_a_long_template_settles_in_either_declaration_order() {
+    const N: usize = 150;
+    let mut forward = String::from("base = 1\n");
+    let mut reverse = String::from("base = 1\n");
+    for i in 1..=N {
+        let prev = if i == 1 {
+            "base".to_string()
+        } else {
+            format!("p{}", i - 1)
+        };
+        forward.push_str(&format!("p{i} = {prev} + 1\n"));
+    }
+    for i in (1..=N).rev() {
+        let prev = if i == 1 {
+            "base".to_string()
+        } else {
+            format!("p{}", i - 1)
+        };
+        reverse.push_str(&format!("p{i} = {prev} + 1\n"));
+    }
+    for (name, template) in [("forward", forward), ("reverse", reverse)] {
+        let path = common::write_entry(&format!("late_order_{name}"), "Template.pkl", &template);
+        let child = path.with_file_name("Child.pkl");
+        std::fs::write(&child, "amends \"Template.pkl\"\nbase = 10\n").unwrap();
+        let json = pklr::eval_to_json(&child).unwrap();
+        assert_eq!(json["p1"], 11, "{name}");
+        assert_eq!(json[format!("p{N}")], 10 + N as i64, "{name}");
+    }
+}
