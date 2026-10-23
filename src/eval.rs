@@ -9816,8 +9816,6 @@ fn without_overridden_members(base: &Expr, body: &Body) -> Expr {
         match entry {
             Entry::Property(prop)
                 if !has_modifier(&prop.modifiers, Modifier::Local)
-                    // A Mapping's `default` still shapes the entries the base declares.
-                    && &*prop.name != "default"
                     && prop.type_ann.is_none()
                     && prop.body.is_none()
                     && prop.value.as_ref().is_some_and(|value| !reads_super(value)) =>
@@ -9838,6 +9836,10 @@ fn without_overridden_members(base: &Expr, body: &Body) -> Expr {
     let mut layers = Vec::new();
     if !collect_prunable_layers(base, &mut layers) {
         return base.clone();
+    }
+    // A Mapping's `default` still shapes the entries the base declares.
+    if builds_mapping(base) {
+        properties.remove("default");
     }
     let overridden = |entry: &Entry| match entry {
         Entry::Property(prop) => {
@@ -9895,6 +9897,15 @@ fn without_overridden_members(base: &Expr, body: &Body) -> Expr {
         )
     };
     rebuild_layers(base, &blank)
+}
+
+fn builds_mapping(expr: &Expr) -> bool {
+    match expr {
+        Expr::New(type_name, ..) => type_name.as_deref() == Some("Mapping"),
+        Expr::TemplateLocals(_, inner) => builds_mapping(inner),
+        Expr::Binop(BinOp::Add, left, _) => builds_mapping(left),
+        _ => false,
+    }
 }
 
 /// The bodies of the object `expr` builds and of the amendments layered on it,

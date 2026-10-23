@@ -1434,6 +1434,16 @@ fn amendment_does_not_evaluate_the_base_members_it_overrides() {
 }
 
 #[test]
+fn amendment_skips_a_replaced_default_outside_a_mapping() {
+    let json = amended_pair(
+        "amend_dynamic_default",
+        "p = new Dynamic {\n  default = throw(\"unused\")\n  n = 1\n}\n",
+        "p { default = 0 }\n",
+    );
+    assert_eq!(json, serde_json::json!({ "p": { "n": 1 } }));
+}
+
+#[test]
 fn amended_base_reads_the_templates_locals() {
     let json = amended_pair(
         "amend_template_local",
