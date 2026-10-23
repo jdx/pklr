@@ -9670,11 +9670,12 @@ fn settled_eq(old: Option<&Value>, new: Option<&Value>) -> bool {
                 same_source
                     && (Arc::ptr_eq(left, right)
                         || (left.len() == right.len()
-                            && left.iter().all(|(key, value)| {
-                                right
-                                    .get(key)
-                                    .is_some_and(|other| settled_eq(Some(value), Some(other)))
-                            })))
+                            && left.iter().zip(right.iter()).all(
+                                |((left_key, left_value), (right_key, right_value))| {
+                                    left_key == right_key
+                                        && settled_eq(Some(left_value), Some(right_value))
+                                },
+                            )))
             }
             (Value::List(left), Value::List(right)) => {
                 left.kind() == right.kind()

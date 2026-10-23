@@ -1362,3 +1362,17 @@ fn late_binding_keeps_going_when_only_the_sign_of_zero_changes() {
     let json = pklr::eval_to_json(&child).unwrap();
     assert_eq!(json["result"], true);
 }
+
+#[test]
+fn late_binding_keeps_going_when_only_the_entry_order_changes() {
+    let template = common::write_entry(
+        "late_map_order",
+        "Template.pkl",
+        "base = true\nresult = a.values\na = b\nb = c\nc = d\nd = if (base) Map(\"x\", 1, \"y\", 2) else Map(\"y\", 2, \"x\", 1)\n",
+    );
+    let child = template.with_file_name("Child.pkl");
+    std::fs::write(&child, "amends \"Template.pkl\"\nbase = false\n").unwrap();
+
+    let json = pklr::eval_to_json(&child).unwrap();
+    assert_eq!(json["result"], serde_json::json!([2, 1]));
+}
