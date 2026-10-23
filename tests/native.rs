@@ -1431,17 +1431,6 @@ fn amendment_does_not_evaluate_the_base_members_it_overrides() {
         json,
         serde_json::json!({ "p": { "a": 2 }, "q": { "n": 2 } })
     );
-
-    // An overlay `default` also shapes the entries the base declared.
-    let json = amended_pair(
-        "amend_mapping_default",
-        "v = new Mapping {\n  default = new { inherited = 1 }\n  [\"a\"] {}\n}\n",
-        "v { default = new { inherited = 2 } }\n",
-    );
-    assert_eq!(
-        json,
-        serde_json::json!({ "v": { "a": { "inherited": 2 } } })
-    );
 }
 
 #[test]

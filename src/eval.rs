@@ -9816,6 +9816,8 @@ fn without_overridden_members(base: &Expr, body: &Body) -> Expr {
         match entry {
             Entry::Property(prop)
                 if !has_modifier(&prop.modifiers, Modifier::Local)
+                    // A Mapping's `default` still shapes the entries the base declares.
+                    && &*prop.name != "default"
                     && prop.type_ann.is_none()
                     && prop.body.is_none()
                     && prop.value.as_ref().is_some_and(|value| !reads_super(value)) =>
