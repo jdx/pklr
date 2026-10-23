@@ -8293,13 +8293,27 @@ impl Evaluator {
         else {
             return Ok(None);
         };
+        let recorded = default.clone();
+        // Entries the amendment replaces outright are never built from the base.
+        let replaced: HashSet<&str> = overlay_entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::DynProperty(Expr::String(key), value)
+                    if !matches!(value, Expr::ObjectBody(_)) =>
+                {
+                    Some(&**key)
+                }
+                _ => None,
+            })
+            .collect();
         let rebased: Vec<Entry> = base_src
             .entries
             .iter()
             .filter(|entry| {
                 matches!(
                     entry,
-                    Entry::DynProperty(Expr::String(_), Expr::ObjectBody(_) | Expr::New(None, ..))
+                    Entry::DynProperty(Expr::String(key), Expr::ObjectBody(_) | Expr::New(None, ..))
+                        if !replaced.contains(&**key)
                 )
             })
             .cloned()
@@ -8348,10 +8362,12 @@ impl Evaluator {
         }
         // The default can only be recorded on the mapping if it also means
         // the same thing where the mapping was declared.
-        Ok(self
+        let declared = self
             .find_default_template(overlay_entries, inherited_scope, depth)
-            .is_ok()
-            .then_some(assigned_default))
+            .ok()
+            .flatten();
+        let same = declared.is_some_and(|declared| declared.to_json() == recorded.to_json());
+        Ok(same.then_some(assigned_default))
     }
 
     fn eval_binop(

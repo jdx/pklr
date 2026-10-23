@@ -1545,3 +1545,13 @@ fn successive_amended_mapping_defaults_each_apply_to_the_base_entries() {
     let json = pklr::eval_to_json(&dir.join("Config.pkl")).unwrap();
     assert_eq!(json["v"]["a"]["inherited"], 3);
 }
+
+#[test]
+fn amended_mapping_default_rebuild_skips_replaced_entries() {
+    let json = amended_pair_dir(
+        "amend_mapping_default_replaced",
+        "v = new Mapping {\n  default = new { inherited = 1 }\n  [\"a\"] { x = super.inherited }\n}\n",
+        "amends \"Template.pkl\"\nv {\n  default = new { other = 2 }\n  [\"a\"] = new { ok = true }\n}\n",
+    );
+    assert_eq!(json["v"]["a"]["ok"], true);
+}
