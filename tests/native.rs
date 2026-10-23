@@ -1410,3 +1410,33 @@ fn amended_mapping_default_applies_to_entries_the_base_declared() {
         serde_json::json!({ "inherited": 2, "extra": 1 })
     );
 }
+
+#[test]
+fn amended_mapping_default_keeps_locals_and_earlier_amendments() {
+    let template = "v = new Mapping {\n  local helper = 7\n  default = new { inherited = 1 }\n  [\"a\"] { own = helper }\n  [(\"b\" + \"c\")] {}\n}\n";
+    let json = amended_pair_dir(
+        "amend_mapping_default_locals",
+        template,
+        "amends \"Template.pkl\"\nv { default = new { inherited = 2 } }\n",
+    );
+    assert_eq!(json["v"]["a"]["own"], 7);
+
+    let base = common::write_entry(
+        "amend_mapping_default_earlier",
+        "Template.pkl",
+        "v = new Mapping {\n  default = new { inherited = 1 }\n  [\"a\"] {}\n}\n",
+    );
+    let dir = base.parent().unwrap();
+    std::fs::write(
+        dir.join("Middle.pkl"),
+        "amends \"Template.pkl\"\nv { [\"a\"] { extra = 1 } }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Config.pkl"),
+        "amends \"Middle.pkl\"\nv { default = new { inherited = 2 } }\n",
+    )
+    .unwrap();
+    let json = pklr::eval_to_json(&dir.join("Config.pkl")).unwrap();
+    assert_eq!(json["v"]["a"]["extra"], 1);
+}

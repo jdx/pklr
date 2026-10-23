@@ -8174,6 +8174,7 @@ impl Evaluator {
                     &inherited_scope,
                     &amendment_scope,
                     &value_type_defaults,
+                    inherited_default.clone(),
                     depth,
                     &mut amended,
                 )?;
@@ -8216,6 +8217,7 @@ impl Evaluator {
         inherited_scope: &Scope,
         amendment_scope: &Scope,
         value_type_defaults: &[(String, Value)],
+        old_default: Option<Value>,
         depth: usize,
         amended: &mut ObjectMap,
     ) -> Result<()> {
@@ -8225,7 +8227,16 @@ impl Evaluator {
                     && prop.value.is_some()
                     && !has_modifier(&prop.modifiers, Modifier::Local))
         });
-        if !assigns_default {
+        // Only a base made of a `default` and literal-key entries is rebuilt:
+        // locals, generators and computed keys are left as they were.
+        let plain_base = base_src.entries.iter().all(|entry| match entry {
+            Entry::Property(prop) => {
+                &*prop.name == "default" && !has_modifier(&prop.modifiers, Modifier::Local)
+            }
+            Entry::DynProperty(key, _) => matches!(key, Expr::String(_)),
+            _ => false,
+        });
+        if !assigns_default || !plain_base {
             return Ok(());
         }
         let Some(default) = self.find_default_template(overlay_entries, amendment_scope, depth)?
@@ -8261,8 +8272,29 @@ impl Evaluator {
                 entries: None,
             },
         )?;
+        // An entry an earlier amendment changed is no longer what the base
+        // built from its own default; keep it.
+        let mut original = ObjectMap::default();
+        self.eval_mapping_entries_with_type_default(
+            &rebased,
+            inherited_scope,
+            depth,
+            &mut original,
+            value_type_defaults,
+            &base_src.mapping_value_types,
+            MappingInheritedDefault {
+                value: old_default,
+                entries: None,
+            },
+        )?;
         for (key, value) in fresh {
-            amended.insert(key, value);
+            let unchanged = match (original.get(&key), amended.get(&key)) {
+                (Some(original), Some(current)) => original.to_json() == current.to_json(),
+                _ => false,
+            };
+            if unchanged {
+                amended.insert(key, value);
+            }
         }
         Ok(())
     }
