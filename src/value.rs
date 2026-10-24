@@ -797,13 +797,6 @@ impl PartialEq for Regex {
 
 /// How an object's [`ObjectSource`] changes what it is, as opposed to what it
 /// holds: its kind and class. `None` is a plain `Dynamic`.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "used by the late-binding passes in the next commit"
-    )
-)]
 fn object_shape(source: Option<&ObjectSource>) -> (ObjectKind, Option<&str>, Option<&str>) {
     source.map_or((ObjectKind::Object, None, None), |source| {
         (
@@ -821,13 +814,6 @@ fn object_shape(source: Option<&ObjectSource>) -> (ObjectKind, Option<&str>, Opt
 /// reads it, and flattening is the cost the lazy capture exists to avoid. What
 /// else a source holds (the entries, the class flags, the deprecations) comes
 /// from the object's syntax and class, which every evaluation of it shares.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "used by the late-binding passes in the next commit"
-    )
-)]
 fn same_source_data(
     a: Option<&Arc<ObjectSource>>,
     b: Option<&Arc<ObjectSource>>,
@@ -874,34 +860,13 @@ fn same_source_data(
 
 /// How deeply `same_data` follows nested values. Each level takes a stack
 /// frame, so a value nested deeper is treated as not known to be equal.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "used by the late-binding passes in the next commit"
-    )
-)]
 const SAME_DATA_MAX_DEPTH: usize = 512;
 
 /// Objects, lists, sources and captured scopes already found equal, by address, and
 /// whether their lambdas were compared by body only (`nested`).
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "used by the late-binding passes in the next commit"
-    )
-)]
 type EqualPairs = HashSet<(usize, usize, bool)>;
 
 /// Whether two shared maps hold the same members in the same order.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "used by the late-binding passes in the next commit"
-    )
-)]
 fn same_members(
     a: &Arc<ObjectMap>,
     b: &Arc<ObjectMap>,
@@ -926,13 +891,6 @@ fn same_members(
 /// [`Value::same_data`] for values `depth` levels into the comparison. `nested`
 /// is set inside a lambda's capture, where lambdas are not compared by what
 /// they captured.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "used by the late-binding passes in the next commit"
-    )
-)]
 fn same_data(a: &Value, b: &Value, equal: &mut EqualPairs, nested: bool, depth: usize) -> bool {
     if depth > SAME_DATA_MAX_DEPTH {
         return false;
@@ -974,7 +932,7 @@ fn same_data(a: &Value, b: &Value, equal: &mut EqualPairs, nested: bool, depth: 
         // the version before it, so lambdas inside a capture are compared by
         // parameters and body only. What such a lambda captured is a copy of
         // members the caller compares directly; it can lag behind them, which
-        // is what late binding allows for.
+        // is what late binding allows for (see `forward_reference_chain`).
         (Value::Lambda(a_params, a_body, a_env), Value::Lambda(b_params, b_body, b_env)) => {
             a_params == b_params
                 && (Arc::ptr_eq(a_body, b_body) || a_body == b_body)
@@ -1006,13 +964,6 @@ impl Value {
     /// `false` means "not known to be equal", not "different": a value nested
     /// more than `SAME_DATA_MAX_DEPTH` levels deep is not followed, so the
     /// comparison cannot overflow the stack.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "used by the late-binding passes in the next commit"
-        )
-    )]
     pub(crate) fn same_data(&self, other: &Value) -> bool {
         same_data(self, other, &mut EqualPairs::default(), false, 0)
     }
