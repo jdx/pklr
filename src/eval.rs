@@ -61,6 +61,16 @@ const MODULE_OUTPUT_TEXT_CONTEXT: &str = "\0pklr:module-output-text-context";
 /// passes. Larger live sets use a doubling threshold for amortized cleanup;
 /// an evaluation boundary always removes dropped entries.
 const LAMBDA_GUARD_PRUNE_MIN: usize = 64;
+/// How many more quiet late-binding passes than the longest chain of forward
+/// references (`forward_reference_chain`) run before the passes stop. The
+/// chain is what the model of how reads travel needs. This margin is slack,
+/// not derived from it: it covers a read the model might miss. Margins of 0 and
+/// 1 gave the same result on every valid program in about 50,000 fuzzed
+/// programs each; the one program that differed at 0 is one pkl rejects. The
+/// value is a judgement that two passes are cheap insurance. Each pass of
+/// slack costs one pass over every late property, and only values that
+/// capture a scope pay it.
+const QUIET_PASS_MARGIN: usize = 2;
 
 /// A delayed evaluation error shared by every copy of one lambda value.
 #[derive(Debug, Clone, Default)]
@@ -124,6 +134,9 @@ pub struct Evaluator {
     #[cfg(test)]
     /// Total entries visited by guard-registry cleanup, for amortization tests.
     lambda_guard_prune_scans: usize,
+    #[cfg(test)]
+    /// Late-binding passes run, for convergence tests.
+    late_passes_run: usize,
     /// Resources read in this run, by URI. As in Pkl, reading a resource again
     /// returns the first result, so reads are deterministic.
     resource_cache: HashMap<String, Value>,
@@ -827,6 +840,8 @@ impl Evaluator {
             lambda_guard_prune_at: LAMBDA_GUARD_PRUNE_MIN,
             #[cfg(test)]
             lambda_guard_prune_scans: 0,
+            #[cfg(test)]
+            late_passes_run: 0,
             resource_cache: HashMap::default(),
             allowed_resources: DEFAULT_ALLOWED_RESOURCES
                 .iter()
@@ -3132,12 +3147,64 @@ impl Evaluator {
         } else {
             HashSet::default()
         };
-        // Each pass re-evaluates every late-bound property against the values
-        // the previous pass produced. Once a pass changes nothing, the next
-        // would repeat it, so stop; `late_passes` stays the upper bound.
+        // A pass that reproduces every value, as `settled_eq` compares them,
+        // is the last: the next would start from the same state and repeat it.
+        //
+        // A value that holds an object or a lambda is never reproduced in that
+        // sense, since each evaluation makes a new one that captures the
+        // scope as it then stands. Such a value can still be the same data,
+        // and a pass whose values all are is quiet: it changes nothing a
+        // reader can see. It is not necessarily the last. An object or
+        // lambda keeps the scope it was made in, so a change reaches a
+        // property that reads it through such a capture one pass later for
+        // every forward reference on the way, and no value changes while it
+        // travels. A property listed before a reader is read as this pass
+        // has just evaluated it, one listed after it as the previous pass
+        // left it.
+        //
+        // `forward_reference_chain` finds the longest chain of such forward
+        // references. As many quiet passes in a row as that are enough if
+        // the model holds, and `QUIET_PASS_MARGIN` more run as slack. The
+        // values are what end the loop, and they are the safety net for reads
+        // the model misses: a pass that changes the data keeps it running.
+        // The loop never runs past `late_passes`.
+        //
+        // Pass 0 never counts as quiet: it starts from the values the base
+        // module computed.
+        let chain_memo = std::cell::Cell::new(None);
+        let settled_after = || -> usize {
+            if let Some(settled_after) = chain_memo.get() {
+                return settled_after;
+            }
+            let late_order: Vec<&Property> = late_inherited_properties
+                .iter()
+                .map(|prop| &**prop)
+                .filter(|prop| {
+                    !child_property_names.contains(prop.name.as_ref())
+                        && !reads_super.contains(prop.name.as_ref())
+                })
+                .chain(late_child_properties.iter().copied())
+                .collect();
+            let settled_after = forward_reference_chain(&late_order) + QUIET_PASS_MARGIN;
+            chain_memo.set(Some(settled_after));
+            settled_after
+        };
+        // Quiet passes are counted after pass 0 and the loop breaks before
+        // counting at `late_passes`, so at most `late_passes - 1` can be
+        // counted. If `settled_after` is not below `late_passes`, no run of
+        // quiet passes can end the loop, and telling a quiet pass from a
+        // changed one decides nothing: only `settled_eq` can end it. Then
+        // `same_data` is not called, which matters for values that capture a
+        // large scope.
+        let can_stop = || settled_after() < late_passes;
         let mut pass = 0;
+        let mut quiet_passes = 0;
         loop {
-            let mut changed = false;
+            #[cfg(test)]
+            {
+                self.late_passes_run += 1;
+            }
+            let mut change = Change::None;
             let mut errored = false;
             for prop in &late_inherited_properties {
                 if child_property_names.contains(prop.name.as_ref())
@@ -3147,8 +3214,11 @@ impl Evaluator {
                 }
                 match self.eval_property_with(prop, &scope, depth, true) {
                     Ok(Some(value)) => {
-                        changed |= !settled_eq(scope.get(&prop.name), Some(&value))
-                            || !settled_eq(all_props.get(prop.name.as_ref()), Some(&value));
+                        change = change.then(scope.get(&prop.name), &value, can_stop).then(
+                            all_props.get(prop.name.as_ref()),
+                            &value,
+                            can_stop,
+                        );
                         scope.set(&prop.name, value.clone());
                         module_props_insert(
                             &mut scope,
@@ -3197,12 +3267,12 @@ impl Evaluator {
                         Ok(value)
                     }) {
                     Ok(Some(value)) => {
-                        changed |= !settled_eq(scope.get(&prop.name), Some(&value));
+                        change = change.then(scope.get(&prop.name), &value, can_stop);
                         scope.set(&prop.name, value.clone());
                         if has_modifier(&prop.modifiers, Modifier::Local) {
                             continue;
                         }
-                        changed |= !settled_eq(all_props.get(prop.name.as_ref()), Some(&value));
+                        change = change.then(all_props.get(prop.name.as_ref()), &value, can_stop);
                         module_props_insert(
                             &mut scope,
                             &mut all_props,
@@ -3232,12 +3302,31 @@ impl Evaluator {
                     Err(error) => return Err(error),
                 }
             }
-            if pass >= late_passes || (!changed && !errored) {
+            if pass >= late_passes {
                 break;
             }
-            // Errors are only reported on the last pass, so a stable pass
-            // that still failed goes straight there.
-            pass = if changed { pass + 1 } else { late_passes };
+            let settled = match change {
+                Change::None => true,
+                Change::Data => {
+                    quiet_passes = 0;
+                    false
+                }
+                Change::Capture => {
+                    if pass > 0 {
+                        quiet_passes += 1;
+                    }
+                    quiet_passes >= settled_after()
+                }
+            };
+            if !settled {
+                pass += 1;
+            } else if errored {
+                // Errors are only reported on the last pass, so a settled
+                // pass that still failed goes straight there.
+                pass = late_passes;
+            } else {
+                break;
+            }
         }
 
         if depth == 0 {
@@ -9925,6 +10014,54 @@ fn settled_eq(old: Option<&Value>, new: Option<&Value>) -> bool {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many times the late-binding passes called `same_data`, on this thread.
+    static SAME_DATA_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn same_data_counted(old: &Value, new: &Value) -> bool {
+    #[cfg(test)]
+    SAME_DATA_CHECKS.with(|checks| checks.set(checks.get() + 1));
+    old.same_data(new)
+}
+
+/// How the values a late-binding pass produced compare with the ones they
+/// replace, the largest over all of them.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Change {
+    /// Each value is one `settled_eq` accepts.
+    None,
+    /// Each value is the same data, but one holds an object or lambda made
+    /// anew, which captured the scope as it now stands.
+    Capture,
+    /// A value is different data.
+    Data,
+}
+
+impl Change {
+    /// The larger of `self` and how `new` compares with `old`. Only a value
+    /// that holds an object, list or lambda can be the same data without being
+    /// one `settled_eq` accepts, so a scalar that differs is different data
+    /// at once. `same_data` is only called if `can_stop` says a quiet pass
+    /// could end the loop.
+    fn then(self, old: Option<&Value>, new: &Value, can_stop: impl Fn() -> bool) -> Self {
+        if self == Self::Data {
+            return self;
+        }
+        let this = if settled_eq(old, Some(new)) {
+            Self::None
+        } else if matches!(new, Value::Object(..) | Value::List(_) | Value::Lambda(..))
+            && old.is_some_and(|old| can_stop() && same_data_counted(old, new))
+        {
+            Self::Capture
+        } else {
+            Self::Data
+        };
+        self.max(this)
+    }
+}
+
 /// The function `(function) { body }` evaluates to: one that calls `function`
 /// with its `arity` arguments and amends the result with `body`, evaluated
 /// where the amendment is written.
@@ -11088,5 +11225,441 @@ result = (base) { old = super.old + super.old }
                 .warned_deprecated
                 .contains(&("old".into(), Some("use replacement".into())))
         );
+    }
+}
+
+/// Late-binding passes re-evaluate every inherited property. They must stop
+/// once the values settle, not run once per inherited property.
+#[cfg(all(test, feature = "native-io"))]
+mod late_binding_pass_tests {
+    use super::{Entry, Evaluator, Property, forward_reference_chain};
+
+    /// How many properties the template declares.
+    const PROPERTIES: usize = 60;
+
+    /// A pass per property over `PROPERTIES` properties takes more than
+    /// `PROPERTIES` passes; settling takes a few.
+    const MAX_PASSES: usize = PROPERTIES / 4;
+
+    /// A directory of modules, removed when dropped.
+    struct Modules(std::path::PathBuf);
+
+    impl Drop for Modules {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Evaluate `Child.pkl` from the modules in `files`, and return the result
+    /// with the number of late-binding passes it ran.
+    fn try_evaluate_modules(
+        files: &[(&str, &str)],
+    ) -> (Result<serde_json::Value, crate::Error>, usize) {
+        let dir = Modules(std::env::temp_dir().join(format!(
+            "pklr-late-passes-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        )));
+        std::fs::create_dir_all(&dir.0).unwrap();
+        for (name, source) in files {
+            std::fs::write(dir.0.join(name), source).unwrap();
+        }
+        let mut evaluator = Evaluator::default();
+        let value = evaluator.eval_file(&dir.0.join("Child.pkl"));
+        (
+            value.map(|value| value.to_json()),
+            evaluator.late_passes_run,
+        )
+    }
+
+    /// [`try_evaluate_modules`] for modules that evaluate.
+    fn evaluate_modules(files: &[(&str, &str)]) -> (serde_json::Value, usize) {
+        let (value, passes) = try_evaluate_modules(files);
+        (value.unwrap(), passes)
+    }
+
+    /// Evaluate `Child.pkl`, which amends `Template.pkl`.
+    fn evaluate_amendment(template: &str, child: &str) -> (serde_json::Value, usize) {
+        evaluate_modules(&[("Template.pkl", template), ("Child.pkl", child)])
+    }
+
+    #[test]
+    fn amending_module_does_not_run_a_pass_per_inherited_property() {
+        // `base`, then `p1 = base + 1`, `p2 = p1 + 1`, and so on.
+        let mut template = String::from("base = 1\n");
+        for n in 1..=PROPERTIES {
+            let previous = if n == 1 {
+                "base".to_string()
+            } else {
+                format!("p{}", n - 1)
+            };
+            template.push_str(&format!("p{n} = {previous} + 1\n"));
+        }
+        let (json, passes) = evaluate_amendment(&template, "amends \"Template.pkl\"\nbase = 10\n");
+
+        assert_eq!(json[format!("p{PROPERTIES}")], 10 + PROPERTIES);
+        assert!(
+            passes <= MAX_PASSES,
+            "{passes} late-binding passes for {PROPERTIES} properties (at most {MAX_PASSES} expected)"
+        );
+    }
+
+    /// A template of objects and a lambda, which keep the scope they were made
+    /// in and so are never the same allocation twice, settles in a few passes
+    /// as one of plain values does.
+    #[test]
+    fn amending_a_template_of_objects_does_not_run_a_pass_per_property() {
+        let mut template = String::from("base = 1\nadd = (x) -> x + base\n");
+        for n in 1..=PROPERTIES {
+            template.push_str(&format!(
+                "o{n} = new {{ v = base; w = add.apply({n}); items = new Listing {{ base }} }}\n"
+            ));
+        }
+        let (json, passes) = evaluate_amendment(&template, "amends \"Template.pkl\"\nbase = 10\n");
+
+        assert_eq!(json[format!("o{PROPERTIES}")]["v"], 10);
+        assert_eq!(json[format!("o{PROPERTIES}")]["w"], 10 + PROPERTIES);
+        assert_eq!(json["o1"]["items"][0], 10);
+        assert!(
+            passes <= MAX_PASSES,
+            "{passes} late-binding passes for {PROPERTIES} objects (at most {MAX_PASSES} expected)"
+        );
+    }
+
+    /// The same, where a module between them amends each object, so that the
+    /// amendments are late-bound too, and the last module overrides what the
+    /// objects read.
+    #[test]
+    fn amending_amended_objects_does_not_run_a_pass_per_property() {
+        let mut template = String::from("base = 1\n");
+        let mut middle = String::from("amends \"Template.pkl\"\n");
+        for n in 1..=PROPERTIES {
+            template.push_str(&format!("o{n} = new {{ a = {n}; b = base }}\n"));
+            middle.push_str(&format!("o{n} {{ a = {} }}\n", n + 1));
+        }
+        let (json, passes) = evaluate_modules(&[
+            ("Template.pkl", &template),
+            ("Middle.pkl", &middle),
+            ("Child.pkl", "amends \"Middle.pkl\"\nbase = 10\n"),
+        ]);
+
+        assert_eq!(json[format!("o{PROPERTIES}")]["a"], PROPERTIES + 1);
+        assert_eq!(json[format!("o{PROPERTIES}")]["b"], 10);
+        assert_eq!(json["o1"]["b"], 10);
+        assert!(
+            passes <= 2 * MAX_PASSES,
+            "{passes} late-binding passes for {PROPERTIES} amended objects"
+        );
+    }
+
+    /// `x0 = x1`, `x1 = x2`, and so on to `x{reads} = 1`, with an unrelated
+    /// `w` for the amending module to override, so no value ever changes.
+    fn chain_of_reads(reads: usize) -> String {
+        let mut template = String::new();
+        for n in 0..reads {
+            template.push_str(&format!("x{n} = x{}\n", n + 1));
+        }
+        template.push_str(&format!("x{reads} = 1\nw = 0\n"));
+        template
+    }
+
+    /// The same chain, of objects: each is made anew by every pass, capturing
+    /// the scope as it then stands.
+    fn chain_of_objects(reads: usize) -> String {
+        let mut template = String::new();
+        for n in 0..reads {
+            template.push_str(&format!("x{n} = new {{ v = x{}.v }}\n", n + 1));
+        }
+        template.push_str(&format!("x{reads} = new {{ v = 1 }}\nw = 0\n"));
+        template
+    }
+
+    /// A chain of lambdas that each read the whole module, `f1` to `f{n}`.
+    fn chain_of_lambdas_reading_the_module(n: usize) -> String {
+        let mut template = String::from("res = f1.apply(1)\n");
+        for k in 1..n {
+            template.push_str(&format!(
+                "hidden f{k} = (x) -> module.f{}.apply(x)\n",
+                k + 1
+            ));
+        }
+        template.push_str(&format!("hidden f{n} = (x) -> x + 1\n"));
+        template
+    }
+
+    /// Where the chain of forward references plus the margin is as long as
+    /// the passes can run, no run of quiet passes can end them, so only
+    /// `settled_eq` can. The lambdas here capture the module and are never
+    /// reproduced, so every pass runs, as on a build without the quiet-pass
+    /// rule, and `same_data` is not called, which would walk everything
+    /// each captured scope holds on every pass.
+    #[test]
+    fn a_chain_no_quiet_pass_can_end_never_compares_by_data() {
+        let child = "amends \"Template.pkl\"\nbase = 10\n";
+        let (json, passes) = evaluate_amendment(&chain_of_lambdas_reading_the_module(30), child);
+        assert_eq!(json["res"], 2);
+        // The template's own pass and pass 0 of the amending module, then a pass for
+        // each of the inherited properties, and one more.
+        assert_eq!(passes, 2 + 31, "every pass runs");
+        assert_eq!(crate::eval::SAME_DATA_CHECKS.with(std::cell::Cell::get), 0);
+    }
+
+    /// The chain and the margin as long as the passes, to the pass: the last
+    /// quiet pass would be the last pass, so nothing is compared either. Six
+    /// properties, a chain of four reads and two passes of margin.
+    #[test]
+    fn a_chain_exactly_as_long_as_the_passes_is_never_compared_by_data() {
+        let child = "amends \"Template.pkl\"\nw = 5\n";
+        let (_, passes) = evaluate_amendment(&chain_of_objects(4), child);
+        assert_eq!(passes, 1 + 1 + 6, "every pass runs");
+        assert_eq!(crate::eval::SAME_DATA_CHECKS.with(std::cell::Cell::get), 0);
+    }
+
+    /// The guard above must not turn the comparison off where it can end the
+    /// passes: a chain of four reads and the margin are fewer passes than
+    /// the template has properties.
+    #[test]
+    fn a_chain_a_quiet_pass_can_end_is_compared_by_data() {
+        let child = "amends \"Template.pkl\"\nw = 5\n";
+        let mut template = chain_of_objects(4);
+        for n in 0..8 {
+            template.push_str(&format!("y{n} = {n}\n"));
+        }
+        let (_, passes) = evaluate_amendment(&template, child);
+        assert!(passes < 2 * 6, "{passes} passes");
+        assert!(crate::eval::SAME_DATA_CHECKS.with(std::cell::Cell::get) > 0);
+    }
+
+    /// The same chain, of objects that differ from one pass to the next only
+    /// in their bare elements, which are not in the member map: each holds
+    /// the elements of the next, and the last holds `base`.
+    fn chain_of_elements(reads: usize) -> String {
+        let mut template = String::from("base = 1\n");
+        for n in 0..reads {
+            template.push_str(&format!("x{n} = new Dynamic {{ w = 0; ...x{} }}\n", n + 1));
+        }
+        template.push_str(&format!("x{reads} = new Dynamic {{ w = 0; base }}\n"));
+        template
+    }
+
+    /// A change that shows only in the elements of an object is a change, and
+    /// keeps the passes running as one in a member does.
+    #[test]
+    fn a_change_only_in_elements_restarts_the_quiet_count() {
+        let child = "amends \"Template.pkl\"\nbase = 10\n";
+        let (_, short) = evaluate_amendment(&chain_of_elements(3), child);
+        let (_, long) = evaluate_amendment(&chain_of_elements(9), child);
+        // The template's own pass and pass 0, then the passes the last change
+        // takes to arrive (one per link, as the elements travel the chain)
+        // and the quiet ones that follow it: the chain and the margin.
+        assert_eq!((short, long), (7, 13));
+    }
+
+    /// Values that every pass reproduces end the passes at the first that
+    /// changes nothing, however long the chain: that pass would be repeated.
+    /// Counted: the template's own pass and pass 0 of the amending module.
+    #[test]
+    fn reproduced_values_end_the_passes_at_the_first_that_changes_nothing() {
+        let child = "amends \"Template.pkl\"\nw = 5\n";
+        let (_, short) = evaluate_amendment(&chain_of_reads(0), child);
+        let (_, long) = evaluate_amendment(&chain_of_reads(40), child);
+        assert_eq!((short, long), (2, 2));
+    }
+
+    /// Readers of the whole module read every property, and two of them read
+    /// each other. That must not keep the passes of a template of plain values
+    /// running: nothing in it captures a scope.
+    #[test]
+    fn readers_of_the_module_do_not_keep_plain_values_from_settling() {
+        let mut template = String::from("base = 1\n");
+        for n in 0..PROPERTIES {
+            template.push_str(&format!("p{n} = base + {n}\n"));
+        }
+        template.push_str("hidden m0 = module.base\nhidden m1 = this.base\n");
+        let (json, passes) = evaluate_amendment(&template, "amends \"Template.pkl\"\nbase = 10\n");
+        assert_eq!(json["p0"], 10);
+        assert!(passes <= 3, "{passes} late-binding passes");
+    }
+
+    /// Passes that change nothing the data shows still run until more of them
+    /// than the longest chain of forward references have passed, and that is
+    /// what carries a change through a capture that lags behind. Counted: the
+    /// template's own pass, pass 0 of the amending module, a pass for each
+    /// of the four reads in the chain, and two quiet passes beyond it.
+    #[test]
+    fn quiet_passes_run_past_the_longest_forward_chain() {
+        let child = "amends \"Template.pkl\"\nw = 5\n";
+        // Properties enough that the passes are not capped by their number.
+        let with_filler = |mut template: String| {
+            for n in 0..12 {
+                template.push_str(&format!("y{n} = {n}\n"));
+            }
+            template
+        };
+        let (_, without_reads) = evaluate_amendment(&with_filler(chain_of_objects(0)), child);
+        let (_, with_reads) = evaluate_amendment(&with_filler(chain_of_objects(4)), child);
+        assert_eq!((without_reads, with_reads), (1 + 1 + 2, 1 + 1 + 4 + 2));
+    }
+
+    /// A pass that fails and changes nothing is not repeated: errors are only
+    /// reported on the last pass, so the passes go straight to it. Counted: the
+    /// template's pass, pass 0 and the quiet passes of the amending module
+    /// (two beyond a chain of none), and the last.
+    #[test]
+    fn a_settled_pass_that_still_fails_goes_straight_to_the_last() {
+        let mut template = String::from("base = 1\nbad = base + throw(\"boom\")\n");
+        for n in 0..PROPERTIES {
+            template.push_str(&format!("o{n} = new {{ v = {n} }}\n"));
+        }
+        let (result, passes) = try_evaluate_modules(&[
+            ("Template.pkl", &template),
+            ("Child.pkl", "amends \"Template.pkl\"\nbase = 2\n"),
+        ]);
+        let message = result.unwrap_err().to_string();
+        assert!(message.contains("boom"), "{message}");
+        assert!(passes <= MAX_PASSES, "{passes} late-binding passes");
+    }
+
+    /// An override in the amending module ends a chain of reads: what it reads
+    /// is not the template's property any more.
+    #[test]
+    fn an_overridden_property_ends_the_chain_of_reads() {
+        let template = chain_of_objects(4);
+        let (_, kept) = evaluate_amendment(&template, "amends \"Template.pkl\"\nw = 5\n");
+        let (_, cut) = evaluate_amendment(
+            &template,
+            "amends \"Template.pkl\"\nw = 5\nx2 = new { v = 7 }\n",
+        );
+        assert!(
+            cut < kept,
+            "{cut} passes with the chain cut, {kept} without"
+        );
+    }
+
+    /// A change can arrive after quiet passes. Each `o{n}` reads the next
+    /// through an object it amends, which keeps the scope it was made in, so
+    /// an override of `base` reaches `res` one capture per link without any
+    /// value showing it on the way. Pass 3 changes `res` after passes 1 and 2
+    /// found nothing different; the quiet passes are counted again from it,
+    /// and six follow it: the chain of four forward references, and the
+    /// margin of two. Dropping the reset ends the passes before `res` is right.
+    #[test]
+    fn a_change_after_quiet_passes_restarts_the_count() {
+        let mut template = String::from("res = (o1) { go = true }.v\n");
+        for n in 1..6 {
+            template.push_str(&format!(
+                "o{n} = new {{ go = false; v = if (go) (o{}) {{ go = true }}.v else 0 }}\n",
+                n + 1
+            ));
+        }
+        template
+            .push_str("o6 = new { go = false; v = if (go) r else 0 }\nbase = 1\nr = base + 1\n");
+        let (json, passes) = evaluate_amendment(&template, "amends \"Template.pkl\"\nbase = 10\n");
+        assert_eq!(json["res"], 11);
+        // The template's pass, and passes 0 to 9 of the amending module.
+        assert_eq!(passes, 1 + 10);
+    }
+
+    /// The longest chain among the properties of `source`, listed `times`
+    /// times in a row as an amending module lists those it inherits.
+    fn longest_chain_listed(source: &str, times: usize) -> usize {
+        let tokens = crate::lexer::lex(source).unwrap();
+        let module = crate::parser::parse(&tokens).unwrap();
+        let once: Vec<&Property> = module
+            .body
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Property(prop) => Some(&**prop),
+                _ => None,
+            })
+            .collect();
+        let late: Vec<&Property> = (0..times).flat_map(|_| once.iter().copied()).collect();
+        forward_reference_chain(&late)
+    }
+
+    fn longest_chain(source: &str) -> usize {
+        longest_chain_listed(source, 1)
+    }
+
+    fn references(source: &str) -> Vec<String> {
+        let tokens = crate::lexer::lex(source).unwrap();
+        let module = crate::parser::parse(&tokens).unwrap();
+        let Some(Entry::Property(prop)) = module.body.first() else {
+            panic!("expected a property");
+        };
+        let mut names: Vec<String> = super::property_reference_names(prop)
+            .iter()
+            .map(|name| name.to_string())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// A read by computed key names the module it indexes, so the chain does
+    /// not need to treat `DYNAMIC_SIBLING_REF` itself as a read of everything.
+    #[test]
+    fn a_read_by_computed_key_names_the_module_it_reads_through() {
+        for source in [
+            "m = module[\"B\".toLowerCase()]\n",
+            "m = this[\"B\".toLowerCase()]\n",
+            "local m = module\n",
+            "local m = this\n",
+        ] {
+            let names = references(source);
+            assert!(
+                names.iter().any(|name| name == "module" || name == "this"),
+                "{source:?} references only {names:?}"
+            );
+        }
+    }
+
+    /// Which earlier copy of a property a later one reads changes how many
+    /// forward references stand in its way: `b` reads the copy of `d` just
+    /// before it, whose own read of `a` is not forward, and not the first.
+    #[test]
+    fn a_property_reads_the_latest_earlier_copy_of_what_it_reads() {
+        let source = "d = a\nc = b + d\nb = d\na = 1\n";
+        assert_eq!(longest_chain_listed(source, 2), 1);
+    }
+
+    #[test]
+    fn properties_declared_after_what_they_read_have_no_forward_chain() {
+        assert_eq!(longest_chain("a = 1\nb = a\nc = b + a\n"), 0);
+    }
+
+    #[test]
+    fn each_read_of_a_later_property_adds_one_to_the_chain() {
+        assert_eq!(longest_chain("c = b\nb = a\na = 1\n"), 2);
+        assert_eq!(longest_chain("c = b\nb = 1\na = 1\n"), 1);
+        assert_eq!(longest_chain("c = a\nb = a\na = 1\n"), 1);
+    }
+
+    #[test]
+    fn a_property_that_reads_the_module_reads_every_other_property() {
+        assert_eq!(longest_chain("m = module\nb = 1\n"), 1);
+        assert_eq!(longest_chain("m = module\nb = a\na = 1\n"), 2);
+        assert_eq!(longest_chain("b = 1\nm = module\n"), 0);
+        assert_eq!(longest_chain("m = this\nb = 1\n"), 1);
+    }
+
+    #[test]
+    fn a_property_that_reads_a_computed_key_reads_every_other_property() {
+        assert_eq!(longest_chain("m = module[\"B\".toLowerCase()]\nb = 1\n"), 1);
+    }
+
+    #[test]
+    fn properties_that_read_each_other_have_the_longest_possible_chain() {
+        assert_eq!(longest_chain("a = b\nb = a\nc = 1\n"), 3);
+    }
+
+    #[test]
+    fn a_property_that_reads_itself_has_the_longest_possible_chain() {
+        assert_eq!(longest_chain("f = (x) -> f.apply(x)\nb = 1\n"), 2);
+    }
+
+    #[test]
+    fn a_property_that_reads_through_outer_reads_every_other_property() {
+        assert_eq!(longest_chain("o = new { v = outer.x }\nx = 1\n"), 1);
+        assert_eq!(longest_chain("o = new { v = 1 }\nx = 1\n"), 0);
     }
 }

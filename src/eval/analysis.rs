@@ -1153,6 +1153,105 @@ pub(super) fn property_reference_names(prop: &Property) -> HashSet<Name> {
     refs
 }
 
+/// The longest chain of forward references among `late`, the properties a
+/// module evaluates, in this order, on every late-binding pass.
+///
+/// A pass reads a property declared earlier as the pass has just evaluated it,
+/// but one declared later only as the previous pass left it, and an object or
+/// lambda made in the pass captures the scope in that state. A change thus
+/// reaches a property that reads it through such a capture one pass later for
+/// every forward reference on the way, and no value changes while it travels.
+/// If that holds, a change still on its way shows up within this many passes
+/// of the previous one, so this many passes in a row that change nothing show
+/// that none is coming.
+///
+/// This is a model of how reads travel, not a proof about every program. It
+/// rests on `property_reference_names` finding every property a property
+/// reads. One that reads the module through `this`, `module` or `outer`, or by
+/// a computed key (which names the `module` or `this` it indexes), can read
+/// any property and is taken to read every other one, earlier or later, which
+/// can only lengthen the chain.
+/// Properties that read each other, or themselves, as recursive lambdas do
+/// through the previous version they captured, have no longest chain: a call
+/// can go back through as many versions as it recurses, so the result is
+/// `late.len()`.
+pub(super) fn forward_reference_chain(late: &[&Property]) -> usize {
+    // Where a pass evaluates each name. A module can list a property twice.
+    let mut positions: HashMap<&str, Vec<usize>> = HashMap::default();
+    for (index, prop) in late.iter().enumerate() {
+        positions.entry(&*prop.name).or_default().push(index);
+    }
+    // What each property reads, as `(position, is a forward reference)`, or
+    // `None` for one that reads the module itself. A name that is listed
+    // before the reader is read as this pass left it.
+    let reads: Vec<Option<Vec<(usize, bool)>>> = late
+        .iter()
+        .enumerate()
+        .map(|(index, prop)| {
+            let mut reads = Vec::new();
+            for name in property_reference_names(prop) {
+                if matches!(&*name, "this" | "module" | "outer") {
+                    return None;
+                }
+                let Some(at) = positions.get(&*name) else {
+                    continue;
+                };
+                match at.iter().rev().find(|&&position| position < index) {
+                    Some(&earlier) => reads.push((earlier, false)),
+                    None => reads.push((at[at.len() - 1], true)),
+                }
+            }
+            Some(reads)
+        })
+        .collect();
+
+    // The longest chain that starts at `index`, or `None` where reads loop.
+    fn chain_from(
+        index: usize,
+        reads: &[Option<Vec<(usize, bool)>>],
+        known: &mut [Option<usize>],
+        visiting: &mut [bool],
+    ) -> Option<usize> {
+        if let Some(length) = known[index] {
+            return Some(length);
+        }
+        if visiting[index] {
+            return None;
+        }
+        visiting[index] = true;
+        let everything: Vec<(usize, bool)>;
+        let edges = match &reads[index] {
+            Some(reads) => reads,
+            None => {
+                everything = (0..reads.len())
+                    .filter(|&other| other != index)
+                    .map(|other| (other, other > index))
+                    .collect();
+                &everything
+            }
+        };
+        let mut longest = 0;
+        for &(other, forward) in edges {
+            longest =
+                longest.max(chain_from(other, reads, known, visiting)? + usize::from(forward));
+        }
+        visiting[index] = false;
+        known[index] = Some(longest);
+        Some(longest)
+    }
+
+    let mut known = vec![None; late.len()];
+    let mut visiting = vec![false; late.len()];
+    let mut longest = 0;
+    for index in 0..late.len() {
+        match chain_from(index, &reads, &mut known, &mut visiting) {
+            Some(length) => longest = longest.max(length),
+            None => return late.len(),
+        }
+    }
+    longest
+}
+
 /// Whether `expr` is certainly not the module object: a literal or a freshly
 /// built object, or a bare `module` already hidden by an outer shadow. A
 /// binding of anything else (`module`, a call, a field read) may hold the
