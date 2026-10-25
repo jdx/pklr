@@ -203,6 +203,7 @@ pub(super) fn resolve_package_uri(uri: &str) -> Result<PackageSource> {
 }
 
 /// Lowercase hex SHA-256 of `bytes`.
+#[cfg(feature = "package-zip")]
 pub(super) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest;
     sha2::Sha256::digest(bytes)

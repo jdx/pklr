@@ -607,6 +607,7 @@ impl Evaluator {
     }
 
     /// A member of the module's evaluated `output`.
+    #[cfg(feature = "native-io")]
     fn output_member(&self, name: &str) -> Option<&Value> {
         match &self.module_output {
             Some(Value::Object(map, _)) => map.get(name),
