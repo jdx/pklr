@@ -158,6 +158,7 @@ pub struct Evaluator {
     /// Expected metadata SHA-256 per package zip URL, from `::sha256:` URIs.
     package_checksums: HashMap<String, String>,
     /// Per zip URL, the extracted directory and checksum it was verified against.
+    #[cfg(feature = "package-zip")]
     verified_packages: HashMap<String, (PathBuf, String)>,
     /// Directory used to persist downloaded package content across evaluators.
     package_cache_dir: Option<PathBuf>,

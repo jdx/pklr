@@ -104,6 +104,7 @@ impl Evaluator {
             #[cfg(feature = "package-zip")]
             package_dirs: HashMap::default(),
             package_checksums: HashMap::default(),
+            #[cfg(feature = "package-zip")]
             verified_packages: HashMap::default(),
             package_cache_dir: None,
             package_http_roots: HashSet::default(),

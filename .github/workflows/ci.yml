@@ -37,6 +37,10 @@ jobs:
             exit 1
           fi
       - run: cargo clippy --all-targets --all-features -- -D warnings
+      # Embedders build the evaluator without host IO, where items only those
+      # features use are dead. The examples and tests need native-io.
+      - run: cargo clippy --lib --no-default-features --features eval-core -- -D warnings
+      - run: cargo clippy --lib --no-default-features --features package-zip -- -D warnings
       - run: cargo fmt --check
   windows:
     runs-on: windows-latest
