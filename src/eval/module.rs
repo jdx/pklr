@@ -3,6 +3,28 @@
 
 use super::*;
 
+/// What a module inherits from the module it amends or extends.
+#[derive(Default)]
+struct ModuleBase {
+    /// The base module's members: this module's starting values.
+    members: ObjectMap,
+    /// The base's properties, evaluated again once this module's overrides
+    /// are in scope.
+    late_properties: Vec<Arc<Property>>,
+    /// The base module's members, which `super` reads.
+    super_members: Option<ObjectMap>,
+}
+
+/// The members a module body evaluated.
+struct ModuleMembers<'b> {
+    /// The classes, and type aliases to classes, the body declares.
+    class_names: std::collections::HashSet<Name>,
+    /// The non-local properties that evaluated, by name.
+    evaluated: HashMap<&'b str, Value>,
+    /// The members that failed, with their errors.
+    failed: HashMap<&'b str, String>,
+}
+
 impl Evaluator {
     pub(super) fn eval_module(
         &mut self,
@@ -136,519 +158,42 @@ impl Evaluator {
             .filter(|uri| local_module_path(path, uri).is_some())
             .map(|uri| self.local_file_path(path, uri))
             .collect::<Result<_>>()?;
-        let mut deferred_inherited_imports = Vec::new();
+        let deferred_inherited_imports = self.bind_imports(
+            module,
+            path,
+            depth,
+            evaluated_as_base,
+            &mut scope,
+            &referenced_imports,
+            &import_field_uses,
+            &inherited_local_paths,
+        )?;
 
-        // Process imports
-        for import in &module.imports {
-            // A relative import inside a remote module resolves against that URL.
-            let resolved_uri = resolve_remote_relative(path, &import.uri);
-            let uri: &str = resolved_uri.as_deref().unwrap_or(&import.uri);
+        let mut base = ModuleBase::default();
+        self.amend_base_module(
+            module,
+            path,
+            depth,
+            &mut scope,
+            &deferred_inherited_imports,
+            &mut base,
+        )?;
 
-            // Handle glob imports: import* "dir/*.pkl" as Alias
-            if import.is_glob {
-                let alias = import
-                    .alias
-                    .clone()
-                    .ok_or_else(|| Error::Eval("import* requires an alias".into()))?;
-                if !referenced_imports.contains(alias.as_str()) {
-                    continue;
-                }
+        self.bind_amended_base_classes(module, path, depth, &mut scope, &mut base)?;
 
-                // Code in other modules can read the alias without being analyzed
-                // here: an amended or extended base reads it from this module's
-                // scope, and a module amending or extending this one inherits it.
-                let requested =
-                    if module.amends.is_none() && module.extends.is_none() && !evaluated_as_base {
-                        glob_index_keys(&import_field_uses, &alias)
-                    } else {
-                        None
-                    };
-                let mapping = self.eval_glob_import(uri, path, depth, requested.as_ref())?;
-                scope.declare(alias, mapping);
-                continue;
-            }
-
-            if uri.starts_with("https://") || uri.starts_with("http://") {
-                // HTTP import
-                let alias = import.alias.clone().unwrap_or_else(|| {
-                    uri.rsplit('/')
-                        .next()
-                        .unwrap_or(uri)
-                        .strip_suffix(".pkl")
-                        .unwrap_or(uri)
-                        .to_string()
-                });
-                if !referenced_imports.contains(alias.as_str()) {
-                    continue;
-                }
-                let requested = requested_fields_for_import(&import_field_uses, &alias);
-                let source = self.fetch_source(uri)?;
-                let imported_val = {
-                    let tokens = lexer::lex_named(&source, uri)?;
-                    let imp_module = parser::parse_named(&tokens, &source, uri)?;
-                    self.eval_module_with_scope(
-                        &imp_module,
-                        Path::new(uri),
-                        depth + 1,
-                        None,
-                        requested,
-                    )?
-                };
-                scope.declare(&alias, imported_val);
-                scope.set_module_identity(alias, canonical_remote_module_identity(uri));
-                continue;
-            }
-
-            if uri.starts_with("package://") {
-                let pkg = self.resolve_package(uri)?;
-                let fragment = uri.split_once('#').map(|(_, f)| f).unwrap_or("");
-                let file_path = fragment.strip_prefix('/').unwrap_or(fragment);
-                let alias = import.alias.clone().unwrap_or_else(|| {
-                    file_path
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(file_path)
-                        .strip_suffix(".pkl")
-                        .unwrap_or(file_path)
-                        .to_string()
-                });
-                if !referenced_imports.contains(alias.as_str()) {
-                    continue;
-                }
-                let requested = requested_fields_for_import(&import_field_uses, &alias);
-                // For zip packages, extract to temp dir and eval as local file
-                if let PackageSource::Zip(zip_url, _) = &pkg {
-                    #[cfg(feature = "package-zip")]
-                    {
-                        let pkg_dir = self.extract_package_zip(zip_url)?;
-                        let local_path = pkg_dir.join(file_path);
-                        let imported_val = self.eval_file_with_requested_fields(
-                            &local_path,
-                            depth + 1,
-                            requested,
-                        )?;
-                        let identity = self.module_type_namespace(&local_path);
-                        scope.declare(&alias, imported_val);
-                        scope.set_module_identity(alias, identity);
-                        continue;
-                    }
-                    #[cfg(not(feature = "package-zip"))]
-                    {
-                        return Err(Error::Unsupported(format!(
-                            "package zip imports require pklr's 'package-zip' feature: {zip_url}"
-                        )));
-                    }
-                }
-                let url = match &pkg {
-                    PackageSource::Direct { url, .. } => url.clone(),
-                    PackageSource::Zip(..) => unreachable!(),
-                };
-                let root = match &pkg {
-                    PackageSource::Direct { root, .. } => root,
-                    PackageSource::Zip(..) => unreachable!(),
-                };
-                let source = self.fetch_direct_package_source(&url, root)?;
-                let imported_val = {
-                    let tokens = lexer::lex_named(&source, &url)?;
-                    let imp_module = parser::parse_named(&tokens, &source, &url)?;
-                    self.eval_module_with_scope(
-                        &imp_module,
-                        Path::new(&url),
-                        depth + 1,
-                        None,
-                        requested,
-                    )?
-                };
-                scope.declare(&alias, imported_val);
-                scope.set_module_identity(alias, url);
-                continue;
-            }
-
-            // Handle pkl: standard library imports
-            if let Some(module_name) = uri.strip_prefix("pkl:") {
-                let stdlib_val = self.stdlib_module(module_name, depth)?;
-                let alias = import
-                    .alias
-                    .clone()
-                    .unwrap_or_else(|| module_name.to_string());
-                if !referenced_imports.contains(alias.as_str()) {
-                    continue;
-                }
-                scope.declare(alias, stdlib_val);
-                continue;
-            }
-
-            // Skip other non-local imports
-            if uri.contains("://") && !uri.starts_with("file://") {
-                continue;
-            }
-
-            let import_path = self.local_file_path(path, uri)?;
-            let alias = import.alias.clone().unwrap_or_else(|| {
-                import_path
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string()
-            });
-            if !referenced_imports.contains(alias.as_str()) {
-                // Unused imports are intentionally lazy: missing local paths are
-                // reported only if the imported binding is actually referenced.
-                continue;
-            }
-            if !self.path_exists_io(&import_path)? {
-                return Err(Error::ImportNotFound(import_path.display().to_string()));
-            }
-            let mut inherited_path = None;
-            for candidate in &inherited_local_paths {
-                if self.same_local_path(candidate, &import_path)? {
-                    inherited_path = Some(candidate);
-                    break;
-                }
-            }
-            if let Some(inherited_path) = inherited_path {
-                deferred_inherited_imports.push((alias, inherited_path.clone()));
-                continue;
-            }
-            {
-                let requested = requested_fields_for_import(&import_field_uses, &alias);
-                let imported_val =
-                    self.eval_file_with_requested_fields(&import_path, depth + 1, requested)?;
-                let identity = self.module_type_namespace(&import_path);
-                scope.declare(&alias, imported_val);
-                scope.set_module_identity(alias, identity);
-            }
-        }
-
-        // The base module's members, which `super` reads.
-        let mut super_members: Option<ObjectMap> = None;
-        // Process amends: load base module as starting values
-        let mut base_obj = ObjectMap::default();
-        let mut late_inherited_properties = Vec::new();
-        if let Some(amends_uri) = &module.amends {
-            // A relative amends inside a remote module resolves against that URL.
-            let resolved_amends = resolve_remote_relative(path, amends_uri);
-            let uri: &str = resolved_amends.as_deref().unwrap_or(amends_uri);
-            if uri.starts_with("https://") || uri.starts_with("http://") {
-                // HTTP amends
-                self.check_not_self(module, path, Path::new(uri), "amend")?;
-                let source = self.fetch_source(uri)?;
-                let tokens = lexer::lex_named(&source, uri)?;
-                let base_module = parser::parse_named(&tokens, &source, uri)?;
-                let base_val = self.eval_module_with_scope(
-                    &base_module,
-                    Path::new(uri),
-                    depth + 1,
-                    Some(scope.clone()),
-                    None,
-                )?;
-                self.layer_evaluated_module_scope(Path::new(uri), &mut scope);
-                late_inherited_properties.extend(self.inherited_late_properties(Path::new(uri)));
-                if let Value::Object(m, _) = base_val {
-                    base_obj = (*m).clone();
-                }
-                super_members = Some(self.module_super_members(Path::new(uri), &base_obj, false));
-            } else if uri.starts_with("package://") {
-                let pkg = self.resolve_package(uri)?;
-                if let PackageSource::Zip(zip_url, entry) = &pkg {
-                    #[cfg(feature = "package-zip")]
-                    {
-                        let pkg_dir = self.extract_package_zip(zip_url)?;
-                        let local_path = pkg_dir.join(entry);
-                        self.check_not_self(module, path, &local_path, "amend")?;
-                        let source = self.read_to_string_io(&local_path)?;
-                        let name = local_path.display().to_string();
-                        let tokens = lexer::lex_named(&source, &name)?;
-                        let base_module = parser::parse_named(&tokens, &source, &name)?;
-                        let base_val = self.eval_module_with_scope(
-                            &base_module,
-                            &local_path,
-                            depth + 1,
-                            Some(scope.clone()),
-                            None,
-                        )?;
-                        self.layer_evaluated_module_scope(&local_path, &mut scope);
-                        late_inherited_properties
-                            .extend(self.inherited_late_properties(&local_path));
-                        if let Value::Object(m, _) = base_val {
-                            base_obj = (*m).clone();
-                        }
-                        super_members =
-                            Some(self.module_super_members(&local_path, &base_obj, false));
-                    }
-                    #[cfg(not(feature = "package-zip"))]
-                    {
-                        let _ = entry;
-                        return Err(Error::Unsupported(format!(
-                            "package zip imports require pklr's 'package-zip' feature: {zip_url}"
-                        )));
-                    }
-                } else if let PackageSource::Direct { url, root } = &pkg {
-                    self.check_not_self(module, path, Path::new(url.as_str()), "amend")?;
-                    let source = self.fetch_direct_package_source(url, root)?;
-                    let tokens = lexer::lex_named(&source, url)?;
-                    let base_module = parser::parse_named(&tokens, &source, url)?;
-                    let base_val = self.eval_module_with_scope(
-                        &base_module,
-                        Path::new(url.as_str()),
-                        depth + 1,
-                        Some(scope.clone()),
-                        None,
-                    )?;
-                    self.layer_evaluated_module_scope(Path::new(url.as_str()), &mut scope);
-                    late_inherited_properties
-                        .extend(self.inherited_late_properties(Path::new(url.as_str())));
-                    if let Value::Object(m, _) = base_val {
-                        base_obj = (*m).clone();
-                    }
-                    super_members =
-                        Some(self.module_super_members(Path::new(url.as_str()), &base_obj, false));
-                }
-            } else if uri == "pkl:test" {
-                inherit_stdlib_module("test", &mut base_obj, &mut scope);
-            } else if !uri.starts_with("pkl:")
-                && (!uri.contains("://") || uri.starts_with("file://"))
-            {
-                let amends_path = self.local_file_path(path, uri)?;
-                if self.path_exists_io(&amends_path)? {
-                    self.check_not_self(module, path, &amends_path, "amend")?;
-                    let base_val =
-                        self.eval_file_with_scope(&amends_path, depth + 1, Some(scope.clone()))?;
-                    self.layer_evaluated_module_scope(&amends_path, &mut scope);
-                    late_inherited_properties.extend(self.inherited_late_properties(&amends_path));
-                    if let Value::Object(m, _) = &base_val {
-                        self.bind_deferred_inherited_imports(
-                            &deferred_inherited_imports,
-                            &amends_path,
-                            &base_val,
-                            &mut scope,
-                        )?;
-                        base_obj = (**m).clone();
-                    }
-                    super_members = Some(self.module_super_members(&amends_path, &base_obj, false));
-                }
-            }
-        }
-
-        // Inject class definitions from amends base into scope so the amending
-        // module can reference them (e.g., `new Step { ... }`).
-        // We re-parse the base module to find ClassDef entries, then evaluate
-        // them directly (similar to extends handling), because eval_module strips
-        // class definitions from its return value.
-        // Also remove inherited class definitions from base_obj so they don't
-        // appear in the amending module's data output.
-        if let Some(amends_uri) = &module.amends {
-            let resolved_amends = resolve_remote_relative(path, amends_uri);
-            let uri: &str = resolved_amends.as_deref().unwrap_or(amends_uri);
-            if let Some((base_module, source_path)) = self.load_parsed_module(uri, path)? {
-                let mut base_scope = scope.clone();
-                base_scope.type_namespace =
-                    Some(self.module_type_namespace(Path::new(&source_path)));
-                for entry in base_module.body.iter() {
-                    if let Entry::ClassDef(name, class_mods, parent, body) = entry {
-                        let defaults = self.eval_class_def(
-                            name,
-                            class_mods,
-                            parent.as_deref(),
-                            body,
-                            &base_scope,
-                            depth,
-                        )?;
-                        scope.set(name, defaults.clone());
-                        if depth == 0 {
-                            base_obj.shift_remove(name.as_str());
-                        } else {
-                            base_obj.insert(name.as_str().into(), defaults.clone());
-                        }
-                    }
-                    // Extract converters from the base module's output block
-                    // (the amending module inherits them; child overrides if present).
-                    if let Entry::Property(prop) = entry
-                        && &*prop.name == "output"
-                        && depth == 0
-                    {
-                        self.extract_converters_from_ast(prop, &scope, depth);
-                    }
-                    if let Entry::Property(prop) = entry
-                        && !has_modifier(&prop.modifiers, Modifier::Local)
-                        && &*prop.name != "output"
-                        && !self
-                            .inherited_late_properties(Path::new(&source_path))
-                            .iter()
-                            .any(|known| known.name == prop.name)
-                    {
-                        push_base_property(&mut late_inherited_properties, prop);
-                    }
-                }
-            }
-            // Functions inherited from the base stay members, so `module.f`
-            // and `this.f` reach them. They are dropped when the module is
-            // rendered (see the end of this function).
-        }
-
-        // Process extends: load base module, inherit all members and scope
-        if let Some(extends_uri) = &module.extends {
-            // A relative extends inside a remote module resolves against that URL.
-            let resolved_extends = resolve_remote_relative(path, extends_uri);
-            let uri: &str = resolved_extends.as_deref().unwrap_or(extends_uri);
-            if uri == "pkl:test" {
-                inherit_stdlib_module("test", &mut base_obj, &mut scope);
-                super_members = Some(base_obj.clone());
-            }
-            if !uri.contains("://") || uri.starts_with("file://") {
-                let extends_path = self.local_file_path(path, uri)?;
-                if self.path_exists_io(&extends_path)? {
-                    self.check_not_self(module, path, &extends_path, "extend")?;
-                    let base_module = self.parse_file(&extends_path)?;
-                    if base_module.amends.is_some() {
-                        return Err(Error::Eval(format!(
-                            "Module `{}` cannot be extended or used as type because it amends another module.",
-                            self.amended_module_name(&base_module, &extends_path)
-                        )));
-                    }
-                    let ext_val =
-                        self.eval_file_with_scope(&extends_path, depth + 1, Some(scope.clone()))?;
-                    self.layer_evaluated_module_scope(&extends_path, &mut scope);
-                    late_inherited_properties.extend(self.inherited_late_properties(&extends_path));
-                    let name = extends_path.display().to_string();
-                    let source = self.read_to_string_io(&extends_path)?;
-                    let tokens = lexer::lex_named(&source, &name)?;
-                    let ext_module = parser::parse_named(&tokens, &source, &name)?;
-                    if !ext_module.annotations.iter().any(|annotation| {
-                        matches!(
-                            annotation.name.as_str(),
-                            "pklr:module:Open" | "pklr:module:Abstract"
-                        )
-                    }) {
-                        return Err(Error::Eval(format!(
-                            "Cannot extend non-open module `{}`.",
-                            extends_path
-                                .file_stem()
-                                .unwrap_or_default()
-                                .to_string_lossy()
-                        )));
-                    }
-                    if let Value::Object(m, _) = &ext_val {
-                        self.bind_deferred_inherited_imports(
-                            &deferred_inherited_imports,
-                            &extends_path,
-                            &ext_val,
-                            &mut scope,
-                        )?;
-                        base_obj = (**m).clone();
-                    }
-                    let mut base_scope = scope.clone();
-                    base_scope.type_namespace = Some(self.module_type_namespace(&extends_path));
-                    // Also evaluate the base module's scope (classes, locals) into our scope
-                    // by re-processing its body entries
-                    for entry in ext_module.body.iter() {
-                        match entry {
-                            Entry::ClassDef(cls_name, cls_mods, parent, body) => {
-                                let defaults = self.eval_class_def(
-                                    cls_name,
-                                    cls_mods,
-                                    parent.as_deref(),
-                                    body,
-                                    &base_scope,
-                                    depth,
-                                )?;
-                                scope.set(cls_name, defaults.clone());
-                                if depth == 0 {
-                                    base_obj.shift_remove(cls_name.as_str());
-                                } else {
-                                    base_obj.insert(cls_name.as_str().into(), defaults.clone());
-                                }
-                            }
-                            Entry::TypeAlias(name, ty) => {
-                                self.eval_type_alias(name, ty, &mut scope);
-                            }
-                            Entry::Property(prop) if &*prop.name == "output" && depth == 0 => {
-                                self.extract_converters_from_ast(prop, &scope, depth);
-                            }
-                            Entry::Property(prop)
-                                if !has_modifier(&prop.modifiers, Modifier::Local)
-                                    && &*prop.name != "output" =>
-                            {
-                                push_base_property(&mut late_inherited_properties, prop);
-                                if let Ok(Some(value)) = self.eval_property(prop, &scope, depth) {
-                                    scope.set(&prop.name, value);
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    super_members = Some(self.module_super_members(&extends_path, &base_obj, true));
-                }
-            } else if uri.starts_with("https://") || uri.starts_with("http://") {
-                self.check_not_self(module, path, Path::new(uri), "extend")?;
-                let source = self.fetch_source(uri)?;
-                let tokens = lexer::lex_named(&source, uri)?;
-                let ext_module = parser::parse_named(&tokens, &source, uri)?;
-                if ext_module.amends.is_some() {
-                    return Err(Error::Eval(format!(
-                        "Module `{}` cannot be extended or used as type because it amends another module.",
-                        self.amended_module_name(&ext_module, Path::new(uri))
-                    )));
-                }
-                if !ext_module.annotations.iter().any(|annotation| {
-                    matches!(
-                        annotation.name.as_str(),
-                        "pklr:module:Open" | "pklr:module:Abstract"
-                    )
-                }) {
-                    return Err(Error::Eval(format!(
-                        "Cannot extend non-open module `{}`.",
-                        Path::new(uri)
-                            .file_stem()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                    )));
-                }
-                let ext_val = self.eval_module_with_scope(
-                    &ext_module,
-                    Path::new(uri),
-                    depth + 1,
-                    Some(scope.clone()),
-                    None,
-                )?;
-                self.layer_evaluated_module_scope(Path::new(uri), &mut scope);
-                late_inherited_properties.extend(self.inherited_late_properties(Path::new(uri)));
-                if let Value::Object(m, _) = ext_val {
-                    base_obj = (*m).clone();
-                }
-                let mut base_scope = scope.clone();
-                base_scope.type_namespace = Some(self.module_type_namespace(Path::new(uri)));
-                // Inject class definitions from HTTP base into scope
-                for entry in ext_module.body.iter() {
-                    if let Entry::ClassDef(cls_name, cls_mods, parent, body) = entry {
-                        let defaults = self.eval_class_def(
-                            cls_name,
-                            cls_mods,
-                            parent.as_deref(),
-                            body,
-                            &base_scope,
-                            depth,
-                        )?;
-                        scope.set(cls_name, defaults.clone());
-                        if depth == 0 {
-                            base_obj.shift_remove(cls_name.as_str());
-                        } else {
-                            base_obj.insert(cls_name.as_str().into(), defaults.clone());
-                        }
-                    }
-                    if let Entry::Property(prop) = entry
-                        && !has_modifier(&prop.modifiers, Modifier::Local)
-                        && &*prop.name != "output"
-                    {
-                        push_base_property(&mut late_inherited_properties, prop);
-                        if let Ok(Some(value)) = self.eval_property(prop, &scope, depth) {
-                            scope.set(&prop.name, value);
-                        }
-                    }
-                }
-                super_members = Some(self.module_super_members(Path::new(uri), &base_obj, true));
-            }
-        }
+        self.extend_base_module(
+            module,
+            path,
+            depth,
+            &mut scope,
+            &deferred_inherited_imports,
+            &mut base,
+        )?;
+        let ModuleBase {
+            members: base_obj,
+            late_properties: late_inherited_properties,
+            mut super_members,
+        } = base;
 
         if (module.amends.is_some() || module.extends.is_some()) && super_members.is_none() {
             super_members = Some(base_obj.clone());
@@ -734,218 +279,22 @@ impl Evaluator {
         scope.set("this", Value::Object(Arc::clone(&all_props), None));
         scope.set("module", Value::Object(Arc::clone(&all_props), None));
 
-        // Evaluate locals, classes, type aliases and properties in dependency
-        // order, so a member can read one declared after it. A member that
-        // fails is poisoned rather than failing the module: as in Pkl, the
-        // error surfaces only where the member is used (or rendered, below).
-        let mut class_names: std::collections::HashSet<Name> = std::collections::HashSet::default();
-        let mut evaluated: HashMap<&str, Value> = HashMap::default();
-        let mut failed: HashMap<&str, String> = HashMap::default();
-        let mut failed_indices: HashSet<usize> = HashSet::default();
-        let plan = Arc::clone(
-            &self
-                .plan_cache
-                .entry(Arc::as_ptr(body) as usize)
-                .or_insert_with(|| (Arc::clone(body), Arc::new(module_evaluation_plan(body))))
-                .1,
-        );
-        let mut todo = plan.order.clone();
-        // A member can fail because it read another before that one could be
-        // evaluated: through a dynamic `module[key]`, which the order can't
-        // account for. Members that failed are evaluated again, along with
-        // the members that read them, until a pass changes nothing.
-        let mut previous_failures: Option<HashMap<&str, String>> = None;
-        for _ in 0..=plan.order.len() {
-            for index in todo {
-                let entry = &body[index];
-                if let Some(name) = module_member_name(entry) {
-                    failed.remove(name);
-                    failed_indices.remove(&index);
-                }
-                match entry {
-                    Entry::Property(prop)
-                        if has_modifier(&prop.modifiers, Modifier::Local)
-                            && prop.value.is_some() =>
-                    {
-                        match self.eval_expr(prop.value.as_ref().unwrap(), &scope, depth) {
-                            Ok(val) => scope.declare(&prop.name, val),
-                            Err(Error::Eval(message)) => {
-                                scope.declare_poisoned(prop.name.clone(), message.clone());
-                                failed.insert(&prop.name, message);
-                                failed_indices.insert(index);
-                            }
-                            Err(error) => return Err(error),
-                        }
-                    }
-                    Entry::ClassDef(name, class_mods, parent, body) => {
-                        class_names.insert(nm(name));
-                        // Reject invalid inheritance eagerly using the same
-                        // structural validation as `eval_class_def`. Other
-                        // evaluation errors can depend on members declared
-                        // later in the module and remain retryable.
-                        if let Some(parent_name) = parent.as_deref() {
-                            let parent_val = resolve_dotted(&scope, parent_name);
-                            check_supertype(&scope, name, parent_name, parent_val.as_ref())?;
-                        }
-                        match self.eval_class_def(
-                            name,
-                            class_mods,
-                            parent.as_deref(),
-                            body,
-                            &scope,
-                            depth,
-                        ) {
-                            Ok(defaults) => {
-                                scope.set_member_poison(name, None);
-                                scope.declare(name, defaults.clone());
-                                module_props_insert(
-                                    &mut scope,
-                                    &mut all_props,
-                                    name.clone(),
-                                    defaults,
-                                );
-                                let snapshot = Value::Object(Arc::clone(&all_props), None);
-                                scope.set("this", snapshot.clone());
-                                scope.set("module", snapshot);
-                            }
-                            Err(Error::Eval(message)) => {
-                                scope.set_member_poison(name, Some(message.clone()));
-                                scope.declare_poisoned(name.clone(), message.clone());
-                                failed.insert(name, message);
-                                failed_indices.insert(index);
-                            }
-                            Err(error) => return Err(error),
-                        }
-                    }
-                    Entry::TypeAlias(name, ty) => {
-                        self.eval_type_alias(name, ty, &mut scope);
-                        // A non-local alias to a class is a module member, like
-                        // the class, and its value is schema, not data. An
-                        // inherited property of the same name stays data.
-                        if !module.local_type_aliases.contains(name)
-                            && !base_obj.contains_key(name.as_str())
-                            && matches!(
-                                scope.get(name),
-                                Some(Value::Object(_, Some(source)))
-                                    if source.kind == ObjectKind::Class
-                            )
-                        {
-                            class_names.insert(nm(name));
-                        }
-                    }
-                    Entry::Property(prop) => {
-                        let mods = &prop.modifiers;
-                        if has_modifier(mods, Modifier::Local) {
-                            continue;
-                        }
-                        // Extract renderer converters from the `output` block AST,
-                        // then skip it (it's not included in the output).
-                        // Clear any base-inherited converters so child overrides take precedence.
-                        if &*prop.name == "output" {
-                            if depth == 0 {
-                                self.output_props.push(Arc::clone(prop));
-                                self.extract_converters_from_ast(prop, &scope, depth);
-                            }
-                            continue;
-                        }
-                        if let Some(fields) = &requested_eval_fields
-                            && !fields.contains(&prop.name)
-                        {
-                            continue;
-                        }
-                        // abstract/external properties must have a value (or be overridden)
-                        if (has_modifier(mods, Modifier::Abstract)
-                            || has_modifier(mods, Modifier::External))
-                            && prop.value.is_none()
-                            && prop.body.is_none()
-                        {
-                            if let Some(v) = base_obj.get(prop.name.as_ref()) {
-                                // Satisfied by base — add to scope so other properties can reference it
-                                scope.set(&prop.name, v.clone());
-                            } else if has_modifier(mods, Modifier::External) {
-                                return Err(Error::Eval(format!(
-                                    "external property '{}' must be assigned a value in {}",
-                                    prop.name,
-                                    path.display()
-                                )));
-                            } else if depth == 0 && !module_is_abstract(module) {
-                                return Err(Error::Eval(format!(
-                                    "abstract property '{}' must be assigned a value in {}",
-                                    prop.name,
-                                    path.display()
-                                )));
-                            }
-                            continue;
-                        }
-                        let property_result = self
-                            .eval_property_with(prop, &scope, depth, true)
-                            .and_then(|value| {
-                                if synthesized_inherited_types.contains(prop.name.as_ref())
-                                    && let (Some(value), Some(ty)) = (&value, &prop.type_ann)
-                                {
-                                    self.check_inherited_mapping_value_types(
-                                        value, ty, &scope, depth,
-                                    )?;
-                                }
-                                Ok(value)
-                            });
-                        let val = match property_result {
-                            Ok(value) => value,
-                            // Module properties are late-bound. Keep an unresolved
-                            // template expression deferred until a consumer actually
-                            // requires it; poisoned locals still surface that error.
-                            Err(Error::Eval(message))
-                                if is_unresolved_template_error(&message)
-                                    && (module_is_abstract(module)
-                                        || property_reference_names(prop).iter().any(|name| {
-                                            late_inherited_properties
-                                                .iter()
-                                                .any(|inherited| inherited.name == *name)
-                                        })) =>
-                            {
-                                None
-                            }
-                            Err(Error::Eval(message)) => {
-                                scope.declare_poisoned(prop.name.clone(), message.clone());
-                                failed.insert(&prop.name, message);
-                                failed_indices.insert(index);
-                                continue;
-                            }
-                            Err(error) => return Err(error),
-                        };
-                        if let Some(v) = val {
-                            if let Some(message) = late_inherited_properties
-                                .iter()
-                                .filter(|inherited| inherited.name == prop.name)
-                                .find_map(|inherited| immutable_member_error(prop, inherited))
-                            {
-                                return Err(Error::Eval(message));
-                            }
-                            // Always add to scope so other properties can reference it
-                            scope.declare(&prop.name, v.clone());
-                            // Track in all_props (including hidden) for `this`/`module`
-                            module_props_insert(
-                                &mut scope,
-                                &mut all_props,
-                                prop.name.clone(),
-                                v.clone(),
-                            );
-                            // Update `this` and `module` with all properties (including hidden)
-                            let snapshot = Value::Object(Arc::clone(&all_props), None);
-                            scope.set("this", snapshot.clone());
-                            scope.set("module", snapshot);
-                            evaluated.insert(&prop.name, v);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            if failed_indices.is_empty() || previous_failures.as_ref() == Some(&failed) {
-                break;
-            }
-            previous_failures = Some(failed.clone());
-            todo = plan.affected_by(&failed_indices);
-        }
+        let ModuleMembers {
+            class_names,
+            mut evaluated,
+            failed,
+        } = self.eval_module_members(
+            module,
+            path,
+            body,
+            depth,
+            &mut scope,
+            &mut all_props,
+            &base_obj,
+            &late_inherited_properties,
+            &requested_eval_fields,
+            &synthesized_inherited_types,
+        )?;
 
         // The planner may evaluate an annotation class or alias after the
         // annotated property. Validate once the final module scope is ready.
@@ -1094,199 +443,20 @@ impl Evaluator {
                 break;
             }
         }
-        let late_passes = late_inherited_properties.len() + late_child_properties.len();
-        // `super` in a base module's property is that module's own base, not
-        // this module's: those keep the value the base computed.
-        let reads_super: HashSet<&str> = if super_bound {
-            late_inherited_properties
-                .iter()
-                .filter(|prop| property_reads_module_super(prop))
-                .map(|prop| prop.name.as_ref())
-                .collect()
-        } else {
-            HashSet::default()
-        };
-        // A pass that reproduces every value, as `settled_eq` compares them,
-        // is the last: the next would start from the same state and repeat it.
-        //
-        // A value that holds an object or a lambda is never reproduced in that
-        // sense, since each evaluation makes a new one that captures the
-        // scope as it then stands. Such a value can still be the same data,
-        // and a pass whose values all are is quiet: it changes nothing a
-        // reader can see. It is not necessarily the last. An object or
-        // lambda keeps the scope it was made in, so a change reaches a
-        // property that reads it through such a capture one pass later for
-        // every forward reference on the way, and no value changes while it
-        // travels. A property listed before a reader is read as this pass
-        // has just evaluated it, one listed after it as the previous pass
-        // left it.
-        //
-        // `forward_reference_chain` finds the longest chain of such forward
-        // references. As many quiet passes in a row as that are enough if
-        // the model holds, and `QUIET_PASS_MARGIN` more run as slack. The
-        // values are what end the loop, and they are the safety net for reads
-        // the model misses: a pass that changes the data keeps it running.
-        // The loop never runs past `late_passes`.
-        //
-        // Pass 0 never counts as quiet: it starts from the values the base
-        // module computed.
-        let chain_memo = std::cell::Cell::new(None);
-        let settled_after = || -> usize {
-            if let Some(settled_after) = chain_memo.get() {
-                return settled_after;
-            }
-            let late_order: Vec<&Property> = late_inherited_properties
-                .iter()
-                .map(|prop| &**prop)
-                .filter(|prop| {
-                    !child_property_names.contains(prop.name.as_ref())
-                        && !reads_super.contains(prop.name.as_ref())
-                })
-                .chain(late_child_properties.iter().copied())
-                .collect();
-            let settled_after = forward_reference_chain(&late_order) + QUIET_PASS_MARGIN;
-            chain_memo.set(Some(settled_after));
-            settled_after
-        };
-        // Quiet passes are counted after pass 0 and the loop breaks before
-        // counting at `late_passes`, so at most `late_passes - 1` can be
-        // counted. If `settled_after` is not below `late_passes`, no run of
-        // quiet passes can end the loop, and telling a quiet pass from a
-        // changed one decides nothing: only `settled_eq` can end it. Then
-        // `same_data` is not called, which matters for values that capture a
-        // large scope.
-        let can_stop = || settled_after() < late_passes;
-        let mut pass = 0;
-        let mut quiet_passes = 0;
-        loop {
-            #[cfg(test)]
-            {
-                self.late_passes_run += 1;
-            }
-            let mut change = Change::None;
-            let mut errored = false;
-            for prop in &late_inherited_properties {
-                if child_property_names.contains(prop.name.as_ref())
-                    || reads_super.contains(prop.name.as_ref())
-                {
-                    continue;
-                }
-                match self.eval_property_with(prop, &scope, depth, true) {
-                    Ok(Some(value)) => {
-                        change = change.then(scope.get(&prop.name), &value, can_stop).then(
-                            all_props.get(prop.name.as_ref()),
-                            &value,
-                            can_stop,
-                        );
-                        scope.set(&prop.name, value.clone());
-                        module_props_insert(
-                            &mut scope,
-                            &mut all_props,
-                            prop.name.clone(),
-                            value.clone(),
-                        );
-                        if !has_modifier(&prop.modifiers, Modifier::Hidden)
-                            && (depth > 0 || should_render_property_value(prop, &value))
-                            && requested_output_fields
-                                .as_ref()
-                                .is_none_or(|fields| fields.contains(&prop.name))
-                        {
-                            out.insert(prop.name.as_ref().into(), value);
-                        }
-                        let snapshot = Value::Object(Arc::clone(&all_props), None);
-                        scope.set("this", snapshot.clone());
-                        scope.set("module", snapshot);
-                    }
-                    Ok(None) => {}
-                    Err(Error::Eval(message))
-                        if pass < late_passes
-                            || (module_is_abstract(module)
-                                && is_unresolved_template_error(&message)) =>
-                    {
-                        errored = true;
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-            for prop in &late_child_properties {
-                if requested_eval_fields
-                    .as_ref()
-                    .is_some_and(|fields| !fields.contains(&prop.name))
-                {
-                    continue;
-                }
-                match self
-                    .eval_property_with(prop, &scope, depth, true)
-                    .and_then(|value| {
-                        if synthesized_inherited_types.contains(prop.name.as_ref())
-                            && let (Some(value), Some(ty)) = (&value, &prop.type_ann)
-                        {
-                            self.check_inherited_mapping_value_types(value, ty, &scope, depth)?;
-                        }
-                        Ok(value)
-                    }) {
-                    Ok(Some(value)) => {
-                        change = change.then(scope.get(&prop.name), &value, can_stop);
-                        scope.set(&prop.name, value.clone());
-                        if has_modifier(&prop.modifiers, Modifier::Local) {
-                            continue;
-                        }
-                        change = change.then(all_props.get(prop.name.as_ref()), &value, can_stop);
-                        module_props_insert(
-                            &mut scope,
-                            &mut all_props,
-                            prop.name.clone(),
-                            value.clone(),
-                        );
-                        if !has_modifier(&prop.modifiers, Modifier::Hidden)
-                            && (depth > 0 || should_render_property_value(prop, &value))
-                            && requested_output_fields
-                                .as_ref()
-                                .is_none_or(|fields| fields.contains(&prop.name))
-                        {
-                            out.insert(prop.name.as_ref().into(), value);
-                        }
-                        let snapshot = Value::Object(Arc::clone(&all_props), None);
-                        scope.set("this", snapshot.clone());
-                        scope.set("module", snapshot);
-                    }
-                    Ok(None) => {}
-                    Err(Error::Eval(message))
-                        if pass < late_passes
-                            || (module_is_abstract(module)
-                                && is_unresolved_template_error(&message)) =>
-                    {
-                        errored = true;
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-            if pass >= late_passes {
-                break;
-            }
-            let settled = match change {
-                Change::None => true,
-                Change::Data => {
-                    quiet_passes = 0;
-                    false
-                }
-                Change::Capture => {
-                    if pass > 0 {
-                        quiet_passes += 1;
-                    }
-                    quiet_passes >= settled_after()
-                }
-            };
-            if !settled {
-                pass += 1;
-            } else if errored {
-                // Errors are only reported on the last pass, so a settled
-                // pass that still failed goes straight there.
-                pass = late_passes;
-            } else {
-                break;
-            }
-        }
+        self.run_late_binding_passes(
+            module,
+            depth,
+            &mut scope,
+            &mut all_props,
+            &mut out,
+            &late_inherited_properties,
+            &late_child_properties,
+            &child_property_names,
+            super_bound,
+            &requested_eval_fields,
+            &requested_output_fields,
+            &synthesized_inherited_types,
+        )?;
 
         if depth == 0 {
             for prop in &late_inherited_properties {
@@ -1315,52 +485,8 @@ impl Evaluator {
                     _ => None,
                 }))
                 .collect::<Vec<_>>();
-            let mut inherited_type_failures = IndexMap::new();
-            for entry in body.iter() {
-                if let Entry::Property(prop) = entry
-                    && !has_modifier(&prop.modifiers, Modifier::Local)
-                    && (prop.value.is_some() || prop.body.is_some())
-                    && prop.type_ann.is_some()
-                    && scope.is_declared(&prop.name)
-                    && let Some(value) = scope.get(&prop.name)
-                {
-                    if synthesized_inherited_types.contains(prop.name.as_ref()) {
-                        let ty = prop.type_ann.as_ref().expect("checked above");
-                        if !type_has_constraint(ty, &scope) {
-                            continue;
-                        }
-                        let failure = if type_is_runtime_checkable(ty, &scope) {
-                            match self.eval_type_check(value, ty, &scope, depth + 1) {
-                                Ok(true) => None,
-                                Ok(false) => Some(format!(
-                                    "property '{}' expected {}, got {}",
-                                    prop.name,
-                                    display_type_expr(ty),
-                                    value_type_name(value)
-                                )),
-                                // An explicit Pkl `throw` is observable after the
-                                // member is materialized. Keep other evaluator
-                                // limitations deferred, as before.
-                                Err(Error::Eval(message))
-                                    if type_constraint_has_explicit_throw(ty, &scope)
-                                        && !is_deferred_constraint_evaluator_error(&message) =>
-                                {
-                                    Some(message)
-                                }
-                                Err(Error::Eval(_)) => None,
-                                Err(error) => return Err(error),
-                            }
-                        } else {
-                            None
-                        };
-                        if let Some(message) = failure {
-                            inherited_type_failures.insert(prop.name.clone(), message);
-                        }
-                    } else {
-                        self.check_declared_property_type(prop, value, &scope, depth)?;
-                    }
-                }
-            }
+            let mut inherited_type_failures =
+                self.inherited_type_failures(body, &scope, &synthesized_inherited_types, depth)?;
 
             // Values are evaluated before these late inherited checks. Carry a
             // constrained member's failure through direct and transitive reads
@@ -1369,102 +495,16 @@ impl Evaluator {
             // syntactic reference list: an unselected `if` branch, or a
             // caught failed read, must remain usable.
             if !inherited_type_failures.is_empty() {
-                let mut dependency_entries = late_inherited_properties
-                    .iter()
-                    .cloned()
-                    .map(Entry::Property)
-                    .collect::<Vec<_>>();
-                dependency_entries.extend(body.iter().cloned());
-                let dependency_plan = module_evaluation_plan(&dependency_entries);
-                while !inherited_type_failures.is_empty() {
-                    // Find every member that can reach a failed member. This
-                    // follows local helpers transitively. Restricting probes
-                    // to that closure preserves narrowed evaluation's
-                    // laziness without leaving a value computed before its
-                    // inherited type check stale.
-                    let mut failure_dependents = inherited_type_failures
-                        .keys()
-                        .cloned()
-                        .collect::<HashSet<_>>();
-                    loop {
-                        let mut expanded = false;
-                        for entry in &dependency_entries {
-                            let Entry::Property(prop) = entry else {
-                                continue;
-                            };
-                            let refs = property_reference_names(prop);
-                            if refs.iter().any(|name| failure_dependents.contains(name))
-                                && failure_dependents.insert(prop.name.clone())
-                            {
-                                expanded = true;
-                            }
-                        }
-                        if !expanded {
-                            break;
-                        }
-                    }
-
-                    let mut added = false;
-                    let mut probe_scope = scope.child();
-                    let mut probe_properties = (*all_props).clone();
-                    for (name, message) in &inherited_type_failures {
-                        probe_scope.poison(name.clone(), message.clone());
-                        probe_scope.set_member_poison(name, Some(message.clone()));
-                        probe_properties.shift_remove(name.as_ref());
-                    }
-                    let probe_snapshot = Value::Object(Arc::new(probe_properties), None);
-                    probe_scope.set("this", probe_snapshot.clone());
-                    probe_scope.set("module", probe_snapshot);
-                    // A local helper can retain an already-computed value,
-                    // and a method captures its scope when it is built.
-                    // Rebuild affected locals and lambdas in the probe scope,
-                    // so they observe the poisoned member rather than the
-                    // prior successful value.
-                    for &index in &dependency_plan.order {
-                        let Entry::Property(prop) = &dependency_entries[index] else {
-                            continue;
-                        };
-                        if !has_modifier(&prop.modifiers, Modifier::Local)
-                            && !matches!(prop.value.as_ref(), Some(Expr::Lambda(..)))
-                            || !failure_dependents.contains(&prop.name)
-                        {
-                            continue;
-                        }
-                        let Some(value) = &prop.value else {
-                            continue;
-                        };
-                        match self.eval_expr(value, &probe_scope, depth + 1) {
-                            Ok(value) => probe_scope.declare(&prop.name, value),
-                            Err(Error::Eval(message)) => {
-                                probe_scope.declare_poisoned(prop.name.clone(), message)
-                            }
-                            Err(error) => return Err(error),
-                        }
-                    }
-                    for prop in &effective_properties {
-                        if has_modifier(&prop.modifiers, Modifier::Local)
-                            || inherited_type_failures.contains_key(prop.name.as_ref())
-                            || requested_eval_fields
-                                .as_ref()
-                                .is_some_and(|fields| !fields.contains(&prop.name))
-                            || !failure_dependents.contains(&prop.name)
-                        {
-                            continue;
-                        }
-                        if let Err(Error::Eval(message)) =
-                            self.eval_property(prop, &probe_scope, depth + 1)
-                            && inherited_type_failures
-                                .values()
-                                .any(|failure| failure == &message)
-                        {
-                            inherited_type_failures.insert(prop.name.clone(), message.clone());
-                            added = true;
-                        }
-                    }
-                    if !added {
-                        break;
-                    }
-                }
+                self.propagate_inherited_type_failures(
+                    &mut inherited_type_failures,
+                    body,
+                    &scope,
+                    &all_props,
+                    &late_inherited_properties,
+                    &effective_properties,
+                    &requested_eval_fields,
+                    depth,
+                )?;
             }
             for prop in effective_properties {
                 if let Some(message) = inherited_type_failures.get(prop.name.as_ref()) {
@@ -1592,6 +632,1191 @@ impl Evaluator {
             self.eval_module_output(module, &module_map, &scope, path, depth)?;
         }
         Ok(Value::Object(module_map, source))
+    }
+
+    /// Check the declared types of `body`'s evaluated non-local properties.
+    /// Returns the constraint failures of types inherited from the amended
+    /// module, which stay attached to their members; any other failure is an
+    /// error.
+    fn inherited_type_failures(
+        &mut self,
+        body: &Body,
+        scope: &Scope,
+        synthesized_inherited_types: &HashSet<&str>,
+        depth: usize,
+    ) -> Result<IndexMap<Name, String>> {
+        let mut inherited_type_failures = IndexMap::new();
+        for entry in body.iter() {
+            if let Entry::Property(prop) = entry
+                && !has_modifier(&prop.modifiers, Modifier::Local)
+                && (prop.value.is_some() || prop.body.is_some())
+                && prop.type_ann.is_some()
+                && scope.is_declared(&prop.name)
+                && let Some(value) = scope.get(&prop.name)
+            {
+                if synthesized_inherited_types.contains(prop.name.as_ref()) {
+                    let ty = prop.type_ann.as_ref().expect("checked above");
+                    if !type_has_constraint(ty, scope) {
+                        continue;
+                    }
+                    let failure = if type_is_runtime_checkable(ty, scope) {
+                        match self.eval_type_check(value, ty, scope, depth + 1) {
+                            Ok(true) => None,
+                            Ok(false) => Some(format!(
+                                "property '{}' expected {}, got {}",
+                                prop.name,
+                                display_type_expr(ty),
+                                value_type_name(value)
+                            )),
+                            // An explicit Pkl `throw` is observable after the
+                            // member is materialized. Keep other evaluator
+                            // limitations deferred, as before.
+                            Err(Error::Eval(message))
+                                if type_constraint_has_explicit_throw(ty, scope)
+                                    && !is_deferred_constraint_evaluator_error(&message) =>
+                            {
+                                Some(message)
+                            }
+                            Err(Error::Eval(_)) => None,
+                            Err(error) => return Err(error),
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(message) = failure {
+                        inherited_type_failures.insert(prop.name.clone(), message);
+                    }
+                } else {
+                    self.check_declared_property_type(prop, value, scope, depth)?;
+                }
+            }
+        }
+        Ok(inherited_type_failures)
+    }
+
+    /// Add to `inherited_type_failures` every effective property whose
+    /// evaluation fails with one of those failures once the failed members are
+    /// hidden, until no more fail.
+    #[allow(clippy::too_many_arguments)]
+    fn propagate_inherited_type_failures(
+        &mut self,
+        inherited_type_failures: &mut IndexMap<Name, String>,
+        body: &Body,
+        scope: &Scope,
+        all_props: &ObjectMap,
+        late_inherited_properties: &[Arc<Property>],
+        effective_properties: &[&Property],
+        requested_eval_fields: &Option<HashSet<Name>>,
+        depth: usize,
+    ) -> Result<()> {
+        let mut dependency_entries = late_inherited_properties
+            .iter()
+            .cloned()
+            .map(Entry::Property)
+            .collect::<Vec<_>>();
+        dependency_entries.extend(body.iter().cloned());
+        let dependency_plan = module_evaluation_plan(&dependency_entries);
+        while !inherited_type_failures.is_empty() {
+            // Find every member that can reach a failed member. This
+            // follows local helpers transitively. Restricting probes
+            // to that closure preserves narrowed evaluation's
+            // laziness without leaving a value computed before its
+            // inherited type check stale.
+            let mut failure_dependents = inherited_type_failures
+                .keys()
+                .cloned()
+                .collect::<HashSet<_>>();
+            loop {
+                let mut expanded = false;
+                for entry in &dependency_entries {
+                    let Entry::Property(prop) = entry else {
+                        continue;
+                    };
+                    let refs = property_reference_names(prop);
+                    if refs.iter().any(|name| failure_dependents.contains(name))
+                        && failure_dependents.insert(prop.name.clone())
+                    {
+                        expanded = true;
+                    }
+                }
+                if !expanded {
+                    break;
+                }
+            }
+
+            let mut added = false;
+            let mut probe_scope = scope.child();
+            let mut probe_properties = (*all_props).clone();
+            for (name, message) in inherited_type_failures.iter() {
+                probe_scope.poison(name.clone(), message.clone());
+                probe_scope.set_member_poison(name, Some(message.clone()));
+                probe_properties.shift_remove(name.as_ref());
+            }
+            let probe_snapshot = Value::Object(Arc::new(probe_properties), None);
+            probe_scope.set("this", probe_snapshot.clone());
+            probe_scope.set("module", probe_snapshot);
+            // A local helper can retain an already-computed value,
+            // and a method captures its scope when it is built.
+            // Rebuild affected locals and lambdas in the probe scope,
+            // so they observe the poisoned member rather than the
+            // prior successful value.
+            for &index in &dependency_plan.order {
+                let Entry::Property(prop) = &dependency_entries[index] else {
+                    continue;
+                };
+                if !has_modifier(&prop.modifiers, Modifier::Local)
+                    && !matches!(prop.value.as_ref(), Some(Expr::Lambda(..)))
+                    || !failure_dependents.contains(&prop.name)
+                {
+                    continue;
+                }
+                let Some(value) = &prop.value else {
+                    continue;
+                };
+                match self.eval_expr(value, &probe_scope, depth + 1) {
+                    Ok(value) => probe_scope.declare(&prop.name, value),
+                    Err(Error::Eval(message)) => {
+                        probe_scope.declare_poisoned(prop.name.clone(), message)
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            for prop in effective_properties {
+                if has_modifier(&prop.modifiers, Modifier::Local)
+                    || inherited_type_failures.contains_key(prop.name.as_ref())
+                    || requested_eval_fields
+                        .as_ref()
+                        .is_some_and(|fields| !fields.contains(&prop.name))
+                    || !failure_dependents.contains(&prop.name)
+                {
+                    continue;
+                }
+                if let Err(Error::Eval(message)) = self.eval_property(prop, &probe_scope, depth + 1)
+                    && inherited_type_failures
+                        .values()
+                        .any(|failure| failure == &message)
+                {
+                    inherited_type_failures.insert(prop.name.clone(), message.clone());
+                    added = true;
+                }
+            }
+            if !added {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Evaluate the late-bound properties again until their values settle:
+    /// the inherited properties this module does not override, and the
+    /// child properties that read a late-bound one. Each pass updates
+    /// `scope`, the module's members and its rendered `out`.
+    #[allow(clippy::too_many_arguments)]
+    fn run_late_binding_passes(
+        &mut self,
+        module: &Module,
+        depth: usize,
+        scope: &mut Scope,
+        all_props: &mut Arc<ObjectMap>,
+        out: &mut ObjectMap,
+        late_inherited_properties: &[Arc<Property>],
+        late_child_properties: &[&Property],
+        child_property_names: &HashSet<&str>,
+        super_bound: bool,
+        requested_eval_fields: &Option<HashSet<Name>>,
+        requested_output_fields: &Option<HashSet<Name>>,
+        synthesized_inherited_types: &HashSet<&str>,
+    ) -> Result<()> {
+        let late_passes = late_inherited_properties.len() + late_child_properties.len();
+        // `super` in a base module's property is that module's own base, not
+        // this module's: those keep the value the base computed.
+        let reads_super: HashSet<&str> = if super_bound {
+            late_inherited_properties
+                .iter()
+                .filter(|prop| property_reads_module_super(prop))
+                .map(|prop| prop.name.as_ref())
+                .collect()
+        } else {
+            HashSet::default()
+        };
+        // A pass that reproduces every value, as `settled_eq` compares them,
+        // is the last: the next would start from the same state and repeat it.
+        //
+        // A value that holds an object or a lambda is never reproduced in that
+        // sense, since each evaluation makes a new one that captures the
+        // scope as it then stands. Such a value can still be the same data,
+        // and a pass whose values all are is quiet: it changes nothing a
+        // reader can see. It is not necessarily the last. An object or
+        // lambda keeps the scope it was made in, so a change reaches a
+        // property that reads it through such a capture one pass later for
+        // every forward reference on the way, and no value changes while it
+        // travels. A property listed before a reader is read as this pass
+        // has just evaluated it, one listed after it as the previous pass
+        // left it.
+        //
+        // `forward_reference_chain` finds the longest chain of such forward
+        // references. As many quiet passes in a row as that are enough if
+        // the model holds, and `QUIET_PASS_MARGIN` more run as slack. The
+        // values are what end the loop, and they are the safety net for reads
+        // the model misses: a pass that changes the data keeps it running.
+        // The loop never runs past `late_passes`.
+        //
+        // Pass 0 never counts as quiet: it starts from the values the base
+        // module computed.
+        let chain_memo = std::cell::Cell::new(None);
+        let settled_after = || -> usize {
+            if let Some(settled_after) = chain_memo.get() {
+                return settled_after;
+            }
+            let late_order: Vec<&Property> = late_inherited_properties
+                .iter()
+                .map(|prop| &**prop)
+                .filter(|prop| {
+                    !child_property_names.contains(prop.name.as_ref())
+                        && !reads_super.contains(prop.name.as_ref())
+                })
+                .chain(late_child_properties.iter().copied())
+                .collect();
+            let settled_after = forward_reference_chain(&late_order) + QUIET_PASS_MARGIN;
+            chain_memo.set(Some(settled_after));
+            settled_after
+        };
+        // Quiet passes are counted after pass 0 and the loop breaks before
+        // counting at `late_passes`, so at most `late_passes - 1` can be
+        // counted. If `settled_after` is not below `late_passes`, no run of
+        // quiet passes can end the loop, and telling a quiet pass from a
+        // changed one decides nothing: only `settled_eq` can end it. Then
+        // `same_data` is not called, which matters for values that capture a
+        // large scope.
+        let can_stop = || settled_after() < late_passes;
+        let mut pass = 0;
+        let mut quiet_passes = 0;
+        loop {
+            #[cfg(test)]
+            {
+                self.late_passes_run += 1;
+            }
+            let mut change = Change::None;
+            let mut errored = false;
+            for prop in late_inherited_properties {
+                if child_property_names.contains(prop.name.as_ref())
+                    || reads_super.contains(prop.name.as_ref())
+                {
+                    continue;
+                }
+                match self.eval_property_with(prop, scope, depth, true) {
+                    Ok(Some(value)) => {
+                        change = change.then(scope.get(&prop.name), &value, can_stop).then(
+                            all_props.get(prop.name.as_ref()),
+                            &value,
+                            can_stop,
+                        );
+                        scope.set(&prop.name, value.clone());
+                        module_props_insert(scope, all_props, prop.name.clone(), value.clone());
+                        if !has_modifier(&prop.modifiers, Modifier::Hidden)
+                            && (depth > 0 || should_render_property_value(prop, &value))
+                            && requested_output_fields
+                                .as_ref()
+                                .is_none_or(|fields| fields.contains(&prop.name))
+                        {
+                            out.insert(prop.name.as_ref().into(), value);
+                        }
+                        let snapshot = Value::Object(Arc::clone(all_props), None);
+                        scope.set("this", snapshot.clone());
+                        scope.set("module", snapshot);
+                    }
+                    Ok(None) => {}
+                    Err(Error::Eval(message))
+                        if pass < late_passes
+                            || (module_is_abstract(module)
+                                && is_unresolved_template_error(&message)) =>
+                    {
+                        errored = true;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            for prop in late_child_properties {
+                if requested_eval_fields
+                    .as_ref()
+                    .is_some_and(|fields| !fields.contains(&prop.name))
+                {
+                    continue;
+                }
+                match self
+                    .eval_property_with(prop, scope, depth, true)
+                    .and_then(|value| {
+                        if synthesized_inherited_types.contains(prop.name.as_ref())
+                            && let (Some(value), Some(ty)) = (&value, &prop.type_ann)
+                        {
+                            self.check_inherited_mapping_value_types(value, ty, scope, depth)?;
+                        }
+                        Ok(value)
+                    }) {
+                    Ok(Some(value)) => {
+                        change = change.then(scope.get(&prop.name), &value, can_stop);
+                        scope.set(&prop.name, value.clone());
+                        if has_modifier(&prop.modifiers, Modifier::Local) {
+                            continue;
+                        }
+                        change = change.then(all_props.get(prop.name.as_ref()), &value, can_stop);
+                        module_props_insert(scope, all_props, prop.name.clone(), value.clone());
+                        if !has_modifier(&prop.modifiers, Modifier::Hidden)
+                            && (depth > 0 || should_render_property_value(prop, &value))
+                            && requested_output_fields
+                                .as_ref()
+                                .is_none_or(|fields| fields.contains(&prop.name))
+                        {
+                            out.insert(prop.name.as_ref().into(), value);
+                        }
+                        let snapshot = Value::Object(Arc::clone(all_props), None);
+                        scope.set("this", snapshot.clone());
+                        scope.set("module", snapshot);
+                    }
+                    Ok(None) => {}
+                    Err(Error::Eval(message))
+                        if pass < late_passes
+                            || (module_is_abstract(module)
+                                && is_unresolved_template_error(&message)) =>
+                    {
+                        errored = true;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            if pass >= late_passes {
+                break;
+            }
+            let settled = match change {
+                Change::None => true,
+                Change::Data => {
+                    quiet_passes = 0;
+                    false
+                }
+                Change::Capture => {
+                    if pass > 0 {
+                        quiet_passes += 1;
+                    }
+                    quiet_passes >= settled_after()
+                }
+            };
+            if !settled {
+                pass += 1;
+            } else if errored {
+                // Errors are only reported on the last pass, so a settled
+                // pass that still failed goes straight there.
+                pass = late_passes;
+            } else {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Evaluate locals, classes, type aliases and properties in dependency
+    /// order, so a member can read one declared after it. A member that
+    /// fails is poisoned rather than failing the module: as in Pkl, the
+    /// error surfaces only where the member is used (or rendered).
+    #[allow(clippy::too_many_arguments)]
+    fn eval_module_members<'b>(
+        &mut self,
+        module: &Module,
+        path: &Path,
+        body: &'b Body,
+        depth: usize,
+        scope: &mut Scope,
+        all_props: &mut Arc<ObjectMap>,
+        base_obj: &ObjectMap,
+        late_inherited_properties: &[Arc<Property>],
+        requested_eval_fields: &Option<HashSet<Name>>,
+        synthesized_inherited_types: &HashSet<&str>,
+    ) -> Result<ModuleMembers<'b>> {
+        // Evaluate locals, classes, type aliases and properties in dependency
+        // order, so a member can read one declared after it. A member that
+        // fails is poisoned rather than failing the module: as in Pkl, the
+        // error surfaces only where the member is used (or rendered, below).
+        let mut class_names: std::collections::HashSet<Name> = std::collections::HashSet::default();
+        let mut evaluated: HashMap<&str, Value> = HashMap::default();
+        let mut failed: HashMap<&str, String> = HashMap::default();
+        let mut failed_indices: HashSet<usize> = HashSet::default();
+        let plan = Arc::clone(
+            &self
+                .plan_cache
+                .entry(Arc::as_ptr(body) as usize)
+                .or_insert_with(|| (Arc::clone(body), Arc::new(module_evaluation_plan(body))))
+                .1,
+        );
+        let mut todo = plan.order.clone();
+        // A member can fail because it read another before that one could be
+        // evaluated: through a dynamic `module[key]`, which the order can't
+        // account for. Members that failed are evaluated again, along with
+        // the members that read them, until a pass changes nothing.
+        let mut previous_failures: Option<HashMap<&str, String>> = None;
+        for _ in 0..=plan.order.len() {
+            for index in todo {
+                let entry = &body[index];
+                if let Some(name) = module_member_name(entry) {
+                    failed.remove(name);
+                    failed_indices.remove(&index);
+                }
+                match entry {
+                    Entry::Property(prop)
+                        if has_modifier(&prop.modifiers, Modifier::Local)
+                            && prop.value.is_some() =>
+                    {
+                        match self.eval_expr(prop.value.as_ref().unwrap(), scope, depth) {
+                            Ok(val) => scope.declare(&prop.name, val),
+                            Err(Error::Eval(message)) => {
+                                scope.declare_poisoned(prop.name.clone(), message.clone());
+                                failed.insert(&prop.name, message);
+                                failed_indices.insert(index);
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    Entry::ClassDef(name, class_mods, parent, body) => {
+                        class_names.insert(nm(name));
+                        // Reject invalid inheritance eagerly using the same
+                        // structural validation as `eval_class_def`. Other
+                        // evaluation errors can depend on members declared
+                        // later in the module and remain retryable.
+                        if let Some(parent_name) = parent.as_deref() {
+                            let parent_val = resolve_dotted(scope, parent_name);
+                            check_supertype(scope, name, parent_name, parent_val.as_ref())?;
+                        }
+                        match self.eval_class_def(
+                            name,
+                            class_mods,
+                            parent.as_deref(),
+                            body,
+                            scope,
+                            depth,
+                        ) {
+                            Ok(defaults) => {
+                                scope.set_member_poison(name, None);
+                                scope.declare(name, defaults.clone());
+                                module_props_insert(scope, all_props, name.clone(), defaults);
+                                let snapshot = Value::Object(Arc::clone(all_props), None);
+                                scope.set("this", snapshot.clone());
+                                scope.set("module", snapshot);
+                            }
+                            Err(Error::Eval(message)) => {
+                                scope.set_member_poison(name, Some(message.clone()));
+                                scope.declare_poisoned(name.clone(), message.clone());
+                                failed.insert(name, message);
+                                failed_indices.insert(index);
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    Entry::TypeAlias(name, ty) => {
+                        self.eval_type_alias(name, ty, scope);
+                        // A non-local alias to a class is a module member, like
+                        // the class, and its value is schema, not data. An
+                        // inherited property of the same name stays data.
+                        if !module.local_type_aliases.contains(name)
+                            && !base_obj.contains_key(name.as_str())
+                            && matches!(
+                                scope.get(name),
+                                Some(Value::Object(_, Some(source)))
+                                    if source.kind == ObjectKind::Class
+                            )
+                        {
+                            class_names.insert(nm(name));
+                        }
+                    }
+                    Entry::Property(prop) => {
+                        let mods = &prop.modifiers;
+                        if has_modifier(mods, Modifier::Local) {
+                            continue;
+                        }
+                        // Extract renderer converters from the `output` block AST,
+                        // then skip it (it's not included in the output).
+                        // Clear any base-inherited converters so child overrides take precedence.
+                        if &*prop.name == "output" {
+                            if depth == 0 {
+                                self.output_props.push(Arc::clone(prop));
+                                self.extract_converters_from_ast(prop, scope, depth);
+                            }
+                            continue;
+                        }
+                        if let Some(fields) = &requested_eval_fields
+                            && !fields.contains(&prop.name)
+                        {
+                            continue;
+                        }
+                        // abstract/external properties must have a value (or be overridden)
+                        if (has_modifier(mods, Modifier::Abstract)
+                            || has_modifier(mods, Modifier::External))
+                            && prop.value.is_none()
+                            && prop.body.is_none()
+                        {
+                            if let Some(v) = base_obj.get(prop.name.as_ref()) {
+                                // Satisfied by base — add to scope so other properties can reference it
+                                scope.set(&prop.name, v.clone());
+                            } else if has_modifier(mods, Modifier::External) {
+                                return Err(Error::Eval(format!(
+                                    "external property '{}' must be assigned a value in {}",
+                                    prop.name,
+                                    path.display()
+                                )));
+                            } else if depth == 0 && !module_is_abstract(module) {
+                                return Err(Error::Eval(format!(
+                                    "abstract property '{}' must be assigned a value in {}",
+                                    prop.name,
+                                    path.display()
+                                )));
+                            }
+                            continue;
+                        }
+                        let property_result = self
+                            .eval_property_with(prop, scope, depth, true)
+                            .and_then(|value| {
+                                if synthesized_inherited_types.contains(prop.name.as_ref())
+                                    && let (Some(value), Some(ty)) = (&value, &prop.type_ann)
+                                {
+                                    self.check_inherited_mapping_value_types(
+                                        value, ty, scope, depth,
+                                    )?;
+                                }
+                                Ok(value)
+                            });
+                        let val = match property_result {
+                            Ok(value) => value,
+                            // Module properties are late-bound. Keep an unresolved
+                            // template expression deferred until a consumer actually
+                            // requires it; poisoned locals still surface that error.
+                            Err(Error::Eval(message))
+                                if is_unresolved_template_error(&message)
+                                    && (module_is_abstract(module)
+                                        || property_reference_names(prop).iter().any(|name| {
+                                            late_inherited_properties
+                                                .iter()
+                                                .any(|inherited| inherited.name == *name)
+                                        })) =>
+                            {
+                                None
+                            }
+                            Err(Error::Eval(message)) => {
+                                scope.declare_poisoned(prop.name.clone(), message.clone());
+                                failed.insert(&prop.name, message);
+                                failed_indices.insert(index);
+                                continue;
+                            }
+                            Err(error) => return Err(error),
+                        };
+                        if let Some(v) = val {
+                            if let Some(message) = late_inherited_properties
+                                .iter()
+                                .filter(|inherited| inherited.name == prop.name)
+                                .find_map(|inherited| immutable_member_error(prop, inherited))
+                            {
+                                return Err(Error::Eval(message));
+                            }
+                            // Always add to scope so other properties can reference it
+                            scope.declare(&prop.name, v.clone());
+                            // Track in all_props (including hidden) for `this`/`module`
+                            module_props_insert(scope, all_props, prop.name.clone(), v.clone());
+                            // Update `this` and `module` with all properties (including hidden)
+                            let snapshot = Value::Object(Arc::clone(all_props), None);
+                            scope.set("this", snapshot.clone());
+                            scope.set("module", snapshot);
+                            evaluated.insert(&prop.name, v);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if failed_indices.is_empty() || previous_failures.as_ref() == Some(&failed) {
+                break;
+            }
+            previous_failures = Some(failed.clone());
+            todo = plan.affected_by(&failed_indices);
+        }
+        Ok(ModuleMembers {
+            class_names,
+            evaluated,
+            failed,
+        })
+    }
+
+    /// Load the module `module` amends, whose members are this module's
+    /// starting values.
+    fn amend_base_module(
+        &mut self,
+        module: &Module,
+        path: &Path,
+        depth: usize,
+        scope: &mut Scope,
+        deferred_inherited_imports: &[(String, PathBuf)],
+        base: &mut ModuleBase,
+    ) -> Result<()> {
+        let ModuleBase {
+            members: base_obj,
+            late_properties: late_inherited_properties,
+            super_members,
+        } = base;
+        if let Some(amends_uri) = &module.amends {
+            // A relative amends inside a remote module resolves against that URL.
+            let resolved_amends = resolve_remote_relative(path, amends_uri);
+            let uri: &str = resolved_amends.as_deref().unwrap_or(amends_uri);
+            if uri.starts_with("https://") || uri.starts_with("http://") {
+                // HTTP amends
+                self.check_not_self(module, path, Path::new(uri), "amend")?;
+                let source = self.fetch_source(uri)?;
+                let tokens = lexer::lex_named(&source, uri)?;
+                let base_module = parser::parse_named(&tokens, &source, uri)?;
+                let base_val = self.eval_module_with_scope(
+                    &base_module,
+                    Path::new(uri),
+                    depth + 1,
+                    Some(scope.clone()),
+                    None,
+                )?;
+                self.layer_evaluated_module_scope(Path::new(uri), scope);
+                late_inherited_properties.extend(self.inherited_late_properties(Path::new(uri)));
+                if let Value::Object(m, _) = base_val {
+                    *base_obj = (*m).clone();
+                }
+                *super_members = Some(self.module_super_members(Path::new(uri), base_obj, false));
+            } else if uri.starts_with("package://") {
+                let pkg = self.resolve_package(uri)?;
+                if let PackageSource::Zip(zip_url, entry) = &pkg {
+                    #[cfg(feature = "package-zip")]
+                    {
+                        let pkg_dir = self.extract_package_zip(zip_url)?;
+                        let local_path = pkg_dir.join(entry);
+                        self.check_not_self(module, path, &local_path, "amend")?;
+                        let source = self.read_to_string_io(&local_path)?;
+                        let name = local_path.display().to_string();
+                        let tokens = lexer::lex_named(&source, &name)?;
+                        let base_module = parser::parse_named(&tokens, &source, &name)?;
+                        let base_val = self.eval_module_with_scope(
+                            &base_module,
+                            &local_path,
+                            depth + 1,
+                            Some(scope.clone()),
+                            None,
+                        )?;
+                        self.layer_evaluated_module_scope(&local_path, scope);
+                        late_inherited_properties
+                            .extend(self.inherited_late_properties(&local_path));
+                        if let Value::Object(m, _) = base_val {
+                            *base_obj = (*m).clone();
+                        }
+                        *super_members =
+                            Some(self.module_super_members(&local_path, base_obj, false));
+                    }
+                    #[cfg(not(feature = "package-zip"))]
+                    {
+                        let _ = entry;
+                        return Err(Error::Unsupported(format!(
+                            "package zip imports require pklr's 'package-zip' feature: {zip_url}"
+                        )));
+                    }
+                } else if let PackageSource::Direct { url, root } = &pkg {
+                    self.check_not_self(module, path, Path::new(url.as_str()), "amend")?;
+                    let source = self.fetch_direct_package_source(url, root)?;
+                    let tokens = lexer::lex_named(&source, url)?;
+                    let base_module = parser::parse_named(&tokens, &source, url)?;
+                    let base_val = self.eval_module_with_scope(
+                        &base_module,
+                        Path::new(url.as_str()),
+                        depth + 1,
+                        Some(scope.clone()),
+                        None,
+                    )?;
+                    self.layer_evaluated_module_scope(Path::new(url.as_str()), scope);
+                    late_inherited_properties
+                        .extend(self.inherited_late_properties(Path::new(url.as_str())));
+                    if let Value::Object(m, _) = base_val {
+                        *base_obj = (*m).clone();
+                    }
+                    *super_members =
+                        Some(self.module_super_members(Path::new(url.as_str()), base_obj, false));
+                }
+            } else if uri == "pkl:test" {
+                inherit_stdlib_module("test", base_obj, scope);
+            } else if !uri.starts_with("pkl:")
+                && (!uri.contains("://") || uri.starts_with("file://"))
+            {
+                let amends_path = self.local_file_path(path, uri)?;
+                if self.path_exists_io(&amends_path)? {
+                    self.check_not_self(module, path, &amends_path, "amend")?;
+                    let base_val =
+                        self.eval_file_with_scope(&amends_path, depth + 1, Some(scope.clone()))?;
+                    self.layer_evaluated_module_scope(&amends_path, scope);
+                    late_inherited_properties.extend(self.inherited_late_properties(&amends_path));
+                    if let Value::Object(m, _) = &base_val {
+                        self.bind_deferred_inherited_imports(
+                            deferred_inherited_imports,
+                            &amends_path,
+                            &base_val,
+                            scope,
+                        )?;
+                        *base_obj = (**m).clone();
+                    }
+                    *super_members = Some(self.module_super_members(&amends_path, base_obj, false));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Bind the classes of the module `module` amends, which its evaluated
+    /// value omits, and collect its non-local properties as late-bound.
+    fn bind_amended_base_classes(
+        &mut self,
+        module: &Module,
+        path: &Path,
+        depth: usize,
+        scope: &mut Scope,
+        base: &mut ModuleBase,
+    ) -> Result<()> {
+        let ModuleBase {
+            members: base_obj,
+            late_properties: late_inherited_properties,
+            super_members: _,
+        } = base;
+        // Inject class definitions from amends base into scope so the amending
+        // module can reference them (e.g., `new Step { ... }`).
+        // We re-parse the base module to find ClassDef entries, then evaluate
+        // them directly (similar to extends handling), because eval_module strips
+        // class definitions from its return value.
+        // Also remove inherited class definitions from base_obj so they don't
+        // appear in the amending module's data output.
+        if let Some(amends_uri) = &module.amends {
+            let resolved_amends = resolve_remote_relative(path, amends_uri);
+            let uri: &str = resolved_amends.as_deref().unwrap_or(amends_uri);
+            if let Some((base_module, source_path)) = self.load_parsed_module(uri, path)? {
+                let mut base_scope = scope.clone();
+                base_scope.type_namespace =
+                    Some(self.module_type_namespace(Path::new(&source_path)));
+                for entry in base_module.body.iter() {
+                    if let Entry::ClassDef(name, class_mods, parent, body) = entry {
+                        let defaults = self.eval_class_def(
+                            name,
+                            class_mods,
+                            parent.as_deref(),
+                            body,
+                            &base_scope,
+                            depth,
+                        )?;
+                        scope.set(name, defaults.clone());
+                        if depth == 0 {
+                            base_obj.shift_remove(name.as_str());
+                        } else {
+                            base_obj.insert(name.as_str().into(), defaults.clone());
+                        }
+                    }
+                    // Extract converters from the base module's output block
+                    // (the amending module inherits them; child overrides if present).
+                    if let Entry::Property(prop) = entry
+                        && &*prop.name == "output"
+                        && depth == 0
+                    {
+                        self.extract_converters_from_ast(prop, scope, depth);
+                    }
+                    if let Entry::Property(prop) = entry
+                        && !has_modifier(&prop.modifiers, Modifier::Local)
+                        && &*prop.name != "output"
+                        && !self
+                            .inherited_late_properties(Path::new(&source_path))
+                            .iter()
+                            .any(|known| known.name == prop.name)
+                    {
+                        push_base_property(late_inherited_properties, prop);
+                    }
+                }
+            }
+            // Functions inherited from the base stay members, so `module.f`
+            // and `this.f` reach them. They are dropped when the module is
+            // rendered (see the end of this function).
+        }
+        Ok(())
+    }
+
+    /// Inherit the members, scope and late-bound properties of the module
+    /// `module` extends.
+    fn extend_base_module(
+        &mut self,
+        module: &Module,
+        path: &Path,
+        depth: usize,
+        scope: &mut Scope,
+        deferred_inherited_imports: &[(String, PathBuf)],
+        base: &mut ModuleBase,
+    ) -> Result<()> {
+        let ModuleBase {
+            members: base_obj,
+            late_properties: late_inherited_properties,
+            super_members,
+        } = base;
+        // Process extends: load base module, inherit all members and scope
+        if let Some(extends_uri) = &module.extends {
+            // A relative extends inside a remote module resolves against that URL.
+            let resolved_extends = resolve_remote_relative(path, extends_uri);
+            let uri: &str = resolved_extends.as_deref().unwrap_or(extends_uri);
+            if uri == "pkl:test" {
+                inherit_stdlib_module("test", base_obj, scope);
+                *super_members = Some(base_obj.clone());
+            }
+            if !uri.contains("://") || uri.starts_with("file://") {
+                let extends_path = self.local_file_path(path, uri)?;
+                if self.path_exists_io(&extends_path)? {
+                    self.check_not_self(module, path, &extends_path, "extend")?;
+                    let base_module = self.parse_file(&extends_path)?;
+                    if base_module.amends.is_some() {
+                        return Err(Error::Eval(format!(
+                            "Module `{}` cannot be extended or used as type because it amends another module.",
+                            self.amended_module_name(&base_module, &extends_path)
+                        )));
+                    }
+                    let ext_val =
+                        self.eval_file_with_scope(&extends_path, depth + 1, Some(scope.clone()))?;
+                    self.layer_evaluated_module_scope(&extends_path, scope);
+                    late_inherited_properties.extend(self.inherited_late_properties(&extends_path));
+                    let name = extends_path.display().to_string();
+                    let source = self.read_to_string_io(&extends_path)?;
+                    let tokens = lexer::lex_named(&source, &name)?;
+                    let ext_module = parser::parse_named(&tokens, &source, &name)?;
+                    if !ext_module.annotations.iter().any(|annotation| {
+                        matches!(
+                            annotation.name.as_str(),
+                            "pklr:module:Open" | "pklr:module:Abstract"
+                        )
+                    }) {
+                        return Err(Error::Eval(format!(
+                            "Cannot extend non-open module `{}`.",
+                            extends_path
+                                .file_stem()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                        )));
+                    }
+                    if let Value::Object(m, _) = &ext_val {
+                        self.bind_deferred_inherited_imports(
+                            deferred_inherited_imports,
+                            &extends_path,
+                            &ext_val,
+                            scope,
+                        )?;
+                        *base_obj = (**m).clone();
+                    }
+                    let mut base_scope = scope.clone();
+                    base_scope.type_namespace = Some(self.module_type_namespace(&extends_path));
+                    // Also evaluate the base module's scope (classes, locals) into our scope
+                    // by re-processing its body entries
+                    for entry in ext_module.body.iter() {
+                        match entry {
+                            Entry::ClassDef(cls_name, cls_mods, parent, body) => {
+                                let defaults = self.eval_class_def(
+                                    cls_name,
+                                    cls_mods,
+                                    parent.as_deref(),
+                                    body,
+                                    &base_scope,
+                                    depth,
+                                )?;
+                                scope.set(cls_name, defaults.clone());
+                                if depth == 0 {
+                                    base_obj.shift_remove(cls_name.as_str());
+                                } else {
+                                    base_obj.insert(cls_name.as_str().into(), defaults.clone());
+                                }
+                            }
+                            Entry::TypeAlias(name, ty) => {
+                                self.eval_type_alias(name, ty, scope);
+                            }
+                            Entry::Property(prop) if &*prop.name == "output" && depth == 0 => {
+                                self.extract_converters_from_ast(prop, scope, depth);
+                            }
+                            Entry::Property(prop)
+                                if !has_modifier(&prop.modifiers, Modifier::Local)
+                                    && &*prop.name != "output" =>
+                            {
+                                push_base_property(late_inherited_properties, prop);
+                                if let Ok(Some(value)) = self.eval_property(prop, scope, depth) {
+                                    scope.set(&prop.name, value);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    *super_members = Some(self.module_super_members(&extends_path, base_obj, true));
+                }
+            } else if uri.starts_with("https://") || uri.starts_with("http://") {
+                self.check_not_self(module, path, Path::new(uri), "extend")?;
+                let source = self.fetch_source(uri)?;
+                let tokens = lexer::lex_named(&source, uri)?;
+                let ext_module = parser::parse_named(&tokens, &source, uri)?;
+                if ext_module.amends.is_some() {
+                    return Err(Error::Eval(format!(
+                        "Module `{}` cannot be extended or used as type because it amends another module.",
+                        self.amended_module_name(&ext_module, Path::new(uri))
+                    )));
+                }
+                if !ext_module.annotations.iter().any(|annotation| {
+                    matches!(
+                        annotation.name.as_str(),
+                        "pklr:module:Open" | "pklr:module:Abstract"
+                    )
+                }) {
+                    return Err(Error::Eval(format!(
+                        "Cannot extend non-open module `{}`.",
+                        Path::new(uri)
+                            .file_stem()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                    )));
+                }
+                let ext_val = self.eval_module_with_scope(
+                    &ext_module,
+                    Path::new(uri),
+                    depth + 1,
+                    Some(scope.clone()),
+                    None,
+                )?;
+                self.layer_evaluated_module_scope(Path::new(uri), scope);
+                late_inherited_properties.extend(self.inherited_late_properties(Path::new(uri)));
+                if let Value::Object(m, _) = ext_val {
+                    *base_obj = (*m).clone();
+                }
+                let mut base_scope = scope.clone();
+                base_scope.type_namespace = Some(self.module_type_namespace(Path::new(uri)));
+                // Inject class definitions from HTTP base into scope
+                for entry in ext_module.body.iter() {
+                    if let Entry::ClassDef(cls_name, cls_mods, parent, body) = entry {
+                        let defaults = self.eval_class_def(
+                            cls_name,
+                            cls_mods,
+                            parent.as_deref(),
+                            body,
+                            &base_scope,
+                            depth,
+                        )?;
+                        scope.set(cls_name, defaults.clone());
+                        if depth == 0 {
+                            base_obj.shift_remove(cls_name.as_str());
+                        } else {
+                            base_obj.insert(cls_name.as_str().into(), defaults.clone());
+                        }
+                    }
+                    if let Entry::Property(prop) = entry
+                        && !has_modifier(&prop.modifiers, Modifier::Local)
+                        && &*prop.name != "output"
+                    {
+                        push_base_property(late_inherited_properties, prop);
+                        if let Ok(Some(value)) = self.eval_property(prop, scope, depth) {
+                            scope.set(&prop.name, value);
+                        }
+                    }
+                }
+                *super_members = Some(self.module_super_members(Path::new(uri), base_obj, true));
+            }
+        }
+        Ok(())
+    }
+
+    /// Bind the imports `module` reads in `scope`. Returns the imports of a
+    /// module this one amends or extends, by alias and path: those bind once
+    /// that base is evaluated.
+    #[allow(clippy::too_many_arguments)]
+    fn bind_imports(
+        &mut self,
+        module: &Module,
+        path: &Path,
+        depth: usize,
+        evaluated_as_base: bool,
+        scope: &mut Scope,
+        referenced_imports: &HashSet<Name>,
+        import_field_uses: &HashMap<String, ImportUse>,
+        inherited_local_paths: &[PathBuf],
+    ) -> Result<Vec<(String, PathBuf)>> {
+        let mut deferred_inherited_imports = Vec::new();
+
+        // Process imports
+        for import in &module.imports {
+            // A relative import inside a remote module resolves against that URL.
+            let resolved_uri = resolve_remote_relative(path, &import.uri);
+            let uri: &str = resolved_uri.as_deref().unwrap_or(&import.uri);
+
+            // Handle glob imports: import* "dir/*.pkl" as Alias
+            if import.is_glob {
+                let alias = import
+                    .alias
+                    .clone()
+                    .ok_or_else(|| Error::Eval("import* requires an alias".into()))?;
+                if !referenced_imports.contains(alias.as_str()) {
+                    continue;
+                }
+
+                // Code in other modules can read the alias without being analyzed
+                // here: an amended or extended base reads it from this module's
+                // scope, and a module amending or extending this one inherits it.
+                let requested =
+                    if module.amends.is_none() && module.extends.is_none() && !evaluated_as_base {
+                        glob_index_keys(import_field_uses, &alias)
+                    } else {
+                        None
+                    };
+                let mapping = self.eval_glob_import(uri, path, depth, requested.as_ref())?;
+                scope.declare(alias, mapping);
+                continue;
+            }
+
+            if uri.starts_with("https://") || uri.starts_with("http://") {
+                // HTTP import
+                let alias = import.alias.clone().unwrap_or_else(|| {
+                    uri.rsplit('/')
+                        .next()
+                        .unwrap_or(uri)
+                        .strip_suffix(".pkl")
+                        .unwrap_or(uri)
+                        .to_string()
+                });
+                if !referenced_imports.contains(alias.as_str()) {
+                    continue;
+                }
+                let requested = requested_fields_for_import(import_field_uses, &alias);
+                let source = self.fetch_source(uri)?;
+                let imported_val = {
+                    let tokens = lexer::lex_named(&source, uri)?;
+                    let imp_module = parser::parse_named(&tokens, &source, uri)?;
+                    self.eval_module_with_scope(
+                        &imp_module,
+                        Path::new(uri),
+                        depth + 1,
+                        None,
+                        requested,
+                    )?
+                };
+                scope.declare(&alias, imported_val);
+                scope.set_module_identity(alias, canonical_remote_module_identity(uri));
+                continue;
+            }
+
+            if uri.starts_with("package://") {
+                let pkg = self.resolve_package(uri)?;
+                let fragment = uri.split_once('#').map(|(_, f)| f).unwrap_or("");
+                let file_path = fragment.strip_prefix('/').unwrap_or(fragment);
+                let alias = import.alias.clone().unwrap_or_else(|| {
+                    file_path
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(file_path)
+                        .strip_suffix(".pkl")
+                        .unwrap_or(file_path)
+                        .to_string()
+                });
+                if !referenced_imports.contains(alias.as_str()) {
+                    continue;
+                }
+                let requested = requested_fields_for_import(import_field_uses, &alias);
+                // For zip packages, extract to temp dir and eval as local file
+                if let PackageSource::Zip(zip_url, _) = &pkg {
+                    #[cfg(feature = "package-zip")]
+                    {
+                        let pkg_dir = self.extract_package_zip(zip_url)?;
+                        let local_path = pkg_dir.join(file_path);
+                        let imported_val = self.eval_file_with_requested_fields(
+                            &local_path,
+                            depth + 1,
+                            requested,
+                        )?;
+                        let identity = self.module_type_namespace(&local_path);
+                        scope.declare(&alias, imported_val);
+                        scope.set_module_identity(alias, identity);
+                        continue;
+                    }
+                    #[cfg(not(feature = "package-zip"))]
+                    {
+                        return Err(Error::Unsupported(format!(
+                            "package zip imports require pklr's 'package-zip' feature: {zip_url}"
+                        )));
+                    }
+                }
+                let url = match &pkg {
+                    PackageSource::Direct { url, .. } => url.clone(),
+                    PackageSource::Zip(..) => unreachable!(),
+                };
+                let root = match &pkg {
+                    PackageSource::Direct { root, .. } => root,
+                    PackageSource::Zip(..) => unreachable!(),
+                };
+                let source = self.fetch_direct_package_source(&url, root)?;
+                let imported_val = {
+                    let tokens = lexer::lex_named(&source, &url)?;
+                    let imp_module = parser::parse_named(&tokens, &source, &url)?;
+                    self.eval_module_with_scope(
+                        &imp_module,
+                        Path::new(&url),
+                        depth + 1,
+                        None,
+                        requested,
+                    )?
+                };
+                scope.declare(&alias, imported_val);
+                scope.set_module_identity(alias, url);
+                continue;
+            }
+
+            // Handle pkl: standard library imports
+            if let Some(module_name) = uri.strip_prefix("pkl:") {
+                let stdlib_val = self.stdlib_module(module_name, depth)?;
+                let alias = import
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| module_name.to_string());
+                if !referenced_imports.contains(alias.as_str()) {
+                    continue;
+                }
+                scope.declare(alias, stdlib_val);
+                continue;
+            }
+
+            // Skip other non-local imports
+            if uri.contains("://") && !uri.starts_with("file://") {
+                continue;
+            }
+
+            let import_path = self.local_file_path(path, uri)?;
+            let alias = import.alias.clone().unwrap_or_else(|| {
+                import_path
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string()
+            });
+            if !referenced_imports.contains(alias.as_str()) {
+                // Unused imports are intentionally lazy: missing local paths are
+                // reported only if the imported binding is actually referenced.
+                continue;
+            }
+            if !self.path_exists_io(&import_path)? {
+                return Err(Error::ImportNotFound(import_path.display().to_string()));
+            }
+            let mut inherited_path = None;
+            for candidate in inherited_local_paths {
+                if self.same_local_path(candidate, &import_path)? {
+                    inherited_path = Some(candidate);
+                    break;
+                }
+            }
+            if let Some(inherited_path) = inherited_path {
+                deferred_inherited_imports.push((alias, inherited_path.clone()));
+                continue;
+            }
+            {
+                let requested = requested_fields_for_import(import_field_uses, &alias);
+                let imported_val =
+                    self.eval_file_with_requested_fields(&import_path, depth + 1, requested)?;
+                let identity = self.module_type_namespace(&import_path);
+                scope.declare(&alias, imported_val);
+                scope.set_module_identity(alias, identity);
+            }
+        }
+        Ok(deferred_inherited_imports)
     }
 }
 
