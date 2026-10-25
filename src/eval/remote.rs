@@ -138,3 +138,89 @@ fn normalize_lexical_path(path: &Path) -> PathBuf {
     }
     normalized
 }
+
+#[cfg(test)]
+mod remote_relative_tests {
+    use super::{
+        Path, canonical_remote_module_identity, resolve_http_relative, resolve_remote_relative,
+    };
+
+    #[test]
+    fn http_relative_resolves_against_base_directory() {
+        assert_eq!(
+            resolve_http_relative("https://example.com/cfg/Main.pkl", "../Lib.pkl").as_deref(),
+            Some("https://example.com/Lib.pkl")
+        );
+    }
+
+    #[test]
+    fn http_relative_ignores_base_query_and_fragment() {
+        assert_eq!(
+            resolve_http_relative(
+                "https://example.com/cfg/Main.pkl?version=2#part",
+                "../Lib.pkl"
+            )
+            .as_deref(),
+            Some("https://example.com/Lib.pkl")
+        );
+    }
+
+    #[test]
+    fn http_relative_keeps_absolute_path_references_absolute() {
+        assert_eq!(
+            resolve_http_relative("https://example.com/cfg/Main.pkl", "/shared/Lib.pkl").as_deref(),
+            Some("https://example.com/shared/Lib.pkl")
+        );
+    }
+
+    #[test]
+    fn http_relative_clamps_above_root_segments() {
+        assert_eq!(
+            resolve_http_relative("https://example.com/Main.pkl", "../../Lib.pkl").as_deref(),
+            Some("https://example.com/Lib.pkl")
+        );
+    }
+
+    #[test]
+    fn http_relative_resolves_query_only_references() {
+        assert_eq!(
+            resolve_http_relative("https://example.com/cfg/Main.pkl", "?v=2").as_deref(),
+            Some("https://example.com/cfg/Main.pkl?v=2")
+        );
+    }
+
+    #[test]
+    fn http_relative_resolves_fragment_only_references() {
+        assert_eq!(
+            resolve_http_relative("https://example.com/cfg/Main.pkl", "#frag").as_deref(),
+            Some("https://example.com/cfg/Main.pkl#frag")
+        );
+    }
+
+    #[test]
+    fn http_relative_resolves_network_path_references() {
+        assert_eq!(
+            resolve_http_relative("https://example.com/cfg/Main.pkl", "//cdn.example/Lib.pkl")
+                .as_deref(),
+            Some("https://cdn.example/Lib.pkl")
+        );
+    }
+
+    #[test]
+    fn http_relative_does_not_rewrite_file_uris() {
+        let base = Path::new("https://example.com/cfg/Main.pkl");
+        assert_eq!(resolve_remote_relative(base, "file:/tmp/Lib.pkl"), None);
+        assert_eq!(resolve_remote_relative(base, "file:///tmp/Lib.pkl"), None);
+    }
+
+    #[test]
+    fn remote_module_identity_normalizes_dot_segments() {
+        let absolute =
+            canonical_remote_module_identity("https://example.com/cfg/../shared/Lib.pkl");
+        let relative =
+            resolve_http_relative("https://example.com/cfg/Main.pkl", "../shared/Lib.pkl").unwrap();
+
+        assert_eq!(absolute, relative);
+        assert_eq!(absolute, "https://example.com/shared/Lib.pkl");
+    }
+}

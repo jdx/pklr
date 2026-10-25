@@ -636,3 +636,573 @@ pub(super) fn object_declares_field(value: &Value, field: &str) -> bool {
             })
         })
 }
+
+impl Evaluator {
+    /// Find and evaluate a `default { ... }` property in an entry list.
+    pub(super) fn find_default_template(
+        &mut self,
+        entries: &[Entry],
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<Option<Value>> {
+        for entry in entries {
+            if let Entry::Property(prop) = entry
+                && &*prop.name == "default"
+                && !has_modifier(&prop.modifiers, Modifier::Local)
+            {
+                return self.eval_property(prop, scope, depth);
+            }
+        }
+        Ok(None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn eval_mapping_entries_with_type_default(
+        &mut self,
+        entries: &[crate::parser::Entry],
+        scope: &Scope,
+        depth: usize,
+        map: &mut ObjectMap,
+        type_defaults: &[(String, Value)],
+        value_type_names: &[String],
+        inherited_default: MappingInheritedDefault,
+    ) -> Result<()> {
+        self.eval_mapping_body(
+            entries,
+            scope,
+            depth,
+            map,
+            type_defaults,
+            value_type_names,
+            inherited_default,
+            &mut HashSet::default(),
+            true,
+        )
+    }
+
+    /// Evaluate the entries of one mapping body into `map`. `defined_keys`
+    /// holds the keys the body has defined so far, including those its
+    /// generators produced: a body may amend its parent's entries, but may
+    /// define each key only once.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn eval_mapping_body(
+        &mut self,
+        entries: &[crate::parser::Entry],
+        scope: &Scope,
+        depth: usize,
+        map: &mut ObjectMap,
+        type_defaults: &[(String, Value)],
+        value_type_names: &[String],
+        inherited_default: MappingInheritedDefault,
+        defined_keys: &mut HashSet<Arc<str>>,
+        bind_mapping_this: bool,
+    ) -> Result<()> {
+        let mut entry_scope = scope.child();
+        let mut deferred_lambdas: Vec<(Name, &crate::parser::Expr)> = Vec::new();
+        for entry in entries {
+            match entry {
+                Entry::Property(prop)
+                    if has_modifier(&prop.modifiers, Modifier::Local) && prop.value.is_some() =>
+                {
+                    let expr = prop.value.as_ref().unwrap();
+                    // Bind every local in declaration order so later locals and
+                    // entries can reference it (e.g. a non-lambda local that
+                    // calls a lambda local defined just above it).
+                    let val = self.eval_expr(expr, &entry_scope, depth)?;
+                    entry_scope.declare(&prop.name, val);
+                    if matches!(expr, crate::parser::Expr::Lambda(..)) {
+                        // Lambda evaluation only captures the current scope; it
+                        // does not run the body. Bind once for declaration-order
+                        // visibility, then re-bind after properties for late
+                        // binding of overrides.
+                        deferred_lambdas.push((prop.name.clone(), expr));
+                    }
+                }
+                Entry::Property(prop)
+                    if has_modifier(&prop.modifiers, Modifier::Local) && prop.body.is_some() =>
+                {
+                    let val =
+                        self.eval_entries(prop.body.as_ref().unwrap(), &entry_scope, depth)?;
+                    entry_scope.declare(&prop.name, val);
+                }
+                Entry::ClassDef(name, class_mods, parent, body) => {
+                    let defaults = self.eval_class_def(
+                        name,
+                        class_mods,
+                        parent.as_deref(),
+                        body,
+                        &entry_scope,
+                        depth,
+                    )?;
+                    entry_scope.set(name, defaults);
+                }
+                Entry::TypeAlias(name, ty) => {
+                    self.eval_type_alias(name, ty, &mut entry_scope);
+                }
+                _ => {}
+            }
+        }
+        for (name, expr) in deferred_lambdas {
+            let val = self.eval_expr(expr, &entry_scope, depth)?;
+            entry_scope.set(name, val);
+        }
+
+        let explicit_default = self
+            .find_default_template(entries, &entry_scope, depth)?
+            .or(inherited_default.value);
+        let explicit_default_entries =
+            find_default_body_entries(entries).or(inherited_default.entries);
+
+        for entry in entries {
+            match entry {
+                Entry::Predicate(..) => return Err(member_predicates_unsupported()),
+                Entry::DynProperty(key_expr, val_expr) => {
+                    // Direct Mapping entries see a snapshot of the entries
+                    // evaluated before them through `this`. Generators retain
+                    // their lexical `this`, and the cheap single-name probe
+                    // keeps ordinary Mapping evaluation on its fast path.
+                    let mapping_scope = (bind_mapping_this
+                        && (mapping_entry_mentions_this(key_expr)
+                            || mapping_entry_mentions_this(val_expr)))
+                    .then(|| {
+                        let mut scope = entry_scope.clone();
+                        scope.set("this", Value::Object(Arc::new(map.clone()), None));
+                        scope
+                    });
+                    let entry_scope = mapping_scope.as_ref().unwrap_or(&entry_scope);
+                    let class_key = self.class_key_of(key_expr, entry_scope);
+                    let key = class_key
+                        .is_none()
+                        .then(|| self.eval_expr(key_expr, entry_scope, depth + 1))
+                        .transpose()?;
+                    let key_str = match class_key {
+                        Some(key) => key,
+                        None => value_to_key(
+                            key.as_ref().expect("non-class mapping keys are evaluated"),
+                        )?,
+                    };
+                    // Mapping storage preserves Pkl key identity: `1`, `1.0`
+                    // and `"1"` are distinct mapping keys.
+                    // Object-body entries may amend an earlier value from this
+                    // body.
+                    let storage_key =
+                        equivalent_mapping_key(map, &key_str).unwrap_or_else(|| key_str.clone());
+                    if let Some(key) = key.as_ref() {
+                        self.remember_mapping_key(storage_key.clone(), key);
+                    }
+                    if !insert_mapping_key(defined_keys, &key_str) {
+                        let key = match key.as_ref() {
+                            None => key_str.to_string(),
+                            Some(Value::String(s)) => format!("{s:?}"),
+                            Some(key) => value_to_display(key),
+                        };
+                        return Err(Error::Eval(format!(
+                            "Duplicate definition of member `{key}`."
+                        )));
+                    }
+                    if let Some(Value::Object(existing_map, Some(existing_src))) =
+                        map.get(&storage_key)
+                        && let Expr::ObjectBody(body) = val_expr
+                    {
+                        let val = self.eval_amended_object(
+                            existing_map,
+                            existing_src,
+                            body,
+                            entry_scope,
+                            depth,
+                        )?;
+                        map.insert(storage_key, val);
+                        continue;
+                    }
+                    // An entry body of a `Listing` value amends a listing: an
+                    // inherited entry's, else the mapping's `default`, else an
+                    // empty one. The declared value type decides: `Listing`, or
+                    // a union containing `Listing` when the body has only
+                    // elements. An untyped element-only body is a Dynamic
+                    // rendered as a listing.
+                    let expanded_value_type_names =
+                        expand_type_alias_names(value_type_names, entry_scope);
+                    let selected_value_type = |name: &String| {
+                        expanded_value_type_names.len() == 1 || name.starts_with('*')
+                    };
+                    let listing_value_type = expanded_value_type_names.iter().any(|name| {
+                        selected_value_type(name)
+                            && mapping_value_type_base(name).split('<').next() == Some("Listing")
+                    });
+                    // A selected Dynamic alternative can render an
+                    // element-only object body as a listing. A bare Mapping
+                    // has no value type at all.
+                    let dynamic_value_type = expanded_value_type_names.iter().any(|name| {
+                        selected_value_type(name) && mapping_value_type_base(name) == "Dynamic"
+                    });
+                    if let Expr::ObjectBody(body) = val_expr
+                        && (matches!(map.get(&storage_key), Some(Value::List(_)))
+                            || listing_value_type
+                            || ((dynamic_value_type || value_type_names.is_empty())
+                                && matches!(explicit_default, None | Some(Value::List(_)))
+                                && is_element_only_body(body)))
+                    {
+                        if find_listing_body_property(body).is_some() {
+                            return Err(Error::Eval(
+                                "Object of type `Listing` cannot have a property (other than \
+                                 `default`)."
+                                    .into(),
+                            ));
+                        }
+                        let base = match (map.get(&storage_key), &explicit_default) {
+                            (Some(existing @ Value::List(_)), _) => existing.clone(),
+                            (_, Some(default @ Value::List(_))) => default.clone(),
+                            _ => Value::List(ListValue::new(ListKind::Listing, Vec::new())),
+                        };
+                        let val = self.eval_value_amendment(base, body, entry_scope, depth)?;
+                        map.insert(storage_key, val);
+                        continue;
+                    }
+                    // An element-only entry body is valid only for an
+                    // untyped Mapping or a selected Listing/Dynamic value
+                    // type. Otherwise Pkl tries to amend the selected value
+                    // type and rejects the element, rather than silently
+                    // constructing a Dynamic object.
+                    if let Expr::ObjectBody(body) = val_expr
+                        && is_element_only_body(body)
+                        && !value_type_names.is_empty()
+                        && !listing_value_type
+                        && !dynamic_value_type
+                        // A user class keeps the normal amendment path so
+                        // it can report the class's qualified name.
+                        && !type_defaults.iter().any(|(_, value)| {
+                            matches!(value, Value::Object(_, Some(source)) if source.type_identity.is_some())
+                        })
+                    {
+                        let value_type = expanded_value_type_names
+                            .first()
+                            .map(String::as_str)
+                            .unwrap_or("Mapping value");
+                        return Err(Error::Eval(format!(
+                            "Object of type `{value_type}` cannot have an element."
+                        )));
+                    }
+                    // `new { ... }` for a `Mixin` value is a mixin, not an object.
+                    if let Expr::New(None, body, params) = val_expr
+                        && expanded_value_type_names.iter().any(|name| {
+                            selected_value_type(name) && mapping_value_type_base(name) == "Mixin"
+                        })
+                    {
+                        let mixin = Expr::New(Some("Mixin".into()), body.clone(), params.clone());
+                        let val = self.eval_expr(&mixin, entry_scope, depth + 1)?;
+                        map.insert(storage_key, val);
+                        continue;
+                    }
+                    // `new { ... }` takes its type from the Mapping's value type
+                    // and amends its `default`, like a bare `[key] { ... }` body.
+                    // A builtin value type such as `Dynamic` or `Listing` keeps its
+                    // own `new` evaluation, and a union (of classes or with a
+                    // builtin) has no single type to infer.
+                    let inferred_body;
+                    let val_expr = match val_expr {
+                        Expr::New(None, body, _)
+                            if expanded_value_type_names.len() == 1
+                                && matches!(
+                                    type_defaults,
+                                    [(_, Value::Object(_, Some(source)))] if source.type_name.is_some()
+                                ) =>
+                        {
+                            inferred_body = Expr::ObjectBody(body.clone());
+                            &inferred_body
+                        }
+                        _ => val_expr,
+                    };
+                    let type_default = match val_expr {
+                        Expr::ObjectBody(body) => select_mapping_type_default(type_defaults, body)
+                            .map(|(name, value)| (Some(name.as_str()), value)),
+                        Expr::New(Some(type_name), _, _) => {
+                            select_mapping_type_default_for_new(type_defaults, type_name)
+                                .map(|(name, value)| (Some(name.as_str()), value))
+                        }
+                        Expr::New(None, _, _) => None,
+                        _ => type_defaults
+                            .first()
+                            .map(|(name, value)| (Some(name.as_str()), value)),
+                    };
+                    // `new T { ... }` constructs a fresh T. It never amends the
+                    // mapping's `default`, so only T's own defaults apply. In
+                    // particular a `default` of another class (the synthetic
+                    // `new Step {}` of `new Mapping<String, Step> {}`) must not
+                    // turn a `new Group {}` entry into a Step.
+                    let is_typed_new = matches!(val_expr, Expr::New(Some(_), _, _));
+                    let default_template = match (type_default, explicit_default.as_ref()) {
+                        (Some((type_name, type_default)), _) if is_typed_new => {
+                            Some((type_name, type_default.clone()))
+                        }
+                        (None, _) if is_typed_new => None,
+                        (Some((type_name, type_default)), Some(explicit_default)) => Some((
+                            type_name,
+                            merge_values(type_default.clone(), explicit_default.clone()),
+                        )),
+                        (Some((type_name, type_default)), None) => {
+                            Some((type_name, type_default.clone()))
+                        }
+                        (None, Some(explicit_default)) => Some((None, explicit_default.clone())),
+                        (None, None) => None,
+                    };
+                    // If the default template has ObjectSource, amend its source entries
+                    // so late-bound class properties are recomputed after overrides.
+                    let val =
+                        if let Some((default_type_name, Value::Object(template_map, Some(src)))) =
+                            default_template.as_ref()
+                            && let Some(body) = mapping_entry_body(val_expr)
+                        {
+                            if let Expr::New(Some(type_name), _, _) = val_expr {
+                                validate_new_object_body(type_name, body, src)?;
+                            }
+                            let mut result =
+                                if let Some(default_entries) = explicit_default_entries.as_ref() {
+                                    let mut overlay_entries = default_entries.to_vec();
+                                    overlay_entries.extend(body.iter().cloned());
+                                    self.eval_amended_object(
+                                        template_map,
+                                        src,
+                                        &overlay_entries,
+                                        entry_scope,
+                                        depth,
+                                    )?
+                                } else if !is_typed_new
+                                    && let Some(Value::Object(explicit_map, Some(explicit_src))) =
+                                        explicit_default.as_ref()
+                                    && type_default.is_some()
+                                    && default_type_name.is_some_and(|expected| {
+                                        let chain = explicit_src
+                                            .type_name
+                                            .iter()
+                                            .chain(explicit_src.parent_type_names.iter())
+                                            .cloned()
+                                            .collect::<Vec<_>>();
+                                        let expected = expand_type_alias_names(
+                                            std::slice::from_ref(&expected.to_string()),
+                                            entry_scope,
+                                        );
+                                        expand_type_alias_names(&chain, entry_scope).iter().any(
+                                            |actual| {
+                                                expected.iter().any(|expected| {
+                                                    type_names_match(actual, expected)
+                                                })
+                                            },
+                                        )
+                                    })
+                                {
+                                    // The `default` is itself an instance of the selected
+                                    // value type (for example the synthetic `new Step {}`
+                                    // of a typed mapping literal). Amend its entries so the
+                                    // body's assignments late-bind sibling properties.
+                                    self.eval_amended_object(
+                                        explicit_map,
+                                        explicit_src,
+                                        body,
+                                        entry_scope,
+                                        depth,
+                                    )?
+                                } else if let Some(Value::Object(explicit_map, _)) =
+                                    explicit_default.as_ref()
+                                    && type_default.is_some()
+                                {
+                                    self.eval_object_body_over_template(
+                                        template_map,
+                                        src,
+                                        explicit_map,
+                                        body,
+                                        entry_scope,
+                                        depth,
+                                    )?
+                                } else {
+                                    self.eval_amended_object(
+                                        template_map,
+                                        src,
+                                        body,
+                                        entry_scope,
+                                        depth,
+                                    )?
+                                };
+                            let type_name = src.type_name.as_deref().or(*default_type_name);
+                            if let Some(tn) = type_name
+                                && let Value::Object(_, ref mut result_src) = result
+                            {
+                                let new_src = match result_src.take() {
+                                    Some(s) => {
+                                        let mut ns = Arc::unwrap_or_clone(s);
+                                        ns.type_name = Some(tn.to_string());
+                                        ns
+                                    }
+                                    None => ObjectSource {
+                                        entries: vec![].into(),
+                                        captured: SourceScope::default(),
+                                        body_members: HashSet::default(),
+                                        is_open: true,
+                                        is_abstract: false,
+                                        type_name: Some(tn.to_string()),
+                                        type_identity: src.type_identity.clone(),
+                                        parent_type_names: src.parent_type_names.clone(),
+                                        parent_type_identities: src.parent_type_identities.clone(),
+                                        entry_scopes: Vec::new(),
+                                        evaluated_properties: Vec::new(),
+                                        elements: Vec::new(),
+                                        mapping_value_types: Vec::new(),
+                                        deprecated: merge_deprecated(&src.deprecated, body),
+                                        poisoned_members: None,
+                                        kind: ObjectKind::Object,
+                                        is_parsed_json: false,
+                                        prototype: None,
+                                    },
+                                };
+                                *result_src = Some(std::sync::Arc::new(new_src));
+                            }
+                            result
+                        } else {
+                            let val = self.eval_expr(val_expr, entry_scope, depth + 1)?;
+                            apply_mapping_entry_template(
+                                default_template.map(|(_, template)| template),
+                                val,
+                                value_type_names,
+                                entry_scope,
+                            )?
+                        };
+                    map.insert(storage_key, val);
+                }
+                Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {}
+                Entry::Property(prop)
+                    if &*prop.name == "default"
+                        && (explicit_default.is_some() || !type_defaults.is_empty()) => {}
+                Entry::Spread(e) => {
+                    let val = self.eval_expr(e, &entry_scope, depth + 1)?;
+                    check_iterable(&val)?;
+                    if let Value::List(_) = val {
+                        return Err(Error::Eval(
+                            "Cannot spread value of type `List` into object of type `Mapping`."
+                                .into(),
+                        ));
+                    }
+                    if let Value::Object(m, _) = val {
+                        for (key, value) in m.iter() {
+                            insert_mapping_entry(map, key.clone(), value.clone());
+                        }
+                    }
+                }
+                Entry::ForGenerator(fgen) => {
+                    let collection = self.eval_expr(&fgen.collection, &entry_scope, depth + 1)?;
+                    for (k, v) in collection_to_items(collection)? {
+                        let mut iter_scope = entry_scope.child();
+                        iter_scope.set(&fgen.val_var, v);
+                        if let Some(kv) = &fgen.key_var {
+                            iter_scope.set(kv, k);
+                        }
+                        self.eval_mapping_body(
+                            &fgen.body,
+                            &iter_scope,
+                            depth + 1,
+                            map,
+                            type_defaults,
+                            value_type_names,
+                            MappingInheritedDefault {
+                                value: explicit_default.clone(),
+                                entries: explicit_default_entries.clone(),
+                            },
+                            defined_keys,
+                            false,
+                        )?;
+                    }
+                }
+                Entry::WhenGenerator(generator) => {
+                    let condition =
+                        self.eval_expr(&generator.condition, &entry_scope, depth + 1)?;
+                    let selected = if is_truthy(&condition) {
+                        Some(generator.body.as_slice())
+                    } else {
+                        generator.else_body.as_deref().map(Vec::as_slice)
+                    };
+                    if let Some(selected) = selected {
+                        self.eval_mapping_body(
+                            selected,
+                            &entry_scope,
+                            depth + 1,
+                            map,
+                            type_defaults,
+                            value_type_names,
+                            MappingInheritedDefault {
+                                value: explicit_default.clone(),
+                                entries: explicit_default_entries.clone(),
+                            },
+                            defined_keys,
+                            false,
+                        )?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The backing map retains the first spelling of a native-unit key so `keys`
+/// and renderer converters see the source unit. Every mapping operation,
+/// however, resolves equivalent normalized amounts to that stored key.
+pub(super) fn equivalent_mapping_key(map: &ObjectMap, key: &str) -> Option<Arc<str>> {
+    map.get_key_value(key)
+        .map(|(key, _)| key.clone())
+        .or_else(|| {
+            map.keys()
+                .find(|stored| crate::value::mapping_storage_keys_equal(stored, key))
+                .cloned()
+        })
+}
+
+pub(super) fn insert_mapping_key(keys: &mut HashSet<Arc<str>>, key: &Arc<str>) -> bool {
+    if keys.contains(key)
+        || keys
+            .iter()
+            .any(|stored| crate::value::mapping_storage_keys_equal(stored, key))
+    {
+        false
+    } else {
+        keys.insert(key.clone());
+        true
+    }
+}
+
+pub(super) fn insert_mapping_entry(map: &mut ObjectMap, key: Arc<str>, value: Value) {
+    let storage_key = equivalent_mapping_key(map, &key).unwrap_or(key);
+    map.insert(storage_key, value);
+}
+
+pub(super) fn extend_object_entries(
+    target: &mut ObjectMap,
+    entries: &ObjectMap,
+    mapping_entries: bool,
+) {
+    for (key, value) in entries {
+        if mapping_entries {
+            insert_mapping_entry(target, key.clone(), value.clone());
+        } else {
+            target.insert(key.clone(), value.clone());
+        }
+    }
+}
+
+#[cfg(all(test, feature = "native-io"))]
+mod mapping_key_tests {
+    use std::sync::Arc;
+
+    use super::Evaluator;
+    use crate::Value;
+
+    #[test]
+    fn evaluation_boundary_clears_mapping_key_provenance() {
+        let mut evaluator = Evaluator::new();
+        evaluator
+            .mapping_key_values
+            .insert(Arc::<str>::from("key"), Value::Int(1));
+
+        evaluator.begin_evaluation();
+
+        assert!(evaluator.mapping_key_values.is_empty());
+    }
+}

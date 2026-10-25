@@ -1,127 +1,373 @@
-//! Static checks pkl performs while building a module: modifier
-//! applicability, duplicate member definitions and a few member rules.
-//! They run while parsing, so the errors point at the offending member.
+//! Checks on parsed declarations that pkl reports as syntax errors: modifiers,
+//! duplicate members, type alias cycles and the module's minimum pkl version.
 
-use std::collections::HashSet;
+use super::*;
 
-use super::Parser;
-use super::ast::{Annotation, Entry, Expr, Import, Modifier, Property};
-use crate::error::Result;
-use crate::lexer::TokenKind;
-
-/// The kind of body whose members are being parsed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum BodyKind {
-    /// A module that does not amend another module. Its members are class
-    /// members.
-    Module,
-    /// A module that amends another module. Its members are object members.
-    AmendingModule,
-    Class,
-    Object,
-    /// The body of a `when` generator.
-    When,
-    /// The body of a `for` generator, or of a `when` generator nested in one.
-    For,
-}
-
-/// A constant object entry key, as far as duplicate detection is concerned.
-#[derive(Debug, PartialEq, Eq, Hash)]
-enum ConstKey {
-    String(String),
-    Int(i64),
-    Bool(bool),
-}
-
-/// Members defined so far in one body.
-pub(super) struct BodyScope {
-    pub(super) kind: BodyKind,
-    /// Offset of the innermost enclosing `for` keyword, if the body is
-    /// (nested in) a for-generator body.
-    for_offset: Option<usize>,
-    /// Names of properties, classes, type aliases and imports. In modules
-    /// and classes, local and non-local members share one namespace.
-    properties: HashSet<String>,
-    /// Local property names (object bodies keep them apart from non-local
-    /// ones).
-    local_properties: HashSet<String>,
-    methods: HashSet<String>,
-    entries: HashSet<ConstKey>,
-    /// Whether the body has a generator or spread member. pkl merges the
-    /// members of such a body at runtime, so a duplicate in it is not a
-    /// static error.
-    has_generator: bool,
-    /// The first duplicate found in an object body, reported once the body
-    /// is known to have no generator.
-    duplicate: Option<(usize, String)>,
-    /// Type aliases defined in the body: offset, name and the names their
-    /// type refers to.
-    type_aliases: Vec<(usize, String, Vec<String>)>,
-}
-
-impl BodyScope {
-    pub(super) fn new(kind: BodyKind, for_offset: Option<usize>) -> Self {
-        Self {
-            kind,
-            for_offset,
-            properties: HashSet::new(),
-            local_properties: HashSet::new(),
-            methods: HashSet::new(),
-            entries: HashSet::new(),
-            has_generator: false,
-            duplicate: None,
-            type_aliases: Vec::new(),
+impl<'a> Parser<'a> {
+    /// Check modifiers against the kind of member they are attached to.
+    pub(super) fn check_modifiers(&self, header: &MemberHeader, kind: MemberKind) -> Result<()> {
+        for (modifier, offset) in &header.modifiers {
+            if !kind.allows(modifier) {
+                return Err(self.error_at(
+                    *offset,
+                    format!(
+                        "Modifier `{}` is not applicable to {}.",
+                        modifier_name(modifier),
+                        kind.description()
+                    ),
+                ));
+            }
         }
+        let offset_of = |wanted: Modifier| {
+            header
+                .modifiers
+                .iter()
+                .find(|(m, _)| *m == wanted)
+                .map_or(0, |(_, offset)| *offset)
+        };
+        if header.has(Modifier::External) {
+            return Err(self.error_at(
+                offset_of(Modifier::External),
+                "External members can only be defined by standard library modules.",
+            ));
+        }
+        if header.has(Modifier::Local) && header.has(Modifier::Hidden) {
+            return Err(self.error_at(
+                offset_of(Modifier::Hidden),
+                "Modifier `hidden` is redundant here; just use `local`.",
+            ));
+        }
+        if header.has(Modifier::Local) && header.has(Modifier::Fixed) {
+            return Err(self.error_at(
+                offset_of(Modifier::Fixed),
+                "Modifier `fixed` is redundant here; just use `local`.",
+            ));
+        }
+        if header.has(Modifier::Abstract) && header.has(Modifier::Open) {
+            return Err(self.error_at(
+                offset_of(Modifier::Open),
+                "Modifier `open` is redundant here; just use `abstract`.",
+            ));
+        }
+        if matches!(kind, MemberKind::ObjectMember)
+            && header.has(Modifier::Const)
+            && !header.has(Modifier::Local)
+        {
+            return Err(self.error_at(
+                offset_of(Modifier::Const),
+                "Modifier `const` can only be applied to object members that are also `local`.",
+            ));
+        }
+        Ok(())
     }
 
-    /// Record a type alias and the type names its type uses, for the cycle
-    /// check. Its own type parameters shadow other types inside it.
-    pub(super) fn record_type_alias(
-        &mut self,
-        offset: usize,
-        name: &str,
-        mut refs: Vec<String>,
-        params: &[String],
-    ) {
-        refs.retain(|r| !params.contains(r));
-        self.type_aliases.push((offset, name.to_string(), refs));
+    /// Reject `new X {}` where `X` names a module property rather than a
+    /// class or type alias: types and values live in separate namespaces.
+    pub(super) fn check_new_types(&self, body: &[Entry], imports: &[Import]) -> Result<()> {
+        if self.new_types.is_empty() {
+            return Ok(());
+        }
+        let is_type = |name: &str| {
+            entries_define_type(body, name)
+                || imports.iter().any(|import| {
+                    let inferred = import
+                        .uri
+                        .rsplit(['/', ':'])
+                        .next()
+                        .unwrap_or(&import.uri)
+                        .trim_end_matches(".pkl");
+                    import.alias.as_deref().unwrap_or(inferred) == name
+                })
+        };
+        for (name, offset) in &self.new_types {
+            let is_property = body
+                .iter()
+                .any(|entry| matches!(entry, Entry::Property(p) if *p.name == **name));
+            if is_property && !is_type(name) {
+                return Err(self.error_at(
+                    *offset,
+                    format!("Expected `{name}` to be a type, but it is not."),
+                ));
+            }
+        }
+        Ok(())
     }
 
-    /// The offset of a type alias that refers back to itself, directly or
-    /// through other aliases of the body.
-    fn cyclic_type_alias(&self) -> Option<usize> {
-        if self.type_aliases.is_empty() {
-            return None;
+    pub(super) fn check_min_pkl_version(
+        &self,
+        annotations: &[Annotation],
+        module_name: Option<&str>,
+    ) -> Result<()> {
+        let required = annotations
+            .iter()
+            .filter(|annotation| annotation.name == "ModuleInfo")
+            .flat_map(|annotation| &annotation.body)
+            .find_map(|entry| match entry {
+                Entry::Property(property) if &*property.name == "minPklVersion" => {
+                    property.value.as_ref().and_then(constant_string)
+                }
+                _ => None,
+            });
+        let Some(required) = required else {
+            return Ok(());
+        };
+        let (Some(required), Some(current)) = (version_triple(&required), version_triple("0.32.1"))
+        else {
+            return Ok(());
+        };
+        if required <= current {
+            return Ok(());
         }
-        let index_of: std::collections::HashMap<&str, usize> = self
-            .type_aliases
+        let name = module_name.unwrap_or_else(|| {
+            std::path::Path::new(self.name)
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or(self.name)
+        });
+        Err(self.error_at(
+            0,
+            format!(
+                "Module `{name}` requires Pkl version {} or higher, but your Pkl version is 0.32.1.",
+                required_string(&required)
+            ),
+        ))
+    }
+
+    pub(super) fn check_member_duplicates(
+        &self,
+        entries: &[Entry],
+        imports: &[Import],
+    ) -> Result<()> {
+        self.check_entry_duplicates(entries, Some(imports), false, false)
+    }
+
+    /// Validate duplicate names after parsing a body. Object values need the
+    /// complete body before a duplicate can be rejected: Pkl merges a body
+    /// containing a spread or generator at run time instead.
+    pub(super) fn check_entry_duplicates(
+        &self,
+        entries: &[Entry],
+        imports: Option<&[Import]>,
+        object_scope: bool,
+        generated_scope: bool,
+    ) -> Result<()> {
+        let mut members = std::collections::HashSet::new();
+        let mut local_members = std::collections::HashSet::new();
+        let mut methods = std::collections::HashSet::new();
+        let mut dynamic_entries = std::collections::HashSet::new();
+        let has_runtime_members = entries.iter().any(|entry| {
+            matches!(
+                entry,
+                Entry::Spread(_) | Entry::ForGenerator(_) | Entry::WhenGenerator(_)
+            )
+        });
+
+        if let Some(imports) = imports {
+            for import in imports {
+                let name = import.alias.as_deref().or_else(|| {
+                    (!import.is_glob).then(|| {
+                        import
+                            .uri
+                            .rsplit(['/', ':'])
+                            .next()
+                            .unwrap_or(&import.uri)
+                            .trim_end_matches(".pkl")
+                    })
+                });
+                if let Some(name) = name
+                    && !members.insert(name.to_string())
+                {
+                    return Err(self.error_at(
+                        self.prev_end,
+                        format!("Duplicate definition of member `{name}`."),
+                    ));
+                }
+            }
+        }
+        for entry in entries {
+            let duplicate = match entry {
+                Entry::Property(property) => {
+                    let names = if property.is_method {
+                        &mut methods
+                    } else if object_scope && property.modifiers.contains(&Modifier::Local) {
+                        &mut local_members
+                    } else {
+                        &mut members
+                    };
+                    (!names.insert(property.name.to_string())).then(|| property.name.to_string())
+                }
+                Entry::ClassDef(name, ..) => (!members.insert(name.clone())).then(|| name.clone()),
+                Entry::TypeAlias(name, _) => {
+                    let names = if object_scope && self.local_type_aliases.contains(name) {
+                        &mut local_members
+                    } else {
+                        &mut members
+                    };
+                    (!names.insert(name.clone())).then(|| name.clone())
+                }
+                Entry::DynProperty(key, _) => constant_entry_name(key)
+                    .and_then(|name| (!dynamic_entries.insert(name.clone())).then_some(name)),
+                _ => None,
+            };
+            if let Some(name) = duplicate
+                && !generated_scope
+                && !has_runtime_members
+            {
+                return Err(self.error_at(
+                    self.prev_end,
+                    format!("Duplicate definition of member `{name}`."),
+                ));
+            }
+        }
+
+        for entry in entries {
+            self.check_entry_child_duplicates(entry)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn check_entry_child_duplicates(&self, entry: &Entry) -> Result<()> {
+        match entry {
+            Entry::Property(property) => {
+                for annotation in &property.annotations {
+                    self.check_entry_duplicates(&annotation.body, None, true, false)?;
+                }
+                if let Some(value) = &property.value {
+                    self.check_expr_duplicates(value)?;
+                }
+                if let Some(body) = &property.body {
+                    self.check_entry_duplicates(body, None, true, false)?;
+                }
+            }
+            Entry::DynProperty(key, value) | Entry::Predicate(key, value) => {
+                self.check_expr_duplicates(key)?;
+                self.check_expr_duplicates(value)?;
+            }
+            Entry::Spread(expr) | Entry::Elem(expr) => self.check_expr_duplicates(expr)?,
+            Entry::ForGenerator(generator) => {
+                self.check_expr_duplicates(&generator.collection)?;
+                self.check_entry_duplicates(&generator.body, None, true, true)?;
+            }
+            Entry::WhenGenerator(generator) => {
+                self.check_expr_duplicates(&generator.condition)?;
+                self.check_entry_duplicates(&generator.body, None, true, true)?;
+                if let Some(else_body) = &generator.else_body {
+                    self.check_entry_duplicates(else_body, None, true, true)?;
+                }
+            }
+            Entry::ClassDef(_, _, _, body) => {
+                self.check_entry_duplicates(body, None, false, false)?
+            }
+            Entry::TypeAlias(_, _) => {}
+        }
+        Ok(())
+    }
+
+    pub(super) fn check_expr_duplicates(&self, expr: &Expr) -> Result<()> {
+        match expr {
+            Expr::New(_, body, _) | Expr::ObjectBody(body) | Expr::InferredNew(_, body) => {
+                self.check_entry_duplicates(body, None, true, false)?
+            }
+            Expr::Field(value, _)
+            | Expr::NullSafeField(value, _)
+            | Expr::Unop(_, value)
+            | Expr::Throw(value)
+            | Expr::TemplateLocals(_, value)
+            | Expr::Trace(value, _)
+            | Expr::Read(value, _)
+            | Expr::ReadOrNull(value, _)
+            | Expr::ReadGlob(value, _) => self.check_expr_duplicates(value)?,
+            Expr::Index(left, right) | Expr::Binop(_, left, right) => {
+                self.check_expr_duplicates(left)?;
+                self.check_expr_duplicates(right)?;
+            }
+            Expr::Call(callee, args) => {
+                self.check_expr_duplicates(callee)?;
+                for arg in args {
+                    self.check_expr_duplicates(arg)?;
+                }
+            }
+            Expr::If(condition, then_expr, else_expr) => {
+                self.check_expr_duplicates(condition)?;
+                self.check_expr_duplicates(then_expr)?;
+                self.check_expr_duplicates(else_expr)?;
+            }
+            Expr::Let(_, value, body) => {
+                self.check_expr_duplicates(value)?;
+                self.check_expr_duplicates(body)?;
+            }
+            Expr::Lambda(_, body) => self.check_expr_duplicates(body)?,
+            Expr::StringInterpolation(parts) => {
+                for part in parts {
+                    if let StringInterpPart::Expr(expr) = part {
+                        self.check_expr_duplicates(expr)?;
+                    }
+                }
+            }
+            Expr::Is(value, _) | Expr::As(value, _) => self.check_expr_duplicates(value)?,
+            Expr::Null
+            | Expr::Bool(_)
+            | Expr::Int(_)
+            | Expr::Float(_)
+            | Expr::String(_)
+            | Expr::Ident(_)
+            | Expr::Import(_, _)
+            | Expr::ImportGlob(_, _) => {}
+        }
+        Ok(())
+    }
+
+    pub(super) fn check_type_alias_cycles(&self, entries: &[Entry]) -> Result<()> {
+        let aliases: Vec<(&str, &TypeExpr)> = entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::TypeAlias(name, ty) if !self.local_type_aliases.contains(name) => {
+                    Some((name.as_str(), ty))
+                }
+                _ => None,
+            })
+            .collect();
+        let indexes: std::collections::HashMap<&str, usize> = aliases
             .iter()
             .enumerate()
-            .map(|(i, (_, name, _))| (name.as_str(), i))
+            .map(|(index, (name, _))| (*name, index))
             .collect();
-        // 0 = unvisited, 1 = on the current path, 2 = done
-        let mut state = vec![0u8; self.type_aliases.len()];
-        for root in 0..self.type_aliases.len() {
+        let mut refs = Vec::with_capacity(aliases.len());
+        for (alias, ty) in &aliases {
+            let mut names = Vec::new();
+            collect_type_names(ty, &mut names);
+            if let Some(parameters) = self.type_alias_parameters.get(*alias) {
+                names.retain(|name| !parameters.contains(name));
+            }
+            refs.push(
+                names
+                    .into_iter()
+                    .filter_map(|name| indexes.get(name.as_str()).copied())
+                    .collect::<Vec<_>>(),
+            );
+        }
+        let mut state = vec![0_u8; aliases.len()];
+        for root in 0..aliases.len() {
             if state[root] != 0 {
                 continue;
             }
-            // Depth-first with an explicit stack of (alias, next ref).
-            let mut stack = vec![(root, 0usize)];
+            let mut stack = vec![(root, 0_usize)];
             state[root] = 1;
-            while let Some((alias, next)) = stack.last_mut() {
-                let refs = &self.type_aliases[*alias].2;
-                if *next == refs.len() {
-                    state[*alias] = 2;
+            while let Some((index, next)) = stack.last_mut() {
+                if *next == refs[*index].len() {
+                    state[*index] = 2;
                     stack.pop();
                     continue;
                 }
-                let r = &refs[*next];
+                let target = refs[*index][*next];
                 *next += 1;
-                let Some(&target) = index_of.get(r.as_str()) else {
-                    continue;
-                };
                 match state[target] {
-                    1 => return Some(self.type_aliases[target].0),
+                    1 => {
+                        return Err(self.error_at(
+                            self.prev_end,
+                            "Type alias definitions must not be cyclic.",
+                        ));
+                    }
                     0 => {
                         state[target] = 1;
                         stack.push((target, 0));
@@ -130,31 +376,11 @@ impl BodyScope {
                 }
             }
         }
-        None
-    }
-
-    /// Record the names a module's imports bind, which share the namespace
-    /// of its properties. Returns a name bound twice.
-    pub(super) fn declare_imports(&mut self, imports: &[Import]) -> Option<String> {
-        for import in imports {
-            let name = match &import.alias {
-                Some(alias) => alias.as_str(),
-                None if import.is_glob => continue,
-                None => inferred_import_name(&import.uri),
-            };
-            if !self.properties.insert(name.to_string()) {
-                return Some(name.to_string());
-            }
-        }
-        None
-    }
-
-    pub(super) fn set_has_generator(&mut self) {
-        self.has_generator = true;
+        Ok(())
     }
 }
 
-fn modifier_keyword(modifier: &Modifier) -> &'static str {
+pub(super) fn modifier_name(modifier: &Modifier) -> &'static str {
     match modifier {
         Modifier::Local => "local",
         Modifier::Const => "const",
@@ -166,413 +392,155 @@ fn modifier_keyword(modifier: &Modifier) -> &'static str {
     }
 }
 
-const MODULE_MODIFIERS: &[Modifier] = &[Modifier::Abstract, Modifier::Open];
-const CLASS_MODIFIERS: &[Modifier] = &[
-    Modifier::Abstract,
-    Modifier::Open,
-    Modifier::Local,
-    Modifier::External,
-];
-const TYPE_ALIAS_MODIFIERS: &[Modifier] = &[Modifier::Local, Modifier::External];
-const METHOD_MODIFIERS: &[Modifier] = &[
-    Modifier::Abstract,
-    Modifier::Local,
-    Modifier::External,
-    Modifier::Const,
-];
-const PROPERTY_MODIFIERS: &[Modifier] = &[
-    Modifier::Abstract,
-    Modifier::Local,
-    Modifier::Hidden,
-    Modifier::External,
-    Modifier::Fixed,
-    Modifier::Const,
-];
-const OBJECT_MEMBER_MODIFIERS: &[Modifier] = &[Modifier::Local, Modifier::Const];
+/// Collect the class names of a `new` expression's type arguments.
+pub(super) fn generic_param_names(ty: &TypeExpr, out: &mut Vec<String>) {
+    match ty {
+        TypeExpr::Named(name) | TypeExpr::Generic(name, _) => {
+            // Retain `*` on a union's selected alternative. Mapping entry
+            // bodies use it to distinguish the default type from another
+            // merely permitted alternative.
+            out.push(name.clone());
+        }
+        TypeExpr::Constrained(name, _) => {
+            out.push(name.trim_end_matches('?').to_string());
+        }
+        TypeExpr::Nullable(inner) => generic_param_names(inner, out),
+        TypeExpr::Union(variants) => {
+            for variant in variants {
+                generic_param_names(variant, out);
+            }
+        }
+    }
+}
 
-/// The Pkl release whose language pklr implements, checked against a
-/// module's `@ModuleInfo { minPklVersion = "..." }`.
-pub(crate) const PKL_VERSION: &str = "0.32.1";
+pub(super) fn collect_type_names(ty: &TypeExpr, out: &mut Vec<String>) {
+    match ty {
+        TypeExpr::Named(name) | TypeExpr::Constrained(name, _) => {
+            out.push(name.trim_start_matches('*').to_string())
+        }
+        TypeExpr::Nullable(inner) => collect_type_names(inner, out),
+        TypeExpr::Union(variants) => {
+            for variant in variants {
+                collect_type_names(variant, out);
+            }
+        }
+        TypeExpr::Generic(name, args) => {
+            out.push(name.clone());
+            for arg in args {
+                collect_type_names(arg, out);
+            }
+        }
+    }
+}
 
-/// `major.minor.patch` of a version string, ignoring any pre-release or
-/// build suffix.
-fn version_triple(version: &str) -> Option<(u64, u64, u64)> {
+pub(super) fn constant_entry_name(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::String(value) => Some(format!("\"{value}\"")),
+        Expr::Int(value) => Some(value.to_string()),
+        Expr::Bool(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+pub(super) fn entries_define_type(entries: &[Entry], name: &str) -> bool {
+    entries.iter().any(|entry| match entry {
+        Entry::ClassDef(entry_name, _, _, body) => {
+            entry_name == name || entries_define_type(body, name)
+        }
+        Entry::TypeAlias(entry_name, _) => entry_name == name,
+        Entry::Property(property) => {
+            property
+                .body
+                .as_deref()
+                .is_some_and(|body| entries_define_type(body, name))
+                || property
+                    .value
+                    .as_ref()
+                    .is_some_and(|value| expr_defines_type(value, name))
+        }
+        Entry::DynProperty(_, value)
+        | Entry::Predicate(_, value)
+        | Entry::Spread(value)
+        | Entry::Elem(value) => expr_defines_type(value, name),
+        Entry::ForGenerator(generator) => entries_define_type(&generator.body, name),
+        Entry::WhenGenerator(generator) => {
+            entries_define_type(&generator.body, name)
+                || generator
+                    .else_body
+                    .as_deref()
+                    .is_some_and(|body| entries_define_type(body, name))
+        }
+    })
+}
+
+pub(super) fn expr_defines_type(expr: &Expr, name: &str) -> bool {
+    match expr {
+        Expr::New(_, body, _) | Expr::ObjectBody(body) | Expr::InferredNew(_, body) => {
+            entries_define_type(body, name)
+        }
+        Expr::Field(value, _)
+        | Expr::NullSafeField(value, _)
+        | Expr::Unop(_, value)
+        | Expr::Throw(value)
+        | Expr::TemplateLocals(_, value)
+        | Expr::Trace(value, _)
+        | Expr::Read(value, _)
+        | Expr::ReadOrNull(value, _)
+        | Expr::ReadGlob(value, _)
+        | Expr::Is(value, _)
+        | Expr::As(value, _) => expr_defines_type(value, name),
+        Expr::Lambda(_, value) => expr_defines_type(value, name),
+        Expr::Index(left, right) | Expr::Binop(_, left, right) => {
+            expr_defines_type(left, name) || expr_defines_type(right, name)
+        }
+        Expr::Call(callee, args) => {
+            expr_defines_type(callee, name) || args.iter().any(|arg| expr_defines_type(arg, name))
+        }
+        Expr::If(condition, then_expr, else_expr) => {
+            expr_defines_type(condition, name)
+                || expr_defines_type(then_expr, name)
+                || expr_defines_type(else_expr, name)
+        }
+        Expr::Let(_, value, body) => {
+            expr_defines_type(value, name) || expr_defines_type(body, name)
+        }
+        Expr::StringInterpolation(parts) => parts.iter().any(
+            |part| matches!(part, StringInterpPart::Expr(value) if expr_defines_type(value, name)),
+        ),
+        Expr::Null
+        | Expr::Bool(_)
+        | Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::String(_)
+        | Expr::Ident(_)
+        | Expr::Import(_, _)
+        | Expr::ImportGlob(_, _) => false,
+    }
+}
+
+pub(super) fn version_triple(version: &str) -> Option<(u64, u64, u64)> {
     let core = version.split(['-', '+']).next()?;
     let mut parts = core.split('.').map(|part| part.parse::<u64>().ok());
     Some((parts.next()??, parts.next()??, parts.next()??))
 }
 
-/// The value of a string expression made only of literals
-/// (`"0.2" + "7.0"`), as pkl folds them.
-fn constant_string(expr: &Expr) -> Option<String> {
+pub(super) fn required_string(version: &(u64, u64, u64)) -> String {
+    format!("{}.{}.{}", version.0, version.1, version.2)
+}
+
+pub(super) fn constant_string(expr: &Expr) -> Option<String> {
     match expr {
-        Expr::String(s) => Some(s.to_string()),
-        Expr::Binop(super::ast::BinOp::Add, left, right) => {
+        Expr::String(value) => Some(value.to_string()),
+        Expr::Binop(BinOp::Add, left, right) => {
             Some(constant_string(left)? + &constant_string(right)?)
         }
         Expr::StringInterpolation(parts) => parts
             .iter()
             .map(|part| match part {
-                super::ast::StringInterpPart::Literal(s) => Some(s.to_string()),
-                super::ast::StringInterpPart::Expr(expr) => constant_string(expr),
+                StringInterpPart::Literal(value) => Some(value.to_string()),
+                StringInterpPart::Expr(expr) => constant_string(expr),
             })
             .collect(),
         _ => None,
-    }
-}
-
-/// The name a module import is bound to when it has no `as` alias: the last
-/// path segment of the URI without its extension.
-fn inferred_import_name(uri: &str) -> &str {
-    let last = uri.rsplit(['/', ':', '#']).next().unwrap_or(uri);
-    match last.rfind('.') {
-        Some(dot) if dot > 0 => &last[..dot],
-        _ => last,
-    }
-}
-
-impl Parser<'_> {
-    fn semantic_error(&self, offset: usize, message: impl Into<String>) -> crate::error::Error {
-        crate::error::Error::parse(self.name, self.source, offset, message.into())
-    }
-
-    /// Check `modifiers` against the set valid for a kind of member, then
-    /// reject the combinations pkl never allows.
-    fn check_modifiers(
-        &self,
-        offset: usize,
-        modifiers: &[Modifier],
-        valid: &[Modifier],
-        what: &str,
-    ) -> Result<()> {
-        if let Some(invalid) = modifiers.iter().find(|m| !valid.contains(m)) {
-            return Err(self.semantic_error(
-                offset,
-                format!(
-                    "Modifier `{}` is not applicable to {what}.",
-                    modifier_keyword(invalid)
-                ),
-            ));
-        }
-        let has = |m: Modifier| modifiers.contains(&m);
-        let message = if has(Modifier::External) {
-            "External members can only be defined by standard library modules."
-        } else if has(Modifier::Local) && has(Modifier::Hidden) {
-            "Modifier `hidden` is redundant here; just use `local`."
-        } else if has(Modifier::Local) && has(Modifier::Fixed) {
-            "Modifier `fixed` is redundant here; just use `local`."
-        } else if has(Modifier::Abstract) && has(Modifier::Open) {
-            "Modifier `open` is redundant here; just use `abstract`."
-        } else {
-            return Ok(());
-        };
-        Err(self.semantic_error(offset, message))
-    }
-
-    fn check_object_member_modifiers(&self, offset: usize, modifiers: &[Modifier]) -> Result<()> {
-        self.check_modifiers(offset, modifiers, OBJECT_MEMBER_MODIFIERS, "object members")?;
-        if modifiers.contains(&Modifier::Const) && !modifiers.contains(&Modifier::Local) {
-            return Err(self.semantic_error(
-                offset,
-                "Modifier `const` can only be applied to object members that are also `local`.",
-            ));
-        }
-        Ok(())
-    }
-
-    /// Reject a module whose `@ModuleInfo` requires a newer Pkl than
-    /// [`PKL_VERSION`].
-    pub(super) fn check_min_pkl_version(
-        &self,
-        annotations: &[Annotation],
-        module_name: Option<&str>,
-    ) -> Result<()> {
-        let Some(required) = annotations
-            .iter()
-            .filter(|annotation| annotation.name == "ModuleInfo")
-            .flat_map(|annotation| &annotation.body)
-            .find_map(|entry| match entry {
-                Entry::Property(prop) if prop.name == "minPklVersion" => {
-                    prop.value.as_ref().and_then(constant_string)
-                }
-                _ => None,
-            })
-        else {
-            return Ok(());
-        };
-        let (Some(required_triple), Some(current)) =
-            (version_triple(&required), version_triple(PKL_VERSION))
-        else {
-            return Ok(());
-        };
-        if required_triple <= current {
-            return Ok(());
-        }
-        let name = module_name.map(str::to_string).unwrap_or_else(|| {
-            std::path::Path::new(self.name)
-                .file_stem()
-                .map(|stem| stem.to_string_lossy().into_owned())
-                .unwrap_or_else(|| self.name.to_string())
-        });
-        Err(self.semantic_error(
-            0,
-            format!(
-                "Module `{name}` requires Pkl version {required} or higher, but your Pkl version is {PKL_VERSION}."
-            ),
-        ))
-    }
-
-    /// Check the modifiers of the module declaration (`open module foo`).
-    pub(super) fn check_module_modifiers(
-        &self,
-        offset: usize,
-        modifiers: &[Modifier],
-        amends: bool,
-    ) -> Result<()> {
-        self.check_modifiers(offset, modifiers, MODULE_MODIFIERS, "modules")?;
-        if amends {
-            self.check_modifiers(offset, modifiers, &[], "modules that amend another module")?;
-        }
-        Ok(())
-    }
-
-    pub(super) fn duplicate_error(&self, offset: usize, name: &str) -> crate::error::Error {
-        self.semantic_error(offset, format!("Duplicate definition of member `{name}`."))
-    }
-
-    /// Record a member name, reporting a duplicate right away in modules and
-    /// classes, and once the body is complete in object bodies.
-    fn declare(&mut self, offset: usize, name: &str, method: bool, local: bool) -> Result<()> {
-        let in_object = matches!(
-            self.body.kind,
-            BodyKind::Object | BodyKind::When | BodyKind::For
-        );
-        let set = if method {
-            &mut self.body.methods
-        } else if in_object && local {
-            &mut self.body.local_properties
-        } else {
-            &mut self.body.properties
-        };
-        if set.insert(name.to_string()) {
-            return Ok(());
-        }
-        if !in_object {
-            return Err(self.duplicate_error(offset, name));
-        }
-        if self.body.duplicate.is_none() {
-            self.body.duplicate = Some((offset, name.to_string()));
-        }
-        Ok(())
-    }
-
-    /// Report a duplicate member of a finished body, unless pkl only finds it
-    /// at runtime.
-    pub(super) fn finish_body(&self, scope: &BodyScope) -> Result<()> {
-        if let Some(offset) = scope.cyclic_type_alias() {
-            return Err(self.semantic_error(offset, "Type alias definitions must not be cyclic."));
-        }
-        if scope.has_generator || matches!(scope.kind, BodyKind::When | BodyKind::For) {
-            return Ok(());
-        }
-        match &scope.duplicate {
-            Some((offset, name)) => Err(self.duplicate_error(*offset, name)),
-            None => Ok(()),
-        }
-    }
-
-    pub(super) fn check_class(
-        &mut self,
-        offset: usize,
-        modifiers: &[Modifier],
-        name: &str,
-    ) -> Result<()> {
-        self.check_modifiers(offset, modifiers, CLASS_MODIFIERS, "classes")?;
-        if self.body.kind == BodyKind::AmendingModule && !modifiers.contains(&Modifier::Local) {
-            return Err(self.semantic_error(offset, "Class needs a `local` modifier."));
-        }
-        self.declare(offset, name, false, modifiers.contains(&Modifier::Local))
-    }
-
-    pub(super) fn check_type_alias(
-        &mut self,
-        offset: usize,
-        modifiers: &[Modifier],
-        name: &str,
-    ) -> Result<()> {
-        self.check_modifiers(offset, modifiers, TYPE_ALIAS_MODIFIERS, "type aliases")?;
-        if self.body.kind == BodyKind::AmendingModule && !modifiers.contains(&Modifier::Local) {
-            return Err(self.semantic_error(offset, "Type alias needs a `local` modifier."));
-        }
-        self.declare(offset, name, false, modifiers.contains(&Modifier::Local))
-    }
-
-    /// A `*` default marker is only valid on one member of a union type.
-    pub(super) fn check_union_defaults(
-        &self,
-        offset: usize,
-        variants: &[(super::TypeExpr, bool)],
-    ) -> Result<()> {
-        let defaults = variants
-            .iter()
-            .filter(|(_, is_default)| *is_default)
-            .count();
-        if defaults == 0 {
-            Ok(())
-        } else if variants.len() == 1 {
-            Err(self.semantic_error(offset, "Only type unions can have a default marker (*)."))
-        } else if defaults > 1 {
-            Err(self.semantic_error(
-                offset,
-                "A type union cannot have more than one default type.",
-            ))
-        } else {
-            Ok(())
-        }
-    }
-
-    /// The names and offsets of the type parameters in the `<...>` list
-    /// starting at token `start`, without the `out` variance markers.
-    pub(super) fn type_parameter_names(&self, start: usize) -> Vec<(String, usize)> {
-        let mut names = Vec::new();
-        let mut depth = 0;
-        for (i, tok) in self.tokens.iter().enumerate().skip(start) {
-            match &tok.kind {
-                TokenKind::Lt => depth += 1,
-                TokenKind::Gt if depth > 0 => {
-                    depth -= 1;
-                    if depth == 0 {
-                        break;
-                    }
-                }
-                TokenKind::Ident(name) if depth == 1 => {
-                    let is_variance = name == "out"
-                        && matches!(
-                            self.tokens.get(i + 1).map(|t| &t.kind),
-                            Some(TokenKind::Ident(_))
-                        );
-                    if !is_variance {
-                        names.push((name.clone(), tok.offset));
-                    }
-                }
-                TokenKind::Eof => break,
-                _ => {}
-            }
-        }
-        names
-    }
-
-    /// Reject a duplicate type parameter in the `<...>` list starting at
-    /// token `start`.
-    pub(super) fn check_type_parameters(&self, start: usize) -> Result<()> {
-        let names = self.type_parameter_names(start);
-        for (i, (name, offset)) in names.iter().enumerate() {
-            if names[..i].iter().any(|(other, _)| other == name) {
-                return Err(
-                    self.semantic_error(*offset, format!("Duplicate type parameter `{name}`."))
-                );
-            }
-        }
-        Ok(())
-    }
-
-    pub(super) fn type_parameters_error(&self) -> crate::error::Error {
-        self.semantic_error(
-            self.peek_tok().offset,
-            "Only standard library members can have type parameters.",
-        )
-    }
-
-    pub(super) fn check_method(
-        &mut self,
-        offset: usize,
-        modifiers: &[Modifier],
-        name: &str,
-    ) -> Result<()> {
-        let local = modifiers.contains(&Modifier::Local);
-        match self.body.kind {
-            BodyKind::Module | BodyKind::Class => {
-                self.check_modifiers(offset, modifiers, METHOD_MODIFIERS, "methods")?;
-            }
-            BodyKind::For => {
-                return Err(self.semantic_error(
-                    self.body.for_offset.unwrap_or(offset),
-                    "A for-generator cannot generate object methods (only entries and elements).",
-                ));
-            }
-            kind => {
-                self.check_modifiers(offset, modifiers, OBJECT_MEMBER_MODIFIERS, "object members")?;
-                if !local {
-                    let message = if kind == BodyKind::AmendingModule {
-                        "Method needs a `local` modifier."
-                    } else {
-                        "Method needs a `local` modifier because it is defined in an object, not a class."
-                    };
-                    return Err(self.semantic_error(offset, message));
-                }
-            }
-        }
-        self.declare(offset, name, true, local)
-    }
-
-    pub(super) fn check_property(&mut self, offset: usize, prop: &Property) -> Result<()> {
-        let local = prop.modifiers.contains(&Modifier::Local);
-        match self.body.kind {
-            BodyKind::Module | BodyKind::Class => {
-                self.check_modifiers(offset, &prop.modifiers, PROPERTY_MODIFIERS, "properties")?;
-            }
-            BodyKind::For => {
-                return Err(self.semantic_error(
-                    self.body.for_offset.unwrap_or(offset),
-                    "A for-generator cannot generate object properties (only entries and elements).",
-                ));
-            }
-            _ => {
-                self.check_object_member_modifiers(offset, &prop.modifiers)?;
-                if !local && prop.type_ann.is_some() {
-                    return Err(self.semantic_error(
-                        offset,
-                        "A non-local object property cannot have a type annotation.",
-                    ));
-                }
-                if local && prop.body.is_some() {
-                    return Err(self
-                        .semantic_error(offset, "A local property definition cannot be amended."));
-                }
-            }
-        }
-        if local && prop.value.is_none() && prop.body.is_none() {
-            return Err(self.semantic_error(offset, "Missing property value."));
-        }
-        self.declare(offset, &prop.name, false, local)
-    }
-
-    /// Record an object entry whose key is a constant.
-    pub(super) fn check_entry_key(&mut self, offset: usize, key: &Expr) {
-        let key = match key {
-            Expr::String(s) => ConstKey::String(s.to_string()),
-            Expr::Int(i) => ConstKey::Int(*i),
-            Expr::Bool(b) => ConstKey::Bool(*b),
-            _ => return,
-        };
-        let shown = match &key {
-            ConstKey::String(s) => format!("\"{s}\""),
-            ConstKey::Int(i) => i.to_string(),
-            ConstKey::Bool(b) => b.to_string(),
-        };
-        if !self.body.entries.insert(key) && self.body.duplicate.is_none() {
-            self.body.duplicate = Some((offset, shown));
-        }
-    }
-
-    pub(super) fn for_scope(&self, for_offset: usize) -> BodyScope {
-        BodyScope::new(BodyKind::For, Some(for_offset))
-    }
-
-    pub(super) fn when_scope(&self) -> BodyScope {
-        match self.body.for_offset {
-            Some(offset) => BodyScope::new(BodyKind::For, Some(offset)),
-            None => BodyScope::new(BodyKind::When, None),
-        }
     }
 }
