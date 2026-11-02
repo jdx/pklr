@@ -38,7 +38,7 @@ reqwest = ["native-io", "dep:reqwest", "dep:tokio"]
 async = ["http", "reqwest"]
 
 [dependencies]
-fancy-regex = { version = "0.19", optional = true }
+fancy-regex = { version = "0.20", optional = true }
 indexmap    = { version = "2", optional = true }
 libm        = "0.2.16"
 md-5       = { version = "0.11", optional = true }
