@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.2.3](https://github.com/jdx/pklr/compare/v5.2.2...v5.2.3) - 2026-11-02
+
+### Fixed
+
+- *(deps)* update rust crate fancy-regex to 0.20 ([#364](https://github.com/jdx/pklr/pull/364))
+
+### Other
+
+- *(deps)* lock file maintenance ([#366](https://github.com/jdx/pklr/pull/366))
+- *(deps)* lock file maintenance ([#365](https://github.com/jdx/pklr/pull/365))
+- *(deps)* lock file maintenance ([#361](https://github.com/jdx/pklr/pull/361))
+- *(deps)* lock file maintenance ([#354](https://github.com/jdx/pklr/pull/354))
+
 ## [5.2.2](https://github.com/jdx/pklr/compare/v5.2.1...v5.2.2) - 2026-10-26
 
 ### Fixed
