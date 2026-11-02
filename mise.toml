@@ -5,7 +5,7 @@ cargo-msrv = "latest"
 # hk.pkl amends a pinned hk package; the tool itself floats and is resolved by mise.lock.
 hk = { version = "latest", minimum_release_age = "0s" }
 jactionlint = "latest"
-pkl = "0.32.1"
+pkl = "0.32.2"
 # Measures tak.toml's benchmarks. Bump deliberately, in a commit that changes
 # nothing else: a new tak can move the series without pklr changing.
 tak = "v0.0.15"
