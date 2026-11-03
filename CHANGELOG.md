@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.2.4](https://github.com/jdx/pklr/compare/v5.2.3...v5.2.4) - 2026-11-03
+
+### Other
+
+- *(deps)* lock file maintenance ([#367](https://github.com/jdx/pklr/pull/367))
+
 ## [5.2.3](https://github.com/jdx/pklr/compare/v5.2.2...v5.2.3) - 2026-11-02
 
 ### Fixed
