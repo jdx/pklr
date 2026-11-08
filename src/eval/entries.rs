@@ -186,9 +186,6 @@ impl Evaluator {
                 let instance = self.eval_amended_object(map, source, &[], scope, depth);
                 self.active_typed_defaults.remove(class_identity.as_str());
                 let instance = instance?;
-                if let Some(message) = rendered_member_failure(&instance) {
-                    return Err(Error::Eval(message.to_string()));
-                }
                 default = Some(instance);
             }
             if let Some(default) = &mut default {

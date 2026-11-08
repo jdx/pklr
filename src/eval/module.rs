@@ -1287,7 +1287,7 @@ impl Evaluator {
                         let pkg_dir = self.extract_package_zip(zip_url)?;
                         let local_path = pkg_dir.join(entry);
                         self.check_not_self(module, path, &local_path, "amend")?;
-                        let source = self.read_to_string_io(&local_path)?;
+                        let source = self.module_read_io(&local_path)?;
                         let name = local_path.display().to_string();
                         let tokens = lexer::lex_named(&source, &name)?;
                         let base_module = parser::parse_named(&tokens, &source, &name)?;
@@ -1341,7 +1341,7 @@ impl Evaluator {
                 && (!uri.contains("://") || uri.starts_with("file://"))
             {
                 let amends_path = self.local_file_path(path, uri)?;
-                if self.path_exists_io(&amends_path)? {
+                if self.module_exists_io(&amends_path)? {
                     self.check_not_self(module, path, &amends_path, "amend")?;
                     let base_val =
                         self.eval_file_with_scope(&amends_path, depth + 1, Some(scope.clone()))?;
@@ -1463,7 +1463,7 @@ impl Evaluator {
             }
             if !uri.contains("://") || uri.starts_with("file://") {
                 let extends_path = self.local_file_path(path, uri)?;
-                if self.path_exists_io(&extends_path)? {
+                if self.module_exists_io(&extends_path)? {
                     self.check_not_self(module, path, &extends_path, "extend")?;
                     let base_module = self.parse_file(&extends_path)?;
                     if base_module.amends.is_some() {
@@ -1477,7 +1477,7 @@ impl Evaluator {
                     self.layer_evaluated_module_scope(&extends_path, scope);
                     late_inherited_properties.extend(self.inherited_late_properties(&extends_path));
                     let name = extends_path.display().to_string();
-                    let source = self.read_to_string_io(&extends_path)?;
+                    let source = self.module_read_io(&extends_path)?;
                     let tokens = lexer::lex_named(&source, &name)?;
                     let ext_module = parser::parse_named(&tokens, &source, &name)?;
                     if !ext_module.annotations.iter().any(|annotation| {
@@ -1793,7 +1793,7 @@ impl Evaluator {
                 // reported only if the imported binding is actually referenced.
                 continue;
             }
-            if !self.path_exists_io(&import_path)? {
+            if !self.module_exists_io(&import_path)? {
                 return Err(Error::ImportNotFound(import_path.display().to_string()));
             }
             let mut inherited_path = None;

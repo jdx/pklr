@@ -211,6 +211,7 @@ impl<'a> Parser<'a> {
                                 )));
                             }
                             self.import_exprs.append(&mut nested.import_exprs);
+                            self.import_glob_exprs.append(&mut nested.import_glob_exprs);
                             interp_parts.push(StringInterpPart::Expr(expr));
                         }
                     }
@@ -284,6 +285,7 @@ impl<'a> Parser<'a> {
             TokenKind::KwImportStar => {
                 self.advance();
                 let uri = self.parse_import_expr_uri()?;
+                self.import_glob_exprs.push(uri.clone());
                 Expr::ImportGlob(uri, self.name.to_string())
             }
             TokenKind::Ident(name) => {

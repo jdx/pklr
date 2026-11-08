@@ -538,7 +538,7 @@ impl Evaluator {
             .collect();
         let mut pending_refs: Vec<_> = output_refs.keys().cloned().collect();
         let key = self
-            .canonicalize_io(&base.path)
+            .module_identity_io(&base.path)
             .ok()
             .filter(|key| self.module_scopes.contains_key(key))
             .unwrap_or_else(|| base.path.clone());
@@ -665,7 +665,20 @@ impl Evaluator {
     #[cfg(feature = "native-io")]
     pub(crate) fn eval_file_json_blocking(&mut self, path: &Path) -> Result<serde_json::Value> {
         let module = self.eval_file(path)?;
-        self.module_json(module)
+        let result = self.module_json(module);
+        self.finish_module_result(result)
+    }
+
+    /// Evaluate source at its logical module path and render its output as JSON.
+    #[cfg(feature = "native-io")]
+    pub fn eval_source_json_blocking(
+        &mut self,
+        source: &str,
+        path: &Path,
+    ) -> Result<serde_json::Value> {
+        let module = self.eval_source(source, path)?;
+        let result = self.module_json(module);
+        self.finish_module_result(result)
     }
 
     #[cfg(feature = "native-io")]

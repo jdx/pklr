@@ -5,12 +5,12 @@
 //! oracle evidence generated from Java StrictMath; it is not implementation input.
 //!
 //! Source map:
-//! - https://www.netlib.org/fdlibm/e_atan2.c -> atan2
-//! - https://www.netlib.org/fdlibm/s_cbrt.c -> cbrt
-//! - https://www.netlib.org/fdlibm/e_log10.c -> log10
-//! - https://www.netlib.org/fdlibm/e_log.c -> log
-//! - https://www.netlib.org/fdlibm/k_sin.c, k_cos.c, s_sin.c, s_cos.c -> sin, cos
-//! - https://www.netlib.org/fdlibm/e_rem_pio2.c, k_rem_pio2.c -> trig reduction
+//! - <https://www.netlib.org/fdlibm/e_atan2.c> -> atan2
+//! - <https://www.netlib.org/fdlibm/s_cbrt.c> -> cbrt
+//! - <https://www.netlib.org/fdlibm/e_log10.c> -> log10
+//! - <https://www.netlib.org/fdlibm/e_log.c> -> log
+//! - <https://www.netlib.org/fdlibm/k_sin.c>, k_cos.c, s_sin.c, s_cos.c -> sin, cos
+//! - <https://www.netlib.org/fdlibm/e_rem_pio2.c>, k_rem_pio2.c -> trig reduction
 //! - MIT Rust libm 0.2.16 -> the remaining wrappers.
 //!
 //! The pow wrapper also states the Java-compatible NaN special cases directly.

@@ -232,7 +232,7 @@ fn budget_spent(url: &str) -> crate::Error {
 /// Batch fetches ([`EvalCapabilities::fetch_text_many`] and
 /// [`EvalCapabilities::fetch_bytes_many`]) run up to
 /// eight requests at once on scoped threads sharing the agent. With the
-/// `reqwest` feature, [`NativeCapabilities::with_reqwest_client`] uses a
+/// `reqwest` feature, `NativeCapabilities::with_reqwest_client` uses a
 /// `reqwest` client on tokio instead.
 #[cfg(feature = "native-io")]
 #[derive(Debug, Clone)]

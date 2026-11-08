@@ -18,7 +18,7 @@ impl Evaluator {
             return module.to_string();
         }
         let path = PathBuf::from(module);
-        let path = match self.canonicalize_io(&path) {
+        let path = match self.module_identity_io(&path) {
             Ok(path) => path,
             Err(_) if self.capabilities.is_native_filesystem() => {
                 std::path::absolute(&path).unwrap_or(path)

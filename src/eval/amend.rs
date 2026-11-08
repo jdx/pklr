@@ -414,6 +414,15 @@ impl Evaluator {
                         .flatten()
                 });
                 let Some(value) = value else {
+                    if !has_modifier(&prop.modifiers, Modifier::Local) {
+                        type_failures.insert(
+                            prop.name.clone(),
+                            PoisonedMember {
+                                message: format!("property '{}' is required", prop.name),
+                                rendered: !has_modifier(&prop.modifiers, Modifier::Hidden),
+                            },
+                        );
+                    }
                     continue;
                 };
                 let check_scope: &Scope = if type_has_constraint(type_ann, &eval_scope) {

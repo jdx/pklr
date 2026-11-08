@@ -1231,7 +1231,7 @@ result = (new Leaf.Leaf {}) { fromMain = collision }
 }
 
 #[test]
-fn unassigned_inherited_property_does_not_shadow_amendment_scope() {
+fn unassigned_inherited_property_requires_assignment_before_rendering() {
     let temp = TestTempDir::new("pklr_test_unassigned_inherited_property_scope");
     let dir = temp.path();
     std::fs::write(
@@ -1240,6 +1240,7 @@ fn unassigned_inherited_property_does_not_shadow_amendment_scope() {
 local collision = "definition"
 open class Item {
     collision: String
+    selected: String?
 }
 item = new Item {}
 "#,
@@ -1257,8 +1258,28 @@ result = (Lib.item) {
     )
     .unwrap();
 
+    let error = pklr::eval_to_json(&dir.join("main.pkl")).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "Eval error: property 'collision' is required"
+    );
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "Lib.pkl"
+local collision = "amendment"
+result = (Lib.item) {
+    collision = "assigned"
+    selected = collision
+}
+"#,
+    )
+    .unwrap();
     let json = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
-    assert_eq!(json["result"], serde_json::json!({"selected": "amendment"}));
+    assert_eq!(
+        json["result"],
+        serde_json::json!({"collision": "assigned", "selected": "assigned"})
+    );
 }
 
 #[test]
