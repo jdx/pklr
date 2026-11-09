@@ -134,6 +134,7 @@ struct Parser<'a> {
     pos: usize,
     /// URIs of `import(...)` expressions parsed in this module.
     import_exprs: Vec<String>,
+    import_glob_exprs: Vec<String>,
     /// End offset of the last consumed token.
     prev_end: usize,
     /// Line of the last consumed token, used when no source is available.

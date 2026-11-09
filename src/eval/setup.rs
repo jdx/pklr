@@ -5,6 +5,60 @@ use super::*;
 
 /// Access to the host capabilities.
 impl Evaluator {
+    /// Use a separate namespace for module IO. Resource and package IO is unchanged.
+    pub fn set_module_source(&mut self, source: impl crate::ModuleSource + 'static) {
+        self.module_source = Some(Box::new(source));
+    }
+
+    pub(super) fn module_identity_io(&mut self, path: &Path) -> Result<PathBuf> {
+        let result = match self.module_source.as_mut() {
+            Some(source) => source.identity(path),
+            None => return self.capabilities.canonicalize(path),
+        };
+        self.record_module_result(result)
+    }
+
+    pub(super) fn module_exists_io(&mut self, path: &Path) -> Result<bool> {
+        let result = match self.module_source.as_mut() {
+            Some(source) => source.exists(path),
+            None => return self.capabilities.path_exists(path),
+        };
+        self.record_module_result(result)
+    }
+
+    pub(super) fn module_read_io(&mut self, path: &Path) -> Result<String> {
+        self.check_cancelled()?;
+        let result = match self.module_source.as_mut() {
+            Some(source) => source.read(path),
+            None => return self.capabilities.read_to_string(path),
+        };
+        self.record_module_result(result)
+    }
+
+    pub(super) fn module_glob_io(&mut self, base: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
+        if self.module_source.is_some() {
+            return self.record_module_result(Err(Error::Eval(
+                "module globs are unavailable with a module source namespace".into(),
+            )));
+        }
+        self.capabilities.glob(base, pattern)
+    }
+
+    fn record_module_result<T>(&mut self, result: Result<T>) -> Result<T> {
+        if let Err(error) = &result {
+            self.module_source_failure
+                .get_or_insert_with(|| error.to_string());
+        }
+        result
+    }
+
+    pub(super) fn finish_module_result<T>(&self, result: Result<T>) -> Result<T> {
+        match &self.module_source_failure {
+            Some(message) => Err(Error::Eval(format!("module source refused: {message}"))),
+            None => result,
+        }
+    }
+
     pub(super) fn read_to_string_io(&mut self, path: &Path) -> Result<String> {
         self.check_cancelled()?;
         self.capabilities.read_to_string(path)
@@ -100,6 +154,8 @@ impl Evaluator {
             env_reads: BTreeMap::new(),
             scoped_imports_in_flight: HashSet::default(),
             capabilities: Box::new(capabilities),
+            module_source: None,
+            module_source_failure: None,
             cancel: None,
             #[cfg(feature = "package-zip")]
             package_dirs: HashMap::default(),
@@ -183,6 +239,7 @@ impl Evaluator {
     }
 
     pub(super) fn begin_evaluation(&mut self) {
+        self.module_source_failure = None;
         // Lambda values can outlive an evaluation, so retain guards for every
         // capture map that is still reachable through one. Dead capture maps
         // are otherwise only held here weakly; drop their registry entries at

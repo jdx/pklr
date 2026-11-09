@@ -11,6 +11,7 @@ impl<'a> Parser<'a> {
             name,
             pos: 0,
             import_exprs: Vec::new(),
+            import_glob_exprs: Vec::new(),
             prev_end: first.map_or(0, |t| t.offset),
             prev_line: first.map_or(1, |t| t.line),
             amending: false,

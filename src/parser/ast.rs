@@ -27,10 +27,34 @@ pub struct Module {
     /// URIs of the module's `import("...")` expressions, in source order.
     /// Glob `import*(...)` expressions are not included.
     pub import_exprs: Vec<String>,
+    /// URIs of `import*(...)` expressions, including inside interpolations.
+    pub import_glob_exprs: Vec<String>,
     pub annotations: Vec<Annotation>,
     pub body: Body,
     /// Names of the module's `local` type aliases, which importers cannot see.
     pub local_type_aliases: std::collections::HashSet<String>,
+}
+
+impl Module {
+    /// Module references parsed from declarations, inheritance and expressions.
+    /// The boolean is true for glob imports.
+    pub fn module_references(&self) -> impl Iterator<Item = (&str, bool)> {
+        self.amends
+            .iter()
+            .chain(self.extends.iter())
+            .map(|uri| (uri.as_str(), false))
+            .chain(
+                self.imports
+                    .iter()
+                    .map(|import| (import.uri.as_str(), import.is_glob)),
+            )
+            .chain(self.import_exprs.iter().map(|uri| (uri.as_str(), false)))
+            .chain(
+                self.import_glob_exprs
+                    .iter()
+                    .map(|uri| (uri.as_str(), true)),
+            )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

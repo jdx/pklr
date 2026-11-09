@@ -39,7 +39,7 @@ impl Evaluator {
         // native relative entry paths and supports virtual path namespaces.
         // Unlike an unconditional `std::path::absolute`, this never
         // substitutes the host CWD for a capability-backed evaluator.
-        let current_path = match self.canonicalize_io(current_path) {
+        let current_path = match self.module_identity_io(current_path) {
             Ok(path) => path,
             // Native evaluators use the default base path. When a relative
             // unsaved path cannot be canonicalized yet, make its ancestors
@@ -55,13 +55,13 @@ impl Evaluator {
         let roots: Vec<PathBuf> = self.package_dirs.values().cloned().collect();
         #[cfg(feature = "package-zip")]
         let root = roots.into_iter().find_map(|root| {
-            let root = self.canonicalize_io(&root).unwrap_or(root);
+            let root = self.module_identity_io(&root).unwrap_or(root);
             current_path.starts_with(&root).then_some(root)
         });
         #[cfg(not(feature = "package-zip"))]
         let root: Option<PathBuf> = None;
         resolve_triple_dot(&current_path, path, root.as_deref(), |candidate| {
-            self.path_exists_io(candidate)
+            self.module_exists_io(candidate)
         })
     }
 
@@ -69,7 +69,7 @@ impl Evaluator {
         if path.to_string_lossy().contains("://") {
             return path.display().to_string();
         }
-        self.canonicalize_io(path)
+        self.module_identity_io(path)
             .unwrap_or_else(|_| path.to_path_buf())
             .display()
             .to_string()
@@ -155,7 +155,7 @@ impl Evaluator {
                     {
                         let pkg_dir = self.extract_package_zip(zip_url)?;
                         let local_path = pkg_dir.join(entry);
-                        let source = self.read_to_string_io(&local_path)?;
+                        let source = self.module_read_io(&local_path)?;
                         return Ok(Some((source, local_path.display().to_string())));
                     }
                     #[cfg(not(feature = "package-zip"))]
@@ -172,10 +172,10 @@ impl Evaluator {
             return Ok(None);
         }
         let import_path = self.local_file_path(path, uri)?;
-        if !self.path_exists_io(&import_path)? {
+        if !self.module_exists_io(&import_path)? {
             return Ok(None);
         }
-        let source = self.read_to_string_io(&import_path)?;
+        let source = self.module_read_io(&import_path)?;
         Ok(Some((source, import_path.display().to_string())))
     }
 
@@ -195,7 +195,7 @@ impl Evaluator {
         let key = if source_path.contains("://") {
             Some(PathBuf::from(&source_path))
         } else {
-            self.canonicalize_io(Path::new(&source_path)).ok()
+            self.module_identity_io(Path::new(&source_path)).ok()
         };
         if let Some(module) = key.as_ref().and_then(|key| self.parse_cache.get(key)) {
             return Ok(Some((Arc::clone(module), source_path)));
@@ -216,14 +216,15 @@ impl Evaluator {
     /// Evaluate `source` as the module at `path`.
     pub fn eval_source(&mut self, source: &str, path: &Path) -> Result<Value> {
         self.begin_evaluation();
-        self.eval_source_inner(source, path)
+        let result = self.eval_source_inner(source, path);
+        self.finish_module_result(result)
     }
 
     pub(super) fn eval_source_inner(&mut self, source: &str, path: &Path) -> Result<Value> {
         // Seed import cache for the entry file so circular back-references work.
         // Mark it in flight too, so a narrowed import that reads this
         // placeholder is not cached.
-        let canonical = self.canonicalize_io(path).ok();
+        let canonical = self.module_identity_io(path).ok();
         if let Some(canonical) = &canonical {
             self.import_cache
                 .insert(canonical.clone(), Value::Object(Arc::default(), None));
@@ -250,14 +251,15 @@ impl Evaluator {
     /// Evaluate a local pkl file by path.
     pub fn eval_file(&mut self, path: &Path) -> Result<Value> {
         self.begin_evaluation();
-        let source = self.read_to_string_io(path)?;
-        self.eval_source_inner(&source, path)
+        let source = self.module_read_io(path)?;
+        let result = self.eval_source_inner(&source, path);
+        self.finish_module_result(result)
     }
 
     /// Read, lex, parse, and evaluate a local file (with caching).
     /// Inserts a placeholder before evaluation to break circular imports.
     pub(super) fn eval_import_file(&mut self, path: &Path, depth: usize) -> Result<Value> {
-        let canonical = self.canonicalize_io(path)?;
+        let canonical = self.module_identity_io(path)?;
         if let Some(cached) = self.cached_import(&canonical) {
             return Ok(cached);
         }
@@ -283,7 +285,7 @@ impl Evaluator {
         if requested_fields.is_none() {
             return self.eval_import_file(path, depth);
         }
-        let canonical = self.canonicalize_io(path)?;
+        let canonical = self.module_identity_io(path)?;
         if let Some(cached) = self.cached_import(&canonical) {
             return Ok(cached);
         }
@@ -352,7 +354,7 @@ impl Evaluator {
         if inherited_scope.is_none() {
             return self.eval_import_file(path, depth);
         }
-        let canonical = self.canonicalize_io(path)?;
+        let canonical = self.module_identity_io(path)?;
         if !self.scoped_imports_in_flight.insert(canonical.clone()) {
             self.placeholder_reads += 1;
             return Ok(Value::Object(Arc::default(), None));
@@ -374,11 +376,11 @@ impl Evaluator {
     }
 
     pub(super) fn parse_file(&mut self, path: &Path) -> Result<Arc<Module>> {
-        let canonical = self.canonicalize_io(path).ok();
+        let canonical = self.module_identity_io(path).ok();
         if let Some(module) = canonical.as_ref().and_then(|c| self.parse_cache.get(c)) {
             return Ok(Arc::clone(module));
         }
-        let source = self.read_to_string_io(path)?;
+        let source = self.module_read_io(path)?;
         let name = path.display().to_string();
         let tokens = lexer::lex_named(&source, &name)?;
         let module = Arc::new(parser::parse_named(&tokens, &source, &name)?);
@@ -418,7 +420,10 @@ impl Evaluator {
         base_path: &Path,
         verb: &str,
     ) -> Result<()> {
-        let same = match (self.canonicalize_io(path), self.canonicalize_io(base_path)) {
+        let same = match (
+            self.module_identity_io(path),
+            self.module_identity_io(base_path),
+        ) {
             (Ok(a), Ok(b)) => a == b,
             _ => path == base_path,
         };
@@ -457,7 +462,7 @@ impl Evaluator {
         // Match `expand_glob`, which walks `.` for a bare entry path, so the
         // matched paths share this prefix and the keys come out relative.
         let base_dir = module_dir(path.parent().unwrap_or(Path::new(".")));
-        let matched = self.glob_io(base_dir, uri)?;
+        let matched = self.module_glob_io(base_dir, uri)?;
         let matched = matched
             .into_iter()
             .map(|matched_path| {
@@ -508,7 +513,7 @@ impl Evaluator {
 
         if !uri.contains("://") || uri.starts_with("file://") {
             let import_path = self.local_file_path(path, uri)?;
-            if !self.path_exists_io(&import_path)? {
+            if !self.module_exists_io(&import_path)? {
                 return Err(Error::ImportNotFound(import_path.display().to_string()));
             }
             return self.eval_file_with_requested_fields(&import_path, depth + 1, requested);
@@ -532,10 +537,10 @@ impl Evaluator {
             return Ok(true);
         }
         let left_key = self
-            .canonicalize_io(left)
+            .module_identity_io(left)
             .unwrap_or_else(|_| left.to_path_buf());
         let right_key = self
-            .canonicalize_io(right)
+            .module_identity_io(right)
             .unwrap_or_else(|_| right.to_path_buf());
         Ok(left_key == right_key)
     }

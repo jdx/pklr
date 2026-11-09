@@ -4,6 +4,8 @@ pub mod error;
 #[cfg(feature = "eval-core")]
 pub mod eval;
 pub mod lexer;
+#[cfg(feature = "eval-core")]
+pub mod module_source;
 pub mod parser;
 #[cfg(feature = "eval-core")]
 pub mod value;
@@ -15,6 +17,8 @@ pub use capabilities::{EvalCapabilities, FetchBudget};
 pub use error::{Error, Result};
 #[cfg(feature = "eval-core")]
 pub use eval::Evaluator;
+#[cfg(feature = "eval-core")]
+pub use module_source::ModuleSource;
 #[cfg(feature = "eval-core")]
 pub use value::Value;
 

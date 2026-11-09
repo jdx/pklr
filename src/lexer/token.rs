@@ -12,7 +12,7 @@ pub enum TokenKind {
     Ident(String),
     StringLit(String),
     /// Interpolated string: alternating literal parts and expression-token groups.
-    /// Parts[0] is always a literal (possibly empty), Parts[1] is tokens for first \(...), etc.
+    /// `Parts[0]` is always a literal (possibly empty), `Parts[1]` is tokens for first \(...), etc.
     InterpolatedString(Vec<StringPart>),
     /// A `///` doc comment line; its span covers the comment text.
     DocComment,

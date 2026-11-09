@@ -149,6 +149,8 @@ pub struct Evaluator {
     scoped_imports_in_flight: HashSet<PathBuf>,
     /// Host-provided IO for files, environment, HTTP, packages, and globs.
     capabilities: Box<dyn EvalCapabilities>,
+    module_source: Option<Box<dyn crate::ModuleSource>>,
+    module_source_failure: Option<String>,
     /// Set from another thread to stop the evaluation (see
     /// [`Evaluator::set_cancel_flag`]).
     cancel: Option<Arc<std::sync::atomic::AtomicBool>>,

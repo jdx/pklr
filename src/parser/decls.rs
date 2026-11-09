@@ -148,6 +148,7 @@ impl<'a> Parser<'a> {
             extends,
             imports,
             import_exprs: std::mem::take(&mut self.import_exprs),
+            import_glob_exprs: std::mem::take(&mut self.import_glob_exprs),
             annotations,
             body: body.into(),
             local_type_aliases: std::mem::take(&mut self.module_local_type_aliases),

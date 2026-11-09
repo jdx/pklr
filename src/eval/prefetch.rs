@@ -507,7 +507,7 @@ impl Evaluator {
     ) {
         for entry in entries {
             let path = dir.join(entry);
-            if let Ok(source) = self.read_to_string_io(&path) {
+            if let Ok(source) = self.module_read_io(&path) {
                 scan(sources, &source, path.display().to_string(), roots.clone());
             }
         }
