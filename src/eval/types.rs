@@ -290,6 +290,14 @@ impl AliasResolver<'_> {
                 let Some(resolved) = self.resolved_alias(plain, shadowed) else {
                     return;
                 };
+                // The expanded base is a quoted name when the alias's target is
+                // one (`typealias L = `C?``), and not when it is `C?` or
+                // `List<Int>`.
+                let target_quoted = match &resolved {
+                    TypeExpr::Named(name) => !crate::lexer::is_plain_qualified_name(name),
+                    TypeExpr::Constrained(_, _, quoted) => *quoted,
+                    _ => false,
+                };
                 let (target, constraint_expr) = match resolved {
                     // `A(c)` with `A = B(c2)` checks `B`, then `c2`, then `c`,
                     // all against the same value. A nullable `A?` lets null
@@ -314,8 +322,7 @@ impl AliasResolver<'_> {
                     ""
                 };
                 *base = format!("{default_marker}{target}{suffix}");
-                // The base is the alias's type now, not a quoted name.
-                *quoted = false;
+                *quoted = target_quoted;
                 **constraint = constraint_expr;
             }
         }

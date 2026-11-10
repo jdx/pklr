@@ -632,6 +632,40 @@ d = f(List("a"))
 }
 
 #[test]
+fn an_expanded_constrained_alias_keeps_whether_its_target_is_a_quoted_name() {
+    let json = eval(
+        r#"
+class C {}
+class `C?` {}
+typealias L = `C?`
+typealias U = C?
+typealias G = List<Int>
+function f(x) = x is `L`(true)
+function g(x) = x is U(true)
+function h(x) = x is G(true)
+a = f(new `C?` {})
+b = f(null)
+c = f(new C {})
+d = g(null)
+e = g(new C {})
+f2 = g(new `C?` {})
+i = h(List(1))
+j = new `C?` {} is `L`(true)
+k = null is `L`(true)
+l = null is U(true)
+m = new `C?` {} as `L`(true)
+"#,
+    );
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "a": true, "b": false, "c": false, "d": true, "e": true, "f2": false,
+            "i": true, "j": true, "k": false, "l": true, "m": {}
+        })
+    );
+}
+
+#[test]
 fn a_constrained_quoted_alias_resolves_in_a_function_and_when_default_marked() {
     let json = eval(
         r#"
