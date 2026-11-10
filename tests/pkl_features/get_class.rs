@@ -277,3 +277,66 @@ b = new Dynamic { x = Duration } { y = Duration }
         json!({"a": ["Duration"], "b": {"x": "Duration", "y": "Duration"}})
     );
 }
+
+#[test]
+fn class_values_are_class_and_not_dynamic() {
+    // pkl 0.32: a Class value is a `Class`, never a `Dynamic`.
+    let result = eval(
+        r#"
+class Foo {}
+r {
+  durationIsDynamic = Duration is Dynamic
+  durationIsClass = Duration is Class
+  dynamicIsDynamic = Dynamic is Dynamic
+  dynamicIsClass = Dynamic is Class
+  regexIsClass = Regex is Class
+  dataSizeIsMapping = DataSize is Mapping
+  getClassIsClass = 1.getClass() is Class
+  getClassIsDynamic = 1.getClass() is Dynamic
+  getClassIsObject = 1.getClass() is Object
+  newDynamicIsClass = new Dynamic {} is Class
+  newDynamicIsDynamic = new Dynamic {} is Dynamic
+  userClassIsClass = Foo is Class
+  userClassIsDynamic = Foo is Dynamic
+  instanceIsFoo = new Foo {} is Foo
+  instanceIsClass = new Foo {} is Class
+}
+"#,
+    );
+    assert_eq!(
+        result["r"],
+        json!({
+            "durationIsDynamic": false, "durationIsClass": true,
+            "dynamicIsDynamic": false, "dynamicIsClass": true,
+            "regexIsClass": true, "dataSizeIsMapping": false,
+            "getClassIsClass": true, "getClassIsDynamic": false,
+            "getClassIsObject": false, "newDynamicIsClass": false,
+            "newDynamicIsDynamic": true, "userClassIsClass": true,
+            "userClassIsDynamic": false, "instanceIsFoo": true,
+            "instanceIsClass": false
+        })
+    );
+}
+
+#[test]
+fn class_value_cast_to_dynamic_fails() {
+    let err = eval_fails("a = Duration as Dynamic");
+    assert!(err.contains("Dynamic"), "{err}");
+}
+
+#[test]
+fn amending_a_builtin_class_value_is_rejected() {
+    for src in [
+        "x = (Duration) { a = 1 }",
+        "x = (DataSize) { a = 1 }",
+        "x = (Regex) { a = 1 }",
+        "x = (Dynamic) { a = 1 }",
+        "x = (1.getClass()) { a = 1 }",
+    ] {
+        let err = eval_fails(src);
+        assert!(
+            err.contains("Cannot instantiate, or amend an instance of, external class"),
+            "{src}: {err}"
+        );
+    }
+}
