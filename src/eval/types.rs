@@ -503,6 +503,45 @@ pub(super) fn type_is_listing(ty: &crate::parser::TypeExpr) -> bool {
     }
 }
 
+/// Whether a `Dynamic` object can satisfy `ty`: `Dynamic`, its superclass
+/// `Object`, `Any`, or a union or alias that includes one of them. A name that
+/// cannot be resolved is assumed to accept it, so only a type known to reject
+/// a `Dynamic` (a collection, a primitive, a class) is reported.
+pub(super) fn type_accepts_dynamic(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
+    fn named(name: &str, scope: &Scope, depth: usize) -> bool {
+        let name = name.trim_start_matches('*').trim_end_matches('?');
+        let base = name.split('<').next().unwrap_or(name);
+        if depth > 32 {
+            return true;
+        }
+        if let Some(alias) = scope.get_type_alias(base) {
+            return visit(alias, scope, depth + 1);
+        }
+        match base {
+            "Dynamic" | "Object" | "Any" => true,
+            "Null" | "Boolean" | "Bool" | "Int" | "Float" | "Number" | "String" | "List"
+            | "Listing" | "Set" | "Map" | "Mapping" | "Function" | "Regex" | "Duration"
+            | "DataSize" | "Collection" | "Pair" | "IntSeq" => false,
+            // A class declaration; a `Dynamic` is not an instance of one.
+            _ => !matches!(
+                resolve_dotted(scope, base),
+                Some(Value::Object(_, Some(source))) if source.kind == ObjectKind::Class
+            ),
+        }
+    }
+    fn visit(ty: &crate::parser::TypeExpr, scope: &Scope, depth: usize) -> bool {
+        use crate::parser::TypeExpr;
+        match ty {
+            TypeExpr::Named(name) | TypeExpr::Generic(name, _) | TypeExpr::Constrained(name, _) => {
+                string_literal_type_value(name).is_none() && named(name, scope, depth)
+            }
+            TypeExpr::Nullable(inner) => visit(inner, scope, depth),
+            TypeExpr::Union(variants) => variants.iter().any(|v| visit(v, scope, depth)),
+        }
+    }
+    visit(ty, scope, 0)
+}
+
 /// `Any` (optionally nullable) gives an untyped `new` no parent to infer.
 pub(super) fn type_is_any(ty: &crate::parser::TypeExpr) -> bool {
     use crate::parser::TypeExpr;

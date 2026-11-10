@@ -19,6 +19,21 @@ impl Evaluator {
         let Some(ty) = &prop.type_ann else {
             return Ok(());
         };
+        // An explicit `new Dynamic { ... }` is a `Dynamic` even when the value
+        // model represents its elements as a `Listing` or its members as an
+        // untyped object, so the declared type must accept a `Dynamic`.
+        if is_explicit_dynamic(prop) && !type_accepts_dynamic(ty, scope) {
+            return Err(Error::Eval(format!(
+                "property '{}' expected {}, got Dynamic",
+                prop.name,
+                display_type_expr(ty),
+            )));
+        }
+        // Its elements are stored as a `Listing`, which a `Dynamic` type
+        // would otherwise not match.
+        if is_explicit_dynamic(prop) && matches!(value, Value::List(_)) {
+            return Ok(());
+        }
         if !type_is_runtime_checkable(ty, scope)
             || self.eval_type_check(value, ty, scope, depth + 1)?
         {

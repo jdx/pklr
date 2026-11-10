@@ -5344,3 +5344,89 @@ m: Mapping<String, R | Listing<Int>> = new {
     );
     assert_eq!(result["m"]["l"], serde_json::json!([1, 2]));
 }
+
+// Amending a property whose default is an explicit `null` amends the `null`,
+// which makes a `Dynamic` that the declared type then checks (jdx/pklr#386).
+#[test]
+fn amend_explicit_null_default_rejects_listing_type() {
+    for ty in [
+        "Listing<String>?",
+        "(Listing<String>|Int)?",
+        "Listing<String>|Null",
+        "List<String>?",
+    ] {
+        let err = eval_fails(&format!(
+            "class U {{ g: {ty} = null }}\na = new U {{ g {{ \"adm\" }} }}\n"
+        ));
+        assert!(
+            err.contains("expected") && err.contains("Dynamic"),
+            "{ty}: {err}"
+        );
+    }
+}
+
+#[test]
+fn amend_explicit_null_default_rejects_mapping_and_class_types() {
+    for ty in ["Mapping<String, Int>?", "Foo?"] {
+        let err = eval_fails(&format!(
+            "class Foo {{ a: Int }}\nclass U {{ g: {ty} = null }}\na = new U {{ g {{ [\"a\"] = 1 }} }}\n"
+        ));
+        assert!(err.contains("Dynamic"), "{ty}: {err}");
+    }
+    let err =
+        eval_fails("class Foo { a: Int }\nclass U { f: Foo? = null }\nx = new U { f { a = 1 } }\n");
+    assert!(err.contains("Dynamic"), "{err}");
+}
+
+#[test]
+fn amend_explicit_null_default_accepts_dynamic_types() {
+    let json = eval(
+        r#"
+typealias D = Dynamic
+class U {
+  a: Dynamic? = null
+  b: (Listing<String>|Dynamic)? = null
+  c: D? = null
+  d: Any = null
+  e = null
+}
+x = new U { a { "p" }; b { "q" }; c { k = 1 }; d { "r" }; e { "s" } }
+"#,
+    );
+    assert_eq!(
+        json["x"],
+        serde_json::json!({"a": ["p"], "b": ["q"], "c": {"k": 1}, "d": ["r"], "e": ["s"]})
+    );
+}
+
+#[test]
+fn amend_nullable_without_default_still_amends_type_default() {
+    let json = eval(
+        r#"
+class Foo { a: Int = 0 }
+class U { g: Listing<String>?; m: Mapping<String, Int>?; f: Foo?; u: (*Listing<String>|Int)? }
+x = new U { g { "adm" }; m { ["a"] = 1 }; f { a = 2 }; u { "z" } }
+"#,
+    );
+    assert_eq!(
+        json["x"],
+        serde_json::json!({"g": ["adm"], "m": {"a": 1}, "f": {"a": 2}, "u": ["z"]})
+    );
+}
+
+#[test]
+fn amend_non_null_default_still_amends_it() {
+    let json = eval(
+        "class U { g: Listing<String> = new Listing { \"z\" } }\nx = new U { g { \"adm\" } }\n",
+    );
+    assert_eq!(json["x"]["g"], serde_json::json!(["z", "adm"]));
+}
+
+#[test]
+fn explicit_new_dynamic_is_rejected_by_listing_typed_property() {
+    let err =
+        eval_fails("class U { g: Listing<String>? }\na = new U { g = new Dynamic { \"adm\" } }\n");
+    assert!(err.contains("Dynamic"), "{err}");
+    let err = eval_fails("x: Listing<String> = new Dynamic { \"a\" }\n");
+    assert!(err.contains("Dynamic"), "{err}");
+}
