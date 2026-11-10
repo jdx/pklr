@@ -3351,6 +3351,21 @@ fn imported_module_rendered_by_the_stdlib_renderers_does_not_include_classes() {
     let val = eval_with_class_module(
         "j = new JsonRenderer { omitNullProperties = false }.renderValue(lib)\ny = new YamlRenderer {}.renderValue(lib)\np = new PcfRenderer {}.renderValue(lib)\nt = \"\\(lib)\"",
     );
-    assert!(!val.to_string().contains("req"), "{val}");
-    assert!(val["j"].as_str().unwrap().contains("value"), "{val}");
+    // `opt` is only reachable through class `C` (its default), so a leaked
+    // class shows up as `opt` or as a `C`/`A` member, whatever the format.
+    for key in ["j", "y", "p", "t"] {
+        let text = val[key].as_str().unwrap();
+        assert!(text.contains("value"), "{key}: {text}");
+        assert!(!text.contains("opt"), "{key}: {text}");
+        for class in ["C", "A"] {
+            for leaked in [
+                format!("\"{class}\""),
+                format!("{class}:"),
+                format!("{class} {{"),
+                format!("{class} = "),
+            ] {
+                assert!(!text.contains(&leaked), "{key}: {text}");
+            }
+        }
+    }
 }
