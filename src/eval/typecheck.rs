@@ -210,6 +210,15 @@ impl Evaluator {
                     None => UnionAmendState::NotUnion,
                 }
             }
+            // A constraint is checked on the value afterwards and gives it no
+            // default: follow its base, which names an alias or spells a union.
+            TypeExpr::Constrained(base, _) => {
+                let nullable = nullable || base.ends_with('?');
+                match crate::parser::parse_type_name(base.trim_end_matches('?')) {
+                    Ok(base) => self.union_amend_state_in(&base, scope, nullable, depth + 1),
+                    Err(_) => UnionAmendState::NotUnion,
+                }
+            }
             _ => UnionAmendState::NotUnion,
         }
     }

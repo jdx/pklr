@@ -5794,3 +5794,52 @@ fn amending_inherited_union_property_uses_the_declaring_modules_aliases() {
         eval_union_files("inherited_default", &[("lib.pkl", lib), ("main.pkl", main)]).unwrap();
     assert_eq!(json["x"]["argv"], serde_json::json!(["a"]));
 }
+
+#[test]
+fn amending_constrained_union_alias_follows_the_alias_for_a_default() {
+    // A constraint is checked on the value and supplies no default, so the
+    // alias's own `*` marker decides.
+    for (tag, lib) in [
+        (
+            "constrained",
+            "typealias U = Listing<String>|Int\nclass C { argv: U(true) }\n",
+        ),
+        (
+            "constrained_marked_use",
+            "typealias U = Listing<String>|Int\nclass C { argv: *U(true)|String }\n",
+        ),
+    ] {
+        let error =
+            eval_union_files(tag, &[("lib.pkl", lib), ("main.pkl", UNION_MAIN)]).unwrap_err();
+        assert!(error.to_string().contains(UNDEFINED), "{tag}: {error}");
+    }
+    // Nullable, through the property or the alias.
+    for lib in [
+        "typealias U = Listing<String>|Int\nclass C { argv: U(true)? }\n",
+        "typealias U = (Listing<String>|Int)?\nclass C { argv: U(true) }\n",
+    ] {
+        let error = eval_union_files(
+            "constrained_null",
+            &[("lib.pkl", lib), ("main.pkl", UNION_MAIN)],
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Expected value of type `Listing<String>|Int`"),
+            "{error}"
+        );
+    }
+    // A marked alias or a non-union alias keeps the amendment valid.
+    for lib in [
+        "typealias U = *Listing<String>|Int\nclass C { argv: U(true) }\n",
+        "typealias U = Listing<String>\nclass C { argv: U(true) }\n",
+    ] {
+        let json = eval_union_files(
+            "constrained_ok",
+            &[("lib.pkl", lib), ("main.pkl", UNION_MAIN)],
+        )
+        .unwrap();
+        assert_eq!(json["x"]["argv"], serde_json::json!(["a"]));
+    }
+}
