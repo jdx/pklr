@@ -697,3 +697,105 @@ r = new PcfRenderer {}.renderValue(Map(List(1), "v").toDynamic())
     assert!(!rendered.contains("pklr:"), "{rendered}");
     assert!(rendered.starts_with("{\n  ["), "{rendered}");
 }
+
+// A body that amends nothing and has elements as well as members is a
+// `Dynamic` with both. Each expectation was compared with `pkl eval` 0.32.2.
+#[test]
+fn an_untyped_body_with_elements_and_members_keeps_both() {
+    let json = eval(
+        r#"
+local d = new Dynamic { y { 5; z = 1 } }
+a1 = d.y.z
+a2 = d.y.toList()
+a3 = d.y.toMap()
+local e = new Dynamic { y { z = 1; 5 } }
+b1 = e.y.z
+b2 = e.y.toList()
+local n = new Dynamic { a { b { 5; z = 1 } } }
+c1 = n.a.b.z
+c2 = n.a.b.toList()
+local g = new Dynamic { y { 1; 2; z = 1; 3 } }
+d1 = g.y.toList()
+d2 = g.y.z
+"#,
+    );
+    assert_eq!(json["a1"], 1);
+    assert_eq!(json["a2"], serde_json::json!([5]));
+    assert_eq!(json["a3"], serde_json::json!({"z": 1}));
+    assert_eq!(json["b1"], 1);
+    assert_eq!(json["b2"], serde_json::json!([5]));
+    assert_eq!(json["c1"], 1);
+    assert_eq!(json["c2"], serde_json::json!([5]));
+    assert_eq!(json["d1"], serde_json::json!([1, 2, 3]));
+    assert_eq!(json["d2"], 1);
+}
+
+#[test]
+fn a_generator_body_with_elements_and_members_keeps_both() {
+    let json = eval(
+        r#"
+local d = new Dynamic { y { for (i in List(1, 2)) { i }; when (true) { z = 1 } } }
+a1 = d.y.z
+a2 = d.y.toList()
+local f = new Dynamic { y { for (k in List("a")) { ["k\(k)"] = 1 }; 7 } }
+b1 = f.y.toMap()
+b2 = f.y.toList()
+"#,
+    );
+    assert_eq!(json["a1"], 1);
+    assert_eq!(json["a2"], serde_json::json!([1, 2]));
+    assert_eq!(json["b1"], serde_json::json!({"ka": 1}));
+    assert_eq!(json["b2"], serde_json::json!([7]));
+}
+
+#[test]
+fn an_untyped_body_with_elements_and_members_in_a_listing_or_typed_dynamic() {
+    let json = eval(
+        r#"
+local l = new Listing { new { 5; z = 1 } }
+a1 = l[0].z
+a2 = l[0].toList()
+class D { x: Dynamic? }
+local d = new D { x { 5; z = 1 } }
+b1 = d.x.z
+b2 = d.x.toList()
+local m = new Dynamic { y { z = 1 } }
+c = m.y.z
+"#,
+    );
+    assert_eq!(json["a1"], 1);
+    assert_eq!(json["a2"], serde_json::json!([5]));
+    assert_eq!(json["b1"], 1);
+    assert_eq!(json["b2"], serde_json::json!([5]));
+    assert_eq!(json["c"], 1);
+}
+
+#[test]
+fn amending_a_mixed_body_adds_to_both() {
+    let json = eval(
+        r#"
+local d = new Dynamic { y { 5; z = 1 } }
+local d2 = (d) { y { 6; w = 2 } }
+a1 = d2.y.toList()
+a2 = d2.y.z
+a3 = d2.y.w
+"#,
+    );
+    assert_eq!(json["a1"], serde_json::json!([5, 6]));
+    assert_eq!(json["a2"], 1);
+    assert_eq!(json["a3"], 2);
+}
+
+#[test]
+fn a_listing_typed_body_with_only_elements_stays_a_listing() {
+    let json = eval(
+        r#"
+class C { l: Listing<Int> }
+local c = new C { l { 1; 2 } }
+a = c.l is Listing
+b = c.l
+"#,
+    );
+    assert_eq!(json["a"], true);
+    assert_eq!(json["b"], serde_json::json!([1, 2]));
+}

@@ -139,6 +139,20 @@ impl Evaluator {
                     }
                     _ => ListValue::new(ListKind::Dynamic, Vec::new()),
                 };
+                // A body that amends nothing and defines members besides its
+                // elements makes a `Dynamic` with both, as it does on an
+                // existing element-only one.
+                if items.kind() == ListKind::Dynamic
+                    && !matches!(amendment_base, Some(Value::List(_)))
+                    && entries_define_members(body)
+                {
+                    return Ok(Some(self.eval_value_amendment(
+                        Value::List(items),
+                        body,
+                        scope,
+                        depth,
+                    )?));
+                }
                 let mut amendment_scope = scope.child();
                 amendment_scope.set("super", Value::List(items.clone()));
                 amendment_scope.receiver_entries = Some(body.clone());
