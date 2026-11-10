@@ -71,7 +71,7 @@ pub(super) fn typed_object(type_name: &str, members: ObjectMap) -> Value {
 /// A `Dynamic` with the given members, such as `toDynamic()` builds. Its body
 /// spreads the members from a bound variable, so an amendment of it, which
 /// rebuilds the object from its body, keeps them and can replace any of them.
-pub(super) fn dynamic_object(members: ObjectMap) -> Value {
+pub(super) fn dynamic_object(members: Arc<ObjectMap>) -> Value {
     const MEMBERS: &str = "\0pklr:members";
     const KEYS: &str = "\0pklr:member-keys";
     let Value::Object(_, Some(source)) = typed_object("Dynamic", ObjectMap::default()) else {
@@ -81,15 +81,34 @@ pub(super) fn dynamic_object(members: ObjectMap) -> Value {
     source.type_name = None;
     source.kind = ObjectKind::Dynamic;
     let mut scope = Scope::default();
-    scope.set(MEMBERS, Value::Object(Arc::new(members.clone()), None));
+    scope.set(MEMBERS, Value::Object(members.clone(), None));
     // A string key is a property, read from the bound variable: an amendment
     // replaces it in place, and its body reads it by name. Any other key is an
     // entry (`Map(1, "a").toDynamic()` is `[1] = "a"`), keyed by its value.
-    let keys = members
+    // Only an entry's key is decoded, and only when there is one, so the usual
+    // object of properties builds no key list.
+    let keys: Vec<Option<Value>> = if members
         .keys()
-        .map(|key| crate::value::mapping_storage_value(key))
-        .collect::<Vec<_>>();
-    scope.set(KEYS, Value::List(keys.clone().into()));
+        .any(|key| key.starts_with(crate::value::MAPPING_KEY_PREFIX))
+    {
+        members
+            .keys()
+            .map(|key| match crate::value::mapping_storage_value(key) {
+                Value::String(_) => None,
+                other => Some(other),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let is_property = |i: usize| keys.get(i).is_none_or(Option::is_none);
+    if !keys.is_empty() {
+        let list = keys
+            .iter()
+            .map(|key| key.clone().unwrap_or(Value::Null))
+            .collect::<Vec<_>>();
+        scope.set(KEYS, Value::List(list.into()));
+    }
     let member = |name: &Arc<str>| {
         Expr::Index(
             Box::new(Expr::Ident(MEMBERS.into())),
@@ -99,34 +118,37 @@ pub(super) fn dynamic_object(members: ObjectMap) -> Value {
     source.entries = members
         .keys()
         .enumerate()
-        .map(|(i, name)| match &keys[i] {
-            Value::String(_) => Entry::Property(Arc::new(Property {
-                annotations: Vec::new(),
-                modifiers: Vec::new(),
-                name: name.clone(),
-                type_ann: None,
-                value: Some(member(name)),
-                body: None,
-                is_method: false,
-            })),
-            _ => Entry::DynProperty(
-                Expr::Index(
-                    Box::new(Expr::Ident(KEYS.into())),
-                    Box::new(Expr::Int(i as i64)),
-                ),
-                member(name),
-            ),
+        .map(|(i, name)| {
+            if is_property(i) {
+                Entry::Property(Arc::new(Property {
+                    annotations: Vec::new(),
+                    modifiers: Vec::new(),
+                    name: name.clone(),
+                    type_ann: None,
+                    value: Some(member(name)),
+                    body: None,
+                    is_method: false,
+                }))
+            } else {
+                Entry::DynProperty(
+                    Expr::Index(
+                        Box::new(Expr::Ident(KEYS.into())),
+                        Box::new(Expr::Int(i as i64)),
+                    ),
+                    member(name),
+                )
+            }
         })
         .collect::<Vec<_>>()
         .into();
     source.captured = SourceScope::lazy(&scope, Vec::new(), Vec::new());
     source.evaluated_properties = members
         .keys()
-        .zip(&keys)
-        .filter(|(_, key)| matches!(key, Value::String(_)))
-        .map(|(name, _)| name.clone())
+        .enumerate()
+        .filter(|(i, _)| is_property(*i))
+        .map(|(_, name)| name.clone())
         .collect();
-    Value::Object(Arc::new(members), Some(Arc::new(source)))
+    Value::Object(members, Some(Arc::new(source)))
 }
 
 /// A `Class` value for the class `type_name` with the given identity. Classes

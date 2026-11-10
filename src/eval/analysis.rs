@@ -902,6 +902,9 @@ fn with_builtins_unresolved<'a>(
     entries: &'a [Entry],
     declared: &HashSet<&str>,
 ) -> Option<TypeAliases<'a>> {
+    if declared.is_empty() {
+        return None;
+    }
     let redeclared: Vec<&str> = BINDING_BUILTIN_TYPES
         .iter()
         .copied()
