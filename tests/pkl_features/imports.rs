@@ -707,7 +707,7 @@ steps {
         serde_json::json!({
             "steps": {
                 "a": {"check": {"command": "lint"}, "prefix": "x"},
-                "b": {"check": "true", "prefix": null}
+                "b": {"check": "true"}
             }
         })
     );
