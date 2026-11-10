@@ -437,7 +437,20 @@ pub(super) fn inferred_new_type(
 }
 
 pub(super) fn type_default_value(ty: &crate::parser::TypeExpr, scope: &Scope) -> Option<Value> {
+    type_default_value_at(ty, scope, 0)
+}
+
+fn type_default_value_at(
+    ty: &crate::parser::TypeExpr,
+    scope: &Scope,
+    depth: usize,
+) -> Option<Value> {
     use crate::parser::TypeExpr;
+    // Local aliases can form a cycle the parser does not reject; the type
+    // check of the value reports it, so give up on a default here.
+    if depth > 32 {
+        return None;
+    }
     match ty {
         TypeExpr::Constrained(base, _) if base.ends_with('?') => Some(Value::Null),
         TypeExpr::Constrained(base, _) => type_default_for_name(base, scope),
@@ -448,7 +461,7 @@ pub(super) fn type_default_value(ty: &crate::parser::TypeExpr, scope: &Scope) ->
                 return Some(Value::String(value.into()));
             }
             if let Some(alias) = scope.get_type_alias(name).cloned() {
-                return type_default_value(&alias, scope);
+                return type_default_value_at(&alias, scope, depth + 1);
             }
             type_default_for_name(name, scope)
         }
@@ -467,7 +480,7 @@ pub(super) fn type_default_value(ty: &crate::parser::TypeExpr, scope: &Scope) ->
             // A nullable default alternative leaves the property unset, as
             // `*Int?` does.
             .filter(|ty| !is_nullable_default(ty, scope))
-            .and_then(|ty| type_default_value(ty, scope)),
+            .and_then(|ty| type_default_value_at(ty, scope, depth + 1)),
     }
 }
 
@@ -607,15 +620,15 @@ fn nullable_inner_default_at(
         // Look through a nullable alias first: its own default is null, but an
         // amendment starts from the type it wraps.
         TypeExpr::Nullable(inner) => nullable_inner_default_at(inner, scope, depth + 1)
-            .or_else(|| type_default_value(inner, scope)),
+            .or_else(|| type_default_value_at(inner, scope, depth + 1)),
         TypeExpr::Constrained(name, _) => match alias(name) {
             Some(target) => nullable_inner_default_at(target, scope, depth + 1)
-                .or_else(|| type_default_value(target, scope)),
+                .or_else(|| type_default_value_at(target, scope, depth + 1)),
             None => type_default_for_name(name.trim_end_matches('?'), scope),
         },
         // `Listing<String>`, `Mapping<K, V>` and the like start from their
         // empty collection (or a generic class's instance).
-        TypeExpr::Generic(..) => type_default_value(ty, scope),
+        TypeExpr::Generic(..) => type_default_value_at(ty, scope, depth + 1),
         // An alias amends like the type it names, so look through it.
         TypeExpr::Named(name) => match alias(name) {
             Some(target) => nullable_inner_default_at(target, scope, depth + 1),

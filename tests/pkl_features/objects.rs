@@ -5901,3 +5901,108 @@ fn amending_a_nullable_default_alias_of_a_generic_type_starts_from_it() {
         assert_eq!(json["x"][key], serde_json::json!({}), "{key}");
     }
 }
+
+#[test]
+fn imported_alias_keeps_its_constraint() {
+    // Verified against pkl 0.32.2: `-1 is lib.Pos` is false, and a value that
+    // breaks the constraint of an imported alias is rejected, whether it is
+    // cast, assigned to a typed property, or the object of a constrained
+    // default union alternative.
+    let temp = TestTempDir::new("pklr_test_imported_alias_constraint");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("lib.pkl"),
+        "class Item { n: Int = 1 }\n\
+         typealias P = *Item(n > 0) | String\n\
+         typealias Pos = Int(this > 0)\n",
+    )
+    .unwrap();
+    let eval_main = |body: &str| {
+        let main = dir.join("main.pkl");
+        std::fs::write(&main, format!("import \"lib.pkl\"\n{body}")).unwrap();
+        Evaluator::new().eval_file(&main)
+    };
+    let json = eval_main(
+        "class U { x: lib.P; y: lib.Pos = 3 }\n\
+         u = new U {}\n\
+         v = new U { x { n = 4 } }\n\
+         a = -1 is lib.Pos\n\
+         b = 5 is lib.Pos\n",
+    )
+    .unwrap()
+    .to_json();
+    assert_eq!(json["a"], false);
+    assert_eq!(json["b"], true);
+    assert_eq!(json["u"]["x"], serde_json::json!({"n": 1}));
+    assert_eq!(json["v"]["x"], serde_json::json!({"n": 4}));
+    assert!(eval_main("c = (-1 as lib.Pos)\n").is_err());
+    assert!(eval_main("class U { y: lib.Pos }\nv = new U { y = -4 }\n").is_err());
+    assert!(eval_main("class U { x: lib.P }\nv = new U { x { n = -4 } }\n").is_err());
+}
+
+#[test]
+fn imported_alias_of_a_class_the_declaring_module_imports_keeps_its_default() {
+    // Verified against pkl 0.32.2: `lib.T` names `dep.Item`, which only `lib`
+    // imports, and a property of that type still defaults to an `Item`.
+    let temp = TestTempDir::new("pklr_test_imported_alias_of_dep_class");
+    let dir = temp.path();
+    std::fs::write(dir.join("dep.pkl"), "class Item { n: Int = 1 }\n").unwrap();
+    std::fs::write(
+        dir.join("lib.pkl"),
+        "import \"dep.pkl\"\ntypealias T = dep.Item\n",
+    )
+    .unwrap();
+    let main = dir.join("main.pkl");
+    std::fs::write(
+        &main,
+        "import \"lib.pkl\"\nclass U { x: lib.T }\nu = new U {}\n",
+    )
+    .unwrap();
+    let json = Evaluator::new().eval_file(&main).unwrap().to_json();
+    assert_eq!(json["u"]["x"], serde_json::json!({"n": 1}));
+}
+
+#[test]
+fn re_exported_imported_alias_keeps_its_class_default() {
+    // Verified against pkl 0.32.2: `a.M` names `b.Q`, which only `a` imports,
+    // through any number of re-exports and a nullable wrapper.
+    let temp = TestTempDir::new("pklr_test_re_exported_alias_default");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("c.pkl"),
+        "class Item { n = 1 }\ntypealias R = Item\ntypealias Q = R\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("b.pkl"), "import \"c.pkl\"\ntypealias P = c.Q\n").unwrap();
+    std::fs::write(dir.join("a.pkl"), "import \"b.pkl\"\ntypealias M = b.P?\n").unwrap();
+    let main = dir.join("main.pkl");
+    std::fs::write(
+        &main,
+        "import \"a.pkl\"\n\
+         class U { x: a.M; y: a.M? }\n\
+         u = new U { x {} }\n\
+         w = new U {}\n\
+         z = new U { x { n = 5 } }\n",
+    )
+    .unwrap();
+    let json = Evaluator::new().eval_file(&main).unwrap().to_json();
+    assert_eq!(json["u"]["x"], serde_json::json!({"n": 1}));
+    assert!(
+        json["w"]["x"].is_null() && json["w"]["y"].is_null(),
+        "{}",
+        json["w"]
+    );
+    assert_eq!(json["z"]["x"], serde_json::json!({"n": 5}));
+}
+
+#[test]
+fn cyclic_local_aliases_are_an_error_not_a_crash() {
+    // pkl 0.32.2 rejects these with "Type alias definitions must not be
+    // cyclic."; amending through them must fail rather than overflow the stack.
+    eval_fails(
+        "local typealias A = B\n\
+         local typealias B = A\n\
+         class U { a: A?(true) }\n\
+         x = new U { a {} }\n",
+    );
+}

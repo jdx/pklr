@@ -239,6 +239,28 @@ impl Evaluator {
         result
     }
 
+    /// Check `val` against an alias an imported module declares, as that
+    /// module's own scope reads it: its constraint calls the module's
+    /// functions and names its constants.
+    fn check_imported_alias(
+        &mut self,
+        val: &Value,
+        name: &str,
+        scope: &Scope,
+        depth: usize,
+        resolving: &mut Vec<String>,
+    ) -> Result<Option<bool>> {
+        if !name.contains('.') || scope.get_type_alias(name).is_none() {
+            return Ok(None);
+        }
+        let Some((tail, declaring)) = self.imported_alias_scope(scope, name) else {
+            return Ok(None);
+        };
+        let ty = crate::parser::TypeExpr::Named(tail);
+        self.eval_type_check_in(val, &ty, &declaring, depth + 1, resolving)
+            .map(Some)
+    }
+
     pub(super) fn eval_type_check_in(
         &mut self,
         val: &Value,
@@ -257,6 +279,11 @@ impl Evaluator {
             TypeExpr::Named(name) => {
                 if let Some(expected) = string_literal_type_value(name) {
                     return Ok(matches!(val, Value::String(actual) if &**actual == expected));
+                }
+                if let Some(accepted) =
+                    self.check_imported_alias(val, name, scope, depth, resolving)?
+                {
+                    return Ok(accepted);
                 }
                 // Check if name is a type alias; if so, resolve to the aliased type
                 if let Some(resolved) = scope.get_type_alias(name) {
@@ -279,6 +306,10 @@ impl Evaluator {
                     .unwrap_or(base);
                 let base_matches = if base.ends_with('?') && is_null_value(val) {
                     true
+                } else if let Some(accepted) =
+                    self.check_imported_alias(val, class_name, scope, depth, resolving)?
+                {
+                    accepted
                 } else if let Some(resolved) = scope.get_type_alias(class_name) {
                     let resolved = resolved.clone();
                     self.eval_alias_check(val, class_name, &resolved, scope, depth, resolving)?
@@ -312,6 +343,11 @@ impl Evaluator {
                 Ok(has_uncheckable_variant)
             }
             TypeExpr::Generic(name, _) => {
+                if let Some(accepted) =
+                    self.check_imported_alias(val, name, scope, depth, resolving)?
+                {
+                    return Ok(accepted);
+                }
                 if let Some(resolved) = scope.get_type_alias(name) {
                     let resolved = resolved.clone();
                     return self.eval_alias_check(val, name, &resolved, scope, depth, resolving);

@@ -39,12 +39,12 @@ impl Evaluator {
         let Some(inherited) = self.module_scopes.get(path) else {
             return;
         };
-        for (name, value) in &inherited.values {
+        for (name, value) in inherited.values.iter() {
             if &**name != "this" && &**name != "module" {
                 scope.set_name(name.clone(), value.clone());
             }
         }
-        for (name, ty) in &inherited.type_aliases {
+        for (name, ty) in inherited.type_aliases.iter() {
             scope.set_type_alias(name.clone(), ty.clone());
         }
     }
@@ -117,31 +117,72 @@ impl Evaluator {
             if aliases.contains_key(name) || members.is_some_and(|m| m.contains_key(name)) {
                 return true;
             }
-            let is_class = matches!(
-                snapshot.values.get(name),
-                Some(Value::Object(_, Some(source))) if source.kind == ObjectKind::Class
-            );
-            if is_class {
-                classes.borrow_mut().push(name.to_string());
+            let found = snapshot
+                .values
+                .get(name)
+                .or_else(|| dotted_snapshot_value(&snapshot.values, name));
+            match found {
+                Some(class @ Value::Object(_, Some(source)))
+                    if source.kind == ObjectKind::Class =>
+                {
+                    classes.borrow_mut().push((name.to_string(), class.clone()));
+                    true
+                }
+                _ => false,
             }
-            is_class
         };
         let qualified: Vec<_> = aliases
             .iter()
             .filter(|(name, _)| !name.contains('.'))
             .map(|(name, ty)| (name, qualify_alias_body(ty, alias, &declared)))
             .collect();
-        let bound: Vec<_> = classes
-            .into_inner()
-            .into_iter()
-            .filter_map(|name| Some((name.clone(), snapshot.values.get(name.as_str())?.clone())))
-            .collect();
+        let bound = classes.into_inner();
         for (name, ty) in qualified {
             scope.set_type_alias(format!("{alias}.{name}"), ty);
         }
         for (name, class) in bound {
             scope.declare(format!("{alias}.{name}"), class);
         }
+        // Where the aliases were written: a type check resolves them there.
+        let origin = if let Some(url) = path.to_str().filter(|path| path.contains("://")) {
+            self.alias_origins
+                .insert(canonical_remote_module_identity(url), key.clone());
+            url.to_string()
+        } else {
+            self.module_type_namespace(path)
+        };
+        self.alias_origins.insert(origin, key);
+    }
+
+    /// The scope a module imported as `alias` evaluates its own types in.
+    #[cold]
+    pub(super) fn imported_alias_scope(
+        &mut self,
+        scope: &Scope,
+        name: &str,
+    ) -> Option<(String, Scope)> {
+        let (alias, tail) = name.split_once('.')?;
+        let key = self
+            .alias_origins
+            .get(scope.module_identity(alias)?)?
+            .clone();
+        if !self.foreign_scopes.contains_key(&key) {
+            let snapshot = self.module_scopes.get(&key)?;
+            let declaring = Scope {
+                vars: Arc::clone(&snapshot.values),
+                type_aliases: Arc::clone(&snapshot.type_aliases),
+                module_identities: Arc::new(
+                    snapshot
+                        .module_identities
+                        .iter()
+                        .map(|(name, identity)| (nm(name), identity.clone()))
+                        .collect(),
+                ),
+                ..Scope::default()
+            };
+            self.foreign_scopes.insert(key.clone(), declaring);
+        }
+        Some((tail.to_string(), self.foreign_scopes.get(&key)?.clone()))
     }
 
     pub(super) fn inherited_late_properties(&self, path: &Path) -> Vec<Arc<Property>> {
@@ -705,11 +746,12 @@ impl Evaluator {
             };
             effective_late_properties.insert(prop.name.clone(), prop);
         }
+        self.foreign_scopes.remove(path);
         self.module_scopes.insert(
             path.to_path_buf(),
             ModuleScopeSnapshot {
-                values: scope.flatten(),
-                type_aliases: scope.flatten_type_aliases(),
+                values: Arc::new(scope.flatten()),
+                type_aliases: Arc::new(scope.flatten_type_aliases()),
                 module_identities: scope.flatten_module_identities(),
                 late_properties: effective_late_properties.into_values().collect(),
             },
@@ -1998,6 +2040,22 @@ fn alias_use<'a>(
         Some(ImportUse::Fields(fields)) => Some(fields),
         _ => None,
     }
+}
+
+/// A member `name` of a module's scope, which may be dotted (`dep.Item`: a
+/// member of an import).
+#[inline(never)]
+fn dotted_snapshot_value<'a>(values: &'a ScopeMap, name: &str) -> Option<&'a Value> {
+    let (root, rest) = name.split_once('.')?;
+    let mut parts = rest.split('.');
+    let mut value = values.get(root)?;
+    for part in parts {
+        let Value::Object(members, _) = value else {
+            return None;
+        };
+        value = members.get(part)?;
+    }
+    Some(value)
 }
 
 pub(super) fn check_module_annotations(module: &Module, scope: &Scope) -> Result<()> {
