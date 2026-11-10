@@ -39,13 +39,109 @@ impl Evaluator {
         let Some(inherited) = self.module_scopes.get(path) else {
             return;
         };
-        for (name, value) in &inherited.values {
+        for (name, value) in inherited.values.iter() {
             if &**name != "this" && &**name != "module" {
                 scope.set_name(name.clone(), value.clone());
             }
         }
-        for (name, ty) in &inherited.type_aliases {
+        for (name, ty) in inherited.type_aliases.iter() {
             scope.set_type_alias(name.clone(), ty.clone());
+        }
+    }
+
+    /// Make the type aliases the module imported as `alias` declares
+    /// available as `alias.Name`. Each is written for the importer: names the
+    /// module declares in its body become `alias.Name` too, so the alias
+    /// resolves from here to what it meant there.
+    pub(super) fn bind_import_type_aliases(
+        &mut self,
+        scope: &mut Scope,
+        alias: &str,
+        path: &Path,
+        imported: &Value,
+        used: Option<&HashSet<Name>>,
+    ) {
+        // The common case: the importer's key is the module's own.
+        let key = if self.module_scopes.contains_key(path) {
+            path.to_path_buf()
+        } else {
+            self.canonicalize_io(path)
+                .ok()
+                .filter(|key| self.module_scopes.contains_key(key))
+                .unwrap_or_else(|| path.to_path_buf())
+        };
+        let Some(snapshot) = self.module_scopes.get(&key) else {
+            return;
+        };
+        let all_aliases = &snapshot.type_aliases;
+        if all_aliases.is_empty() {
+            return;
+        }
+        // When the importer reads only some fields of the module, bind the
+        // aliases it names, and those their bodies name in turn. Binding the
+        // rest only grows every scope that captures this one.
+        let selected: Option<TypeAliasMap> = used.map(|used| {
+            let mut chosen = TypeAliasMap::default();
+            for field in used {
+                let head = field.split('.').next().unwrap_or(field);
+                if let Some((name, ty)) = all_aliases.get_key_value(head) {
+                    chosen.insert(name.clone(), ty.clone());
+                }
+            }
+            let mut grown = !chosen.is_empty();
+            while grown {
+                grown = false;
+                for (name, ty) in all_aliases.iter() {
+                    if !chosen.contains_key(name)
+                        && chosen.values().any(|body| type_mentions(body, name))
+                    {
+                        chosen.insert(name.clone(), ty.clone());
+                        grown = true;
+                    }
+                }
+            }
+            chosen
+        });
+        let aliases = selected.as_ref().unwrap_or(all_aliases);
+        if aliases.is_empty() {
+            return;
+        }
+        let members = match imported {
+            Value::Object(members, _) => Some(members),
+            _ => None,
+        };
+        // A class the module declares is not always among the members the
+        // importer asked for, so bind the ones an alias names as `alias.Name`.
+        let classes = std::cell::RefCell::new(Vec::new());
+        let declared = |name: &str| {
+            if aliases.contains_key(name) || members.is_some_and(|m| m.contains_key(name)) {
+                return true;
+            }
+            let found = snapshot
+                .values
+                .get(name)
+                .or_else(|| dotted_snapshot_value(&snapshot.values, name));
+            match found {
+                Some(class @ Value::Object(_, Some(source)))
+                    if source.kind == ObjectKind::Class =>
+                {
+                    classes.borrow_mut().push((name.to_string(), class.clone()));
+                    true
+                }
+                _ => false,
+            }
+        };
+        let qualified: Vec<_> = aliases
+            .iter()
+            .filter(|(name, _)| !name.contains('.'))
+            .map(|(name, ty)| (name, qualify_alias_body(ty, alias, &declared)))
+            .collect();
+        let bound = classes.into_inner();
+        for (name, ty) in qualified {
+            scope.set_type_alias(format!("{alias}#{name}"), ty);
+        }
+        for (name, class) in bound {
+            scope.declare(format!("{alias}.{name}"), class);
         }
     }
 
@@ -618,8 +714,8 @@ impl Evaluator {
         self.module_scopes.insert(
             path.to_path_buf(),
             ModuleScopeSnapshot {
-                values: scope.flatten(),
-                type_aliases: scope.flatten_type_aliases(),
+                values: Arc::new(scope.flatten()),
+                type_aliases: Arc::new(scope.flatten_type_aliases()),
                 module_identities: scope.flatten_module_identities(),
                 late_properties: effective_late_properties.into_values().collect(),
             },
@@ -1712,6 +1808,13 @@ impl Evaluator {
                         requested,
                     )?
                 };
+                self.bind_import_type_aliases(
+                    scope,
+                    &alias,
+                    Path::new(uri),
+                    &imported_val,
+                    alias_use(module, evaluated_as_base, import_field_uses, &alias),
+                );
                 scope.declare(&alias, imported_val);
                 scope.set_module_identity(alias, canonical_remote_module_identity(uri));
                 continue;
@@ -1746,6 +1849,13 @@ impl Evaluator {
                             requested,
                         )?;
                         let identity = self.module_type_namespace(&local_path);
+                        self.bind_import_type_aliases(
+                            scope,
+                            &alias,
+                            &local_path,
+                            &imported_val,
+                            alias_use(module, evaluated_as_base, import_field_uses, &alias),
+                        );
                         scope.declare(&alias, imported_val);
                         scope.set_module_identity(alias, identity);
                         continue;
@@ -1777,6 +1887,13 @@ impl Evaluator {
                         requested,
                     )?
                 };
+                self.bind_import_type_aliases(
+                    scope,
+                    &alias,
+                    Path::new(&url),
+                    &imported_val,
+                    alias_use(module, evaluated_as_base, import_field_uses, &alias),
+                );
                 scope.declare(&alias, imported_val);
                 scope.set_module_identity(alias, url);
                 continue;
@@ -1833,6 +1950,13 @@ impl Evaluator {
                 let imported_val =
                     self.eval_file_with_requested_fields(&import_path, depth + 1, requested)?;
                 let identity = self.module_type_namespace(&import_path);
+                self.bind_import_type_aliases(
+                    scope,
+                    &alias,
+                    &import_path,
+                    &imported_val,
+                    alias_use(module, evaluated_as_base, import_field_uses, &alias),
+                );
                 scope.declare(&alias, imported_val);
                 scope.set_module_identity(alias, identity);
             }
@@ -1880,6 +2004,39 @@ pub(super) const STDLIB_NON_ANNOTATION_TYPES: &[&str] = &[
 
 /// Check that each annotation on a module property names an annotation
 /// class: a subclass of `Annotation`, not another class or a value.
+/// The fields of the import `alias` that `module` reads, when that is all that
+/// reads it. A module that amends, extends or is a base is read by code this
+/// analysis does not see, so it gets every alias.
+fn alias_use<'a>(
+    module: &Module,
+    evaluated_as_base: bool,
+    uses: &'a HashMap<String, ImportUse>,
+    alias: &str,
+) -> Option<&'a HashSet<Name>> {
+    if module.amends.is_some() || module.extends.is_some() || evaluated_as_base {
+        return None;
+    }
+    match uses.get(alias) {
+        Some(ImportUse::Fields(fields)) => Some(fields),
+        _ => None,
+    }
+}
+
+/// A member `name` of a module's scope, which may be dotted (`dep.Item`: a
+/// member of an import).
+#[inline(never)]
+fn dotted_snapshot_value<'a>(values: &'a ScopeMap, name: &str) -> Option<&'a Value> {
+    let (root, rest) = name.split_once('.')?;
+    let mut value = values.get(root)?;
+    for part in rest.split('.') {
+        let Value::Object(members, _) = value else {
+            return None;
+        };
+        value = members.get(part)?;
+    }
+    Some(value)
+}
+
 pub(super) fn check_module_annotations(module: &Module, scope: &Scope) -> Result<()> {
     let annotated = module
         .body

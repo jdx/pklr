@@ -5899,6 +5899,132 @@ fn amending_marked_nullable_alternative_starts_from_its_default_or_null() {
     );
 }
 
+// ============================================================
+// Constrained default union alternatives (`*T(constraint)|U`)
+// ============================================================
+
+const CONSTRAINED_DEFAULT_CLASS: &str = "class C { argv: *Listing<String>(!this.isEmpty)|Int }\n";
+
+#[test]
+fn constrained_default_alternative_rejects_implicit_default() {
+    let err = eval_fails(&format!("{CONSTRAINED_DEFAULT_CLASS}c = new C {{}}"));
+    assert!(err.contains("argv"), "{err}");
+    assert!(err.contains("*Listing<String>"), "{err}");
+}
+
+#[test]
+fn constrained_default_alternative_rejects_explicit_and_amended_empty() {
+    eval_fails(&format!(
+        "{CONSTRAINED_DEFAULT_CLASS}c = new C {{ argv = new Listing {{}} }}"
+    ));
+    eval_fails(&format!(
+        "{CONSTRAINED_DEFAULT_CLASS}c = new C {{ argv {{}} }}"
+    ));
+    eval_fails("x: *Listing<String>(!this.isEmpty)|Int = new Listing {}");
+}
+
+#[test]
+fn constrained_default_alternative_accepts_valid_values() {
+    let v = eval(&format!(
+        "{CONSTRAINED_DEFAULT_CLASS}c = new C {{ argv {{ \"x\" }} }}\nd = new C {{ argv = 3 }}"
+    ));
+    assert_eq!(v["c"]["argv"], serde_json::json!(["x"]));
+    assert_eq!(v["d"]["argv"], serde_json::json!(3));
+}
+
+#[test]
+fn constrained_default_primitive_alternative_checks_constraint() {
+    let class = "class C { n: *String(length > 2)|Int }\n";
+    let v = eval(&format!(
+        "{class}a = new C {{ n = \"abcd\" }}\nb = new C {{ n = 5 }}"
+    ));
+    assert_eq!(v["a"]["n"], "abcd");
+    assert_eq!(v["b"]["n"], 5);
+    eval_fails(&format!("{class}a = new C {{ n = \"ab\" }}"));
+}
+
+#[test]
+fn constrained_default_alternative_through_alias_checks_constraint() {
+    let alias = "typealias T = *Listing<String>(!this.isEmpty)|Int\nclass C { argv: T }\n";
+    eval_fails(&format!("{alias}c = new C {{}}"));
+    let v = eval(&format!("{alias}c = new C {{ argv {{ \"x\" }} }}"));
+    assert_eq!(v["c"]["argv"], serde_json::json!(["x"]));
+}
+
+#[test]
+fn constrained_default_alternative_through_imported_alias_checks_constraint() {
+    let temp = TestTempDir::new("pklr_test_constrained_default_alias");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("mod.pkl"),
+        "typealias T = *Listing<String>(!this.isEmpty)|Int\nclass C { argv: T }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("bad.pkl"),
+        "import \"mod.pkl\"\nc = new mod.C {}\n",
+    )
+    .unwrap();
+    let mut ev = Evaluator::new();
+    let err = ev.eval_file(&dir.join("bad.pkl")).unwrap_err().to_string();
+    assert!(err.contains("argv"), "{err}");
+}
+
+#[test]
+fn nullable_constrained_default_alternative_keeps_constraint() {
+    let class = "class C { n: *Int(this > 1)?|String }\n";
+    let v = eval(&format!("{class}a = new C {{}}\nb = new C {{ n = 5 }}"));
+    assert_eq!(v["b"]["n"], 5);
+    assert!(v["a"].get("n").is_none());
+    eval_fails(&format!("{class}a = new C {{ n = 1 }}"));
+}
+
+#[test]
+fn nullable_constrained_default_alternative_amends_its_own_default() {
+    // The property stays unset without an assignment, but a body amendment
+    // starts from the default alternative's value, as in pkl.
+    let class = "class C { xs: *Listing<String>(true)?|Int }\n";
+    let v = eval(&format!(
+        "{class}a = new C {{ xs {{}} }}\nb = new C {{ xs {{ \"x\" }} }}"
+    ));
+    assert_eq!(v["a"]["xs"], serde_json::json!([]));
+    assert_eq!(v["b"]["xs"], serde_json::json!(["x"]));
+    let v = eval(&format!("{class}c = new C {{ xs = 3 }}"));
+    assert_eq!(v["c"]["xs"], serde_json::json!(3));
+}
+
+#[test]
+fn default_constrained_generic_alternative_with_nullable_argument_keeps_constraint() {
+    // The `?` belongs to the generic argument, not to the alternative, so the
+    // default still applies and its constraint is checked on the implicit value.
+    let msg = eval_fails("class C { xs: *Listing<String?>(!isEmpty)|Int }\nc = new C {}");
+    assert!(msg.contains("xs"), "{msg}");
+    let class = "class C { xs: *Listing<String?>(true)|Int }\n";
+    let v = eval(&format!(
+        "{class}a = new C {{}}\nb = new C {{ xs {{ \"x\" null }} }}\nc = new C {{ xs = 3 }}"
+    ));
+    assert_eq!(v["a"]["xs"], serde_json::json!([]));
+    assert_eq!(v["b"]["xs"], serde_json::json!(["x", null]));
+    assert_eq!(v["c"]["xs"], serde_json::json!(3));
+    let v = eval("class C { m: *Mapping<String, Int?>(true)|Int }\na = new C {}");
+    assert_eq!(v["a"]["m"], serde_json::json!({}));
+}
+
+#[test]
+fn default_constrained_listing_alternative_amends_as_listing() {
+    // A body amendment of a `*Listing<...>(...)` default builds a listing,
+    // also when the property is read from an amended module.
+    let v = eval(
+        "class C { xs: *Listing<String>(true)|Int }\n\
+         a = new C {}\nb = new C { xs {} }\nc = new C { xs { \"x\" } }\n\
+         d: *Listing<String>(true)|Int = new {}",
+    );
+    assert_eq!(v["a"]["xs"], serde_json::json!([]));
+    assert_eq!(v["b"]["xs"], serde_json::json!([]));
+    assert_eq!(v["c"]["xs"], serde_json::json!(["x"]));
+    assert_eq!(v["d"], serde_json::json!([]));
+}
+
 // Amending a property whose default is an explicit `null` amends the `null`,
 // which makes a `Dynamic` that the declared type then checks (jdx/pklr#386).
 #[test]
@@ -6182,6 +6308,260 @@ fn element_only_dynamic_is_rejected_by_function_types() {
 }
 
 #[test]
+fn amending_a_property_whose_alias_has_a_nullable_default_starts_from_it() {
+    // Verified against pkl 0.32.2: the nullable `*` alternative leaves the
+    // property unset, but a body amendment still starts from its default,
+    // however many aliases lead to it.
+    let json = eval(
+        "class Item { n = 1; m = 5 }\n\
+         typealias A = *Item(true)?|Int\n\
+         typealias B = A\n\
+         typealias C = Item?\n\
+         typealias D = *Item?|Int\n\
+         typealias E = D\n\
+         typealias Star = *C|Int\n\
+         class U {\n  a: A\n  b: B\n  c: C\n  d: D\n  e: E\n  f: *Item(true)?|Int\n  g: Star\n  h: D?\n}\n\
+         x = new U { a { n = 2 } b { n = 2 } c { n = 2 } d { n = 2 } e { n = 2 } f { n = 2 } g { n = 2 } h { n = 2 } }\n\
+         y = new U {}\n",
+    );
+    for key in ["a", "b", "c", "d", "e", "f", "g", "h"] {
+        assert_eq!(json["x"][key], serde_json::json!({"n": 2, "m": 5}), "{key}");
+    }
+    // Nothing is amended, so every nullable default stays unset.
+    for key in ["a", "b", "d", "e", "f", "g"] {
+        assert!(json["y"].get(key).is_none(), "{key}: {}", json["y"]);
+    }
+    let listing = eval(
+        "typealias L = *Listing<String>(true)?|Int\nclass U { l: L }\nx = new U { l { \"1\" } }\n",
+    );
+    assert_eq!(listing["x"]["l"], serde_json::json!(["1"]));
+}
+
+#[test]
+fn amending_through_a_cyclic_alias_does_not_loop() {
+    let err = eval_fails(
+        "typealias A = B?\ntypealias B = A?\nclass U { a: A }\nx = new U { a { \"1\" } }\n",
+    );
+    assert!(!err.is_empty());
+}
+
+#[test]
+fn alias_nullable_default_resolves_in_the_declaring_module() {
+    // Verified against pkl 0.32.2.
+    let temp = TestTempDir::new("pklr_test_alias_nullable_default");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("lib.pkl"),
+        "class Item { n = 1 }\ntypealias MaybeItem = *Item(true)?|Int\n",
+    )
+    .unwrap();
+    let main = dir.join("main.pkl");
+    std::fs::write(
+        &main,
+        "import \"lib.pkl\"\nclass U { m: lib.MaybeItem }\nx = new U { m { n = 2 } }\n",
+    )
+    .unwrap();
+    let json = Evaluator::new().eval_file(&main).unwrap().to_json();
+    assert_eq!(json["x"]["m"], serde_json::json!({"n": 2}));
+}
+
+#[test]
+fn amending_a_property_typed_by_a_nullable_alias_starts_from_the_class() {
+    // Verified against pkl 0.32.2: looking through the alias's nullable
+    // wrapper, a constrained or parenthesized nullable alias still amends an
+    // `Item` instance rather than null.
+    let json = eval(
+        "class Item { n = 1; m = 5 }\n\
+         typealias A = Item?\n\
+         typealias B = A\n\
+         class U {\n  a: A?(true)\n  b: A\n  c: (A)?\n  d: B?(true)\n  e: A(true)\n  f: B\n}\n\
+         x = new U { a { n = 2 } b { n = 3 } c { n = 4 } d { n = 5 } e { n = 6 } f { n = 7 } }\n",
+    );
+    for (key, n) in [("a", 2), ("b", 3), ("c", 4), ("d", 5), ("e", 6), ("f", 7)] {
+        assert_eq!(json["x"][key], serde_json::json!({"n": n, "m": 5}), "{key}");
+    }
+}
+
+#[test]
+fn amending_through_a_qualified_imported_alias_starts_from_its_default() {
+    // Verified against pkl 0.32.2: `lib.MaybeItem` and an alias chain to it
+    // amend an `Item` instance, so `m` keeps its default.
+    let temp = TestTempDir::new("pklr_test_qualified_alias_default");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("lib.pkl"),
+        "class Item { n = 1; m = 5 }\n\
+         typealias MaybeItem = *Item?|Int\n\
+         typealias Chain = MaybeItem\n\
+         typealias Strs = Listing<String>\n\
+         typealias MaybeStrs = *Strs?|Int\n",
+    )
+    .unwrap();
+    let main = dir.join("main.pkl");
+    std::fs::write(
+        &main,
+        "import \"lib.pkl\"\n\
+         class U { a: lib.MaybeItem; b: lib.Chain; c: lib.MaybeStrs; d: lib.Strs? }\n\
+         x = new U { a { n = 2 } b { n = 3 } c {} d { \"1\" } }\n\
+         y = new U {}\n",
+    )
+    .unwrap();
+    let json = Evaluator::new().eval_file(&main).unwrap().to_json();
+    assert_eq!(json["x"]["a"], serde_json::json!({"n": 2, "m": 5}));
+    assert_eq!(json["x"]["b"], serde_json::json!({"n": 3, "m": 5}));
+    assert_eq!(json["x"]["c"], serde_json::json!([]));
+    assert_eq!(json["x"]["d"], serde_json::json!(["1"]));
+    assert!(json["y"].get("a").is_none(), "{}", json["y"]);
+}
+
+#[test]
+fn imported_alias_constraint_may_use_declaring_module_names() {
+    // Verified against pkl 0.32.2: a constraint naming a `const` function of
+    // the declaring module is valid, so importing the alias must not fail.
+    let temp = TestTempDir::new("pklr_test_qualified_alias_constraint");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("lib.pkl"),
+        "const function ok(n: Int): Boolean = n > 0\ntypealias Pos = Int(ok(this))\n",
+    )
+    .unwrap();
+    let main = dir.join("main.pkl");
+    std::fs::write(
+        &main,
+        "import \"lib.pkl\"\nclass U { a: lib.Pos }\nx = new U { a = 5 }\n",
+    )
+    .unwrap();
+    let json = Evaluator::new().eval_file(&main).unwrap().to_json();
+    assert_eq!(json["x"]["a"], 5);
+}
+
+#[test]
+fn amending_a_nullable_default_alias_of_a_generic_type_starts_from_it() {
+    // Verified against pkl 0.32.2: an alias to `Listing<String>` or
+    // `Mapping<String, Int>` amends from an empty collection, not an object.
+    let json = eval(
+        "typealias Strs = Listing<String>\n\
+         typealias M = Mapping<String, Int>\n\
+         typealias S1 = *Strs?|Int\n\
+         typealias S2 = *Listing<String>?|Int\n\
+         typealias S3 = *M?|Int\n\
+         class U { a: S1; b: S2; d: S3; e: Strs?; f: M? }\n\
+         x = new U { a {} b {} d {} e {} f {} }\n",
+    );
+    for key in ["a", "b", "e"] {
+        assert_eq!(json["x"][key], serde_json::json!([]), "{key}");
+    }
+    for key in ["d", "f"] {
+        assert_eq!(json["x"][key], serde_json::json!({}), "{key}");
+    }
+}
+
+#[test]
+fn imported_alias_keeps_its_constraint() {
+    // Verified against pkl 0.32.2: `-1 is lib.Pos` is false, and a value that
+    // breaks the constraint of an imported alias is rejected, whether it is
+    // cast, assigned to a typed property, or the object of a constrained
+    // default union alternative.
+    let temp = TestTempDir::new("pklr_test_imported_alias_constraint");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("lib.pkl"),
+        "class Item { n: Int = 1 }\n\
+         typealias P = *Item(n > 0) | String\n\
+         typealias Pos = Int(this > 0)\n",
+    )
+    .unwrap();
+    let eval_main = |body: &str| {
+        let main = dir.join("main.pkl");
+        std::fs::write(&main, format!("import \"lib.pkl\"\n{body}")).unwrap();
+        Evaluator::new().eval_file(&main)
+    };
+    let json = eval_main(
+        "class U { x: lib.P; y: lib.Pos = 3 }\n\
+         u = new U {}\n\
+         v = new U { x { n = 4 } }\n\
+         a = -1 is lib.Pos\n\
+         b = 5 is lib.Pos\n",
+    )
+    .unwrap()
+    .to_json();
+    assert_eq!(json["a"], false);
+    assert_eq!(json["b"], true);
+    assert_eq!(json["u"]["x"], serde_json::json!({"n": 1}));
+    assert_eq!(json["v"]["x"], serde_json::json!({"n": 4}));
+    assert!(eval_main("c = (-1 as lib.Pos)\n").is_err());
+    assert!(eval_main("class U { y: lib.Pos }\nv = new U { y = -4 }\n").is_err());
+    assert!(eval_main("class U { x: lib.P }\nv = new U { x { n = -4 } }\n").is_err());
+}
+
+#[test]
+fn imported_alias_of_a_class_the_declaring_module_imports_keeps_its_default() {
+    // Verified against pkl 0.32.2: `lib.T` names `dep.Item`, which only `lib`
+    // imports, and a property of that type still defaults to an `Item`.
+    let temp = TestTempDir::new("pklr_test_imported_alias_of_dep_class");
+    let dir = temp.path();
+    std::fs::write(dir.join("dep.pkl"), "class Item { n: Int = 1 }\n").unwrap();
+    std::fs::write(
+        dir.join("lib.pkl"),
+        "import \"dep.pkl\"\ntypealias T = dep.Item\n",
+    )
+    .unwrap();
+    let main = dir.join("main.pkl");
+    std::fs::write(
+        &main,
+        "import \"lib.pkl\"\nclass U { x: lib.T }\nu = new U {}\n",
+    )
+    .unwrap();
+    let json = Evaluator::new().eval_file(&main).unwrap().to_json();
+    assert_eq!(json["u"]["x"], serde_json::json!({"n": 1}));
+}
+
+#[test]
+fn re_exported_imported_alias_keeps_its_class_default() {
+    // Verified against pkl 0.32.2: `a.M` names `b.Q`, which only `a` imports,
+    // through any number of re-exports and a nullable wrapper.
+    let temp = TestTempDir::new("pklr_test_re_exported_alias_default");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("c.pkl"),
+        "class Item { n = 1 }\ntypealias R = Item\ntypealias Q = R\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("b.pkl"), "import \"c.pkl\"\ntypealias P = c.Q\n").unwrap();
+    std::fs::write(dir.join("a.pkl"), "import \"b.pkl\"\ntypealias M = b.P?\n").unwrap();
+    let main = dir.join("main.pkl");
+    std::fs::write(
+        &main,
+        "import \"a.pkl\"\n\
+         class U { x: a.M; y: a.M? }\n\
+         u = new U { x {} }\n\
+         w = new U {}\n\
+         z = new U { x { n = 5 } }\n",
+    )
+    .unwrap();
+    let json = Evaluator::new().eval_file(&main).unwrap().to_json();
+    assert_eq!(json["u"]["x"], serde_json::json!({"n": 1}));
+    assert!(
+        json["w"]["x"].is_null() && json["w"]["y"].is_null(),
+        "{}",
+        json["w"]
+    );
+    assert_eq!(json["z"]["x"], serde_json::json!({"n": 5}));
+}
+
+#[test]
+fn cyclic_local_aliases_are_an_error_not_a_crash() {
+    // pkl 0.32.2 rejects these with "Type alias definitions must not be
+    // cyclic."; amending through them must fail rather than overflow the stack.
+    eval_fails(
+        "local typealias A = B\n\
+         local typealias B = A\n\
+         class U { a: A?(true) }\n\
+         x = new U { a {} }\n",
+    );
+}
+
+#[test]
 fn union_amend_follows_a_long_alias_chain_to_dynamic() {
     // A chain longer than any fixed step limit still ends at `Dynamic`, which
     // the null default of `argv` satisfies once the body has run.
@@ -6363,4 +6743,69 @@ fn union_amend_still_accepts_a_dynamic_for_the_builtin_names_unshadowed() {
         let src = format!("class C {{ argv: ({name}|Int)? }}\nc = new C {{ argv {{ x = 1 }} }}\n");
         assert_eq!(eval(&src)["c"]["argv"]["x"], serde_json::json!(1));
     }
+}
+
+#[test]
+fn constrained_default_of_a_type_with_no_default_leaves_the_property_unset() {
+    // Verified against pkl 0.32.2: `*IntSeq(c)|String` has no default, as bare
+    // `IntSeq` has none, while `*Map<K, V>(c)|String` defaults to an empty
+    // map and a class named `IntSeq` keeps its own default.
+    let json = eval("class C { x: *Map<String, Int>(true)|String }\nc = new C {}\n");
+    assert_eq!(json["c"]["x"], serde_json::json!({}));
+    let json = eval("class IntSeq { n = 1 }\nclass C { x: *IntSeq(true)|String }\nc = new C {}\n");
+    assert_eq!(json["c"]["x"], serde_json::json!({"n": 1}));
+    let error = eval_fails("class C { x: *IntSeq(true)|String }\nc = new C {}\nd = c.x\n");
+    assert!(error.contains("x"), "{error}");
+}
+
+#[test]
+fn amending_through_a_long_alias_chain_to_a_nullable_class_starts_from_it() {
+    // Verified against pkl 0.32.2: any number of aliases (`A0 = A1`, ...) may
+    // lead to `Item?`, and the property amends from an `Item`.
+    let mut src = String::from("class Item { n = 1 }\n");
+    for i in 0..40 {
+        src.push_str(&format!("typealias A{i} = A{}\n", i + 1));
+    }
+    src.push_str("typealias A40 = Item?\nclass C { x: A0 }\nc = new C { x { n = 2 } }\n");
+    let json = eval(&src);
+    assert_eq!(json["c"]["x"], serde_json::json!({"n": 2}));
+}
+
+#[test]
+fn imported_nullable_default_alias_leaves_the_property_unset() {
+    // Verified against pkl 0.32.2: `lib.A` is `B?(true)` with `B = Item`, so
+    // its `*` alternative is nullable and the property stays unset, whether
+    // the alias is named plainly, nullable, or through another module.
+    let temp = TestTempDir::new("pklr_test_imported_nullable_default_alias");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("lib.pkl"),
+        "class Item { n = 1 }\n\
+         typealias B = Item\n\
+         typealias A = B?(true)\n\
+         typealias N = B?\n\
+         typealias X = A\n\
+         typealias Y = N\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("mid.pkl"),
+        "import \"lib.pkl\"\ntypealias M = lib.A\n",
+    )
+    .unwrap();
+    let main = dir.join("main.pkl");
+    std::fs::write(
+        &main,
+        "import \"lib.pkl\"\nimport \"mid.pkl\"\n\
+         class C { x: *lib.A|Int; y: *lib.N|Int; z: *mid.M|Int; w: *lib.A?|Int; v: *lib.X|Int; u: *lib.Y|Int }\n\
+         c = new C {}\n\
+         b = new lib.B {}\n\
+         whole = lib\n",
+    )
+    .unwrap();
+    let json = Evaluator::new().eval_file(&main).unwrap().to_json();
+    for key in ["x", "y", "z", "w", "v", "u"] {
+        assert!(json["c"][key].is_null(), "{key}: {}", json["c"]);
+    }
+    assert_eq!(json["b"], serde_json::json!({"n": 1}));
 }
