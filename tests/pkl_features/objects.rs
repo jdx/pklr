@@ -5344,3 +5344,82 @@ m: Mapping<String, R | Listing<Int>> = new {
     );
     assert_eq!(result["m"]["l"], serde_json::json!([1, 2]));
 }
+
+// ============================================================
+// Constrained default union alternatives (`*T(constraint)|U`)
+// ============================================================
+
+const CONSTRAINED_DEFAULT_CLASS: &str = "class C { argv: *Listing<String>(!this.isEmpty)|Int }\n";
+
+#[test]
+fn constrained_default_alternative_rejects_implicit_default() {
+    let err = eval_fails(&format!("{CONSTRAINED_DEFAULT_CLASS}c = new C {{}}"));
+    assert!(err.contains("argv"), "{err}");
+    assert!(err.contains("*Listing<String>"), "{err}");
+}
+
+#[test]
+fn constrained_default_alternative_rejects_explicit_and_amended_empty() {
+    eval_fails(&format!(
+        "{CONSTRAINED_DEFAULT_CLASS}c = new C {{ argv = new Listing {{}} }}"
+    ));
+    eval_fails(&format!(
+        "{CONSTRAINED_DEFAULT_CLASS}c = new C {{ argv {{}} }}"
+    ));
+    eval_fails("x: *Listing<String>(!this.isEmpty)|Int = new Listing {}");
+}
+
+#[test]
+fn constrained_default_alternative_accepts_valid_values() {
+    let v = eval(&format!(
+        "{CONSTRAINED_DEFAULT_CLASS}c = new C {{ argv {{ \"x\" }} }}\nd = new C {{ argv = 3 }}"
+    ));
+    assert_eq!(v["c"]["argv"], serde_json::json!(["x"]));
+    assert_eq!(v["d"]["argv"], serde_json::json!(3));
+}
+
+#[test]
+fn constrained_default_primitive_alternative_checks_constraint() {
+    let class = "class C { n: *String(length > 2)|Int }\n";
+    let v = eval(&format!(
+        "{class}a = new C {{ n = \"abcd\" }}\nb = new C {{ n = 5 }}"
+    ));
+    assert_eq!(v["a"]["n"], "abcd");
+    assert_eq!(v["b"]["n"], 5);
+    eval_fails(&format!("{class}a = new C {{ n = \"ab\" }}"));
+}
+
+#[test]
+fn constrained_default_alternative_through_alias_checks_constraint() {
+    let alias = "typealias T = *Listing<String>(!this.isEmpty)|Int\nclass C { argv: T }\n";
+    eval_fails(&format!("{alias}c = new C {{}}"));
+    let v = eval(&format!("{alias}c = new C {{ argv {{ \"x\" }} }}"));
+    assert_eq!(v["c"]["argv"], serde_json::json!(["x"]));
+}
+
+#[test]
+fn constrained_default_alternative_through_imported_alias_checks_constraint() {
+    let temp = TestTempDir::new("pklr_test_constrained_default_alias");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("mod.pkl"),
+        "typealias T = *Listing<String>(!this.isEmpty)|Int\nclass C { argv: T }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("bad.pkl"),
+        "import \"mod.pkl\"\nc = new mod.C {}\n",
+    )
+    .unwrap();
+    let mut ev = Evaluator::new();
+    assert!(ev.eval_file(&dir.join("bad.pkl")).is_err());
+}
+
+#[test]
+fn nullable_constrained_default_alternative_keeps_constraint() {
+    let class = "class C { n: *Int(this > 1)?|String }\n";
+    let v = eval(&format!("{class}a = new C {{}}\nb = new C {{ n = 5 }}"));
+    assert_eq!(v["b"]["n"], 5);
+    assert!(v["a"].get("n").is_none());
+    eval_fails(&format!("{class}a = new C {{ n = 1 }}"));
+}

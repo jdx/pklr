@@ -106,7 +106,12 @@ impl Evaluator {
             }
             TypeExpr::Constrained(base, constraint) => {
                 // First check the base type
-                let class_name = base.trim_end_matches('?').split('<').next().unwrap_or(base);
+                let class_name = base
+                    .trim_start_matches('*')
+                    .trim_end_matches('?')
+                    .split('<')
+                    .next()
+                    .unwrap_or(base);
                 let base_matches = if base.ends_with('?') && is_null_value(val) {
                     true
                 } else if let Some(resolved) = scope.get_type_alias(class_name) {

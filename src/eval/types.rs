@@ -388,7 +388,19 @@ pub(super) fn type_default_value(ty: &crate::parser::TypeExpr, scope: &Scope) ->
         TypeExpr::Union(variants) => variants
             .iter()
             .find(|ty| is_default_type(ty))
+            // A nullable default alternative leaves the property unset, as
+            // `*Int?` does.
+            .filter(|ty| !is_nullable_default(ty))
             .and_then(|ty| type_default_value(ty, scope)),
+    }
+}
+
+fn is_nullable_default(ty: &crate::parser::TypeExpr) -> bool {
+    use crate::parser::TypeExpr;
+    match ty {
+        TypeExpr::Nullable(_) => true,
+        TypeExpr::Constrained(base, _) => base.ends_with('?'),
+        _ => false,
     }
 }
 
@@ -829,7 +841,12 @@ pub(super) fn string_literal_type_value(name: &str) -> Option<&str> {
 }
 
 pub(super) fn is_default_type(ty: &crate::parser::TypeExpr) -> bool {
-    matches!(ty, crate::parser::TypeExpr::Named(name) if name.starts_with('*'))
+    use crate::parser::TypeExpr;
+    match ty {
+        TypeExpr::Named(name) | TypeExpr::Constrained(name, _) => name.starts_with('*'),
+        TypeExpr::Nullable(inner) => is_default_type(inner),
+        _ => false,
+    }
 }
 
 /// Format a TypeExpr for user-facing error messages.

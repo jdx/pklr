@@ -196,6 +196,18 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// Mark a union alternative as the default. A constrained alternative keeps
+/// its predicate: the marker goes on the base name, as for a plain name.
 pub(super) fn mark_default_type(ty: TypeExpr) -> TypeExpr {
-    TypeExpr::Named(format!("*{}", type_expr_runtime_name(&ty)))
+    match ty {
+        TypeExpr::Constrained(base, constraint) => {
+            TypeExpr::Constrained(format!("*{base}"), constraint)
+        }
+        TypeExpr::Nullable(inner)
+            if matches!(*inner, TypeExpr::Constrained(..) | TypeExpr::Nullable(_)) =>
+        {
+            TypeExpr::Nullable(Box::new(mark_default_type(*inner)))
+        }
+        ty => TypeExpr::Named(format!("*{}", type_expr_runtime_name(&ty))),
+    }
 }
