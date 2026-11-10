@@ -598,3 +598,49 @@ b = (d) { x = 10; w = y }
     assert_eq!(json["a"], serde_json::json!({"x": 1, "y": 2, "z": 3}));
     assert_eq!(json["b"], serde_json::json!({"x": 10, "y": 2, "w": 2}));
 }
+
+// Every expectation below was compared with `pkl eval` 0.32.2. A string key
+// becomes a property of `toDynamic()`'s result, whatever its spelling; any
+// other key becomes an entry.
+#[test]
+fn to_dynamic_keeps_non_string_keys_as_entries() {
+    let json = eval(
+        r#"
+local m1 = Map(1, "a").toDynamic()
+local m2 = Map("a", 1, "a b", 2, "1x", 3, "ok_1", 4, 5, 6).toDynamic()
+pcf1 = new PcfRenderer {}.renderValue(m1)
+pcf2 = new PcfRenderer {}.renderValue(m2)
+pcf3 = new PcfRenderer {}.renderValue((m2) { [5] = 60; a = 9 })
+yaml1 = new YamlRenderer {}.renderValue(m1)
+yaml2 = new YamlRenderer {}.renderValue(m2)
+byKey = m1[1]
+amended = (m1) { [1] = "b" }[1]
+size = (m2) { [5] = 60 }.toMap().length
+"#,
+    );
+    assert_eq!(json["pcf1"], "{\n  [1] = \"a\"\n}");
+    assert_eq!(
+        json["pcf2"],
+        "{\n  a = 1\n  `a b` = 2\n  `1x` = 3\n  ok_1 = 4\n  [5] = 6\n}"
+    );
+    assert_eq!(
+        json["pcf3"],
+        "{\n  a = 9\n  `a b` = 2\n  `1x` = 3\n  ok_1 = 4\n  [5] = 60\n}"
+    );
+    assert_eq!(json["yaml1"], "1: a");
+    assert_eq!(json["yaml2"], "a: 1\na b: 2\n1x: 3\nok_1: 4\n5: 6");
+    assert_eq!(json["byKey"], "a");
+    assert_eq!(json["amended"], "b");
+    assert_eq!(json["size"], 5);
+}
+
+#[test]
+fn to_dynamic_members_read_unqualified_beside_entries() {
+    let json = eval(
+        r#"
+local d = Map("a", 1, "ok_1", 4, 5, 6).toDynamic()
+z = (d) { z = a + ok_1 }.z
+"#,
+    );
+    assert_eq!(json["z"], 5);
+}

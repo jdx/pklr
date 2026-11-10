@@ -71,6 +71,7 @@ pub(super) fn typed_object(type_name: &str, members: ObjectMap) -> Value {
 /// rebuilds the object from its body, keeps them and can replace any of them.
 pub(super) fn dynamic_object(members: ObjectMap) -> Value {
     const MEMBERS: &str = "\0pklr:members";
+    const KEYS: &str = "\0pklr:member-keys";
     let Value::Object(_, Some(source)) = typed_object("Dynamic", ObjectMap::default()) else {
         unreachable!("typed_object builds an object with a source")
     };
@@ -79,28 +80,50 @@ pub(super) fn dynamic_object(members: ObjectMap) -> Value {
     source.kind = ObjectKind::Dynamic;
     let mut scope = Scope::default();
     scope.set(MEMBERS, Value::Object(Arc::new(members.clone()), None));
-    // One property per member, read from the bound variable: an amendment
-    // replaces a member in place, and its body reads the members by name.
+    // A string key is a property, read from the bound variable: an amendment
+    // replaces it in place, and its body reads it by name. Any other key is an
+    // entry (`Map(1, "a").toDynamic()` is `[1] = "a"`), keyed by its value.
+    let keys = members
+        .keys()
+        .map(|key| crate::value::mapping_storage_value(key))
+        .collect::<Vec<_>>();
+    scope.set(KEYS, Value::List(keys.clone().into()));
+    let member = |name: &Arc<str>| {
+        Expr::Index(
+            Box::new(Expr::Ident(MEMBERS.into())),
+            Box::new(Expr::String(name.clone())),
+        )
+    };
     source.entries = members
         .keys()
-        .map(|name| {
-            Entry::Property(Arc::new(Property {
+        .enumerate()
+        .map(|(i, name)| match &keys[i] {
+            Value::String(_) => Entry::Property(Arc::new(Property {
                 annotations: Vec::new(),
                 modifiers: Vec::new(),
                 name: name.clone(),
                 type_ann: None,
-                value: Some(Expr::Index(
-                    Box::new(Expr::Ident(MEMBERS.into())),
-                    Box::new(Expr::String(name.clone())),
-                )),
+                value: Some(member(name)),
                 body: None,
                 is_method: false,
-            }))
+            })),
+            _ => Entry::DynProperty(
+                Expr::Index(
+                    Box::new(Expr::Ident(KEYS.into())),
+                    Box::new(Expr::Int(i as i64)),
+                ),
+                member(name),
+            ),
         })
         .collect::<Vec<_>>()
         .into();
     source.captured = SourceScope::lazy(&scope, Vec::new(), Vec::new());
-    source.evaluated_properties = members.keys().cloned().collect();
+    source.evaluated_properties = members
+        .keys()
+        .zip(&keys)
+        .filter(|(_, key)| matches!(key, Value::String(_)))
+        .map(|(name, _)| name.clone())
+        .collect();
     Value::Object(Arc::new(members), Some(Arc::new(source)))
 }
 
