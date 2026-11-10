@@ -39,19 +39,30 @@ impl Evaluator {
         scope: &Scope,
     ) -> Option<String> {
         unresolved_type_error(ty, scope, &mut |identity, name| {
-            self.module_declares_alias(identity, name)
+            self.module_alias(identity, name)
         })
     }
 
-    /// Whether the module with the given identity (the canonical path or URL
-    /// an import records) declares the type alias `name`. A module's aliases
-    /// are no members of its value, so they are found in its final scope.
-    fn module_declares_alias(&mut self, identity: &str, name: &str) -> bool {
-        self.module_scope_key(identity).is_some_and(|key| {
-            self.module_scopes
-                .get(&key)
-                .is_some_and(|snapshot| snapshot.type_aliases.contains_key(name))
-        })
+    /// The type alias `name` that the module with the given identity (the
+    /// canonical path or URL an import records) declares, with the scope its
+    /// definition resolves in. A module's aliases are no members of its value,
+    /// so they are found in its final scope.
+    fn module_alias(
+        &mut self,
+        identity: &str,
+        name: &str,
+    ) -> Option<(crate::parser::TypeExpr, Scope)> {
+        let key = self.module_scope_key(identity)?;
+        let mut module_scope = Scope::default();
+        self.layer_evaluated_module_scope(&key, &mut module_scope);
+        // The module's own imports resolve the aliases it names.
+        if let Some(snapshot) = self.module_scopes.get(&key) {
+            for (import, identity) in &snapshot.module_identities {
+                module_scope.set_module_identity(import.clone(), identity.clone());
+            }
+        }
+        let alias = module_scope.get_type_alias(name)?.clone();
+        Some((alias, module_scope))
     }
 
     /// The key of the final scope of the module with the given identity.

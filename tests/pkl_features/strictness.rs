@@ -318,6 +318,50 @@ fn an_imported_module_names_its_type_aliases() {
 }
 
 #[test]
+fn the_names_in_an_imported_type_alias_are_checked() {
+    let temp = TestTempDir::new("pklr_test_is_imported_alias_names");
+    let write = |name: &str, src: &str| std::fs::write(temp.path().join(name), src).unwrap();
+    write(
+        "m.pkl",
+        "typealias A = Int|Foo\ntypealias B = A\ntypealias G<T> = List<T|Foo>\n\
+         typealias C = Int(this > 0)|Bar\ntypealias Ok = Int|String\n",
+    );
+    write(
+        "n.pkl",
+        "import \"m.pkl\"\ntypealias D = m.B\ntypealias E = m.Ok\n",
+    );
+    let eval_main = |body: &str| {
+        let path = temp.path().join("main.pkl");
+        std::fs::write(
+            &path,
+            format!("import \"m.pkl\"\nimport \"n.pkl\"\n{body}\n"),
+        )
+        .unwrap();
+        pklr::eval_to_json(&path)
+    };
+    for (body, name) in [
+        ("r = 1 is m.A", "Foo"),
+        ("r = \"x\" is m.A", "Foo"),
+        ("r = 1 is m.B", "Foo"),
+        ("r = 1 is m.G<Int>", "Foo"),
+        ("r = 1 is m.C", "Bar"),
+        ("r = 1 is n.D", "Foo"),
+        ("r = null is m.A?", "Foo"),
+        ("r = 1 as m.A", "Foo"),
+    ] {
+        let error = eval_main(body).unwrap_err().to_string();
+        assert!(
+            error.contains(&format!("Cannot find type `{name}`.")),
+            "{body}: {error}"
+        );
+    }
+    assert_eq!(
+        eval_main("b = 1 is m.Ok").unwrap(),
+        serde_json::json!({"b": true})
+    );
+}
+
+#[test]
 fn to_dynamic_works_on_a_module_that_carries_a_source() {
     let temp = TestTempDir::new("pklr_test_to_dynamic_module");
     std::fs::write(temp.path().join("m.pkl"), "@Deprecated\nold = 1\nx = 2\n").unwrap();

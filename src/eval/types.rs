@@ -1471,28 +1471,36 @@ const STDLIB_TYPE_NAMES: &[&str] = &[
 /// resolve (one inherited from an amended module, say) is reported only when
 /// it is a plain or dotted identifier that nothing in `scope` provides.
 ///
-/// The names inside a type alias are checked too. `module_has_alias` tells
-/// whether the imported module with the given identity declares a type alias
-/// (aliases are not members of the module's value).
+/// The names inside a type alias are checked too, in the scope that declares
+/// it. `module_alias` returns the type alias of the imported module with the
+/// given identity, and the module's scope (aliases are not members of the
+/// module's value).
 pub(super) fn unresolved_type_error(
     ty: &crate::parser::TypeExpr,
     scope: &Scope,
-    module_has_alias: &mut dyn FnMut(&str, &str) -> bool,
+    module_alias: &mut ModuleAliasLookup<'_>,
 ) -> Option<String> {
+    let mut expanding = std::collections::HashSet::new();
     TypeResolver {
         scope,
-        module_has_alias,
-        expanding: std::collections::HashSet::new(),
+        scope_id: "",
+        module_alias,
+        expanding: &mut expanding,
     }
     .check(ty)
 }
 
+pub(super) type ModuleAliasLookup<'a> =
+    dyn FnMut(&str, &str) -> Option<(crate::parser::TypeExpr, Scope)> + 'a;
+
 struct TypeResolver<'a> {
     scope: &'a Scope,
-    module_has_alias: &'a mut dyn FnMut(&str, &str) -> bool,
-    /// The aliases being expanded, so a recursive alias ends the walk. Every
-    /// alias is looked up in `scope`, so its name identifies it.
-    expanding: std::collections::HashSet<String>,
+    /// The identity of the module `scope` belongs to, empty for the root.
+    scope_id: &'a str,
+    module_alias: &'a mut ModuleAliasLookup<'a>,
+    /// The aliases being expanded, so a recursive alias ends the walk. Each is
+    /// keyed by its module identity and name.
+    expanding: &'a mut std::collections::HashSet<String>,
 }
 
 impl TypeResolver<'_> {
@@ -1549,15 +1557,36 @@ impl TypeResolver<'_> {
             resolve_dotted(scope, name),
             Some(Value::Object(_, Some(source))) if source.kind == ObjectKind::Class
         );
-        let names_alias = if enclosing {
-            scope.get_type_alias(member).is_some()
-        } else {
-            scope
-                .module_identity(module)
-                .is_some_and(|identity| (self.module_has_alias)(identity, member))
+        if names_class {
+            return None;
+        }
+        if enclosing {
+            return if scope.get_type_alias(member).is_some() {
+                self.check_bare_name(member)
+            } else {
+                Some(format!("Cannot find type `{member}` in module `{module}`."))
+            };
+        }
+        let imported = scope
+            .module_identity(module)
+            .and_then(|identity| (self.module_alias)(identity, member).map(|a| (identity, a)));
+        let Some((identity, (alias, module_scope))) = imported else {
+            return Some(format!("Cannot find type `{member}` in module `{module}`."));
         };
-        (!names_class && !names_alias)
-            .then(|| format!("Cannot find type `{member}` in module `{module}`."))
+        // Walk the body in the scope of the module that declares it.
+        let key = format!("{identity}\0{member}");
+        if !self.expanding.insert(key.clone()) {
+            return None;
+        }
+        let error = TypeResolver {
+            scope: &module_scope,
+            scope_id: identity,
+            module_alias: &mut *self.module_alias,
+            expanding: &mut *self.expanding,
+        }
+        .check(&alias);
+        self.expanding.remove(&key);
+        error
     }
 
     /// Whether `name`, taken literally, is a class or type alias in scope.
@@ -1578,10 +1607,11 @@ impl TypeResolver<'_> {
             let mut opened = Vec::new();
             let mut current = name;
             let error = loop {
-                if !self.expanding.insert(current.to_string()) {
+                let key = format!("{}\0{current}", self.scope_id);
+                if !self.expanding.insert(key.clone()) {
                     break None;
                 }
-                opened.push(current);
+                opened.push(key);
                 let alias = scope.get_type_alias(current).expect("alias");
                 match alias {
                     crate::parser::TypeExpr::Named(next)
@@ -1592,8 +1622,8 @@ impl TypeResolver<'_> {
                     _ => break self.check(alias),
                 }
             };
-            for name in opened {
-                self.expanding.remove(name);
+            for key in opened {
+                self.expanding.remove(&key);
             }
             return error;
         }
