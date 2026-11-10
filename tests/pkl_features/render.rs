@@ -268,6 +268,24 @@ fn eval_to_json_keeps_nulls_when_renderer_sets_omit_false() {
 
 #[cfg(feature = "native-io")]
 #[test]
+fn eval_to_json_reads_the_evaluated_omit_setting() {
+    // A computed setting and an inherited renderer whose child flips `true` to
+    // `false` both keep nulls: the evaluated renderer decides, not the source.
+    let expected = serde_json::json!({"a": null, "b": 1});
+    let (_dir, path) = module_file(
+        "pklr_render_computed_omit_false",
+        "local keep = true\na = null\nb = 1\noutput { renderer = new JsonRenderer { omitNullProperties = !keep } }\n",
+    );
+    assert_eq!(pklr::eval_to_json(&path).unwrap(), expected);
+    let (_dir, path) = module_file(
+        "pklr_render_inherited_omit_false",
+        "local base = new JsonRenderer { omitNullProperties = true }\na = null\nb = 1\noutput { renderer = (base) { omitNullProperties = false } }\n",
+    );
+    assert_eq!(pklr::eval_to_json(&path).unwrap(), expected);
+}
+
+#[cfg(feature = "native-io")]
+#[test]
 fn output_renderer_defaults_omit_nulls_when_only_converters_are_set() {
     let (_dir, path) = module_file(
         "pklr_render_converter_omits_nulls",
