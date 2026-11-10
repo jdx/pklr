@@ -311,7 +311,7 @@ impl Evaluator {
         if let Value::List(items) = obj
             && items.kind() == ListKind::Dynamic
         {
-            return dynamic_elements_method(items, method, args);
+            return dynamic_elements_method(obj, items, method, args);
         }
         match (obj, method) {
             // String methods
@@ -695,6 +695,7 @@ pub(super) fn seed_builtins(scope: &mut Scope) {
 /// `Dynamic` has no members besides its elements, so `toMap()` is empty and
 /// `toList()` gives the elements.
 fn dynamic_elements_method(
+    this: &Value,
     items: &ListValue,
     method: &str,
     args: &[Value],
@@ -702,6 +703,7 @@ fn dynamic_elements_method(
     match method {
         "toList" => Ok(Some(Value::List(items.clone().with_kind(ListKind::List)))),
         "toMap" => Ok(Some(Value::Object(Arc::default(), None))),
+        "getClass" if args.is_empty() => stdlib::get_class(this).map(Some),
         "hasProperty" => {
             require_str_arg(args, 0, method)?;
             Ok(Some(Value::Bool(false)))
