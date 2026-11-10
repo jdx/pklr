@@ -42,14 +42,8 @@ impl Evaluator {
             // A listing whose element class the declaring class bound (the
             // type it names may not be visible here) builds its elements
             // from that class instead.
-            // Only when that class covers every level: a `Mapping` among them
-            // still needs its values inferred.
             let bound_class = scope.get(&listing_elem_class_binding(&prop.name)).is_some()
-                && owns_listing_bindings(scope, &prop.name, body)
-                && prop
-                    .type_ann
-                    .as_ref()
-                    .is_none_or(|ty| is_listing_chain(ty, scope));
+                && owns_listing_bindings(scope, &prop.name, body);
             let inferred = prop
                 .type_ann
                 .as_ref()
@@ -169,25 +163,24 @@ impl Evaluator {
                 // `x: Listing<T>` makes each `new { ... }` element a `T`. A
                 // listing the declaring class built already knows `T`, as does
                 // an amendment of a class's `Listing<T>?` property.
-                let elem_class = items
-                    .elem_class()
-                    .cloned()
-                    .or_else(|| {
-                        match scope
-                            .get(&listing_elem_class_binding(&prop.name))
-                            .filter(|_| owns_listing_bindings(scope, &prop.name, declared_body))
-                        {
-                            Some(class @ (Value::Object(..) | Value::List(_))) => {
-                                Some(Arc::new(class.clone()))
-                            }
-                            _ => None,
-                        }
-                    })
-                    .or_else(|| {
-                        prop.type_ann
-                            .as_ref()
-                            .and_then(|ty| self.declared_elem_class(ty, scope))
-                    });
+                // The class the declaring class bound is resolved where the type
+                // was declared, which an element class read from a default
+                // built in this scope (aliases here may shadow it) is not.
+                let elem_class = match scope
+                    .get(&listing_elem_class_binding(&prop.name))
+                    .filter(|_| owns_listing_bindings(scope, &prop.name, declared_body))
+                {
+                    Some(class @ (Value::Object(..) | Value::List(_))) => {
+                        Some(Arc::new(class.clone()))
+                    }
+                    _ => None,
+                }
+                .or_else(|| items.elem_class().cloned())
+                .or_else(|| {
+                    prop.type_ann
+                        .as_ref()
+                        .and_then(|ty| self.declared_elem_class(ty, scope))
+                });
                 items = items.with_elem_class(elem_class.clone());
                 let mut amendment_scope = scope.child();
                 amendment_scope.set("super", Value::List(items.clone()));

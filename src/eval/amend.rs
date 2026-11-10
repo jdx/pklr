@@ -181,7 +181,11 @@ impl Evaluator {
                 && let Some((class, declaring)) =
                     self.inherited_elem_class(base_source, ty, entry_scope.and_then(Option::as_ref))
             {
-                if let Some(class) = class {
+                // The class stands for the whole type only when it is
+                // `Listing`s down to a non-collection type, judged by the
+                // aliases where the type was declared; a `Mapping` among them
+                // needs its values inferred instead.
+                if let Some(class) = class.filter(|_| is_listing_chain(ty, &declaring)) {
                     amendment_scope
                         .values
                         .insert(listing_elem_class_binding(&prop.name).into(), class);

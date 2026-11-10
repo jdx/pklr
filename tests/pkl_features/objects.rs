@@ -7225,3 +7225,42 @@ fn nested_listing_amendment_still_infers_mapping_values_below_the_saved_class() 
     assert_eq!(json["cs"], serde_json::json!("d"));
     assert_eq!(json["bs"], serde_json::json!("d"));
 }
+
+#[test]
+fn listing_element_types_are_judged_where_the_property_was_declared() {
+    // Verified against pkl 0.32.2 with `a.pkl` declaring the classes and
+    // aliases and `main.pkl` an alias of its own named like a class of `a.pkl`.
+    let lib = "class E { x: Int = 1 }\n\
+         typealias M = Mapping<String, E>\n\
+         class H { xs: Listing<E>?; ls: Listing<Listing<E>>; ms: Listing<Listing<M>> }\n";
+    let main = "import \"a.pkl\" as A\n\
+         typealias E = Mapping<String, Int>\n\
+         r = new A.H {\n\
+           xs { new {} }\n\
+           ls { new { new {} } }\n\
+           ms { new { new { [\"k\"] { x = 4 } } } }\n\
+         }\n";
+    let json = eval_union_files(
+        "declaring_scope_chain",
+        &[("a.pkl", lib), ("main.pkl", main)],
+    )
+    .unwrap();
+    assert_eq!(json["r"]["xs"], serde_json::json!([{"x": 1}]));
+    assert_eq!(json["r"]["ls"], serde_json::json!([[{"x": 1}]]));
+    assert_eq!(json["r"]["ms"], serde_json::json!([[{"k": {"x": 4}}]]));
+}
+
+#[test]
+fn a_mapping_alias_of_the_declaring_module_is_inferred_below_a_listing() {
+    // Verified against pkl 0.32.2: the alias `M` is private to `lib.pkl`.
+    let lib = "typealias M = Mapping<String, Int>\nclass H { ys: Listing<Listing<M>> }\n";
+    let main = "import \"lib.pkl\" as L\n\
+         r = new L.H { ys { new { new { [\"k\"] = 4 } } } }\n\
+         isMapping = r.ys[0][0] is Mapping\n";
+    let json = eval_union_files(
+        "declaring_mapping_alias",
+        &[("lib.pkl", lib), ("main.pkl", main)],
+    )
+    .unwrap();
+    assert_eq!(json["isMapping"], serde_json::json!(true));
+}
