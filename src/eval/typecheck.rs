@@ -4,113 +4,202 @@ use super::*;
 use crate::parser::TypeExpr;
 
 impl Evaluator {
-    /// The type aliases a loaded module defines, by its identity (canonical
-    /// path or URL). Snapshots are keyed by the path the module was loaded
-    /// with, which need not be canonical.
-    fn module_type_aliases(&mut self, identity: &str) -> Option<TypeAliasMap> {
-        if let Some(snapshot) = self.module_scopes.get(Path::new(identity)) {
-            return Some(snapshot.type_aliases.clone());
+    /// The scope a loaded module's own names resolve in (its type aliases,
+    /// classes and imports), by its identity (canonical path or URL).
+    /// Snapshots are keyed by the path the module was loaded with, which need
+    /// not be canonical.
+    fn module_type_scope(&mut self, identity: &str) -> Option<Scope> {
+        let key = if self.module_scopes.contains_key(Path::new(identity)) {
+            PathBuf::from(identity)
+        } else {
+            let keys: Vec<PathBuf> = self.module_scopes.keys().cloned().collect();
+            keys.into_iter()
+                .find(|key| self.module_type_namespace(key) == identity)?
+        };
+        let snapshot = self.module_scopes.get(&key)?;
+        let mut scope = Scope {
+            type_namespace: Some(identity.to_string()),
+            ..Scope::default()
+        };
+        if !snapshot.values.is_empty() {
+            scope.vars = Arc::new(snapshot.values.clone());
         }
-        let keys: Vec<PathBuf> = self.module_scopes.keys().cloned().collect();
-        keys.into_iter().find_map(|key| {
-            let canonical = self.module_type_namespace(&key);
-            (canonical == identity)
-                .then(|| self.module_scopes.get(&key).map(|s| s.type_aliases.clone()))
-                .flatten()
-        })
+        for (name, ty) in &snapshot.type_aliases {
+            scope.set_type_alias(name.clone(), ty.clone());
+        }
+        for (name, identity) in &snapshot.module_identities {
+            scope.set_module_identity(name.clone(), identity.clone());
+        }
+        Some(scope)
+    }
+
+    /// The type a name stands for when it is a type alias, with the scope its
+    /// right-hand side resolves in: `None` for the scope it was looked up in,
+    /// or the defining module's own scope for an imported `m.A`, whose
+    /// right-hand side may name that module's other aliases and imports.
+    fn resolve_type_alias(
+        &mut self,
+        name: &str,
+        scope: &Scope,
+    ) -> Option<(TypeExpr, Option<Scope>)> {
+        if let Some(alias) = scope.get_type_alias(name) {
+            return Some((alias.clone(), None));
+        }
+        let (root, member) = name.split_once('.')?;
+        if member.contains('.') {
+            return None;
+        }
+        let identity = scope.module_identity(root)?.clone();
+        let module_scope = self.module_type_scope(&identity)?;
+        let alias = module_scope.get_type_alias(member)?.clone();
+        Some((alias, Some(module_scope)))
+    }
+
+    /// Whether `ty` accepts the Dynamic a body amending null builds.
+    fn type_takes_dynamic(&mut self, ty: &TypeExpr, scope: &Scope, depth: usize) -> bool {
+        if depth > 32 {
+            return false;
+        }
+        let named = |this: &mut Self, name: &str| {
+            let name = name.trim_start_matches('*');
+            if matches!(name, "Dynamic" | "Any" | "Object") {
+                return true;
+            }
+            match this.resolve_type_alias(name, scope) {
+                Some((alias, alias_scope)) => {
+                    let alias_scope = alias_scope.as_ref().unwrap_or(scope);
+                    this.type_takes_dynamic(&alias, alias_scope, depth + 1)
+                }
+                None => false,
+            }
+        };
+        match ty {
+            TypeExpr::Named(name) => named(self, name),
+            TypeExpr::Constrained(base, _) => named(self, base.trim_end_matches('?')),
+            TypeExpr::Nullable(inner) => self.type_takes_dynamic(inner, scope, depth + 1),
+            TypeExpr::Union(variants) => variants
+                .iter()
+                .any(|variant| self.type_takes_dynamic(variant, scope, depth + 1)),
+            TypeExpr::Generic(..) => false,
+        }
+    }
+
+    /// Whether the type a union marks with `*` is known to supply no default
+    /// value: a standard library type other than `Listing`, `Mapping` and
+    /// `Dynamic` (`Int`, `Duration`, `Map<K, V>`, ...), directly or behind
+    /// aliases. A class, or a type this cannot resolve, counts as supplying
+    /// one.
+    fn selected_type_lacks_default(&mut self, ty: &TypeExpr, scope: &Scope, depth: usize) -> bool {
+        if depth > 32 {
+            return false;
+        }
+        let name = match ty {
+            TypeExpr::Named(name) => name.trim_start_matches('*'),
+            TypeExpr::Constrained(base, _) => base.trim_end_matches('?'),
+            TypeExpr::Generic(name, _) => name.as_str(),
+            _ => return false,
+        };
+        let name = name.split('<').next().unwrap_or(name);
+        if let Some((alias, alias_scope)) = self.resolve_type_alias(name, scope) {
+            let alias_scope = alias_scope.as_ref().unwrap_or(scope);
+            return self.selected_type_lacks_default(&alias, alias_scope, depth + 1);
+        }
+        // A class declaration shadows the standard library type of its name.
+        if matches!(resolve_dotted(scope, name),
+            Some(Value::Object(_, Some(source))) if source.kind == ObjectKind::Class)
+        {
+            return false;
+        }
+        matches!(
+            name,
+            "String"
+                | "Boolean"
+                | "Bool"
+                | "Int"
+                | "Int8"
+                | "Int16"
+                | "Int32"
+                | "UInt"
+                | "UInt8"
+                | "UInt16"
+                | "UInt32"
+                | "Float"
+                | "Number"
+                | "Duration"
+                | "DataSize"
+                | "Pair"
+                | "Regex"
+                | "Map"
+                | "List"
+                | "Set"
+                | "Collection"
+                | "IntSeq"
+                | "Bytes"
+                | "Any"
+                | "Object"
+                | "Typed"
+                | "Class"
+        ) || name.starts_with("Function")
     }
 
     /// What amending a property declared `ty` would start from, when `ty` is a
     /// union (possibly nullable, possibly behind aliases). A union has no
     /// default unless one alternative carries the `*` marker; only a marker
     /// written on the property's own union counts, since an alias used as an
-    /// alternative contributes none. Imported aliases (`m.A`) resolve through
-    /// the module they come from; one that cannot be resolved is not a union
-    /// here, so it is never rejected.
+    /// alternative contributes none. `scope` must be where the declaration
+    /// lives: its aliases are not necessarily visible where the property is
+    /// amended. Imported aliases (`m.A`) resolve through the module they come
+    /// from, and that module's own imports through theirs; one that cannot be
+    /// resolved is not a union here, so it is never rejected.
     pub(super) fn union_amend_state(&mut self, ty: &TypeExpr, scope: &Scope) -> UnionAmendState {
-        self.union_amend_state_in(ty, scope, None, false, &mut Vec::new())
+        self.union_amend_state_in(ty, scope, false, 0)
     }
 
     fn union_amend_state_in(
         &mut self,
         ty: &TypeExpr,
         scope: &Scope,
-        aliases: Option<&TypeAliasMap>,
         nullable: bool,
-        seen: &mut Vec<String>,
+        depth: usize,
     ) -> UnionAmendState {
+        if depth > 32 {
+            return UnionAmendState::NotUnion;
+        }
         match ty {
-            TypeExpr::Nullable(inner) => {
-                self.union_amend_state_in(inner, scope, aliases, true, seen)
-            }
-            TypeExpr::Union(variants) if variants.iter().any(is_default_type) => {
-                // The marked alternative's own default is what the property
-                // starts from, and a primitive such as `Int` has none.
+            TypeExpr::Nullable(inner) => self.union_amend_state_in(inner, scope, true, depth + 1),
+            TypeExpr::Union(variants) => {
+                // A marked alternative's own default is what the property
+                // starts from, unless that type has none (`Int`, `Duration`).
                 let marked = variants.iter().find(|variant| is_default_type(variant));
-                let primitive = matches!(marked, Some(TypeExpr::Named(name))
-                    if matches!(
-                        name.trim_start_matches('*'),
-                        "String" | "Int" | "Float" | "Number" | "Boolean"
-                    ) && type_default_value(
-                        &TypeExpr::Named(name.trim_start_matches('*').to_string()),
-                        scope,
-                    )
-                    .is_none());
-                if primitive && !nullable {
-                    UnionAmendState::NoDefault
-                } else {
-                    UnionAmendState::HasDefault
+                if let Some(marked) = marked
+                    && !self.selected_type_lacks_default(marked, scope, 0)
+                {
+                    return UnionAmendState::HasDefault;
                 }
-            }
-            TypeExpr::Union(variants) if nullable => {
-                // A nullable union's default is null, so the amendment builds
-                // a Dynamic that must itself satisfy the union.
-                let takes_dynamic = variants.iter().any(|variant| {
-                    matches!(variant, TypeExpr::Named(name)
-                        if matches!(name.as_str(), "Dynamic" | "Any" | "Object"))
-                });
-                if takes_dynamic {
+                if !nullable {
+                    return UnionAmendState::NoDefault;
+                }
+                // Nothing supplies a default, so a nullable union's is null
+                // and the amendment builds a Dynamic that must itself satisfy
+                // the union. One that takes a Dynamic is checked once the body
+                // has run.
+                if variants
+                    .iter()
+                    .any(|variant| self.type_takes_dynamic(variant, scope, 0))
+                {
                     UnionAmendState::NotUnion
                 } else {
                     UnionAmendState::NullDefault(display_type_expr(ty))
                 }
             }
-            TypeExpr::Union(_) => UnionAmendState::NoDefault,
-            TypeExpr::Named(name) if !name.starts_with('*') && seen.len() < 32 => {
-                let local = match aliases {
-                    Some(map) => map.get(name.as_str()).map(|alias| (**alias).clone()),
-                    None => scope.get_type_alias(name).cloned(),
-                };
-                if let Some(alias) = local {
-                    if seen.iter().any(|s| s == name) {
-                        return UnionAmendState::NotUnion;
+            TypeExpr::Named(name) if !name.starts_with('*') => {
+                match self.resolve_type_alias(name, scope) {
+                    Some((alias, alias_scope)) => {
+                        let alias_scope = alias_scope.as_ref().unwrap_or(scope);
+                        self.union_amend_state_in(&alias, alias_scope, nullable, depth + 1)
                     }
-                    seen.push(name.clone());
-                    let state = self.union_amend_state_in(&alias, scope, aliases, nullable, seen);
-                    seen.pop();
-                    return state;
+                    None => UnionAmendState::NotUnion,
                 }
-                // `m.A`: an alias defined by an imported module.
-                if aliases.is_none()
-                    && let Some((root, member)) = name.split_once('.')
-                    && !member.contains('.')
-                    && let Some(identity) = scope.module_identity(root).cloned()
-                    && let Some(module_aliases) = self.module_type_aliases(&identity)
-                    && let Some(alias) = module_aliases.get(member)
-                {
-                    let alias = (**alias).clone();
-                    seen.push(name.clone());
-                    let state = self.union_amend_state_in(
-                        &alias,
-                        scope,
-                        Some(&module_aliases),
-                        nullable,
-                        seen,
-                    );
-                    seen.pop();
-                    return state;
-                }
-                UnionAmendState::NotUnion
             }
             _ => UnionAmendState::NotUnion,
         }

@@ -533,19 +533,31 @@ impl Evaluator {
                 continue;
             };
             // A union with no `*` alternative cannot be amended without a value
-            // to start from. A parent's default value is not in scope here, so
-            // leave such an amendment untyped rather than have it rejected as
-            // amending an undefined property.
-            if prop.value.is_none()
-                && !matches!(
-                    self.union_amend_state(ty, child_scope),
-                    UnionAmendState::NotUnion | UnionAmendState::HasDefault
-                )
-                && matches!(parent.entries.get(index), Some(Entry::Property(parent_prop))
-                    if parent_prop.value.is_some() || parent_prop.body.is_some())
-            {
-                typed.push(entry.clone());
-                continue;
+            // to start from. Its aliases resolve where the parent declared the
+            // property, which the amending scope may not see.
+            if prop.value.is_none() && prop.body.is_some() {
+                let declaring = parent_scope
+                    .get_or_insert_with(|| restore_scope(&capture_object_source_scope(parent)))
+                    .clone();
+                let state = self.union_amend_state(ty, &declaring);
+                if matches!(
+                    state,
+                    UnionAmendState::NoDefault | UnionAmendState::NullDefault(_)
+                ) {
+                    // A parent's default value is not in scope here, so leave
+                    // such an amendment untyped rather than have it rejected
+                    // as amending an undefined property.
+                    if matches!(parent.entries.get(index), Some(Entry::Property(parent_prop))
+                        if parent_prop.value.is_some() || parent_prop.body.is_some())
+                    {
+                        typed.push(entry.clone());
+                        continue;
+                    }
+                }
+                child_scope.set(
+                    union_amend_marker(&prop.name),
+                    Value::String(encode_union_amend(ty, &state).into()),
+                );
             }
             let mut prop = (**prop).clone();
             prop.type_ann = Some(ty.clone());
@@ -754,4 +766,43 @@ pub(super) fn check_instantiable(
 /// The NUL prefix keeps it apart from any pkl identifier.
 pub(super) fn type_alias_marker(name: &str) -> String {
     format!("\0typealias:{name}")
+}
+
+/// The binding that carries a property's union-amend state, decided where its
+/// type was declared, to the place its body is evaluated.
+pub(super) fn union_amend_marker(name: &str) -> String {
+    format!("#union-amend:{name}")
+}
+
+/// `state` for the declared type `ty`, tagged with the type so that a
+/// same-named property of another type does not read it.
+pub(super) fn encode_union_amend(ty: &crate::parser::TypeExpr, state: &UnionAmendState) -> String {
+    let (kind, union) = match state {
+        UnionAmendState::NullDefault(union) => ("null", union.as_str()),
+        UnionAmendState::NoDefault => ("none", ""),
+        _ => ("ok", ""),
+    };
+    format!("{kind}\u{1}{}\u{1}{union}", display_type_expr(ty))
+}
+
+/// The union-amend state recorded in `scope` for the property `name` declared
+/// `ty`, when one was decided at the declaring class.
+pub(super) fn recorded_union_amend(
+    scope: &Scope,
+    name: &str,
+    ty: &crate::parser::TypeExpr,
+) -> Option<UnionAmendState> {
+    let Some(Value::String(recorded)) = scope.get(&union_amend_marker(name)) else {
+        return None;
+    };
+    let mut parts = recorded.splitn(3, '\u{1}');
+    let (kind, recorded_ty, union) = (parts.next()?, parts.next()?, parts.next()?);
+    if recorded_ty != display_type_expr(ty) {
+        return None;
+    }
+    Some(match kind {
+        "null" => UnionAmendState::NullDefault(union.to_string()),
+        "none" => UnionAmendState::NoDefault,
+        _ => UnionAmendState::NotUnion,
+    })
 }

@@ -5541,3 +5541,189 @@ fn amending_union_property_with_alias_from_imported_module() {
         serde_json::json!(["a"])
     );
 }
+
+/// Evaluate `main.pkl` of a temporary directory holding `files`.
+fn eval_union_files(tag: &str, files: &[(&str, &str)]) -> Result<serde_json::Value, pklr::Error> {
+    let temp = TestTempDir::new(&format!("pklr_test_union_amend_{tag}"));
+    for (name, source) in files {
+        std::fs::write(temp.path().join(name), source).unwrap();
+    }
+    pklr::eval_to_json(&temp.path().join("main.pkl"))
+}
+
+const UNION_MAIN: &str = "import \"lib.pkl\" as L\nx = new L.C { argv { \"a\" } }\n";
+
+#[test]
+fn amending_union_property_resolves_alias_in_declaring_module() {
+    // `Args` is visible only in lib.pkl, where the class was declared.
+    let lib = "typealias Args = Listing<String>|Ref\nclass Ref { path: String }\nclass C { argv: Args }\n";
+    let error =
+        eval_union_files("decl", &[("lib.pkl", lib), ("main.pkl", UNION_MAIN)]).unwrap_err();
+    assert!(error.to_string().contains(UNDEFINED), "{error}");
+
+    // The same with a nullable property or a nullable alias.
+    for lib in [
+        "typealias Args = Listing<String>|Ref\nclass Ref { path: String }\nclass C { argv: Args? }\n",
+        "typealias Args = (Listing<String>|Ref)?\nclass Ref { path: String }\nclass C { argv: Args }\n",
+    ] {
+        let error = eval_union_files("decl_null", &[("lib.pkl", lib), ("main.pkl", UNION_MAIN)])
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Expected value of type `Listing<String>|Ref`"),
+            "{error}"
+        );
+    }
+
+    // A `*` default alternative keeps the amendment valid.
+    for lib in [
+        "typealias Args = *Listing<String>|Ref\nclass Ref { path: String }\nclass C { argv: Args }\n",
+        "typealias Args = Listing<String>|Ref\nclass Ref { path: String }\nclass C { argv: *Args|Int }\n",
+    ] {
+        let json = eval_union_files(
+            "decl_default",
+            &[("lib.pkl", lib), ("main.pkl", UNION_MAIN)],
+        );
+        // pkl rejects the second form: an alias alternative gives no default.
+        if lib.contains("*Args") {
+            assert!(json.is_err());
+        } else {
+            assert_eq!(json.unwrap()["x"]["argv"], serde_json::json!(["a"]));
+        }
+    }
+}
+
+#[test]
+fn amending_union_property_ignores_importer_alias_of_the_same_name() {
+    // The importer's `Args` has a default; the declaring module's does not.
+    let lib = "typealias Args = Listing<String>|Ref\nclass Ref { path: String }\nclass C { argv: Args }\n";
+    let main = "import \"lib.pkl\" as L\ntypealias Args = *Listing<String>|L.Ref\nx = new L.C { argv { \"a\" } }\n";
+    let error = eval_union_files("shadow", &[("lib.pkl", lib), ("main.pkl", main)]).unwrap_err();
+    assert!(error.to_string().contains(UNDEFINED), "{error}");
+
+    // And the other way round: the declaring module's `*` default wins.
+    let lib = "typealias Args = *Listing<String>|Ref\nclass Ref { path: String }\nclass C { argv: Args }\n";
+    let main = "import \"lib.pkl\" as L\ntypealias Args = Listing<String>|L.Ref\nx = new L.C { argv { \"a\" } }\n";
+    let json = eval_union_files("shadow_default", &[("lib.pkl", lib), ("main.pkl", main)]).unwrap();
+    assert_eq!(json["x"]["argv"], serde_json::json!(["a"]));
+}
+
+#[test]
+fn amending_nullable_union_with_dynamic_alternative_checks_the_built_value() {
+    // `D` resolves to Dynamic, so the Dynamic the body builds satisfies it.
+    let main = "import \"lib.pkl\" as L\nx = new L.C { argv { y = 1 } }\n";
+    for lib in [
+        "typealias D = Dynamic\nclass C { argv: (D|Int)? }\n",
+        "class C { argv: (Dynamic(y == 1)|Int)? }\n",
+    ] {
+        let json = eval_union_files("dynamic", &[("lib.pkl", lib), ("main.pkl", main)]).unwrap();
+        assert_eq!(json["x"]["argv"], serde_json::json!({"y": 1}));
+    }
+    // A constraint the built value fails is still reported.
+    let lib = "class C { argv: (Dynamic(y == 1)|Int)? }\n";
+    let main = "import \"lib.pkl\" as L\nx = new L.C { argv { y = 2 } }\n";
+    assert!(eval_union_files("dynamic_fail", &[("lib.pkl", lib), ("main.pkl", main)]).is_err());
+}
+
+#[test]
+fn amending_union_with_marked_type_that_has_no_default() {
+    // `Duration` supplies no default, directly or behind an alias.
+    for lib in [
+        "class C { argv: Listing<String>|*Duration }\n",
+        "typealias T = Duration\nclass C { argv: Listing<String>|*T }\n",
+    ] {
+        let error = eval_union_files("no_default", &[("lib.pkl", lib), ("main.pkl", UNION_MAIN)])
+            .unwrap_err();
+        assert!(error.to_string().contains(UNDEFINED), "{error}");
+    }
+}
+
+#[test]
+fn amending_union_property_follows_aliases_across_several_modules() {
+    // lib.pkl's alias names an alias of another module it imports.
+    let types = "typealias U = Listing<String>|Int\n";
+    let lib = "import \"types.pkl\"\ntypealias A = types.U\nclass C { argv: A }\n";
+    let error = eval_union_files(
+        "chain",
+        &[
+            ("types.pkl", types),
+            ("lib.pkl", lib),
+            ("main.pkl", UNION_MAIN),
+        ],
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains(UNDEFINED), "{error}");
+
+    // Declared in the importer as `L.A`, whose own import `types` it cannot see.
+    let main = "import \"lib.pkl\" as L\nclass E { argv: L.A }\nx = new E { argv { \"a\" } }\n";
+    let error = eval_union_files(
+        "chain_imported",
+        &[("types.pkl", types), ("lib.pkl", lib), ("main.pkl", main)],
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains(UNDEFINED), "{error}");
+}
+
+#[test]
+fn amending_nullable_union_marking_a_type_with_no_default_builds_a_dynamic() {
+    // The marked `Int` supplies no value, so the nullable property is null and
+    // the body builds a Dynamic that neither alternative accepts.
+    for lib in [
+        "class C { argv: (*Int|Listing<String>)? }\n",
+        "class C { argv: (*Duration|Listing<String>)? }\n",
+    ] {
+        let error = eval_union_files("marked_null", &[("lib.pkl", lib), ("main.pkl", UNION_MAIN)])
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("but got type `Dynamic`"),
+            "{error}"
+        );
+    }
+    // A Dynamic alternative still takes it.
+    let lib = "class C { argv: (*Int|Dynamic)? }\n";
+    let main = "import \"lib.pkl\" as L\nx = new L.C { argv { y = 1 } }\n";
+    let json = eval_union_files(
+        "marked_null_dynamic",
+        &[("lib.pkl", lib), ("main.pkl", main)],
+    )
+    .unwrap();
+    assert_eq!(json["x"]["argv"], serde_json::json!({"y": 1}));
+}
+
+#[test]
+fn amending_union_marking_a_standard_library_type_without_default_is_undefined() {
+    for ty in [
+        "*Duration",
+        "*DataSize",
+        "*Regex",
+        "*Pair<Int, Int>",
+        "*Map<String, Int>",
+        "*Boolean",
+        "*Any",
+    ] {
+        let lib = format!("class C {{ argv: Listing<String>|{ty} }}\n");
+        let error = eval_union_files("marked_std", &[("lib.pkl", &lib), ("main.pkl", UNION_MAIN)])
+            .unwrap_err();
+        assert!(error.to_string().contains(UNDEFINED), "{ty}: {error}");
+    }
+}
+
+#[test]
+fn amending_nullable_union_with_aliased_dynamic_alternative_is_accepted() {
+    // `D` is Dynamic behind an alias, so the Dynamic the body builds fits.
+    let lib = "typealias D = Dynamic\nclass Ref { path: String }\nclass C { argv: (Ref|D)? }\n";
+    let main = "import \"lib.pkl\" as L\nx = new L.C { argv { y = 1 } }\n";
+    let json =
+        eval_union_files("aliased_dynamic", &[("lib.pkl", lib), ("main.pkl", main)]).unwrap();
+    assert_eq!(json["x"]["argv"], serde_json::json!({"y": 1}));
+    // Accepted with a Listing alternative too.
+    let lib = "typealias D = Dynamic\nclass C { argv: (Listing<String>|D)? }\n";
+    assert!(
+        eval_union_files(
+            "aliased_dynamic_listing",
+            &[("lib.pkl", lib), ("main.pkl", main)]
+        )
+        .is_ok()
+    );
+}

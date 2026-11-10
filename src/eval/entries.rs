@@ -61,7 +61,9 @@ impl Evaluator {
             if let Some(ty) = &prop.type_ann
                 && (amendment_base.is_none() || amendment_base.is_some_and(is_null_value))
             {
-                match self.union_amend_state(ty, scope) {
+                let state = recorded_union_amend(scope, &prop.name, ty)
+                    .unwrap_or_else(|| self.union_amend_state(ty, scope));
+                match state {
                     UnionAmendState::NoDefault if amendment_base.is_none() => {
                         return Err(Error::Eval(format!(
                             "Tried to read property `{}` but its value is undefined.",

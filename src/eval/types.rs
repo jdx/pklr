@@ -371,7 +371,9 @@ pub(super) fn type_default_value(ty: &crate::parser::TypeExpr, scope: &Scope) ->
             if let Some(value) = string_literal_type_value(name) {
                 return Some(Value::String(value.into()));
             }
-            if let Some(alias) = scope.get_type_alias(name).cloned() {
+            // A marked alternative (`*A`) takes its default from what `A`
+            // aliases.
+            if let Some(alias) = scope.get_type_alias(name.trim_start_matches('*')).cloned() {
                 return type_default_value(&alias, scope);
             }
             type_default_for_name(name, scope)
@@ -388,6 +390,14 @@ pub(super) fn type_default_value(ty: &crate::parser::TypeExpr, scope: &Scope) ->
         TypeExpr::Union(variants) => variants
             .iter()
             .find(|ty| is_default_type(ty))
+            // `Map` and `IntSeq` are values with no default of their own.
+            .filter(|ty| {
+                !matches!(ty, TypeExpr::Named(name)
+                if matches!(
+                    name.trim_start_matches('*').split('<').next(),
+                    Some("Map" | "IntSeq")
+                ))
+            })
             .and_then(|ty| type_default_value(ty, scope)),
     }
 }

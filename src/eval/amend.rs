@@ -150,6 +150,34 @@ impl Evaluator {
                 _ => None,
             })
             .collect::<HashSet<_>>();
+        // A body amendment of a union-typed property is checked against the
+        // aliases of the class that declared it, which the amending scope may
+        // not see (`typealias Args = ...` private to an imported module).
+        if base_source.kind == ObjectKind::Class {
+            let mut declaring = None;
+            for entry in overlay_entries {
+                let Entry::Property(prop) = entry else {
+                    continue;
+                };
+                if prop.value.is_some() || prop.body.is_none() || prop.type_ann.is_some() {
+                    continue;
+                }
+                let Some(ty) = base_entries.iter().rev().find_map(|base| match base {
+                    Entry::Property(base) if base.name == prop.name => base.type_ann.as_ref(),
+                    _ => None,
+                }) else {
+                    continue;
+                };
+                let declaring = declaring.get_or_insert_with(|| {
+                    restore_scope(&capture_object_source_scope(base_source))
+                });
+                let state = self.union_amend_state(ty, declaring);
+                amendment_scope.values.insert(
+                    union_amend_marker(&prop.name).as_str().into(),
+                    Value::String(encode_union_amend(ty, &state).into()),
+                );
+            }
+        }
         let amendment_captured = Arc::new(CapturedScope {
             body_members: overlay_entries
                 .iter()
