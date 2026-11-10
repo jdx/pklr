@@ -49,6 +49,67 @@ impl Evaluator {
         }
     }
 
+    /// Make the type aliases the module imported as `alias` declares
+    /// available as `alias.Name`. Each is written for the importer: names the
+    /// module declares in its body become `alias.Name` too, so the alias
+    /// resolves from here to what it meant there.
+    pub(super) fn bind_import_type_aliases(
+        &mut self,
+        scope: &mut Scope,
+        alias: &str,
+        path: &Path,
+        imported: &Value,
+    ) {
+        let key = self
+            .canonicalize_io(path)
+            .ok()
+            .filter(|key| self.module_scopes.contains_key(key))
+            .unwrap_or_else(|| path.to_path_buf());
+        let Some(snapshot) = self.module_scopes.get(&key) else {
+            return;
+        };
+        let aliases = &snapshot.type_aliases;
+        if aliases.is_empty() {
+            return;
+        }
+        let members = match imported {
+            Value::Object(members, _) => Some(members),
+            _ => None,
+        };
+        // A class the module declares is not always among the members the
+        // importer asked for, so bind the ones an alias names as `alias.Name`.
+        let classes = std::cell::RefCell::new(Vec::new());
+        let declared = |name: &str| {
+            if aliases.contains_key(name) || members.is_some_and(|m| m.contains_key(name)) {
+                return true;
+            }
+            let is_class = matches!(
+                snapshot.values.get(name),
+                Some(Value::Object(_, Some(source))) if source.kind == ObjectKind::Class
+            );
+            if is_class {
+                classes.borrow_mut().push(name.to_string());
+            }
+            is_class
+        };
+        let qualified: Vec<_> = aliases
+            .iter()
+            .filter(|(name, _)| !name.contains('.'))
+            .map(|(name, ty)| (name, qualify_alias_body(ty, alias, &declared)))
+            .collect();
+        let bound: Vec<_> = classes
+            .into_inner()
+            .into_iter()
+            .filter_map(|name| Some((name.clone(), snapshot.values.get(name.as_str())?.clone())))
+            .collect();
+        for (name, ty) in qualified {
+            scope.set_type_alias(format!("{alias}.{name}"), ty);
+        }
+        for (name, class) in bound {
+            scope.declare(format!("{alias}.{name}"), class);
+        }
+    }
+
     pub(super) fn inherited_late_properties(&self, path: &Path) -> Vec<Arc<Property>> {
         self.module_scopes
             .get(path)
@@ -1691,6 +1752,7 @@ impl Evaluator {
                         requested,
                     )?
                 };
+                self.bind_import_type_aliases(scope, &alias, Path::new(uri), &imported_val);
                 scope.declare(&alias, imported_val);
                 scope.set_module_identity(alias, canonical_remote_module_identity(uri));
                 continue;
@@ -1725,6 +1787,7 @@ impl Evaluator {
                             requested,
                         )?;
                         let identity = self.module_type_namespace(&local_path);
+                        self.bind_import_type_aliases(scope, &alias, &local_path, &imported_val);
                         scope.declare(&alias, imported_val);
                         scope.set_module_identity(alias, identity);
                         continue;
@@ -1756,6 +1819,7 @@ impl Evaluator {
                         requested,
                     )?
                 };
+                self.bind_import_type_aliases(scope, &alias, Path::new(&url), &imported_val);
                 scope.declare(&alias, imported_val);
                 scope.set_module_identity(alias, url);
                 continue;
@@ -1812,6 +1876,7 @@ impl Evaluator {
                 let imported_val =
                     self.eval_file_with_requested_fields(&import_path, depth + 1, requested)?;
                 let identity = self.module_type_namespace(&import_path);
+                self.bind_import_type_aliases(scope, &alias, &import_path, &imported_val);
                 scope.declare(&alias, imported_val);
                 scope.set_module_identity(alias, identity);
             }

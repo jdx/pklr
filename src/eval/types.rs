@@ -286,6 +286,82 @@ impl AliasResolver<'_> {
     }
 }
 
+/// The body of the alias `module.Alias`, written for the module that imports
+/// `module` as `prefix`: each name the module declares (`declared`) becomes
+/// `prefix.Name`, so it resolves from the importer to the same type it named
+/// where the alias was declared. Other names (built-ins) are left alone.
+/// Constraints are dropped, as imported aliases are not checked against them.
+pub(super) fn qualify_alias_body(
+    ty: &crate::parser::TypeExpr,
+    prefix: &str,
+    declared: &dyn Fn(&str) -> bool,
+) -> crate::parser::TypeExpr {
+    use crate::parser::TypeExpr;
+    let qualify_name = |name: &str| -> String {
+        let (marker, rest) = match name.strip_prefix('*') {
+            Some(rest) => ("*", rest),
+            None => ("", name),
+        };
+        let (core, nullable) = match rest.strip_suffix('?') {
+            Some(core) => (core, "?"),
+            None => (rest, ""),
+        };
+        let core = if core.contains('<') {
+            // A generic name carries its arguments as text.
+            match crate::parser::parse_type_name(core) {
+                Ok(parsed) => runtime_base_name(&qualify_alias_body(&parsed, prefix, declared))
+                    .unwrap_or_else(|| core.to_string()),
+                Err(_) => core.to_string(),
+            }
+        } else if declared(core) {
+            format!("{prefix}.{core}")
+        } else {
+            core.to_string()
+        };
+        format!("{marker}{core}{nullable}")
+    };
+    match ty {
+        TypeExpr::Named(name) => TypeExpr::Named(qualify_name(name)),
+        TypeExpr::Nullable(inner) => {
+            TypeExpr::Nullable(Box::new(qualify_alias_body(inner, prefix, declared)))
+        }
+        TypeExpr::Union(types) => TypeExpr::Union(
+            types
+                .iter()
+                .map(|ty| qualify_alias_body(ty, prefix, declared))
+                .collect(),
+        ),
+        TypeExpr::Generic(name, args) => TypeExpr::Generic(
+            if declared(name) {
+                format!("{prefix}.{name}")
+            } else {
+                name.clone()
+            },
+            args.iter()
+                .map(|ty| qualify_alias_body(ty, prefix, declared))
+                .collect(),
+        ),
+        // A constraint is an expression of the declaring module, which names
+        // its functions and constants. It cannot be evaluated here, so only
+        // the type it constrains is kept.
+        TypeExpr::Constrained(base, _) => {
+            let plain = base.strip_suffix('?').unwrap_or(base);
+            match crate::parser::parse_type_name(plain) {
+                // A generic base without a `*` marker is the generic type itself.
+                Ok(parsed @ TypeExpr::Generic(..)) if !plain.starts_with('*') => {
+                    let parsed = qualify_alias_body(&parsed, prefix, declared);
+                    if plain.len() < base.len() {
+                        TypeExpr::Nullable(Box::new(parsed))
+                    } else {
+                        parsed
+                    }
+                }
+                _ => TypeExpr::Named(qualify_name(base)),
+            }
+        }
+    }
+}
+
 /// The name a constrained type stores for its base, for a type that has one.
 fn runtime_base_name(ty: &crate::parser::TypeExpr) -> Option<String> {
     use crate::parser::TypeExpr;
@@ -415,7 +491,7 @@ fn is_nullable_default_at(ty: &crate::parser::TypeExpr, scope: &Scope, depth: us
                     .iter()
                     .find(|alt| is_default_type(alt))
                     .is_some_and(|alt| is_nullable_default_at(alt, scope, depth + 1)),
-                _ => is_nullable_default_at(target, scope, depth + 1),
+                target => is_nullable_default_at(target, scope, depth + 1),
             }),
         _ => false,
     }
@@ -532,11 +608,14 @@ fn nullable_inner_default_at(
         // amendment starts from the type it wraps.
         TypeExpr::Nullable(inner) => nullable_inner_default_at(inner, scope, depth + 1)
             .or_else(|| type_default_value(inner, scope)),
-        TypeExpr::Constrained(name, _) if name.ends_with('?') => match alias(name) {
+        TypeExpr::Constrained(name, _) => match alias(name) {
             Some(target) => nullable_inner_default_at(target, scope, depth + 1)
                 .or_else(|| type_default_value(target, scope)),
             None => type_default_for_name(name.trim_end_matches('?'), scope),
         },
+        // `Listing<String>`, `Mapping<K, V>` and the like start from their
+        // empty collection (or a generic class's instance).
+        TypeExpr::Generic(..) => type_default_value(ty, scope),
         // An alias amends like the type it names, so look through it.
         TypeExpr::Named(name) => match alias(name) {
             Some(target) => nullable_inner_default_at(target, scope, depth + 1),
@@ -550,7 +629,6 @@ fn nullable_inner_default_at(
             .find(|alt| is_default_type(alt))
             .filter(|alt| is_nullable_default(alt, scope))
             .and_then(|alt| nullable_inner_default_at(alt, scope, depth + 1)),
-        _ => None,
     }
 }
 
@@ -656,6 +734,12 @@ pub(super) fn entries_are_listing_amendment(entries: &[Entry]) -> bool {
 }
 
 pub(super) fn resolve_dotted(scope: &Scope, name: &str) -> Option<Value> {
+    // An imported alias binds the classes it names under their qualified name.
+    if name.contains('.')
+        && let Some(value) = scope.get(name)
+    {
+        return Some(value.clone());
+    }
     let parts: Vec<&str> = name.split('.').collect();
     let mut val = scope.get(parts[0])?.clone();
     for part in &parts[1..] {

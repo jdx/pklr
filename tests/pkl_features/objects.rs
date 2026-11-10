@@ -5412,7 +5412,8 @@ fn constrained_default_alternative_through_imported_alias_checks_constraint() {
     )
     .unwrap();
     let mut ev = Evaluator::new();
-    assert!(ev.eval_file(&dir.join("bad.pkl")).is_err());
+    let err = ev.eval_file(&dir.join("bad.pkl")).unwrap_err().to_string();
+    assert!(err.contains("argv"), "{err}");
 }
 
 #[test]
@@ -5443,7 +5444,7 @@ fn default_constrained_generic_alternative_with_nullable_argument_keeps_constrai
     // The `?` belongs to the generic argument, not to the alternative, so the
     // default still applies and its constraint is checked on the implicit value.
     let msg = eval_fails("class C { xs: *Listing<String?>(!isEmpty)|Int }\nc = new C {}");
-    assert!(!msg.is_empty());
+    assert!(msg.contains("xs"), "{msg}");
     let class = "class C { xs: *Listing<String?>(true)|Int }\n";
     let v = eval(&format!(
         "{class}a = new C {{}}\nb = new C {{ xs {{ \"x\" null }} }}\nc = new C {{ xs = 3 }}"
@@ -5824,5 +5825,79 @@ fn amending_a_property_typed_by_a_nullable_alias_starts_from_the_class() {
     );
     for (key, n) in [("a", 2), ("b", 3), ("c", 4), ("d", 5), ("e", 6), ("f", 7)] {
         assert_eq!(json["x"][key], serde_json::json!({"n": n, "m": 5}), "{key}");
+    }
+}
+
+#[test]
+fn amending_through_a_qualified_imported_alias_starts_from_its_default() {
+    // Verified against pkl 0.32.2: `lib.MaybeItem` and an alias chain to it
+    // amend an `Item` instance, so `m` keeps its default.
+    let temp = TestTempDir::new("pklr_test_qualified_alias_default");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("lib.pkl"),
+        "class Item { n = 1; m = 5 }\n\
+         typealias MaybeItem = *Item?|Int\n\
+         typealias Chain = MaybeItem\n\
+         typealias Strs = Listing<String>\n\
+         typealias MaybeStrs = *Strs?|Int\n",
+    )
+    .unwrap();
+    let main = dir.join("main.pkl");
+    std::fs::write(
+        &main,
+        "import \"lib.pkl\"\n\
+         class U { a: lib.MaybeItem; b: lib.Chain; c: lib.MaybeStrs; d: lib.Strs? }\n\
+         x = new U { a { n = 2 } b { n = 3 } c {} d { \"1\" } }\n\
+         y = new U {}\n",
+    )
+    .unwrap();
+    let json = Evaluator::new().eval_file(&main).unwrap().to_json();
+    assert_eq!(json["x"]["a"], serde_json::json!({"n": 2, "m": 5}));
+    assert_eq!(json["x"]["b"], serde_json::json!({"n": 3, "m": 5}));
+    assert_eq!(json["x"]["c"], serde_json::json!([]));
+    assert_eq!(json["x"]["d"], serde_json::json!(["1"]));
+    assert!(json["y"].get("a").is_none(), "{}", json["y"]);
+}
+
+#[test]
+fn imported_alias_constraint_may_use_declaring_module_names() {
+    // Verified against pkl 0.32.2: a constraint naming a `const` function of
+    // the declaring module is valid, so importing the alias must not fail.
+    let temp = TestTempDir::new("pklr_test_qualified_alias_constraint");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("lib.pkl"),
+        "const function ok(n: Int): Boolean = n > 0\ntypealias Pos = Int(ok(this))\n",
+    )
+    .unwrap();
+    let main = dir.join("main.pkl");
+    std::fs::write(
+        &main,
+        "import \"lib.pkl\"\nclass U { a: lib.Pos }\nx = new U { a = 5 }\n",
+    )
+    .unwrap();
+    let json = Evaluator::new().eval_file(&main).unwrap().to_json();
+    assert_eq!(json["x"]["a"], 5);
+}
+
+#[test]
+fn amending_a_nullable_default_alias_of_a_generic_type_starts_from_it() {
+    // Verified against pkl 0.32.2: an alias to `Listing<String>` or
+    // `Mapping<String, Int>` amends from an empty collection, not an object.
+    let json = eval(
+        "typealias Strs = Listing<String>\n\
+         typealias M = Mapping<String, Int>\n\
+         typealias S1 = *Strs?|Int\n\
+         typealias S2 = *Listing<String>?|Int\n\
+         typealias S3 = *M?|Int\n\
+         class U { a: S1; b: S2; d: S3; e: Strs?; f: M? }\n\
+         x = new U { a {} b {} d {} e {} f {} }\n",
+    );
+    for key in ["a", "b", "e"] {
+        assert_eq!(json["x"][key], serde_json::json!([]), "{key}");
+    }
+    for key in ["d", "f"] {
+        assert_eq!(json["x"][key], serde_json::json!({}), "{key}");
     }
 }
