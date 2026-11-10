@@ -880,13 +880,23 @@ impl Evaluator {
                         let base = match (map.get(&storage_key), &explicit_default) {
                             (Some(existing @ Value::List(_)), _) => existing.clone(),
                             (_, Some(default @ Value::List(_))) => default.clone(),
-                            // Amending nothing makes a `Dynamic`, unless the
-                            // value type is a `Listing`, whose default the
-                            // body amends.
+                            // Amending nothing makes the selected `Listing`,
+                            // else a `Dynamic`.
                             _ if listing_value_type => {
                                 Value::List(ListValue::new(ListKind::Listing, Vec::new()))
                             }
                             _ => Value::List(ListValue::new(ListKind::Dynamic, Vec::new())),
+                        };
+                        // A `default { 1 }` is evaluated without the value type,
+                        // as an element-only `Dynamic`; amended as an entry of a
+                        // `Listing` type it is a `Listing`.
+                        let base = match base {
+                            Value::List(items)
+                                if listing_value_type && items.kind() == ListKind::Dynamic =>
+                            {
+                                Value::List(items.with_kind(ListKind::Listing))
+                            }
+                            other => other,
                         };
                         let val = self.eval_value_amendment(base, body, entry_scope, depth)?;
                         map.insert(storage_key, val.into_entry_value());

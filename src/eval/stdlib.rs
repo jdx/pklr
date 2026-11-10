@@ -71,7 +71,10 @@ pub(super) fn typed_object(type_name: &str, members: ObjectMap) -> Value {
 /// A `Dynamic` with the given members, such as `toDynamic()` builds. Its body
 /// spreads the members from a bound variable, so an amendment of it, which
 /// rebuilds the object from its body, keeps them and can replace any of them.
-pub(super) fn dynamic_object(members: Arc<ObjectMap>) -> Value {
+pub(super) fn dynamic_object(
+    members: Arc<ObjectMap>,
+    entry_key: impl Fn(&Arc<str>) -> Value,
+) -> Value {
     const MEMBERS: &str = "\0pklr:members";
     const KEYS: &str = "\0pklr:member-keys";
     let Value::Object(_, Some(source)) = typed_object("Dynamic", ObjectMap::default()) else {
@@ -85,18 +88,14 @@ pub(super) fn dynamic_object(members: Arc<ObjectMap>) -> Value {
     // A string key is a property, read from the bound variable: an amendment
     // replaces it in place, and its body reads it by name. Any other key is an
     // entry (`Map(1, "a").toDynamic()` is `[1] = "a"`), keyed by its value.
-    // Only an entry's key is decoded, and only when there is one, so the usual
-    // object of properties builds no key list.
-    let keys: Vec<Option<Value>> = if members
-        .keys()
-        .any(|key| key.starts_with(crate::value::MAPPING_KEY_PREFIX))
-    {
+    // Only an entry's key is resolved (to its original value, which the
+    // storage key cannot always give back), and only when there is one, so the
+    // usual object of properties builds no key list.
+    let is_entry = |key: &str| key.starts_with(crate::value::MAPPING_KEY_PREFIX);
+    let keys: Vec<Option<Value>> = if members.keys().any(|key| is_entry(key)) {
         members
             .keys()
-            .map(|key| match crate::value::mapping_storage_value(key) {
-                Value::String(_) => None,
-                other => Some(other),
-            })
+            .map(|key| is_entry(key).then(|| entry_key(key)))
             .collect()
     } else {
         Vec::new()
