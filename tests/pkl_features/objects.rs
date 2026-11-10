@@ -1667,9 +1667,15 @@ result = (base) {
 }
 "#,
     );
+    // `pkl eval -f json` rejects a `Dynamic` with elements and members;
+    // the lenient conversion tags it instead of dropping the element.
     assert_eq!(
         json["result"]["value"],
-        serde_json::json!({"kept": 1, "added": 2})
+        serde_json::json!({
+            "_type": "dynamic",
+            "elements": ["element"],
+            "members": {"kept": 1, "added": 2}
+        })
     );
 }
 

@@ -520,6 +520,16 @@ impl Evaluator {
                 Ok(Some(Value::List(source.elements.clone().into())))
             }
             (Value::Object(..), "toList") => Ok(Some(obj.clone())),
+            // `Dynamic` and `Mapping` have no `toDynamic()`; it is a method of
+            // `Typed` (class instances, modules) and `Map`.
+            (Value::Object(_, Some(source)), "toDynamic")
+                if source.kind == ObjectKind::Mapping
+                    || (source.kind != ObjectKind::Class
+                        && source.type_name.is_none()
+                        && source.type_identity.is_none()) =>
+            {
+                Ok(None)
+            }
             (Value::Object(map, _), "toDynamic") => {
                 Ok(Some(stdlib::dynamic_object(map.as_ref().clone())))
             }

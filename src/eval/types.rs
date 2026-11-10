@@ -896,7 +896,8 @@ pub(super) fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
             "Function" => matches!(val, Value::Lambda(..)),
             "Duration" => matches!(val, Value::Duration(_)),
             "DataSize" => matches!(val, Value::DataSize(_)),
-            "Any" => true,
+            "Any" | "unknown" => true,
+            "nothing" => false,
             _ => {
                 // Unknown type name -- could be a class; treat objects as matching
                 matches!(val, Value::Object(..))
@@ -1382,5 +1383,135 @@ pub(super) fn merge_values(base: Value, overlay: Value) -> Value {
             as_instance(Value::Object(b, src))
         }
         (_, overlay) => overlay,
+    }
+}
+
+/// Classes and type aliases of `pkl:base`, and the keyword types, that a type
+/// expression names without a declaration in the module.
+const STDLIB_TYPE_NAMES: &[&str] = &[
+    "Any",
+    "Null",
+    "Class",
+    "TypeAlias",
+    "Module",
+    "Annotation",
+    "Since",
+    "Deprecated",
+    "AlsoKnownAs",
+    "Unlisted",
+    "DocExample",
+    "SourceCode",
+    "ModuleInfo",
+    "FileOutput",
+    "ModuleOutput",
+    "BaseValueRenderer",
+    "ConvertProperty",
+    "ValueRenderer",
+    "BytesRenderer",
+    "PcfRenderer",
+    "RenderDirective",
+    "PcfRenderDirective",
+    "JsonRenderer",
+    "YamlRenderer",
+    "PListRenderer",
+    "PropertiesRenderer",
+    "Resource",
+    "Number",
+    "Int",
+    "Float",
+    "Boolean",
+    "String",
+    "Regex",
+    "RegexMatch",
+    "Duration",
+    "DataSize",
+    "Object",
+    "Typed",
+    "Dynamic",
+    "Listing",
+    "Mapping",
+    "Function",
+    "Function0",
+    "Function1",
+    "Function2",
+    "Function3",
+    "Function4",
+    "Function5",
+    "Pair",
+    "Collection",
+    "IntSeq",
+    "VarArgs",
+    "List",
+    "Set",
+    "Map",
+    "Bytes",
+    "NonNull",
+    "Int8",
+    "Int16",
+    "Int32",
+    "UInt8",
+    "UInt16",
+    "UInt32",
+    "UInt",
+    "Comparable",
+    "Char",
+    "Charset",
+    "Uri",
+    "DurationUnit",
+    "DataSizeUnit",
+    "Mixin",
+    // Keyword types, and the lenient spelling `Bool` pklr accepts.
+    "unknown",
+    "nothing",
+    "Bool",
+];
+
+/// The error pkl reports for the first type name in `ty` that names no class
+/// or type alias, or `None` when every name resolves. A name that pklr cannot
+/// resolve (one inherited from an amended module, say) is reported only when
+/// it is a plain or dotted identifier that nothing in `scope` provides.
+pub(super) fn unresolved_type_error(ty: &crate::parser::TypeExpr, scope: &Scope) -> Option<String> {
+    use crate::parser::TypeExpr;
+    match ty {
+        TypeExpr::Named(name) => unresolved_type_name(name, scope),
+        TypeExpr::Nullable(inner) => unresolved_type_error(inner, scope),
+        TypeExpr::Union(variants) => variants
+            .iter()
+            .find_map(|variant| unresolved_type_error(variant, scope)),
+        TypeExpr::Generic(name, args) => unresolved_type_name(name, scope).or_else(|| {
+            args.iter()
+                .find_map(|arg| unresolved_type_error(arg, scope))
+        }),
+        TypeExpr::Constrained(base, _) => {
+            let head = base
+                .trim_start_matches('*')
+                .trim_end_matches('?')
+                .split('<')
+                .next()
+                .unwrap_or(base);
+            unresolved_type_name(head, scope)
+        }
+    }
+}
+
+fn unresolved_type_name(name: &str, scope: &Scope) -> Option<String> {
+    let name = name.strip_prefix('*').unwrap_or(name);
+    let first = name.split('.').next().unwrap_or(name);
+    if name.is_empty()
+        || string_literal_type_value(name).is_some()
+        || STDLIB_TYPE_NAMES.contains(&name)
+        // `module`, `outer` and `this` stand for the enclosing scopes.
+        || matches!(first, "module" | "outer" | "this")
+        || scope.get_type_alias(name).is_some()
+        || resolve_dotted(scope, name).is_some()
+    {
+        return None;
+    }
+    match name.rsplit_once('.') {
+        None => Some(format!("Cannot find type `{name}`.")),
+        Some((module, member)) if resolve_dotted(scope, module).is_some() => {
+            Some(format!("Cannot find type `{member}` in module `{module}`."))
+        }
+        Some(_) => Some(format!("Cannot find module import `{first}`.")),
     }
 }

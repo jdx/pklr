@@ -680,11 +680,17 @@ impl Evaluator {
                 }
             }
             Expr::Is(expr, ty) => {
+                if let Some(message) = unresolved_type_error(ty, scope) {
+                    return Err(Error::Eval(message));
+                }
                 let val = self.eval_expr(expr, scope, depth + 1)?;
                 let matches = self.eval_type_check(&val, ty, scope, depth)?;
                 Ok(Value::Bool(matches))
             }
             Expr::As(expr, ty) => {
+                if let Some(message) = unresolved_type_error(ty, scope) {
+                    return Err(Error::Eval(message));
+                }
                 let val = self.eval_expr(expr, scope, depth + 1)?;
                 let matches = self.eval_type_check(&val, ty, scope, depth)?;
                 if matches {

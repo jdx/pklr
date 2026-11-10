@@ -1136,7 +1136,9 @@ impl Value {
     }
 
     /// Convert to JSON. Values JSON cannot represent become a tagged object
-    /// (a `Regex` is `{"_type": "regex", "pattern": ...}`); see
+    /// (a `Regex` is `{"_type": "regex", "pattern": ...}`, a `Dynamic` with
+    /// both elements and members is
+    /// `{"_type": "dynamic", "elements": [...], "members": {...}}`); see
     /// [`Value::try_to_json`] to reject them as `pkl eval -f json` does.
     pub fn to_json(&self) -> serde_json::Value {
         match self {
@@ -1163,7 +1165,16 @@ impl Value {
                     }
                     obj.insert(display_storage_key(k).to_string(), v.to_json());
                 }
-                serde_json::Value::Object(obj)
+                match source {
+                    // A `Dynamic` with elements and members has no JSON form.
+                    // Tag it, as a `Regex` is, instead of dropping its elements.
+                    Some(source) if self.has_elements_and_members() => json!({
+                        "_type": "dynamic",
+                        "elements": source.elements.iter().map(|v| v.to_json()).collect::<Vec<_>>(),
+                        "members": obj,
+                    }),
+                    _ => serde_json::Value::Object(obj),
+                }
             }
             Value::List(items) => {
                 serde_json::Value::Array(items.iter().map(|v| v.to_json()).collect())
