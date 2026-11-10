@@ -59,8 +59,29 @@ impl Evaluator {
                         .values
                         .insert(binding.as_str().into(), value);
                     let mut prop = (**prop).clone();
+                    // The members of the new body take their parents from the
+                    // type the class declares for the property.
+                    let declared = prototype_source.as_ref().and_then(|source| {
+                        let ty = source.entries.iter().rev().find_map(|entry| match entry {
+                            Entry::Property(declared)
+                                if declared.name == prop.name
+                                    && !has_modifier(&declared.modifiers, Modifier::Local) =>
+                            {
+                                declared.type_ann.clone()
+                            }
+                            _ => None,
+                        })?;
+                        Some((ty, source))
+                    });
                     if let Some(expr) = &mut prop.value {
                         parser::rewrite_untyped_result_new(expr, &mut |entries| {
+                            let entries = declared
+                                .as_ref()
+                                .and_then(|(ty, source)| {
+                                    let scope = restore_scope(&capture_object_source_scope(source));
+                                    infer_amendment_members(ty, &entries, &scope)
+                                })
+                                .unwrap_or(entries);
                             Expr::Binop(
                                 BinOp::Add,
                                 Box::new(Expr::Ident(binding.clone())),

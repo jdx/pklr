@@ -1231,6 +1231,54 @@ const CASES: &[(&str, Option<&str>)] = &[
         r####"a: Mapping<String, Listing<Listing<Int>>> = new { when (true) { ["w"] = new { new { 3 } } } else { ["w"] = new { new { 4 } } } }"####,
         Some(r####"{"a":{"w":[[3]]}}"####),
     ),
+    (
+        "class C { xs: Listing<Listing<Int>> }\na = new C { xs { new { 1 } } }",
+        Some(r####"{"a":{"xs":[[1]]}}"####),
+    ),
+    (
+        "class C { xs: Listing<Listing<Int>> }\na = new C { xs = new { new { 1 } } }",
+        Some(r####"{"a":{"xs":[[1]]}}"####),
+    ),
+    (
+        "class C { xs: Listing<Listing<Int>> }\na = new C { xs { new { \"x\" } } }",
+        None,
+    ),
+    (
+        "class C { xs: Listing<Listing<Int>> }\na = new C { xs = new { new { \"x\" } } }",
+        None,
+    ),
+    (
+        "class D { x: Int }\nclass C { xs: Listing<D> }\na = new C { xs { new { x = 1 } } }",
+        Some(r####"{"a":{"xs":[{"x":1}]}}"####),
+    ),
+    (
+        "class C { xs: Listing<Listing<Int>> }\na = new C { xs { for (i in List(1, 2)) { new { i } } when (true) { new { 3 } } } }",
+        Some(r####"{"a":{"xs":[[1],[2],[3]]}}"####),
+    ),
+    (
+        "class C { xs: Listing<Listing<Int>> }\na = new C { xs { when (false) { new { 1 } } else { new { 2 } } } }",
+        Some(r####"{"a":{"xs":[[2]]}}"####),
+    ),
+    (
+        "class C { xs: Listing<Listing<Int>> = new { new { 1 } } }\nb = new C {}\na = (b) { xs { new { 2 } } }",
+        Some(r####"{"b":{"xs":[[1]]},"a":{"xs":[[1],[2]]}}"####),
+    ),
+    (
+        "class C { xs: Listing<Listing<Int>> = new { new { 1 } } }\nb = new C {}\na = (b.xs) { new { 2 } }",
+        Some(r####"{"b":{"xs":[[1]]},"a":[[1],[2]]}"####),
+    ),
+    (
+        "open class C { xs: Listing<Listing<Int>> }\nclass S extends C { xs = new { new { 1 } } }\na = new S { xs { new { 2 } } }",
+        Some(r####"{"a":{"xs":[[1],[2]]}}"####),
+    ),
+    (
+        "open class C { xs: Listing<Listing<Int>> = new { new { 1 } } }\nclass S extends C {}\na = new S { xs { new { 6 } } }\nb = new S { xs = new { new { 7 } } }",
+        Some(r####"{"a":{"xs":[[1],[6]]},"b":{"xs":[[1],[7]]}}"####),
+    ),
+    (
+        "class C { m: Mapping<String, Listing<Listing<Int>>> }\na = new C { m { [\"k\"] { new { 1 } } [\"j\"] = new { new { 2 } } } }",
+        Some(r####"{"a":{"m":{"k":[[1]],"j":[[2]]}}}"####),
+    ),
 ];
 
 const KEY_CASES: &[(&str, Option<&str>)] = &[

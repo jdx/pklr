@@ -37,6 +37,13 @@ impl Evaluator {
             return Ok(Some(value));
         }
         if let Some(body) = &prop.body {
+            // An untyped `new` member of a declared `Listing` or `Mapping`
+            // takes its parent from the declared member type.
+            let inferred = prop
+                .type_ann
+                .as_ref()
+                .and_then(|ty| infer_amendment_members(ty, body, scope));
+            let body = inferred.as_ref().unwrap_or(body);
             let mut nullable_default = prop
                 .type_ann
                 .as_ref()

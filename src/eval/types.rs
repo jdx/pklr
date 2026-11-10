@@ -1446,6 +1446,16 @@ pub(super) fn infer_listing_elements(
     infer_collection_body(ty, entries, scope, false).unwrap_or_else(|| entries.clone())
 }
 
+/// [`infer_listing_elements`] for the body of a property amendment (`xs { ...
+/// }`) of declared type `ty`, `None` when nothing needs inferring.
+pub(super) fn infer_amendment_members(
+    ty: &crate::parser::TypeExpr,
+    entries: &crate::parser::Body,
+    scope: &Scope,
+) -> Option<crate::parser::Body> {
+    infer_collection_body(ty, entries, scope, false)
+}
+
 /// The element type of a `Listing` or the value type of a `Mapping` that is a
 /// collection itself: the members of such a body need their parent inferred.
 fn nested_collection_type(
