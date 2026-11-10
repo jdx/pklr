@@ -6738,3 +6738,29 @@ fn union_amend_still_accepts_a_dynamic_for_the_builtin_names_unshadowed() {
         assert_eq!(eval(&src)["c"]["argv"]["x"], serde_json::json!(1));
     }
 }
+
+#[test]
+fn constrained_default_of_a_type_with_no_default_leaves_the_property_unset() {
+    // Verified against pkl 0.32.2: `*IntSeq(c)|String` has no default, as bare
+    // `IntSeq` has none, while `*Map<K, V>(c)|String` defaults to an empty
+    // map and a class named `IntSeq` keeps its own default.
+    let json = eval("class C { x: *Map<String, Int>(true)|String }\nc = new C {}\n");
+    assert_eq!(json["c"]["x"], serde_json::json!({}));
+    let json = eval("class IntSeq { n = 1 }\nclass C { x: *IntSeq(true)|String }\nc = new C {}\n");
+    assert_eq!(json["c"]["x"], serde_json::json!({"n": 1}));
+    let error = eval_fails("class C { x: *IntSeq(true)|String }\nc = new C {}\nd = c.x\n");
+    assert!(error.contains("x"), "{error}");
+}
+
+#[test]
+fn amending_through_a_long_alias_chain_to_a_nullable_class_starts_from_it() {
+    // Verified against pkl 0.32.2: any number of aliases (`A0 = A1`, ...) may
+    // lead to `Item?`, and the property amends from an `Item`.
+    let mut src = String::from("class Item { n = 1 }\n");
+    for i in 0..40 {
+        src.push_str(&format!("typealias A{i} = A{}\n", i + 1));
+    }
+    src.push_str("typealias A40 = Item?\nclass C { x: A0 }\nc = new C { x { n = 2 } }\n");
+    let json = eval(&src);
+    assert_eq!(json["c"]["x"], serde_json::json!({"n": 2}));
+}

@@ -503,12 +503,19 @@ fn type_default_value_seen(
             // The built-in `Map` and `IntSeq` are values with no default of
             // their own. A class of that name declared in scope shadows them
             // and keeps its own default.
-            .filter(|ty| {
-                !matches!(ty, TypeExpr::Named(name)
-                if matches!(
-                    name.trim_start_matches('*').split('<').next(),
-                    Some("Map" | "IntSeq")
-                ) && !names_user_class(name, scope))
+            .filter(|ty| match ty {
+                TypeExpr::Named(name) => {
+                    !(matches!(
+                        name.trim_start_matches('*').split('<').next(),
+                        Some("Map" | "IntSeq")
+                    ) && !names_user_class(name, scope))
+                }
+                // pkl gives `*Map<K, V>(c)` its empty map, but `*IntSeq(c)` has
+                // no default, as bare `IntSeq` has none.
+                TypeExpr::Constrained(name, _) => {
+                    !(name.trim_start_matches('*') == "IntSeq" && !names_user_class(name, scope))
+                }
+                _ => true,
             })
             .and_then(|ty| type_default_value_seen(ty, scope, seen)),
     }
@@ -516,25 +523,63 @@ fn type_default_value_seen(
 
 /// Whether a `*` default alternative is nullable, directly or through an alias.
 fn is_nullable_default(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
-    is_nullable_default_at(ty, scope, 0)
+    is_nullable_default_seen(ty, scope, &mut Vec::new())
 }
 
-fn is_nullable_default_at(ty: &crate::parser::TypeExpr, scope: &Scope, depth: usize) -> bool {
+/// The alias `name` stands for, followed along a chain of aliases that each
+/// name the next (`A0 = A1`, ...) in a loop, so a long chain does not use the
+/// stack once per alias. The aliases followed are added to `seen`, and `None`
+/// means there is none, or that following it would close a cycle.
+fn alias_chain_end<'a>(
+    scope: &'a Scope,
+    name: &str,
+    seen: &mut Vec<String>,
+) -> Option<&'a crate::parser::TypeExpr> {
+    use crate::parser::TypeExpr;
+    let name = name.trim_start_matches('*').trim_end_matches('?');
+    let mut target = alias_of(scope, name)?;
+    if seen.iter().any(|seen| seen == name) {
+        return None;
+    }
+    seen.push(name.to_string());
+    while let TypeExpr::Named(next) = target {
+        let next = next.trim_start_matches('*').trim_end_matches('?');
+        let Some(following) = alias_of(scope, next) else {
+            break;
+        };
+        if seen.iter().any(|seen| seen == next) {
+            return None;
+        }
+        seen.push(next.to_string());
+        target = following;
+    }
+    Some(target)
+}
+
+fn is_nullable_default_seen(
+    ty: &crate::parser::TypeExpr,
+    scope: &Scope,
+    seen: &mut Vec<String>,
+) -> bool {
     use crate::parser::TypeExpr;
     match ty {
         TypeExpr::Nullable(_) => true,
         // A bare `*Item?` keeps its `?` on the name.
         TypeExpr::Constrained(name, _) if name.ends_with('?') => true,
         TypeExpr::Named(name) if name.ends_with('?') => true,
-        TypeExpr::Named(name) if depth <= 32 => alias_of(scope, name.trim_start_matches('*'))
-            .is_some_and(|target| match target {
+        TypeExpr::Named(name) => {
+            let mark = seen.len();
+            let nullable = alias_chain_end(scope, name, seen).is_some_and(|target| match target {
                 // The alias's own `*` alternative decides, as for a direct union.
                 TypeExpr::Union(variants) => variants
                     .iter()
                     .find(|alt| is_default_type(alt))
-                    .is_some_and(|alt| is_nullable_default_at(alt, scope, depth + 1)),
-                target => is_nullable_default_at(target, scope, depth + 1),
-            }),
+                    .is_some_and(|alt| is_nullable_default_seen(alt, scope, seen)),
+                target => is_nullable_default_seen(target, scope, seen),
+            });
+            seen.truncate(mark);
+            nullable
+        }
         _ => false,
     }
 }
@@ -548,9 +593,14 @@ pub(super) fn type_default_error(ty: &crate::parser::TypeExpr, scope: &Scope) ->
     fn named_error(name: &str, scope: &Scope, seen: &mut Vec<String>) -> Option<String> {
         let name = name.trim_start_matches('*').trim_end_matches('?');
         let base = name.split('<').next().unwrap_or(name);
-        if let Some(alias) = scope.get_type_alias(base) {
+        if let Some(alias) = alias_of(scope, base) {
             if seen.iter().any(|seen| seen == base) {
-                return Some("Type alias definitions must not be cyclic.".to_string());
+                // An alias an importer bound names the next module's alias
+                // of the same name as it was written (`A = m.A`): that is
+                // another alias, not a cycle.
+                return scope
+                    .get_type_alias(base)
+                    .map(|_| "Type alias definitions must not be cyclic.".to_string());
             }
             seen.push(base.to_string());
             let error = visit(alias, scope, seen);
@@ -639,33 +689,28 @@ fn empty_collection(name: &str) -> Value {
 }
 
 pub(super) fn nullable_inner_default(ty: &crate::parser::TypeExpr, scope: &Scope) -> Option<Value> {
-    nullable_inner_default_at(ty, scope, 0)
+    nullable_inner_default_seen(ty, scope, &mut Vec::new())
 }
 
-fn nullable_inner_default_at(
+fn nullable_inner_default_seen(
     ty: &crate::parser::TypeExpr,
     scope: &Scope,
-    depth: usize,
+    seen: &mut Vec<String>,
 ) -> Option<Value> {
     use crate::parser::TypeExpr;
-    // Aliases can chain or (erroneously) cycle; stop rather than loop.
-    if depth > 32 {
-        return None;
-    }
-    let alias = |name: &str| {
-        let name = name.trim_start_matches('*').trim_end_matches('?');
-        alias_of(scope, name)
-    };
-    match ty {
+    // Aliases already followed on this walk end a cycle.
+    let alias = |name: &str, seen: &mut Vec<String>| alias_chain_end(scope, name, seen);
+    let mark = seen.len();
+    let result = match ty {
         // Look through a nullable alias first: its own default is null, but an
         // amendment starts from the type it wraps.
-        TypeExpr::Nullable(inner) => nullable_inner_default_at(inner, scope, depth + 1)
+        TypeExpr::Nullable(inner) => nullable_inner_default_seen(inner, scope, seen)
             .or_else(|| type_default_value(inner, scope)),
         TypeExpr::Constrained(name, _) => {
             let nullable = name.ends_with('?');
-            match alias(name) {
+            match alias(name, seen) {
                 // Only a nullable type amends from what it wraps.
-                Some(target) => nullable_inner_default_at(target, scope, depth + 1).or_else(|| {
+                Some(target) => nullable_inner_default_seen(target, scope, seen).or_else(|| {
                     nullable
                         .then(|| type_default_value(target, scope))
                         .flatten()
@@ -678,8 +723,8 @@ fn nullable_inner_default_at(
         // empty collection (or a generic class's instance).
         TypeExpr::Generic(..) => type_default_value(ty, scope),
         // An alias amends like the type it names, so look through it.
-        TypeExpr::Named(name) => match alias(name) {
-            Some(target) => nullable_inner_default_at(target, scope, depth + 1),
+        TypeExpr::Named(name) => match alias(name, seen) {
+            Some(target) => nullable_inner_default_seen(target, scope, seen),
             None if name.ends_with('?') => type_default_for_name(name.trim_end_matches('?'), scope),
             None => None,
         },
@@ -689,8 +734,10 @@ fn nullable_inner_default_at(
             .iter()
             .find(|alt| is_default_type(alt))
             .filter(|alt| is_nullable_default(alt, scope))
-            .and_then(|alt| nullable_inner_default_at(alt, scope, depth + 1)),
-    }
+            .and_then(|alt| nullable_inner_default_seen(alt, scope, seen)),
+    };
+    seen.truncate(mark);
+    result
 }
 
 pub(super) fn type_is_listing(ty: &crate::parser::TypeExpr) -> bool {
