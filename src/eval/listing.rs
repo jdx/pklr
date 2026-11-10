@@ -315,7 +315,27 @@ pub(super) fn resolves_to_listing(ty: &crate::parser::TypeExpr, scope: &Scope) -
     // A chain of aliases is walked in a loop, so a long one cannot overflow
     // the stack and a cyclic one ends at its first repeat.
     let mut seen = HashSet::default();
-    resolve_alias_chain(ty, scope, &mut seen).is_some_and(|ty| ty.is_listing_type())
+    resolves_to_listing_in(ty, scope, &mut seen, 0)
+}
+
+/// [`resolves_to_listing`], following a constrained type (`CL = L(pred)`) to
+/// its base, which names another alias or a listing.
+fn resolves_to_listing_in(
+    ty: &crate::parser::TypeExpr,
+    scope: &Scope,
+    seen: &mut HashSet<String>,
+    nesting: usize,
+) -> bool {
+    use crate::parser::TypeExpr;
+    match resolve_alias_chain(ty, scope, seen) {
+        Some(TypeExpr::Constrained(base, _)) => {
+            nesting < MAX_LISTING_NESTING
+                && crate::parser::parse_type_name(base.trim_start_matches('*'))
+                    .is_ok_and(|base| resolves_to_listing_in(&base, scope, seen, nesting + 1))
+        }
+        Some(other) => other.is_listing_type(),
+        None => false,
+    }
 }
 
 /// Follow `ty` through nullability and type aliases to the first type that is

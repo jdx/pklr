@@ -46,8 +46,7 @@ impl Evaluator {
             // may mean something else here (an alias the amending module
             // shadows with a class), so the default read from it is not the
             // listing the declaration gives.
-            let declared_listing = nullable_default.is_some()
-                && matches!(&prop.type_ann, Some(crate::parser::TypeExpr::Nullable(inner))
+            let declared_listing = matches!(&prop.type_ann, Some(crate::parser::TypeExpr::Nullable(inner))
                     if matches!(**inner, crate::parser::TypeExpr::Named(_)))
                 && (matches!(
                     scope.get(&listing_elem_class_binding(&prop.name)),

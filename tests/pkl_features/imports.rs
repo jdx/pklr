@@ -4132,3 +4132,44 @@ fn cyclic_local_alias_named_in_a_constraint_is_rejected_when_used() {
     std::fs::write(dir.join("unused.pkl"), format!("{aliases}x = 1\n")).unwrap();
     assert_eq!(pklr::eval_to_json(&dir.join("unused.pkl")).unwrap()["x"], 1);
 }
+
+// An empty body amending an inherited `Alias?` listing property gives an empty
+// listing even when the amending module cannot see the alias, and elements of
+// a listing of a constrained listing alias are built as the element class.
+// Checked against pkl 0.32.2.
+#[test]
+fn nullable_listing_alias_amends_and_constrained_listing_alias_elements() {
+    let temp = TestTempDir::new("pklr_nullable_listing_alias_amend");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("b1.pkl"),
+        "class T { x: Int = 1 }\nopen class H { xs: Alias? }\ntypealias Alias = Listing<T>\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"b1.pkl\" as B\nh = new B.H { xs {} }\ni = new B.H { xs { new {} } }\n",
+    )
+    .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
+    assert_eq!(val["h"]["xs"], serde_json::json!([]));
+    assert_eq!(val["i"]["xs"], serde_json::json!([{"x": 1}]));
+    std::fs::write(
+        dir.join("shadow.pkl"),
+        "import \"b1.pkl\" as B\nclass Alias {}\nh = new B.H { xs {} }\n",
+    )
+    .unwrap();
+    let val = pklr::eval_to_json(&dir.join("shadow.pkl")).unwrap();
+    assert_eq!(val["h"]["xs"], serde_json::json!([]));
+    std::fs::write(
+        dir.join("cl.pkl"),
+        "class T { x: Int = 1 }\ntypealias L = Listing<T>\ntypealias CL = L(length > 0)\n\
+a = new Listing<CL> { new { new {} } }\nb: Listing<CL> = new { new { new {} } }\n\
+class H { xs: Listing<CL> }\nh = new H { xs { new { new {} } } }\n",
+    )
+    .unwrap();
+    let val = pklr::eval_to_json(&dir.join("cl.pkl")).unwrap();
+    for value in [&val["a"], &val["b"], &val["h"]["xs"]] {
+        assert_eq!(*value, serde_json::json!([[{"x": 1}]]));
+    }
+}
