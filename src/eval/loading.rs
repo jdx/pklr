@@ -549,7 +549,7 @@ impl Evaluator {
     ) -> Result<()> {
         for (alias, alias_path) in deferred {
             if self.same_local_path(alias_path, inherited_path)? {
-                self.bind_import_type_aliases(scope, alias, inherited_path, inherited_val);
+                self.bind_import_type_aliases(scope, alias, inherited_path, inherited_val, None);
                 scope.declare(alias, inherited_val.clone());
                 let identity = self.module_type_namespace(alias_path);
                 scope.set_module_identity(alias.clone(), identity);

@@ -59,16 +59,50 @@ impl Evaluator {
         alias: &str,
         path: &Path,
         imported: &Value,
+        used: Option<&HashSet<Name>>,
     ) {
-        let key = self
-            .canonicalize_io(path)
-            .ok()
-            .filter(|key| self.module_scopes.contains_key(key))
-            .unwrap_or_else(|| path.to_path_buf());
+        // The common case: the importer's key is the module's own.
+        let key = if self.module_scopes.contains_key(path) {
+            path.to_path_buf()
+        } else {
+            self.canonicalize_io(path)
+                .ok()
+                .filter(|key| self.module_scopes.contains_key(key))
+                .unwrap_or_else(|| path.to_path_buf())
+        };
         let Some(snapshot) = self.module_scopes.get(&key) else {
             return;
         };
-        let aliases = &snapshot.type_aliases;
+        let all_aliases = &snapshot.type_aliases;
+        if all_aliases.is_empty() {
+            return;
+        }
+        // When the importer reads only some fields of the module, bind the
+        // aliases it names, and those their bodies name in turn. Binding the
+        // rest only grows every scope that captures this one.
+        let selected: Option<TypeAliasMap> = used.map(|used| {
+            let mut chosen = TypeAliasMap::default();
+            for field in used {
+                let head = field.split('.').next().unwrap_or(field);
+                if let Some((name, ty)) = all_aliases.get_key_value(head) {
+                    chosen.insert(name.clone(), ty.clone());
+                }
+            }
+            let mut grown = !chosen.is_empty();
+            while grown {
+                grown = false;
+                for (name, ty) in all_aliases.iter() {
+                    if !chosen.contains_key(name)
+                        && chosen.values().any(|body| type_mentions(body, name))
+                    {
+                        chosen.insert(name.clone(), ty.clone());
+                        grown = true;
+                    }
+                }
+            }
+            chosen
+        });
+        let aliases = selected.as_ref().unwrap_or(all_aliases);
         if aliases.is_empty() {
             return;
         }
@@ -1752,7 +1786,13 @@ impl Evaluator {
                         requested,
                     )?
                 };
-                self.bind_import_type_aliases(scope, &alias, Path::new(uri), &imported_val);
+                self.bind_import_type_aliases(
+                    scope,
+                    &alias,
+                    Path::new(uri),
+                    &imported_val,
+                    alias_use(module, evaluated_as_base, import_field_uses, &alias),
+                );
                 scope.declare(&alias, imported_val);
                 scope.set_module_identity(alias, canonical_remote_module_identity(uri));
                 continue;
@@ -1787,7 +1827,13 @@ impl Evaluator {
                             requested,
                         )?;
                         let identity = self.module_type_namespace(&local_path);
-                        self.bind_import_type_aliases(scope, &alias, &local_path, &imported_val);
+                        self.bind_import_type_aliases(
+                            scope,
+                            &alias,
+                            &local_path,
+                            &imported_val,
+                            alias_use(module, evaluated_as_base, import_field_uses, &alias),
+                        );
                         scope.declare(&alias, imported_val);
                         scope.set_module_identity(alias, identity);
                         continue;
@@ -1819,7 +1865,13 @@ impl Evaluator {
                         requested,
                     )?
                 };
-                self.bind_import_type_aliases(scope, &alias, Path::new(&url), &imported_val);
+                self.bind_import_type_aliases(
+                    scope,
+                    &alias,
+                    Path::new(&url),
+                    &imported_val,
+                    alias_use(module, evaluated_as_base, import_field_uses, &alias),
+                );
                 scope.declare(&alias, imported_val);
                 scope.set_module_identity(alias, url);
                 continue;
@@ -1876,7 +1928,13 @@ impl Evaluator {
                 let imported_val =
                     self.eval_file_with_requested_fields(&import_path, depth + 1, requested)?;
                 let identity = self.module_type_namespace(&import_path);
-                self.bind_import_type_aliases(scope, &alias, &import_path, &imported_val);
+                self.bind_import_type_aliases(
+                    scope,
+                    &alias,
+                    &import_path,
+                    &imported_val,
+                    alias_use(module, evaluated_as_base, import_field_uses, &alias),
+                );
                 scope.declare(&alias, imported_val);
                 scope.set_module_identity(alias, identity);
             }
@@ -1924,6 +1982,24 @@ pub(super) const STDLIB_NON_ANNOTATION_TYPES: &[&str] = &[
 
 /// Check that each annotation on a module property names an annotation
 /// class: a subclass of `Annotation`, not another class or a value.
+/// The fields of the import `alias` that `module` reads, when that is all that
+/// reads it. A module that amends, extends or is a base is read by code this
+/// analysis does not see, so it gets every alias.
+fn alias_use<'a>(
+    module: &Module,
+    evaluated_as_base: bool,
+    uses: &'a HashMap<String, ImportUse>,
+    alias: &str,
+) -> Option<&'a HashSet<Name>> {
+    if module.amends.is_some() || module.extends.is_some() || evaluated_as_base {
+        return None;
+    }
+    match uses.get(alias) {
+        Some(ImportUse::Fields(fields)) => Some(fields),
+        _ => None,
+    }
+}
+
 pub(super) fn check_module_annotations(module: &Module, scope: &Scope) -> Result<()> {
     let annotated = module
         .body
