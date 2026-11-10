@@ -69,6 +69,30 @@ impl Evaluator {
                 .filter(|value| !is_null_value(value))
                 .or(nullable_default.as_ref())
                 .or(scoped);
+            // A union without a `*` alternative has no default, so there is
+            // nothing for the body to amend. A nullable one defaults to null,
+            // and the Dynamic that amending null builds must itself satisfy
+            // the union.
+            if let Some(ty) = &prop.type_ann
+                && (amendment_base.is_none() || amendment_base.is_some_and(is_null_value))
+            {
+                let state = recorded_union_amend(scope, &prop.name, ty, body)
+                    .unwrap_or_else(|| self.union_amend_state(ty, scope));
+                match state {
+                    UnionAmendState::NoDefault if amendment_base.is_none() => {
+                        return Err(Error::Eval(format!(
+                            "Tried to read property `{}` but its value is undefined.",
+                            prop.name
+                        )));
+                    }
+                    UnionAmendState::NullDefault(union) => {
+                        return Err(Error::Eval(format!(
+                            "Expected value of type `{union}`, but got type `Dynamic`."
+                        )));
+                    }
+                    _ => {}
+                }
+            }
             if let Some(Value::List(items)) = amendment_base
                 && matches!(items.kind(), ListKind::List | ListKind::Set)
             {
@@ -492,8 +516,10 @@ impl Evaluator {
             mapping_value_types: Vec::new(),
             deprecated: collect_deprecated(entries),
             poisoned_members: None,
+            declared_as: None,
             kind: ObjectKind::Object,
             is_parsed_json: false,
+            is_module: false,
             prototype: None,
         };
         Ok(Value::Object(Arc::new(st.map), Some(Arc::new(source))))
@@ -1198,8 +1224,10 @@ impl Evaluator {
                         mapping_value_types: Vec::new(),
                         deprecated: merge_deprecated(&src.deprecated, body),
                         poisoned_members: None,
+                        declared_as: None,
                         kind: ObjectKind::Object,
                         is_parsed_json: false,
+                        is_module: false,
                         prototype: None,
                     },
                 };

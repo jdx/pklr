@@ -3437,6 +3437,278 @@ fn empty_listing_amend_through_amends_of_imported_mapping_property() {
     assert_eq!(val["nodes"]["a"]["bulk"], serde_json::json!([]));
 }
 
+/// Writes the module `lib.pkl` (a class, an alias to it, a property) and the
+/// module `main.pkl` with `main_body` below `import "lib.pkl" as lib`, then
+/// evaluates `main.pkl`.
+fn eval_with_class_module(main_body: &str) -> serde_json::Value {
+    let temp = TestTempDir::new("pklr_test_imported_classes");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("lib.pkl"),
+        "class C { req: Int; opt: Int = 1 }\ntypealias A = C\nvalue = 1\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        format!("import \"lib.pkl\" as lib\n{main_body}\n"),
+    )
+    .unwrap();
+    pklr::eval_to_json(&dir.join("main.pkl")).unwrap()
+}
+
+#[test]
+fn imported_module_value_does_not_render_its_classes() {
+    let val = eval_with_class_module("result = lib");
+    assert_eq!(val, serde_json::json!({"result": {"value": 1}}));
+}
+
+#[test]
+fn imported_module_nested_value_does_not_render_its_classes() {
+    let val = eval_with_class_module(
+        "a { b { m = lib } }\nl = new Listing { lib }\nm = new Mapping { [\"k\"] = lib }",
+    );
+    assert_eq!(
+        val,
+        serde_json::json!({
+            "a": {"b": {"m": {"value": 1}}},
+            "l": [{"value": 1}],
+            "m": {"k": {"value": 1}},
+        })
+    );
+}
+
+#[test]
+fn imported_module_converted_to_dynamic_or_map_does_not_carry_its_classes() {
+    let val = eval_with_class_module(
+        "d = lib.toDynamic()\nm = lib.toMap()\nk = lib.toMap().keys\nn = lib.toDynamic().toMap().keys",
+    );
+    assert_eq!(
+        val,
+        serde_json::json!({
+            "d": {"value": 1},
+            "m": {"value": 1},
+            "k": ["value"],
+            "n": ["value"],
+        })
+    );
+}
+
+#[test]
+fn imported_module_as_output_value_does_not_render_its_classes() {
+    let val = eval_with_class_module("output { value = lib }");
+    assert_eq!(val, serde_json::json!({"value": 1}));
+}
+
+#[test]
+fn imported_module_classes_stay_resolvable_through_dotted_access() {
+    let val = eval_with_class_module(
+        "c = new lib.C { req = 2 }\nd = new lib.A { req = 3; opt = 4 }\nf: lib.C = new lib.C { req = 5 }\nv = lib.value",
+    );
+    assert_eq!(
+        val,
+        serde_json::json!({
+            "c": {"req": 2, "opt": 1},
+            "d": {"req": 3, "opt": 4},
+            "f": {"req": 5, "opt": 1},
+            "v": 1,
+        })
+    );
+}
+
+#[test]
+fn imported_module_rendered_by_the_stdlib_renderers_does_not_include_classes() {
+    let val = eval_with_class_module(
+        "j = new JsonRenderer { omitNullProperties = false }.renderValue(lib)\ny = new YamlRenderer {}.renderValue(lib)\np = new PcfRenderer {}.renderValue(lib)\nt = \"\\(lib)\"",
+    );
+    // `opt` is only reachable through class `C` (its default), so a leaked
+    // class shows up as `opt` or as a `C`/`A` member, whatever the format.
+    for key in ["j", "y", "p", "t"] {
+        let text = val[key].as_str().unwrap();
+        assert!(text.contains("value"), "{key}: {text}");
+        assert!(!text.contains("opt"), "{key}: {text}");
+        for class in ["C", "A"] {
+            for leaked in [
+                format!("\"{class}\""),
+                format!("{class}:"),
+                format!("{class} {{"),
+                format!("{class} = "),
+            ] {
+                assert!(!text.contains(&leaked), "{key}: {text}");
+            }
+        }
+    }
+}
+
+/// Evaluates `main.pkl` with `files` beside it, to JSON.
+fn eval_files_to_json(files: &[(&str, &str)]) -> serde_json::Value {
+    let temp = TestTempDir::new("pklr_test_class_member_files");
+    for (name, source) in files {
+        std::fs::write(temp.path().join(name), source).unwrap();
+    }
+    pklr::eval_to_json(&temp.path().join("main.pkl")).unwrap()
+}
+
+#[test]
+fn class_held_by_a_property_is_a_value_not_a_member() {
+    // Pkl renders `d.c` through the converter: only the classes a module
+    // declares are left out, not every class-valued property.
+    let val = eval_files_to_json(&[
+        ("lib.pkl", "class C { req: Int; opt: Int = 1 }\n"),
+        (
+            "main.pkl",
+            "import \"lib.pkl\" as lib\nd { c = lib.C }\noutput { renderer = new JsonRenderer { converters { [\"d.c\"] = (_) -> \"class\" } } }\n",
+        ),
+    ]);
+    assert_eq!(val, serde_json::json!({"d": {"c": "class"}}));
+}
+
+#[test]
+fn live_module_snapshots_do_not_render_declared_classes() {
+    // `module`, `this` and their `toMap()`/`toDynamic()` views are built from the
+    // module's live member map, which holds the class as a declared member just
+    // like the exported object. Pkl never renders it.
+    for value in ["module", "module.toMap()", "module.toDynamic()"] {
+        let src = format!(
+            "class C {{ a: Int = 1 }}\ntypealias A = C\nvalue = 1\noutput {{ value = new Dynamic {{ snap = {value} }} }}\n"
+        );
+        assert_eq!(
+            eval_files_to_json(&[("main.pkl", src.as_str())]),
+            serde_json::json!({"snap": {"value": 1}}),
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn live_module_snapshot_keeps_a_class_held_by_a_property() {
+    // Only the declared member is skipped: `d` is an ordinary property that
+    // happens to hold a class, so the snapshot still carries it.
+    let val = eval_files_to_json(&[(
+        "main.pkl",
+        "class C { a: Int = 1 }\nd = C\noutput { value = new Dynamic { d = module.toMap().containsKey(\"d\"); c = module.toMap().containsKey(\"C\") } }\n",
+    )]);
+    assert_eq!(val, serde_json::json!({"d": true, "c": false}));
+}
+
+#[test]
+fn imported_module_drops_a_property_named_like_an_inherited_typealias() {
+    // As in Pkl, `A = 5` is not a rendered member of a module that inherits
+    // `typealias A`, whether the module is evaluated or imported, while an
+    // ordinary property still is.
+    let files = [
+        (
+            "lib.pkl",
+            "open module lib\ntypealias A = Int\nclass B {}\n",
+        ),
+        ("child.pkl", "extends \"lib.pkl\"\nA = 5\na = 1\n"),
+        ("main.pkl", "import \"child.pkl\" as child\nr = child\n"),
+    ];
+    assert_eq!(
+        eval_files_to_json(&files),
+        serde_json::json!({"r": {"a": 1}})
+    );
+}
+
+#[test]
+fn imported_module_class_with_a_duration_default_still_renders_as_json() {
+    // The class is never rendered, so its `Duration` default is not an
+    // unrenderable value.
+    let temp = TestTempDir::new("pklr_test_class_duration");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("lib.pkl"),
+        "class K { t: Duration = 5.min }\nx = 1\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("main.pkl"), "import \"lib.pkl\" as lib\nr = lib\n").unwrap();
+    let value = pklr::Evaluator::new()
+        .eval_file(&dir.join("main.pkl"))
+        .unwrap();
+    assert_eq!(
+        value.try_to_json().unwrap(),
+        serde_json::json!({"r": {"x": 1}})
+    );
+}
+
+#[test]
+fn converted_collection_keeps_an_entry_holding_an_imported_class() {
+    // A class held as a `Mapping`, `Map` or `Dynamic` entry is data, even when
+    // its key is the class's name, so converting the container (repeatedly)
+    // keeps it. Only the module's own declaration (`f`) is not a member.
+    // Checked against pkl 0.32.2.
+    let val = eval_files_to_json(&[
+        ("lib.pkl", "class C { a: Int = 1 }\n"),
+        (
+            "main.pkl",
+            "import \"lib.pkl\" as lib\n\
+             local m = new Mapping { [\"C\"] = lib.C }\n\
+             a = m.toMap().toMap().containsKey(\"C\")\n\
+             b = m.toMap().mapValues((k, v) -> v).toMap().containsKey(\"C\")\n\
+             c = m.toMap().filter((k, v) -> true).toMap().containsKey(\"C\")\n\
+             d = new Dynamic { [\"C\"] = lib.C }.toMap().toMap().containsKey(\"C\")\n\
+             e = Map(\"C\", lib.C).toMap().containsKey(\"C\")\n\
+             f = lib.toMap().containsKey(\"C\")\n\
+             g = m.toMap().toDynamic().toMap().keys.length\n\
+             h = m.toMap().toMapping().toMap().keys.length\n",
+        ),
+    ]);
+    assert_eq!(
+        val,
+        serde_json::json!({
+            "a": true, "b": true, "c": true, "d": true, "e": true,
+            "f": false, "g": 1, "h": 1,
+        })
+    );
+}
+
+#[test]
+fn live_this_view_of_a_body_keeps_an_entry_holding_an_imported_class() {
+    // Inside a `Dynamic`, `Mapping` or typed body, `this.toMap()`
+    // sees the entry that holds a class (even under the class's own name),
+    // matching the completed object. Only a module's own declaration is left
+    // out of its `module`/`this` views. Checked against pkl 0.32.2.
+    let val = eval_files_to_json(&[
+        (
+            "lib.pkl",
+            "class C { a: Int = 1 }\n\
+             function has() = module.toMap().containsKey(\"C\")\n\
+             function hasThis() = this.toMap().containsKey(\"C\")\n",
+        ),
+        (
+            "main.pkl",
+            "import \"lib.pkl\" as lib\n\
+             class T { c: Any = lib.C; f: Function }\n\
+             local x_dyn = new Dynamic { [\"C\"] = lib.C; f = () -> this.toMap().containsKey(\"C\") }\n\
+             local x_prop = new Dynamic { C = lib.C; f = () -> this.toMap().containsKey(\"C\") }\n\
+             local x_outer = new Dynamic { [\"C\"] = lib.C; inner { f = () -> outer.toMap().containsKey(\"C\") } }\n\
+             local x_map = new Mapping { [\"C\"] = lib.C; [\"f\"] = () -> this.toMap().containsKey(\"C\") }\n\
+             local x_mapOuter = new Mapping { [\"C\"] = lib.C; [\"inner\"] { f = () -> outer.toMap().containsKey(\"C\") } }\n\
+\
+             local x_typed = new T { f = () -> this.toMap().containsKey(\"c\") }\n\
+             r {\n\
+               dyn = x_dyn.f.apply()\n\
+               prop = x_prop.f.apply()\n\
+               outerDyn = x_outer.inner.f.apply()\n\
+               map = x_map[\"f\"].apply()\n\
+               outerMap = x_mapOuter[\"inner\"].f.apply()\n\
+\
+               typed = x_typed.f.apply()\n\
+             }\n\
+             r2 { m = lib.has()\n t = lib.hasThis() }\n",
+        ),
+    ]);
+    assert_eq!(
+        val,
+        serde_json::json!({
+            "r": {
+                "dyn": true, "prop": true, "outerDyn": false, "map": true,
+                "outerMap": false, "typed": true,
+            },
+            "r2": {"m": false, "t": false},
+        })
+    );
+}
+
 #[test]
 fn inherited_listing_property_elements_use_the_declaring_modules_class() {
     let temp = TestTempDir::new("pklr_inherited_listing_elem_class");

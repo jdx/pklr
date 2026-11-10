@@ -183,6 +183,54 @@ impl Evaluator {
                 _ => None,
             })
             .collect::<HashSet<_>>();
+        // A body amendment of a union-typed property is checked against the
+        // aliases of the class that declared it, which the amending scope may
+        // not see (`typealias Args = ...` private to an imported module).
+        // The same holds for an instance, which keeps its class's entries.
+        {
+            let mut declaring = None;
+            for entry in overlay_entries {
+                let Entry::Property(prop) = entry else {
+                    continue;
+                };
+                let Some(overlay_body) = &prop.body else {
+                    continue;
+                };
+                if prop.value.is_some() || prop.type_ann.is_some() {
+                    continue;
+                }
+                let Some((index, ty)) =
+                    base_entries
+                        .iter()
+                        .enumerate()
+                        .rev()
+                        .find_map(|(index, base)| match base {
+                            Entry::Property(base) if base.name == prop.name => {
+                                base.type_ann.as_ref().map(|ty| (index, ty))
+                            }
+                            _ => None,
+                        })
+                else {
+                    continue;
+                };
+                // An inherited property keeps the scope of the class that
+                // declared it, which can be another module with private aliases.
+                let declaring = match base_source.entry_scopes.get(index).and_then(Clone::clone) {
+                    Some(captured) => restore_scope(&captured),
+                    None => declaring
+                        .get_or_insert_with(|| {
+                            restore_scope(&capture_object_source_scope(base_source))
+                        })
+                        .clone(),
+                };
+                let declaring = &declaring;
+                let state = self.union_amend_state(ty, declaring);
+                amendment_scope.values.insert(
+                    union_amend_marker(&prop.name).as_str().into(),
+                    Value::String(encode_union_amend(ty, overlay_body, &state).into()),
+                );
+            }
+        }
         let amendment_captured = Arc::new(CapturedScope {
             body_members: overlay_entries
                 .iter()
@@ -1210,7 +1258,9 @@ impl Evaluator {
             )?;
             for (key, value) in fresh {
                 let unchanged = match (original.get(&key), amended.get(&key)) {
-                    (Some(original), Some(current)) => original.to_json() == current.to_json(),
+                    (Some(original), Some(current)) => {
+                        original.identity_json() == current.identity_json()
+                    }
                     _ => false,
                 };
                 if unchanged {
@@ -1224,7 +1274,8 @@ impl Evaluator {
             .find_default_template(overlay_entries, inherited_scope, depth)
             .ok()
             .flatten();
-        let same = declared.is_some_and(|declared| declared.to_json() == recorded.to_json());
+        let same =
+            declared.is_some_and(|declared| declared.identity_json() == recorded.identity_json());
         Ok(same.then_some(assigned_default))
     }
 }

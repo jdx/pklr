@@ -384,34 +384,53 @@ pub(super) fn inferred_new_type(
 }
 
 pub(super) fn type_default_value(ty: &crate::parser::TypeExpr, scope: &Scope) -> Option<Value> {
+    type_default_value_seen(ty, scope, &mut Vec::new())
+}
+
+/// [`type_default_value`] with the aliases already being expanded, so a cyclic
+/// alias such as `typealias A = *A|Int` yields no default instead of recursing
+/// until the stack overflows. [`type_default_error`] reports the cycle.
+fn type_default_value_seen(
+    ty: &crate::parser::TypeExpr,
+    scope: &Scope,
+    seen: &mut Vec<String>,
+) -> Option<Value> {
     use crate::parser::TypeExpr;
     match ty {
         TypeExpr::Constrained(base, _) if base.ends_with('?') => Some(Value::Null),
         TypeExpr::Constrained(base, _) => type_default_for_name(base, scope),
         TypeExpr::Nullable(_) => Some(Value::Null),
         TypeExpr::Named(name) => {
-            // Follow a chain of plain aliases in a loop; a cyclic one has no
-            // default.
+            // Follow a chain of plain aliases in a loop, not by recursion; a
+            // cyclic one has no default.
+            let mark = seen.len();
             let mut name = name;
-            let mut seen = HashSet::default();
-            loop {
+            let value = loop {
                 if name == "Null" {
-                    return Some(Value::Null);
+                    break Some(Value::Null);
                 }
                 if let Some(value) = string_literal_type_value(name) {
-                    return Some(Value::String(value.into()));
+                    break Some(Value::String(value.into()));
                 }
-                match scope.get_type_alias(name) {
-                    Some(TypeExpr::Named(next)) => {
-                        if !seen.insert(name.as_str()) {
-                            return None;
+                // A marked alternative (`*A`) takes its default from what `A`
+                // aliases.
+                let base = name.trim_start_matches('*');
+                match scope.get_type_alias(base) {
+                    Some(alias) => {
+                        if seen.iter().any(|seen| seen == base) {
+                            break None;
                         }
-                        name = next;
+                        seen.push(base.to_string());
+                        match alias {
+                            TypeExpr::Named(next) => name = next,
+                            other => break type_default_value_seen(other, scope, seen),
+                        }
                     }
-                    Some(other) => return type_default_value(other, scope),
-                    None => return type_default_for_name(name, scope),
+                    None => break type_default_for_name(name, scope),
                 }
-            }
+            };
+            seen.truncate(mark);
+            value
         }
         TypeExpr::Generic(name, _) => match name.as_str() {
             "Collection" | "List" | "Set" | "Listing" => Some(empty_collection(name)),
@@ -425,7 +444,17 @@ pub(super) fn type_default_value(ty: &crate::parser::TypeExpr, scope: &Scope) ->
         TypeExpr::Union(variants) => variants
             .iter()
             .find(|ty| is_default_type(ty))
-            .and_then(|ty| type_default_value(ty, scope)),
+            // The built-in `Map` and `IntSeq` are values with no default of
+            // their own. A class of that name declared in scope shadows them
+            // and keeps its own default.
+            .filter(|ty| {
+                !matches!(ty, TypeExpr::Named(name)
+                if matches!(
+                    name.trim_start_matches('*').split('<').next(),
+                    Some("Map" | "IntSeq")
+                ) && !names_user_class(name, scope))
+            })
+            .and_then(|ty| type_default_value_seen(ty, scope, seen)),
     }
 }
 
@@ -450,7 +479,7 @@ pub(super) fn type_default_error(ty: &crate::parser::TypeExpr, scope: &Scope) ->
                 break poisoned_member(scope, base);
             };
             if seen.iter().any(|seen| seen == base) {
-                break None;
+                break Some("Type alias definitions must not be cyclic.".to_string());
             }
             seen.push(base.to_string());
             match alias {
@@ -488,6 +517,17 @@ pub(super) fn type_default_error(ty: &crate::parser::TypeExpr, scope: &Scope) ->
     }
 
     visit(ty, scope, &mut Vec::new())
+}
+
+/// Whether `name` resolves to a class declared in scope, which shadows the
+/// built-in type of that name.
+fn names_user_class(name: &str, scope: &Scope) -> bool {
+    let name = name.trim_start_matches('*').trim_end_matches('?');
+    let base = name.split('<').next().unwrap_or(name);
+    matches!(
+        resolve_dotted(scope, base),
+        Some(Value::Object(_, Some(source))) if source.kind == ObjectKind::Class
+    )
 }
 
 pub(super) fn type_default_for_name(name: &str, scope: &Scope) -> Option<Value> {
