@@ -944,7 +944,9 @@ pub(crate) trait StringRenderer<'a> {
             .iter()
             // Methods are stored as function-valued members, and a module's
             // classes are members but not properties.
-            .filter(|(_, value)| !matches!(value, Value::Lambda(..)) && !value.is_class())
+            .filter(|(key, value)| {
+                !matches!(value, Value::Lambda(..)) && !crate::value::is_type_member(source, key)
+            })
             .map(|(key, value)| (members.kind_of(key), key, value))
             .collect();
         ordered.sort_by_key(|(member, ..)| *member == MemberKind::Entry);
@@ -1357,7 +1359,9 @@ impl JsonValue<'_> {
                             _ => PathPart::Property(key),
                         });
                     }
-                    let converted = if matches!(member, Value::Lambda(..)) || member.is_class() {
+                    let converted = if matches!(member, Value::Lambda(..))
+                        || crate::value::is_type_member(source.as_deref(), key)
+                    {
                         None
                     } else {
                         self.convert_member(member)?
@@ -1439,7 +1443,9 @@ impl JsonValue<'_> {
                     // Methods are stored as function-valued members, and an
                     // object without a source cannot tell them from data. A
                     // module's classes are members but not properties.
-                    if matches!(member, Value::Lambda(..)) || member.is_class() {
+                    if matches!(member, Value::Lambda(..))
+                        || crate::value::is_type_member(source.as_deref(), key)
+                    {
                         continue;
                     }
                     if let Some(members) = &members {

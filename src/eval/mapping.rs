@@ -426,6 +426,7 @@ pub(super) fn mapping_source() -> ObjectSource {
         kind: ObjectKind::Mapping,
         is_parsed_json: false,
         prototype: None,
+        type_members: Default::default(),
     }
 }
 
@@ -1051,6 +1052,7 @@ impl Evaluator {
                                         kind: ObjectKind::Object,
                                         is_parsed_json: false,
                                         prototype: None,
+                                        type_members: Default::default(),
                                     },
                                 };
                                 *result_src = Some(std::sync::Arc::new(new_src));

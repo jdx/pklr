@@ -241,6 +241,7 @@ impl Evaluator {
                             kind: ObjectKind::Mapping,
                             is_parsed_json: false,
                             prototype: None,
+                            type_members: Default::default(),
                         };
                         Ok(Value::Object(Arc::new(map), Some(Arc::new(source))))
                     }
@@ -370,6 +371,7 @@ impl Evaluator {
                                         kind: ObjectKind::Object,
                                         is_parsed_json: false,
                                         prototype: None,
+                                        type_members: Default::default(),
                                     }
                                 };
                                 *src_slot = Some(Arc::new(new_src));
@@ -412,6 +414,7 @@ impl Evaluator {
                                 kind: ObjectKind::Object,
                                 is_parsed_json: false,
                                 prototype: None,
+                                type_members: Default::default(),
                             };
                             Ok(Value::Object(Arc::new(merged), Some(Arc::new(src))))
                         } else {

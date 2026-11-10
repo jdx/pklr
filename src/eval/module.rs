@@ -556,7 +556,23 @@ impl Evaluator {
         // An abstract module also keeps a source, so `new` can reject it.
         let deprecated = collect_deprecated(body);
         let is_abstract = module_is_abstract(module);
-        let source = if deprecated.is_empty() && poisoned_members.is_empty() && !is_abstract {
+        // An imported module keeps its classes as members for dotted access;
+        // record them so renderers do not output them as properties.
+        let type_members: Arc<[Arc<str>]> = if depth == 0 {
+            Arc::from([])
+        } else {
+            out.keys()
+                .filter(|name| {
+                    class_names.contains(&***name) || inherited_type_names.contains(&***name)
+                })
+                .cloned()
+                .collect()
+        };
+        let source = if deprecated.is_empty()
+            && poisoned_members.is_empty()
+            && !is_abstract
+            && type_members.is_empty()
+        {
             None
         } else {
             Some(Arc::new(ObjectSource {
@@ -580,6 +596,7 @@ impl Evaluator {
                 kind: ObjectKind::Object,
                 is_parsed_json: false,
                 prototype: None,
+                type_members,
             }))
         };
         let mut effective_late_properties = IndexMap::new();

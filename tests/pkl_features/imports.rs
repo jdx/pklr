@@ -3294,6 +3294,26 @@ fn imported_module_value_does_not_render_its_classes() {
         })
     );
 
+    // `Value::try_to_json` walks objects separately from `to_json`.
+    let value = pklr::eval::Evaluator::new().eval_file(&main).unwrap();
+    let checked = value.try_to_json().unwrap();
+    assert_eq!(checked["result"]["value"], 1);
+    assert!(checked["result"].get("C").is_none(), "{checked}");
+    assert!(checked["result"].get("Alias").is_none(), "{checked}");
+
+    // A class held by a property is data, not a declaration: a converter for
+    // its path still applies (`pkl eval` 0.33.0 renders `"class"`).
+    let converted = temp.path().join("converted.pkl");
+    std::fs::write(
+        &converted,
+        "import \"lib.pkl\" as lib\nd { c = lib.C }\noutput { renderer = new JsonRenderer { converters { [\"d.c\"] = (_) -> \"class\" } } }\n",
+    )
+    .unwrap();
+    assert_eq!(
+        pklr::eval_to_json(&converted).unwrap(),
+        serde_json::json!({"d": {"c": "class"}})
+    );
+
     let yaml = temp.path().join("yaml.pkl");
     std::fs::write(
         &yaml,
