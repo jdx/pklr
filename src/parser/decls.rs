@@ -233,12 +233,7 @@ impl<'a> Parser<'a> {
         self.type_alias_parameters
             .insert(name.clone(), parameters.clone());
         self.expect(&TokenKind::Equals, "=")?;
-        let ty = self.parse_type()?;
-        let ty = if parameters.is_empty() {
-            ty
-        } else {
-            mark_type_parameters(ty, &parameters)
-        };
+        let ty = erase_type_parameters(self.parse_type()?, &parameters);
         Ok(Entry::TypeAlias(name, ty))
     }
 
@@ -494,9 +489,11 @@ impl<'a> Parser<'a> {
         }
         self.advance(); // =
         let mut body = self.parse_expr()?;
-        if let Some(return_type) = return_type {
-            infer_method_return_new(&mut body, &return_type);
+        if let Some(return_type) = &return_type {
+            infer_method_return_new(&mut body, return_type);
         }
+        let body = check_signature(&params, return_type.as_ref(), body);
+        let params: Vec<String> = params.into_iter().map(|(name, _)| name).collect();
         Ok(Some(Entry::Property(std::sync::Arc::new(Property {
             name: name.into(),
             type_ann: None,
@@ -508,17 +505,30 @@ impl<'a> Parser<'a> {
         }))))
     }
 
-    /// Parse `(a: Type, b, _)`; types are checked but not kept.
-    pub(super) fn parse_parameter_list(&mut self) -> Result<Vec<String>> {
+    /// Parse `(a: Type, b, _)`; the types are kept.
+    pub(super) fn parse_parameter_list(&mut self) -> Result<Vec<(String, Option<TypeExpr>)>> {
         self.expect(&TokenKind::LParen, "(")?;
-        let params = self.parse_parameters(&TokenKind::RParen)?;
+        let params = self.parse_typed_parameters(&TokenKind::RParen)?;
         self.expect2(&TokenKind::RParen, ")", ",")?;
         Ok(params)
     }
 
     /// Parse a comma-separated parameter list up to `terminator`, allowing a
-    /// trailing comma.
+    /// trailing comma. The types are checked but not kept.
     pub(super) fn parse_parameters(&mut self, terminator: &TokenKind) -> Result<Vec<String>> {
+        Ok(self
+            .parse_typed_parameters(terminator)?
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect())
+    }
+
+    /// Parse a comma-separated parameter list up to `terminator`, allowing a
+    /// trailing comma, keeping the types.
+    pub(super) fn parse_typed_parameters(
+        &mut self,
+        terminator: &TokenKind,
+    ) -> Result<Vec<(String, Option<TypeExpr>)>> {
         let mut params = Vec::new();
         let at_terminator =
             |p: &Self| std::mem::discriminant(p.peek()) == std::mem::discriminant(terminator);
@@ -526,7 +536,7 @@ impl<'a> Parser<'a> {
             return Ok(params);
         }
         loop {
-            params.push(self.parse_parameter()?);
+            params.push(self.parse_typed_parameter()?);
             if !matches!(self.peek(), TokenKind::Comma) {
                 break;
             }
@@ -536,11 +546,6 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(params)
-    }
-
-    /// Parse `name`, `name: Type` or `_`.
-    pub(super) fn parse_parameter(&mut self) -> Result<String> {
-        Ok(self.parse_typed_parameter()?.0)
     }
 
     /// Parse `name`, `name: Type` or `_`, keeping the type.

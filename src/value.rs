@@ -473,10 +473,19 @@ pub enum ListKind {
 
 /// The items of a [`Value::List`] and which collection they form. Derefs to
 /// the items.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ListValue {
     items: Arc<Vec<Value>>,
     kind: ListKind,
+    /// Made by `IntSeq(...)`: a `List` that is also of type `IntSeq`. Any
+    /// change of the items or the kind clears it, and equality ignores it.
+    int_seq: bool,
+}
+
+impl PartialEq for ListValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind && self.items == other.items
+    }
 }
 
 impl ListValue {
@@ -484,7 +493,18 @@ impl ListValue {
         ListValue {
             items: items.into(),
             kind,
+            int_seq: false,
         }
+    }
+
+    /// The same list, marked as the result of `IntSeq(...)`.
+    pub(crate) fn into_int_seq(mut self) -> Self {
+        self.int_seq = true;
+        self
+    }
+
+    pub(crate) fn is_int_seq(&self) -> bool {
+        self.int_seq
     }
 
     pub fn kind(&self) -> ListKind {
@@ -494,6 +514,7 @@ impl ListValue {
     /// The same items as a collection of another kind.
     pub fn with_kind(mut self, kind: ListKind) -> Self {
         self.kind = kind;
+        self.int_seq = false;
         self
     }
 
@@ -505,6 +526,7 @@ impl ListValue {
 
     /// Mutable access to the items, copying them first if they are shared.
     pub fn make_mut(&mut self) -> &mut Vec<Value> {
+        self.int_seq = false;
         Arc::make_mut(&mut self.items)
     }
 }

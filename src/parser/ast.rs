@@ -159,6 +159,41 @@ pub(super) fn infers_new(ty: &TypeExpr) -> bool {
     }
 }
 
+/// Wrap a function body so that its typed parameters and its result type are
+/// checked. Untyped parameters and `Any` need no check.
+pub(crate) fn check_signature(
+    params: &[(String, Option<TypeExpr>)],
+    return_type: Option<&TypeExpr>,
+    body: Expr,
+) -> Expr {
+    fn unchecked(ty: &TypeExpr) -> bool {
+        match ty {
+            TypeExpr::Named(name) => matches!(name.as_str(), "Any" | "unknown"),
+            TypeExpr::Nullable(inner) => unchecked(inner),
+            _ => false,
+        }
+    }
+    let mut body = match return_type {
+        Some(ty) if !unchecked(ty) => Expr::Checked(Box::new(body), ty.clone()),
+        _ => body,
+    };
+    for (name, ty) in params.iter().rev() {
+        if let Some(ty) = ty
+            && !unchecked(ty)
+        {
+            body = Expr::Let(
+                "_".to_string(),
+                Box::new(Expr::Checked(
+                    Box::new(Expr::Ident(name.clone())),
+                    ty.clone(),
+                )),
+                Box::new(body),
+            );
+        }
+    }
+    body
+}
+
 /// Whether `expr` has an untyped `new { ... }` in a result position.
 pub(crate) fn has_untyped_result_new(expr: &Expr) -> bool {
     match expr {
@@ -225,6 +260,10 @@ pub enum Expr {
     Is(Box<Expr>, TypeExpr),
     /// `expr as Type`
     As(Box<Expr>, TypeExpr),
+    /// A value that must match a declared type: a function's argument or
+    /// result. Unlike `as`, a type pklr cannot model accepts the value, as
+    /// it does for a declared property.
+    Checked(Box<Expr>, TypeExpr),
     /// Binary operation
     Binop(BinOp, Box<Expr>, Box<Expr>),
     /// Unary operation
@@ -318,64 +357,82 @@ pub struct WhenGenerator {
     pub else_body: Option<Body>,
 }
 
-/// The prefix of the name of a type parameter of a type alias in the alias's
-/// body (`T` in `typealias L<T> = List<T>`), which names no class or alias.
-pub(crate) const TYPE_PARAM_PREFIX: &str = "$tp$";
-
-/// `ty` with the type parameters `parameters` of a type alias marked (see
-/// [`TYPE_PARAM_PREFIX`]), so they are not taken for a class or alias.
-pub(super) fn mark_type_parameters(ty: TypeExpr, parameters: &[String]) -> TypeExpr {
-    // The text of a constrained or default-marked type (`List<T>`, `*T?`) is
-    // read with the lexer, so a name is what the lexer takes for one.
-    let mark_text = |text: &str| {
-        let Ok(tokens) = crate::lexer::lex(text) else {
-            return text.to_string();
-        };
+/// Replace the type parameters of a generic type alias in its target by
+/// `unknown`, which accepts every value. Evaluation does not know an alias's
+/// parameters, and a parameter named like a real alias (`typealias Pair<Foo> =
+/// List<Foo>`) must not be resolved as that alias.
+pub(crate) fn erase_type_parameters(ty: TypeExpr, parameters: &[String]) -> TypeExpr {
+    if parameters.is_empty() {
+        return ty;
+    }
+    fn erase_word(text: &str, parameters: &[String]) -> String {
         let mut out = String::with_capacity(text.len());
-        let mut copied = 0;
-        for (index, token) in tokens.iter().enumerate() {
-            let crate::lexer::TokenKind::Ident(name) = &token.kind else {
-                continue;
-            };
-            // A qualified name (`m.T`) names a member, not the parameter.
-            let qualified = index
-                .checked_sub(1)
-                .is_some_and(|before| matches!(tokens[before].kind, crate::lexer::TokenKind::Dot))
-                || matches!(
-                    tokens.get(index + 1).map(|next| &next.kind),
-                    Some(crate::lexer::TokenKind::Dot)
-                );
-            if !qualified
-                && !text[token.offset..].starts_with('`')
-                && parameters.iter().any(|parameter| parameter == name)
-            {
-                out.push_str(&text[copied..token.offset]);
-                out.push_str(TYPE_PARAM_PREFIX);
-                copied = token.offset;
+        let mut word = String::new();
+        let flush = |word: &mut String, out: &mut String| {
+            if parameters.iter().any(|p| p == word) {
+                out.push_str("unknown");
+            } else {
+                out.push_str(word);
+            }
+            word.clear();
+        };
+        // Words inside a string literal type (`Listing<"T">`) are text, not
+        // type names.
+        let mut in_string = false;
+        let mut escaped = false;
+        for c in text.chars() {
+            if in_string {
+                out.push(c);
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == '"' {
+                    in_string = false;
+                }
+            } else if c.is_alphanumeric() || c == '_' || c == '.' {
+                word.push(c);
+            } else if c == '"' {
+                flush(&mut word, &mut out);
+                out.push(c);
+                in_string = true;
+            } else {
+                flush(&mut word, &mut out);
+                out.push(c);
             }
         }
-        out.push_str(&text[copied..]);
+        flush(&mut word, &mut out);
         out
-    };
+    }
     match ty {
-        TypeExpr::Named(text) => TypeExpr::Named(mark_text(&text)),
+        TypeExpr::Named(name) => {
+            let (star, bare) = match name.strip_prefix('*') {
+                Some(bare) => ("*", bare),
+                None => ("", name.as_str()),
+            };
+            if parameters.iter().any(|p| p == bare) {
+                TypeExpr::Named(format!("{star}unknown"))
+            } else {
+                TypeExpr::Named(name)
+            }
+        }
         TypeExpr::Nullable(inner) => {
-            TypeExpr::Nullable(Box::new(mark_type_parameters(*inner, parameters)))
+            TypeExpr::Nullable(Box::new(erase_type_parameters(*inner, parameters)))
         }
         TypeExpr::Union(variants) => TypeExpr::Union(
             variants
                 .into_iter()
-                .map(|variant| mark_type_parameters(variant, parameters))
+                .map(|variant| erase_type_parameters(variant, parameters))
                 .collect(),
         ),
         TypeExpr::Generic(name, args) => TypeExpr::Generic(
             name,
             args.into_iter()
-                .map(|arg| mark_type_parameters(arg, parameters))
+                .map(|arg| erase_type_parameters(arg, parameters))
                 .collect(),
         ),
-        TypeExpr::Constrained(text, constraint, quoted) => {
-            TypeExpr::Constrained(mark_text(&text), constraint, quoted)
+        TypeExpr::Constrained(base, constraint, quoted) => {
+            TypeExpr::Constrained(erase_word(&base, parameters), constraint, quoted)
         }
     }
 }

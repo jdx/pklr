@@ -475,6 +475,8 @@ impl Evaluator {
                 let binding = format!("#parent:{}", prop.name);
                 child_scope.set(&binding, default);
                 parser::rewrite_untyped_result_new(expr, &mut |entries| {
+                    let entries =
+                        infer_amendment_members(ty, &entries, child_scope).unwrap_or(entries);
                     Expr::Binop(
                         BinOp::Add,
                         Box::new(Expr::Ident(binding.clone())),
@@ -591,6 +593,8 @@ impl Evaluator {
                 };
                 child_scope.set(&binding, default);
                 parser::rewrite_untyped_result_new(expr, &mut |entries| {
+                    let entries =
+                        infer_amendment_members(ty, &entries, child_scope).unwrap_or(entries);
                     Expr::Binop(
                         BinOp::Add,
                         Box::new(Expr::Ident(binding.clone())),

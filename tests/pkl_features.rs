@@ -77,3 +77,5 @@ mod strictness;
 mod strings;
 #[path = "pkl_features/syntax.rs"]
 mod syntax;
+#[path = "pkl_features/typed_elements.rs"]
+mod typed_elements;

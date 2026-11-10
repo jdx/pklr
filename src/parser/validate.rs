@@ -216,7 +216,9 @@ impl ConstChecker<'_> {
                     self.nested_const_expr(body, shadow)
                 })
             }),
-            Expr::Is(value, _) | Expr::As(value, _) => self.nested_const_expr(value, shadow),
+            Expr::Is(value, _) | Expr::As(value, _) | Expr::Checked(value, _) => {
+                self.nested_const_expr(value, shadow)
+            }
             Expr::Lambda(params, body) => self.bound(shadow, params, |shadow| {
                 self.nested_const_expr(body, shadow)
             }),
@@ -309,7 +311,7 @@ impl ConstChecker<'_> {
                     self.expr(body, shadow)
                 })
             }),
-            Expr::Is(value, ty) | Expr::As(value, ty) => self
+            Expr::Is(value, ty) | Expr::As(value, ty) | Expr::Checked(value, ty) => self
                 .expr(value, shadow)
                 .or_else(|| self.type_expr(ty, shadow)),
             Expr::Unop(_, value)

@@ -99,7 +99,7 @@ struct AliasResolver<'a> {
 impl AliasResolver<'_> {
     fn expr(&mut self, expr: &mut Expr, shadowed: &HashSet<Name>) {
         match expr {
-            Expr::Is(value, ty) | Expr::As(value, ty) => {
+            Expr::Is(value, ty) | Expr::As(value, ty) | Expr::Checked(value, ty) => {
                 self.expr(value, shadowed);
                 self.ty(ty, shadowed);
             }
@@ -243,7 +243,24 @@ impl AliasResolver<'_> {
                 };
             }
             TypeExpr::Nullable(inner) => self.ty(inner, shadowed),
-            TypeExpr::Union(types) | TypeExpr::Generic(_, types) => {
+            TypeExpr::Generic(name, args) => {
+                // A generic alias (`L<Int>` with `typealias L<T> = List<T>`)
+                // stands for its erased definition.
+                let (default_marker, plain) = match name.strip_prefix('*') {
+                    Some(plain) => ("*", plain),
+                    None => ("", name.as_str()),
+                };
+                if default_marker.is_empty()
+                    && let Some(resolved) = self.resolved_alias(plain, shadowed)
+                {
+                    *ty = resolved;
+                    return;
+                }
+                for ty in args {
+                    self.ty(ty, shadowed);
+                }
+            }
+            TypeExpr::Union(types) => {
                 for ty in types {
                     self.ty(ty, shadowed);
                 }
@@ -255,6 +272,20 @@ impl AliasResolver<'_> {
                     Some(plain) => ("*", plain),
                     None => ("", base.trim_end_matches('?')),
                 };
+                // `List<I>(length == 1)`: the aliases are in the type
+                // arguments of the base, not in its name.
+                if plain.contains('<')
+                    && let Ok(mut generic) = crate::parser::parse_type_name(plain)
+                {
+                    self.ty(&mut generic, shadowed);
+                    if let Some(text) = runtime_base_name(&generic)
+                        && text != plain
+                    {
+                        let suffix = if nullable { "?" } else { "" };
+                        *base = format!("{default_marker}{text}{suffix}");
+                    }
+                    return;
+                }
                 let Some(resolved) = self.resolved_alias(plain, shadowed) else {
                     return;
                 };
@@ -701,6 +732,7 @@ pub(super) fn pkl_class_name(value: &Value) -> String {
     match value {
         Value::Object(_, source) => object_class_name(source.as_deref(), None),
         Value::List(items) => match items.kind() {
+            ListKind::List if items.is_int_seq() => "IntSeq".to_string(),
             ListKind::List => "List".to_string(),
             ListKind::Listing => "Listing".to_string(),
             ListKind::Set => "Set".to_string(),
@@ -911,7 +943,7 @@ pub(super) fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
         && let TypeExpr::Named(name) | TypeExpr::Generic(name, _) = ty
         && string_literal_type_value(name).is_none()
     {
-        return list_is_type(items.kind(), name.strip_prefix('*').unwrap_or(name));
+        return list_is_type(items, name.strip_prefix('*').unwrap_or(name));
     }
     match ty {
         TypeExpr::Named(name) if string_literal_type_value(name).is_some() => {
@@ -950,7 +982,7 @@ pub(super) fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
         TypeExpr::Union(variants) => variants.iter().any(|v| value_is_type(val, v)),
         TypeExpr::Generic(name, _) => {
             // Check the base type, ignore type parameters
-            match name.as_str() {
+            match name.trim_start_matches('*') {
                 "List" | "Listing" | "Set" => matches!(val, Value::List(_)),
                 "Map" | "Mapping" => {
                     matches!(val, Value::Object(..))
@@ -959,7 +991,7 @@ pub(super) fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
                 }
                 "Class" => is_class_value(val),
                 "Regex" => matches!(val, Value::Regex(_)),
-                "Function" | "Function0" | "Function1" | "Function2" | "Function3"
+                "Function" | "Mixin" | "Function0" | "Function1" | "Function2" | "Function3"
                 | "Function4" | "Function5" => matches!(val, Value::Lambda(..)),
                 _ => matches!(val, Value::Object(..)),
             }
@@ -979,13 +1011,16 @@ pub(super) fn is_class_value(val: &Value) -> bool {
 
 /// Whether a value of the given list kind is an instance of the built-in
 /// class `name`. `Object` is the superclass of `Dynamic` and `Listing`.
-pub(super) fn list_is_type(kind: ListKind, name: &str) -> bool {
+pub(super) fn list_is_type(list: &crate::value::ListValue, name: &str) -> bool {
+    let kind = list.kind();
     match name {
         "Any" | "unknown" => true,
-        "List" => kind == ListKind::List,
+        // An `IntSeq` is its own class, not a `List`.
+        "List" => kind == ListKind::List && !list.is_int_seq(),
+        "IntSeq" => list.is_int_seq(),
         "Listing" => kind == ListKind::Listing,
         "Set" => kind == ListKind::Set,
-        "Collection" => matches!(kind, ListKind::List | ListKind::Set),
+        "Collection" => matches!(kind, ListKind::List | ListKind::Set) && !list.is_int_seq(),
         "Dynamic" => kind == ListKind::Dynamic,
         "Object" => matches!(kind, ListKind::Listing | ListKind::Dynamic),
         _ => false,
@@ -1071,10 +1106,24 @@ fn is_untyped_dynamic(val: &Value) -> bool {
     }
 }
 
+/// The type a union's default alternative stands for when it keeps type
+/// arguments (`*Listing<Int>`, stored as the name `*Listing<Int>`): the `*`
+/// marks the default and is not part of the type.
+pub(super) fn unmarked_generic(name: &str) -> Option<crate::parser::TypeExpr> {
+    let plain = name.strip_prefix('*')?;
+    plain
+        .contains('<')
+        .then(|| crate::parser::parse_type_name(plain).ok())
+        .flatten()
+}
+
 pub(super) fn type_is_runtime_checkable(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
     use crate::parser::TypeExpr;
     match ty {
         TypeExpr::Named(name) => {
+            if let Some(unmarked) = unmarked_generic(name) {
+                return type_is_runtime_checkable(&unmarked, scope);
+            }
             let runtime_name = name.strip_prefix('*').unwrap_or(name);
             string_literal_type_value(name).is_some()
                 || matches!(
@@ -1604,10 +1653,7 @@ impl TypeResolver<'_> {
 
     fn check_name(&mut self, name: &str) -> Option<String> {
         let scope = self.scope;
-        if STDLIB_TYPE_NAMES.contains(&name)
-            || name == "module"
-            || name.starts_with(crate::parser::TYPE_PARAM_PREFIX)
-        {
+        if STDLIB_TYPE_NAMES.contains(&name) || name == "module" {
             return None;
         }
         let Some((module, member)) = name.rsplit_once('.') else {
@@ -1767,4 +1813,236 @@ pub(super) fn alias_key(scope: &Scope, name: &str) -> String {
         .map(|module| module.display().to_string())
         .unwrap_or_default();
     format!("{module}\0{name}")
+}
+
+/// The generic `Listing` or `Mapping` type `ty` stands for, through aliases,
+/// nullability and constraints.
+fn resolve_collection_type(
+    ty: &crate::parser::TypeExpr,
+    scope: &Scope,
+    depth: usize,
+) -> Option<crate::parser::TypeExpr> {
+    use crate::parser::TypeExpr;
+    if depth > 8 {
+        return None;
+    }
+    match ty {
+        TypeExpr::Generic(name, _) if matches!(name.as_str(), "Listing" | "Mapping") => {
+            Some(ty.clone())
+        }
+        TypeExpr::Nullable(inner) => resolve_collection_type(inner, scope, depth + 1),
+        TypeExpr::Named(name) => {
+            let alias = scope.get_type_alias(name.trim_start_matches('*'))?;
+            resolve_collection_type(alias, scope, depth + 1)
+        }
+        TypeExpr::Constrained(base, _, false) if base.contains('<') => {
+            let base = crate::parser::parse_type_name(base.trim_start_matches('*')).ok()?;
+            resolve_collection_type(&base, scope, depth + 1)
+        }
+        _ => None,
+    }
+}
+
+/// An untyped `new { ... }` element of a `Listing<E>` takes its parent from
+/// `E` when that is a `Listing` or `Mapping` (`Listing<Listing<Int>> = new {
+/// new { 1 } }`), as does the value of a `Mapping<K, V>` entry
+/// (`Mapping<String, Listing<Int>> = new { ["k"] = new { 1 } }`). Elsewhere it
+/// is a `Dynamic`, as pkl does.
+pub(super) fn infer_listing_elements(
+    ty: &crate::parser::TypeExpr,
+    entries: &crate::parser::Body,
+    scope: &Scope,
+) -> crate::parser::Body {
+    infer_collection_body(ty, entries, scope, false).unwrap_or_else(|| entries.clone())
+}
+
+/// [`infer_listing_elements`] for the body of a property amendment (`xs { ...
+/// }`) of declared type `ty`, `None` when nothing needs inferring.
+pub(super) fn infer_amendment_members(
+    ty: &crate::parser::TypeExpr,
+    entries: &crate::parser::Body,
+    scope: &Scope,
+) -> Option<crate::parser::Body> {
+    infer_collection_body(ty, entries, scope, false)
+}
+
+/// The element type of a `Listing` or the value type of a `Mapping` that is a
+/// collection itself: the members of such a body need their parent inferred.
+fn nested_collection_type(
+    ty: &crate::parser::TypeExpr,
+    scope: &Scope,
+) -> Option<crate::parser::TypeExpr> {
+    use crate::parser::TypeExpr;
+    let Some(TypeExpr::Generic(name, args)) = resolve_collection_type(ty, scope, 0) else {
+        return None;
+    };
+    let member_ty = match (name.as_str(), args.as_slice()) {
+        ("Listing", [element_ty]) => element_ty,
+        ("Mapping", [_, value_ty]) => value_ty,
+        _ => return None,
+    };
+    resolve_collection_type(member_ty, scope, 0).map(|_| member_ty.clone())
+}
+
+/// `entries` with the members of a body of type `ty` rewritten, or `None` when
+/// the type has no collection members to infer. `amended` is set for the body
+/// of an entry amendment (`["k"] { ... }`), whose members have no value types
+/// of their own to fall back on.
+fn infer_collection_body(
+    ty: &crate::parser::TypeExpr,
+    entries: &crate::parser::Body,
+    scope: &Scope,
+    amended: bool,
+) -> Option<crate::parser::Body> {
+    let member_ty = nested_collection_type(ty, scope)?;
+    let is_listing = matches!(
+        resolve_collection_type(ty, scope, 0),
+        Some(crate::parser::TypeExpr::Generic(name, _)) if name == "Listing"
+    );
+    Some(infer_members_in(
+        entries, &member_ty, is_listing, amended, scope,
+    ))
+}
+
+/// Rewrite the untyped `new` members of `entries` (elements of a listing,
+/// entry values of a mapping), including those inside `for` and `when`
+/// generator bodies and the bodies of entry amendments (`["k"] { ... }`).
+fn infer_members_in(
+    entries: &crate::parser::Body,
+    member_ty: &crate::parser::TypeExpr,
+    is_listing: bool,
+    amended: bool,
+    scope: &Scope,
+) -> crate::parser::Body {
+    entries
+        .iter()
+        .map(|entry| match entry {
+            Entry::Elem(Expr::New(None, body, _)) if is_listing => {
+                Entry::Elem(Expr::InferredNew(member_ty.clone(), body.clone()))
+            }
+            // A listing index assignment (`[0] = new { ... }`) takes the
+            // element type like a plain element does.
+            Entry::DynProperty(key, Expr::New(None, body, _)) if is_listing => Entry::DynProperty(
+                key.clone(),
+                Expr::InferredNew(member_ty.clone(), body.clone()),
+            ),
+            // A mapping value whose own members need inferring stays an entry
+            // body, which amends the mapping's `default`, with its members
+            // inferred. Other values keep their untyped `new`, which honors
+            // the `default` too.
+            Entry::DynProperty(key, Expr::New(None, body, _))
+                if !is_listing
+                    && !amended
+                    && nested_collection_type(member_ty, scope).is_some() =>
+            {
+                let body = infer_collection_body(member_ty, body, scope, false)
+                    .unwrap_or_else(|| body.clone());
+                let is_listing_value = matches!(
+                    resolve_collection_type(member_ty, scope, 0),
+                    Some(crate::parser::TypeExpr::Generic(name, _)) if name == "Listing"
+                );
+                if is_listing_value {
+                    Entry::DynProperty(key.clone(), Expr::ObjectBody(body))
+                } else {
+                    Entry::DynProperty(
+                        key.clone(),
+                        Expr::InferredNew(member_ty.clone(), body.clone()),
+                    )
+                }
+            }
+            // Any value of an amended body: it has no value types of its own
+            // to fall back on.
+            Entry::DynProperty(key, Expr::New(None, body, _)) if !is_listing && amended => {
+                Entry::DynProperty(
+                    key.clone(),
+                    Expr::InferredNew(member_ty.clone(), body.clone()),
+                )
+            }
+            // The body of an amended entry has no parent to amend, so the
+            // entry is a new value of the member type.
+            Entry::DynProperty(key, Expr::ObjectBody(body)) if !is_listing && amended => {
+                Entry::DynProperty(
+                    key.clone(),
+                    Expr::InferredNew(member_ty.clone(), body.clone()),
+                )
+            }
+            // An index amendment (`[0] { ... }`) of a listing amends an
+            // element, whose own members are inferred from the element type.
+            // The element exists, so its entry bodies amend rather than build.
+            Entry::DynProperty(key, Expr::ObjectBody(body)) => {
+                match infer_collection_body(member_ty, body, scope, !is_listing) {
+                    Some(body) => Entry::DynProperty(key.clone(), Expr::ObjectBody(body)),
+                    None => entry.clone(),
+                }
+            }
+            // An untyped `new` that an `if` or `let` picks as the member takes
+            // the member type as well, when that is a collection.
+            Entry::Elem(expr) if is_listing && selects_untyped_new(expr) => {
+                Entry::Elem(infer_selected_new(expr, member_ty, false, scope))
+            }
+            Entry::DynProperty(key, expr)
+                if (is_listing || !amended) && selects_untyped_new(expr) =>
+            {
+                Entry::DynProperty(
+                    key.clone(),
+                    infer_selected_new(expr, member_ty, !is_listing, scope),
+                )
+            }
+            Entry::ForGenerator(generator) => {
+                let mut generator = generator.clone();
+                generator.body =
+                    infer_members_in(&generator.body, member_ty, is_listing, amended, scope);
+                Entry::ForGenerator(generator)
+            }
+            Entry::WhenGenerator(generator) => {
+                let mut generator = generator.clone();
+                generator.body =
+                    infer_members_in(&generator.body, member_ty, is_listing, amended, scope);
+                generator.else_body = generator
+                    .else_body
+                    .as_ref()
+                    .map(|body| infer_members_in(body, member_ty, is_listing, amended, scope));
+                Entry::WhenGenerator(generator)
+            }
+            other => other.clone(),
+        })
+        .collect::<Vec<_>>()
+        .into()
+}
+
+/// Whether `expr` is an `if` or `let` (not a plain `new`) whose result may be
+/// an untyped `new`.
+fn selects_untyped_new(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::If(..) | Expr::Let(..) | Expr::Trace(..) | Expr::TemplateLocals(..)
+    )
+}
+
+/// `expr` with the untyped `new` results of its `if` and `let` branches
+/// inferred from `member_ty`, which must be a `Listing` or `Mapping`. For a
+/// `Listing` mapping value the results stay untyped, so the mapping amends its
+/// `default` with them (see `eval_mapping_body`), with their members inferred.
+fn infer_selected_new(
+    expr: &Expr,
+    member_ty: &crate::parser::TypeExpr,
+    mapping_value: bool,
+    scope: &Scope,
+) -> Expr {
+    let mut expr = expr.clone();
+    let Some(crate::parser::TypeExpr::Generic(kind, _)) =
+        resolve_collection_type(member_ty, scope, 0)
+    else {
+        return expr;
+    };
+    crate::parser::rewrite_untyped_result_new(&mut expr, &mut |entries| {
+        if mapping_value && kind == "Listing" {
+            let entries =
+                infer_collection_body(member_ty, &entries, scope, false).unwrap_or(entries);
+            Expr::New(None, entries, Vec::new())
+        } else {
+            Expr::InferredNew(member_ty.clone(), entries)
+        }
+    });
+    expr
 }
