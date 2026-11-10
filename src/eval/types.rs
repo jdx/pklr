@@ -1750,7 +1750,7 @@ pub(super) fn merge_values(base: Value, overlay: Value) -> Value {
 
 /// The generic `Listing` or `Mapping` type `ty` stands for, through aliases,
 /// nullability and constraints.
-fn resolve_collection_type(
+pub(super) fn resolve_collection_type(
     ty: &crate::parser::TypeExpr,
     scope: &Scope,
     depth: usize,
@@ -1978,4 +1978,24 @@ fn infer_selected_new(
         }
     });
     expr
+}
+
+/// Whether `ty` is built only of `Listing`s down to a type that is not a
+/// collection (`Listing<Listing<T>>`), so that an element class saved for it
+/// covers every level. A `Mapping` on the way needs its values inferred.
+pub(super) fn is_listing_chain(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
+    let mut ty = ty.clone();
+    for _ in 0..64 {
+        match resolve_collection_type(&ty, scope, 0) {
+            None => return true,
+            Some(crate::parser::TypeExpr::Generic(name, args)) if name == "Listing" => {
+                match args.as_slice() {
+                    [arg] => ty = arg.clone(),
+                    _ => return true,
+                }
+            }
+            Some(_) => return false,
+        }
+    }
+    true
 }

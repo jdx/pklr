@@ -7195,3 +7195,33 @@ fn nested_listing_of_an_imported_class_builds_elements_from_the_declaring_class(
     assert_eq!(json["b"]["ys"], want);
     assert_eq!(json["c"]["zs"], want);
 }
+
+#[test]
+fn nested_listing_amendment_still_infers_mapping_values_below_the_saved_class() {
+    // Verified against pkl 0.32.2: a `Mapping` below a `Listing` of listings
+    // builds a `Mapping` (and its values a `Foo`) when the class declaring
+    // the property saved an element class for the listings above it.
+    let json = eval(
+        "class Foo { n: Int = 1; s: String = \"d\" }\n\
+         class H {\n\
+           a: Listing<Listing<Mapping<String, Int>>>\n\
+           c: Listing<Mapping<String, Foo>>\n\
+           d: Listing<Listing<Mapping<String, Foo>>>\n\
+           b: Listing<Listing<Listing<Foo>>>\n\
+         }\n\
+         h = new H {\n\
+           a { new { new { [\"k\"] = 1 } } }\n\
+           b { new { new { new { n = 5 } } } }\n\
+           c { new { [\"k\"] { n = 5 } } }\n\
+           d { new { new { [\"k\"] { n = 5 } } } }\n\
+         }\n\
+         isMapping = h.a[0][0] is Mapping\n\
+         ds = h.d[0][0][\"k\"].s\n\
+         cs = h.c[0][\"k\"].s\n\
+         bs = h.b[0][0][0].s\n",
+    );
+    assert_eq!(json["isMapping"], serde_json::json!(true));
+    assert_eq!(json["ds"], serde_json::json!("d"));
+    assert_eq!(json["cs"], serde_json::json!("d"));
+    assert_eq!(json["bs"], serde_json::json!("d"));
+}

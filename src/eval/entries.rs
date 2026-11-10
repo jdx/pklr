@@ -42,8 +42,14 @@ impl Evaluator {
             // A listing whose element class the declaring class bound (the
             // type it names may not be visible here) builds its elements
             // from that class instead.
+            // Only when that class covers every level: a `Mapping` among them
+            // still needs its values inferred.
             let bound_class = scope.get(&listing_elem_class_binding(&prop.name)).is_some()
-                && owns_listing_bindings(scope, &prop.name, body);
+                && owns_listing_bindings(scope, &prop.name, body)
+                && prop
+                    .type_ann
+                    .as_ref()
+                    .is_none_or(|ty| is_listing_chain(ty, scope));
             let inferred = prop
                 .type_ann
                 .as_ref()
