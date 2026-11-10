@@ -629,6 +629,7 @@ fn object_class_name(
     module_names: Option<&HashMap<String, String>>,
 ) -> String {
     match source {
+        Some(source) if source.kind == ObjectKind::Class => "Class".to_string(),
         Some(ObjectSource {
             type_name: Some(class),
             type_identity,

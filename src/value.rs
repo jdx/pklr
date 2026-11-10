@@ -978,6 +978,7 @@ impl Value {
             Value::Int(_) => "Int",
             Value::Float(_) => "Float",
             Value::String(_) => "String",
+            Value::Object(_, Some(source)) if source.kind == ObjectKind::Class => "Class",
             Value::Object(..) => "Dynamic",
             Value::List(_) => "List",
             Value::Lambda(params, ..) => match params.len() {

@@ -47,14 +47,23 @@ impl Evaluator {
                 }
                 Ok(Value::String(result.into()))
             }
-            Expr::Ident(name) => scope.get(name).cloned().ok_or_else(|| {
-                Error::Eval(
+            Expr::Ident(name) => scope
+                .get(name)
+                .cloned()
+                .or_else(|| {
                     scope
                         .poison_of(name)
-                        .cloned()
-                        .unwrap_or_else(|| format!("undefined variable: {name}")),
-                )
-            }),
+                        .is_none()
+                        .then(|| stdlib::stdlib_class(name))?
+                })
+                .ok_or_else(|| {
+                    Error::Eval(
+                        scope
+                            .poison_of(name)
+                            .cloned()
+                            .unwrap_or_else(|| format!("undefined variable: {name}")),
+                    )
+                }),
             Expr::Lambda(params, body) => {
                 // The body is shared with the AST unless one of the rewrites
                 // below applies to it.
@@ -443,6 +452,11 @@ impl Evaluator {
                 }
                 // Built-in properties
                 match (&obj, field.as_str()) {
+                    (Value::Object(map, Some(source)), "simpleName")
+                        if source.kind == ObjectKind::Class && !map.contains_key("simpleName") =>
+                    {
+                        return Ok(Value::String(source.type_name().unwrap_or("Class").into()));
+                    }
                     (Value::List(items), "length") => return Ok(Value::Int(items.len() as i64)),
                     (Value::List(items), "isEmpty") => return Ok(Value::Bool(items.is_empty())),
                     (Value::List(items), "first") => {
@@ -821,14 +835,23 @@ pub(super) fn eval_simple_expr(
         Expr::Int(n) => Ok(Value::Int(*n)),
         Expr::Float(f) => Ok(Value::Float(*f)),
         Expr::String(s) => Ok(Value::String(Arc::clone(s))),
-        Expr::Ident(name) => scope.get(name).cloned().ok_or_else(|| {
-            Error::Eval(
+        Expr::Ident(name) => scope
+            .get(name)
+            .cloned()
+            .or_else(|| {
                 scope
                     .poison_of(name)
-                    .cloned()
-                    .unwrap_or_else(|| format!("undefined variable: {name}")),
-            )
-        }),
+                    .is_none()
+                    .then(|| stdlib::stdlib_class(name))?
+            })
+            .ok_or_else(|| {
+                Error::Eval(
+                    scope
+                        .poison_of(name)
+                        .cloned()
+                        .unwrap_or_else(|| format!("undefined variable: {name}")),
+                )
+            }),
         // An operator over simple operands, other than `|>` (a call) and an
         // object-body amendment, which need the evaluator. `&&`, `||` keep
         // short-circuiting; the depth mirrors `eval_binop`'s `depth + 1`.

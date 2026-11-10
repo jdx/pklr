@@ -65,6 +65,12 @@ impl Evaluator {
             if let Some(result) = self.eval_object_field_call(&obj, method, &evaled_args)? {
                 return Ok(result);
             }
+            if method == "getClass" && evaled_args.is_empty() {
+                if matches!(obj_expr.as_ref(), Expr::Ident(name) if name == "module") {
+                    return Err(stdlib::get_class_unsupported("a module"));
+                }
+                return stdlib::get_class(&obj);
+            }
             return Err(Error::Eval(format!(
                 "unknown method '{method}' on {}",
                 value_type_name(&obj)
@@ -102,6 +108,9 @@ impl Evaluator {
             }
             if let Some(result) = self.eval_object_field_call(&obj, method, &evaled_args)? {
                 return Ok(result);
+            }
+            if method == "getClass" && evaled_args.is_empty() {
+                return stdlib::get_class(&obj);
             }
             return Err(Error::Eval(format!(
                 "unknown method '{method}' on {}",
