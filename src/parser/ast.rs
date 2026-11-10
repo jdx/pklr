@@ -114,10 +114,21 @@ pub enum TypeExpr {
     Generic(String, Vec<TypeExpr>),
     /// Constrained type: `Type(predicate)` e.g. `Int(this >= 0)`.
     /// Multiple source constraints are represented by a conjunctive expression.
-    /// The third field is whether the type before the constraint was a name
-    /// written in backticks, such as `C?`, which is that name and not the
-    /// nullable `C`.
-    Constrained(String, Box<Expr>, bool),
+    /// The third field says how to read the text of the type before the
+    /// constraint (see [`BaseForm`]).
+    Constrained(String, Box<Expr>, BaseForm),
+}
+
+/// How the text of the base of a constrained type is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BaseForm {
+    /// The text of a type, such as `List<Int>` or `C?` (the nullable `C`).
+    Text,
+    /// One name written in backticks, such as `C?`, whatever it holds.
+    Quoted,
+    /// The same quoted name, and null matches it too (the use `L?(c)` of an
+    /// alias whose target is a quoted name).
+    NullableQuoted,
 }
 
 pub(super) fn type_expr_runtime_name(ty: &TypeExpr) -> String {

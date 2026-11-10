@@ -315,7 +315,7 @@ impl Evaluator {
                         if base.is_none()
                             && let Some(message) = type_name
                                 .as_deref()
-                                .and_then(|name| poisoned_member(scope, name))
+                                .and_then(|name| poisoned_member(scope, name.trim_end_matches('?')))
                         {
                             return Err(Error::Eval(message));
                         }

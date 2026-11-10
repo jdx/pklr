@@ -1,4 +1,5 @@
 use super::*;
+use crate::parser::BaseForm;
 
 /// Collect `@Deprecated` annotations from a list of entries into a map of
 /// property name → optional message. Used to populate `ObjectSource.deprecated`
@@ -265,13 +266,13 @@ impl AliasResolver<'_> {
                     self.ty(ty, shadowed);
                 }
             }
-            TypeExpr::Constrained(base, constraint, quoted) => {
+            TypeExpr::Constrained(base, constraint, form) => {
                 self.expr(constraint, shadowed);
                 // A quoted base is one name: a trailing `?` belongs to it.
-                let (nullable, unsuffixed) = if *quoted {
-                    (false, base.as_str())
-                } else {
-                    (base.ends_with('?'), base.trim_end_matches('?'))
+                let (nullable, unsuffixed) = match form {
+                    BaseForm::Text => (base.ends_with('?'), base.trim_end_matches('?')),
+                    BaseForm::Quoted => (false, base.as_str()),
+                    BaseForm::NullableQuoted => (true, base.as_str()),
                 };
                 let (default_marker, plain) = match unsuffixed.strip_prefix('*') {
                     Some(plain) => ("*", plain),
@@ -279,7 +280,7 @@ impl AliasResolver<'_> {
                 };
                 // `List<I>(length == 1)`: the aliases are in the type
                 // arguments of the base, not in its name.
-                if !*quoted
+                if *form == BaseForm::Text
                     && plain.contains('<')
                     && let Ok(mut generic) = crate::parser::parse_type_name(plain)
                 {
@@ -298,17 +299,21 @@ impl AliasResolver<'_> {
                 // The expanded base is a quoted name when the alias's target is
                 // one (`typealias L = `C?``), and not when it is `C?` or
                 // `List<Int>`.
-                let target_quoted = match &resolved {
-                    TypeExpr::Named(name) => !crate::lexer::is_plain_qualified_name(name),
-                    TypeExpr::Constrained(_, _, quoted) => *quoted,
-                    _ => false,
+                let target_form = match &resolved {
+                    TypeExpr::Named(name) if !crate::lexer::is_plain_qualified_name(name) => {
+                        BaseForm::Quoted
+                    }
+                    TypeExpr::Constrained(_, _, form) => *form,
+                    _ => BaseForm::Text,
                 };
                 let (target, constraint_expr) = match resolved {
                     // `A(c)` with `A = B(c2)` checks `B`, then `c2`, then `c`,
                     // all against the same value. A nullable `A?` lets null
                     // skip `c2`, which a single conjunction cannot express.
-                    TypeExpr::Constrained(target, inner, _)
-                        if !nullable || target.ends_with('?') =>
+                    TypeExpr::Constrained(target, inner, inner_form)
+                        if !nullable
+                            || inner_form == BaseForm::NullableQuoted
+                            || (inner_form == BaseForm::Text && target.ends_with('?')) =>
                     {
                         let outer = std::mem::replace(constraint.as_mut(), Expr::Null);
                         (target, Expr::Binop(BinOp::And, inner, Box::new(outer)))
@@ -321,24 +326,23 @@ impl AliasResolver<'_> {
                         None => return,
                     },
                 };
-                // `L?(c)` with `L` a quoted name: the use site's `?` is not part
-                // of the name, so build the nullable type around it.
-                if nullable && target_quoted {
-                    let inner = TypeExpr::Constrained(
-                        format!("{default_marker}{target}"),
-                        Box::new(constraint_expr),
-                        true,
-                    );
-                    *ty = TypeExpr::Nullable(Box::new(inner));
-                    return;
-                }
-                let suffix = if nullable && !target.ends_with('?') {
-                    "?"
-                } else {
-                    ""
+                // The use site's `?` is not part of a quoted target's name, so
+                // the form carries it: null matches the target, then the
+                // constraint runs on it, as in pkl.
+                let (suffix, expanded_form) = match target_form {
+                    BaseForm::Text => (
+                        if nullable && !target.ends_with('?') {
+                            "?"
+                        } else {
+                            ""
+                        },
+                        BaseForm::Text,
+                    ),
+                    BaseForm::Quoted if nullable => ("", BaseForm::NullableQuoted),
+                    form => ("", form),
                 };
                 *base = format!("{default_marker}{target}{suffix}");
-                *quoted = target_quoted;
+                *form = expanded_form;
                 **constraint = constraint_expr;
             }
         }
@@ -519,7 +523,24 @@ fn type_default_value_seen(
 ) -> Option<Value> {
     use crate::parser::TypeExpr;
     match ty {
-        TypeExpr::Constrained(base, _, false) if base.ends_with('?') => Some(Value::Null),
+        TypeExpr::Constrained(_, _, BaseForm::NullableQuoted) => Some(Value::Null),
+        TypeExpr::Constrained(base, _, BaseForm::Text) if base.ends_with('?') => Some(Value::Null),
+        // A quoted name is one name, which is not trimmed to another class.
+        TypeExpr::Constrained(base, _, BaseForm::Quoted) => {
+            let base = base.trim_start_matches('*');
+            if let Some(alias) = alias_of(scope, base).cloned() {
+                if seen.iter().any(|seen| seen == base) {
+                    return None;
+                }
+                seen.push(base.to_string());
+                let value = type_default_value_seen(&alias, scope, seen);
+                seen.pop();
+                return value;
+            }
+            resolve_dotted(scope, base)
+                .filter(|value| matches!(value, Value::Object(_, Some(source)) if source.kind == ObjectKind::Class))
+                .map(as_instance)
+        }
         // A constraint supplies no default: the type it constrains does.
         TypeExpr::Constrained(base, _, _) => {
             type_default_value_seen(&TypeExpr::Named(base.clone()), scope, seen)
@@ -541,6 +562,15 @@ fn type_default_value_seen(
                 let value = type_default_value_seen(&alias, scope, seen);
                 seen.pop();
                 return value;
+            }
+            // A name the parser read (no `*`) is one name, which can hold a
+            // `?` of its own when it was quoted.
+            if !name.starts_with('*')
+                && let Some(class) = resolve_dotted(scope, name).filter(|value| {
+                    matches!(value, Value::Object(_, Some(source)) if source.kind == ObjectKind::Class)
+                })
+            {
+                return Some(as_instance(class));
             }
             type_default_for_name(name, scope)
         }
@@ -632,7 +662,8 @@ fn is_nullable_default_seen(
     match ty {
         TypeExpr::Nullable(_) => true,
         // A bare `*Item?` keeps its `?` on the name.
-        TypeExpr::Constrained(name, _, false) if name.ends_with('?') => true,
+        TypeExpr::Constrained(_, _, BaseForm::NullableQuoted) => true,
+        TypeExpr::Constrained(name, _, BaseForm::Text) if name.ends_with('?') => true,
         TypeExpr::Named(name) if name.ends_with('?') => true,
         TypeExpr::Named(name) => {
             let mark = seen.len();
@@ -657,9 +688,17 @@ fn is_nullable_default_seen(
 /// poisoned user class (including through an alias) reports its original
 /// error when the property is actually evaluated.
 pub(super) fn type_default_error(ty: &crate::parser::TypeExpr, scope: &Scope) -> Option<String> {
-    fn named_error(name: &str, scope: &Scope, seen: &mut Vec<String>) -> Option<String> {
-        let name = name.trim_start_matches('*').trim_end_matches('?');
-        let base = name.split('<').next().unwrap_or(name);
+    // `raw` is a name as the parser read it, which can hold a `?` or `<` of its
+    // own when it was quoted. Other text is a type, whose `?` and type
+    // arguments are not part of the name.
+    fn named_error(name: &str, raw: bool, scope: &Scope, seen: &mut Vec<String>) -> Option<String> {
+        let name = name.trim_start_matches('*');
+        let base = if raw {
+            name
+        } else {
+            let name = name.trim_end_matches('?');
+            name.split('<').next().unwrap_or(name)
+        };
         if let Some(alias) = alias_of(scope, base) {
             if seen.iter().any(|seen| seen == base) {
                 // An alias an importer bound names the next module's alias
@@ -689,15 +728,20 @@ pub(super) fn type_default_error(ty: &crate::parser::TypeExpr, scope: &Scope) ->
         use crate::parser::TypeExpr;
 
         match ty {
-            TypeExpr::Constrained(base, _, quoted) if *quoted || !base.ends_with('?') => {
-                named_error(base, scope, seen)
+            TypeExpr::Constrained(base, _, form)
+                if *form == BaseForm::Quoted
+                    || (*form == BaseForm::Text && !base.ends_with('?')) =>
+            {
+                named_error(base, *form == BaseForm::Quoted, scope, seen)
             }
             TypeExpr::Constrained(..) | TypeExpr::Nullable(_) => None,
-            TypeExpr::Named(name) if name != "Null" => named_error(name, scope, seen),
+            TypeExpr::Named(name) if name != "Null" => {
+                named_error(name, !name.starts_with('*'), scope, seen)
+            }
             TypeExpr::Named(_) => None,
             TypeExpr::Generic(name, _) => match name.as_str() {
                 "Collection" | "List" | "Set" | "Listing" | "Mapping" | "Map" => None,
-                _ => named_error(name, scope, seen),
+                _ => named_error(name, true, scope, seen),
             },
             TypeExpr::Union(variants) => variants
                 .iter()
@@ -773,8 +817,8 @@ fn nullable_inner_default_seen(
         // amendment starts from the type it wraps.
         TypeExpr::Nullable(inner) => nullable_inner_default_seen(inner, scope, seen)
             .or_else(|| type_default_value(inner, scope)),
-        TypeExpr::Constrained(name, _, _) => {
-            let nullable = name.ends_with('?');
+        TypeExpr::Constrained(name, _, form) => {
+            let (name, nullable) = constrained_name(name, *form);
             match alias(name, seen) {
                 // Only a nullable type amends from what it wraps.
                 Some(target) => nullable_inner_default_seen(&target, scope, seen).or_else(|| {
@@ -782,7 +826,7 @@ fn nullable_inner_default_seen(
                         .then(|| type_default_value(&target, scope))
                         .flatten()
                 }),
-                None if nullable => type_default_for_name(name.trim_end_matches('?'), scope),
+                None if nullable => type_default_for_name(name, scope),
                 None => None,
             }
         }
@@ -813,9 +857,9 @@ pub(super) fn type_is_listing(ty: &crate::parser::TypeExpr) -> bool {
         TypeExpr::Named(name) | TypeExpr::Generic(name, _) => name == "Listing",
         TypeExpr::Nullable(inner) => type_is_listing(inner),
         // A default alternative keeps its `*` marker on the base name.
-        TypeExpr::Constrained(name, _, _) => {
-            let name = name.trim_start_matches('*');
-            name.trim_end_matches('?') == "Listing" || name.starts_with("Listing<")
+        TypeExpr::Constrained(name, _, form) => {
+            let (name, _) = constrained_name(name, *form);
+            name == "Listing" || (*form == BaseForm::Text && name.starts_with("Listing<"))
         }
         TypeExpr::Union(variants) => variants.iter().any(type_is_listing),
     }
@@ -1878,7 +1922,10 @@ impl TypeResolver<'_> {
                     return None;
                 }
                 // A name written in backticks is one name, whatever it holds.
-                if matches!(ty, TypeExpr::Constrained(_, _, true)) {
+                if matches!(
+                    ty,
+                    TypeExpr::Constrained(_, _, BaseForm::Quoted | BaseForm::NullableQuoted)
+                ) {
                     return self.check_name(whole);
                 }
                 // A default-marked name is the name as written, quoted or not.
@@ -2090,7 +2137,7 @@ fn resolve_collection_type(
             let alias = scope.get_type_alias(name.trim_start_matches('*'))?;
             resolve_collection_type(alias, scope, depth + 1)
         }
-        TypeExpr::Constrained(base, _, false) if base.contains('<') => {
+        TypeExpr::Constrained(base, _, BaseForm::Text) if base.contains('<') => {
             let base = crate::parser::parse_type_name(base.trim_start_matches('*')).ok()?;
             resolve_collection_type(&base, scope, depth + 1)
         }
@@ -2300,4 +2347,16 @@ fn infer_selected_new(
         }
     });
     expr
+}
+
+/// The name in the text of the base of a constrained type (without a default
+/// marker or a nullable suffix) and whether the type is nullable. A quoted
+/// base is one name, so a trailing `?` belongs to it.
+pub(super) fn constrained_name(base: &str, form: BaseForm) -> (&str, bool) {
+    let base = base.trim_start_matches('*');
+    match form {
+        BaseForm::Text => (base.trim_end_matches('?'), base.ends_with('?')),
+        BaseForm::Quoted => (base, false),
+        BaseForm::NullableQuoted => (base, true),
+    }
 }

@@ -1,7 +1,7 @@
 //! Checking values against declared types and their constraints.
 
 use super::*;
-use crate::parser::TypeExpr;
+use crate::parser::{BaseForm, TypeExpr};
 
 impl Evaluator {
     /// The scope a loaded module's own names resolve in (its type aliases,
@@ -137,11 +137,9 @@ impl Evaluator {
         };
         match ty {
             TypeExpr::Named(name) => named(self, name, seen),
-            TypeExpr::Constrained(base, _, _) => named(
-                self,
-                base.trim_start_matches('*').trim_end_matches('?'),
-                seen,
-            ),
+            TypeExpr::Constrained(base, _, form) => {
+                named(self, constrained_name(base, *form).0, seen)
+            }
             TypeExpr::Nullable(inner) => self.type_takes_dynamic(inner, scope, seen),
             TypeExpr::Union(variants) => variants
                 .iter()
@@ -163,7 +161,7 @@ impl Evaluator {
     ) -> bool {
         let name = match ty {
             TypeExpr::Named(name) => name.trim_start_matches('*'),
-            TypeExpr::Constrained(base, _, _) => base.trim_start_matches('*').trim_end_matches('?'),
+            TypeExpr::Constrained(base, _, form) => constrained_name(base, *form).0,
             TypeExpr::Generic(name, _) => name.as_str(),
             // An alias to a union supplies the default of the alternative it
             // marks with `*`, and none when it marks nothing. A nullable one
@@ -235,7 +233,13 @@ impl Evaluator {
         let name = match ty {
             TypeExpr::Nullable(_) => return true,
             TypeExpr::Named(name) => name.trim_start_matches('*'),
-            TypeExpr::Constrained(base, _, _) => base.trim_start_matches('*'),
+            TypeExpr::Constrained(base, _, form) => {
+                let (name, nullable) = constrained_name(base, *form);
+                if nullable {
+                    return true;
+                }
+                name
+            }
             _ => return false,
         };
         if name.ends_with('?') {
@@ -312,11 +316,14 @@ impl Evaluator {
             }
             // A constraint is checked on the value afterwards and gives it no
             // default: follow its base, which names an alias or spells a union.
-            TypeExpr::Constrained(base, _, _) => {
-                let nullable = nullable || base.ends_with('?');
-                match crate::parser::parse_type_name(
-                    base.trim_start_matches('*').trim_end_matches('?'),
-                ) {
+            TypeExpr::Constrained(base, _, form) => {
+                let (name, base_nullable) = constrained_name(base, *form);
+                let nullable = nullable || base_nullable;
+                // A quoted name is one name, not a type to parse.
+                if *form != BaseForm::Text {
+                    return UnionAmendState::NotUnion;
+                }
+                match crate::parser::parse_type_name(name) {
                     Ok(base) => self.union_amend_state_in(&base, scope, nullable, seen),
                     Err(_) => UnionAmendState::NotUnion,
                 }
@@ -651,13 +658,13 @@ impl Evaluator {
                 // Otherwise, plain type check
                 Ok(value_is_type(val, ty))
             }
-            TypeExpr::Constrained(base, constraint, quoted) => {
+            TypeExpr::Constrained(base, constraint, form) => {
                 // A name written in backticks (`C?`) is that one name, and
                 // the same text without them is the nullable `C`.
-                let (quoted_name, nullable) = if *quoted {
-                    (Some(base.trim_start_matches('*')), false)
-                } else {
-                    (None, base.ends_with('?'))
+                let (quoted_name, nullable) = match form {
+                    BaseForm::Text => (None, base.ends_with('?')),
+                    BaseForm::Quoted => (Some(base.trim_start_matches('*')), false),
+                    BaseForm::NullableQuoted => (Some(base.trim_start_matches('*')), true),
                 };
                 // First check the base type
                 let class_name = quoted_name.unwrap_or_else(|| {
@@ -684,7 +691,7 @@ impl Evaluator {
                     self.check_imported_alias(val, class_name, scope, depth, resolving)?
                 {
                     accepted
-                } else if !*quoted
+                } else if *form == BaseForm::Text
                     && base.contains('<')
                     && let Ok(generic) = crate::parser::parse_type_name(base)
                 {

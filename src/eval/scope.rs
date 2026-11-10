@@ -714,7 +714,7 @@ pub(super) fn missing_member_error(
 /// (`dep.C` where `dep`'s class `C` could not be built). `None` when the name
 /// resolves or is simply absent.
 pub(super) fn poisoned_member(scope: &Scope, name: &str) -> Option<String> {
-    let mut parts = name.trim_end_matches('?').split('.');
+    let mut parts = name.split('.');
     let root = parts.next()?;
     let Some(mut value) = scope.get(root) else {
         return scope.poison_of(root).cloned();

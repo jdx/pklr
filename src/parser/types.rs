@@ -192,7 +192,11 @@ impl<'a> Parser<'a> {
                 ty = TypeExpr::Constrained(
                     type_expr_runtime_name(&ty),
                     Box::new(constraint.expect("at least one constraint")),
-                    quoted_name && matches!(ty, TypeExpr::Named(_)),
+                    if quoted_name && matches!(ty, TypeExpr::Named(_)) {
+                        BaseForm::Quoted
+                    } else {
+                        BaseForm::Text
+                    },
                 );
             } else {
                 return Ok(ty);

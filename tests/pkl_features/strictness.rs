@@ -713,6 +713,81 @@ fn an_alias_expanded_in_a_constrained_type_keeps_the_use_sites_nullable_suffix()
 }
 
 #[test]
+fn a_constrained_alias_use_matches_pkl_for_every_target_use_and_value() {
+    // Targets `C?` (quoted), `C?` (nullable `C`), `X Y` and List<Int>, each
+    // used as `L(true)`, `L(false)`, `L?(true)`, `L?(false)`, `L?` and `L`,
+    // against null, an instance of each class and a list. The bits are pkl
+    // 0.32.2's `is` results.
+    const EXPECTED: &str = "001000000010100000001010000100110000000011000000001100011000000100000010010000001001000010000010000010001000001000100001";
+    let header = "class C {}\nclass `C?` {}\nclass `X Y` {}\ntypealias LQ = `C?`\ntypealias LU = C?\ntypealias LS = `X Y`\ntypealias LG = List<Int>\n";
+    let mut direct = String::from(header);
+    let mut in_function = String::from(header);
+    let mut casts = String::from(header);
+    let mut n = 0;
+    let mut cast_cases = Vec::new();
+    for alias in ["LQ", "LU", "LS", "LG"] {
+        for usage in [
+            format!("{alias}(true)"),
+            format!("{alias}(false)"),
+            format!("{alias}?(true)"),
+            format!("{alias}?(false)"),
+            format!("{alias}?"),
+            alias.to_string(),
+        ] {
+            for value in ["null", "new C {}", "new `C?` {}", "new `X Y` {}", "List(1)"] {
+                n += 1;
+                direct.push_str(&format!("d{n} = {value} is {usage}\n"));
+                in_function.push_str(&format!(
+                    "function f{n}(x) = x is {usage}\nd{n} = f{n}({value})\n"
+                ));
+                if EXPECTED.as_bytes()[n - 1] == b'1' {
+                    casts.push_str(&format!(
+                        "function g{n}(x) = x as {usage}\nd{n} = g{n}({value})\n"
+                    ));
+                } else {
+                    cast_cases.push(format!(
+                        "{header}function g(x) = x as {usage}\nr = g({value})\n"
+                    ));
+                }
+            }
+        }
+    }
+    for (name, src) in [("direct", direct), ("in a function", in_function)] {
+        let json = eval(&src);
+        let bits: String = (1..=n)
+            .map(|i| {
+                if json[format!("d{i}")] == true {
+                    '1'
+                } else {
+                    '0'
+                }
+            })
+            .collect();
+        assert_eq!(bits, EXPECTED, "{name}");
+    }
+    // A cast that holds returns the value.
+    eval(&casts);
+    // A cast that fails is an error.
+    for src in cast_cases.iter().step_by(7) {
+        eval_fails(src);
+    }
+}
+
+#[test]
+fn a_quoted_class_default_is_that_class_and_not_the_one_without_the_question_mark() {
+    // `C` and a class named `C?`: the one that fails to build is the one
+    // the property is typed with, as in pkl 0.32.2.
+    let healthy_quoted = "class C { x = throw(\"bad C\") }\nclass `C?` { y = 1 }\nclass H { p: `C?`(true) }\nr = new H {}.p.y";
+    assert_eq!(eval(healthy_quoted), serde_json::json!({"r": 1}));
+    let plain = "class C { x = throw(\"bad C\") }\nclass `C?` { y = 1 }\nclass H { p: `C?` }\nr = new H {}.p.y";
+    assert_eq!(eval(plain), serde_json::json!({"r": 1}));
+    let poisoned_quoted = "class C { x = 1 }\nclass `C?` { y = throw(\"bad quoted\") }\nclass H { p: `C?`(true) }\nr = new H {}.p";
+    assert!(eval_fails(poisoned_quoted).contains("bad quoted"));
+    // Unquoted `C?(...)` is the nullable `C`, whose default is null.
+    let nullable = "class C { x = throw(\"bad C\") }\nclass `C?` { y = 1 }\nclass H { p: C?(true) }\nr = new H {}.p";
+    assert_eq!(eval(nullable), serde_json::json!({"r": null}));
+}
+#[test]
 fn an_alias_of_a_non_identifier_quoted_name_keeps_the_use_sites_nullable_suffix() {
     // Results are pkl 0.32.2's, for `LS(c)`, `LS?(c)`, `LS?` and `LS`
     // against null and two instances, directly and in a function.

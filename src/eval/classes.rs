@@ -25,7 +25,8 @@ impl Evaluator {
         // A parent class that failed to evaluate fails its subclasses too,
         // rather than leaving them without the inherited members.
         if parent_val.is_none()
-            && let Some(message) = parent_name.and_then(|name| poisoned_member(scope, name))
+            && let Some(message) =
+                parent_name.and_then(|name| poisoned_member(scope, name.trim_end_matches('?')))
         {
             return Err(Error::Eval(message));
         }

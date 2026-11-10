@@ -292,8 +292,8 @@ pub(super) fn collect_type_import_field_uses(
                 collect_type_import_field_uses(param, uses, shadows);
             }
         }
-        crate::parser::TypeExpr::Constrained(base, constraint, _) => {
-            for component in constrained_type_components(base) {
+        crate::parser::TypeExpr::Constrained(base, constraint, form) => {
+            for component in constrained_type_components(base, *form) {
                 record_type_name_import_use(uses, shadows, component);
             }
             collect_expr_import_field_uses(constraint, uses, shadows);
@@ -2619,8 +2619,8 @@ fn collect_type_refs(
                 collect_type_refs(param, refs, shadows, aliases, definitions);
             }
         }
-        crate::parser::TypeExpr::Constrained(base, constraint, _) => {
-            for component in constrained_type_components(base) {
+        crate::parser::TypeExpr::Constrained(base, constraint, form) => {
+            for component in constrained_type_components(base, *form) {
                 collect_name_root(component, refs, shadows);
             }
             // A type check binds the checked value's own names inside the
@@ -2655,12 +2655,18 @@ fn collect_name_root(name: &str, refs: &mut Names, shadows: &Names) {
     }
 }
 
-pub(super) fn constrained_type_components(name: &str) -> impl Iterator<Item = &str> {
-    name.trim_start_matches('*')
-        .trim_end_matches('?')
+/// The names in the text of the base of a constrained type. A quoted base is
+/// one name, whatever it holds.
+pub(super) fn constrained_type_components(name: &str, form: crate::parser::BaseForm) -> Vec<&str> {
+    let name = name.trim_start_matches('*');
+    if form != crate::parser::BaseForm::Text {
+        return vec![name];
+    }
+    name.trim_end_matches('?')
         .split(['<', '>', ','])
         .map(str::trim)
         .filter(|component| !component.is_empty())
+        .collect()
 }
 
 /// `declared_entry_roots` by namespace.
