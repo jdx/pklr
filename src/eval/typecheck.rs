@@ -38,8 +38,9 @@ impl Evaluator {
         ty: &crate::parser::TypeExpr,
         scope: &Scope,
     ) -> Option<String> {
-        unresolved_type_error(ty, scope, &mut |identity, name| {
-            self.module_alias(identity, name)
+        unresolved_type_error(ty, scope, &mut |lookup| match lookup {
+            AliasLookup::Imported { identity, name } => self.module_alias(identity, name),
+            AliasLookup::Inherited { scope, name } => self.inherited_alias(scope, name),
         })
     }
 
@@ -52,25 +53,53 @@ impl Evaluator {
         identity: &str,
         name: &str,
     ) -> Option<(crate::parser::TypeExpr, Scope)> {
-        let mut key = self.module_scope_key(identity)?;
-        // An inherited alias resolves in the module that declares it.
-        if let Some(definer) = self
+        let key = self.module_scope_key(identity)?;
+        self.alias_in_module(&key, name)
+    }
+
+    /// The type alias `name` of the module with the scope key `module`, with
+    /// the scope its definition resolves in. Every path that expands an
+    /// alias (the name check, value matching, a nested alias) goes through
+    /// here, so an alias the module inherits is always expanded in the module
+    /// that declares it, whose imports its names refer to.
+    fn alias_in_module(
+        &mut self,
+        module: &Path,
+        name: &str,
+    ) -> Option<(crate::parser::TypeExpr, Scope)> {
+        let definer = self
             .module_scopes
-            .get(&key)
+            .get(module)
             .and_then(|snapshot| snapshot.alias_definers.get(name))
-        {
-            key = definer.clone();
-        }
+            .map_or_else(|| module.to_path_buf(), Clone::clone);
         let mut module_scope = Scope::default();
-        self.layer_evaluated_module_scope(&key, &mut module_scope);
+        self.layer_evaluated_module_scope(&definer, &mut module_scope);
         // The module's own imports resolve the aliases it names.
-        if let Some(snapshot) = self.module_scopes.get(&key) {
+        if let Some(snapshot) = self.module_scopes.get(&definer) {
             for (import, identity) in &snapshot.module_identities {
                 module_scope.set_module_identity(import.clone(), identity.clone());
             }
         }
+        module_scope.alias_module = Some(Arc::new(definer));
         let alias = module_scope.get_type_alias(name)?.clone();
         Some((alias, module_scope))
+    }
+
+    /// The alias `name` in the declaring module's scope, when `scope` walks a
+    /// module that inherits `name` from another module. `None` means the
+    /// alias is `scope`'s own.
+    fn inherited_alias(
+        &mut self,
+        scope: &Scope,
+        name: &str,
+    ) -> Option<(crate::parser::TypeExpr, Scope)> {
+        let module = scope.alias_module.as_ref()?;
+        self.module_scopes
+            .get(&**module)?
+            .alias_definers
+            .contains_key(name)
+            .then(|| self.alias_in_module(module, name))
+            .flatten()
     }
 
     /// The key of the final scope of the module with the given identity.
@@ -100,11 +129,7 @@ impl Evaluator {
         if module.contains('.') || scope.get(module).is_none() {
             return None;
         }
-        let key = self.module_scope_key(scope.module_identity(module)?)?;
-        let mut module_scope = Scope::default();
-        self.layer_evaluated_module_scope(&key, &mut module_scope);
-        let alias = module_scope.get_type_alias(member)?.clone();
-        Some((alias, module_scope))
+        self.module_alias(scope.module_identity(module)?, member)
     }
 
     /// Check if a value matches a type expression, including constraint evaluation.
@@ -138,17 +163,27 @@ impl Evaluator {
         // Rust call stack once per alias.  Flatten the simple-name part here;
         // compound targets still go through the regular checker below.
         let mut target = resolved.clone();
+        let mut redirected: Option<Scope> = None;
         while let crate::parser::TypeExpr::Named(next) = &target {
-            let Some(next_target) = scope.get_type_alias(next) else {
-                break;
+            let current = redirected.as_ref().unwrap_or(scope);
+            let (next_target, next_scope) = match self.inherited_alias(current, next) {
+                Some((alias, module_scope)) => (alias, Some(module_scope)),
+                None => match current.get_type_alias(next) {
+                    Some(alias) => (alias.clone(), None),
+                    None => break,
+                },
             };
             if resolving.iter().any(|seen| seen == next) {
                 while resolving.pop().as_deref() != Some(name) {}
                 return Err(Error::Eval(format!("type alias '{next}' refers to itself")));
             }
             resolving.push(next.clone());
-            target = next_target.clone();
+            target = next_target;
+            if next_scope.is_some() {
+                redirected = next_scope;
+            }
         }
+        let scope = redirected.as_ref().unwrap_or(scope);
         let result = self.eval_type_check_in(val, &target, scope, depth + 1, resolving);
         while resolving.pop().as_deref() != Some(name) {}
         result
@@ -169,6 +204,16 @@ impl Evaluator {
                     return Ok(matches!(val, Value::String(actual) if &**actual == expected));
                 }
                 // Check if name is a type alias; if so, resolve to the aliased type
+                if let Some((resolved, module_scope)) = self.inherited_alias(scope, name) {
+                    return self.eval_alias_check(
+                        val,
+                        name,
+                        &resolved,
+                        &module_scope,
+                        depth,
+                        resolving,
+                    );
+                }
                 if let Some(resolved) = scope.get_type_alias(name) {
                     let resolved = resolved.clone();
                     return self.eval_alias_check(val, name, &resolved, scope, depth, resolving);
@@ -198,6 +243,17 @@ impl Evaluator {
                 let class_name = base.trim_end_matches('?').split('<').next().unwrap_or(base);
                 let base_matches = if base.ends_with('?') && is_null_value(val) {
                     true
+                } else if let Some((resolved, module_scope)) =
+                    self.inherited_alias(scope, class_name)
+                {
+                    self.eval_alias_check(
+                        val,
+                        class_name,
+                        &resolved,
+                        &module_scope,
+                        depth,
+                        resolving,
+                    )?
                 } else if let Some(resolved) = scope.get_type_alias(class_name) {
                     let resolved = resolved.clone();
                     self.eval_alias_check(val, class_name, &resolved, scope, depth, resolving)?

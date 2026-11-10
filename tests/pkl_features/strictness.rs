@@ -410,6 +410,54 @@ fn an_inherited_type_alias_resolves_in_the_module_that_declares_it() {
 }
 
 #[test]
+fn an_inherited_type_alias_matches_values_in_the_module_that_declares_it() {
+    let temp = TestTempDir::new("pklr_test_is_inherited_alias_values");
+    let write = |name: &str, src: &str| std::fs::write(temp.path().join(name), src).unwrap();
+    write("dep.pkl", "class T {}\ntypealias U = Int\n");
+    write("dep2.pkl", "class Other {}\n");
+    write(
+        "base.pkl",
+        "open module base\nimport \"dep.pkl\"\ntypealias A = dep.U\ntypealias B = A\ntypealias K = B|String\n",
+    );
+    write(
+        "child.pkl",
+        "open module child\nextends \"base.pkl\"\ntypealias G = B\n",
+    );
+    write("gc.pkl", "extends \"child.pkl\"\ntypealias H = G\n");
+    write("ch2.pkl", "amends \"base.pkl\"\n");
+    write(
+        "shadow.pkl",
+        "extends \"base.pkl\"\nimport \"dep2.pkl\" as dep\ntypealias G = B\n",
+    );
+    let eval_main = |module: &str, body: &str| {
+        let path = temp.path().join("main.pkl");
+        std::fs::write(&path, format!("import \"{module}.pkl\"\n{body}\n")).unwrap();
+        pklr::eval_to_json(&path).unwrap()
+    };
+    for (module, name) in [
+        ("child", "A"),
+        ("child", "B"),
+        ("child", "G"),
+        ("child", "K"),
+        ("gc", "A"),
+        ("gc", "H"),
+        ("ch2", "A"),
+        ("shadow", "G"),
+    ] {
+        let m = module;
+        let json = eval_main(
+            module,
+            &format!("a = 1 is {m}.{name}\nb = 1 as {m}.{name}\nc = 1.5 is {m}.{name}"),
+        );
+        assert_eq!(
+            json,
+            serde_json::json!({"a": true, "b": 1, "c": false}),
+            "{m}.{name}"
+        );
+    }
+}
+
+#[test]
 fn to_dynamic_works_on_a_module_that_carries_a_source() {
     let temp = TestTempDir::new("pklr_test_to_dynamic_module");
     std::fs::write(temp.path().join("m.pkl"), "@Deprecated\nold = 1\nx = 2\n").unwrap();

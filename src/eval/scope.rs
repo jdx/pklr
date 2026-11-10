@@ -53,6 +53,10 @@ pub(super) struct Scope {
     /// body never names it can leave it out of what it captures.
     pub(super) this_aliases: Arc<FxHashSet<Name>>,
     pub(super) type_namespace: Option<String>,
+    /// The module whose type aliases this scope holds, when it was built to
+    /// walk one (see `alias_in_module`). An alias that module inherits is
+    /// walked in the module that declares it.
+    pub(super) alias_module: Option<Arc<PathBuf>>,
     pub(super) receiver_entries: Option<Arc<Vec<Entry>>>,
     pub(super) receiver_list_base: Option<usize>,
     pub(super) parent: Option<Arc<Scope>>,
@@ -114,6 +118,7 @@ impl Default for Scope {
             declared: Arc::clone(&empty.declared),
             this_aliases: Arc::clone(&empty.this_aliases),
             type_namespace: None,
+            alias_module: None,
             receiver_entries: None,
             receiver_list_base: None,
             parent: None,
@@ -136,6 +141,7 @@ impl Scope {
     pub(super) fn child(&self) -> Self {
         Self {
             type_namespace: self.type_namespace.clone(),
+            alias_module: self.alias_module.clone(),
             receiver_entries: self.receiver_entries.clone(),
             receiver_list_base: self.receiver_list_base,
             parent: Some(Arc::new(self.clone())),

@@ -1483,20 +1483,26 @@ pub(super) fn unresolved_type_error(
     let mut expanding = std::collections::HashSet::new();
     TypeResolver {
         scope,
-        scope_id: "",
         module_alias,
         expanding: &mut expanding,
     }
     .check(ty)
 }
 
+/// How the type check finds the scope that an alias resolves in.
+pub(super) enum AliasLookup<'a> {
+    /// The alias `name` of the imported module with this identity.
+    Imported { identity: &'a str, name: &'a str },
+    /// The alias `name` of the module `scope` walks, when that module inherits
+    /// it from the module that declares it.
+    Inherited { scope: &'a Scope, name: &'a str },
+}
+
 pub(super) type ModuleAliasLookup<'a> =
-    dyn FnMut(&str, &str) -> Option<(crate::parser::TypeExpr, Scope)> + 'a;
+    dyn FnMut(AliasLookup<'_>) -> Option<(crate::parser::TypeExpr, Scope)> + 'a;
 
 struct TypeResolver<'a> {
     scope: &'a Scope,
-    /// The identity of the module `scope` belongs to, empty for the root.
-    scope_id: &'a str,
     module_alias: &'a mut ModuleAliasLookup<'a>,
     /// The aliases being expanded, so a recursive alias ends the walk. Each is
     /// keyed by its module identity and name.
@@ -1567,26 +1573,48 @@ impl TypeResolver<'_> {
                 Some(format!("Cannot find type `{member}` in module `{module}`."))
             };
         }
-        let imported = scope
-            .module_identity(module)
-            .and_then(|identity| (self.module_alias)(identity, member).map(|a| (identity, a)));
-        let Some((identity, (alias, module_scope))) = imported else {
+        let imported = scope.module_identity(module).and_then(|identity| {
+            (self.module_alias)(AliasLookup::Imported {
+                identity,
+                name: member,
+            })
+        });
+        let Some((alias, module_scope)) = imported else {
             return Some(format!("Cannot find type `{member}` in module `{module}`."));
         };
         // Walk the body in the scope of the module that declares it.
-        let key = format!("{identity}\0{member}");
+        self.walk_alias(&module_scope, member, &alias)
+    }
+
+    /// The error in the body of the alias `name`, which resolves in `scope`.
+    fn walk_alias(
+        &mut self,
+        scope: &Scope,
+        name: &str,
+        alias: &crate::parser::TypeExpr,
+    ) -> Option<String> {
+        let key = Self::alias_key(scope, name);
         if !self.expanding.insert(key.clone()) {
             return None;
         }
         let error = TypeResolver {
-            scope: &module_scope,
-            scope_id: identity,
+            scope,
             module_alias: &mut *self.module_alias,
             expanding: &mut *self.expanding,
         }
-        .check(&alias);
+        .check(alias);
         self.expanding.remove(&key);
         error
+    }
+
+    /// The key that tells an alias apart from those of other modules.
+    fn alias_key(scope: &Scope, name: &str) -> String {
+        let module = scope
+            .alias_module
+            .as_ref()
+            .map(|module| module.display().to_string())
+            .unwrap_or_default();
+        format!("{module}\0{name}")
     }
 
     /// Whether `name`, taken literally, is a class or type alias in scope.
@@ -1607,7 +1635,14 @@ impl TypeResolver<'_> {
             let mut opened = Vec::new();
             let mut current = name;
             let error = loop {
-                let key = format!("{}\0{current}", self.scope_id);
+                // An alias the module inherits is walked where it is declared.
+                if let Some((alias, module_scope)) = (self.module_alias)(AliasLookup::Inherited {
+                    scope,
+                    name: current,
+                }) {
+                    break self.walk_alias(&module_scope, current, &alias);
+                }
+                let key = Self::alias_key(scope, current);
                 if !self.expanding.insert(key.clone()) {
                     break None;
                 }
