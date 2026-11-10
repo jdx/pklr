@@ -117,6 +117,17 @@ pub enum TypeExpr {
     Constrained(String, Box<Expr>),
 }
 
+impl TypeExpr {
+    /// Whether this is a `Listing<...>` type, possibly nullable.
+    pub(crate) fn is_listing_type(&self) -> bool {
+        match self {
+            TypeExpr::Nullable(inner) => inner.is_listing_type(),
+            TypeExpr::Generic(name, _) => name == "Listing",
+            _ => false,
+        }
+    }
+}
+
 pub(super) fn type_expr_runtime_name(ty: &TypeExpr) -> String {
     match ty {
         TypeExpr::Named(name) => name.clone(),

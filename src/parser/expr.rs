@@ -388,9 +388,7 @@ impl<'a> Parser<'a> {
                 for arg in &args {
                     // `Listing<Listing<T>>` keeps the inner listing type, so
                     // its elements can be built as `T`.
-                    if name == "Listing"
-                        && matches!(arg, TypeExpr::Generic(inner, _) if inner == "Listing")
-                    {
+                    if name == "Listing" && arg.is_listing_type() {
                         params.push(type_expr_runtime_name(arg));
                     } else {
                         generic_param_names(arg, &mut params);

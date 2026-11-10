@@ -304,6 +304,22 @@ fn typed_listing_elem(
     (typed, elem_scope)
 }
 
+/// Whether `ty` is a `Listing<...>`, through nullability and type aliases.
+pub(super) fn resolves_to_listing(
+    ty: &crate::parser::TypeExpr,
+    scope: &Scope,
+    depth: usize,
+) -> bool {
+    use crate::parser::TypeExpr;
+    match ty {
+        TypeExpr::Nullable(inner) => resolves_to_listing(inner, scope, depth),
+        TypeExpr::Named(name) if depth < 8 => scope
+            .get_type_alias(name.trim_start_matches('*').trim_end_matches('?'))
+            .is_some_and(|alias| resolves_to_listing(&alias.clone(), scope, depth + 1)),
+        other => other.is_listing_type(),
+    }
+}
+
 /// The class an untyped `new { ... }` element of a `Listing<T>` constructs:
 /// `T` when it is a single class (an alias or nullable `T?` included). A
 /// union, a built-in or an unresolved name leaves such an element untyped.
@@ -316,6 +332,17 @@ pub(super) fn listing_elem_class(type_args: &[String], scope: &Scope) -> Option<
             .strip_prefix("Listing<")
         && inner.ends_with('>')
         && let Ok(ty) = crate::parser::parse_type_name(arg.trim_start_matches('*'))
+    {
+        return type_elem_class(&ty, scope);
+    }
+    // `Listing<L>` where `L` is an alias of a listing type.
+    if let [arg] = type_args
+        && let Ok(ty) = crate::parser::parse_type_name(arg.trim_start_matches('*'))
+        && matches!(
+            ty.clone(),
+            crate::parser::TypeExpr::Named(_) | crate::parser::TypeExpr::Nullable(_)
+        )
+        && resolves_to_listing(&ty, scope, 0)
     {
         return type_elem_class(&ty, scope);
     }

@@ -5610,3 +5610,25 @@ p = new Task { name = "t"; steps { new { sub { new { name = "z" } } } } }
     assert_eq!(result["p"]["steps"][0]["id"], "s");
     assert_eq!(result["p"]["steps"][0]["sub"][0]["loopVar"], "item");
 }
+
+#[test]
+fn typed_listing_of_nullable_or_aliased_listings_builds_inner_elements_as_the_class() {
+    let result = eval(
+        r#"
+class T { n: String; d: Int = 1 }
+typealias L = Listing<T>
+class H { x: Listing<Listing<T>?>; y: Listing<L> }
+h = new H { x { new { new { n = "p" } } }; y { new { new { n = "q" } } } }
+a = new Listing<Listing<T>?> { new { new { n = "a" } } }
+b = new Listing<L> { new { new { n = "b" } } }
+c: Listing<Listing<T>?> = new { new { new { n = "c" } } }
+d: Listing<L> = new { new { new { n = "d" } } }
+"#,
+    );
+    assert_eq!(result["h"]["x"], serde_json::json!([[{"n": "p", "d": 1}]]));
+    assert_eq!(result["h"]["y"], serde_json::json!([[{"n": "q", "d": 1}]]));
+    assert_eq!(result["a"], serde_json::json!([[{"n": "a", "d": 1}]]));
+    assert_eq!(result["b"], serde_json::json!([[{"n": "b", "d": 1}]]));
+    assert_eq!(result["c"], serde_json::json!([[{"n": "c", "d": 1}]]));
+    assert_eq!(result["d"], serde_json::json!([[{"n": "d", "d": 1}]]));
+}
