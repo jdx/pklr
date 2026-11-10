@@ -209,8 +209,8 @@ struct MappingInheritedDefault {
 
 #[derive(Clone, Default)]
 struct ModuleScopeSnapshot {
-    values: ScopeMap,
-    type_aliases: TypeAliasMap,
+    values: Arc<ScopeMap>,
+    type_aliases: Arc<TypeAliasMap>,
     module_identities: IndexMap<String, String>,
     /// The module that declares each inherited type alias, when it is not
     /// the module itself. Its imports resolve the names in the alias.

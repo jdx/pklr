@@ -21,12 +21,8 @@ impl Evaluator {
             type_namespace: Some(identity.to_string()),
             ..Scope::default()
         };
-        if !snapshot.values.is_empty() {
-            scope.vars = Arc::new(snapshot.values.clone());
-        }
-        for (name, ty) in &snapshot.type_aliases {
-            scope.set_type_alias(name.clone(), ty.clone());
-        }
+        scope.vars = Arc::clone(&snapshot.values);
+        scope.type_aliases = Arc::clone(&snapshot.type_aliases);
         for (name, identity) in &snapshot.module_identities {
             scope.set_module_identity(name.clone(), identity.clone());
         }
@@ -42,17 +38,21 @@ impl Evaluator {
         name: &str,
         scope: &Scope,
     ) -> Option<(TypeExpr, Option<Scope>)> {
-        if let Some(alias) = scope.get_type_alias(name) {
-            return Some((alias.clone(), None));
+        // An imported `m.A` resolves where `m` declares it. The importer may
+        // also bind `m.A` rewritten for its own scope, for what needs only the
+        // shape of the type; that one drops the constraint and the names `m`
+        // itself imports.
+        if let Some((root, member)) = name.split_once('.')
+            && !member.contains('.')
+            && let Some(identity) = scope.module_identity(root).cloned()
+            && let Some(module_scope) = self.module_type_scope(&identity)
+            && let Some(alias) = module_scope.get_type_alias(member).cloned()
+        {
+            return Some((alias, Some(module_scope)));
         }
-        let (root, member) = name.split_once('.')?;
-        if member.contains('.') {
-            return None;
-        }
-        let identity = scope.module_identity(root)?.clone();
-        let module_scope = self.module_type_scope(&identity)?;
-        let alias = module_scope.get_type_alias(member)?.clone();
-        Some((alias, Some(module_scope)))
+        scope
+            .get_type_alias(name)
+            .map(|alias| (alias.clone(), None))
     }
 
     /// `resolve_type_alias`, except that an alias already followed on this
@@ -137,7 +137,11 @@ impl Evaluator {
         };
         match ty {
             TypeExpr::Named(name) => named(self, name, seen),
-            TypeExpr::Constrained(base, _, _) => named(self, base.trim_end_matches('?'), seen),
+            TypeExpr::Constrained(base, _, _) => named(
+                self,
+                base.trim_start_matches('*').trim_end_matches('?'),
+                seen,
+            ),
             TypeExpr::Nullable(inner) => self.type_takes_dynamic(inner, scope, seen),
             TypeExpr::Union(variants) => variants
                 .iter()
@@ -159,7 +163,7 @@ impl Evaluator {
     ) -> bool {
         let name = match ty {
             TypeExpr::Named(name) => name.trim_start_matches('*'),
-            TypeExpr::Constrained(base, _, _) => base.trim_end_matches('?'),
+            TypeExpr::Constrained(base, _, _) => base.trim_start_matches('*').trim_end_matches('?'),
             TypeExpr::Generic(name, _) => name.as_str(),
             // An alias to a union supplies the default of the alternative it
             // marks with `*`, and none when it marks nothing. A nullable one
@@ -231,7 +235,7 @@ impl Evaluator {
         let name = match ty {
             TypeExpr::Nullable(_) => return true,
             TypeExpr::Named(name) => name.trim_start_matches('*'),
-            TypeExpr::Constrained(base, _, _) => base.as_str(),
+            TypeExpr::Constrained(base, _, _) => base.trim_start_matches('*'),
             _ => return false,
         };
         if name.ends_with('?') {
@@ -310,7 +314,9 @@ impl Evaluator {
             // default: follow its base, which names an alias or spells a union.
             TypeExpr::Constrained(base, _, _) => {
                 let nullable = nullable || base.ends_with('?');
-                match crate::parser::parse_type_name(base.trim_end_matches('?')) {
+                match crate::parser::parse_type_name(
+                    base.trim_start_matches('*').trim_end_matches('?'),
+                ) {
                     Ok(base) => self.union_amend_state_in(&base, scope, nullable, seen),
                     Err(_) => UnionAmendState::NotUnion,
                 }
@@ -524,6 +530,48 @@ impl Evaluator {
         self.eval_type_check_in(val, ty, scope, depth, resolving)
     }
 
+    /// Check `val` against an alias an imported module declares, as that
+    /// module's own scope reads it: its constraint calls the module's
+    /// functions and names its constants. The importer's binding of the
+    /// alias drops constraints, so it only serves what needs no check.
+    fn check_imported_alias(
+        &mut self,
+        val: &Value,
+        name: &str,
+        scope: &Scope,
+        depth: usize,
+        resolving: &[String],
+    ) -> Result<Option<bool>> {
+        let Some((root, member)) = name.split_once('.') else {
+            return Ok(None);
+        };
+        // Only an alias the importer bound has a constraint to keep.
+        if scope.get_type_alias(&format!("{root}#{member}")).is_none() {
+            return Ok(None);
+        }
+        let Some(identity) = scope.module_identity(root).cloned() else {
+            return Ok(None);
+        };
+        let Some(declaring) = self.module_type_scope(&identity) else {
+            return Ok(None);
+        };
+        // Names that name an alias are tracked per module: another module's
+        // `A` is not this one.
+        let key = format!("{identity}|{member}");
+        if resolving.contains(&key) {
+            return Err(Error::Eval(format!("type alias '{name}' refers to itself")));
+        }
+        let mut inner: Vec<String> = resolving
+            .iter()
+            .filter(|seen| seen.contains('|'))
+            .cloned()
+            .collect();
+        inner.push(key);
+        let ty = TypeExpr::Named(member.to_string());
+        self.eval_type_check_in(val, &ty, &declaring, depth + 1, &mut inner)
+            .map(Some)
+    }
+
     pub(super) fn eval_type_check_in(
         &mut self,
         val: &Value,
@@ -554,6 +602,11 @@ impl Evaluator {
                         depth,
                         resolving,
                     );
+                }
+                if let Some(accepted) =
+                    self.check_imported_alias(val, name, scope, depth, resolving)?
+                {
+                    return Ok(accepted);
                 }
                 if let Some(resolved) = scope.get_type_alias(name) {
                     let resolved = resolved.clone();
@@ -602,13 +655,17 @@ impl Evaluator {
                 // A name written in backticks (`C?`) is that one name, and
                 // the same text without them is the nullable `C`.
                 let (quoted_name, nullable) = if *quoted {
-                    (Some(base.as_str()), false)
+                    (Some(base.trim_start_matches('*')), false)
                 } else {
                     (None, base.ends_with('?'))
                 };
                 // First check the base type
                 let class_name = quoted_name.unwrap_or_else(|| {
-                    base.trim_end_matches('?').split('<').next().unwrap_or(base)
+                    base.trim_start_matches('*')
+                        .trim_end_matches('?')
+                        .split('<')
+                        .next()
+                        .unwrap_or(base)
                 });
                 let base_matches = if nullable && is_null_value(val) {
                     true
@@ -630,6 +687,10 @@ impl Evaluator {
                     // `Listing<Int>(length == 2)`: the base keeps its type
                     // arguments, which constrain the elements.
                     self.eval_type_check_in(val, &generic, scope, depth, resolving)?
+                } else if let Some(accepted) =
+                    self.check_imported_alias(val, class_name, scope, depth, resolving)?
+                {
+                    accepted
                 } else if let Some(resolved) = scope.get_type_alias(class_name) {
                     let resolved = resolved.clone();
                     self.eval_alias_check(val, class_name, &resolved, scope, depth, resolving)?
@@ -703,6 +764,11 @@ impl Evaluator {
                         depth,
                         resolving,
                     );
+                }
+                if let Some(accepted) =
+                    self.check_imported_alias(val, name, scope, depth, resolving)?
+                {
+                    return Ok(accepted);
                 }
                 if let Some(resolved) = scope.get_type_alias(name) {
                     let resolved = resolved.clone();
