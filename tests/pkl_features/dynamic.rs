@@ -886,3 +886,81 @@ b = e.toList()
     assert_eq!(json["a"], serde_json::json!([1]));
     assert_eq!(json["b"], serde_json::json!([11, 12]));
 }
+
+#[test]
+fn a_for_that_fails_after_emitting_resumes_once_the_member_is_bound() {
+    let json = eval(
+        r#"
+local d = new Dynamic { y { 0; for (i in List(1, 2)) { if (i == 1) 1 else z }; z = 2 } }
+a = d.y.toList()
+local e = new Dynamic { 0; for (i in List(1, 2, 3)) { if (i < 3) i else z }; 9; z = 2 }
+b = e.toList()
+"#,
+    );
+    assert_eq!(json["a"], serde_json::json!([0, 1, 2]));
+    assert_eq!(json["b"], serde_json::json!([0, 1, 2, 2, 9]));
+}
+
+#[test]
+fn a_member_of_the_body_shadows_an_enclosing_binding_of_the_same_name() {
+    let json = eval(
+        r#"
+z = 5
+local a = new Dynamic { z; z = 1 }
+r1 = a.toList()
+function f(z) = new Dynamic { z; z = 1 }
+r2 = f(7).toList()
+local q = 9
+local b = new Dynamic { y { q; q = 2 } }
+r3 = b.y.toList()
+local c = new Dynamic { for (i in List(1)) { q + i }; q = 10 }
+r4 = c.toList()
+"#,
+    );
+    assert_eq!(json["r1"], serde_json::json!([1]));
+    assert_eq!(json["r2"], serde_json::json!([1]));
+    assert_eq!(json["r3"], serde_json::json!([2]));
+    assert_eq!(json["r4"], serde_json::json!([11]));
+}
+
+#[test]
+fn an_enclosing_binding_is_read_when_the_body_has_no_such_member() {
+    let json = eval(
+        r#"
+function f(z) = new Dynamic { z; w = 1 }
+r1 = f(5).toList()
+local z = 9
+r2 = new Dynamic { when (true) { z }; w = 1 }.toList()
+"#,
+    );
+    assert_eq!(json["r1"], serde_json::json!([5]));
+    assert_eq!(json["r2"], serde_json::json!([9]));
+}
+
+#[test]
+fn a_failure_that_is_not_a_later_member_still_surfaces() {
+    let message =
+        eval_fails("local d = new Dynamic { y { 5; throw(\"boom\") }; q = 1 }\nr = d.y.toList()\n");
+    assert!(message.contains("boom"), "{message}");
+    let message = eval_fails(
+        "local d = new Dynamic { for (i in List(1, 2)) { if (i == 2) throw(\"boom\") else i }; z = 1 }\nr = d.toList()\n",
+    );
+    assert!(message.contains("boom"), "{message}");
+    let message = eval_fails("local d = new Dynamic { z; z = throw(\"inner\") }\nr = d.toList()\n");
+    assert!(message.contains("inner"), "{message}");
+    let message = eval_fails("local d = new Dynamic { nope; z = 1 }\nr = d.toList()\n");
+    assert!(message.contains("nope"), "{message}");
+}
+
+#[test]
+fn a_body_with_a_member_produced_by_a_generator_keeps_its_elements() {
+    let json = eval(
+        r#"
+local d = new Dynamic { y { 5; when (true) { q = 2 }; 6 } }
+a = d.y.toList()
+a2 = d.y.q
+"#,
+    );
+    assert_eq!(json["a"], serde_json::json!([5, 6]));
+    assert_eq!(json["a2"], 2);
+}
