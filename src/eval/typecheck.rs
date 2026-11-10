@@ -30,13 +30,15 @@ impl Evaluator {
             )));
         }
         // Its elements are stored as a `Listing`, which a `Dynamic` type
-        // would otherwise not match.
-        if is_explicit_dynamic(prop) && matches!(value, Value::List(_)) {
-            return Ok(());
-        }
-        if !type_is_runtime_checkable(ty, scope)
-            || self.eval_type_check(value, ty, scope, depth + 1)?
-        {
+        // would otherwise not match, so check the type's constraints on it
+        // separately.
+        let accepted = if is_explicit_dynamic(prop) && matches!(value, Value::List(_)) {
+            self.check_element_dynamic(value, ty, scope, depth + 1, &mut Vec::new())?
+        } else {
+            !type_is_runtime_checkable(ty, scope)
+                || self.eval_type_check(value, ty, scope, depth + 1)?
+        };
+        if accepted {
             return Ok(());
         }
         Err(Error::Eval(format!(
@@ -45,6 +47,58 @@ impl Evaluator {
             display_type_expr(ty),
             value_type_name(value)
         )))
+    }
+
+    /// Check an element-only `Dynamic`, which the value model stores as a
+    /// list, against a declared type: the type must accept a `Dynamic` and
+    /// every constraint along the way must hold for the value.
+    pub(super) fn check_element_dynamic(
+        &mut self,
+        val: &Value,
+        ty: &crate::parser::TypeExpr,
+        scope: &Scope,
+        depth: usize,
+        resolving: &mut Vec<String>,
+    ) -> Result<bool> {
+        use crate::parser::TypeExpr;
+        match ty {
+            TypeExpr::Nullable(inner) => {
+                self.check_element_dynamic(val, inner, scope, depth, resolving)
+            }
+            TypeExpr::Union(variants) => {
+                for variant in variants {
+                    if self.check_element_dynamic(val, variant, scope, depth, resolving)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            TypeExpr::Named(name) | TypeExpr::Generic(name, _) => {
+                let base = name.trim_start_matches('*').trim_end_matches('?');
+                let base = base.split('<').next().unwrap_or(base);
+                if let Some(target) = scope.get_type_alias(base) {
+                    let target = target.clone();
+                    if resolving.iter().any(|seen| seen == base) {
+                        return Err(Error::Eval(format!("type alias '{base}' refers to itself")));
+                    }
+                    resolving.push(base.to_string());
+                    let accepted =
+                        self.check_element_dynamic(val, &target, scope, depth, resolving);
+                    resolving.pop();
+                    return accepted;
+                }
+                Ok(type_accepts_dynamic(ty, scope))
+            }
+            TypeExpr::Constrained(base, constraint) => {
+                let base_ty = TypeExpr::Named(base.clone());
+                if !self.check_element_dynamic(val, &base_ty, scope, depth, resolving)? {
+                    return Ok(false);
+                }
+                // The base type accepted it; what is left is the predicate.
+                let predicate = TypeExpr::Constrained("Any".into(), constraint.clone());
+                self.eval_type_check_in(val, &predicate, scope, depth, resolving)
+            }
+        }
     }
 
     /// Check if a value matches a type expression, including constraint evaluation.

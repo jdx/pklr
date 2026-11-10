@@ -461,11 +461,21 @@ impl Evaluator {
                     }
                     _ => None,
                 }) == Some(true);
-                if (assigns_dynamic && !type_accepts_dynamic(type_ann, check_scope))
-                    || (!(assigns_dynamic && matches!(value, Value::List(_)))
-                        && type_is_runtime_checkable(type_ann, check_scope)
-                        && !self.eval_type_check(value, type_ann, check_scope, depth + 1)?)
-                {
+                let failed = if assigns_dynamic && !type_accepts_dynamic(type_ann, check_scope) {
+                    true
+                } else if assigns_dynamic && matches!(value, Value::List(_)) {
+                    !self.check_element_dynamic(
+                        value,
+                        type_ann,
+                        check_scope,
+                        depth + 1,
+                        &mut Vec::new(),
+                    )?
+                } else {
+                    type_is_runtime_checkable(type_ann, check_scope)
+                        && !self.eval_type_check(value, type_ann, check_scope, depth + 1)?
+                };
+                if failed {
                     let message = format!(
                         "property '{}' expected {}, got {}",
                         prop.name,

@@ -517,16 +517,22 @@ pub(super) fn type_accepts_dynamic(ty: &crate::parser::TypeExpr, scope: &Scope) 
         if let Some(alias) = scope.get_type_alias(base) {
             return visit(alias, scope, depth + 1);
         }
+        // A class declaration in scope (even one named `Object`, `Any` or
+        // `Dynamic`) shadows the built-in type, and a `Dynamic` is not an
+        // instance of one.
+        if matches!(
+            resolve_dotted(scope, base),
+            Some(Value::Object(_, Some(source))) if source.kind == ObjectKind::Class
+        ) {
+            return false;
+        }
         match base {
             "Dynamic" | "Object" | "Any" => true,
             "Null" | "Boolean" | "Bool" | "Int" | "Float" | "Number" | "String" | "List"
-            | "Listing" | "Set" | "Map" | "Mapping" | "Function" | "Regex" | "Duration"
+            | "Listing" | "Set" | "Map" | "Mapping" | "Function" | "Function0" | "Function1"
+            | "Function2" | "Function3" | "Function4" | "Function5" | "Regex" | "Duration"
             | "DataSize" | "Collection" | "Pair" | "IntSeq" => false,
-            // A class declaration; a `Dynamic` is not an instance of one.
-            _ => !matches!(
-                resolve_dotted(scope, base),
-                Some(Value::Object(_, Some(source))) if source.kind == ObjectKind::Class
-            ),
+            _ => true,
         }
     }
     fn visit(ty: &crate::parser::TypeExpr, scope: &Scope, depth: usize) -> bool {

@@ -5430,3 +5430,85 @@ fn explicit_new_dynamic_is_rejected_by_listing_typed_property() {
     let err = eval_fails("x: Listing<String> = new Dynamic { \"a\" }\n");
     assert!(err.contains("Dynamic"), "{err}");
 }
+
+// An element-only `new Dynamic` still satisfies the constraints on a declared
+// type that accepts a `Dynamic`, and is rejected when they fail, as in pkl.
+#[test]
+fn element_only_dynamic_evaluates_declared_type_constraints() {
+    for decl in [
+        "x: Any(false)",
+        "x: Dynamic(false)",
+        "x: Object(false)",
+        "x: Dynamic(toList().length == 2)",
+        "x: Dynamic(false)?",
+        "x: (Listing<String>|Dynamic(false))",
+        "typealias A = Any(false)\nx: A",
+    ] {
+        let err = eval_fails(&format!("{decl} = new Dynamic {{ \"a\" }}\n"));
+        assert!(
+            err.contains("expected") || err.contains("constraint"),
+            "{decl}: {err}"
+        );
+    }
+    let json = eval(
+        r#"
+typealias D = Dynamic(toList().length == 1)
+a: Any(true) = new Dynamic { "a" }
+b: Dynamic(toList().length == 1) = new Dynamic { "a" }
+c: (Listing<String>|Dynamic(toList().length == 1)) = new Dynamic { "a" }
+d: D? = new Dynamic { "a" }
+"#,
+    );
+    for key in ["a", "b", "c", "d"] {
+        assert_eq!(json[key], serde_json::json!(["a"]), "{key}");
+    }
+}
+
+#[test]
+fn amended_explicit_null_default_evaluates_declared_type_constraints() {
+    for ty in [
+        "Any(false)?",
+        "Dynamic(false)?",
+        "Dynamic(toList().length == 2)?",
+        "(Listing<String>|Any(false))?",
+    ] {
+        let err = eval_fails(&format!(
+            "class U {{ g: {ty} = null }}\na = new U {{ g {{ \"adm\" }} }}\n"
+        ));
+        assert!(err.contains("Dynamic"), "{ty}: {err}");
+    }
+    let err = eval_fails(
+        "class U { g: Any(false)? = null }\na = new U { g = new Dynamic { \"adm\" } }\n",
+    );
+    assert!(err.contains("expected"), "{err}");
+    let json =
+        eval("class U { g: Dynamic(toList().length == 1)? = null }\na = new U { g { \"adm\" } }\n");
+    assert_eq!(json["a"]["g"], serde_json::json!(["adm"]));
+}
+
+#[test]
+fn element_only_dynamic_is_not_a_class_named_like_a_builtin() {
+    for name in ["Object", "Any"] {
+        let err = eval_fails(&format!(
+            "class {name} {{}}\nx: {name} = new Dynamic {{ \"a\" }}\n"
+        ));
+        assert!(
+            err.contains("expected") || err.contains("Dynamic"),
+            "{name}: {err}"
+        );
+    }
+}
+
+#[test]
+fn element_only_dynamic_is_rejected_by_function_types() {
+    for ty in [
+        "(Int) -> Int",
+        "() -> Int",
+        "Function0<Int>",
+        "Function1<Int, Int>",
+        "Function2<Int, Int, Int>",
+    ] {
+        let err = eval_fails(&format!("x: {ty} = new Dynamic {{ \"a\" }}\n"));
+        assert!(err.contains("Dynamic"), "{ty}: {err}");
+    }
+}
