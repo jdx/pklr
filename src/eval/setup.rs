@@ -96,8 +96,6 @@ impl Evaluator {
             environment: None,
             external_properties: BTreeMap::default(),
             module_scopes: HashMap::default(),
-            foreign_scopes: HashMap::default(),
-            alias_origins: HashMap::default(),
             rendered_member_failed: false,
             env_reads: BTreeMap::new(),
             scoped_imports_in_flight: HashSet::default(),
@@ -201,8 +199,6 @@ impl Evaluator {
         self.resource_cache.clear();
         clear_names();
         self.module_scopes.clear();
-        self.foreign_scopes.clear();
-        self.alias_origins.clear();
         self.rendered_member_failed = false;
         self.scoped_imports_in_flight.clear();
         self.converters.clear();

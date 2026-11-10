@@ -436,32 +436,52 @@ pub(super) fn inferred_new_type(
     }
 }
 
-pub(super) fn type_default_value(ty: &crate::parser::TypeExpr, scope: &Scope) -> Option<Value> {
-    type_default_value_at(ty, scope, 0)
+/// The type alias `name` stands for in `scope`, including one an importer
+/// bound for the module it imports as `m` (`m.A`, kept under `m#A` so only the
+/// default-value helpers, which need no more than its shape, see it).
+fn alias_of<'a>(scope: &'a Scope, name: &str) -> Option<&'a crate::parser::TypeExpr> {
+    scope.get_type_alias(name).or_else(|| {
+        let (root, member) = name.split_once('.')?;
+        scope.get_type_alias(&format!("{root}#{member}"))
+    })
 }
 
-fn type_default_value_at(
+pub(super) fn type_default_value(ty: &crate::parser::TypeExpr, scope: &Scope) -> Option<Value> {
+    type_default_value_seen(ty, scope, &mut Vec::new())
+}
+
+/// [`type_default_value`] with the aliases already being expanded, so a cyclic
+/// alias such as `typealias A = *A|Int` yields no default instead of recursing
+/// until the stack overflows. [`type_default_error`] reports the cycle.
+fn type_default_value_seen(
     ty: &crate::parser::TypeExpr,
     scope: &Scope,
-    depth: usize,
+    seen: &mut Vec<String>,
 ) -> Option<Value> {
     use crate::parser::TypeExpr;
-    // Local aliases can form a cycle the parser does not reject; the type
-    // check of the value reports it, so give up on a default here.
-    if depth > 32 {
-        return None;
-    }
     match ty {
         TypeExpr::Constrained(base, _) if base.ends_with('?') => Some(Value::Null),
-        TypeExpr::Constrained(base, _) => type_default_for_name(base, scope),
+        // A constraint supplies no default: the type it constrains does.
+        TypeExpr::Constrained(base, _) => {
+            type_default_value_seen(&TypeExpr::Named(base.clone()), scope, seen)
+        }
         TypeExpr::Nullable(_) => Some(Value::Null),
         TypeExpr::Named(name) if name == "Null" => Some(Value::Null),
         TypeExpr::Named(name) => {
             if let Some(value) = string_literal_type_value(name) {
                 return Some(Value::String(value.into()));
             }
-            if let Some(alias) = scope.get_type_alias(name).cloned() {
-                return type_default_value_at(&alias, scope, depth + 1);
+            // A marked alternative (`*A`) takes its default from what `A`
+            // aliases.
+            let base = name.trim_start_matches('*');
+            if let Some(alias) = alias_of(scope, base).cloned() {
+                if seen.iter().any(|seen| seen == base) {
+                    return None;
+                }
+                seen.push(base.to_string());
+                let value = type_default_value_seen(&alias, scope, seen);
+                seen.pop();
+                return value;
             }
             type_default_for_name(name, scope)
         }
@@ -480,7 +500,17 @@ fn type_default_value_at(
             // A nullable default alternative leaves the property unset, as
             // `*Int?` does.
             .filter(|ty| !is_nullable_default(ty, scope))
-            .and_then(|ty| type_default_value_at(ty, scope, depth + 1)),
+            // The built-in `Map` and `IntSeq` are values with no default of
+            // their own. A class of that name declared in scope shadows them
+            // and keeps its own default.
+            .filter(|ty| {
+                !matches!(ty, TypeExpr::Named(name)
+                if matches!(
+                    name.trim_start_matches('*').split('<').next(),
+                    Some("Map" | "IntSeq")
+                ) && !names_user_class(name, scope))
+            })
+            .and_then(|ty| type_default_value_seen(ty, scope, seen)),
     }
 }
 
@@ -496,8 +526,7 @@ fn is_nullable_default_at(ty: &crate::parser::TypeExpr, scope: &Scope, depth: us
         // A bare `*Item?` keeps its `?` on the name.
         TypeExpr::Constrained(name, _) if name.ends_with('?') => true,
         TypeExpr::Named(name) if name.ends_with('?') => true,
-        TypeExpr::Named(name) if depth <= 32 => scope
-            .get_type_alias(name.trim_start_matches('*'))
+        TypeExpr::Named(name) if depth <= 32 => alias_of(scope, name.trim_start_matches('*'))
             .is_some_and(|target| match target {
                 // The alias's own `*` alternative decides, as for a direct union.
                 TypeExpr::Union(variants) => variants
@@ -521,7 +550,7 @@ pub(super) fn type_default_error(ty: &crate::parser::TypeExpr, scope: &Scope) ->
         let base = name.split('<').next().unwrap_or(name);
         if let Some(alias) = scope.get_type_alias(base) {
             if seen.iter().any(|seen| seen == base) {
-                return None;
+                return Some("Type alias definitions must not be cyclic.".to_string());
             }
             seen.push(base.to_string());
             let error = visit(alias, scope, seen);
@@ -561,6 +590,17 @@ pub(super) fn type_default_error(ty: &crate::parser::TypeExpr, scope: &Scope) ->
     }
 
     visit(ty, scope, &mut Vec::new())
+}
+
+/// Whether `name` resolves to a class declared in scope, which shadows the
+/// built-in type of that name.
+fn names_user_class(name: &str, scope: &Scope) -> bool {
+    let name = name.trim_start_matches('*').trim_end_matches('?');
+    let base = name.split('<').next().unwrap_or(name);
+    matches!(
+        resolve_dotted(scope, base),
+        Some(Value::Object(_, Some(source))) if source.kind == ObjectKind::Class
+    )
 }
 
 pub(super) fn type_default_for_name(name: &str, scope: &Scope) -> Option<Value> {
@@ -614,21 +654,29 @@ fn nullable_inner_default_at(
     }
     let alias = |name: &str| {
         let name = name.trim_start_matches('*').trim_end_matches('?');
-        scope.get_type_alias(name)
+        alias_of(scope, name)
     };
     match ty {
         // Look through a nullable alias first: its own default is null, but an
         // amendment starts from the type it wraps.
         TypeExpr::Nullable(inner) => nullable_inner_default_at(inner, scope, depth + 1)
-            .or_else(|| type_default_value_at(inner, scope, depth + 1)),
-        TypeExpr::Constrained(name, _) => match alias(name) {
-            Some(target) => nullable_inner_default_at(target, scope, depth + 1)
-                .or_else(|| type_default_value_at(target, scope, depth + 1)),
-            None => type_default_for_name(name.trim_end_matches('?'), scope),
-        },
+            .or_else(|| type_default_value(inner, scope)),
+        TypeExpr::Constrained(name, _) => {
+            let nullable = name.ends_with('?');
+            match alias(name) {
+                // Only a nullable type amends from what it wraps.
+                Some(target) => nullable_inner_default_at(target, scope, depth + 1).or_else(|| {
+                    nullable
+                        .then(|| type_default_value(target, scope))
+                        .flatten()
+                }),
+                None if nullable => type_default_for_name(name.trim_end_matches('?'), scope),
+                None => None,
+            }
+        }
         // `Listing<String>`, `Mapping<K, V>` and the like start from their
         // empty collection (or a generic class's instance).
-        TypeExpr::Generic(..) => type_default_value_at(ty, scope, depth + 1),
+        TypeExpr::Generic(..) => type_default_value(ty, scope),
         // An alias amends like the type it names, so look through it.
         TypeExpr::Named(name) => match alias(name) {
             Some(target) => nullable_inner_default_at(target, scope, depth + 1),
@@ -1198,7 +1246,7 @@ pub(super) fn type_is_runtime_checkable(ty: &crate::parser::TypeExpr, scope: &Sc
                         | "DataSize"
                         | "Any"
                 )
-                || scope.get_type_alias(runtime_name).is_some()
+                || alias_of(scope, runtime_name).is_some()
                 || resolve_dotted(scope, runtime_name).is_some()
         }
         TypeExpr::Nullable(inner) => type_is_runtime_checkable(inner, scope),

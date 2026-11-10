@@ -138,51 +138,11 @@ impl Evaluator {
             .collect();
         let bound = classes.into_inner();
         for (name, ty) in qualified {
-            scope.set_type_alias(format!("{alias}.{name}"), ty);
+            scope.set_type_alias(format!("{alias}#{name}"), ty);
         }
         for (name, class) in bound {
             scope.declare(format!("{alias}.{name}"), class);
         }
-        // Where the aliases were written: a type check resolves them there.
-        let origin = if let Some(url) = path.to_str().filter(|path| path.contains("://")) {
-            self.alias_origins
-                .insert(canonical_remote_module_identity(url), key.clone());
-            url.to_string()
-        } else {
-            self.module_type_namespace(path)
-        };
-        self.alias_origins.insert(origin, key);
-    }
-
-    /// The scope a module imported as `alias` evaluates its own types in.
-    #[cold]
-    pub(super) fn imported_alias_scope(
-        &mut self,
-        scope: &Scope,
-        name: &str,
-    ) -> Option<(String, Scope)> {
-        let (alias, tail) = name.split_once('.')?;
-        let key = self
-            .alias_origins
-            .get(scope.module_identity(alias)?)?
-            .clone();
-        if !self.foreign_scopes.contains_key(&key) {
-            let snapshot = self.module_scopes.get(&key)?;
-            let declaring = Scope {
-                vars: Arc::clone(&snapshot.values),
-                type_aliases: Arc::clone(&snapshot.type_aliases),
-                module_identities: Arc::new(
-                    snapshot
-                        .module_identities
-                        .iter()
-                        .map(|(name, identity)| (nm(name), identity.clone()))
-                        .collect(),
-                ),
-                ..Scope::default()
-            };
-            self.foreign_scopes.insert(key.clone(), declaring);
-        }
-        Some((tail.to_string(), self.foreign_scopes.get(&key)?.clone()))
     }
 
     pub(super) fn inherited_late_properties(&self, path: &Path) -> Vec<Arc<Property>> {
@@ -452,7 +412,7 @@ impl Evaluator {
             };
             if let Some(name) = exported {
                 if let Some(value) = scope.get(name) {
-                    out.insert(name.as_str().into(), value.clone());
+                    out.insert(name.as_str().into(), value.clone().declared_as_member(name));
                 } else if let Some(message) = failed.get(name.as_str()) {
                     poisoned_members.insert(
                         nm(name),
@@ -667,10 +627,13 @@ impl Evaluator {
 
         // A top-level amending or extending module renders data, not the
         // classes it inherited. An imported module keeps those classes so
-        // dotted access (for example `child.Person`) remains available.
-        if depth == 0 {
-            out.retain(|name, _| !inherited_type_names.contains(&**name));
-        }
+        // dotted access (for example `child.Person`) remains available, but a
+        // property named like an inherited type alias is not a member Pkl
+        // renders at any depth.
+        out.retain(|name, value| {
+            !inherited_type_names.contains(&**name)
+                || (depth > 0 && value.is_class_member(name, None))
+        });
 
         // At the top level (depth 0), strip class definitions and lambdas from
         // the serialized output — they're schema/functions, not data.
@@ -711,10 +674,12 @@ impl Evaluator {
                 elements: Vec::new(),
                 mapping_value_types: Vec::new(),
                 deprecated,
+                declared_as: None,
                 poisoned_members: (!poisoned_members.is_empty())
                     .then(|| Arc::new(poisoned_members)),
                 kind: ObjectKind::Object,
                 is_parsed_json: false,
+                is_module: true,
                 prototype: None,
             }))
         };
@@ -746,7 +711,6 @@ impl Evaluator {
             };
             effective_late_properties.insert(prop.name.clone(), prop);
         }
-        self.foreign_scopes.remove(path);
         self.module_scopes.insert(
             path.to_path_buf(),
             ModuleScopeSnapshot {
@@ -1232,7 +1196,14 @@ impl Evaluator {
                             Ok(defaults) => {
                                 scope.set_member_poison(name, None);
                                 scope.declare(name, defaults.clone());
-                                module_props_insert(scope, all_props, name.clone(), defaults);
+                                // The live `this`/`module` hold the class as a
+                                // declared member too, so rendering them skips it.
+                                module_props_insert(
+                                    scope,
+                                    all_props,
+                                    name.clone(),
+                                    defaults.declared_as_member(name),
+                                );
                                 let snapshot = Value::Object(Arc::clone(all_props), None);
                                 scope.set("this", snapshot.clone());
                                 scope.set("module", snapshot);
@@ -1543,7 +1514,10 @@ impl Evaluator {
                         if depth == 0 {
                             base_obj.shift_remove(name.as_str());
                         } else {
-                            base_obj.insert(name.as_str().into(), defaults.clone());
+                            base_obj.insert(
+                                name.as_str().into(),
+                                defaults.clone().declared_as_member(name),
+                            );
                         }
                     }
                     // Extract converters from the base module's output block
@@ -1659,7 +1633,10 @@ impl Evaluator {
                                 if depth == 0 {
                                     base_obj.shift_remove(cls_name.as_str());
                                 } else {
-                                    base_obj.insert(cls_name.as_str().into(), defaults.clone());
+                                    base_obj.insert(
+                                        cls_name.as_str().into(),
+                                        defaults.clone().declared_as_member(cls_name),
+                                    );
                                 }
                             }
                             Entry::TypeAlias(name, ty) => {
@@ -1736,7 +1713,10 @@ impl Evaluator {
                         if depth == 0 {
                             base_obj.shift_remove(cls_name.as_str());
                         } else {
-                            base_obj.insert(cls_name.as_str().into(), defaults.clone());
+                            base_obj.insert(
+                                cls_name.as_str().into(),
+                                defaults.clone().declared_as_member(cls_name),
+                            );
                         }
                     }
                     if let Entry::Property(prop) = entry
@@ -2047,9 +2027,8 @@ fn alias_use<'a>(
 #[inline(never)]
 fn dotted_snapshot_value<'a>(values: &'a ScopeMap, name: &str) -> Option<&'a Value> {
     let (root, rest) = name.split_once('.')?;
-    let mut parts = rest.split('.');
     let mut value = values.get(root)?;
-    for part in parts {
+    for part in rest.split('.') {
         let Value::Object(members, _) = value else {
             return None;
         };

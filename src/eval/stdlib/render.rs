@@ -300,7 +300,7 @@ fn render(value: &Value, explicit: bool, out: &mut String) {
             out.push('{');
             let mut first = true;
             for (key, member) in map.iter() {
-                if matches!(member, Value::Lambda(..)) {
+                if member.is_unrendered_member(key, source.as_deref()) {
                     continue;
                 }
                 out.push_str(if first { " " } else { "; " });
