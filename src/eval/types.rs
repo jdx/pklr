@@ -515,7 +515,9 @@ pub(super) fn type_is_listing(ty: &crate::parser::TypeExpr) -> bool {
     match ty {
         TypeExpr::Named(name) | TypeExpr::Generic(name, _) => name == "Listing",
         TypeExpr::Nullable(inner) => type_is_listing(inner),
+        // A default alternative keeps its `*` marker on the base name.
         TypeExpr::Constrained(name, _) => {
+            let name = name.trim_start_matches('*');
             name.trim_end_matches('?') == "Listing" || name.starts_with("Listing<")
         }
         TypeExpr::Union(variants) => variants.iter().any(type_is_listing),

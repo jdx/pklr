@@ -5437,3 +5437,35 @@ fn nullable_constrained_default_alternative_amends_its_own_default() {
     let v = eval(&format!("{class}c = new C {{ xs = 3 }}"));
     assert_eq!(v["c"]["xs"], serde_json::json!(3));
 }
+
+#[test]
+fn default_constrained_generic_alternative_with_nullable_argument_keeps_constraint() {
+    // The `?` belongs to the generic argument, not to the alternative, so the
+    // default still applies and its constraint is checked on the implicit value.
+    let msg = eval_fails("class C { xs: *Listing<String?>(!isEmpty)|Int }\nc = new C {}");
+    assert!(!msg.is_empty());
+    let class = "class C { xs: *Listing<String?>(true)|Int }\n";
+    let v = eval(&format!(
+        "{class}a = new C {{}}\nb = new C {{ xs {{ \"x\" null }} }}\nc = new C {{ xs = 3 }}"
+    ));
+    assert_eq!(v["a"]["xs"], serde_json::json!([]));
+    assert_eq!(v["b"]["xs"], serde_json::json!(["x", null]));
+    assert_eq!(v["c"]["xs"], serde_json::json!(3));
+    let v = eval("class C { m: *Mapping<String, Int?>(true)|Int }\na = new C {}");
+    assert_eq!(v["a"]["m"], serde_json::json!({}));
+}
+
+#[test]
+fn default_constrained_listing_alternative_amends_as_listing() {
+    // A body amendment of a `*Listing<...>(...)` default builds a listing,
+    // also when the property is read from an amended module.
+    let v = eval(
+        "class C { xs: *Listing<String>(true)|Int }\n\
+         a = new C {}\nb = new C { xs {} }\nc = new C { xs { \"x\" } }\n\
+         d: *Listing<String>(true)|Int = new {}",
+    );
+    assert_eq!(v["a"]["xs"], serde_json::json!([]));
+    assert_eq!(v["b"]["xs"], serde_json::json!([]));
+    assert_eq!(v["c"]["xs"], serde_json::json!(["x"]));
+    assert_eq!(v["d"], serde_json::json!([]));
+}
