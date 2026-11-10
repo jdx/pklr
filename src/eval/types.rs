@@ -314,13 +314,32 @@ pub(super) fn inferred_new_type(
     if depth > 32 {
         return Err(Error::Eval("recursive inferred return type".into()));
     }
+    // Nullability and chains of aliases are followed in a loop, so a long
+    // chain cannot overflow the stack and a cyclic one is an error.
+    let mut ty = ty;
+    let mut seen = HashSet::default();
+    loop {
+        match ty {
+            TypeExpr::Nullable(inner) => ty = inner,
+            TypeExpr::Named(name) => {
+                let name = name.trim_start_matches('*');
+                let Some(alias) = scope.get_type_alias(name) else {
+                    break;
+                };
+                if !seen.insert(name) {
+                    return Err(Error::Eval(
+                        "Type alias definitions must not be cyclic.".into(),
+                    ));
+                }
+                ty = alias;
+            }
+            _ => break,
+        }
+    }
     match ty {
         TypeExpr::Nullable(inner) => inferred_new_type(inner, scope, depth + 1),
         TypeExpr::Named(name) => {
             let name = name.trim_start_matches('*');
-            if let Some(alias) = scope.get_type_alias(name) {
-                return inferred_new_type(alias, scope, depth + 1);
-            }
             // Default union alternatives are stored as Named("*Type<...>").
             if name.contains('<') || name.ends_with('?') {
                 let ty = crate::parser::parse_type_name(name)?;
@@ -339,7 +358,7 @@ pub(super) fn inferred_new_type(
                         return vec![display_type_expr(arg)];
                     }
                     // `Listing<Listing<T>>` keeps the inner listing type.
-                    if name == "Listing" && resolves_to_listing(arg, scope, 0) {
+                    if name == "Listing" && resolves_to_listing(arg, scope) {
                         return vec![display_type_expr(arg)];
                     }
                     let mut names = Vec::new();
@@ -370,15 +389,29 @@ pub(super) fn type_default_value(ty: &crate::parser::TypeExpr, scope: &Scope) ->
         TypeExpr::Constrained(base, _) if base.ends_with('?') => Some(Value::Null),
         TypeExpr::Constrained(base, _) => type_default_for_name(base, scope),
         TypeExpr::Nullable(_) => Some(Value::Null),
-        TypeExpr::Named(name) if name == "Null" => Some(Value::Null),
         TypeExpr::Named(name) => {
-            if let Some(value) = string_literal_type_value(name) {
-                return Some(Value::String(value.into()));
+            // Follow a chain of plain aliases in a loop; a cyclic one has no
+            // default.
+            let mut name = name;
+            let mut seen = HashSet::default();
+            loop {
+                if name == "Null" {
+                    return Some(Value::Null);
+                }
+                if let Some(value) = string_literal_type_value(name) {
+                    return Some(Value::String(value.into()));
+                }
+                match scope.get_type_alias(name) {
+                    Some(TypeExpr::Named(next)) => {
+                        if !seen.insert(name.as_str()) {
+                            return None;
+                        }
+                        name = next;
+                    }
+                    Some(other) => return type_default_value(other, scope),
+                    None => return type_default_for_name(name, scope),
+                }
             }
-            if let Some(alias) = scope.get_type_alias(name).cloned() {
-                return type_default_value(&alias, scope);
-            }
-            type_default_for_name(name, scope)
         }
         TypeExpr::Generic(name, _) => match name.as_str() {
             "Collection" | "List" | "Set" | "Listing" => Some(empty_collection(name)),
@@ -403,22 +436,30 @@ pub(super) fn type_default_value(ty: &crate::parser::TypeExpr, scope: &Scope) ->
 /// error when the property is actually evaluated.
 pub(super) fn type_default_error(ty: &crate::parser::TypeExpr, scope: &Scope) -> Option<String> {
     fn named_error(name: &str, scope: &Scope, seen: &mut Vec<String>) -> Option<String> {
-        let name = name.trim_start_matches('*').trim_end_matches('?');
-        let base = name.split('<').next().unwrap_or(name);
-        if let Some(alias) = scope.get_type_alias(base) {
+        let mark = seen.len();
+        let mut name = name;
+        // A chain of aliases is followed in a loop, not by recursion.
+        let error = loop {
+            let plain = name.trim_start_matches('*').trim_end_matches('?');
+            let base = plain.split('<').next().unwrap_or(plain);
+            let Some(alias) = scope.get_type_alias(base) else {
+                // A qualified class can be absent from an imported module's
+                // rendered map because evaluating its definition failed. Walk
+                // the dotted path so its ObjectSource poison is still reported
+                // when this default is actually materialized.
+                break poisoned_member(scope, base);
+            };
             if seen.iter().any(|seen| seen == base) {
-                return None;
+                break None;
             }
             seen.push(base.to_string());
-            let error = visit(alias, scope, seen);
-            seen.pop();
-            return error;
-        }
-        // A qualified class can be absent from an imported module's rendered
-        // map because evaluating its definition failed. Walk the dotted path
-        // so its ObjectSource poison is still reported when this default is
-        // actually materialized.
-        poisoned_member(scope, base)
+            match alias {
+                crate::parser::TypeExpr::Named(next) if next != "Null" => name = next,
+                other => break visit(other, scope, seen),
+            }
+        };
+        seen.truncate(mark);
+        error
     }
 
     fn visit(

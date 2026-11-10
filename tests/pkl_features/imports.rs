@@ -3546,3 +3546,144 @@ fn assigned_null_listing_property_cannot_be_amended_with_elements() {
     .unwrap();
     assert!(pklr::eval_to_json(&dir.join("main.pkl")).is_err());
 }
+
+// A listing alias keeps its constraints when a new element is added to an
+// inherited property: the amended value is checked against the full alias in
+// its declaring module, whether or not the amending module shadows a name.
+// Checked against pkl 0.32.2.
+#[test]
+fn amended_listing_alias_keeps_its_constraints() {
+    let temp = TestTempDir::new("pklr_amended_listing_alias_constraint");
+    let dir = temp.path();
+    let decls =
+        "class T { x: Int = 1 }\ntypealias One = Listing<T>(length == 1)\nclass H { xs: One }\n";
+    std::fs::write(
+        dir.join("ok.pkl"),
+        format!("{decls}h = new H {{ xs {{ new {{}} }} }}\n"),
+    )
+    .unwrap();
+    let val = pklr::eval_to_json(&dir.join("ok.pkl")).unwrap();
+    assert_eq!(val["h"]["xs"], serde_json::json!([{"x": 1}]));
+    std::fs::write(
+        dir.join("bad.pkl"),
+        format!("{decls}h = new H {{ xs {{ new {{}}; new {{}} }} }}\n"),
+    )
+    .unwrap();
+    let err = pklr::eval_to_json(&dir.join("bad.pkl")).unwrap_err();
+    assert!(err.to_string().contains("expected One"), "{err}");
+
+    // The amending module binds the alias's name to a class.
+    std::fs::write(
+        dir.join("a.pkl"),
+        "class T { x: Int = 1 }\ntypealias One = Listing<T>(length == 1)\nopen class H { xs: One }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("b.pkl"),
+        "import \"a.pkl\" as A\nclass One { z: Int = 0 }\nh = new A.H { xs { new {} } }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("shadowed.pkl"),
+        "import \"b.pkl\" as B\nr = (B.h) { xs { new {} } }\n",
+    )
+    .unwrap();
+    let err = pklr::eval_to_json(&dir.join("shadowed.pkl")).unwrap_err();
+    assert!(err.to_string().contains("expected One"), "{err}");
+}
+
+// A cyclic type alias is rejected, a `local` one included, instead of
+// recursing until the stack overflows. Checked against pkl 0.32.2.
+#[test]
+fn cyclic_local_listing_alias_is_rejected() {
+    let temp = TestTempDir::new("pklr_cyclic_local_listing_alias");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "local typealias L = Listing<L>\nclass C { x: L? }\nc = new C { x { new {} } }\n",
+    )
+    .unwrap();
+    let err = pklr::eval_to_json(&dir.join("main.pkl")).unwrap_err();
+    assert!(err.to_string().contains("must not be cyclic"), "{err}");
+}
+
+// A long chain of aliases to a listing resolves without deep recursion.
+#[test]
+fn long_listing_alias_chain_resolves_elements() {
+    let temp = TestTempDir::new("pklr_long_listing_alias_chain");
+    let dir = temp.path();
+    let mut source = String::from("class T { x: Int = 1 }\ntypealias A0 = Listing<T>\n");
+    for index in 1..=5000 {
+        source.push_str(&format!("typealias A{index} = A{}\n", index - 1));
+    }
+    source.push_str("class H { xs: A5000 }\nh = new H { xs { new {} } }\n");
+    std::fs::write(dir.join("main.pkl"), source).unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
+    assert_eq!(val["h"]["xs"], serde_json::json!([{"x": 1}]));
+}
+
+// A parenthesised `new { ... }` has no parent to amend, whatever type is
+// expected where it stands, so it is an error in a typed listing's element,
+// `if` branch and `let` body, and in a typed property. Without parentheses the
+// same elements are built as the element class. Checked against pkl 0.32.2.
+#[test]
+fn parenthesised_untyped_new_cannot_tell_which_parent_to_amend() {
+    let temp = TestTempDir::new("pklr_parenthesised_untyped_new");
+    let dir = temp.path();
+    let decl = "class T { x: Int = 1 }\n";
+    for (index, source) in [
+        "xs: Listing<T> = new { (new {}) }\n",
+        "xs: Listing<T> = new { new {}; (new { x = 2 }) }\n",
+        "xs: Listing<T> = new { if (true) (new {}) else new {} }\n",
+        "xs: Listing<T> = new { let (a = 1) (new {}) }\n",
+        "a: T = (new {})\n",
+        "x = (new { a = 1 })\n",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let path = dir.join(format!("paren{index}.pkl"));
+        std::fs::write(&path, format!("{decl}{source}")).unwrap();
+        let err = pklr::eval_to_json(&path).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Cannot tell which parent to amend"),
+            "{source}: {err}"
+        );
+    }
+    std::fs::write(
+        dir.join("plain.pkl"),
+        format!(
+            "{decl}xs: Listing<T> = new {{ let (a = 1) new {{}} }}\n\
+ys: Listing<T> = new {{ if (true) new {{}} else new {{}} }}\n"
+        ),
+    )
+    .unwrap();
+    let val = pklr::eval_to_json(&dir.join("plain.pkl")).unwrap();
+    assert_eq!(val["xs"], serde_json::json!([{"x": 1}]));
+    assert_eq!(val["ys"], serde_json::json!([{"x": 1}]));
+}
+
+// Module-level aliases that name themselves are rejected whichever way they
+// are used as a listing type. Checked against pkl 0.32.2.
+#[test]
+fn self_referential_module_aliases_are_rejected() {
+    let temp = TestTempDir::new("pklr_self_referential_alias");
+    let dir = temp.path();
+    for (index, source) in [
+        "typealias A = Listing<A>\nclass T { x: Int = 1 }\nxs: A = new {}\n",
+        "typealias A = A\nxs: A = new {}\n",
+        "local typealias A = A\nxs: A = new {}\n",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let path = dir.join(format!("cycle{index}.pkl"));
+        std::fs::write(&path, source).unwrap();
+        let err = pklr::eval_to_json(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("must not be cyclic"),
+            "{source}: {err}"
+        );
+    }
+}

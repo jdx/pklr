@@ -821,7 +821,7 @@ fn class_local_this_alias_tracks_amended_inputs() {
 class Factory {
     local factory = this
     staged: Boolean = false
-    fixed step = (new { staged = false }) {
+    fixed step = (new Dynamic { staged = false }) {
         staged = factory.staged
     }
 }

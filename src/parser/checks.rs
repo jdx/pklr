@@ -321,9 +321,7 @@ impl<'a> Parser<'a> {
         let aliases: Vec<(&str, &TypeExpr)> = entries
             .iter()
             .filter_map(|entry| match entry {
-                Entry::TypeAlias(name, ty) if !self.local_type_aliases.contains(name) => {
-                    Some((name.as_str(), ty))
-                }
+                Entry::TypeAlias(name, ty) => Some((name.as_str(), ty)),
                 _ => None,
             })
             .collect();
@@ -363,10 +361,29 @@ impl<'a> Parser<'a> {
                 *next += 1;
                 match state[target] {
                     1 => {
-                        return Err(self.error_at(
-                            self.prev_end,
-                            "Type alias definitions must not be cyclic.",
-                        ));
+                        // Pkl resolves a `local` alias only where something
+                        // uses it, so a cycle through one is an error only
+                        // when the module names it besides its declaration
+                        // and the aliases that refer to it.
+                        let from = stack
+                            .iter()
+                            .position(|(member, _)| *member == target)
+                            .unwrap_or(0);
+                        let locals = stack[from..]
+                            .iter()
+                            .map(|(member, _)| aliases[*member].0)
+                            .filter(|name| self.local_type_aliases.contains(*name))
+                            .collect::<Vec<_>>();
+                        if locals.is_empty()
+                            || locals
+                                .iter()
+                                .any(|name| self.is_type_alias_used(name, &aliases))
+                        {
+                            return Err(self.error_at(
+                                self.prev_end,
+                                "Type alias definitions must not be cyclic.",
+                            ));
+                        }
                     }
                     0 => {
                         state[target] = 1;
@@ -377,6 +394,23 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Whether the module names the type alias `name` anywhere besides its
+    /// own declaration and the module-level aliases' definitions.
+    fn is_type_alias_used(&self, name: &str, aliases: &[(&str, &TypeExpr)]) -> bool {
+        let mentions = self
+            .tokens
+            .iter()
+            .filter(|token| matches!(&token.kind, TokenKind::Ident(ident) if ident == name))
+            .count();
+        let mut declared = 1;
+        for (_, ty) in aliases {
+            let mut names = Vec::new();
+            collect_type_names(ty, &mut names);
+            declared += names.iter().filter(|other| *other == name).count();
+        }
+        mentions > declared
     }
 }
 

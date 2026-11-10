@@ -311,18 +311,38 @@ fn typed_listing_elem(
 }
 
 /// Whether `ty` is a `Listing<...>`, through nullability and type aliases.
-pub(super) fn resolves_to_listing(
-    ty: &crate::parser::TypeExpr,
-    scope: &Scope,
-    depth: usize,
-) -> bool {
+pub(super) fn resolves_to_listing(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
+    // A chain of aliases is walked in a loop, so a long one cannot overflow
+    // the stack and a cyclic one ends at its first repeat.
+    let mut seen = HashSet::default();
+    resolve_alias_chain(ty, scope, &mut seen).is_some_and(|ty| ty.is_listing_type())
+}
+
+/// Follow `ty` through nullability and type aliases to the first type that is
+/// neither. `seen` holds the aliases already followed; reaching one again is a
+/// cyclic alias (a `local` one escapes the parser's cycle check), which yields
+/// `None` rather than looping.
+fn resolve_alias_chain<'a>(
+    mut ty: &'a crate::parser::TypeExpr,
+    scope: &'a Scope,
+    seen: &mut HashSet<String>,
+) -> Option<&'a crate::parser::TypeExpr> {
     use crate::parser::TypeExpr;
-    match ty {
-        TypeExpr::Nullable(inner) => resolves_to_listing(inner, scope, depth),
-        TypeExpr::Named(name) if depth < 8 => scope
-            .get_type_alias(name.trim_start_matches('*').trim_end_matches('?'))
-            .is_some_and(|alias| resolves_to_listing(&alias.clone(), scope, depth + 1)),
-        other => other.is_listing_type(),
+    loop {
+        match ty {
+            TypeExpr::Nullable(inner) => ty = inner,
+            TypeExpr::Named(name) => {
+                let name = name.trim_start_matches('*').trim_end_matches('?');
+                let Some(alias) = scope.get_type_alias(name) else {
+                    return Some(ty);
+                };
+                if !seen.insert(name.to_string()) {
+                    return None;
+                }
+                ty = alias;
+            }
+            other => return Some(other),
+        }
     }
 }
 
@@ -348,7 +368,7 @@ pub(super) fn listing_elem_class(type_args: &[String], scope: &Scope) -> Option<
             ty.clone(),
             crate::parser::TypeExpr::Named(_) | crate::parser::TypeExpr::Nullable(_)
         )
-        && resolves_to_listing(&ty, scope, 0)
+        && resolves_to_listing(&ty, scope)
     {
         return type_elem_class(&ty, scope);
     }
@@ -372,19 +392,32 @@ pub(super) fn listing_elem_class(type_args: &[String], scope: &Scope) -> Option<
 /// class, or for a `Listing<..>` element type a listing prototype holding
 /// the class of its own elements.
 fn type_elem_class(ty: &crate::parser::TypeExpr, scope: &Scope) -> Option<Arc<Value>> {
+    type_elem_class_in(ty, scope, &mut HashSet::default(), 0)
+}
+
+/// `Listing<Listing<...>>` nests this deep at most; a cyclic alias or an
+/// absurd nesting leaves the element untyped instead of overflowing the stack.
+const MAX_LISTING_NESTING: usize = 64;
+
+/// `type_elem_class`, with the aliases `seen` on the way down to `ty`.
+fn type_elem_class_in(
+    ty: &crate::parser::TypeExpr,
+    scope: &Scope,
+    seen: &mut HashSet<String>,
+    nesting: usize,
+) -> Option<Arc<Value>> {
     use crate::parser::TypeExpr;
-    match ty {
-        TypeExpr::Nullable(inner) => type_elem_class(inner, scope),
+    match resolve_alias_chain(ty, scope, seen)? {
         TypeExpr::Generic(name, args) if name == "Listing" && args.len() == 1 => {
-            let inner = type_elem_class(&args[0], scope)?;
+            if nesting >= MAX_LISTING_NESTING {
+                return None;
+            }
+            let inner = type_elem_class_in(&args[0], scope, seen, nesting + 1)?;
             Some(Arc::new(Value::List(
                 ListValue::new(ListKind::Listing, Vec::new()).with_elem_class(Some(inner)),
             )))
         }
-        TypeExpr::Named(name) => match scope.get_type_alias(name.trim_start_matches('*')) {
-            Some(alias) => type_elem_class(&alias.clone(), scope),
-            None => listing_elem_class(std::slice::from_ref(name), scope),
-        },
+        TypeExpr::Named(name) => listing_elem_class(std::slice::from_ref(name), scope),
         other => listing_elem_class(&[display_type_expr(other)], scope),
     }
 }
@@ -395,15 +428,12 @@ pub(super) fn declared_listing_elem_class(
     scope: &Scope,
 ) -> Option<Arc<Value>> {
     use crate::parser::TypeExpr;
-    match ty {
-        TypeExpr::Nullable(inner) => declared_listing_elem_class(inner, scope),
+    let mut seen = HashSet::default();
+    match resolve_alias_chain(ty, scope, &mut seen)? {
         TypeExpr::Generic(name, args) if name == "Listing" && args.len() == 1 => {
-            type_elem_class(&args[0], scope)
+            type_elem_class_in(&args[0], scope, &mut seen, 1)
         }
-        TypeExpr::Named(name) => {
-            let alias = scope.get_type_alias(name.trim_start_matches('*'))?.clone();
-            declared_listing_elem_class(&alias, scope)
-        }
+        TypeExpr::Named(_) => None,
         _ => {
             let (name, args) = inferred_new_type(ty, scope, 0).ok()?;
             (name == "Listing")
@@ -444,7 +474,7 @@ impl Evaluator {
         base_source: &ObjectSource,
         ty: &crate::parser::TypeExpr,
         entry_scope: Option<&Arc<CapturedScope>>,
-    ) -> Option<Value> {
+    ) -> Option<(Value, Scope)> {
         // A class cannot always see itself, or classes declared after it, in
         // the scope it was captured with: the instance's scope has them. A
         // name the declaring scope binds otherwise (an alias, a value) is not
@@ -462,12 +492,17 @@ impl Evaluator {
         if is_never_listing_type(ty, &is_class) {
             return None;
         }
-        let declaring = match entry_scope {
+        let mut declaring = match entry_scope {
             Some(captured) => restore_scope(captured),
             None => definition_type_scope(base_source),
         };
-        self.declared_elem_class(ty, &declaring)
-            .map(|class| (*class).clone())
+        let class = self.declared_elem_class(ty, &declaring)?;
+        // The returned scope is the one `ty` is checked in, so it also holds
+        // the classes the declaring module defines after this one.
+        if let Some(namespace) = declaring.type_namespace.clone() {
+            self.layer_evaluated_module_scope(Path::new(&namespace), &mut declaring);
+        }
+        Some(((*class).clone(), declaring))
     }
 }
 

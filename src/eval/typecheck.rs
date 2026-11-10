@@ -428,9 +428,22 @@ pub(super) fn type_has_constraint(ty: &crate::parser::TypeExpr, scope: &Scope) -
 
         match ty {
             TypeExpr::Constrained(..) => true,
-            TypeExpr::Named(name) => scope
-                .get_type_alias(name)
-                .is_some_and(|alias| aliases.insert(nm(name)) && visit(alias, scope, aliases)),
+            TypeExpr::Named(name) => {
+                // A chain of aliases is followed in a loop, not by recursion.
+                let mut name = name;
+                loop {
+                    let Some(alias) = scope.get_type_alias(name) else {
+                        return false;
+                    };
+                    if !aliases.insert(nm(name)) {
+                        return false;
+                    }
+                    match alias {
+                        TypeExpr::Named(next) => name = next,
+                        other => return visit(other, scope, aliases),
+                    }
+                }
+            }
             TypeExpr::Nullable(inner) => visit(inner, scope, aliases),
             TypeExpr::Union(variants) => variants
                 .iter()
@@ -550,9 +563,22 @@ pub(super) fn type_constraint_has_explicit_throw(
             TypeExpr::Constrained(_, constraint) => {
                 expr_has_throw(constraint, scope, None, &mut HashSet::default())
             }
-            TypeExpr::Named(name) | TypeExpr::Generic(name, _) => scope
-                .get_type_alias(name)
-                .is_some_and(|alias| aliases.insert(nm(name)) && visit(alias, scope, aliases)),
+            TypeExpr::Named(name) | TypeExpr::Generic(name, _) => {
+                // A chain of aliases is followed in a loop, not by recursion.
+                let mut name = name;
+                loop {
+                    let Some(alias) = scope.get_type_alias(name) else {
+                        return false;
+                    };
+                    if !aliases.insert(nm(name)) {
+                        return false;
+                    }
+                    match alias {
+                        TypeExpr::Named(next) => name = next,
+                        other => return visit(other, scope, aliases),
+                    }
+                }
+            }
             TypeExpr::Nullable(inner) => visit(inner, scope, aliases),
             TypeExpr::Union(variants) => variants
                 .iter()
