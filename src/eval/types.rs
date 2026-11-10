@@ -265,7 +265,7 @@ impl AliasResolver<'_> {
                     self.ty(ty, shadowed);
                 }
             }
-            TypeExpr::Constrained(base, constraint, _) => {
+            TypeExpr::Constrained(base, constraint, quoted) => {
                 self.expr(constraint, shadowed);
                 let nullable = base.ends_with('?');
                 let (default_marker, plain) = match base.trim_end_matches('?').strip_prefix('*') {
@@ -274,7 +274,8 @@ impl AliasResolver<'_> {
                 };
                 // `List<I>(length == 1)`: the aliases are in the type
                 // arguments of the base, not in its name.
-                if plain.contains('<')
+                if !*quoted
+                    && plain.contains('<')
                     && let Ok(mut generic) = crate::parser::parse_type_name(plain)
                 {
                     self.ty(&mut generic, shadowed);
@@ -313,6 +314,8 @@ impl AliasResolver<'_> {
                     ""
                 };
                 *base = format!("{default_marker}{target}{suffix}");
+                // The base is the alias's type now, not a quoted name.
+                *quoted = false;
                 **constraint = constraint_expr;
             }
         }

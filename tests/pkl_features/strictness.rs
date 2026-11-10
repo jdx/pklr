@@ -614,6 +614,24 @@ l = null as C?(true)
 }
 
 #[test]
+fn a_quoted_alias_name_expands_to_its_type_in_a_constrained_check() {
+    let json = eval(
+        r#"
+typealias L = List<Int>
+function f(x) = x is `L`(true)
+a = f(List(1))
+b = List(1) is `L`(true)
+c = List(1) as `L`(true)
+d = f(List("a"))
+"#,
+    );
+    assert_eq!(
+        json,
+        serde_json::json!({"a": true, "b": true, "c": [1], "d": false})
+    );
+}
+
+#[test]
 fn a_constrained_quoted_alias_resolves_in_a_function_and_when_default_marked() {
     let json = eval(
         r#"
