@@ -74,6 +74,19 @@ impl Evaluator {
                     scope,
                 )));
             }
+            // Members make an element-only `Dynamic` one with elements and
+            // members.
+            if let Some(base @ Value::List(items)) = amendment_base
+                && items.kind() == ListKind::Dynamic
+                && entries_define_members(body)
+            {
+                return Ok(Some(self.eval_value_amendment(
+                    base.clone(),
+                    body,
+                    scope,
+                    depth,
+                )?));
+            }
             if matches!(amendment_base, Some(Value::List(_)))
                 || (!matches!(amendment_base, Some(Value::Object(..)))
                     && (prop.type_ann.as_ref().is_some_and(type_is_listing)

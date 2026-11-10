@@ -542,3 +542,32 @@ fn a_computed_dynamic_is_a_dynamic_and_a_dynamic_key() {
     }
     assert!(is("Map(\"x\", 1).toDynamic() is Dynamic"));
 }
+
+#[test]
+fn amending_keeps_members_of_a_computed_dynamic_and_of_a_dynamic_property() {
+    let json = eval(
+        r#"
+local d = Map("x", 1).toDynamic()
+amended = (d) { y = 2 }
+same = (d) {}
+class C { x = 1 }
+typed = (new C {}.toDynamic()) { y = 2 }
+class U { g: Dynamic = new Dynamic { "a" } }
+property = new U { g { x = 1 } }.g
+"#,
+    );
+    assert_eq!(json["amended"], serde_json::json!({"x": 1, "y": 2}));
+    assert_eq!(json["same"], serde_json::json!({"x": 1}));
+    assert_eq!(json["typed"], serde_json::json!({"x": 1, "y": 2}));
+    // Pkl keeps the element of the default beside the member; JSON cannot show both.
+    let json = eval(
+        "class U { g: Dynamic = new Dynamic { \"a\" } }\ne = new U { g { x = 1 } }.g.toList()\n",
+    );
+    assert_eq!(json["e"], serde_json::json!(["a"]));
+}
+
+#[test]
+fn a_dynamic_with_elements_and_members_is_no_mapping() {
+    assert!(!is("new Dynamic { 1; x = 2 } is Mapping"));
+    eval_fails("x: Mapping<Int, Int> = new Dynamic { 1; x = 2 }\n");
+}

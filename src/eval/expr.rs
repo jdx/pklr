@@ -171,7 +171,12 @@ impl Evaluator {
                                 return Ok(Value::List(ListValue::new(element_kind, items)));
                             }
                         }
-                        Ok(object)
+                        // `new Dynamic { 1; x = 2 }` is a Dynamic too.
+                        Ok(if type_name.as_deref() == Some("Dynamic") {
+                            tag_dynamic(object)
+                        } else {
+                            object
+                        })
                     }
                     Some("Listing") => {
                         let mut listing_scope = scope.child();
@@ -258,16 +263,7 @@ impl Evaluator {
                     }
                     Some("Dynamic") => {
                         let object = self.eval_entries(entries, scope, depth + 1)?;
-                        Ok(match object {
-                            Value::Object(map, Some(source))
-                                if source.kind == ObjectKind::Object =>
-                            {
-                                let mut source = Arc::unwrap_or_clone(source);
-                                source.kind = ObjectKind::Dynamic;
-                                Value::Object(map, Some(Arc::new(source)))
-                            }
-                            other => other,
-                        })
+                        Ok(tag_dynamic(object))
                     }
                     // `new Mixin { body }` is a function that amends its
                     // argument with `body`.
@@ -1122,5 +1118,17 @@ pub(super) fn check_iterable(value: &Value) -> Result<()> {
             "Cannot iterate over value of type `{}`.",
             value_type_display(value)
         ))),
+    }
+}
+
+/// An object `new Dynamic { ... }` built, marked as the `Dynamic` it is.
+fn tag_dynamic(object: Value) -> Value {
+    match object {
+        Value::Object(map, Some(source)) if source.kind == ObjectKind::Object => {
+            let mut source = Arc::unwrap_or_clone(source);
+            source.kind = ObjectKind::Dynamic;
+            Value::Object(map, Some(Arc::new(source)))
+        }
+        other => other,
     }
 }

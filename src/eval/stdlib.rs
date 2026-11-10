@@ -74,6 +74,9 @@ pub(super) fn dynamic_object(members: ObjectMap) -> Value {
     let mut source = Arc::unwrap_or_clone(source);
     source.type_name = None;
     source.kind = ObjectKind::Dynamic;
+    // As an object parsed from JSON, it keeps its members when amended: there
+    // is no body to rebuild them from.
+    source.is_parsed_json = true;
     Value::Object(Arc::new(members), Some(Arc::new(source)))
 }
 
