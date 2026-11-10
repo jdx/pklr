@@ -379,6 +379,17 @@ pub(super) fn apply_mapping_type_annotation(
     let Value::Object(_, src_slot) = value else {
         return;
     };
+    // A type alias of a `Mapping` (`typealias M = Mapping<String, E>`) records
+    // the value types of the type it stands for.
+    let resolved;
+    let type_ann = if matches!(type_ann, crate::parser::TypeExpr::Named(_))
+        && let Some(generic) = resolve_collection_type(type_ann, scope, 0)
+    {
+        resolved = generic;
+        &resolved
+    } else {
+        type_ann
+    };
     // An untagged object declared a `Mapping` is a mapping.
     if src_slot.is_none() && is_mapping_type(type_ann) {
         *src_slot = Some(Arc::new(mapping_source()));

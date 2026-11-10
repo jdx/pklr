@@ -1999,3 +1999,100 @@ pub(super) fn is_listing_chain(ty: &crate::parser::TypeExpr, scope: &Scope) -> b
     }
     true
 }
+
+/// `ty` as written where a property is declared, with what only that scope can
+/// see made independent of it: an alias is replaced by its body, and a class
+/// is bound by value under a synthetic name (through `bind`) that resolves
+/// anywhere. `None` when nothing changes. Lets an amendment in another module
+/// infer the members of a `Mapping` or nested listing declared there.
+pub(super) fn close_type_over(
+    ty: &crate::parser::TypeExpr,
+    declaring: &Scope,
+    bind: &mut dyn FnMut(&str, Value),
+) -> Option<crate::parser::TypeExpr> {
+    fn close(
+        ty: &crate::parser::TypeExpr,
+        declaring: &Scope,
+        bind: &mut dyn FnMut(&str, Value),
+        depth: usize,
+        changed: &mut bool,
+    ) -> crate::parser::TypeExpr {
+        use crate::parser::TypeExpr;
+        if depth > 16 {
+            return ty.clone();
+        }
+        match ty {
+            TypeExpr::Nullable(inner) => {
+                TypeExpr::Nullable(Box::new(close(inner, declaring, bind, depth + 1, changed)))
+            }
+            TypeExpr::Union(types) => TypeExpr::Union(
+                types
+                    .iter()
+                    .map(|ty| close(ty, declaring, bind, depth + 1, changed))
+                    .collect(),
+            ),
+            TypeExpr::Generic(name, args) if matches!(name.as_str(), "Listing" | "Mapping") => {
+                TypeExpr::Generic(
+                    name.clone(),
+                    args.iter()
+                        .map(|ty| close(ty, declaring, bind, depth + 1, changed))
+                        .collect(),
+                )
+            }
+            TypeExpr::Named(name) => {
+                let plain = name.trim_start_matches('*').trim_end_matches('?');
+                if let Some(alias) = declaring.get_type_alias(plain) {
+                    *changed = true;
+                    let closed = close(alias, declaring, bind, depth + 1, changed);
+                    return match (name.ends_with('?'), closed) {
+                        (true, closed @ TypeExpr::Nullable(_)) => closed,
+                        (true, closed) => TypeExpr::Nullable(Box::new(closed)),
+                        (false, closed) => closed,
+                    };
+                }
+                match resolve_dotted(declaring, plain) {
+                    Some(class @ Value::Object(_, Some(_))) if matches!(&class, Value::Object(_, Some(source)) if source.type_name.is_some()) =>
+                    {
+                        *changed = true;
+                        let synthetic = format!("\0declared_class:{plain}");
+                        bind(&synthetic, class);
+                        TypeExpr::Named(format!(
+                            "{}{synthetic}{}",
+                            if name.starts_with('*') { "*" } else { "" },
+                            if name.ends_with('?') { "?" } else { "" }
+                        ))
+                    }
+                    _ => ty.clone(),
+                }
+            }
+            _ => ty.clone(),
+        }
+    }
+    let mut changed = false;
+    let closed = close(ty, declaring, bind, 0, &mut changed);
+    changed.then_some(closed)
+}
+
+/// Whether `ty` cannot involve a `Listing` or `Mapping`, judged by its text.
+pub(super) fn is_never_collection_type(ty: &crate::parser::TypeExpr) -> bool {
+    use crate::parser::TypeExpr;
+    match ty {
+        TypeExpr::Nullable(inner) => is_never_collection_type(inner),
+        TypeExpr::Generic(name, _) => !matches!(name.as_str(), "Listing" | "Mapping"),
+        TypeExpr::Named(name) => matches!(
+            name.trim_start_matches('*').trim_end_matches('?'),
+            "String"
+                | "Int"
+                | "Float"
+                | "Boolean"
+                | "Number"
+                | "Any"
+                | "Dynamic"
+                | "Duration"
+                | "DataSize"
+                | "Null"
+        ),
+        TypeExpr::Constrained(..) => true,
+        TypeExpr::Union(types) => types.iter().all(is_never_collection_type),
+    }
+}
