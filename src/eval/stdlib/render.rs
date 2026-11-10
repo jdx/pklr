@@ -2,7 +2,7 @@
 //! produce, and how error messages quote values. Ports pkl-core's
 //! `VmValueRenderer` (single-line mode) and `ValueFormatter`.
 
-use crate::value::{ObjectSource, Value};
+use crate::value::{ObjectKind, ObjectSource, Value};
 
 /// Java's `Double.toString`, which pkl uses to print a `Float`: the shortest
 /// digits that round-trip, in plain notation for magnitudes in
@@ -246,6 +246,29 @@ fn object_class_name(source: &Option<std::sync::Arc<ObjectSource>>) -> &str {
         .unwrap_or("Dynamic")
 }
 
+/// A class's `toString()`: `Int` for a standard library class and
+/// `module#Class` otherwise, naming the module by its file. (pkl names a
+/// module with a `module` declaration by that name instead.)
+fn class_display_name(source: &ObjectSource) -> String {
+    let name = source.type_name().unwrap_or("Class");
+    let namespace = source
+        .type_identity
+        .as_deref()
+        .and_then(|identity| identity.strip_suffix(name))
+        .and_then(|namespace| namespace.strip_suffix('.'));
+    match namespace {
+        Some(namespace) => {
+            let module = namespace
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(namespace)
+                .trim_end_matches(".pkl");
+            format!("{module}#{name}")
+        }
+        None => name.to_string(),
+    }
+}
+
 /// Render `value`. `explicit` is false for an object that is a property's
 /// value, which pkl writes without its `new <Class>` prefix.
 fn render(value: &Value, explicit: bool, out: &mut String) {
@@ -264,6 +287,9 @@ fn render(value: &Value, explicit: bool, out: &mut String) {
                 render(item, true, out);
             }
             out.push(')');
+        }
+        Value::Object(_, Some(source)) if source.kind == ObjectKind::Class => {
+            out.push_str(&class_display_name(source));
         }
         Value::Object(map, source) => {
             if explicit {
@@ -355,6 +381,18 @@ pub(crate) fn group_digits(n: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn class_display_name_strips_either_path_separator() {
+        for namespace in ["/tmp/dir/test.pkl", "C:\\dir\\test.pkl"] {
+            let Value::Object(_, Some(source)) =
+                crate::eval::stdlib::class_value("Foo", format!("{namespace}.Foo"))
+            else {
+                unreachable!()
+            };
+            assert_eq!(class_display_name(&source), "test#Foo", "{namespace}");
+        }
+    }
 
     #[test]
     fn floats_print_like_java() {

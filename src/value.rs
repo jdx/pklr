@@ -93,6 +93,13 @@ pub(crate) fn mapping_storage_key(value: &Value) -> Option<Arc<str>> {
             mapping_compound_identity(&Value::List(value.clone())),
             Value::List(value.clone()).to_json().to_string(),
         ),
+        // A class is a key by identity alone: the template a bare class name
+        // evaluates to holds its property defaults, `getClass()` has none.
+        Value::Object(_, Some(source)) if source.kind == ObjectKind::Class => (
+            "object",
+            mapping_object_identity(&ObjectMap::default(), Some(source)),
+            source.type_name.clone().unwrap_or_else(|| "Class".into()),
+        ),
         Value::Object(map, source) => (
             "object",
             mapping_object_identity(map, source.as_deref()),
@@ -132,6 +139,9 @@ fn mapping_compound_identity(value: &Value) -> String {
             }
             identity.push(']');
             identity
+        }
+        Value::Object(_, Some(source)) if source.kind == ObjectKind::Class => {
+            mapping_object_identity(&ObjectMap::default(), Some(source))
         }
         Value::Object(map, source) => mapping_object_identity(map, source.as_deref()),
         // Functions have identity semantics and are not structurally keyable.
@@ -1000,6 +1010,7 @@ impl Value {
             Value::Int(_) => "Int",
             Value::Float(_) => "Float",
             Value::String(_) => "String",
+            Value::Object(_, Some(source)) if source.kind == ObjectKind::Class => "Class",
             Value::Object(..) => "Dynamic",
             Value::List(_) => "List",
             Value::Lambda(params, ..) => match params.len() {
