@@ -67,6 +67,106 @@ pub(super) fn typed_object(type_name: &str, members: ObjectMap) -> Value {
     Value::Object(Arc::new(members), Some(Arc::new(source)))
 }
 
+/// A `Class` value for the class `type_name` with the given identity. Classes
+/// compare by identity, so it carries no members.
+pub(super) fn class_value(type_name: &str, type_identity: String) -> Value {
+    let Value::Object(_, Some(source)) = typed_object(type_name, ObjectMap::default()) else {
+        unreachable!("typed_object builds an object with a source")
+    };
+    let mut source = Arc::unwrap_or_clone(source);
+    source.type_identity = Some(type_identity);
+    source.kind = ObjectKind::Class;
+    Value::Object(Arc::default(), Some(Arc::new(source)))
+}
+
+/// The `Class` value a standard library class name stands for, when it is not
+/// bound in scope: the classes `getClass()` can answer.
+pub(super) fn stdlib_class(name: &str) -> Option<Value> {
+    const NAMES: &[&str] = &[
+        "Null", "Boolean", "Int", "Float", "String", "Duration", "DataSize", "Regex", "List",
+        "Listing", "Set", "Mapping", "Dynamic", "Class",
+    ];
+    NAMES
+        .contains(&name)
+        .then(|| class_value(name, format!("pkl:base#{name}")))
+}
+
+/// The marker `seed_builtins` binds to `name`, shared by every scope so a
+/// binding can be told from a user's string of the same contents by identity.
+pub(super) fn builtin_marker(name: &str) -> Value {
+    static MARKERS: std::sync::LazyLock<Vec<(&'static str, std::sync::Arc<str>)>> =
+        std::sync::LazyLock::new(|| {
+            BUILTIN_MARKER_NAMES
+                .iter()
+                .map(|name| (*name, std::sync::Arc::from(*name)))
+                .collect()
+        });
+    match MARKERS.iter().find(|(known, _)| *known == name) {
+        Some((_, marker)) => Value::String(marker.clone()),
+        None => Value::String(name.into()),
+    }
+}
+
+/// The names `seed_builtins` binds to a marker string of their own name.
+pub(super) const BUILTIN_MARKER_NAMES: &[&str] = &[
+    "Regex",
+    "Dynamic",
+    "Annotation",
+    "Duration",
+    "DataSize",
+    "IntSeq",
+    "Pair",
+];
+
+/// The `Class` value for a name `seed_builtins` bound to its marker
+/// (`Duration`, `DataSize`, `Regex`, `Dynamic`), when `value` is that very
+/// marker. A user's string with the same contents is a different allocation
+/// and is left alone.
+pub(super) fn builtin_marker_class(name: &str, value: &Value) -> Option<Value> {
+    if !matches!(name, "Duration" | "DataSize" | "Regex" | "Dynamic") {
+        return None;
+    }
+    match (value, builtin_marker(name)) {
+        (Value::String(got), Value::String(marker)) if std::sync::Arc::ptr_eq(got, &marker) => {
+            stdlib_class(name)
+        }
+        _ => None,
+    }
+}
+
+/// The error for a `getClass()` pklr cannot answer faithfully.
+pub(super) fn get_class_unsupported(what: &str) -> Error {
+    Error::Eval(format!(
+        "getClass() is not supported on {what}: pklr does not track its class"
+    ))
+}
+
+/// `Any.getClass()`: the `Class` of a value. A class from the standard library
+/// is identified as `pkl:base#Name`. A `Map`, and a `Dynamic` that a method
+/// built, have no source and are not told apart (see `object_kinds_match`), so
+/// they are an error rather than a guess. An `IntSeq` is a plain `List`.
+pub(super) fn get_class(value: &Value) -> Result<Value> {
+    let (name, identity) = match value {
+        Value::Object(_, Some(source)) if source.kind == ObjectKind::Class => ("Class", None),
+        Value::Object(_, Some(source)) if source.kind == ObjectKind::Mapping => ("Mapping", None),
+        Value::Object(_, Some(source)) => match source.type_name.as_deref() {
+            Some(name) => (name, source.type_identity.clone()),
+            None => ("Dynamic", None),
+        },
+        Value::Object(_, None) => return Err(get_class_unsupported("a Map or a computed Dynamic")),
+        Value::List(items) => match items.kind() {
+            ListKind::List => ("List", None),
+            ListKind::Listing => ("Listing", None),
+            ListKind::Set => ("Set", None),
+        },
+        other => (other.type_name(), None),
+    };
+    Ok(class_value(
+        name,
+        identity.unwrap_or_else(|| format!("pkl:base#{name}")),
+    ))
+}
+
 fn is_builtin_regex_match(value: &Value) -> bool {
     matches!(value, Value::Object(_, Some(source)) if source.type_identity.as_deref() == Some("pkl:base#RegexMatch"))
 }

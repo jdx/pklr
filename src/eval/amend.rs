@@ -749,6 +749,19 @@ impl Evaluator {
                 source.type_identity.as_deref().unwrap_or_default()
             )));
         }
+        // A standard library class value (`Duration`, `1.getClass()`) is an
+        // external class's value: it has no members to amend.
+        if let Value::Object(_, Some(source)) = &base
+            && source.kind == ObjectKind::Class
+            && let Some(class) = source
+                .type_identity
+                .as_deref()
+                .and_then(|identity| identity.strip_prefix("pkl:base#"))
+        {
+            return Err(Error::Eval(format!(
+                "Cannot instantiate, or amend an instance of, external class `{class}`."
+            )));
+        }
         if let Value::Lambda(params, ..) = &base {
             return Ok(amended_function(
                 params.len(),

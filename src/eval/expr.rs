@@ -47,14 +47,25 @@ impl Evaluator {
                 }
                 Ok(Value::String(result.into()))
             }
-            Expr::Ident(name) => scope.get(name).cloned().ok_or_else(|| {
-                Error::Eval(
+            Expr::Ident(name) => scope
+                .get(name)
+                .map(|value| {
+                    stdlib::builtin_marker_class(name, value).unwrap_or_else(|| value.clone())
+                })
+                .or_else(|| {
                     scope
                         .poison_of(name)
-                        .cloned()
-                        .unwrap_or_else(|| format!("undefined variable: {name}")),
-                )
-            }),
+                        .is_none()
+                        .then(|| stdlib::stdlib_class(name))?
+                })
+                .ok_or_else(|| {
+                    Error::Eval(
+                        scope
+                            .poison_of(name)
+                            .cloned()
+                            .unwrap_or_else(|| format!("undefined variable: {name}")),
+                    )
+                }),
             Expr::Lambda(params, body) => {
                 // The body is shared with the AST unless one of the rewrites
                 // below applies to it.
@@ -446,6 +457,9 @@ impl Evaluator {
                 }
                 // Built-in properties
                 match (&obj, field.as_str()) {
+                    (Value::Object(..), "simpleName") if class_simple_name(&obj).is_some() => {
+                        return Ok(class_simple_name(&obj).unwrap());
+                    }
                     (Value::List(items), "length") => return Ok(Value::Int(items.len() as i64)),
                     (Value::List(items), "isEmpty") => return Ok(Value::Bool(items.is_empty())),
                     (Value::List(items), "first") => {
@@ -525,6 +539,11 @@ impl Evaluator {
                 let obj = self.eval_field_base(obj_expr, field, scope, depth)?;
                 match &obj {
                     Value::Null => Ok(Value::Null),
+                    Value::Object(..)
+                        if field == "simpleName" && class_simple_name(&obj).is_some() =>
+                    {
+                        Ok(class_simple_name(&obj).unwrap())
+                    }
                     _ if self.stdlib_property(&obj, field).is_some() => {
                         self.stdlib_property(&obj, field).unwrap()
                     }
@@ -824,14 +843,23 @@ pub(super) fn eval_simple_expr(
         Expr::Int(n) => Ok(Value::Int(*n)),
         Expr::Float(f) => Ok(Value::Float(*f)),
         Expr::String(s) => Ok(Value::String(Arc::clone(s))),
-        Expr::Ident(name) => scope.get(name).cloned().ok_or_else(|| {
-            Error::Eval(
+        Expr::Ident(name) => scope
+            .get(name)
+            .map(|value| stdlib::builtin_marker_class(name, value).unwrap_or_else(|| value.clone()))
+            .or_else(|| {
                 scope
                     .poison_of(name)
-                    .cloned()
-                    .unwrap_or_else(|| format!("undefined variable: {name}")),
-            )
-        }),
+                    .is_none()
+                    .then(|| stdlib::stdlib_class(name))?
+            })
+            .ok_or_else(|| {
+                Error::Eval(
+                    scope
+                        .poison_of(name)
+                        .cloned()
+                        .unwrap_or_else(|| format!("undefined variable: {name}")),
+                )
+            }),
         // An operator over simple operands, other than `|>` (a call) and an
         // object-body amendment, which need the evaluator. `&&`, `||` keep
         // short-circuiting; the depth mirrors `eval_binop`'s `depth + 1`.
@@ -983,6 +1011,18 @@ pub(super) fn regex_value(pattern: Value) -> Result<Value> {
     match pattern {
         Value::String(pattern) => Ok(Value::Regex(Arc::new(stdlib::compile_regex(&pattern)?))),
         other => Err(stdlib::type_mismatch("String", &other)),
+    }
+}
+
+/// `Class.simpleName`: the name of a `Class` value, which a member of the same
+/// name on the class's template does not shadow (pkl: `Bar.simpleName` is
+/// `"Bar"` for `class Bar { simpleName = "x" }`).
+fn class_simple_name(value: &Value) -> Option<Value> {
+    match value {
+        Value::Object(_, Some(source)) if source.kind == ObjectKind::Class => {
+            Some(Value::String(source.type_name().unwrap_or("Class").into()))
+        }
+        _ => None,
     }
 }
 
