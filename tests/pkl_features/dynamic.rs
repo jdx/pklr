@@ -872,3 +872,17 @@ r = d.y.toList()
     );
     assert_eq!(json["r"], serde_json::json!([1, 2]));
 }
+
+#[test]
+fn a_body_whose_only_elements_come_from_generators_reads_a_later_member() {
+    let json = eval(
+        r#"
+local d = new Dynamic { when (true) { z }; z = 1 }
+a = d.toList()
+local e = new Dynamic { for (i in List(1, 2)) { z + i }; z = 10 }
+b = e.toList()
+"#,
+    );
+    assert_eq!(json["a"], serde_json::json!([1]));
+    assert_eq!(json["b"], serde_json::json!([11, 12]));
+}

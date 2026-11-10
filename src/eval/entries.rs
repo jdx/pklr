@@ -464,7 +464,15 @@ impl Evaluator {
         // is retried once the members are bound.
         let last_member = entries
             .iter()
-            .any(|entry| matches!(entry, Entry::Elem(_) | Entry::Spread(_)))
+            .any(|entry| {
+                matches!(
+                    entry,
+                    Entry::Elem(_)
+                        | Entry::Spread(_)
+                        | Entry::ForGenerator(_)
+                        | Entry::WhenGenerator(_)
+                )
+            })
             .then(|| entries.iter().rposition(entry_is_member))
             .flatten();
         let mut deferred_elements: Vec<(usize, usize)> = Vec::new();
