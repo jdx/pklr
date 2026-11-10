@@ -386,7 +386,15 @@ impl<'a> Parser<'a> {
             TypeExpr::Generic(name, args) => {
                 let mut params = Vec::new();
                 for arg in &args {
-                    generic_param_names(arg, &mut params);
+                    // `Listing<Listing<T>>` keeps the inner listing type, so
+                    // its elements can be built as `T`.
+                    if name == "Listing"
+                        && matches!(arg, TypeExpr::Generic(inner, _) if inner == "Listing")
+                    {
+                        params.push(type_expr_runtime_name(arg));
+                    } else {
+                        generic_param_names(arg, &mut params);
+                    }
                 }
                 (Some(name), params)
             }

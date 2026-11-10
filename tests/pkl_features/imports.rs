@@ -3267,3 +3267,64 @@ fn late_binding_reaches_through_a_long_chain_of_outer_reads() {
 
     assert_eq!(eval_chain(dir.join("main.pkl"))["res"], 12);
 }
+
+#[test]
+fn typed_listing_elements_of_recursive_classes_in_an_imported_module() {
+    let temp = TestTempDir::new("pklr_typed_listing_recursive_import");
+    std::fs::write(
+        temp.path().join("lib.pkl"),
+        r#"
+class Task { name: String; loopVar: String = "item"; block: Listing<Task>?; steps: Listing<Step>? }
+class Step { id: String = "s"; sub: Listing<Task>? }
+class Play { tasks: Listing<Task> }
+"#,
+    )
+    .unwrap();
+    let main = temp.path().join("main.pkl");
+    std::fs::write(
+        &main,
+        r#"
+import "lib.pkl" as L
+p = new L.Play { tasks { new { name = "t"; block { new { name = "c" } }; steps { new { sub { new { name = "z" } } } } } } }
+"#,
+    )
+    .unwrap();
+    let result = pklr::eval_to_json(&main).unwrap();
+    let task = &result["p"]["tasks"][0];
+    assert_eq!(task["loopVar"], "item");
+    assert_eq!(task["block"][0]["name"], "c");
+    assert_eq!(task["block"][0]["loopVar"], "item");
+    assert_eq!(task["steps"][0]["id"], "s");
+    assert_eq!(task["steps"][0]["sub"][0]["name"], "z");
+    assert_eq!(task["steps"][0]["sub"][0]["loopVar"], "item");
+}
+
+#[test]
+fn typed_listing_elements_through_a_transitive_import() {
+    let temp = TestTempDir::new("pklr_typed_listing_transitive_import");
+    std::fs::write(
+        temp.path().join("types.pkl"),
+        "class Item { n: String; d: Int = 1; kids: Listing<Item> }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("lib.pkl"),
+        "import \"types.pkl\"\nclass Holder { kids: Listing<types.Item>; opt: Listing<types.Item>? }\n",
+    )
+    .unwrap();
+    let main = temp.path().join("main.pkl");
+    std::fs::write(
+        &main,
+        r#"
+import "lib.pkl" as L
+h = new L.Holder { kids { new { n = "k"; kids { new { n = "kk" } } } }; opt { new { n = "o" } } }
+"#,
+    )
+    .unwrap();
+    let result = pklr::eval_to_json(&main).unwrap();
+    assert_eq!(
+        result["h"]["kids"],
+        serde_json::json!([{"n": "k", "d": 1, "kids": [{"n": "kk", "d": 1, "kids": []}]}])
+    );
+    assert_eq!(result["h"]["opt"][0]["d"], 1);
+}

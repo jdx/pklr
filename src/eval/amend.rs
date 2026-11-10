@@ -133,6 +133,32 @@ impl Evaluator {
             "super".into(),
             Value::Object(Arc::new(parent_members), Some(Arc::clone(base_source))),
         );
+        // `nested { new { ... } }` amends a property declared `Listing<T>?`, whose
+        // default is null. `T` is resolved where the class declares it, which
+        // the amending scope may not see.
+        for entry in overlay_entries {
+            let Entry::Property(prop) = entry else {
+                continue;
+            };
+            if prop.body.is_none() || prop.value.is_some() {
+                continue;
+            }
+            let declared = base_entries.iter().find_map(|base| match base {
+                Entry::Property(inherited) if inherited.name == prop.name => {
+                    inherited.type_ann.as_ref()
+                }
+                _ => None,
+            });
+            if let Some(ty) = declared
+                && let Some(class) =
+                    self.declared_elem_class(ty, &definition_type_scope(base_source))
+            {
+                amendment_scope.values.insert(
+                    listing_elem_class_binding(&prop.name).into(),
+                    (*class).clone(),
+                );
+            }
+        }
         let prototype = base_source.prototype.clone().or_else(|| {
             (base_source.kind == ObjectKind::Class)
                 .then(|| Value::Object(Arc::clone(base_map), Some(Arc::clone(base_source))))
@@ -552,31 +578,7 @@ impl Evaluator {
         // Property annotations belong to the definition site of the class.
         // An imported class's aliases and sibling classes may not be visible
         // in the scope that amends one of its instances.
-        let mut type_scope = Scope {
-            type_namespace: object_source_type_namespace(base_source),
-            ..Scope::default()
-        };
-        let base_scope = base_source.scope();
-        if !base_scope.is_empty() {
-            type_scope.vars = Arc::new(base_scope.clone());
-            let declared = base_source.scope_declared();
-            if !declared.is_empty() {
-                type_scope.declared = Arc::new(
-                    declared
-                        .iter()
-                        .filter(|name| base_scope.contains_key(&***name))
-                        .cloned()
-                        .collect(),
-                );
-            }
-        }
-        for (name, identity) in base_source.scope_module_identities() {
-            type_scope.set_module_identity(name.clone(), identity.clone());
-        }
-        let aliases = base_source.scope_type_aliases();
-        if !aliases.is_empty() {
-            type_scope.type_aliases = Arc::new(aliases.clone());
-        }
+        let type_scope = definition_type_scope(base_source);
 
         let base_properties = base_source
             .entries
@@ -861,6 +863,7 @@ impl Evaluator {
                 ));
             }
             let mut amended = existing;
+            let elem_class = amended.elem_class().cloned();
             let mut amendment_scope = scope.child();
             amendment_scope.set("super", Value::List(amended.clone()));
             amendment_scope.receiver_entries = Some(overlay_entries.clone());
@@ -870,7 +873,7 @@ impl Evaluator {
                 &amendment_scope,
                 depth + 1,
                 amended.make_mut(),
-                None,
+                elem_class.as_ref(),
             )?;
             return Ok(Value::List(amended));
         }
@@ -1444,4 +1447,41 @@ pub(super) fn amended_function(arity: usize, function: Value, body: &Body, scope
         )),
         Arc::new(captured),
     )
+}
+
+/// The scope a class instance's property annotations are resolved in: the
+/// definition site of the class.
+pub(super) fn definition_type_scope(base_source: &ObjectSource) -> Scope {
+    let mut type_scope = Scope {
+        type_namespace: object_source_type_namespace(base_source),
+        ..Scope::default()
+    };
+    let base_scope = base_source.scope();
+    if !base_scope.is_empty() {
+        type_scope.vars = Arc::new(base_scope.clone());
+        let declared = base_source.scope_declared();
+        if !declared.is_empty() {
+            type_scope.declared = Arc::new(
+                declared
+                    .iter()
+                    .filter(|name| base_scope.contains_key(&***name))
+                    .cloned()
+                    .collect(),
+            );
+        }
+    }
+    for (name, identity) in base_source.scope_module_identities() {
+        type_scope.set_module_identity(name.clone(), identity.clone());
+    }
+    let aliases = base_source.scope_type_aliases();
+    if !aliases.is_empty() {
+        type_scope.type_aliases = Arc::new(aliases.clone());
+    }
+    type_scope
+}
+
+/// The name under which an amendment scope carries the element class of the
+/// `Listing<T>` property `name` that the amended class declares.
+pub(super) fn listing_elem_class_binding(name: &str) -> String {
+    format!("\0listing_elem_class_of:{name}")
 }

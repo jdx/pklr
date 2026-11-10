@@ -83,17 +83,30 @@ impl Evaluator {
                     Some(Value::List(existing)) => existing.clone(),
                     _ => ListValue::new(ListKind::Listing, Vec::new()),
                 };
+                // `x: Listing<T>` makes each `new { ... }` element a `T`. A
+                // listing the declaring class built already knows `T`, as does
+                // an amendment of a class's `Listing<T>?` property.
+                let elem_class = items
+                    .elem_class()
+                    .cloned()
+                    .or_else(
+                        || match scope.get(&listing_elem_class_binding(&prop.name)) {
+                            Some(class @ (Value::Object(..) | Value::List(_))) => {
+                                Some(Arc::new(class.clone()))
+                            }
+                            _ => None,
+                        },
+                    )
+                    .or_else(|| {
+                        prop.type_ann
+                            .as_ref()
+                            .and_then(|ty| self.declared_elem_class(ty, scope))
+                    });
+                items = items.with_elem_class(elem_class.clone());
                 let mut amendment_scope = scope.child();
                 amendment_scope.set("super", Value::List(items.clone()));
                 amendment_scope.receiver_entries = Some(body.clone());
                 amendment_scope.receiver_list_base = Some(items.len());
-                // `x: Listing<T>` makes each `new { ... }` element a `T`. A
-                // listing the declaring class built already knows `T`.
-                let elem_class = items.elem_class().cloned().or_else(|| {
-                    prop.type_ann
-                        .as_ref()
-                        .and_then(|ty| declared_listing_elem_class(ty, scope))
-                });
                 self.eval_listing_entries(
                     body,
                     &amendment_scope,
@@ -209,8 +222,8 @@ impl Evaluator {
                 if let Value::List(list) = default
                     && list.kind() == ListKind::Listing
                 {
-                    *list = std::mem::take(list)
-                        .with_elem_class(declared_listing_elem_class(ty, scope));
+                    *list =
+                        std::mem::take(list).with_elem_class(self.declared_elem_class(ty, scope));
                 }
             }
             if require_union_default

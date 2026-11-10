@@ -168,14 +168,17 @@ impl Evaluator {
                         Ok(object)
                     }
                     Some("Listing") => {
+                        let elem_class = listing_elem_class(generic_params, scope);
                         let mut listing_scope = scope.child();
                         listing_scope.set(
                             "super",
-                            Value::List(ListValue::new(ListKind::Listing, Vec::new())),
+                            Value::List(
+                                ListValue::new(ListKind::Listing, Vec::new())
+                                    .with_elem_class(elem_class.clone()),
+                            ),
                         );
                         listing_scope.receiver_list_base = Some(0);
                         let mut items = Vec::new();
-                        let elem_class = listing_elem_class(generic_params, scope);
                         self.eval_listing_entries(
                             entries,
                             &listing_scope,

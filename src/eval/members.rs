@@ -38,6 +38,7 @@ impl Evaluator {
                             &mut position,
                             &mut value,
                             &[],
+                            items.elem_class(),
                         )?;
                     }
                     value.ok_or_else(|| {

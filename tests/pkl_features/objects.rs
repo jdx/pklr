@@ -5496,3 +5496,117 @@ d: Listing<Dynamic> = new { new { k = 1 } }
     assert_eq!(result["u"], serde_json::json!([{"a": 3}]));
     assert_eq!(result["d"], serde_json::json!([{"k": 1}]));
 }
+
+#[test]
+fn typed_listing_direct_amendment_keeps_the_element_class() {
+    let result = eval(
+        r#"
+class T { x: Int = 1 }
+a = new Listing<T> {}
+b = (a) { new {} }
+"#,
+    );
+    assert_eq!(result["a"], serde_json::json!([]));
+    assert_eq!(result["b"], serde_json::json!([{"x": 1}]));
+    let error = eval_fails(
+        r#"
+class T { x: Int = 1 }
+a = new Listing<T> {}
+b = (a) { new { x = "s" } }
+"#,
+    );
+    assert!(error.contains("expected Int"), "{error}");
+}
+
+#[test]
+fn typed_listing_super_reads_see_typed_elements() {
+    let result = eval(
+        r#"
+class T { x: Int = 1 }
+a = new Listing<T> { new {}; super.first }
+b = new Listing<T> { new {}; super.last; new {} }
+"#,
+    );
+    assert_eq!(result["a"], serde_json::json!([{"x": 1}, {"x": 1}]));
+    assert_eq!(
+        result["b"],
+        serde_json::json!([{"x": 1}, {"x": 1}, {"x": 1}])
+    );
+}
+
+#[test]
+fn typed_listing_abstract_element_class_error_names_the_class() {
+    let error = eval_fails(
+        r#"
+abstract class Task {}
+a = new Listing<Task> { new {} }
+"#,
+    );
+    assert!(error.contains("abstract class `"), "{error}");
+    assert!(error.contains("Task"), "{error}");
+    assert!(!error.contains("listing_elem_class"), "{error}");
+}
+
+#[test]
+fn typed_nullable_listing_amendment_uses_the_declaring_scope_class() {
+    let dir = TestTempDir::new("pklr_typed_nullable_listing_import");
+    std::fs::write(
+        dir.path().join("lib.pkl"),
+        "class T { x: Int = 1 }\nclass P { nested: Listing<T>? }\n",
+    )
+    .unwrap();
+    let main = dir.path().join("main.pkl");
+    std::fs::write(
+        &main,
+        "import \"lib.pkl\" as L\np = new L.P { nested { new {} } }\n",
+    )
+    .unwrap();
+    let result = pklr::eval_to_json(&main).unwrap();
+    assert_eq!(result["p"]["nested"], serde_json::json!([{"x": 1}]));
+    std::fs::write(
+        &main,
+        "import \"lib.pkl\" as L\np = new L.P { nested { new { x = \"s\" } } }\n",
+    )
+    .unwrap();
+    let error = pklr::eval_to_json(&main).unwrap_err().to_string();
+    assert!(error.contains("expected Int"), "{error}");
+}
+
+#[test]
+fn typed_listing_of_listings_builds_inner_elements_as_the_class() {
+    let result = eval(
+        r#"
+class T { name: String; d: Int = 1 }
+class P { ll: Listing<Listing<T>> }
+p = new P { ll { new { new { name = "t" } } } }
+x: Listing<Listing<T>> = new { new { new { name = "u" } } }
+y = new Listing<Listing<T>> { new { new { name = "v" } } }
+"#,
+    );
+    assert_eq!(
+        result["p"]["ll"],
+        serde_json::json!([[{"name": "t", "d": 1}]])
+    );
+    assert_eq!(result["x"], serde_json::json!([[{"name": "u", "d": 1}]]));
+    assert_eq!(result["y"], serde_json::json!([[{"name": "v", "d": 1}]]));
+    let error = eval_fails(
+        r#"
+class T { name: String }
+x: Listing<Listing<T>> = new { new { new { name = 5 } } }
+"#,
+    );
+    assert!(error.contains("expected String"), "{error}");
+}
+
+#[test]
+fn typed_listing_class_declared_after_its_use_in_a_recursive_class() {
+    let result = eval(
+        r#"
+class Task { name: String; loopVar: String = "item"; steps: Listing<Step>? }
+class Step { id: String = "s"; sub: Listing<Task>? }
+p = new Task { name = "t"; steps { new { sub { new { name = "z" } } } } }
+"#,
+    );
+    assert_eq!(result["p"]["steps"][0]["id"], "s");
+    assert_eq!(result["p"]["steps"][0]["sub"][0]["loopVar"], "item");
+}

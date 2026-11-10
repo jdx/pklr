@@ -338,6 +338,12 @@ pub(super) fn inferred_new_type(
                     if index == 0 && matches!(name.as_str(), "Mapping" | "Map") {
                         return vec![display_type_expr(arg)];
                     }
+                    // `Listing<Listing<T>>` keeps the inner listing type.
+                    if name == "Listing"
+                        && matches!(arg, TypeExpr::Generic(inner, _) if inner == "Listing")
+                    {
+                        return vec![display_type_expr(arg)];
+                    }
                     let mut names = Vec::new();
                     collect_type_expr_class_names(arg, scope, &mut names, 0);
                     names
