@@ -1140,7 +1140,7 @@ pub(crate) fn java_double_to_string(value: f64) -> String {
 
 /// Convert a module's output value to JSON for [`crate::eval_to_json`],
 /// applying `converters` and refusing what Pkl's `JsonRenderer` refuses.
-/// Null properties and entries are kept unless `omit_nulls` (the renderer
+/// Null properties and entries are dropped when `omit_nulls` (the renderer
 /// sets `omitNullProperties`). `top_kind` overrides how the value itself is
 /// classified (a module is typed).
 #[cfg(feature = "native-io")]
@@ -1433,6 +1433,11 @@ impl JsonValue<'_> {
                 let mut out = serde_json::Map::new();
                 for (key, member) in map.iter() {
                     if is_non_string_key(key) {
+                        // As pkl: an entry dropped for its null value is
+                        // never rendered, so its key is not checked.
+                        if self.omit_nulls && kind_of(member) == Kind::Null {
+                            continue;
+                        }
                         return Err(cannot_render_non_string_key(&key_value(key), "JSON"));
                     }
                     // Methods are stored as function-valued members, and an

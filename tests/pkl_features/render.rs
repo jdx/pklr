@@ -47,6 +47,32 @@ fn json_renderer_settings() {
 }
 
 #[test]
+fn yaml_and_pcf_renderers_null_property_settings() {
+    // Expected text is what `pkl eval` 0.32.2 renders.
+    let v = "new Dynamic { a = null; b = 1 }";
+    assert_eq!(
+        render(&format!(
+            "new YamlRenderer {{ omitNullProperties = false }}.renderValue({v})"
+        )),
+        "a: null\nb: 1"
+    );
+    assert_eq!(
+        render(&format!("new YamlRenderer {{}}.renderValue({v})")),
+        "b: 1"
+    );
+    assert_eq!(
+        render(&format!("new PcfRenderer {{}}.renderValue({v})")),
+        "{\n  a = null\n  b = 1\n}"
+    );
+    assert_eq!(
+        render(&format!(
+            "new PcfRenderer {{ omitNullProperties = true }}.renderValue({v})"
+        )),
+        "{\n  b = 1\n}"
+    );
+}
+
+#[test]
 fn json_renderer_refuses_durations() {
     let err = eval_fails("res = new JsonRenderer {}.renderValue(1.min)");
     assert!(
@@ -230,12 +256,19 @@ fn eval_to_json_refuses_what_json_renderer_refuses() {
 
 #[cfg(feature = "native-io")]
 #[test]
-fn eval_to_json_omits_nulls_only_when_renderer_asks() {
-    let (_dir, path) = module_file("pklr_render_json_nulls", "a = null\nb = 1\n");
-    assert_eq!(
-        pklr::eval_to_json(&path).unwrap(),
-        serde_json::json!({"a": null, "b": 1})
+fn eval_to_json_omits_null_properties_by_default() {
+    // As `pkl eval -f json`: null properties and mapping entries go, null
+    // listing elements stay.
+    let src = "p: String? = null\nd { a = null; b = 1 }\nm = new Mapping { [\"k\"] = null; [\"j\"] = 1 }\nl = new Listing { null; 1 }\n";
+    let expected = serde_json::json!({"d": {"b": 1}, "m": {"j": 1}, "l": [null, 1]});
+    let (_dir, path) = module_file("pklr_render_json_nulls", src);
+    assert_eq!(pklr::eval_to_json(&path).unwrap(), expected);
+    // An explicit renderer with no setting behaves the same.
+    let (_dir, path) = module_file(
+        "pklr_render_json_explicit_default",
+        &format!("{src}output {{ renderer = new JsonRenderer {{}} }}\n"),
     );
+    assert_eq!(pklr::eval_to_json(&path).unwrap(), expected);
     let (_dir, path) = module_file(
         "pklr_render_json_omit_nulls",
         "a = null\nb = 1\noutput { renderer = new JsonRenderer { omitNullProperties = true } }\n",
@@ -248,14 +281,72 @@ fn eval_to_json_omits_nulls_only_when_renderer_asks() {
 
 #[cfg(feature = "native-io")]
 #[test]
-fn output_renderer_defaults_keep_nulls_when_only_converters_are_set() {
+fn eval_to_json_omits_null_entries_with_non_string_keys() {
+    // As pkl: the null check precedes the key check, so a null-valued entry
+    // under a non-string key vanishes, while a non-null one still errors.
     let (_dir, path) = module_file(
-        "pklr_render_converter_keeps_nulls",
+        "pklr_render_json_null_int_key",
+        "m = new Mapping { [1] = null }\nn { a = new Mapping { [2] = null; [\"k\"] = 1 } }\n",
+    );
+    assert_eq!(
+        pklr::eval_to_json(&path).unwrap(),
+        serde_json::json!({"m": {}, "n": {"a": {"k": 1}}})
+    );
+    for src in [
+        "m = new Mapping { [1] = null; [2] = 3 }\n",
+        "m = new Mapping { [1] = 5 }\n",
+        "m = new Mapping { [1] = null }\noutput { renderer = new JsonRenderer { omitNullProperties = false } }\n",
+    ] {
+        let (_dir, path) = module_file("pklr_render_json_int_key_errors", src);
+        let err = pklr::eval_to_json(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("Cannot render object with non-string key as JSON"),
+            "{src}: {err}"
+        );
+    }
+}
+
+#[cfg(feature = "native-io")]
+#[test]
+fn eval_to_json_keeps_nulls_when_renderer_sets_omit_false() {
+    let (_dir, path) = module_file(
+        "pklr_render_json_keep_nulls",
+        "a = null\nb = 1\nm = new Mapping { [\"k\"] = null }\noutput { renderer = new JsonRenderer { omitNullProperties = false } }\n",
+    );
+    assert_eq!(
+        pklr::eval_to_json(&path).unwrap(),
+        serde_json::json!({"a": null, "b": 1, "m": {"k": null}})
+    );
+}
+
+#[cfg(feature = "native-io")]
+#[test]
+fn eval_to_json_reads_the_evaluated_omit_setting() {
+    // A computed setting and an inherited renderer whose child flips `true` to
+    // `false` both keep nulls: the evaluated renderer decides, not the source.
+    let expected = serde_json::json!({"a": null, "b": 1});
+    let (_dir, path) = module_file(
+        "pklr_render_computed_omit_false",
+        "local keep = true\na = null\nb = 1\noutput { renderer = new JsonRenderer { omitNullProperties = !keep } }\n",
+    );
+    assert_eq!(pklr::eval_to_json(&path).unwrap(), expected);
+    let (_dir, path) = module_file(
+        "pklr_render_inherited_omit_false",
+        "local base = new JsonRenderer { omitNullProperties = true }\na = null\nb = 1\noutput { renderer = (base) { omitNullProperties = false } }\n",
+    );
+    assert_eq!(pklr::eval_to_json(&path).unwrap(), expected);
+}
+
+#[cfg(feature = "native-io")]
+#[test]
+fn output_renderer_defaults_omit_nulls_when_only_converters_are_set() {
+    let (_dir, path) = module_file(
+        "pklr_render_converter_omits_nulls",
         "a = null\nb = 1\noutput { renderer = new JsonRenderer { converters { [Int] = (n) -> n + 1 } } }\n",
     );
     assert_eq!(
         pklr::eval_to_json(&path).unwrap(),
-        serde_json::json!({"a": null, "b": 2})
+        serde_json::json!({"b": 2})
     );
 }
 
