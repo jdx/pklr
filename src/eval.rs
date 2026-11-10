@@ -182,8 +182,6 @@ pub struct Evaluator {
     module_output: Option<Value>,
     /// Whether an output declaration explicitly assigned `output.value`.
     output_sets_value: bool,
-    /// Whether an output declaration explicitly enabled JSON null omission.
-    output_sets_omit_nulls: bool,
     /// The default renderer used while evaluating module output.
     output_format: render::RendererKind,
     /// Set of (property_name, message) pairs already warned about.
@@ -194,6 +192,9 @@ pub struct Evaluator {
     /// defaults. This makes self- and mutually-recursive defaults fail
     /// cleanly instead of exhausting the process stack.
     active_typed_defaults: HashSet<Name>,
+    /// Addresses of the stored lists of the element-only `Dynamic`s whose
+    /// constraints are running, so type tests on their `this` see a `Dynamic`.
+    element_dynamics: Vec<usize>,
     /// Original values for Mapping keys created in this evaluation. Mapping
     /// storage keys preserve equality and rendering, but compound keys cannot
     /// be faithfully reconstructed from that string representation alone.

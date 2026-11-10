@@ -116,10 +116,10 @@ impl Evaluator {
             output_props: Vec::new(),
             module_output: None,
             output_sets_value: false,
-            output_sets_omit_nulls: false,
             output_format: render::RendererKind::Json,
             warned_deprecated: std::collections::HashSet::default(),
             active_typed_defaults: HashSet::default(),
+            element_dynamics: Vec::new(),
             mapping_key_values: HashMap::default(),
             module_names: HashMap::default(),
         }
@@ -205,9 +205,9 @@ impl Evaluator {
         self.output_props.clear();
         self.module_output = None;
         self.output_sets_value = false;
-        self.output_sets_omit_nulls = false;
         self.prefetch = prefetch::PrefetchState::new(self.cancel.clone());
         self.active_typed_defaults.clear();
+        self.element_dynamics.clear();
         self.mapping_key_values.clear();
         self.module_names.clear();
     }

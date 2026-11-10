@@ -524,6 +524,51 @@ pub(super) fn type_is_listing(ty: &crate::parser::TypeExpr) -> bool {
     }
 }
 
+/// Whether a `Dynamic` object can satisfy `ty`: `Dynamic`, its superclass
+/// `Object`, `Any`, or a union or alias that includes one of them. A name that
+/// cannot be resolved is assumed to accept it, so only a type known to reject
+/// a `Dynamic` (a collection, a primitive, a class) is reported.
+pub(super) fn type_accepts_dynamic(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
+    fn named(name: &str, scope: &Scope, depth: usize) -> bool {
+        let name = name.trim_start_matches('*').trim_end_matches('?');
+        let base = name.split('<').next().unwrap_or(name);
+        if depth > 32 {
+            return true;
+        }
+        if let Some(alias) = scope.get_type_alias(base) {
+            return visit(alias, scope, depth + 1);
+        }
+        // A class declaration in scope (even one named `Object`, `Any` or
+        // `Dynamic`) shadows the built-in type, and a `Dynamic` is not an
+        // instance of one.
+        if matches!(
+            resolve_dotted(scope, base),
+            Some(Value::Object(_, Some(source))) if source.kind == ObjectKind::Class
+        ) {
+            return false;
+        }
+        match base {
+            "Dynamic" | "Object" | "Any" => true,
+            "Null" | "Boolean" | "Bool" | "Int" | "Float" | "Number" | "String" | "List"
+            | "Listing" | "Set" | "Map" | "Mapping" | "Function" | "Function0" | "Function1"
+            | "Function2" | "Function3" | "Function4" | "Function5" | "Regex" | "Duration"
+            | "DataSize" | "Collection" | "Pair" | "IntSeq" => false,
+            _ => true,
+        }
+    }
+    fn visit(ty: &crate::parser::TypeExpr, scope: &Scope, depth: usize) -> bool {
+        use crate::parser::TypeExpr;
+        match ty {
+            TypeExpr::Named(name) | TypeExpr::Generic(name, _) | TypeExpr::Constrained(name, _) => {
+                string_literal_type_value(name).is_none() && named(name, scope, depth)
+            }
+            TypeExpr::Nullable(inner) => visit(inner, scope, depth),
+            TypeExpr::Union(variants) => variants.iter().any(|v| visit(v, scope, depth)),
+        }
+    }
+    visit(ty, scope, 0)
+}
+
 /// `Any` (optionally nullable) gives an untyped `new` no parent to infer.
 pub(super) fn type_is_any(ty: &crate::parser::TypeExpr) -> bool {
     use crate::parser::TypeExpr;
@@ -650,6 +695,7 @@ fn object_class_name(
     module_names: Option<&HashMap<String, String>>,
 ) -> String {
     match source {
+        Some(source) if source.kind == ObjectKind::Class => "Class".to_string(),
         Some(ObjectSource {
             type_name: Some(class),
             type_identity,
@@ -894,7 +940,10 @@ pub(super) fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
             "String" => matches!(val, Value::String(_)),
             "Regex" => matches!(val, Value::Regex(_)),
             "List" | "Listing" | "Set" => matches!(val, Value::List(_)),
-            "Map" | "Mapping" | "Object" | "Dynamic" => matches!(val, Value::Object(..)),
+            "Class" => is_class_value(val),
+            "Map" | "Mapping" | "Object" | "Dynamic" => {
+                matches!(val, Value::Object(..)) && !is_class_value(val)
+            }
             "Function" => matches!(val, Value::Lambda(..)),
             "Duration" => matches!(val, Value::Duration(_)),
             "DataSize" => matches!(val, Value::DataSize(_)),
@@ -910,7 +959,8 @@ pub(super) fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
             // Check the base type, ignore type parameters
             match name.as_str() {
                 "List" | "Listing" | "Set" => matches!(val, Value::List(_)),
-                "Map" | "Mapping" => matches!(val, Value::Object(..)),
+                "Map" | "Mapping" => matches!(val, Value::Object(..)) && !is_class_value(val),
+                "Class" => is_class_value(val),
                 "Regex" => matches!(val, Value::Regex(_)),
                 "Function" | "Function0" | "Function1" | "Function2" | "Function3"
                 | "Function4" | "Function5" => matches!(val, Value::Lambda(..)),
@@ -922,6 +972,12 @@ pub(super) fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
             value_is_named_type(val, base)
         }
     }
+}
+
+/// Whether `val` is a `Class` value (`getClass()`'s result or a class name),
+/// which is of type `Class` and not a `Dynamic`, `Object` or `Mapping`.
+pub(super) fn is_class_value(val: &Value) -> bool {
+    matches!(val, Value::Object(_, Some(source)) if source.kind == ObjectKind::Class)
 }
 
 pub(super) fn value_is_named_type(val: &Value, name: &str) -> bool {
@@ -955,6 +1011,10 @@ pub(super) fn value_is_class_type(val: &Value, name: &str, scope: &Scope) -> Opt
     let Value::Object(_, Some(source)) = val else {
         return Some(false);
     };
+    // A class value is a `Class`, not an instance of the class it stands for.
+    if source.kind == ObjectKind::Class {
+        return Some(false);
+    }
     let Some(actual_type_identity) = source.type_identity.as_ref() else {
         return Some(false);
     };
@@ -990,6 +1050,7 @@ pub(super) fn type_is_runtime_checkable(ty: &crate::parser::TypeExpr, scope: &Sc
                         | "Mapping"
                         | "Object"
                         | "Dynamic"
+                        | "Class"
                         | "Function"
                         | "Regex"
                         | "Duration"
