@@ -202,6 +202,7 @@ impl Evaluator {
                     && overlay_prop.body.is_some()
                     && overlay_prop.value.is_none()
                     && (prop.value.is_some() || prop.body.is_some() || prop.type_ann.is_some())
+                    && !amends_explicit_null(prop)
                 {
                     // Body amendment: keep base entry (for its value) AND overlay
                     // entry (for body amendment). eval_property will see the base
@@ -220,6 +221,16 @@ impl Evaluator {
                     let overlay_prop = Arc::make_mut(overlay_prop);
                     if overlay_prop.type_ann.is_none() {
                         overlay_prop.type_ann = prop.type_ann.clone();
+                    }
+                    // `x: T? = null` amended with `x { ... }` amends the `null`,
+                    // which makes a `Dynamic` that the declared type then
+                    // checks. (Without the `= null`, the property holds the
+                    // type's default and the body amends that.)
+                    if amends_explicit_null(prop)
+                        && overlay_prop.value.is_none()
+                        && let Some(body) = overlay_prop.body.take()
+                    {
+                        overlay_prop.value = Some(Expr::New(Some("Dynamic".into()), body, vec![]));
                     }
                     // `hidden` is declared on the class property. An overlay
                     // that assigns it (`new Step { staged = true }` or
@@ -438,14 +449,42 @@ impl Evaluator {
                 } else {
                     &eval_scope
                 };
-                if type_is_runtime_checkable(type_ann, check_scope)
-                    && !self.eval_type_check(value, type_ann, check_scope, depth + 1)?
-                {
+                // The last assignment of the property, if it is an explicit
+                // `new Dynamic { ... }`, makes a `Dynamic` that the value model
+                // may not tell apart from a `Listing`: check it by its type.
+                let assigns_dynamic = merged.iter().rev().find_map(|entry| match entry {
+                    Entry::Property(assigned)
+                        if assigned.name == prop.name
+                            && (assigned.value.is_some() || assigned.body.is_some()) =>
+                    {
+                        Some(is_explicit_dynamic(assigned))
+                    }
+                    _ => None,
+                }) == Some(true);
+                let failed = if assigns_dynamic && !type_accepts_dynamic(type_ann, check_scope) {
+                    true
+                } else if assigns_dynamic && matches!(value, Value::List(_)) {
+                    !self.check_element_dynamic(
+                        value,
+                        type_ann,
+                        check_scope,
+                        depth + 1,
+                        &mut Vec::new(),
+                    )?
+                } else {
+                    type_is_runtime_checkable(type_ann, check_scope)
+                        && !self.eval_type_check(value, type_ann, check_scope, depth + 1)?
+                };
+                if failed {
                     let message = format!(
                         "property '{}' expected {}, got {}",
                         prop.name,
                         display_type_expr(type_ann),
-                        value_type_name(value)
+                        if assigns_dynamic {
+                            "Dynamic"
+                        } else {
+                            value_type_name(value)
+                        }
                     );
                     if overlay_assigned_properties.contains(prop.name.as_ref()) {
                         return Err(Error::Eval(message));
@@ -1456,4 +1495,16 @@ pub(super) fn amended_function(arity: usize, function: Value, body: &Body, scope
         )),
         Arc::new(captured),
     )
+}
+
+/// Whether `prop` is a typed property whose default is an explicit `null`, so
+/// that a body amendment of it amends the `null` rather than the type's
+/// default.
+fn amends_explicit_null(prop: &Property) -> bool {
+    prop.type_ann.is_some() && matches!(prop.value, Some(Expr::Null))
+}
+
+/// Whether `prop` is assigned an explicit `new Dynamic { ... }`.
+pub(super) fn is_explicit_dynamic(prop: &Property) -> bool {
+    matches!(&prop.value, Some(Expr::New(Some(name), ..)) if name == "Dynamic")
 }
