@@ -33,7 +33,7 @@ impl Evaluator {
                 }
                 _ => self.eval_expr(expr, scope, depth)?,
             };
-            apply_mapping_type_annotation(&mut value, prop.type_ann.as_ref());
+            apply_mapping_type_annotation(&mut value, prop.type_ann.as_ref(), scope);
             return Ok(Some(value));
         }
         if let Some(body) = &prop.body {
@@ -42,7 +42,7 @@ impl Evaluator {
                 .as_ref()
                 .and_then(|ty| nullable_inner_default(ty, scope));
             if let Some(default) = &mut nullable_default {
-                apply_mapping_type_annotation(default, prop.type_ann.as_ref());
+                apply_mapping_type_annotation(default, prop.type_ann.as_ref(), scope);
             }
             // A body amendment amends a member the receiver itself holds. A
             // same-named property of an enclosing object, declared or
@@ -192,7 +192,7 @@ impl Evaluator {
                 default = Some(instance);
             }
             if let Some(default) = &mut default {
-                apply_mapping_type_annotation(default, Some(ty));
+                apply_mapping_type_annotation(default, Some(ty), scope);
             }
             if require_union_default
                 && default.is_none()
