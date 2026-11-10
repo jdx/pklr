@@ -347,3 +347,42 @@ c = 1 is M<String, Int>
     let error = eval_fails("typealias L<T> = List<T|Foo>\nr = 1 is L<Int>");
     assert!(error.contains("Cannot find type `Foo`."), "{error}");
 }
+
+#[test]
+fn a_quoted_type_name_is_resolved_as_written() {
+    let json = eval(
+        r#"
+class `Step?` {}
+class `A|B` {}
+class `L<T>` {}
+typealias `X?` = Int
+a = 1 is `Step?`
+b = 1 is `A|B`
+c = 1 is `L<T>`
+d = 1 is `X?`
+e = new `Step?` {} is `Step?`
+f = 1 is `Step?`?
+"#,
+    );
+    assert_eq!(json["a"], false);
+    assert_eq!(json["b"], false);
+    assert_eq!(json["c"], false);
+    assert_eq!(json["d"], true);
+    assert_eq!(json["e"], true);
+    assert_eq!(json["f"], false);
+    let error = eval_fails("r = 1 is `Nope?`");
+    assert!(error.contains("Cannot find"), "{error}");
+}
+
+#[test]
+fn a_long_alias_chain_is_walked_without_recursion() {
+    for length in [3000, 20000] {
+        let mut src = String::new();
+        for index in 0..length {
+            src.push_str(&format!("typealias A{index} = A{}\n", index + 1));
+        }
+        src.push_str(&format!("typealias A{length} = Int\nr = 1 is A0\n"));
+        let json = eval(&src);
+        assert_eq!(json["r"], true);
+    }
+}

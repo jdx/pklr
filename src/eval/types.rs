@@ -1482,7 +1482,7 @@ pub(super) fn unresolved_type_error(
     TypeResolver {
         scope,
         module_has_alias,
-        expanding: Vec::new(),
+        expanding: std::collections::HashSet::new(),
     }
     .check(ty)
 }
@@ -1490,8 +1490,9 @@ pub(super) fn unresolved_type_error(
 struct TypeResolver<'a> {
     scope: &'a Scope,
     module_has_alias: &'a mut dyn FnMut(&str, &str) -> bool,
-    /// The aliases being expanded, so a recursive alias ends the walk.
-    expanding: Vec<String>,
+    /// The aliases being expanded, so a recursive alias ends the walk. Every
+    /// alias is looked up in `scope`, so its name identifies it.
+    expanding: std::collections::HashSet<String>,
 }
 
 impl TypeResolver<'_> {
@@ -1501,6 +1502,11 @@ impl TypeResolver<'_> {
             // A constrained type or a default-marked variant holds the text of
             // the type it was made from (`List<Foo>`, `*Int?`), not its parts.
             TypeExpr::Named(text) | TypeExpr::Constrained(text, _) => {
+                // A quoted name (`` `Step?` ``) is one literal name, whatever
+                // characters it holds. Use it as is when something declares it.
+                if matches!(ty, TypeExpr::Named(_)) && self.declares_literally(text) {
+                    return self.check_bare_name(text);
+                }
                 let whole = text.trim_start_matches('*').trim_end_matches('?');
                 if whole.is_empty() || string_literal_type_value(whole).is_some() {
                     None
@@ -1554,15 +1560,41 @@ impl TypeResolver<'_> {
             .then(|| format!("Cannot find type `{member}` in module `{module}`."))
     }
 
+    /// Whether `name`, taken literally, is a class or type alias in scope.
+    fn declares_literally(&self, name: &str) -> bool {
+        !name.contains('.')
+            && (self.scope.get_type_alias(name).is_some()
+                || matches!(
+                    self.scope.get(name),
+                    Some(Value::Object(_, Some(source))) if source.kind == ObjectKind::Class
+                ))
+    }
+
     fn check_bare_name(&mut self, name: &str) -> Option<String> {
         let scope = self.scope;
-        if let Some(alias) = scope.get_type_alias(name) {
-            if self.expanding.iter().any(|open| open == name) {
-                return None;
+        if scope.get_type_alias(name).is_some() {
+            // Walk a chain of aliases that each name another alias in a loop,
+            // so a long chain does not use the stack.
+            let mut opened = Vec::new();
+            let mut current = name;
+            let error = loop {
+                if !self.expanding.insert(current.to_string()) {
+                    break None;
+                }
+                opened.push(current);
+                let alias = scope.get_type_alias(current).expect("alias");
+                match alias {
+                    crate::parser::TypeExpr::Named(next)
+                        if next != current && scope.get_type_alias(next).is_some() =>
+                    {
+                        current = next;
+                    }
+                    _ => break self.check(alias),
+                }
+            };
+            for name in opened {
+                self.expanding.remove(name);
             }
-            self.expanding.push(name.to_string());
-            let error = self.check(alias);
-            self.expanding.pop();
             return error;
         }
         // A function captures the marker of an alias, not its definition.
