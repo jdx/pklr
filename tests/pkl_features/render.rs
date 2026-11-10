@@ -47,6 +47,32 @@ fn json_renderer_settings() {
 }
 
 #[test]
+fn yaml_and_pcf_renderers_null_property_settings() {
+    // Expected text is what `pkl eval` 0.32.2 renders.
+    let v = "new Dynamic { a = null; b = 1 }";
+    assert_eq!(
+        render(&format!(
+            "new YamlRenderer {{ omitNullProperties = false }}.renderValue({v})"
+        )),
+        "a: null\nb: 1"
+    );
+    assert_eq!(
+        render(&format!("new YamlRenderer {{}}.renderValue({v})")),
+        "b: 1"
+    );
+    assert_eq!(
+        render(&format!("new PcfRenderer {{}}.renderValue({v})")),
+        "{\n  a = null\n  b = 1\n}"
+    );
+    assert_eq!(
+        render(&format!(
+            "new PcfRenderer {{ omitNullProperties = true }}.renderValue({v})"
+        )),
+        "{\n  b = 1\n}"
+    );
+}
+
+#[test]
 fn json_renderer_refuses_durations() {
     let err = eval_fails("res = new JsonRenderer {}.renderValue(1.min)");
     assert!(

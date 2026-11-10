@@ -182,7 +182,6 @@ pub struct Evaluator {
     module_output: Option<Value>,
     /// Whether an output declaration explicitly assigned `output.value`.
     output_sets_value: bool,
-    /// Whether an output declaration explicitly enabled JSON null omission.
     /// The default renderer used while evaluating module output.
     output_format: render::RendererKind,
     /// Set of (property_name, message) pairs already warned about.
