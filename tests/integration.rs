@@ -707,7 +707,7 @@ value: Mapping<String, String>?(length > 0, !isEmpty)
     };
     assert!(matches!(
         value.type_ann,
-        Some(TypeExpr::Constrained(_, ref constraint))
+        Some(TypeExpr::Constrained(_, ref constraint, _))
             if matches!(constraint.as_ref(), Expr::Binop(BinOp::And, _, _))
     ));
 }

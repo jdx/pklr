@@ -584,11 +584,33 @@ c = new Listing { for (base in List(new Dynamic {})) { 1 is base.Int } }
 }
 
 #[test]
-fn a_nullable_constrained_type_is_not_a_quoted_name_when_the_class_is_declared() {
+fn a_quoted_constrained_type_is_the_class_and_the_unquoted_one_is_nullable() {
+    // With both `C` and a class named `C?`, backticks make the difference.
     let json = eval(
-        "class C {}\nclass `C?` {}\na = null is C?(true)\nb = null as C?(true)\nc = new C {} is C?(true)",
+        r#"
+class C {}
+class `C?` {}
+a = new `C?` {} is `C?`(true)
+b = null is `C?`(true)
+c = new C {} is `C?`(true)
+d = null is C?(true)
+e = new C {} is C?(true)
+f = new `C?` {} is C?(true)
+g = new `C?` {} is `C?`
+h = null is `C?`
+i = new `C?` {} as `C?`(true)
+j = new C {} is C?
+k = new `C?` {} is C?
+l = null as C?(true)
+"#,
     );
-    assert_eq!(json, serde_json::json!({"a": true, "b": null, "c": true}));
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "a": true, "b": false, "c": false, "d": true, "e": true, "f": false,
+            "g": true, "h": false, "i": {}, "j": true, "k": false, "l": null
+        })
+    );
 }
 
 #[test]

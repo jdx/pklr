@@ -137,7 +137,7 @@ impl Evaluator {
         };
         match ty {
             TypeExpr::Named(name) => named(self, name, seen),
-            TypeExpr::Constrained(base, _) => named(self, base.trim_end_matches('?'), seen),
+            TypeExpr::Constrained(base, _, _) => named(self, base.trim_end_matches('?'), seen),
             TypeExpr::Nullable(inner) => self.type_takes_dynamic(inner, scope, seen),
             TypeExpr::Union(variants) => variants
                 .iter()
@@ -159,7 +159,7 @@ impl Evaluator {
     ) -> bool {
         let name = match ty {
             TypeExpr::Named(name) => name.trim_start_matches('*'),
-            TypeExpr::Constrained(base, _) => base.trim_end_matches('?'),
+            TypeExpr::Constrained(base, _, _) => base.trim_end_matches('?'),
             TypeExpr::Generic(name, _) => name.as_str(),
             // An alias to a union supplies the default of the alternative it
             // marks with `*`, and none when it marks nothing. A nullable one
@@ -231,7 +231,7 @@ impl Evaluator {
         let name = match ty {
             TypeExpr::Nullable(_) => return true,
             TypeExpr::Named(name) => name.trim_start_matches('*'),
-            TypeExpr::Constrained(base, _) => base.as_str(),
+            TypeExpr::Constrained(base, _, _) => base.as_str(),
             _ => return false,
         };
         if name.ends_with('?') {
@@ -308,7 +308,7 @@ impl Evaluator {
             }
             // A constraint is checked on the value afterwards and gives it no
             // default: follow its base, which names an alias or spells a union.
-            TypeExpr::Constrained(base, _) => {
+            TypeExpr::Constrained(base, _, _) => {
                 let nullable = nullable || base.ends_with('?');
                 match crate::parser::parse_type_name(base.trim_end_matches('?')) {
                     Ok(base) => self.union_amend_state_in(&base, scope, nullable, seen),
@@ -572,19 +572,11 @@ impl Evaluator {
                 // Otherwise, plain type check
                 Ok(value_is_type(val, ty))
             }
-            TypeExpr::Constrained(base, constraint) => {
-                // The text of the base names a class or alias that something
-                // declares, however its quotes spelled it (`Step?`), as one name.
-                let literal = base.trim_start_matches('*');
-                let declared = |name: &str| {
-                    scope.get_type_alias(name).is_some()
-                        || matches!(scope.get(name), Some(Value::Object(_, Some(source))) if source.kind == ObjectKind::Class)
-                };
-                // `C?` is the nullable `C` when `C` is declared too.
-                let nullable_syntax =
-                    literal.ends_with('?') && declared(literal.trim_end_matches('?'));
-                let (quoted_name, nullable) = if declared(literal) && !nullable_syntax {
-                    (Some(literal), false)
+            TypeExpr::Constrained(base, constraint, quoted) => {
+                // A name written in backticks (`C?`) is that one name, and
+                // the same text without them is the nullable `C`.
+                let (quoted_name, nullable) = if *quoted {
+                    (Some(base.as_str()), false)
                 } else {
                     (None, base.ends_with('?'))
                 };
@@ -917,7 +909,7 @@ pub(super) fn type_constraint_has_explicit_throw(
         use crate::parser::TypeExpr;
 
         match ty {
-            TypeExpr::Constrained(_, constraint) => {
+            TypeExpr::Constrained(_, constraint, _) => {
                 expr_has_throw(constraint, scope, None, &mut HashSet::default())
             }
             TypeExpr::Named(name) | TypeExpr::Generic(name, _) => scope

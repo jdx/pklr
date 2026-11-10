@@ -114,7 +114,10 @@ pub enum TypeExpr {
     Generic(String, Vec<TypeExpr>),
     /// Constrained type: `Type(predicate)` e.g. `Int(this >= 0)`.
     /// Multiple source constraints are represented by a conjunctive expression.
-    Constrained(String, Box<Expr>),
+    /// The third field is whether the type before the constraint was a name
+    /// written in backticks, such as `C?`, which is that name and not the
+    /// nullable `C`.
+    Constrained(String, Box<Expr>, bool),
 }
 
 pub(super) fn type_expr_runtime_name(ty: &TypeExpr) -> String {
@@ -130,7 +133,7 @@ pub(super) fn type_expr_runtime_name(ty: &TypeExpr) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        TypeExpr::Constrained(name, _) => name.clone(),
+        TypeExpr::Constrained(name, _, _) => name.clone(),
     }
 }
 
@@ -141,7 +144,7 @@ pub(super) fn infers_new(ty: &TypeExpr) -> bool {
     match ty {
         TypeExpr::Generic(name, _) => matches!(name.as_str(), "Mapping" | "Listing"),
         TypeExpr::Nullable(inner) => infers_new(inner),
-        TypeExpr::Constrained(base, _) => {
+        TypeExpr::Constrained(base, _, _) => {
             let base = base.trim_end_matches('?');
             matches!(base.split('<').next(), Some("Mapping" | "Listing"))
         }
@@ -371,8 +374,8 @@ pub(super) fn mark_type_parameters(ty: TypeExpr, parameters: &[String]) -> TypeE
                 .map(|arg| mark_type_parameters(arg, parameters))
                 .collect(),
         ),
-        TypeExpr::Constrained(text, constraint) => {
-            TypeExpr::Constrained(mark_text(&text), constraint)
+        TypeExpr::Constrained(text, constraint, quoted) => {
+            TypeExpr::Constrained(mark_text(&text), constraint, quoted)
         }
     }
 }

@@ -258,7 +258,7 @@ pub(super) fn collect_type_expr_class_names(
     use crate::parser::TypeExpr;
     match ty {
         TypeExpr::Named(name) => expand_type_alias_name(name, scope, out, depth),
-        TypeExpr::Constrained(base, _) => expand_type_alias_name(base, scope, out, depth),
+        TypeExpr::Constrained(base, _, _) => expand_type_alias_name(base, scope, out, depth),
         TypeExpr::Generic(name, _) => expand_type_alias_name(name, scope, out, depth),
         TypeExpr::Nullable(inner) => collect_type_expr_class_names(inner, scope, out, depth),
         TypeExpr::Union(variants) => {
@@ -470,7 +470,7 @@ pub(super) fn mapping_value_type_names(type_ann: &crate::parser::TypeExpr) -> Ve
             }
         }
         TypeExpr::Nullable(inner) => return mapping_value_type_names(inner),
-        TypeExpr::Constrained(base, _) => {
+        TypeExpr::Constrained(base, _, _) => {
             if let Some(value_type) = mapping_value_type_from_name(base) {
                 names.push(value_type);
             }
@@ -520,7 +520,7 @@ pub(super) fn collect_mapping_value_type_names(
                 names.push(name.clone());
             }
         }
-        TypeExpr::Constrained(base, _) => {
+        TypeExpr::Constrained(base, _, _) => {
             if !names.contains(base) {
                 names.push(base.clone());
             }

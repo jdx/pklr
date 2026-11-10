@@ -292,7 +292,7 @@ pub(super) fn collect_type_import_field_uses(
                 collect_type_import_field_uses(param, uses, shadows);
             }
         }
-        crate::parser::TypeExpr::Constrained(base, constraint) => {
+        crate::parser::TypeExpr::Constrained(base, constraint, _) => {
             for component in constrained_type_components(base) {
                 record_type_name_import_use(uses, shadows, component);
             }
@@ -825,7 +825,7 @@ fn mentioned_type_names<'t>(ty: &'t crate::parser::TypeExpr, out: &mut Vec<&'t s
         );
     }
     match ty {
-        crate::parser::TypeExpr::Named(name) | crate::parser::TypeExpr::Constrained(name, _) => {
+        crate::parser::TypeExpr::Named(name) | crate::parser::TypeExpr::Constrained(name, _, _) => {
             names_in(name, out)
         }
         crate::parser::TypeExpr::Nullable(inner) => mentioned_type_names(inner, out),
@@ -949,7 +949,7 @@ fn alias_binds_collection_names(ty: &crate::parser::TypeExpr, aliases: &TypeAlia
     match ty {
         crate::parser::TypeExpr::Named(base)
         | crate::parser::TypeExpr::Generic(base, _)
-        | crate::parser::TypeExpr::Constrained(base, _) => {
+        | crate::parser::TypeExpr::Constrained(base, _, _) => {
             constraint_bound_names_resolving(base, Some(aliases)).contains(&"length")
         }
         crate::parser::TypeExpr::Nullable(_) | crate::parser::TypeExpr::Union(_) => false,
@@ -990,7 +990,7 @@ fn constraint_bound_names_resolving(
             crate::parser::TypeExpr::Named(name) | crate::parser::TypeExpr::Generic(name, _) => {
                 name
             }
-            crate::parser::TypeExpr::Constrained(base, _) => base,
+            crate::parser::TypeExpr::Constrained(base, _, _) => base,
             crate::parser::TypeExpr::Nullable(_) | crate::parser::TypeExpr::Union(_) => {
                 return &["this"];
             }
@@ -1010,7 +1010,7 @@ fn collect_sibling_field_refs_type_in(
     shadowed: bool,
 ) {
     match ty {
-        crate::parser::TypeExpr::Constrained(_, constraint) => {
+        crate::parser::TypeExpr::Constrained(_, constraint, _) => {
             collect_sibling_field_refs_expr_in(constraint, refs, false, shadowed);
         }
         crate::parser::TypeExpr::Nullable(inner) => {
@@ -2317,7 +2317,7 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
 pub(super) fn type_alias_target(ty: &crate::parser::TypeExpr) -> Option<&str> {
     match ty {
         crate::parser::TypeExpr::Named(target)
-        | crate::parser::TypeExpr::Constrained(target, _) => Some(target),
+        | crate::parser::TypeExpr::Constrained(target, _, _) => Some(target),
         crate::parser::TypeExpr::Nullable(inner) => match inner.as_ref() {
             crate::parser::TypeExpr::Named(target) => Some(target),
             _ => None,
@@ -2618,7 +2618,7 @@ fn collect_type_refs(
                 collect_type_refs(param, refs, shadows, aliases, definitions);
             }
         }
-        crate::parser::TypeExpr::Constrained(base, constraint) => {
+        crate::parser::TypeExpr::Constrained(base, constraint, _) => {
             for component in constrained_type_components(base) {
                 collect_name_root(component, refs, shadows);
             }
@@ -2819,7 +2819,7 @@ fn collect_unshadowed_entry_names(entries: &[Entry], names: &mut HashSet<Name>) 
 fn collect_unshadowed_type_names(ty: &crate::parser::TypeExpr, names: &mut HashSet<Name>) {
     mark_type_use(names);
     // A constraint is an ordinary expression evaluated against the value.
-    if let crate::parser::TypeExpr::Constrained(_, constraint) = ty {
+    if let crate::parser::TypeExpr::Constrained(_, constraint, _) = ty {
         collect_unshadowed_names(constraint, names);
     }
     match ty {
@@ -3136,7 +3136,7 @@ impl InstanceReads {
 
 pub(super) fn type_mentions(ty: &crate::parser::TypeExpr, name: &str) -> bool {
     match ty {
-        crate::parser::TypeExpr::Constrained(base, constraint) => {
+        crate::parser::TypeExpr::Constrained(base, constraint, _) => {
             type_name_mentions(base, name) || expr_mentions(constraint, name)
         }
         crate::parser::TypeExpr::Nullable(inner) => type_mentions(inner, name),

@@ -266,7 +266,7 @@ impl Evaluator {
                     scope.declare(name, val);
                 }
             }
-            crate::parser::TypeExpr::Constrained(base, _) => {
+            crate::parser::TypeExpr::Constrained(base, _, _) => {
                 self.bind_type_alias_value(name, base, scope);
             }
             // Union types, generics, etc. -- no runtime representation needed
@@ -321,7 +321,7 @@ impl Evaluator {
                         out.push((key.clone(), value.clone()));
                     }
                 }
-                TypeExpr::Constrained(base, _) => {
+                TypeExpr::Constrained(base, _, _) => {
                     if let Ok(base) = parser::parse_type_name(base) {
                         mapping_type_pairs(&base, scope, aliases, out);
                     }

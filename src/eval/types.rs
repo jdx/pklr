@@ -248,7 +248,7 @@ impl AliasResolver<'_> {
                     self.ty(ty, shadowed);
                 }
             }
-            TypeExpr::Constrained(base, constraint) => {
+            TypeExpr::Constrained(base, constraint, _) => {
                 self.expr(constraint, shadowed);
                 let nullable = base.ends_with('?');
                 let (default_marker, plain) = match base.trim_end_matches('?').strip_prefix('*') {
@@ -262,7 +262,9 @@ impl AliasResolver<'_> {
                     // `A(c)` with `A = B(c2)` checks `B`, then `c2`, then `c`,
                     // all against the same value. A nullable `A?` lets null
                     // skip `c2`, which a single conjunction cannot express.
-                    TypeExpr::Constrained(target, inner) if !nullable || target.ends_with('?') => {
+                    TypeExpr::Constrained(target, inner, _)
+                        if !nullable || target.ends_with('?') =>
+                    {
                         let outer = std::mem::replace(constraint.as_mut(), Expr::Null);
                         (target, Expr::Binop(BinOp::And, inner, Box::new(outer)))
                     }
@@ -351,7 +353,7 @@ pub(super) fn inferred_new_type(
                 .ok_or_else(|| Error::Eval("Cannot tell which parent to amend".into()))?;
             inferred_new_type(selected, scope, depth + 1)
         }
-        TypeExpr::Constrained(name, _) => {
+        TypeExpr::Constrained(name, _, _) => {
             // Constraints store the underlying type as a runtime name. Parse
             // that name back into a type to retain any generic arguments.
             let ty = crate::parser::parse_type_name(name.trim_start_matches('*'))?;
@@ -374,8 +376,8 @@ fn type_default_value_seen(
 ) -> Option<Value> {
     use crate::parser::TypeExpr;
     match ty {
-        TypeExpr::Constrained(base, _) if base.ends_with('?') => Some(Value::Null),
-        TypeExpr::Constrained(base, _) => type_default_for_name(base, scope),
+        TypeExpr::Constrained(base, _, _) if base.ends_with('?') => Some(Value::Null),
+        TypeExpr::Constrained(base, _, _) => type_default_for_name(base, scope),
         TypeExpr::Nullable(_) => Some(Value::Null),
         TypeExpr::Named(name) if name == "Null" => Some(Value::Null),
         TypeExpr::Named(name) => {
@@ -455,7 +457,7 @@ pub(super) fn type_default_error(ty: &crate::parser::TypeExpr, scope: &Scope) ->
         use crate::parser::TypeExpr;
 
         match ty {
-            TypeExpr::Constrained(base, _) if !base.ends_with('?') => {
+            TypeExpr::Constrained(base, _, _) if !base.ends_with('?') => {
                 named_error(base, scope, seen)
             }
             TypeExpr::Constrained(..) | TypeExpr::Nullable(_) => None,
@@ -525,7 +527,7 @@ pub(super) fn nullable_inner_default(ty: &crate::parser::TypeExpr, scope: &Scope
     use crate::parser::TypeExpr;
     match ty {
         TypeExpr::Nullable(inner) => type_default_value(inner, scope),
-        TypeExpr::Constrained(name, _) if name.ends_with('?') => {
+        TypeExpr::Constrained(name, _, _) if name.ends_with('?') => {
             type_default_for_name(name.trim_end_matches('?'), scope)
         }
         _ => None,
@@ -537,7 +539,7 @@ pub(super) fn type_is_listing(ty: &crate::parser::TypeExpr) -> bool {
     match ty {
         TypeExpr::Named(name) | TypeExpr::Generic(name, _) => name == "Listing",
         TypeExpr::Nullable(inner) => type_is_listing(inner),
-        TypeExpr::Constrained(name, _) => {
+        TypeExpr::Constrained(name, _, _) => {
             name.trim_end_matches('?') == "Listing" || name.starts_with("Listing<")
         }
         TypeExpr::Union(variants) => variants.iter().any(type_is_listing),
@@ -895,7 +897,7 @@ pub(super) fn display_type_expr(ty: &crate::parser::TypeExpr) -> String {
             let args_str: Vec<_> = args.iter().map(display_type_expr).collect();
             format!("{}<{}>", name, args_str.join(", "))
         }
-        TypeExpr::Constrained(base, _) => format!("{base}(... )"),
+        TypeExpr::Constrained(base, _, _) => format!("{base}(... )"),
     }
 }
 
@@ -962,7 +964,7 @@ pub(super) fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
                 _ => matches!(val, Value::Object(..)),
             }
         }
-        TypeExpr::Constrained(base, _) => {
+        TypeExpr::Constrained(base, _, _) => {
             // Just check the base type; constraint requires async eval
             value_is_named_type(val, base)
         }
@@ -1107,7 +1109,7 @@ pub(super) fn type_is_runtime_checkable(ty: &crate::parser::TypeExpr, scope: &Sc
             .iter()
             .all(|variant| type_is_runtime_checkable(variant, scope)),
         TypeExpr::Generic(_, _) => true,
-        TypeExpr::Constrained(base, _) => {
+        TypeExpr::Constrained(base, _, _) => {
             let runtime_name = base
                 .trim_start_matches('*')
                 .trim_end_matches('?')
@@ -1566,13 +1568,17 @@ impl TypeResolver<'_> {
             // the type it was made from (`List<Foo>`, `*Int?`), which does not
             // tell a quoted name (`Step?`) from the syntax around a name.
             // Where it cannot be read with certainty, accept it.
-            TypeExpr::Named(text) | TypeExpr::Constrained(text, _) => {
+            TypeExpr::Named(text) | TypeExpr::Constrained(text, _, _) => {
                 let whole = text.trim_start_matches('*');
                 if whole.is_empty() || string_literal_type_value(whole).is_some() {
                     return None;
                 }
-                // The whole text is one declared name, however it was quoted.
-                if self.declares_literally(whole) {
+                // A name written in backticks is one name, whatever it holds.
+                if matches!(ty, TypeExpr::Constrained(_, _, true)) {
+                    return self.check_name(whole);
+                }
+                // A default-marked name is the name as written, quoted or not.
+                if matches!(ty, TypeExpr::Named(_)) && self.declares_literally(whole) {
                     return self.check_bare_name(whole);
                 }
                 if crate::lexer::is_plain_qualified_name(whole) {
