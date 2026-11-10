@@ -1429,7 +1429,7 @@ pub(super) fn merge_values(base: Value, overlay: Value) -> Value {
 
 /// Classes and type aliases of `pkl:base`, and the keyword types, that a type
 /// expression names without a declaration in the module.
-const STDLIB_TYPE_NAMES: &[&str] = &[
+pub(super) const STDLIB_TYPE_NAMES: &[&str] = &[
     "Any",
     "Null",
     "Class",
@@ -1559,8 +1559,9 @@ impl TypeResolver<'_> {
             TypeExpr::Named(text) | TypeExpr::Constrained(text, _) => {
                 // A quoted name (`` `Step?` ``) is one literal name, whatever
                 // characters it holds. Use it as is when something declares it.
-                if matches!(ty, TypeExpr::Named(_)) && self.declares_literally(text) {
-                    return self.check_bare_name(text);
+                let literal = text.trim_start_matches('*');
+                if self.declares_literally(literal) {
+                    return self.check_bare_name(literal);
                 }
                 let whole = text.trim_start_matches('*').trim_end_matches('?');
                 if whole.is_empty() || string_literal_type_value(whole).is_some() {
@@ -1621,6 +1622,11 @@ impl TypeResolver<'_> {
             })
         });
         let Some((alias, module_scope)) = imported else {
+            // A type of a standard library module (`import "pkl:base" as base`)
+            // is a marker in the module's value, which has no module identity.
+            if scope.module_identity(module).is_none() && STDLIB_TYPE_NAMES.contains(&member) {
+                return None;
+            }
             return Some(format!("Cannot find type `{member}` in module `{module}`."));
         };
         // Walk the body in the scope of the module that declares it.
@@ -1648,14 +1654,8 @@ impl TypeResolver<'_> {
         error
     }
 
-    /// The key that tells an alias apart from those of other modules.
     fn alias_key(scope: &Scope, name: &str) -> String {
-        let module = scope
-            .alias_module
-            .as_ref()
-            .map(|module| module.display().to_string())
-            .unwrap_or_default();
-        format!("{module}\0{name}")
+        alias_key(scope, name)
     }
 
     /// Whether `name`, taken literally, is a class or type alias in scope.
@@ -1715,4 +1715,15 @@ impl TypeResolver<'_> {
             None => Some(format!("Cannot find type `{name}`.")),
         }
     }
+}
+
+/// The key that tells the alias `name` of the module `scope` walks apart from
+/// an alias of the same name in another module. Cycle guards use it.
+pub(super) fn alias_key(scope: &Scope, name: &str) -> String {
+    let module = scope
+        .alias_module
+        .as_ref()
+        .map(|module| module.display().to_string())
+        .unwrap_or_default();
+    format!("{module}\0{name}")
 }

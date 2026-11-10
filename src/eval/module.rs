@@ -87,6 +87,12 @@ impl Evaluator {
         for (name, ty) in &inherited.type_aliases {
             scope.set_type_alias(name.clone(), ty.clone());
         }
+        // The imports the inherited aliases name keep their modules.
+        for (name, identity) in &inherited.module_identities {
+            if scope.vars.contains_key(&**name) {
+                scope.set_module_identity(name.clone(), identity.clone());
+            }
+        }
     }
 
     pub(super) fn inherited_late_properties(&self, path: &Path) -> Vec<Arc<Property>> {

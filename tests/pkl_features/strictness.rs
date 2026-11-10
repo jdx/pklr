@@ -458,6 +458,68 @@ fn an_inherited_type_alias_matches_values_in_the_module_that_declares_it() {
 }
 
 #[test]
+fn an_inherited_alias_named_in_the_inheriting_module_resolves_in_the_declaring_one() {
+    let temp = TestTempDir::new("pklr_test_is_unqualified_inherited_alias");
+    let write = |name: &str, src: &str| std::fs::write(temp.path().join(name), src).unwrap();
+    write("dep.pkl", "class T {}\ntypealias U = Int\n");
+    write(
+        "base.pkl",
+        "open module base\nimport \"dep.pkl\"\ntypealias B = dep.U\ntypealias GB = List<dep.U>\nx = 0\n",
+    );
+    write(
+        "child.pkl",
+        "extends \"base.pkl\"\ntypealias G = GB\nu1 = 1 is B\nu2 = List(1) is GB\nu3 = 1 as B\nu4 = List(1) is G\nu5 = \"s\" is B\n",
+    );
+    write("am.pkl", "amends \"base.pkl\"\nx = 1 is B\n");
+    let eval = |name: &str| pklr::eval_to_json(&temp.path().join(name)).unwrap();
+    assert_eq!(
+        eval("child.pkl"),
+        serde_json::json!({"x": 0, "u1": true, "u2": true, "u3": 1, "u4": true, "u5": false})
+    );
+    assert_eq!(eval("am.pkl"), serde_json::json!({"x": true}));
+}
+
+#[test]
+fn alias_chains_across_modules_are_no_cycle() {
+    let temp = TestTempDir::new("pklr_test_is_alias_chain_modules");
+    let write = |name: &str, src: &str| std::fs::write(temp.path().join(name), src).unwrap();
+    write("n.pkl", "typealias X = B\ntypealias B = Int\n");
+    write(
+        "m.pkl",
+        "import \"n.pkl\"\ntypealias A = B\ntypealias B = n.X\n",
+    );
+    write(
+        "main.pkl",
+        "import \"m.pkl\"\nr = 1 is m.A\ns = 1 as m.A\nt = \"x\" is m.A\n",
+    );
+    assert_eq!(
+        pklr::eval_to_json(&temp.path().join("main.pkl")).unwrap(),
+        serde_json::json!({"r": true, "s": 1, "t": false})
+    );
+}
+
+#[test]
+fn qualified_standard_library_types_and_quoted_forms_resolve() {
+    let json = eval(
+        r#"
+import "pkl:base" as base
+class `Step?` {}
+typealias `X?` = Int
+a = Regex("x") is base.Regex
+b = 1 is base.Int
+c = 1 is `X?`(true)
+d = 1 is *`X?`|String
+e = 1 is `Step?`(true)
+f = 1 is List<`Step?`>
+"#,
+    );
+    assert_eq!(
+        json,
+        serde_json::json!({"a": true, "b": true, "c": true, "d": true, "e": false, "f": false})
+    );
+}
+
+#[test]
 fn to_dynamic_works_on_a_module_that_carries_a_source() {
     let temp = TestTempDir::new("pklr_test_to_dynamic_module");
     std::fs::write(temp.path().join("m.pkl"), "@Deprecated\nold = 1\nx = 2\n").unwrap();

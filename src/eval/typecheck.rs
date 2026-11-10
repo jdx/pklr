@@ -390,12 +390,6 @@ impl Evaluator {
             .map_or_else(|| module.to_path_buf(), Clone::clone);
         let mut module_scope = Scope::default();
         self.layer_evaluated_module_scope(&definer, &mut module_scope);
-        // The module's own imports resolve the aliases it names.
-        if let Some(snapshot) = self.module_scopes.get(&definer) {
-            for (import, identity) in &snapshot.module_identities {
-                module_scope.set_module_identity(import.clone(), identity.clone());
-            }
-        }
         module_scope.alias_module = Some(Arc::new(definer));
         let alias = module_scope.get_type_alias(name)?.clone();
         Some((alias, module_scope))
@@ -410,6 +404,10 @@ impl Evaluator {
         name: &str,
     ) -> Option<(crate::parser::TypeExpr, Scope)> {
         let module = scope.alias_module.as_ref()?;
+        // The nearest declaration wins over an inherited one.
+        if !scope.alias_declared_at_root(name) {
+            return None;
+        }
         self.module_scopes
             .get(&**module)?
             .alias_definers
@@ -471,10 +469,13 @@ impl Evaluator {
         depth: usize,
         resolving: &mut Vec<String>,
     ) -> Result<bool> {
-        if resolving.iter().any(|seen| seen == name) {
+        // An alias is told apart from one of the same name in another module.
+        let key = alias_key(scope, name);
+        if resolving.contains(&key) {
             return Err(Error::Eval(format!("type alias '{name}' refers to itself")));
         }
-        resolving.push(name.to_string());
+        let open = resolving.len();
+        resolving.push(key);
         // Long chains (`A0 = A1`, …) are valid Pkl and must not consume the
         // Rust call stack once per alias.  Flatten the simple-name part here;
         // compound targets still go through the regular checker below.
@@ -489,11 +490,12 @@ impl Evaluator {
                     None => break,
                 },
             };
-            if resolving.iter().any(|seen| seen == next) {
-                while resolving.pop().as_deref() != Some(name) {}
+            let next_key = alias_key(next_scope.as_ref().unwrap_or(current), next);
+            if resolving.contains(&next_key) {
+                resolving.truncate(open);
                 return Err(Error::Eval(format!("type alias '{next}' refers to itself")));
             }
-            resolving.push(next.clone());
+            resolving.push(next_key);
             target = next_target;
             if next_scope.is_some() {
                 redirected = next_scope;
@@ -501,7 +503,7 @@ impl Evaluator {
         }
         let scope = redirected.as_ref().unwrap_or(scope);
         let result = self.eval_type_check_in(val, &target, scope, depth + 1, resolving);
-        while resolving.pop().as_deref() != Some(name) {}
+        resolving.truncate(open);
         result
     }
 
@@ -554,32 +556,53 @@ impl Evaluator {
                         resolving,
                     );
                 }
+                // A type of a standard library module (`base.Int`) is the
+                // type without its qualifier.
+                if let Some((module, member)) = name.rsplit_once('.')
+                    && !module.contains('.')
+                    && scope.get(module).is_some()
+                    && scope.module_identity(module).is_none()
+                    && STDLIB_TYPE_NAMES.contains(&member)
+                {
+                    return Ok(value_is_type(
+                        val,
+                        &crate::parser::TypeExpr::Named(member.to_string()),
+                    ));
+                }
                 // Otherwise, plain type check
                 Ok(value_is_type(val, ty))
             }
             TypeExpr::Constrained(base, constraint) => {
+                // A quoted name that something declares is one literal name.
+                let literal = base.trim_start_matches('*');
+                let literal_name = (scope.get_type_alias(literal).is_some()
+                    || matches!(scope.get(literal), Some(Value::Object(_, Some(source))) if source.kind == ObjectKind::Class))
+                .then_some(literal);
                 // First check the base type
-                let class_name = base.trim_end_matches('?').split('<').next().unwrap_or(base);
-                let base_matches = if base.ends_with('?') && is_null_value(val) {
-                    true
-                } else if let Some((resolved, module_scope)) =
-                    self.inherited_alias(scope, class_name)
-                {
-                    self.eval_alias_check(
-                        val,
-                        class_name,
-                        &resolved,
-                        &module_scope,
-                        depth,
-                        resolving,
-                    )?
-                } else if let Some(resolved) = scope.get_type_alias(class_name) {
-                    let resolved = resolved.clone();
-                    self.eval_alias_check(val, class_name, &resolved, scope, depth, resolving)?
-                } else {
-                    value_is_class_type(val, class_name, scope)
-                        .unwrap_or_else(|| value_is_named_type(val, base))
-                };
+                let class_name = literal_name.unwrap_or_else(|| {
+                    base.trim_end_matches('?').split('<').next().unwrap_or(base)
+                });
+                let base_matches =
+                    if literal_name.is_none() && base.ends_with('?') && is_null_value(val) {
+                        true
+                    } else if let Some((resolved, module_scope)) =
+                        self.inherited_alias(scope, class_name)
+                    {
+                        self.eval_alias_check(
+                            val,
+                            class_name,
+                            &resolved,
+                            &module_scope,
+                            depth,
+                            resolving,
+                        )?
+                    } else if let Some(resolved) = scope.get_type_alias(class_name) {
+                        let resolved = resolved.clone();
+                        self.eval_alias_check(val, class_name, &resolved, scope, depth, resolving)?
+                    } else {
+                        value_is_class_type(val, class_name, scope)
+                            .unwrap_or_else(|| value_is_named_type(val, base))
+                    };
                 if !base_matches {
                     return Ok(false);
                 }
@@ -635,6 +658,16 @@ impl Evaluator {
                 Ok(has_uncheckable_variant)
             }
             TypeExpr::Generic(name, _) => {
+                if let Some((resolved, module_scope)) = self.inherited_alias(scope, name) {
+                    return self.eval_alias_check(
+                        val,
+                        name,
+                        &resolved,
+                        &module_scope,
+                        depth,
+                        resolving,
+                    );
+                }
                 if let Some(resolved) = scope.get_type_alias(name) {
                     let resolved = resolved.clone();
                     return self.eval_alias_check(val, name, &resolved, scope, depth, resolving);

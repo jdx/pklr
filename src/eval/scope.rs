@@ -363,6 +363,22 @@ impl Scope {
                 .is_some_and(|parent| parent.has_type_aliases())
     }
 
+    /// Whether the nearest declaration of the alias `name` is in the
+    /// outermost scope, where a module's own and inherited aliases are held,
+    /// and not in a nested scope that declares an alias of the same name.
+    pub(super) fn alias_declared_at_root(&self, name: &str) -> bool {
+        let mut level = self;
+        loop {
+            if level.type_aliases.contains_key(name) {
+                return level.parent.is_none();
+            }
+            match level.parent.as_deref() {
+                Some(parent) => level = parent,
+                None => return false,
+            }
+        }
+    }
+
     pub(super) fn get_type_alias(&self, name: &str) -> Option<&crate::parser::TypeExpr> {
         self.type_aliases
             .get(name)
