@@ -141,6 +141,7 @@ impl Evaluator {
         scope: &Scope,
         depth: usize,
         items: &mut Vec<Value>,
+        elem_class: Option<&Arc<Value>>,
     ) -> Result<()> {
         let mut listing_scope = scope.child();
         // A body's locals and properties (`default`) are visible to all of
@@ -177,6 +178,26 @@ impl Evaluator {
             match entry {
                 Entry::Predicate(..) => return Err(member_predicates_unsupported()),
                 Entry::Property(_) => {}
+                Entry::Elem(Expr::New(None, body, params)) if elem_class.is_some() => {
+                    // `new { ... }` in a `Listing<T>` constructs a `T`. The class
+                    // is bound by value: `T` may be visible only where the
+                    // listing's type was declared, not in this scope.
+                    let mut elem_scope = listing_scope.child();
+                    elem_scope.set(
+                        LISTING_ELEM_CLASS,
+                        elem_class
+                            .map(|class| (**class).clone())
+                            .unwrap_or_default(),
+                    );
+                    // A class bound under another name is a value, not a type.
+                    elem_scope.set(type_alias_marker(LISTING_ELEM_CLASS), Value::Null);
+                    let typed = Expr::New(
+                        Some(LISTING_ELEM_CLASS.into()),
+                        body.clone(),
+                        params.clone(),
+                    );
+                    items.push(self.eval_expr(&typed, &elem_scope, depth + 1)?)
+                }
                 Entry::Elem(expr) => items.push(self.eval_expr(expr, &listing_scope, depth + 1)?),
                 Entry::DynProperty(index, value) => {
                     let index = self.eval_expr(index, &listing_scope, depth + 1)?;
@@ -224,7 +245,13 @@ impl Evaluator {
                         if let Some(key_var) = &generator.key_var {
                             iter_scope.set(key_var, key);
                         }
-                        self.eval_listing_entries(&generator.body, &iter_scope, depth + 1, items)?;
+                        self.eval_listing_entries(
+                            &generator.body,
+                            &iter_scope,
+                            depth + 1,
+                            items,
+                            elem_class,
+                        )?;
                     }
                 }
                 Entry::WhenGenerator(generator) => {
@@ -236,7 +263,13 @@ impl Evaluator {
                         generator.else_body.as_deref().map(Vec::as_slice)
                     };
                     if let Some(selected) = selected {
-                        self.eval_listing_entries(selected, &listing_scope, depth + 1, items)?;
+                        self.eval_listing_entries(
+                            selected,
+                            &listing_scope,
+                            depth + 1,
+                            items,
+                            elem_class,
+                        )?;
                     }
                 }
                 _ => {}
@@ -244,6 +277,38 @@ impl Evaluator {
         }
         Ok(())
     }
+}
+
+/// The scope name an untyped `new { ... }` element of a `Listing<T>` is
+/// constructed through.
+const LISTING_ELEM_CLASS: &str = "\0listing_elem_class";
+
+/// The class an untyped `new { ... }` element of a `Listing<T>` constructs:
+/// `T` when it is a single class (an alias or nullable `T?` included). A
+/// union, a built-in or an unresolved name leaves such an element untyped.
+pub(super) fn listing_elem_class(type_args: &[String], scope: &Scope) -> Option<Arc<Value>> {
+    let names = expand_type_alias_names(type_args, scope);
+    let [name] = names.as_slice() else {
+        return None;
+    };
+    let name = mapping_value_type_base(name).trim_end_matches('?');
+    match resolve_dotted(scope, name) {
+        Some(class @ Value::Object(_, Some(_))) if matches!(&class, Value::Object(_, Some(source)) if source.type_name.is_some()) => {
+            Some(Arc::new(class))
+        }
+        _ => None,
+    }
+}
+
+/// The element class of a property declared `ty`, when that is a `Listing<T>`.
+pub(super) fn declared_listing_elem_class(
+    ty: &crate::parser::TypeExpr,
+    scope: &Scope,
+) -> Option<Arc<Value>> {
+    let (name, args) = inferred_new_type(ty, scope, 0).ok()?;
+    (name == "Listing")
+        .then(|| listing_elem_class(&args, scope))
+        .flatten()
 }
 
 /// Bind a local or property of a listing body for the body's entries.

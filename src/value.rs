@@ -418,10 +418,20 @@ pub enum ListKind {
 
 /// The items of a [`Value::List`] and which collection they form. Derefs to
 /// the items.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ListValue {
     items: Arc<Vec<Value>>,
     kind: ListKind,
+    /// For a `Listing<T>` whose `T` is a class: that class, so an untyped
+    /// `new { ... }` element added later is an instance of it. It is not part
+    /// of the value's identity.
+    elem_class: Option<Arc<Value>>,
+}
+
+impl PartialEq for ListValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind && self.items == other.items
+    }
 }
 
 impl ListValue {
@@ -429,7 +439,19 @@ impl ListValue {
         ListValue {
             items: items.into(),
             kind,
+            elem_class: None,
         }
+    }
+
+    /// The class of a `Listing<T>`'s elements, if `T` is a class.
+    pub(crate) fn elem_class(&self) -> Option<&Arc<Value>> {
+        self.elem_class.as_ref()
+    }
+
+    /// The same listing with the class its elements are declared to be.
+    pub(crate) fn with_elem_class(mut self, class: Option<Arc<Value>>) -> Self {
+        self.elem_class = class;
+        self
     }
 
     pub fn kind(&self) -> ListKind {

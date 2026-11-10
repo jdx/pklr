@@ -142,7 +142,13 @@ impl Evaluator {
                     );
                     listing_scope.receiver_list_base = Some(0);
                     let mut items = Vec::new();
-                    this.eval_listing_entries(entries, &listing_scope, depth + 1, &mut items)?;
+                    this.eval_listing_entries(
+                        entries,
+                        &listing_scope,
+                        depth + 1,
+                        &mut items,
+                        None,
+                    )?;
                     Ok(items)
                 };
                 match type_name.as_deref() {
@@ -169,8 +175,17 @@ impl Evaluator {
                         );
                         listing_scope.receiver_list_base = Some(0);
                         let mut items = Vec::new();
-                        self.eval_listing_entries(entries, &listing_scope, depth + 1, &mut items)?;
-                        Ok(Value::List(ListValue::new(ListKind::Listing, items)))
+                        let elem_class = listing_elem_class(generic_params, scope);
+                        self.eval_listing_entries(
+                            entries,
+                            &listing_scope,
+                            depth + 1,
+                            &mut items,
+                            elem_class.as_ref(),
+                        )?;
+                        Ok(Value::List(
+                            ListValue::new(ListKind::Listing, items).with_elem_class(elem_class),
+                        ))
                     }
                     Some("Mapping") => {
                         check_member_kinds("Mapping", entries, false)?;

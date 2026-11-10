@@ -87,8 +87,21 @@ impl Evaluator {
                 amendment_scope.set("super", Value::List(items.clone()));
                 amendment_scope.receiver_entries = Some(body.clone());
                 amendment_scope.receiver_list_base = Some(items.len());
-                self.eval_listing_entries(body, &amendment_scope, depth, items.make_mut())?;
-                return Ok(Some(Value::List(items)));
+                // `x: Listing<T>` makes each `new { ... }` element a `T`. A
+                // listing the declaring class built already knows `T`.
+                let elem_class = items.elem_class().cloned().or_else(|| {
+                    prop.type_ann
+                        .as_ref()
+                        .and_then(|ty| declared_listing_elem_class(ty, scope))
+                });
+                self.eval_listing_entries(
+                    body,
+                    &amendment_scope,
+                    depth,
+                    items.make_mut(),
+                    elem_class.as_ref(),
+                )?;
+                return Ok(Some(Value::List(items.with_elem_class(elem_class))));
             }
             // `foo { ... }` — object body amendment.
             // If the property already has a value in scope (e.g., from a base class),
@@ -193,6 +206,12 @@ impl Evaluator {
             }
             if let Some(default) = &mut default {
                 apply_mapping_type_annotation(default, Some(ty));
+                if let Value::List(list) = default
+                    && list.kind() == ListKind::Listing
+                {
+                    *list = std::mem::take(list)
+                        .with_elem_class(declared_listing_elem_class(ty, scope));
+                }
             }
             if require_union_default
                 && default.is_none()

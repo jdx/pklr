@@ -5344,3 +5344,155 @@ m: Mapping<String, R | Listing<Int>> = new {
     );
     assert_eq!(result["m"]["l"], serde_json::json!([1, 2]));
 }
+
+#[test]
+fn typed_listing_new_element_takes_the_element_class() {
+    let result = eval(
+        r#"
+class Task { name: String; loopVar: String = "item" }
+class Play { tasks: Listing<Task> }
+p = new Play { tasks { new { name = "t" } } }
+n = p.tasks[0] is Task
+"#,
+    );
+    assert_eq!(
+        result["p"]["tasks"],
+        serde_json::json!([{"name": "t", "loopVar": "item"}])
+    );
+    assert_eq!(result["n"], true);
+}
+
+#[test]
+fn typed_listing_new_element_runs_the_class_type_checks() {
+    let error = eval_fails(
+        r#"
+class Task { name: String }
+class Play { tasks: Listing<Task> }
+p = new Play { tasks { new { name = 5 } } }
+"#,
+    );
+    assert!(error.contains("String"), "{error}");
+    let error = eval_fails(
+        r#"
+class Task { name: String }
+class Play { tasks: Listing<Task> }
+p = new Play { tasks { new { nme = "t" } } }
+"#,
+    );
+    assert!(error.contains("nme"), "{error}");
+}
+
+#[test]
+fn typed_listing_new_element_recomputes_class_properties() {
+    let result = eval(
+        r#"
+class Task { x: Int = 1; y: Int = x + 1 }
+class Play { tasks: Listing<Task> }
+local base = 10
+p = new Play {
+  tasks {
+    new { x = 5 }
+    for (i in List(1, 2)) { new { x = base + i } }
+    when (true) { new {} }
+    ...List(new Task { x = 20 })
+  }
+}
+"#,
+    );
+    let ys: Vec<_> = result["p"]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|task| task["y"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ys, [6, 12, 13, 2, 21]);
+}
+
+#[test]
+fn typed_listing_new_element_in_declared_listing_forms() {
+    let result = eval(
+        r#"
+class Task { name: String; loopVar: String = "item" }
+typealias T = Task
+class Play {
+  tasks: Listing<Task> = new { new { name = "d" } }
+  opt: Listing<T?>
+  nested: Listing<Task>?
+}
+a: Listing<Task> = new { new { name = "a" } }
+b = new Listing<T> { new { name = "b" } }
+p = new Play { opt { new { name = "o" } null } }
+q = (p) { tasks { new { name = "e" } } }
+r = new Play { nested { new { name = "n" } } }
+"#,
+    );
+    let item = |name: &str| serde_json::json!({"name": name, "loopVar": "item"});
+    assert_eq!(result["a"], serde_json::json!([item("a")]));
+    assert_eq!(result["b"], serde_json::json!([item("b")]));
+    assert_eq!(
+        result["p"]["opt"],
+        serde_json::json!([item("o"), serde_json::Value::Null])
+    );
+    assert_eq!(
+        result["q"]["tasks"],
+        serde_json::json!([item("d"), item("e")])
+    );
+    assert_eq!(result["r"]["nested"], serde_json::json!([item("n")]));
+}
+
+#[test]
+fn typed_listing_new_element_of_a_self_referential_class() {
+    let result = eval(
+        r#"
+class Task { name: String; loopVar: String = "item"; block: Listing<Task>? }
+class Play { tasks: Listing<Task> }
+p = new Play { tasks { new { name = "t"; block { new { name = "inner" } } } } }
+"#,
+    );
+    assert_eq!(
+        result["p"]["tasks"][0]["block"],
+        serde_json::json!([{"name": "inner", "loopVar": "item", "block": null}])
+    );
+}
+
+#[test]
+fn typed_listing_new_element_class_only_visible_in_the_declaring_module() {
+    let dir = TestTempDir::new("pklr_typed_listing_import");
+    std::fs::write(
+        dir.path().join("lib.pkl"),
+        "class Task { name: String; loopVar: String = \"item\" }\nclass Play { tasks: Listing<Task> }\n",
+    )
+    .unwrap();
+    let main = dir.path().join("main.pkl");
+    std::fs::write(
+        &main,
+        "import \"lib.pkl\" as L\np = new L.Play { tasks { new { name = \"t\" } } }\n",
+    )
+    .unwrap();
+    let result = pklr::eval_to_json(&main).unwrap();
+    assert_eq!(
+        result["p"]["tasks"],
+        serde_json::json!([{"name": "t", "loopVar": "item"}])
+    );
+    std::fs::write(
+        &main,
+        "import \"lib.pkl\" as L\np = new L.Play { tasks { new { nme = \"t\" } } }\n",
+    )
+    .unwrap();
+    let error = pklr::eval_to_json(&main).unwrap_err().to_string();
+    assert!(error.contains("nme"), "{error}");
+}
+
+#[test]
+fn typed_listing_new_element_with_union_or_builtin_element_type_stays_untyped() {
+    let result = eval(
+        r#"
+class A { a: Int = 1 }
+class B { b: Int = 2 }
+u: Listing<A | B> = new { new { a = 3 } }
+d: Listing<Dynamic> = new { new { k = 1 } }
+"#,
+    );
+    assert_eq!(result["u"], serde_json::json!([{"a": 3}]));
+    assert_eq!(result["d"], serde_json::json!([{"k": 1}]));
+}
