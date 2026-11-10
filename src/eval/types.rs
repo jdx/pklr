@@ -938,7 +938,7 @@ pub(super) fn is_class_value(val: &Value) -> bool {
 /// class `name`. `Object` is the superclass of `Dynamic` and `Listing`.
 pub(super) fn list_is_type(kind: ListKind, name: &str) -> bool {
     match name {
-        "Any" => true,
+        "Any" | "unknown" => true,
         "List" => kind == ListKind::List,
         "Listing" => kind == ListKind::Listing,
         "Set" => kind == ListKind::Set,
@@ -1470,48 +1470,111 @@ const STDLIB_TYPE_NAMES: &[&str] = &[
 /// or type alias, or `None` when every name resolves. A name that pklr cannot
 /// resolve (one inherited from an amended module, say) is reported only when
 /// it is a plain or dotted identifier that nothing in `scope` provides.
-pub(super) fn unresolved_type_error(ty: &crate::parser::TypeExpr, scope: &Scope) -> Option<String> {
-    use crate::parser::TypeExpr;
-    match ty {
-        TypeExpr::Named(name) => unresolved_type_name(name, scope),
-        TypeExpr::Nullable(inner) => unresolved_type_error(inner, scope),
-        TypeExpr::Union(variants) => variants
-            .iter()
-            .find_map(|variant| unresolved_type_error(variant, scope)),
-        TypeExpr::Generic(name, args) => unresolved_type_name(name, scope).or_else(|| {
-            args.iter()
-                .find_map(|arg| unresolved_type_error(arg, scope))
-        }),
-        TypeExpr::Constrained(base, _) => {
-            let head = base
-                .trim_start_matches('*')
-                .trim_end_matches('?')
-                .split('<')
-                .next()
-                .unwrap_or(base);
-            unresolved_type_name(head, scope)
-        }
+///
+/// The names inside a type alias are checked too. `module_has_alias` tells
+/// whether the imported module with the given identity declares a type alias
+/// (aliases are not members of the module's value).
+pub(super) fn unresolved_type_error(
+    ty: &crate::parser::TypeExpr,
+    scope: &Scope,
+    module_has_alias: &mut dyn FnMut(&str, &str) -> bool,
+) -> Option<String> {
+    TypeResolver {
+        scope,
+        module_has_alias,
+        expanding: Vec::new(),
     }
+    .check(ty)
 }
 
-fn unresolved_type_name(name: &str, scope: &Scope) -> Option<String> {
-    let name = name.strip_prefix('*').unwrap_or(name);
-    let first = name.split('.').next().unwrap_or(name);
-    if name.is_empty()
-        || string_literal_type_value(name).is_some()
-        || STDLIB_TYPE_NAMES.contains(&name)
-        // `module`, `outer` and `this` stand for the enclosing scopes.
-        || matches!(first, "module" | "outer" | "this")
-        || scope.get_type_alias(name).is_some()
-        || resolve_dotted(scope, name).is_some()
-    {
-        return None;
-    }
-    match name.rsplit_once('.') {
-        None => Some(format!("Cannot find type `{name}`.")),
-        Some((module, member)) if resolve_dotted(scope, module).is_some() => {
-            Some(format!("Cannot find type `{member}` in module `{module}`."))
+struct TypeResolver<'a> {
+    scope: &'a Scope,
+    module_has_alias: &'a mut dyn FnMut(&str, &str) -> bool,
+    /// The aliases being expanded, so a recursive alias ends the walk.
+    expanding: Vec<String>,
+}
+
+impl TypeResolver<'_> {
+    fn check(&mut self, ty: &crate::parser::TypeExpr) -> Option<String> {
+        use crate::parser::TypeExpr;
+        match ty {
+            // A constrained type or a default-marked variant holds the text of
+            // the type it was made from (`List<Foo>`, `*Int?`), not its parts.
+            TypeExpr::Named(text) | TypeExpr::Constrained(text, _) => {
+                let whole = text.trim_start_matches('*').trim_end_matches('?');
+                if whole.is_empty() || string_literal_type_value(whole).is_some() {
+                    None
+                } else if !whole.contains(['<', '>', '(', ')', '|', '"']) {
+                    // One name, which can hold a comma its quotes were
+                    // stripped from.
+                    self.check_name(whole)
+                } else {
+                    crate::parser::type_text_names(text)
+                        .find_map(|range| self.check_name(&text[range]))
+                }
+            }
+            TypeExpr::Nullable(inner) => self.check(inner),
+            TypeExpr::Union(variants) => variants.iter().find_map(|variant| self.check(variant)),
+            TypeExpr::Generic(name, args) => self
+                .check_name(name)
+                .or_else(|| args.iter().find_map(|arg| self.check(arg))),
         }
-        Some(_) => Some(format!("Cannot find module import `{first}`.")),
+    }
+
+    fn check_name(&mut self, name: &str) -> Option<String> {
+        let scope = self.scope;
+        if STDLIB_TYPE_NAMES.contains(&name)
+            || name == "module"
+            || name.starts_with(crate::parser::TYPE_PARAM_PREFIX)
+        {
+            return None;
+        }
+        let Some((module, member)) = name.rsplit_once('.') else {
+            return self.check_bare_name(name);
+        };
+        let first = name.split('.').next().unwrap_or(name);
+        // `module`, `this` and `outer` stand for the enclosing scopes, whose
+        // members must still name a class or alias.
+        let enclosing = matches!(first, "module" | "this" | "outer") && !module.contains('.');
+        if !enclosing && resolve_dotted(scope, module).is_none() {
+            return Some(format!("Cannot find module import `{first}`."));
+        }
+        let names_class = matches!(
+            resolve_dotted(scope, name),
+            Some(Value::Object(_, Some(source))) if source.kind == ObjectKind::Class
+        );
+        let names_alias = if enclosing {
+            scope.get_type_alias(member).is_some()
+        } else {
+            scope
+                .module_identity(module)
+                .is_some_and(|identity| (self.module_has_alias)(identity, member))
+        };
+        (!names_class && !names_alias)
+            .then(|| format!("Cannot find type `{member}` in module `{module}`."))
+    }
+
+    fn check_bare_name(&mut self, name: &str) -> Option<String> {
+        let scope = self.scope;
+        if let Some(alias) = scope.get_type_alias(name) {
+            if self.expanding.iter().any(|open| open == name) {
+                return None;
+            }
+            self.expanding.push(name.to_string());
+            let error = self.check(alias);
+            self.expanding.pop();
+            return error;
+        }
+        // A function captures the marker of an alias, not its definition.
+        if scope.get(&type_alias_marker(name)).is_some() {
+            return None;
+        }
+        match scope.get(name) {
+            Some(Value::Object(_, Some(source))) if source.kind == ObjectKind::Class => None,
+            // The name an import binds is the type of that module.
+            Some(Value::Object(..)) if scope.module_identity(name).is_some() => None,
+            Some(_) => Some(format!("Expected `{name}` to be a type, but it is not.")),
+            None => Some(format!("Cannot find type `{name}`.")),
+        }
     }
 }

@@ -439,6 +439,7 @@ pub(super) fn mapping_source() -> ObjectSource {
         poisoned_members: None,
         kind: ObjectKind::Mapping,
         is_parsed_json: false,
+        is_module: false,
         prototype: None,
     }
 }
@@ -1065,6 +1066,7 @@ impl Evaluator {
                                         poisoned_members: None,
                                         kind: ObjectKind::Object,
                                         is_parsed_json: false,
+                                        is_module: false,
                                         prototype: None,
                                     },
                                 };

@@ -525,6 +525,7 @@ impl Evaluator {
             (Value::Object(_, Some(source)), "toDynamic")
                 if source.kind == ObjectKind::Mapping
                     || (source.kind != ObjectKind::Class
+                        && !source.is_module
                         && source.type_name.is_none()
                         && source.type_identity.is_none()) =>
             {

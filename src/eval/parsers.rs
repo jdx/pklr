@@ -325,6 +325,7 @@ impl JsonParser<'_> {
                 ObjectKind::Object
             },
             is_parsed_json: true,
+            is_module: false,
             prototype: None,
         };
         self.depth -= 1;

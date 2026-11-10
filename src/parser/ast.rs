@@ -314,3 +314,88 @@ pub struct WhenGenerator {
     pub body: Body,
     pub else_body: Option<Body>,
 }
+
+/// The prefix of the name of a type parameter of a type alias in the alias's
+/// body (`T` in `typealias L<T> = List<T>`), which names no class or alias.
+pub(crate) const TYPE_PARAM_PREFIX: &str = "$tp$";
+
+/// The byte ranges of the type names written in the text of a type (the
+/// runtime name of a constrained or default-marked type, such as `List<Foo>`
+/// or `*Int?`): identifiers, which can be qualified, outside string literals.
+pub(crate) fn type_text_names(text: &str) -> impl Iterator<Item = std::ops::Range<usize>> + '_ {
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    std::iter::from_fn(move || {
+        while index < bytes.len() {
+            let byte = bytes[index];
+            if byte == b'`' {
+                // A quoted name, which can hold any character.
+                let start = index;
+                index += 1;
+                while index < bytes.len() && bytes[index] != b'`' {
+                    index += 1;
+                }
+                index = (index + 1).min(bytes.len());
+                return Some(start..index);
+            } else if byte == b'"' {
+                index += 1;
+                while index < bytes.len() && bytes[index] != b'"' {
+                    index += if bytes[index] == b'\\' { 2 } else { 1 };
+                }
+                index += 1;
+            } else if byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'$') {
+                let start = index;
+                while index < bytes.len()
+                    && (bytes[index].is_ascii_alphanumeric()
+                        || matches!(bytes[index], b'_' | b'$' | b'.'))
+                {
+                    index += 1;
+                }
+                let end = start + text[start..index].trim_end_matches('.').len();
+                return Some(start..end);
+            } else {
+                index += 1;
+            }
+        }
+        None
+    })
+}
+
+/// `ty` with the type parameters `parameters` of a type alias marked (see
+/// [`TYPE_PARAM_PREFIX`]), so they are not taken for a class or alias.
+pub(super) fn mark_type_parameters(ty: TypeExpr, parameters: &[String]) -> TypeExpr {
+    let mark_text = |text: &str| {
+        let mut out = String::with_capacity(text.len());
+        let mut copied = 0;
+        for range in type_text_names(text) {
+            if parameters.iter().any(|name| *name == text[range.clone()]) {
+                out.push_str(&text[copied..range.start]);
+                out.push_str(TYPE_PARAM_PREFIX);
+                copied = range.start;
+            }
+        }
+        out.push_str(&text[copied..]);
+        out
+    };
+    match ty {
+        TypeExpr::Named(text) => TypeExpr::Named(mark_text(&text)),
+        TypeExpr::Nullable(inner) => {
+            TypeExpr::Nullable(Box::new(mark_type_parameters(*inner, parameters)))
+        }
+        TypeExpr::Union(variants) => TypeExpr::Union(
+            variants
+                .into_iter()
+                .map(|variant| mark_type_parameters(variant, parameters))
+                .collect(),
+        ),
+        TypeExpr::Generic(name, args) => TypeExpr::Generic(
+            name,
+            args.into_iter()
+                .map(|arg| mark_type_parameters(arg, parameters))
+                .collect(),
+        ),
+        TypeExpr::Constrained(text, constraint) => {
+            TypeExpr::Constrained(mark_text(&text), constraint)
+        }
+    }
+}

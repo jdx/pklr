@@ -347,6 +347,10 @@ pub struct ObjectSource {
     /// from a Pkl body. Such objects retain their evaluated members when
     /// amended, but still render as Dynamics.
     pub(crate) is_parsed_json: bool,
+    /// Whether this object is a module (one that carries a source only for
+    /// its deprecated or failed members), which is a `Typed` object and not
+    /// a `Dynamic`.
+    pub(crate) is_module: bool,
     /// For an instance of a class, the class's default object. An untyped
     /// `new { ... }` assigned to one of the instance's properties amends the
     /// class default of that property, not the receiver's current value.
@@ -1470,6 +1474,7 @@ mod same_data_tests {
             }),
             kind: ObjectKind::Object,
             is_parsed_json: false,
+            is_module: false,
             prototype: None,
         };
         Value::Object(Arc::new(map), Some(Arc::new(source)))

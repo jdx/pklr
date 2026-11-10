@@ -206,3 +206,144 @@ fn json_of_a_dynamic_with_elements_and_members_keeps_the_elements() {
         "{error}"
     );
 }
+
+#[test]
+fn is_and_as_check_the_names_nested_in_a_type() {
+    for src in [
+        "r = 1 is List<Foo>(true)",
+        "r = 1 is Int|List<Foo>(true)",
+        "r = 1 as Map<String, Foo>(true)",
+        "r = 1 is *List<Foo>|Int",
+        "typealias T = Int|Foo\nr = 1 is T",
+        "typealias T = List<Foo>\nr = 1 is T",
+        "typealias T = List<Foo>(true)\nr = 1 is T",
+        "typealias T = U?\ntypealias U = Foo\nr = 1 is T",
+        "typealias T = *List<Foo>|Int\nr = 1 is T",
+        "typealias T = Int|Foo\nr = 1 is List<T>",
+    ] {
+        let error = eval_fails(src);
+        assert!(error.contains("Cannot find type `Foo`."), "{src}: {error}");
+    }
+}
+
+#[test]
+fn a_default_marked_union_variant_is_not_an_unknown_type() {
+    let json = eval(
+        r#"
+a = 1 is *List<Int>|Int
+b = 1 is (*Int?|String)
+c = List(1) is *List<Int>|Int
+d = null is *Int?|String
+e = 1 is *List<Int>(isEmpty)|Int
+typealias T = *Int|String
+f = 1 is T
+"#,
+    );
+    for key in ["a", "b", "c", "d", "e", "f"] {
+        assert_eq!(json[key], true, "{key}");
+    }
+}
+
+#[test]
+fn a_name_that_is_no_type_is_rejected() {
+    for src in [
+        "local Foo = 1\nr = 1 is Foo",
+        "local Foo = new Dynamic { a = 1 }\nr = 1 as Foo",
+        "foo = 1\nr = 1 is foo",
+    ] {
+        let error = eval_fails(src);
+        assert!(
+            error.contains("Expected `") && error.contains("to be a type, but it is not."),
+            "{src}: {error}"
+        );
+    }
+    // pkl rejects a type written `module.Foo`, `this.Foo` or `outer.Foo`;
+    // pklr accepts one that names a class or alias, and reports the rest.
+    for src in [
+        "r = 1 is module.Foo",
+        "r = 1 is this.Foo",
+        "r = 1 is outer.Foo",
+        "foo = 1\nr = 1 is module.foo",
+    ] {
+        let error = eval_fails(src);
+        assert!(error.contains("Cannot find type `"), "{src}: {error}");
+    }
+}
+
+#[test]
+fn is_and_as_unknown_match_a_collection() {
+    let json = eval(
+        r#"
+a = List(1) is unknown
+b = List(1) as unknown
+c = new Listing { 1 } is unknown
+d = Set(1) is unknown
+e = new Dynamic { 1 } is unknown
+f = new Dynamic { 1 } as unknown
+g = List(1) is nothing
+"#,
+    );
+    for key in ["a", "c", "d", "e"] {
+        assert_eq!(json[key], true, "{key}");
+    }
+    assert_eq!(json["b"], serde_json::json!([1]));
+    assert_eq!(json["g"], false);
+}
+
+#[test]
+fn an_imported_module_names_its_type_aliases() {
+    let temp = TestTempDir::new("pklr_test_is_module_aliases");
+    std::fs::write(
+        temp.path().join("m.pkl"),
+        "typealias A = Int\ntypealias B = String(length > 1)|A\nclass C {}\n",
+    )
+    .unwrap();
+    let eval_main = |body: &str| {
+        let path = temp.path().join("main.pkl");
+        std::fs::write(&path, format!("import \"m.pkl\"\n{body}\n")).unwrap();
+        pklr::eval_to_json(&path)
+    };
+    assert_eq!(
+        eval_main(
+            "a = 1 is m.A\nb = \"x\" is m.A\nc = \"xx\" is m.B\nd = 1 as m.B\ne = \"x\" is m.B\nf = new m.C {} is m.A"
+        )
+        .unwrap(),
+        serde_json::json!({"a": true, "b": false, "c": true, "d": 1, "e": false, "f": false})
+    );
+    let error = eval_main("r = 1 is m.Nope").unwrap_err().to_string();
+    assert!(
+        error.contains("Cannot find type `Nope` in module `m`."),
+        "{error}"
+    );
+}
+
+#[test]
+fn to_dynamic_works_on_a_module_that_carries_a_source() {
+    let temp = TestTempDir::new("pklr_test_to_dynamic_module");
+    std::fs::write(temp.path().join("m.pkl"), "@Deprecated\nold = 1\nx = 2\n").unwrap();
+    let path = temp.path().join("main.pkl");
+    std::fs::write(&path, "import \"m.pkl\"\nr = m.toDynamic().x\n").unwrap();
+    assert_eq!(
+        pklr::eval_to_json(&path).unwrap(),
+        serde_json::json!({"r": 2})
+    );
+}
+
+#[test]
+fn the_type_parameters_of_an_alias_are_no_unknown_types() {
+    let json = eval(
+        r#"
+typealias L<T> = List<T>
+typealias M<K, V> = Map<K, V>(isEmpty)|Listing<V>
+class T {}
+a = List(1) is L<Int>
+b = Map() is M<String, Int>
+c = 1 is M<String, Int>
+"#,
+    );
+    assert_eq!(json["a"], true);
+    assert_eq!(json["b"], true);
+    assert_eq!(json["c"], false);
+    let error = eval_fails("typealias L<T> = List<T|Foo>\nr = 1 is L<Int>");
+    assert!(error.contains("Cannot find type `Foo`."), "{error}");
+}

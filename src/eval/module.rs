@@ -579,6 +579,7 @@ impl Evaluator {
                     .then(|| Arc::new(poisoned_members)),
                 kind: ObjectKind::Object,
                 is_parsed_json: false,
+                is_module: true,
                 prototype: None,
             }))
         };

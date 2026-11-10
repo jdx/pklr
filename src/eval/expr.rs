@@ -257,6 +257,7 @@ impl Evaluator {
                             poisoned_members: None,
                             kind: ObjectKind::Mapping,
                             is_parsed_json: false,
+                            is_module: false,
                             prototype: None,
                         };
                         Ok(Value::Object(Arc::new(map), Some(Arc::new(source))))
@@ -389,6 +390,7 @@ impl Evaluator {
                                         poisoned_members: None,
                                         kind: ObjectKind::Object,
                                         is_parsed_json: false,
+                                        is_module: false,
                                         prototype: None,
                                     }
                                 };
@@ -431,6 +433,7 @@ impl Evaluator {
                                 poisoned_members: None,
                                 kind: ObjectKind::Object,
                                 is_parsed_json: false,
+                                is_module: false,
                                 prototype: None,
                             };
                             Ok(Value::Object(Arc::new(merged), Some(Arc::new(src))))
@@ -680,7 +683,7 @@ impl Evaluator {
                 }
             }
             Expr::Is(expr, ty) => {
-                if let Some(message) = unresolved_type_error(ty, scope) {
+                if let Some(message) = self.unresolved_type(ty, scope) {
                     return Err(Error::Eval(message));
                 }
                 let val = self.eval_expr(expr, scope, depth + 1)?;
@@ -688,7 +691,7 @@ impl Evaluator {
                 Ok(Value::Bool(matches))
             }
             Expr::As(expr, ty) => {
-                if let Some(message) = unresolved_type_error(ty, scope) {
+                if let Some(message) = self.unresolved_type(ty, scope) {
                     return Err(Error::Eval(message));
                 }
                 let val = self.eval_expr(expr, scope, depth + 1)?;

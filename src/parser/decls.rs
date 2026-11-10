@@ -230,9 +230,15 @@ impl<'a> Parser<'a> {
         if header.has(Modifier::Local) {
             self.local_type_aliases.insert(name.clone());
         }
-        self.type_alias_parameters.insert(name.clone(), parameters);
+        self.type_alias_parameters
+            .insert(name.clone(), parameters.clone());
         self.expect(&TokenKind::Equals, "=")?;
         let ty = self.parse_type()?;
+        let ty = if parameters.is_empty() {
+            ty
+        } else {
+            mark_type_parameters(ty, &parameters)
+        };
         Ok(Entry::TypeAlias(name, ty))
     }
 

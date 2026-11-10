@@ -32,6 +32,62 @@ impl Evaluator {
         )))
     }
 
+    /// The error for the first name in `ty` that `is` and `as` cannot resolve.
+    pub(super) fn unresolved_type(
+        &mut self,
+        ty: &crate::parser::TypeExpr,
+        scope: &Scope,
+    ) -> Option<String> {
+        unresolved_type_error(ty, scope, &mut |identity, name| {
+            self.module_declares_alias(identity, name)
+        })
+    }
+
+    /// Whether the module with the given identity (the canonical path or URL
+    /// an import records) declares the type alias `name`. A module's aliases
+    /// are no members of its value, so they are found in its final scope.
+    fn module_declares_alias(&mut self, identity: &str, name: &str) -> bool {
+        self.module_scope_key(identity).is_some_and(|key| {
+            self.module_scopes
+                .get(&key)
+                .is_some_and(|snapshot| snapshot.type_aliases.contains_key(name))
+        })
+    }
+
+    /// The key of the final scope of the module with the given identity.
+    fn module_scope_key(&mut self, identity: &str) -> Option<PathBuf> {
+        let keys: Vec<PathBuf> = self.module_scopes.keys().cloned().collect();
+        keys.into_iter().find(|key| {
+            let key_identity = if key.to_string_lossy().contains("://") {
+                key.display().to_string()
+            } else {
+                self.canonicalize_io(key)
+                    .unwrap_or_else(|_| key.clone())
+                    .display()
+                    .to_string()
+            };
+            key_identity == identity
+        })
+    }
+
+    /// The type alias `module.member` of an imported module, with the scope
+    /// that its definition resolves in.
+    fn imported_alias(
+        &mut self,
+        scope: &Scope,
+        name: &str,
+    ) -> Option<(crate::parser::TypeExpr, Scope)> {
+        let (module, member) = name.rsplit_once('.')?;
+        if module.contains('.') || scope.get(module).is_none() {
+            return None;
+        }
+        let key = self.module_scope_key(scope.module_identity(module)?)?;
+        let mut module_scope = Scope::default();
+        self.layer_evaluated_module_scope(&key, &mut module_scope);
+        let alias = module_scope.get_type_alias(member)?.clone();
+        Some((alias, module_scope))
+    }
+
     /// Check if a value matches a type expression, including constraint evaluation.
     pub(super) fn eval_type_check(
         &mut self,
@@ -100,6 +156,20 @@ impl Evaluator {
                 }
                 if let Some(matches) = value_is_class_type(val, name, scope) {
                     return Ok(matches);
+                }
+                // An alias of an imported module is no member of its value.
+                if name.contains('.')
+                    && resolve_dotted(scope, name).is_none()
+                    && let Some((resolved, module_scope)) = self.imported_alias(scope, name)
+                {
+                    return self.eval_alias_check(
+                        val,
+                        name,
+                        &resolved,
+                        &module_scope,
+                        depth,
+                        resolving,
+                    );
                 }
                 // Otherwise, plain type check
                 Ok(value_is_type(val, ty))
