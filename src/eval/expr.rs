@@ -255,8 +255,10 @@ impl Evaluator {
                             mapping_value_types: generic_params.iter().skip(1).cloned().collect(),
                             deprecated,
                             poisoned_members: None,
+                            declared_as: None,
                             kind: ObjectKind::Mapping,
                             is_parsed_json: false,
+                            is_module: false,
                             prototype: None,
                         };
                         Ok(Value::Object(Arc::new(map), Some(Arc::new(source))))
@@ -387,8 +389,10 @@ impl Evaluator {
                                         mapping_value_types: Vec::new(),
                                         deprecated: merge_deprecated(&base_src.deprecated, entries),
                                         poisoned_members: None,
+                                        declared_as: None,
                                         kind: ObjectKind::Object,
                                         is_parsed_json: false,
+                                        is_module: false,
                                         prototype: None,
                                     }
                                 };
@@ -429,8 +433,10 @@ impl Evaluator {
                                 mapping_value_types: Vec::new(),
                                 deprecated,
                                 poisoned_members: None,
+                                declared_as: None,
                                 kind: ObjectKind::Object,
                                 is_parsed_json: false,
+                                is_module: false,
                                 prototype: None,
                             };
                             Ok(Value::Object(Arc::new(merged), Some(Arc::new(src))))

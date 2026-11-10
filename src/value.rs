@@ -341,12 +341,20 @@ pub struct ObjectSource {
     /// instantiating such a member reports its error instead of treating it
     /// as absent, and rendering the module reports a failed output member.
     pub(crate) poisoned_members: Option<Arc<IndexMap<Arc<str>, PoisonedMember>>>,
+    /// For a class a module declares as a member, the name of that member (the
+    /// class, or a type alias to it). A class held by another name, such as an
+    /// ordinary property `c = lib.C`, is data and is not marked.
+    pub(crate) declared_as: Option<Arc<str>>,
     /// Whether this is a `Mapping`, a class, or another object.
     pub(crate) kind: ObjectKind,
     /// Whether this object was materialized from JSON rather than evaluated
     /// from a Pkl body. Such objects retain their evaluated members when
     /// amended, but still render as Dynamics.
     pub(crate) is_parsed_json: bool,
+    /// Whether this object is a module, whose declared classes are members
+    /// rather than entries. A `Dynamic` or `Mapping` entry that holds a class
+    /// is data even when its key matches the class's name.
+    pub(crate) is_module: bool,
     /// For an instance of a class, the class's default object. An untyped
     /// `new { ... }` assigned to one of the instance's properties amends the
     /// class default of that property, not the receiver's current value.
@@ -1068,7 +1076,7 @@ impl Value {
                 unrenderable.get_or_insert(self);
                 serde_json::Value::Null
             }
-            Value::Object(map, _) => {
+            Value::Object(map, source) => {
                 // A `Dynamic` with elements and members has no JSON form.
                 if self.has_elements_and_members() {
                     unrenderable.get_or_insert(self);
@@ -1079,6 +1087,9 @@ impl Value {
                     // The result is discarded once a value fails.
                     if unrenderable.is_some() {
                         break;
+                    }
+                    if v.is_class_member(k, source.as_deref()) {
+                        continue;
                     }
                     obj.insert(
                         display_storage_key(k).to_string(),
@@ -1139,6 +1150,17 @@ impl Value {
     /// (a `Regex` is `{"_type": "regex", "pattern": ...}`); see
     /// [`Value::try_to_json`] to reject them as `pkl eval -f json` does.
     pub fn to_json(&self) -> serde_json::Value {
+        self.json_with(false)
+    }
+
+    /// [`Value::to_json`], keeping the classes a module declares. Two values
+    /// that differ only in those classes are different values, so this is what
+    /// identifies a value, for example as a mapping key.
+    pub(crate) fn identity_json(&self) -> serde_json::Value {
+        self.json_with(true)
+    }
+
+    fn json_with(&self, keep_classes: bool) -> serde_json::Value {
         match self {
             Value::Null => serde_json::Value::Null,
             Value::Bool(b) => json!(b),
@@ -1158,15 +1180,21 @@ impl Value {
                     })
                 };
                 for (k, v) in map.iter() {
+                    if !keep_classes && v.is_class_member(k, source.as_deref()) {
+                        continue;
+                    }
                     if matches!(v, Value::Lambda(..)) && is_method(k) {
                         continue;
                     }
-                    obj.insert(display_storage_key(k).to_string(), v.to_json());
+                    obj.insert(
+                        display_storage_key(k).to_string(),
+                        v.json_with(keep_classes),
+                    );
                 }
                 serde_json::Value::Object(obj)
             }
             Value::List(items) => {
-                serde_json::Value::Array(items.iter().map(|v| v.to_json()).collect())
+                serde_json::Value::Array(items.iter().map(|v| v.json_with(keep_classes)).collect())
             }
             Value::Lambda(..) => json!("<lambda>"),
             Value::Regex(regex) => json!({ "_type": "regex", "pattern": regex.pattern() }),
@@ -1174,6 +1202,62 @@ impl Value {
                 json!(crate::eval::stdlib::render_value(self))
             }
         }
+    }
+
+    /// Whether this is a class (or an alias to one) that the object with
+    /// source `container` declares as the member `key`. Such a class is a
+    /// member of a module, but not a property: Pkl never renders it, though
+    /// dotted access such as `lib.C` resolves it. A class held under another
+    /// name (`c = lib.C`) is an ordinary value.
+    pub(crate) fn is_class_member(&self, key: &str, container: Option<&ObjectSource>) -> bool {
+        matches!(self, Value::Object(_, Some(source))
+            if source.kind == ObjectKind::Class
+                && source.declared_as.as_deref() == Some(key))
+            && container.is_none_or(|container| container.is_module)
+    }
+
+    /// Whether the member `key` of the object with source `container` is left
+    /// out of the rendered object: a method (stored as a function) or a
+    /// declared class.
+    pub(crate) fn is_unrendered_member(&self, key: &str, container: Option<&ObjectSource>) -> bool {
+        matches!(self, Value::Lambda(..)) || self.is_class_member(key, container)
+    }
+
+    /// This class as the member `name` of a module.
+    pub(crate) fn declared_as_member(self, name: &str) -> Value {
+        match self {
+            Value::Object(map, Some(source))
+                if source.kind == ObjectKind::Class
+                    && source.declared_as.as_deref() != Some(name) =>
+            {
+                let mut source = Arc::unwrap_or_clone(source);
+                source.declared_as = Some(name.into());
+                Value::Object(map, Some(Arc::new(source)))
+            }
+            other => other,
+        }
+    }
+
+    /// This value as an entry of a `Map`, `Mapping` or converted object. A
+    /// class there is data, not a member a module declares, so it loses the
+    /// declared-member marker; otherwise a later conversion of the sourceless
+    /// container would take it for a module declaration and drop it.
+    #[inline(always)]
+    pub(crate) fn into_entry_value(self) -> Value {
+        match self {
+            Value::Object(map, Some(source)) if source.declared_as.is_some() => {
+                Self::strip_declared_marker(map, source)
+            }
+            other => other,
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn strip_declared_marker(map: Arc<ObjectMap>, source: Arc<ObjectSource>) -> Value {
+        let mut source = Arc::unwrap_or_clone(source);
+        source.declared_as = None;
+        Value::Object(map, Some(Arc::new(source)))
     }
 
     pub fn as_str(&self) -> Option<&str> {
@@ -1441,6 +1525,7 @@ mod same_data_tests {
             elements,
             mapping_value_types: Vec::new(),
             deprecated: IndexMap::new(),
+            declared_as: None,
             poisoned_members: poisoned.map(|members| {
                 Arc::new(
                     members
@@ -1459,6 +1544,7 @@ mod same_data_tests {
             }),
             kind: ObjectKind::Object,
             is_parsed_json: false,
+            is_module: false,
             prototype: None,
         };
         Value::Object(Arc::new(map), Some(Arc::new(source)))

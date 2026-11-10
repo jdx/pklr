@@ -319,12 +319,14 @@ impl JsonParser<'_> {
             mapping_value_types: Vec::new(),
             deprecated: Default::default(),
             poisoned_members: None,
+            declared_as: None,
             kind: if self.use_mapping {
                 ObjectKind::Mapping
             } else {
                 ObjectKind::Object
             },
             is_parsed_json: true,
+            is_module: false,
             prototype: None,
         };
         self.depth -= 1;

@@ -59,8 +59,10 @@ pub(super) fn typed_object(type_name: &str, members: ObjectMap) -> Value {
         mapping_value_types: Vec::new(),
         deprecated: IndexMap::new(),
         poisoned_members: None,
+        declared_as: None,
         kind: ObjectKind::Object,
         is_parsed_json: false,
+        is_module: false,
         prototype: None,
     };
     Value::Object(Arc::new(members), Some(Arc::new(source)))
