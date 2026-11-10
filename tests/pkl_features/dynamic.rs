@@ -571,3 +571,16 @@ fn a_dynamic_with_elements_and_members_is_no_mapping() {
     assert!(!is("new Dynamic { 1; x = 2 } is Mapping"));
     eval_fails("x: Mapping<Int, Int> = new Dynamic { 1; x = 2 }\n");
 }
+
+#[test]
+fn assigning_a_member_of_a_computed_dynamic_replaces_it() {
+    let json = eval(
+        r#"
+local d = Map("x", new Dynamic { a = 1 }).toDynamic()
+replaced = (d) { x = new Dynamic { b = 2 } }
+merged = (d) { x { b = 2 } }
+"#,
+    );
+    assert_eq!(json["replaced"], serde_json::json!({"x": {"b": 2}}));
+    assert_eq!(json["merged"], serde_json::json!({"x": {"a": 1, "b": 2}}));
+}

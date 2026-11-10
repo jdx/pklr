@@ -66,17 +66,22 @@ pub(super) fn typed_object(type_name: &str, members: ObjectMap) -> Value {
     Value::Object(Arc::new(members), Some(Arc::new(source)))
 }
 
-/// A `Dynamic` with the given members, such as `toDynamic()` builds.
+/// A `Dynamic` with the given members, such as `toDynamic()` builds. Its body
+/// spreads the members from a bound variable, so an amendment of it, which
+/// rebuilds the object from its body, keeps them and can replace any of them.
 pub(super) fn dynamic_object(members: ObjectMap) -> Value {
+    const MEMBERS: &str = "\0pklr:members";
     let Value::Object(_, Some(source)) = typed_object("Dynamic", ObjectMap::default()) else {
         unreachable!("typed_object builds an object with a source")
     };
     let mut source = Arc::unwrap_or_clone(source);
     source.type_name = None;
     source.kind = ObjectKind::Dynamic;
-    // As an object parsed from JSON, it keeps its members when amended: there
-    // is no body to rebuild them from.
-    source.is_parsed_json = true;
+    let mut scope = Scope::default();
+    scope.set(MEMBERS, Value::Object(Arc::new(members.clone()), None));
+    source.entries = vec![Entry::Spread(Expr::Ident(MEMBERS.into()))].into();
+    source.captured = SourceScope::lazy(&scope, Vec::new(), Vec::new());
+    source.evaluated_properties = members.keys().cloned().collect();
     Value::Object(Arc::new(members), Some(Arc::new(source)))
 }
 
