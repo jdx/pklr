@@ -6219,3 +6219,46 @@ o = (new lib.Outer {}) {
         "{err}"
     );
 }
+
+/// Modules `m1`..`m3` each import their successor as `m` and declare
+/// `typealias A = m.A`, so the lookups print identically yet are distinct
+/// aliases; `m4` ends the chain in `end`.
+fn eval_import_chain(end: &str, property_type: &str) -> Result<serde_json::Value, pklr::Error> {
+    let end_src = format!("typealias A = {end}\n");
+    let main = format!(
+        "import \"m1.pkl\" as m\nclass C {{ argv: {property_type} }}\nc = new C {{ argv {{ x = 1 }} }}\n"
+    );
+    eval_union_files(
+        "import_chain",
+        &[
+            ("m4.pkl", &end_src),
+            ("m3.pkl", "import \"m4.pkl\" as m\ntypealias A = m.A\n"),
+            ("m2.pkl", "import \"m3.pkl\" as m\ntypealias A = m.A\n"),
+            ("m1.pkl", "import \"m2.pkl\" as m\ntypealias A = m.A\n"),
+            ("main.pkl", &main),
+        ],
+    )
+}
+
+#[test]
+fn union_amend_accepts_a_dynamic_behind_modules_that_each_import_the_next_as_m() {
+    let value = eval_import_chain("Dynamic", "(m.A|Int)?").unwrap();
+    assert_eq!(value["c"]["argv"]["x"], serde_json::json!(1));
+}
+
+#[test]
+fn union_amend_rejects_an_unmarked_union_behind_modules_that_each_import_the_next_as_m() {
+    let error = eval_import_chain("Int|String", "m.A").unwrap_err();
+    assert!(error.to_string().contains(UNDEFINED), "{error}");
+}
+
+#[test]
+fn union_amend_follows_a_very_long_alias_chain_without_overflowing_the_stack() {
+    let mut src = String::new();
+    for i in 0..5000 {
+        src.push_str(&format!("typealias A{i} = A{}\n", i + 1));
+    }
+    src.push_str("typealias A5000 = Dynamic\nclass C { argv: (A0|Int)? }\n");
+    src.push_str("c = new C { argv { x = 1 } }\n");
+    assert_eq!(eval(&src)["c"]["argv"]["x"], serde_json::json!(1));
+}

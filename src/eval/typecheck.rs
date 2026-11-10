@@ -58,14 +58,54 @@ impl Evaluator {
     /// `resolve_type_alias`, except that an alias already followed on this
     /// walk resolves to `None`. A cycle of aliases ends there, however long
     /// the chain leading to it was.
+    ///
+    /// A chain of aliases that each name the next (`A0 = A1`, ...) is followed
+    /// here in a loop, so a long one does not use the call stack once per
+    /// alias: the result is the end of the chain, or the first name that does
+    /// not resolve or would close a cycle, left for the caller to handle.
     fn resolve_unvisited_alias(
         &mut self,
         name: &str,
         scope: &Scope,
         seen: &mut Vec<String>,
     ) -> Option<(TypeExpr, Option<Scope>)> {
+        let (mut alias, mut alias_scope) = self.resolve_alias_step(name, scope, seen)?;
+        while let TypeExpr::Named(next) = &alias {
+            if next.starts_with('*') {
+                break;
+            }
+            let next = next.clone();
+            let current = alias_scope.as_ref().unwrap_or(scope);
+            match self.resolve_alias_step(&next, current, seen) {
+                Some((target, target_scope)) => {
+                    alias = target;
+                    if target_scope.is_some() {
+                        alias_scope = target_scope;
+                    }
+                }
+                None => break,
+            }
+        }
+        Some((alias, alias_scope))
+    }
+
+    /// One alias lookup of `resolve_unvisited_alias`. The cycle key names the
+    /// module the alias is defined in as well as its name and body: distinct
+    /// modules can each declare `typealias A = m.A` without forming a cycle.
+    fn resolve_alias_step(
+        &mut self,
+        name: &str,
+        scope: &Scope,
+        seen: &mut Vec<String>,
+    ) -> Option<(TypeExpr, Option<Scope>)> {
         let (alias, alias_scope) = self.resolve_type_alias(name, scope)?;
-        let key = format!("{name}={}", display_type_expr(&alias));
+        let defined_in = alias_scope
+            .as_ref()
+            .unwrap_or(scope)
+            .type_namespace
+            .clone()
+            .unwrap_or_default();
+        let key = format!("{defined_in}|{name}={}", display_type_expr(&alias));
         if seen.contains(&key) {
             return None;
         }
