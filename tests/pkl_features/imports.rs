@@ -3369,3 +3369,66 @@ fn imported_module_rendered_by_the_stdlib_renderers_does_not_include_classes() {
         }
     }
 }
+
+/// Evaluates `main.pkl` with `files` beside it, to JSON.
+fn eval_files_to_json(files: &[(&str, &str)]) -> serde_json::Value {
+    let temp = TestTempDir::new("pklr_test_class_member_files");
+    for (name, source) in files {
+        std::fs::write(temp.path().join(name), source).unwrap();
+    }
+    pklr::eval_to_json(&temp.path().join("main.pkl")).unwrap()
+}
+
+#[test]
+fn class_held_by_a_property_is_a_value_not_a_member() {
+    // Pkl renders `d.c` through the converter: only the classes a module
+    // declares are left out, not every class-valued property.
+    let val = eval_files_to_json(&[
+        ("lib.pkl", "class C { req: Int; opt: Int = 1 }\n"),
+        (
+            "main.pkl",
+            "import \"lib.pkl\" as lib\nd { c = lib.C }\noutput { renderer = new JsonRenderer { converters { [\"d.c\"] = (_) -> \"class\" } } }\n",
+        ),
+    ]);
+    assert_eq!(val, serde_json::json!({"d": {"c": "class"}}));
+}
+
+#[test]
+fn imported_module_drops_a_property_named_like_an_inherited_typealias() {
+    // As in Pkl, `A = 5` is not a rendered member of a module that inherits
+    // `typealias A`, whether the module is evaluated or imported, while an
+    // ordinary property still is.
+    let files = [
+        (
+            "lib.pkl",
+            "open module lib\ntypealias A = Int\nclass B {}\n",
+        ),
+        ("child.pkl", "extends \"lib.pkl\"\nA = 5\na = 1\n"),
+        ("main.pkl", "import \"child.pkl\" as child\nr = child\n"),
+    ];
+    assert_eq!(
+        eval_files_to_json(&files),
+        serde_json::json!({"r": {"a": 1}})
+    );
+}
+
+#[test]
+fn imported_module_class_with_a_duration_default_still_renders_as_json() {
+    // The class is never rendered, so its `Duration` default is not an
+    // unrenderable value.
+    let temp = TestTempDir::new("pklr_test_class_duration");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("lib.pkl"),
+        "class K { t: Duration = 5.min }\nx = 1\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("main.pkl"), "import \"lib.pkl\" as lib\nr = lib\n").unwrap();
+    let value = pklr::Evaluator::new()
+        .eval_file(&dir.join("main.pkl"))
+        .unwrap();
+    assert_eq!(
+        value.try_to_json().unwrap(),
+        serde_json::json!({"r": {"x": 1}})
+    );
+}

@@ -1128,7 +1128,9 @@ impl Evaluator {
             )?;
             for (key, value) in fresh {
                 let unchanged = match (original.get(&key), amended.get(&key)) {
-                    (Some(original), Some(current)) => original.to_json() == current.to_json(),
+                    (Some(original), Some(current)) => {
+                        original.identity_json() == current.identity_json()
+                    }
                     _ => false,
                 };
                 if unchanged {
@@ -1142,7 +1144,8 @@ impl Evaluator {
             .find_default_template(overlay_entries, inherited_scope, depth)
             .ok()
             .flatten();
-        let same = declared.is_some_and(|declared| declared.to_json() == recorded.to_json());
+        let same =
+            declared.is_some_and(|declared| declared.identity_json() == recorded.identity_json());
         Ok(same.then_some(assigned_default))
     }
 }

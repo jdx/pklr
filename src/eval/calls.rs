@@ -467,9 +467,10 @@ impl Evaluator {
                 let key = args.first().and_then(|v| v.as_str()).unwrap_or("");
                 Ok(Some(Value::Bool(map.contains_key(key))))
             }
-            (Value::Object(map, _), "toMap" | "toMapping") => {
-                Ok(Some(Value::Object(without_class_members(map), None)))
-            }
+            (Value::Object(map, source), "toMap" | "toMapping") => Ok(Some(Value::Object(
+                without_class_members(map, source.as_deref()),
+                None,
+            ))),
             (Value::Object(map, _), "mapValues") => {
                 let lambda = args
                     .first()
@@ -497,9 +498,10 @@ impl Evaluator {
                 Ok(Some(Value::Object(Arc::new(result), None)))
             }
             (Value::Object(..), "toList") => Ok(Some(obj.clone())),
-            (Value::Object(map, _), "toDynamic") => {
-                Ok(Some(Value::Object(without_class_members(map), None)))
-            }
+            (Value::Object(map, source), "toDynamic") => Ok(Some(Value::Object(
+                without_class_members(map, source.as_deref()),
+                None,
+            ))),
 
             // Int/Float methods
             (Value::Int(n), "toString") => Ok(Some(Value::String(n.to_string().into()))),
@@ -680,13 +682,16 @@ pub(super) fn seed_builtins(scope: &mut Scope) {
 
 /// `map` without the classes a module holds as members. They are not
 /// properties, so a converted copy does not carry them.
-fn without_class_members(map: &Arc<ObjectMap>) -> Arc<ObjectMap> {
-    if !map.values().any(Value::is_class_member) {
+fn without_class_members(map: &Arc<ObjectMap>, source: Option<&ObjectSource>) -> Arc<ObjectMap> {
+    if !map
+        .iter()
+        .any(|(key, value)| value.is_class_member(key, source))
+    {
         return map.clone();
     }
     Arc::new(
         map.iter()
-            .filter(|(_, value)| !value.is_class_member())
+            .filter(|(key, value)| !value.is_class_member(key, source))
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect(),
     )

@@ -57,9 +57,9 @@ pub(crate) fn object_key(value: &Value) -> Arc<str> {
     match kind_of(value) {
         Kind::RenderDirective => match render_directive_text(value) {
             Ok(text) => format!("{DIRECTIVE_KEY_PREFIX}{text}").into(),
-            Err(_) => format!("{VALUE_KEY_PREFIX}{}", value.to_json()).into(),
+            Err(_) => format!("{VALUE_KEY_PREFIX}{}", value.identity_json()).into(),
         },
-        _ => format!("{VALUE_KEY_PREFIX}{}", value.to_json()).into(),
+        _ => format!("{VALUE_KEY_PREFIX}{}", value.identity_json()).into(),
     }
 }
 
@@ -943,7 +943,7 @@ pub(crate) trait StringRenderer<'a> {
         let mut ordered: Vec<(MemberKind, &Arc<str>, &Value)> = map
             .iter()
             // Methods are stored as function-valued members.
-            .filter(|(_, value)| !value.is_unrendered_member())
+            .filter(|(key, value)| !value.is_unrendered_member(key, source))
             .map(|(key, value)| (members.kind_of(key), key, value))
             .collect();
         ordered.sort_by_key(|(member, ..)| *member == MemberKind::Entry);
@@ -1356,7 +1356,7 @@ impl JsonValue<'_> {
                             _ => PathPart::Property(key),
                         });
                     }
-                    let converted = if member.is_unrendered_member() {
+                    let converted = if member.is_unrendered_member(key, source.as_deref()) {
                         None
                     } else {
                         self.convert_member(member)?
@@ -1437,7 +1437,7 @@ impl JsonValue<'_> {
                     }
                     // Methods are stored as function-valued members, and an
                     // object without a source cannot tell them from data.
-                    if member.is_unrendered_member() {
+                    if member.is_unrendered_member(key, source.as_deref()) {
                         continue;
                     }
                     if let Some(members) = &members {
@@ -1508,5 +1508,32 @@ mod tests {
         assert_eq!(parse_path_spec("").unwrap(), vec![TopLevel]);
         assert!(parse_path_spec("a..b").is_err());
         assert!(parse_path_spec("a^").is_err());
+    }
+
+    /// Converters can turn two keys into modules that differ only in the
+    /// classes they declare. Pkl keeps both entries (it renders them as
+    /// `[new { p = 1 }] = 1` and `[new { p = 1 }] = 2`), so the keys' identity
+    /// must keep the classes that rendering leaves out.
+    #[test]
+    fn converted_keys_differing_only_in_classes_stay_distinct() {
+        let dir = std::env::temp_dir().join(format!("pklr-class-keys-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("l1.pkl"), "class X { a: Int = 1 }\np = 1\n").unwrap();
+        std::fs::write(dir.join("l2.pkl"), "class Y { a: Int = 1 }\np = 1\n").unwrap();
+        std::fs::write(
+            dir.join("main.pkl"),
+            "import \"l1.pkl\" as l1\nimport \"l2.pkl\" as l2\nk1 = l1\nk2 = l2\n",
+        )
+        .unwrap();
+        let value = crate::Evaluator::new()
+            .eval_file(&dir.join("main.pkl"))
+            .unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let Value::Object(map, _) = value else {
+            panic!("module value");
+        };
+        let (k1, k2) = (&map["k1"], &map["k2"]);
+        assert_eq!(k1.to_json(), k2.to_json());
+        assert_ne!(object_key(k1), object_key(k2));
     }
 }
