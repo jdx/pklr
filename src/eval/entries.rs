@@ -61,7 +61,7 @@ impl Evaluator {
             if let Some(ty) = &prop.type_ann
                 && (amendment_base.is_none() || amendment_base.is_some_and(is_null_value))
             {
-                let state = recorded_union_amend(scope, &prop.name, ty)
+                let state = recorded_union_amend(scope, &prop.name, ty, body)
                     .unwrap_or_else(|| self.union_amend_state(ty, scope));
                 match state {
                     UnionAmendState::NoDefault if amendment_base.is_none() => {

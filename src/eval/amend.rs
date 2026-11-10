@@ -160,7 +160,10 @@ impl Evaluator {
                 let Entry::Property(prop) = entry else {
                     continue;
                 };
-                if prop.value.is_some() || prop.body.is_none() || prop.type_ann.is_some() {
+                let Some(overlay_body) = &prop.body else {
+                    continue;
+                };
+                if prop.value.is_some() || prop.type_ann.is_some() {
                     continue;
                 }
                 let Some((index, ty)) =
@@ -191,7 +194,7 @@ impl Evaluator {
                 let state = self.union_amend_state(ty, declaring);
                 amendment_scope.values.insert(
                     union_amend_marker(&prop.name).as_str().into(),
-                    Value::String(encode_union_amend(ty, &state).into()),
+                    Value::String(encode_union_amend(ty, overlay_body, &state).into()),
                 );
             }
         }

@@ -55,31 +55,46 @@ impl Evaluator {
         Some((alias, Some(module_scope)))
     }
 
-    /// Whether `ty` accepts the Dynamic a body amending null builds.
-    fn type_takes_dynamic(&mut self, ty: &TypeExpr, scope: &Scope, depth: usize) -> bool {
-        if depth > 32 {
-            return false;
+    /// `resolve_type_alias`, except that an alias already followed on this
+    /// walk resolves to `None`. A cycle of aliases ends there, however long
+    /// the chain leading to it was.
+    fn resolve_unvisited_alias(
+        &mut self,
+        name: &str,
+        scope: &Scope,
+        seen: &mut Vec<String>,
+    ) -> Option<(TypeExpr, Option<Scope>)> {
+        let (alias, alias_scope) = self.resolve_type_alias(name, scope)?;
+        let key = format!("{name}={}", display_type_expr(&alias));
+        if seen.contains(&key) {
+            return None;
         }
-        let named = |this: &mut Self, name: &str| {
+        seen.push(key);
+        Some((alias, alias_scope))
+    }
+
+    /// Whether `ty` accepts the Dynamic a body amending null builds.
+    fn type_takes_dynamic(&mut self, ty: &TypeExpr, scope: &Scope, seen: &mut Vec<String>) -> bool {
+        let named = |this: &mut Self, name: &str, seen: &mut Vec<String>| {
             let name = name.trim_start_matches('*');
             if matches!(name, "Dynamic" | "Any" | "Object") {
                 return true;
             }
-            match this.resolve_type_alias(name, scope) {
+            match this.resolve_unvisited_alias(name, scope, seen) {
                 Some((alias, alias_scope)) => {
                     let alias_scope = alias_scope.as_ref().unwrap_or(scope);
-                    this.type_takes_dynamic(&alias, alias_scope, depth + 1)
+                    this.type_takes_dynamic(&alias, alias_scope, seen)
                 }
                 None => false,
             }
         };
         match ty {
-            TypeExpr::Named(name) => named(self, name),
-            TypeExpr::Constrained(base, _) => named(self, base.trim_end_matches('?')),
-            TypeExpr::Nullable(inner) => self.type_takes_dynamic(inner, scope, depth + 1),
+            TypeExpr::Named(name) => named(self, name, seen),
+            TypeExpr::Constrained(base, _) => named(self, base.trim_end_matches('?'), seen),
+            TypeExpr::Nullable(inner) => self.type_takes_dynamic(inner, scope, seen),
             TypeExpr::Union(variants) => variants
                 .iter()
-                .any(|variant| self.type_takes_dynamic(variant, scope, depth + 1)),
+                .any(|variant| self.type_takes_dynamic(variant, scope, seen)),
             TypeExpr::Generic(..) => false,
         }
     }
@@ -89,10 +104,12 @@ impl Evaluator {
     /// `Dynamic` (`Int`, `Duration`, `Map<K, V>`, ...), directly or behind
     /// aliases. A class, or a type this cannot resolve, counts as supplying
     /// one.
-    fn selected_type_lacks_default(&mut self, ty: &TypeExpr, scope: &Scope, depth: usize) -> bool {
-        if depth > 32 {
-            return false;
-        }
+    fn selected_type_lacks_default(
+        &mut self,
+        ty: &TypeExpr,
+        scope: &Scope,
+        seen: &mut Vec<String>,
+    ) -> bool {
         let name = match ty {
             TypeExpr::Named(name) => name.trim_start_matches('*'),
             TypeExpr::Constrained(base, _) => base.trim_end_matches('?'),
@@ -102,20 +119,20 @@ impl Evaluator {
             // starts from null.
             TypeExpr::Union(variants) => {
                 return match variants.iter().find(|variant| is_default_type(variant)) {
-                    Some(marked) => self.selected_type_lacks_default(marked, scope, depth + 1),
+                    Some(marked) => self.selected_type_lacks_default(marked, scope, seen),
                     None => true,
                 };
             }
             // A nullable type has the default of the type it wraps, or null.
             TypeExpr::Nullable(inner) => {
-                return self.selected_type_lacks_default(inner, scope, depth + 1);
+                return self.selected_type_lacks_default(inner, scope, seen);
             }
         };
         let name = name.trim_end_matches('?');
         let name = name.split('<').next().unwrap_or(name);
-        if let Some((alias, alias_scope)) = self.resolve_type_alias(name, scope) {
+        if let Some((alias, alias_scope)) = self.resolve_unvisited_alias(name, scope, seen) {
             let alias_scope = alias_scope.as_ref().unwrap_or(scope);
-            return self.selected_type_lacks_default(&alias, alias_scope, depth + 1);
+            return self.selected_type_lacks_default(&alias, alias_scope, seen);
         }
         // A class declaration shadows the standard library type of its name.
         if matches!(resolve_dotted(scope, name),
@@ -158,10 +175,12 @@ impl Evaluator {
     /// Whether a type the union marks with `*` is nullable, directly or behind
     /// aliases. When it also supplies no default of its own, the property
     /// starts from null.
-    fn selected_type_nullable(&mut self, ty: &TypeExpr, scope: &Scope, depth: usize) -> bool {
-        if depth > 32 {
-            return false;
-        }
+    fn selected_type_nullable(
+        &mut self,
+        ty: &TypeExpr,
+        scope: &Scope,
+        seen: &mut Vec<String>,
+    ) -> bool {
         let name = match ty {
             TypeExpr::Nullable(_) => return true,
             TypeExpr::Named(name) => name.trim_start_matches('*'),
@@ -171,10 +190,10 @@ impl Evaluator {
         if name.ends_with('?') {
             return true;
         }
-        match self.resolve_type_alias(name, scope) {
+        match self.resolve_unvisited_alias(name, scope, seen) {
             Some((alias, alias_scope)) => {
                 let alias_scope = alias_scope.as_ref().unwrap_or(scope);
-                self.selected_type_nullable(&alias, alias_scope, depth + 1)
+                self.selected_type_nullable(&alias, alias_scope, seen)
             }
             None => false,
         }
@@ -190,7 +209,7 @@ impl Evaluator {
     /// from, and that module's own imports through theirs; one that cannot be
     /// resolved is not a union here, so it is never rejected.
     pub(super) fn union_amend_state(&mut self, ty: &TypeExpr, scope: &Scope) -> UnionAmendState {
-        self.union_amend_state_in(ty, scope, false, 0)
+        self.union_amend_state_in(ty, scope, false, &mut Vec::new())
     }
 
     fn union_amend_state_in(
@@ -198,24 +217,23 @@ impl Evaluator {
         ty: &TypeExpr,
         scope: &Scope,
         nullable: bool,
-        depth: usize,
+        seen: &mut Vec<String>,
     ) -> UnionAmendState {
-        if depth > 32 {
-            return UnionAmendState::NotUnion;
-        }
         match ty {
-            TypeExpr::Nullable(inner) => self.union_amend_state_in(inner, scope, true, depth + 1),
+            TypeExpr::Nullable(inner) => self.union_amend_state_in(inner, scope, true, seen),
             TypeExpr::Union(variants) => {
                 // A marked alternative's own default is what the property
                 // starts from, unless that type has none (`Int`, `Duration`).
                 let marked = variants.iter().find(|variant| is_default_type(variant));
                 if let Some(marked) = marked
-                    && !self.selected_type_lacks_default(marked, scope, 0)
+                    && !self.selected_type_lacks_default(marked, scope, &mut Vec::new())
                 {
                     return UnionAmendState::HasDefault;
                 }
                 let nullable = nullable
-                    || marked.is_some_and(|marked| self.selected_type_nullable(marked, scope, 0));
+                    || marked.is_some_and(|marked| {
+                        self.selected_type_nullable(marked, scope, &mut Vec::new())
+                    });
                 if !nullable {
                     return UnionAmendState::NoDefault;
                 }
@@ -225,7 +243,7 @@ impl Evaluator {
                 // has run.
                 if variants
                     .iter()
-                    .any(|variant| self.type_takes_dynamic(variant, scope, 0))
+                    .any(|variant| self.type_takes_dynamic(variant, scope, &mut Vec::new()))
                 {
                     UnionAmendState::NotUnion
                 } else {
@@ -233,10 +251,10 @@ impl Evaluator {
                 }
             }
             TypeExpr::Named(name) if !name.starts_with('*') => {
-                match self.resolve_type_alias(name, scope) {
+                match self.resolve_unvisited_alias(name, scope, seen) {
                     Some((alias, alias_scope)) => {
                         let alias_scope = alias_scope.as_ref().unwrap_or(scope);
-                        self.union_amend_state_in(&alias, alias_scope, nullable, depth + 1)
+                        self.union_amend_state_in(&alias, alias_scope, nullable, seen)
                     }
                     None => UnionAmendState::NotUnion,
                 }
@@ -246,7 +264,7 @@ impl Evaluator {
             TypeExpr::Constrained(base, _) => {
                 let nullable = nullable || base.ends_with('?');
                 match crate::parser::parse_type_name(base.trim_end_matches('?')) {
-                    Ok(base) => self.union_amend_state_in(&base, scope, nullable, depth + 1),
+                    Ok(base) => self.union_amend_state_in(&base, scope, nullable, seen),
                     Err(_) => UnionAmendState::NotUnion,
                 }
             }

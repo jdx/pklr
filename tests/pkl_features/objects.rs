@@ -6174,3 +6174,48 @@ fn element_only_dynamic_is_rejected_by_function_types() {
         assert!(err.contains("Dynamic"), "{ty}: {err}");
     }
 }
+
+#[test]
+fn union_amend_follows_a_long_alias_chain_to_dynamic() {
+    // A chain longer than any fixed step limit still ends at `Dynamic`, which
+    // the null default of `argv` satisfies once the body has run.
+    let mut src = String::new();
+    for i in 0..39 {
+        src.push_str(&format!("typealias A{i} = A{}\n", i + 1));
+    }
+    src.push_str("typealias A39 = Dynamic\nclass C { argv: (A0|Int)? }\n");
+    src.push_str("c = new C { argv { x = 1 } }\n");
+    assert_eq!(eval(&src)["c"]["argv"]["x"], serde_json::json!(1));
+}
+
+#[test]
+fn union_amend_state_is_not_shared_with_same_named_properties_of_nested_objects() {
+    // The outer amendment of `lib.Outer.argv` (which takes a Dynamic) must not
+    // decide the same-named, same-printing `Args?` property of a nested `C`.
+    let temp = TestTempDir::new("pklr_test_union_amend_nested");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("lib.pkl"),
+        "typealias Args = Dynamic|Int\nclass Outer { argv: Args?; inner: Any? }\n",
+    )
+    .unwrap();
+    let main = dir.join("main.pkl");
+    std::fs::write(
+        &main,
+        r#"
+import "lib.pkl"
+typealias Args = Int|String
+class C { argv: Args? }
+o = (new lib.Outer {}) {
+  argv { x = 1 }
+  inner = new C { argv { x = 1 } }
+}
+"#,
+    )
+    .unwrap();
+    let err = Evaluator::new().eval_file(&main).unwrap_err().to_string();
+    assert!(
+        err.contains("Int|String") && err.contains("Dynamic"),
+        "{err}"
+    );
+}
