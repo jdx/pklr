@@ -81,7 +81,12 @@ impl Evaluator {
             {
                 let mut items = match amendment_base {
                     Some(Value::List(existing)) => existing.clone(),
-                    _ => ListValue::new(ListKind::Listing, Vec::new()),
+                    // Amending nothing makes a `Dynamic`, unless the declared
+                    // type is a `Listing`, whose default the body amends.
+                    _ if prop.type_ann.as_ref().is_some_and(type_is_listing) => {
+                        ListValue::new(ListKind::Listing, Vec::new())
+                    }
+                    _ => ListValue::new(ListKind::Dynamic, Vec::new()),
                 };
                 let mut amendment_scope = scope.child();
                 amendment_scope.set("super", Value::List(items.clone()));
@@ -425,6 +430,11 @@ impl Evaluator {
             })
             .map(|name| name_of(name))
             .collect();
+        // A body that yields only elements (`...list`, a generator) makes an
+        // element-only `Dynamic`, as `new Dynamic { 1; 2 }` does.
+        if st.map.is_empty() && st.all_props.is_empty() && !st.elements.is_empty() {
+            return Ok(Value::List(ListValue::new(ListKind::Dynamic, st.elements)));
+        }
         let source = ObjectSource {
             entries: entries.clone(),
             captured: SourceScope::lazy(&st.child_scope, hidden_aliases, Vec::new()),

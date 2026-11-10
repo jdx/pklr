@@ -866,7 +866,8 @@ impl Evaluator {
                         let base = match (map.get(&storage_key), &explicit_default) {
                             (Some(existing @ Value::List(_)), _) => existing.clone(),
                             (_, Some(default @ Value::List(_))) => default.clone(),
-                            _ => Value::List(ListValue::new(ListKind::Listing, Vec::new())),
+                            // Amending nothing makes a `Dynamic`.
+                            _ => Value::List(ListValue::new(ListKind::Dynamic, Vec::new())),
                         };
                         let val = self.eval_value_amendment(base, body, entry_scope, depth)?;
                         map.insert(storage_key, val);

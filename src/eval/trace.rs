@@ -56,9 +56,16 @@ fn write_trace_value(value: &Value, out: &mut String, top: bool) {
             out.push_str(&crate::eval::stdlib::render_value(value))
         }
         Value::List(items) => {
-            if items.kind() == ListKind::Listing {
+            // A Listing and an element-only Dynamic print their elements in
+            // braces; a List and a Set print them as arguments.
+            let braces = matches!(items.kind(), ListKind::Listing | ListKind::Dynamic);
+            if braces {
                 if top {
-                    out.push_str("new Listing ");
+                    out.push_str(if items.kind() == ListKind::Dynamic {
+                        "new Dynamic "
+                    } else {
+                        "new Listing "
+                    });
                 }
                 if items.is_empty() {
                     out.push_str("{}");
@@ -69,20 +76,16 @@ fn write_trace_value(value: &Value, out: &mut String, top: bool) {
                 out.push_str(match items.kind() {
                     ListKind::List => "List(",
                     ListKind::Set => "Set(",
-                    ListKind::Listing => unreachable!(),
+                    ListKind::Listing | ListKind::Dynamic => unreachable!(),
                 });
             }
             for (i, item) in items.iter().enumerate() {
                 if i > 0 {
-                    out.push_str(if items.kind() == ListKind::Listing {
-                        "; "
-                    } else {
-                        ", "
-                    });
+                    out.push_str(if braces { "; " } else { ", " });
                 }
                 write_trace_value(item, out, true);
             }
-            if items.kind() == ListKind::Listing {
+            if braces {
                 out.push_str(" }");
             } else {
                 out.push(')');
@@ -124,7 +127,7 @@ fn write_trace_value(value: &Value, out: &mut String, top: bool) {
                 }
                 if (matches!(member, Value::Object(..))
                     && !matches!(kind_of(member), Kind::Duration | Kind::DataSize)
-                    || matches!(member, Value::List(items) if items.kind() == ListKind::Listing))
+                    || matches!(member, Value::List(items) if matches!(items.kind(), ListKind::Listing | ListKind::Dynamic)))
                 {
                     out.push(' ');
                     write_trace_value(member, out, false);

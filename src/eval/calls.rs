@@ -306,6 +306,13 @@ impl Evaluator {
         if let Some(result) = self.stdlib_method(obj, method, args, depth) {
             return result.map(Some);
         }
+        // An element-only `Dynamic` is an object, not a collection: it has only
+        // the methods of `Dynamic`, not the `List` ones its storage could answer.
+        if let Value::List(items) = obj
+            && items.kind() == ListKind::Dynamic
+        {
+            return dynamic_elements_method(items, method, args);
+        }
         match (obj, method) {
             // String methods
             (Value::String(s), "contains") => {
@@ -505,6 +512,13 @@ impl Evaluator {
                 }
                 Ok(Some(Value::Object(Arc::new(result), None)))
             }
+            // A `Dynamic`'s elements, which it has besides its members.
+            (Value::Object(_, Some(source)), "toList")
+                if source.kind.dynamic_as_object() == ObjectKind::Object
+                    && source.type_name.is_none() =>
+            {
+                Ok(Some(Value::List(source.elements.clone().into())))
+            }
             (Value::Object(..), "toList") => Ok(Some(obj.clone())),
             (Value::Object(map, _), "toDynamic") => Ok(Some(Value::Object(map.clone(), None))),
 
@@ -674,5 +688,36 @@ pub(super) fn caught_error_message(error: Error) -> String {
 pub(super) fn seed_builtins(scope: &mut Scope) {
     for name in super::stdlib::BUILTIN_MARKER_NAMES {
         scope.set(name, super::stdlib::builtin_marker(name));
+    }
+}
+
+/// A method of an element-only `Dynamic`, whose elements `items` holds. A
+/// `Dynamic` has no members besides its elements, so `toMap()` is empty and
+/// `toList()` gives the elements.
+fn dynamic_elements_method(
+    items: &ListValue,
+    method: &str,
+    args: &[Value],
+) -> Result<Option<Value>> {
+    match method {
+        "toList" => Ok(Some(Value::List(items.clone().with_kind(ListKind::List)))),
+        "toMap" => Ok(Some(Value::Object(Arc::default(), None))),
+        "hasProperty" => {
+            require_str_arg(args, 0, method)?;
+            Ok(Some(Value::Bool(false)))
+        }
+        "getPropertyOrNull" => {
+            require_str_arg(args, 0, method)?;
+            Ok(Some(Value::Null))
+        }
+        "getProperty" => {
+            let name = require_str_arg(args, 0, method)?;
+            Err(Error::Eval(format!(
+                "Cannot find property `{name}` in object of type `Dynamic`."
+            )))
+        }
+        _ => Err(Error::Eval(format!(
+            "Cannot find method `{method}` in class `Dynamic`."
+        ))),
     }
 }

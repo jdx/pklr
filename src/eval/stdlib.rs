@@ -157,6 +157,7 @@ pub(super) fn get_class(value: &Value) -> Result<Value> {
             ListKind::List => ("List", None),
             ListKind::Listing => ("Listing", None),
             ListKind::Set => ("Set", None),
+            ListKind::Dynamic => ("Dynamic", None),
         },
         other => (other.type_name(), None),
     };

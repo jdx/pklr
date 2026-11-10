@@ -167,10 +167,12 @@ fn mapping_object_identity(map: &ObjectMap, source: Option<&ObjectSource>) -> St
             // A class object and an instance intentionally share the class's
             // definition-site identity, but they are not equal Pkl values and
             // therefore must remain distinct when used as mapping keys.
-            ObjectKind::Object => source.type_identity.as_deref().map_or_else(
-                || "Dynamic".to_string(),
-                |identity| format!("instance:{identity}"),
-            ),
+            ObjectKind::Object | ObjectKind::Dynamic => {
+                source.type_identity.as_deref().map_or_else(
+                    || "Dynamic".to_string(),
+                    |identity| format!("instance:{identity}"),
+                )
+            }
             ObjectKind::Class => source.type_identity.as_deref().map_or_else(
                 || "Class".to_string(),
                 |identity| format!("class:{identity}"),
@@ -345,10 +347,24 @@ pub(crate) enum ObjectKind {
     /// A `Dynamic` object, or an instance of the class in `type_name`.
     #[default]
     Object,
+    /// A `Dynamic` known to be one, because `new Dynamic { ... }` made it, as
+    /// opposed to an object that a body amendment rebuilt and whose class is
+    /// not recorded. It is equal to any other `Dynamic` with the same members.
+    Dynamic,
     /// A `Mapping`.
     Mapping,
     /// The class named by `type_name` itself, holding its defaults.
     Class,
+}
+
+impl ObjectKind {
+    /// This kind with a known `Dynamic` as the plain object it equals.
+    pub(crate) fn dynamic_as_object(self) -> ObjectKind {
+        match self {
+            ObjectKind::Dynamic => ObjectKind::Object,
+            other => other,
+        }
+    }
 }
 
 /// A module member that failed to evaluate (see
@@ -415,7 +431,7 @@ impl ObjectSource {
     }
 }
 
-/// Which Pkl collection a [`Value::List`] is. All three render the same, but
+/// Which Pkl value a [`Value::List`] is. They all render as an array, but
 /// they never equal each other, and a `Set` compares without regard to order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
@@ -424,6 +440,12 @@ pub enum ListKind {
     List,
     Listing,
     Set,
+    /// A `Dynamic` object that has elements and no members, such as
+    /// `new Dynamic { 1; 2 }`. It holds its elements like a `Listing`, but it
+    /// is an `Object`, not a collection: it has no `length` or `map()`, a
+    /// `Listing` or `List` type rejects it, and it can take members when
+    /// amended.
+    Dynamic,
 }
 
 /// The items of a [`Value::List`] and which collection they form. Derefs to
@@ -810,7 +832,7 @@ impl PartialEq for Regex {
 fn object_shape(source: Option<&ObjectSource>) -> (ObjectKind, Option<&str>, Option<&str>) {
     source.map_or((ObjectKind::Object, None, None), |source| {
         (
-            source.kind,
+            source.kind.dynamic_as_object(),
             source.type_identity.as_deref(),
             source.type_name.as_deref(),
         )
@@ -990,7 +1012,12 @@ impl Value {
             Value::String(_) => "String",
             Value::Object(_, Some(source)) if source.kind == ObjectKind::Class => "Class",
             Value::Object(..) => "Dynamic",
-            Value::List(_) => "List",
+            Value::List(items) => match items.kind() {
+                ListKind::List => "List",
+                ListKind::Listing => "Listing",
+                ListKind::Set => "Set",
+                ListKind::Dynamic => "Dynamic",
+            },
             Value::Lambda(params, ..) => match params.len() {
                 0 => "Function0",
                 1 => "Function1",
@@ -1029,6 +1056,11 @@ impl Value {
                 serde_json::Value::Null
             }
             Value::Object(map, _) => {
+                // A `Dynamic` with elements and members has no JSON form.
+                if self.has_elements_and_members() {
+                    unrenderable.get_or_insert(self);
+                    return serde_json::Value::Null;
+                }
                 let mut obj = serde_json::Map::new();
                 for (k, v) in map.iter() {
                     // The result is discarded once a value fails.
@@ -1056,8 +1088,21 @@ impl Value {
         }
     }
 
+    /// Whether this is a `Dynamic` that has both elements and members.
+    fn has_elements_and_members(&self) -> bool {
+        matches!(self, Value::Object(map, Some(source))
+            if !source.elements.is_empty()
+                && map.values().any(|value| !matches!(value, Value::Lambda(..))))
+    }
+
     /// pkl's error for rendering this value as JSON.
     fn json_render_error(&self) -> crate::Error {
+        if self.has_elements_and_members() {
+            return crate::Error::Eval(format!(
+                "Cannot render object with both elements and properties/entries as JSON.\nObject: {}",
+                crate::eval::stdlib::render_value(self)
+            ));
+        }
         if let Value::Float(f) = self {
             return crate::Error::Eval(format!(
                 "Cannot render value `{}` as JSON.",

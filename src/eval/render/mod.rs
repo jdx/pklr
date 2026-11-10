@@ -227,6 +227,8 @@ pub(crate) fn typed_class_is(value: &Value, module: &str, class: &str) -> bool {
     )
 }
 
+use crate::value::ListKind;
+
 /// What a pklr [`Value`] is to a renderer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
@@ -267,7 +269,10 @@ impl Kind {
                 _ => "Function".into(),
             },
             Kind::RenderDirective => "RenderDirective".into(),
-            Kind::Listing => "Listing".into(),
+            Kind::Listing => match value {
+                Value::List(items) if items.kind() == ListKind::Dynamic => "Dynamic".into(),
+                _ => "Listing".into(),
+            },
             Kind::Mapping => "Mapping".into(),
             Kind::Dynamic => "Dynamic".into(),
             Kind::Typed => match value {
@@ -618,7 +623,15 @@ impl Converters {
                 Value::Lambda(params, ..) => self.class(&format!("Function{}", params.len())),
                 _ => None,
             },
-            Kind::Listing => self.class("Listing").or_else(|| self.class("List")),
+            Kind::Listing => match value {
+                Value::List(items) => match items.kind() {
+                    ListKind::List => self.class("List"),
+                    ListKind::Listing => self.class("Listing"),
+                    ListKind::Set => self.class("Set"),
+                    ListKind::Dynamic => self.class("Dynamic"),
+                },
+                _ => None,
+            },
             Kind::Mapping => self.class("Mapping").or_else(|| self.class("Map")),
             Kind::Dynamic => self.class("Dynamic"),
             Kind::Typed | Kind::RenderDirective => {
@@ -861,6 +874,10 @@ pub(crate) trait StringRenderer<'a> {
     fn visit_other(&mut self, value: &Value, kind: Kind) -> Result<()> {
         Err(cannot_render_type(value, kind, self.name()))
     }
+    /// Whether an object can have both elements and members in this format.
+    fn supports_mixed_objects(&self) -> bool {
+        false
+    }
     fn start_object(&mut self, kind: Kind) -> Result<()>;
     fn end_object(&mut self, kind: Kind, is_empty: bool) -> Result<()>;
     fn start_listing(&mut self) -> Result<()>;
@@ -947,6 +964,19 @@ pub(crate) trait StringRenderer<'a> {
             .map(|(key, value)| (members.kind_of(key), key, value))
             .collect();
         ordered.sort_by_key(|(member, ..)| *member == MemberKind::Entry);
+        // A `Dynamic` with both members and elements renders its elements
+        // after its members, in the formats that have a place for both.
+        let elements = match source {
+            Some(source) if kind == Kind::Dynamic => &source.elements[..],
+            _ => &[],
+        };
+        if !elements.is_empty() && !ordered.is_empty() && !self.supports_mixed_objects() {
+            self.walk().enclosing = previous;
+            return Err(Error::Eval(format!(
+                "Cannot render object with both elements and properties/entries as {}.",
+                self.name()
+            )));
+        }
         let mut is_first = true;
         for (member, key, value) in ordered {
             match member {
@@ -977,6 +1007,13 @@ pub(crate) trait StringRenderer<'a> {
                     self.walk().path.pop();
                 }
             }
+        }
+        for (index, element) in elements.iter().enumerate() {
+            self.walk().path.push(PathPart::Element(index));
+            let converted = self.walk().convert(element)?;
+            self.visit_element(index, &converted, is_first)?;
+            is_first = false;
+            self.walk().path.pop();
         }
         self.walk().enclosing = previous;
         self.end_object(kind, is_first)
@@ -1427,6 +1464,19 @@ impl JsonValue<'_> {
                 serde_json::Value::Array(out)
             }
             (kind, Value::Object(map, source)) if kind.is_object() => {
+                if kind == Kind::Dynamic
+                    && source
+                        .as_deref()
+                        .is_some_and(|source| !source.elements.is_empty())
+                    && map
+                        .values()
+                        .any(|member| !matches!(member, Value::Lambda(..)))
+                {
+                    return Err(Error::Eval(format!(
+                        "Cannot render object with both elements and properties/entries as JSON.\nObject: {}",
+                        display_value(value)
+                    )));
+                }
                 let members = self
                     .track_path
                     .then(|| Members::new(kind, source.as_deref()));

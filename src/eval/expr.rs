@@ -145,11 +145,12 @@ impl Evaluator {
                 let has_elements = matches!(type_name.as_deref(), None | Some("Dynamic"))
                     && entries_are_listing_amendment(entries);
                 let defines_members = has_elements && entries_define_members(entries);
+                let element_kind = ListKind::Dynamic;
                 let eval_elements = |this: &mut Self| -> Result<Vec<Value>> {
                     let mut listing_scope = scope.child();
                     listing_scope.set(
                         "super",
-                        Value::List(ListValue::new(ListKind::Listing, Vec::new())),
+                        Value::List(ListValue::new(element_kind, Vec::new())),
                     );
                     listing_scope.receiver_list_base = Some(0);
                     let mut items = Vec::new();
@@ -159,7 +160,7 @@ impl Evaluator {
                 match type_name.as_deref() {
                     Some("module") => Err(Error::Eval("`new module` is not supported".into())),
                     _ if has_elements && !defines_members => Ok(Value::List(ListValue::new(
-                        ListKind::Listing,
+                        element_kind,
                         eval_elements(self)?,
                     ))),
                     _ if has_elements => {
@@ -167,7 +168,7 @@ impl Evaluator {
                         if matches!(&object, Value::Object(map, _) if map.is_empty()) {
                             let items = eval_elements(self)?;
                             if !items.is_empty() {
-                                return Ok(Value::List(ListValue::new(ListKind::Listing, items)));
+                                return Ok(Value::List(ListValue::new(element_kind, items)));
                             }
                         }
                         Ok(object)
@@ -255,7 +256,19 @@ impl Evaluator {
                         };
                         Ok(Value::Object(Arc::new(map), Some(Arc::new(source))))
                     }
-                    Some("Dynamic") => self.eval_entries(entries, scope, depth + 1),
+                    Some("Dynamic") => {
+                        let object = self.eval_entries(entries, scope, depth + 1)?;
+                        Ok(match object {
+                            Value::Object(map, Some(source))
+                                if source.kind == ObjectKind::Object =>
+                            {
+                                let mut source = Arc::unwrap_or_clone(source);
+                                source.kind = ObjectKind::Dynamic;
+                                Value::Object(map, Some(Arc::new(source)))
+                            }
+                            other => other,
+                        })
+                    }
                     // `new Mixin { body }` is a function that amends its
                     // argument with `body`.
                     Some("Mixin") => {
@@ -451,6 +464,14 @@ impl Evaluator {
                     && let Some(result) = self.stdlib_property(&obj, field)
                 {
                     return result;
+                }
+                // An element-only `Dynamic` has no members of a collection.
+                if let Value::List(items) = &obj
+                    && items.kind() == ListKind::Dynamic
+                {
+                    return Err(Error::Eval(format!(
+                        "Cannot find property `{field}` in object of type `Dynamic`."
+                    )));
                 }
                 // Built-in properties
                 match (&obj, field.as_str()) {
