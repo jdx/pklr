@@ -522,3 +522,11 @@ more = (b) { 5 }.toList()
     assert_eq!(json["twice"], serde_json::json!([1, 2]));
     assert_eq!(json["more"], serde_json::json!([1, 2, 5]));
 }
+
+#[test]
+fn an_empty_dynamic_is_not_the_key_of_an_empty_map() {
+    eval_fails(
+        "local m = new Mapping { [Map()] = 1 }\ne = m[new Dynamic { for (i in List()) { i } }]\n",
+    );
+    eval_fails("local m = new Mapping { [new Dynamic {}] = 1 }\ne = m[Map()]\n");
+}

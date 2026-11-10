@@ -89,9 +89,11 @@ pub(crate) fn mapping_storage_key(value: &Value) -> Option<Arc<str>> {
         // internal NaN identity, and Debug would make two equal lists such as
         // `List(1.s)` acquire unrelated mapping identities.
         // An empty `Dynamic` with no elements is the same value as `new Dynamic {}`.
-        Value::List(value) if value.kind() == ListKind::Dynamic && value.is_empty() => {
-            return mapping_storage_key(&Value::Object(Arc::default(), None));
-        }
+        Value::List(value) if value.kind() == ListKind::Dynamic && value.is_empty() => (
+            "object",
+            EMPTY_DYNAMIC_IDENTITY.to_string(),
+            "{}".to_string(),
+        ),
         Value::List(value) => (
             "list",
             mapping_compound_identity(&Value::List(value.clone())),
@@ -135,6 +137,9 @@ fn mapping_compound_identity(value: &Value) -> String {
             .expect("native units have mapping keys")
             .to_string(),
         Value::Regex(value) => format!("regex:{}:{}", value.pattern().len(), value.pattern()),
+        Value::List(items) if items.kind() == ListKind::Dynamic && items.is_empty() => {
+            EMPTY_DYNAMIC_IDENTITY.to_string()
+        }
         Value::List(items) => {
             let mut identity = format!("list:{:?}:[", items.kind());
             for item in items.iter() {
@@ -153,6 +158,10 @@ fn mapping_compound_identity(value: &Value) -> String {
     }
 }
 
+/// The identity of a `Dynamic` without members or elements, whether it is an
+/// object or an element-only list that has no elements.
+const EMPTY_DYNAMIC_IDENTITY: &str = "object:Dynamic:";
+
 fn mapping_object_identity(map: &ObjectMap, source: Option<&ObjectSource>) -> String {
     let mut members = map
         .iter()
@@ -165,7 +174,7 @@ fn mapping_object_identity(map: &ObjectMap, source: Option<&ObjectSource>) -> St
     // order. Sorting also makes this identity independent of hash/map layout.
     members.sort_unstable();
     let kind = source.map_or_else(
-        || "Dynamic".to_string(),
+        || "Map".to_string(),
         |source| match source.kind {
             ObjectKind::Mapping => "Mapping".to_string(),
             // A class object and an instance intentionally share the class's
