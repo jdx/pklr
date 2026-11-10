@@ -3568,3 +3568,34 @@ fn imported_module_class_with_a_duration_default_still_renders_as_json() {
         serde_json::json!({"r": {"x": 1}})
     );
 }
+
+#[test]
+fn converted_collection_keeps_an_entry_holding_an_imported_class() {
+    // A class held as a `Mapping`, `Map` or `Dynamic` entry is data, even when
+    // its key is the class's name, so converting the container (repeatedly)
+    // keeps it. Only the module's own declaration (`f`) is not a member.
+    // Checked against pkl 0.32.2.
+    let val = eval_files_to_json(&[
+        ("lib.pkl", "class C { a: Int = 1 }\n"),
+        (
+            "main.pkl",
+            "import \"lib.pkl\" as lib\n\
+             local m = new Mapping { [\"C\"] = lib.C }\n\
+             a = m.toMap().toMap().containsKey(\"C\")\n\
+             b = m.toMap().mapValues((k, v) -> v).toMap().containsKey(\"C\")\n\
+             c = m.toMap().filter((k, v) -> true).toMap().containsKey(\"C\")\n\
+             d = new Dynamic { [\"C\"] = lib.C }.toMap().toMap().containsKey(\"C\")\n\
+             e = Map(\"C\", lib.C).toMap().containsKey(\"C\")\n\
+             f = lib.toMap().containsKey(\"C\")\n\
+             g = m.toMap().toDynamic().toMap().keys.length\n\
+             h = m.toMap().toMapping().toMap().keys.length\n",
+        ),
+    ]);
+    assert_eq!(
+        val,
+        serde_json::json!({
+            "a": true, "b": true, "c": true, "d": true, "e": true,
+            "f": false, "g": 1, "h": 1,
+        })
+    );
+}

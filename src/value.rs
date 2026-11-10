@@ -336,6 +336,10 @@ pub struct ObjectSource {
     /// from a Pkl body. Such objects retain their evaluated members when
     /// amended, but still render as Dynamics.
     pub(crate) is_parsed_json: bool,
+    /// Whether this object is a module, whose declared classes are members
+    /// rather than entries. A `Dynamic` or `Mapping` entry that holds a class
+    /// is data even when its key matches the class's name.
+    pub(crate) is_module: bool,
     /// For an instance of a class, the class's default object. An untyped
     /// `new { ... }` assigned to one of the instance's properties amends the
     /// class default of that property, not the receiver's current value.
@@ -1151,7 +1155,7 @@ impl Value {
         matches!(self, Value::Object(_, Some(source))
             if source.kind == ObjectKind::Class
                 && source.declared_as.as_deref() == Some(key))
-            && container.is_none_or(|container| container.kind != ObjectKind::Mapping)
+            && container.is_none_or(|container| container.is_module)
     }
 
     /// Whether the member `key` of the object with source `container` is left
@@ -1170,6 +1174,21 @@ impl Value {
             {
                 let mut source = Arc::unwrap_or_clone(source);
                 source.declared_as = Some(name.into());
+                Value::Object(map, Some(Arc::new(source)))
+            }
+            other => other,
+        }
+    }
+
+    /// This value as an entry of a `Map`, `Mapping` or converted object. A
+    /// class there is data, not a member a module declares, so it loses the
+    /// declared-member marker; otherwise a later conversion of the sourceless
+    /// container would take it for a module declaration and drop it.
+    pub(crate) fn into_entry_value(self) -> Value {
+        match self {
+            Value::Object(map, Some(source)) if source.declared_as.is_some() => {
+                let mut source = Arc::unwrap_or_clone(source);
+                source.declared_as = None;
                 Value::Object(map, Some(Arc::new(source)))
             }
             other => other,
@@ -1460,6 +1479,7 @@ mod same_data_tests {
             }),
             kind: ObjectKind::Object,
             is_parsed_json: false,
+            is_module: false,
             prototype: None,
         };
         Value::Object(Arc::new(map), Some(Arc::new(source)))

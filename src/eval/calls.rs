@@ -176,7 +176,7 @@ impl Evaluator {
                             let storage_key =
                                 equivalent_mapping_key(&map, &key).unwrap_or_else(|| key.clone());
                             self.remember_mapping_key(storage_key.clone(), k);
-                            map.insert(storage_key, v.clone());
+                            map.insert(storage_key, v.clone().into_entry_value());
                         }
                     }
                     return Ok(Value::Object(Arc::new(map), None));
@@ -488,7 +488,7 @@ impl Evaluator {
                 for (k, v) in map.iter() {
                     let new_v =
                         self.invoke_lambda(lambda, &[Value::String(k.clone()), v.clone()], depth)?;
-                    result.insert(k.clone(), new_v);
+                    result.insert(k.clone(), new_v.into_entry_value());
                 }
                 Ok(Some(Value::Object(Arc::new(result), None)))
             }
@@ -501,7 +501,7 @@ impl Evaluator {
                     let keep =
                         self.invoke_lambda(lambda, &[Value::String(k.clone()), v.clone()], depth)?;
                     if is_truthy(&keep) {
-                        result.insert(k.clone(), v.clone());
+                        result.insert(k.clone(), v.clone().into_entry_value());
                     }
                 }
                 Ok(Some(Value::Object(Arc::new(result), None)))
@@ -681,19 +681,19 @@ pub(super) fn seed_builtins(scope: &mut Scope) {
     }
 }
 
-/// `map` without the classes a module holds as members. They are not
-/// properties, so a converted copy does not carry them.
+/// `map` as the entries of a converted object: without the classes a module
+/// holds as members (they are not properties), and with any other class held
+/// as plain data, so a further conversion does not take it for a declaration.
 fn without_class_members(map: &Arc<ObjectMap>, source: Option<&ObjectSource>) -> Arc<ObjectMap> {
-    if !map
-        .iter()
-        .any(|(key, value)| value.is_class_member(key, source))
-    {
+    let marked =
+        |value: &Value| matches!(value, Value::Object(_, Some(s)) if s.declared_as.is_some());
+    if !map.values().any(marked) {
         return map.clone();
     }
     Arc::new(
         map.iter()
             .filter(|(key, value)| !value.is_class_member(key, source))
-            .map(|(key, value)| (key.clone(), value.clone()))
+            .map(|(key, value)| (key.clone(), value.clone().into_entry_value()))
             .collect(),
     )
 }

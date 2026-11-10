@@ -447,6 +447,7 @@ impl Evaluator {
             declared_as: None,
             kind: ObjectKind::Object,
             is_parsed_json: false,
+            is_module: false,
             prototype: None,
         };
         Ok(Value::Object(Arc::new(st.map), Some(Arc::new(source))))
@@ -1154,6 +1155,7 @@ impl Evaluator {
                         declared_as: None,
                         kind: ObjectKind::Object,
                         is_parsed_json: false,
+                        is_module: false,
                         prototype: None,
                     },
                 };
