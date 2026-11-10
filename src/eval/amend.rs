@@ -165,9 +165,12 @@ impl Evaluator {
                         .values
                         .insert(listing_elem_class_binding(&prop.name).into(), class);
                 }
+                // The marker records which amending body owns the bindings, so
+                // a same-named property of a body nested inside it does not
+                // reuse them.
                 amendment_scope.values.insert(
                     declared_listing_binding(&prop.name).into(),
-                    Value::Bool(true),
+                    Value::Int(prop.body.as_ref().map_or(0, body_identity)),
                 );
                 listing_bound.push((prop.name.clone(), declaring));
             }
@@ -1623,6 +1626,19 @@ pub(super) fn listing_elem_class_binding(name: &str) -> String {
 
 /// The name under which an amendment scope marks that the amended class
 /// declares the property `name` as a listing, whatever its element type.
+pub(super) fn body_identity(body: &crate::parser::Body) -> i64 {
+    Arc::as_ptr(body) as usize as i64
+}
+
+/// Whether the listing bindings of `name` in `scope` belong to the amending
+/// body `body`.
+pub(super) fn owns_listing_bindings(scope: &Scope, name: &str, body: &crate::parser::Body) -> bool {
+    matches!(
+        scope.get(&declared_listing_binding(name)),
+        Some(Value::Int(owner)) if *owner == body_identity(body)
+    )
+}
+
 pub(super) fn declared_listing_binding(name: &str) -> String {
     format!("\0declared_listing_of:{name}")
 }

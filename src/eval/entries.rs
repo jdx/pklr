@@ -48,10 +48,7 @@ impl Evaluator {
             // listing the declaration gives.
             let declared_listing = matches!(&prop.type_ann, Some(crate::parser::TypeExpr::Nullable(inner))
                     if matches!(**inner, crate::parser::TypeExpr::Named(_)))
-                && (matches!(
-                    scope.get(&listing_elem_class_binding(&prop.name)),
-                    Some(Value::Object(..) | Value::List(_))
-                ) || scope.get(&declared_listing_binding(&prop.name)).is_some());
+                && owns_listing_bindings(scope, &prop.name, body);
             if declared_listing {
                 nullable_default = None;
             }
@@ -128,14 +125,17 @@ impl Evaluator {
                 let elem_class = items
                     .elem_class()
                     .cloned()
-                    .or_else(
-                        || match scope.get(&listing_elem_class_binding(&prop.name)) {
+                    .or_else(|| {
+                        match scope
+                            .get(&listing_elem_class_binding(&prop.name))
+                            .filter(|_| owns_listing_bindings(scope, &prop.name, body))
+                        {
                             Some(class @ (Value::Object(..) | Value::List(_))) => {
                                 Some(Arc::new(class.clone()))
                             }
                             _ => None,
-                        },
-                    )
+                        }
+                    })
                     .or_else(|| {
                         prop.type_ann
                             .as_ref()

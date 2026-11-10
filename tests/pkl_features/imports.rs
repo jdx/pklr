@@ -4203,3 +4203,24 @@ z: Listing<Nest> = new { new { new {} } }\nw: Listing<NestB> = new { new {} }\n"
     assert_eq!(val["z"], serde_json::json!([[{"x": 1}]]));
     assert_eq!(val["w"], serde_json::json!([[]]));
 }
+
+// The element class of an amended `Listing<T>?` property belongs to that
+// amendment only: a same-named property of a `Dynamic` nested in one of its
+// elements stays untyped. Checked against pkl 0.32.2.
+#[test]
+fn listing_element_class_binding_is_not_reused_by_nested_same_named_properties() {
+    let temp = TestTempDir::new("pklr_listing_binding_nested");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "class T { x: Int = 1; inner: Dynamic = new Dynamic {} }\n\
+typealias Al = Listing<String>(length >= 0)\nclass H { xs: Listing<T>?; ys: Al? }\n\
+h = new H { xs { new { inner { xs { new {} } } } } }\n\
+g = new H { ys { \"a\" }; xs { new T { inner { ys { new {} } } } } }\n",
+    )
+    .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
+    assert_eq!(val["h"]["xs"][0]["inner"]["xs"], serde_json::json!([{}]));
+    assert_eq!(val["h"]["xs"][0]["x"], 1);
+    assert_eq!(val["g"]["xs"][0]["inner"]["ys"], serde_json::json!([{}]));
+}
