@@ -401,9 +401,15 @@ pub(super) fn apply_mapping_type_annotation(
     // The value types are names, resolved later in whatever scope amends the
     // mapping. A class from an imported module is not visible there under
     // that name, so a metadata-only mapping remembers the scope its
-    // annotation was written in.
+    // annotation was written in. Like a `new Mapping`, it leaves out `this` and
+    // `outer`: resolving a type name needs neither, and keeping them would pin
+    // the declaring object's property map.
     if src.is_metadata_only() && src.mapping_value_types.is_empty() {
-        src.captured = SourceScope::lazy(scope, Vec::new(), Vec::new());
+        src.captured = SourceScope::lazy(
+            scope,
+            vec![name_of("outer"), name_of("this")],
+            vec!["outer", "this"],
+        );
     }
     for name in type_names {
         if !src.mapping_value_types.contains(&name) {
