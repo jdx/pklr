@@ -672,15 +672,7 @@ pub(super) fn caught_error_message(error: Error) -> String {
 }
 
 pub(super) fn seed_builtins(scope: &mut Scope) {
-    for name in [
-        "Regex",
-        "Dynamic",
-        "Annotation",
-        "Duration",
-        "DataSize",
-        "IntSeq",
-        "Pair",
-    ] {
-        scope.set(name, Value::String(name.into()));
+    for name in super::stdlib::BUILTIN_MARKER_NAMES {
+        scope.set(name, super::stdlib::builtin_marker(name));
     }
 }

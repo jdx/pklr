@@ -90,14 +90,44 @@ pub(super) fn stdlib_class(name: &str) -> Option<Value> {
         .then(|| class_value(name, format!("pkl:base#{name}")))
 }
 
-/// The `Class` value for a name `seed_builtins` bound to a marker string of its
-/// own name (`Duration`, `DataSize`, `Regex`, `Dynamic`), when `value` is that
-/// marker. Any other binding of the name is the user's and is left alone.
+/// The marker `seed_builtins` binds to `name`, shared by every scope so a
+/// binding can be told from a user's string of the same contents by identity.
+pub(super) fn builtin_marker(name: &str) -> Value {
+    static MARKERS: std::sync::LazyLock<Vec<(&'static str, std::sync::Arc<str>)>> =
+        std::sync::LazyLock::new(|| {
+            BUILTIN_MARKER_NAMES
+                .iter()
+                .map(|name| (*name, std::sync::Arc::from(*name)))
+                .collect()
+        });
+    match MARKERS.iter().find(|(known, _)| *known == name) {
+        Some((_, marker)) => Value::String(marker.clone()),
+        None => Value::String(name.into()),
+    }
+}
+
+/// The names `seed_builtins` binds to a marker string of their own name.
+pub(super) const BUILTIN_MARKER_NAMES: &[&str] = &[
+    "Regex",
+    "Dynamic",
+    "Annotation",
+    "Duration",
+    "DataSize",
+    "IntSeq",
+    "Pair",
+];
+
+/// The `Class` value for a name `seed_builtins` bound to its marker
+/// (`Duration`, `DataSize`, `Regex`, `Dynamic`), when `value` is that very
+/// marker. A user's string with the same contents is a different allocation
+/// and is left alone.
 pub(super) fn builtin_marker_class(name: &str, value: &Value) -> Option<Value> {
-    match value {
-        Value::String(marker) if &**marker == name => {
-            matches!(name, "Duration" | "DataSize" | "Regex" | "Dynamic")
-                .then(|| stdlib_class(name))?
+    if !matches!(name, "Duration" | "DataSize" | "Regex" | "Dynamic") {
+        return None;
+    }
+    match (value, builtin_marker(name)) {
+        (Value::String(got), Value::String(marker)) if std::sync::Arc::ptr_eq(got, &marker) => {
+            stdlib_class(name)
         }
         _ => None,
     }

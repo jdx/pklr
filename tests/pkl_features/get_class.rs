@@ -238,3 +238,42 @@ e = Set(Foo, new Foo {}.getClass()).length
     );
     assert_eq!(result, json!({"a": "hit", "b": "hit", "d": "hit", "e": 1}));
 }
+
+#[test]
+fn user_strings_equal_to_a_builtin_name_stay_strings() {
+    let result = eval(
+        r#"
+a = let (Duration = "Duration") Duration == "Duration"
+function f(Regex) = Regex.length
+b = f("Regex")
+local DataSize = "DataSize"
+c = DataSize.length
+class C { Dynamic = "Dynamic" }
+d = new C {}.Dynamic == "Dynamic"
+e = (new C {}) { Dynamic = "Dynamic" }.Dynamic.length
+f2 = let (Regex = "Regex") Regex + "!"
+g = 1.s.getClass() == Duration
+h = Regex.simpleName
+"#,
+    );
+    assert_eq!(
+        result,
+        json!({"a": true, "b": 5, "c": 8, "d": true, "e": 7, "f2": "Regex!",
+               "g": true, "h": "Regex"})
+    );
+}
+
+#[test]
+fn user_string_marker_is_kept_inside_lambdas_and_amended_objects() {
+    let result = eval(
+        r#"
+local Duration = "Duration"
+a = List(1).map((_) -> Duration)
+b = new Dynamic { x = Duration } { y = Duration }
+"#,
+    );
+    assert_eq!(
+        result,
+        json!({"a": ["Duration"], "b": {"x": "Duration", "y": "Duration"}})
+    );
+}
