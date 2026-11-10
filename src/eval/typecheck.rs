@@ -106,8 +106,12 @@ impl Evaluator {
                     None => true,
                 };
             }
-            TypeExpr::Nullable(_) => return true,
+            // A nullable type has the default of the type it wraps, or null.
+            TypeExpr::Nullable(inner) => {
+                return self.selected_type_lacks_default(inner, scope, depth + 1);
+            }
         };
+        let name = name.trim_end_matches('?');
         let name = name.split('<').next().unwrap_or(name);
         if let Some((alias, alias_scope)) = self.resolve_type_alias(name, scope) {
             let alias_scope = alias_scope.as_ref().unwrap_or(scope);
@@ -151,6 +155,31 @@ impl Evaluator {
         ) || name.starts_with("Function")
     }
 
+    /// Whether a type the union marks with `*` is nullable, directly or behind
+    /// aliases. When it also supplies no default of its own, the property
+    /// starts from null.
+    fn selected_type_nullable(&mut self, ty: &TypeExpr, scope: &Scope, depth: usize) -> bool {
+        if depth > 32 {
+            return false;
+        }
+        let name = match ty {
+            TypeExpr::Nullable(_) => return true,
+            TypeExpr::Named(name) => name.trim_start_matches('*'),
+            TypeExpr::Constrained(base, _) => base.as_str(),
+            _ => return false,
+        };
+        if name.ends_with('?') {
+            return true;
+        }
+        match self.resolve_type_alias(name, scope) {
+            Some((alias, alias_scope)) => {
+                let alias_scope = alias_scope.as_ref().unwrap_or(scope);
+                self.selected_type_nullable(&alias, alias_scope, depth + 1)
+            }
+            None => false,
+        }
+    }
+
     /// What amending a property declared `ty` would start from, when `ty` is a
     /// union (possibly nullable, possibly behind aliases). A union has no
     /// default unless one alternative carries the `*` marker; only a marker
@@ -185,6 +214,8 @@ impl Evaluator {
                 {
                     return UnionAmendState::HasDefault;
                 }
+                let nullable = nullable
+                    || marked.is_some_and(|marked| self.selected_type_nullable(marked, scope, 0));
                 if !nullable {
                     return UnionAmendState::NoDefault;
                 }
@@ -314,6 +345,9 @@ impl Evaluator {
                     return Ok(matches!(val, Value::String(actual) if &**actual == expected));
                 }
                 // Check if name is a type alias; if so, resolve to the aliased type
+                // A `*` marks a union's default alternative and is not part of
+                // the type.
+                let name = name.trim_start_matches('*');
                 if let Some(resolved) = scope.get_type_alias(name) {
                     let resolved = resolved.clone();
                     return self.eval_alias_check(val, name, &resolved, scope, depth, resolving);

@@ -153,7 +153,8 @@ impl Evaluator {
         // A body amendment of a union-typed property is checked against the
         // aliases of the class that declared it, which the amending scope may
         // not see (`typealias Args = ...` private to an imported module).
-        if base_source.kind == ObjectKind::Class {
+        // The same holds for an instance, which keeps its class's entries.
+        {
             let mut declaring = None;
             for entry in overlay_entries {
                 let Entry::Property(prop) = entry else {

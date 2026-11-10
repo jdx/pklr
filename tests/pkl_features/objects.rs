@@ -5843,3 +5843,52 @@ fn amending_constrained_union_alias_follows_the_alias_for_a_default() {
         assert_eq!(json["x"]["argv"], serde_json::json!(["a"]));
     }
 }
+
+#[test]
+fn amending_an_instance_with_undefined_union_property_uses_the_declaring_aliases() {
+    let lib = "typealias Args = Listing<String>|Ref\nclass Ref { path: String }\nclass C { argv: Args }\n";
+    for main in [
+        "import \"lib.pkl\" as L\nx = (new L.C {}) { argv { \"a\" } }\n",
+        "import \"lib.pkl\" as L\nlocal c = new L.C {}\nx = (c) { argv { \"a\" } }\n",
+    ] {
+        let error =
+            eval_union_files("instance", &[("lib.pkl", lib), ("main.pkl", main)]).unwrap_err();
+        assert!(error.to_string().contains(UNDEFINED), "{error}");
+    }
+    // Assigning the value instead of amending it is fine, and so is amending
+    // a value the instance already holds.
+    let main = "import \"lib.pkl\" as L\nlocal c = new L.C { argv = new Listing { \"a\" } }\nx = (c) { argv { \"b\" } }\n";
+    let json = eval_union_files("instance_set", &[("lib.pkl", lib), ("main.pkl", main)]).unwrap();
+    assert_eq!(json["x"]["argv"], serde_json::json!(["a", "b"]));
+}
+
+#[test]
+fn amending_marked_nullable_alternative_starts_from_its_default_or_null() {
+    // A nullable alternative takes the default of the type it wraps.
+    for lib in [
+        "typealias A = Listing<String>?\nclass C { argv: *A|Int }\n",
+        "class C { argv: *Listing<String>?|Int }\n",
+        "typealias A = Listing<String>?\nclass C { argv: (*A|Int)? }\n",
+        "typealias B = Listing<String>?\ntypealias A = B\nclass C { argv: *A|Int }\n",
+    ] {
+        let json = eval_union_files(
+            "marked_nullable",
+            &[("lib.pkl", lib), ("main.pkl", UNION_MAIN)],
+        )
+        .unwrap();
+        assert_eq!(json["x"]["argv"], serde_json::json!(["a"]), "{lib}");
+    }
+    // One without a default starts from null, which the built Dynamic fails.
+    let lib = "class C { argv: *Int?|Listing<String> }\n";
+    let error = eval_union_files(
+        "marked_nullable_none",
+        &[("lib.pkl", lib), ("main.pkl", UNION_MAIN)],
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Expected value of type `*Int?|Listing<String>`"),
+        "{error}"
+    );
+}
