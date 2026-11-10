@@ -433,6 +433,42 @@ impl Evaluator {
             declared_listing_elem_class(ty, &declaring)
         })
     }
+
+    /// The element class of an inherited property of `base_source` whose
+    /// annotation is `ty`, resolved in the scope that declared `ty`, never in
+    /// the scope that assigned a value to the property. `entry_scope` is the
+    /// scope recorded for the inherited entry, or `None` for the object's own
+    /// definition scope.
+    pub(super) fn inherited_elem_class(
+        &self,
+        base_source: &ObjectSource,
+        ty: &crate::parser::TypeExpr,
+        entry_scope: Option<&Arc<CapturedScope>>,
+    ) -> Option<Value> {
+        // A class cannot always see itself, or classes declared after it, in
+        // the scope it was captured with: the instance's scope has them. A
+        // name the declaring scope binds otherwise (an alias, a value) is not
+        // the instance's class of that name.
+        let is_class = |name: &str| match entry_scope {
+            Some(captured) => match captured.values.get(name) {
+                Some(value) => is_class_value(value),
+                None => {
+                    !captured.type_aliases.contains_key(name)
+                        && base_source.scope().get(name).is_some_and(is_class_value)
+                }
+            },
+            None => base_source.scope().get(name).is_some_and(is_class_value),
+        };
+        if is_never_listing_type(ty, &is_class) {
+            return None;
+        }
+        let declaring = match entry_scope {
+            Some(captured) => restore_scope(captured),
+            None => definition_type_scope(base_source),
+        };
+        self.declared_elem_class(ty, &declaring)
+            .map(|class| (*class).clone())
+    }
 }
 
 /// Bind a local or property of a listing body for the body's entries.

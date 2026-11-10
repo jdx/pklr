@@ -136,6 +136,7 @@ impl Evaluator {
         // `nested { new { ... } }` amends a property declared `Listing<T>?`, whose
         // default is null. `T` is resolved where the class declares it, which
         // the amending scope may not see.
+        let mut listing_bound: Vec<Name> = Vec::new();
         for entry in overlay_entries {
             let Entry::Property(prop) = entry else {
                 continue;
@@ -156,21 +157,13 @@ impl Evaluator {
                     _ => None,
                 });
             if let Some((ty, entry_scope)) = declared
-                && !is_never_listing_type(ty, &|name| {
-                    base_source.scope().get(name).is_some_and(is_class_value)
-                })
-                && let Some(class) = self.declared_elem_class(
-                    ty,
-                    &match entry_scope.and_then(Option::as_ref) {
-                        Some(captured) => restore_scope(captured),
-                        None => definition_type_scope(base_source),
-                    },
-                )
+                && let Some(class) =
+                    self.inherited_elem_class(base_source, ty, entry_scope.and_then(Option::as_ref))
             {
-                amendment_scope.values.insert(
-                    listing_elem_class_binding(&prop.name).into(),
-                    (*class).clone(),
-                );
+                amendment_scope
+                    .values
+                    .insert(listing_elem_class_binding(&prop.name).into(), class);
+                listing_bound.push(prop.name.clone());
             }
         }
         let prototype = base_source.prototype.clone().or_else(|| {
@@ -454,6 +447,16 @@ impl Evaluator {
                 let Some(type_ann) = &prop.type_ann else {
                     continue;
                 };
+                // A name the class declares as a listing alias may mean
+                // another type in the amending scope (a class of the same
+                // name). The declaring scope resolved it as a `Listing`, so
+                // check the value as one.
+                let listing_alias = if listing_bound.is_empty() {
+                    None
+                } else {
+                    listing_alias_type(type_ann, &prop.name, &listing_bound)
+                };
+                let type_ann = listing_alias.as_ref().unwrap_or(type_ann);
                 let value = map.get(prop.name.as_ref()).or_else(|| {
                     assigned_property_names
                         .contains(prop.name.as_ref())
@@ -1562,4 +1565,31 @@ fn amends_explicit_null(prop: &Property) -> bool {
 /// Whether `prop` is assigned an explicit `new Dynamic { ... }`.
 pub(super) fn is_explicit_dynamic(prop: &Property) -> bool {
     matches!(&prop.value, Some(Expr::New(Some(name), ..)) if name == "Dynamic")
+}
+
+/// `Listing` (or `Listing?`) in place of the alias `ty` that the declaring
+/// scope resolved to a listing, when `ty` is the type of one of the
+/// `bound` properties.
+fn listing_alias_type(
+    ty: &crate::parser::TypeExpr,
+    name: &Name,
+    bound: &[Name],
+) -> Option<crate::parser::TypeExpr> {
+    use crate::parser::TypeExpr;
+    let alias = match ty {
+        TypeExpr::Named(alias) => alias,
+        TypeExpr::Nullable(inner) => match &**inner {
+            TypeExpr::Named(alias) => alias,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    if alias == "Listing" || !bound.contains(name) {
+        return None;
+    }
+    let listing = TypeExpr::Named("Listing".into());
+    Some(match ty {
+        TypeExpr::Nullable(_) => TypeExpr::Nullable(Box::new(listing)),
+        _ => listing,
+    })
 }

@@ -12,8 +12,7 @@ fn encoded_file_uri(path: &std::path::Path) -> String {
     }
 }
 
-// =====================================================}
-
+// ============================================================
 // Glob imports (import*)
 // ============================================================
 
@@ -3459,4 +3458,91 @@ fn inherited_listing_property_elements_use_the_declaring_modules_class() {
     .unwrap();
     let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["v"]["nested"], serde_json::json!([{"x": 1}]));
+}
+
+// A listing alias written in the declaring module keeps its meaning when the
+// subclass's module binds the same name to a class. Checked against pkl 0.32.2.
+#[test]
+fn inherited_listing_alias_shadowed_by_a_class_in_the_subclass_module() {
+    let temp = TestTempDir::new("pklr_inherited_listing_alias_shadowed");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("a.pkl"),
+        "class T { x: Int = 1 }\ntypealias L = Listing<T>\nopen class Base { nested: L? }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("sub.pkl"),
+        "import \"a.pkl\" as A\nclass T { y: Int = 2 }\nclass L {}\nclass Sub extends A.Base {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"sub.pkl\" as S\nv = new S.Sub { nested { new {} } }\nw = (v) { nested { new {} } }\n",
+    )
+    .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
+    assert_eq!(val["v"]["nested"], serde_json::json!([{"x": 1}]));
+    assert_eq!(val["w"]["nested"], serde_json::json!([{"x": 1}, {"x": 1}]));
+}
+
+// Amending an instance, or an instance of a subclass, resolves a new
+// element's class where the property's type is declared, not where the
+// instance was built. Checked against pkl 0.32.2.
+#[test]
+fn amended_instances_resolve_inherited_listing_elements_in_the_declaring_module() {
+    let temp = TestTempDir::new("pklr_amended_instance_listing_elem_class");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("a.pkl"),
+        "class T { x: Int = 1 }\nopen class Base { nested: Listing<T>?; label: String = \"base\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("sub.pkl"),
+        "import \"a.pkl\" as A\nclass T { y: Int = 2 }\nclass Sub extends A.Base {}\n\
+plain = new A.Base { label = \"plain\" }\n\
+inst = new Sub { label = \"inst\" }\n\
+grown = new A.Base { nested { new {} } }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"sub.pkl\" as S\n\
+a = (S.plain) { nested { new {} } }\n\
+b = (S.inst) { nested { new {} } }\n\
+c = (S.grown) { nested { new {} } }\n\
+d = (S.inst) { label = \"again\"; nested { new {} } }\n",
+    )
+    .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
+    assert_eq!(val["a"]["nested"], serde_json::json!([{"x": 1}]));
+    assert_eq!(val["b"]["nested"], serde_json::json!([{"x": 1}]));
+    assert_eq!(val["c"]["nested"], serde_json::json!([{"x": 1}, {"x": 1}]));
+    assert_eq!(val["d"]["nested"], serde_json::json!([{"x": 1}]));
+}
+
+// An explicit `null` assigned to a `Listing<T>?` property is not a listing, so
+// pkl rejects amending it with `new {}` whatever module declares `T`; pklr
+// must not instead build an element of another module's `T`.
+#[test]
+fn assigned_null_listing_property_cannot_be_amended_with_elements() {
+    let temp = TestTempDir::new("pklr_assigned_null_listing");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("a.pkl"),
+        "class T { x: Int = 1 }\nclass P { nested: Listing<T>? }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("b.pkl"),
+        "import \"a.pkl\" as A\nclass T { y: Int = 2 }\np = new A.P { nested = null }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"b.pkl\" as B\nr = (B.p) { nested { new {} } }\n",
+    )
+    .unwrap();
+    assert!(pklr::eval_to_json(&dir.join("main.pkl")).is_err());
 }

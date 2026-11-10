@@ -41,6 +41,21 @@ impl Evaluator {
                 .type_ann
                 .as_ref()
                 .and_then(|ty| nullable_inner_default(ty, scope));
+            // An amendment of an inherited `Listing` property records its
+            // element class where the class declared the type. The type name
+            // may mean something else here (an alias the amending module
+            // shadows with a class), so the default read from it is not the
+            // listing the declaration gives.
+            let declared_listing = nullable_default.is_some()
+                && matches!(&prop.type_ann, Some(crate::parser::TypeExpr::Nullable(inner))
+                    if matches!(**inner, crate::parser::TypeExpr::Named(_)))
+                && matches!(
+                    scope.get(&listing_elem_class_binding(&prop.name)),
+                    Some(Value::Object(..) | Value::List(_))
+                );
+            if declared_listing {
+                nullable_default = None;
+            }
             if let Some(default) = &mut nullable_default {
                 apply_mapping_type_annotation(default, prop.type_ann.as_ref(), scope);
             }
@@ -76,7 +91,8 @@ impl Evaluator {
             }
             if matches!(amendment_base, Some(Value::List(_)))
                 || (!matches!(amendment_base, Some(Value::Object(..)))
-                    && (prop.type_ann.as_ref().is_some_and(type_is_listing)
+                    && (declared_listing
+                        || prop.type_ann.as_ref().is_some_and(type_is_listing)
                         || entries_are_listing_amendment(body)))
             {
                 let mut items = match amendment_base {
