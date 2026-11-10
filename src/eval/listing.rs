@@ -423,6 +423,9 @@ impl Evaluator {
         ty: &crate::parser::TypeExpr,
         scope: &Scope,
     ) -> Option<Arc<Value>> {
+        if is_never_listing_type(ty, &|name| scope.get(name).is_some_and(is_class_value)) {
+            return None;
+        }
         declared_listing_elem_class(ty, scope).or_else(|| {
             let namespace = scope.type_namespace.clone()?;
             let mut declaring = scope.clone();
@@ -473,5 +476,35 @@ pub(super) fn check_no_elements(source: &ObjectSource, entries: &[Entry]) -> Res
         ),
         None if source.kind == ObjectKind::Mapping => check_member_kinds("Mapping", entries, false),
         None => Ok(()),
+    }
+}
+
+/// Whether `ty` cannot declare a listing, judged without resolving aliases or
+/// module scopes: a non-`Listing` generic, a primitive, or a name that
+/// `is_class` says is a class. Lets hot paths skip building a type scope.
+pub(super) fn is_never_listing_type(
+    ty: &crate::parser::TypeExpr,
+    is_class: &impl Fn(&str) -> bool,
+) -> bool {
+    use crate::parser::TypeExpr;
+    match ty {
+        TypeExpr::Nullable(inner) => is_never_listing_type(inner, is_class),
+        TypeExpr::Generic(name, _) => name != "Listing",
+        TypeExpr::Named(name) => {
+            let name = name.trim_start_matches('*');
+            matches!(
+                name,
+                "String"
+                    | "Int"
+                    | "Float"
+                    | "Boolean"
+                    | "Number"
+                    | "Any"
+                    | "Dynamic"
+                    | "Duration"
+                    | "DataSize"
+            ) || is_class(name)
+        }
+        _ => false,
     }
 }

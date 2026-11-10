@@ -156,6 +156,9 @@ impl Evaluator {
                     _ => None,
                 });
             if let Some((ty, entry_scope)) = declared
+                && !is_never_listing_type(ty, &|name| {
+                    base_source.scope().get(name).is_some_and(is_class_value)
+                })
                 && let Some(class) = self.declared_elem_class(
                     ty,
                     &match entry_scope.and_then(Option::as_ref) {
