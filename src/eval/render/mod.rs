@@ -1140,7 +1140,7 @@ pub(crate) fn java_double_to_string(value: f64) -> String {
 
 /// Convert a module's output value to JSON for [`crate::eval_to_json`],
 /// applying `converters` and refusing what Pkl's `JsonRenderer` refuses.
-/// Null properties and entries are kept unless `omit_nulls` (the renderer
+/// Null properties and entries are dropped when `omit_nulls` (the renderer
 /// sets `omitNullProperties`). `top_kind` overrides how the value itself is
 /// classified (a module is typed).
 #[cfg(feature = "native-io")]
