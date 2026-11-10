@@ -1662,7 +1662,7 @@ pub(super) fn this_member_reads_non_const(
         }
         Expr::Let(_, value, body) => this_member_reads_non_const(value, non_const_members)
             .or_else(|| this_member_reads_non_const(body, non_const_members)),
-        Expr::Is(value, _) | Expr::As(value, _) => {
+        Expr::Is(value, _) | Expr::As(value, _) | Expr::Checked(value, _) => {
             this_member_reads_non_const(value, non_const_members)
         }
         Expr::Lambda(_, value) => this_member_reads_non_const(value, non_const_members),

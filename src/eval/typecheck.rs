@@ -79,6 +79,23 @@ impl Evaluator {
         result
     }
 
+    /// Check an element, key, value, argument or result against its declared
+    /// type. An untyped object body is accepted where the type names a class,
+    /// as pkl would have made it an instance of it.
+    pub(super) fn eval_argument_check(
+        &mut self,
+        val: &Value,
+        ty: &crate::parser::TypeExpr,
+        scope: &Scope,
+        depth: usize,
+        resolving: &mut Vec<String>,
+    ) -> Result<bool> {
+        if is_uninferred_object(val) && type_names_user_class(ty, scope, 0) {
+            return Ok(true);
+        }
+        self.eval_type_check_in(val, ty, scope, depth, resolving)
+    }
+
     pub(super) fn eval_type_check_in(
         &mut self,
         val: &Value,
@@ -98,6 +115,12 @@ impl Evaluator {
                     let resolved = resolved.clone();
                     return self.eval_alias_check(val, name, &resolved, scope, depth, resolving);
                 }
+                // A scalar of the built-in type of that name matches without
+                // looking the name up as a class, which only a class instance
+                // could match.
+                if scalar_is_builtin_type(val, name) {
+                    return Ok(true);
+                }
                 if let Some(matches) = value_is_class_type(val, name, scope) {
                     return Ok(matches);
                 }
@@ -109,6 +132,12 @@ impl Evaluator {
                 let class_name = base.trim_end_matches('?').split('<').next().unwrap_or(base);
                 let base_matches = if base.ends_with('?') && is_null_value(val) {
                     true
+                } else if base.contains('<')
+                    && let Ok(generic) = crate::parser::parse_type_name(base)
+                {
+                    // `Listing<Int>(length == 2)`: the base keeps its type
+                    // arguments, which constrain the elements.
+                    self.eval_type_check_in(val, &generic, scope, depth, resolving)?
                 } else if let Some(resolved) = scope.get_type_alias(class_name) {
                     let resolved = resolved.clone();
                     self.eval_alias_check(val, class_name, &resolved, scope, depth, resolving)?
@@ -170,13 +199,82 @@ impl Evaluator {
                 }
                 Ok(has_uncheckable_variant)
             }
-            TypeExpr::Generic(name, _) => {
+            TypeExpr::Generic(name, args) => {
                 if let Some(resolved) = scope.get_type_alias(name) {
                     let resolved = resolved.clone();
                     return self.eval_alias_check(val, name, &resolved, scope, depth, resolving);
                 }
-                Ok(value_is_type(val, ty))
+                if !value_is_type(val, ty) {
+                    return Ok(false);
+                }
+                self.check_type_arguments(val, name, args, scope, depth, resolving)
             }
+        }
+    }
+
+    /// Check the elements of a `List<T>`, `Set<T>`, `Listing<T>` or
+    /// `Collection<T>`, and the keys and values of a `Map<K, V>` or
+    /// `Mapping<K, V>`, against their type arguments. The value is already
+    /// known to be an instance of the generic class. An argument pklr cannot
+    /// model (a type parameter, an unresolved class) accepts everything, as
+    /// does `Any`.
+    fn check_type_arguments(
+        &mut self,
+        val: &Value,
+        name: &str,
+        args: &[crate::parser::TypeExpr],
+        scope: &Scope,
+        depth: usize,
+        resolving: &mut Vec<String>,
+    ) -> Result<bool> {
+        fn checked<'t>(
+            ty: Option<&'t crate::parser::TypeExpr>,
+            scope: &Scope,
+        ) -> Option<&'t crate::parser::TypeExpr> {
+            ty.filter(|ty| !type_is_any(ty) && type_is_runtime_checkable(ty, scope))
+        }
+        match (name, val) {
+            ("List" | "Listing" | "Set" | "Collection", Value::List(items)) => {
+                let Some(element_ty) = checked(args.first(), scope) else {
+                    return Ok(true);
+                };
+                for item in items.iter() {
+                    if !self.eval_argument_check(item, element_ty, scope, depth, resolving)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            ("Map" | "Mapping", Value::Object(entries, source))
+                if source
+                    .as_ref()
+                    .is_none_or(|source| source.type_name.is_none()) =>
+            {
+                let key_ty = checked(args.first(), scope);
+                let value_ty = checked(args.get(1), scope);
+                if key_ty.is_none() && value_ty.is_none() {
+                    return Ok(true);
+                }
+                for (stored_key, entry) in entries.iter() {
+                    if let Some(key_ty) = key_ty {
+                        let key = self
+                            .mapping_key_values
+                            .get(stored_key)
+                            .cloned()
+                            .unwrap_or_else(|| crate::value::mapping_storage_value(stored_key));
+                        if !self.eval_argument_check(&key, key_ty, scope, depth, resolving)? {
+                            return Ok(false);
+                        }
+                    }
+                    if let Some(value_ty) = value_ty
+                        && !self.eval_argument_check(entry, value_ty, scope, depth, resolving)?
+                    {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            _ => Ok(true),
         }
     }
 }
@@ -248,6 +346,7 @@ pub(super) fn with_constraint_receiver(constraint: &Expr, scope: &Scope) -> Opti
             }
             Expr::Is(value, ty) => Expr::Is(go(value, bound), ty.clone()),
             Expr::As(value, ty) => Expr::As(go(value, bound), ty.clone()),
+            Expr::Checked(value, ty) => Expr::Checked(go(value, bound), ty.clone()),
             Expr::Binop(op, left, right) => Expr::Binop(*op, go(left, bound), go(right, bound)),
             Expr::Unop(op, value) => Expr::Unop(*op, go(value, bound)),
             Expr::Lambda(params, body) => {
@@ -401,6 +500,7 @@ pub(super) fn type_constraint_has_explicit_throw(
             | Expr::InferredNew(..)
             | Expr::Is(..)
             | Expr::As(..)
+            | Expr::Checked(..)
             | Expr::ObjectBody(_)
             | Expr::Import(..)
             | Expr::ImportGlob(..) => false,
@@ -434,4 +534,60 @@ pub(super) fn is_deferred_constraint_evaluator_error(message: &str) -> bool {
     message.starts_with("Operator `")
         && message.contains(" is not defined for operand types `")
         && message.contains("Function")
+}
+
+/// Whether `val` is an object body whose class pklr did not infer: not a
+/// `Dynamic` made by `new Dynamic`, not a `Mapping`, and no class instance.
+/// pkl gives such a `new { ... }` the class its declared type names; pklr does
+/// not always, so it cannot disprove that the type accepts it.
+fn is_uninferred_object(val: &Value) -> bool {
+    matches!(
+        val,
+        Value::Object(_, Some(source))
+            if source.kind == ObjectKind::Object
+                && source.type_name.is_none()
+                && source.type_identity.is_none()
+    )
+}
+
+/// Whether `ty` names a class of the program, directly or through an alias,
+/// a nullable, a constraint or a union.
+fn type_names_user_class(ty: &crate::parser::TypeExpr, scope: &Scope, depth: usize) -> bool {
+    use crate::parser::TypeExpr;
+    if depth > 8 {
+        return false;
+    }
+    let class_name = |name: &str| {
+        let name = name.trim_start_matches('*').trim_end_matches('?');
+        if let Some(alias) = scope.get_type_alias(name) {
+            return type_names_user_class(alias, scope, depth + 1);
+        }
+        matches!(
+            resolve_dotted(scope, name),
+            Some(Value::Object(_, Some(source))) if source.type_identity.is_some()
+        )
+    };
+    match ty {
+        TypeExpr::Named(name) | TypeExpr::Generic(name, _) => class_name(name),
+        TypeExpr::Constrained(base, _) => class_name(base.split('<').next().unwrap_or(base)),
+        TypeExpr::Nullable(inner) => type_names_user_class(inner, scope, depth + 1),
+        TypeExpr::Union(variants) => variants
+            .iter()
+            .any(|variant| type_names_user_class(variant, scope, depth + 1)),
+    }
+}
+
+/// Whether `val` is a scalar (a number, string, boolean, regex, duration or
+/// data size) and `name` is the built-in type it is an instance of.
+fn scalar_is_builtin_type(val: &Value, name: &str) -> bool {
+    match val {
+        Value::Int(_) => matches!(name, "Int" | "Number"),
+        Value::Float(_) => matches!(name, "Float" | "Number"),
+        Value::String(_) => name == "String",
+        Value::Bool(_) => name == "Boolean",
+        Value::Regex(_) => name == "Regex",
+        Value::Duration(_) => name == "Duration",
+        Value::DataSize(_) => name == "DataSize",
+        _ => false,
+    }
 }

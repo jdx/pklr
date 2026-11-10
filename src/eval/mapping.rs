@@ -849,6 +849,16 @@ impl Evaluator {
                     let dynamic_value_type = expanded_value_type_names.iter().any(|name| {
                         selected_value_type(name) && mapping_value_type_base(name) == "Dynamic"
                     });
+                    // `["a"] = new { 1 }` for a `Listing` value type builds the
+                    // listing like the body `["a"] { 1 }` does.
+                    let listing_body;
+                    let val_expr = match val_expr {
+                        Expr::New(None, body, _) if listing_value_type => {
+                            listing_body = Expr::ObjectBody(body.clone());
+                            &listing_body
+                        }
+                        _ => val_expr,
+                    };
                     if let Expr::ObjectBody(body) = val_expr
                         && (matches!(map.get(&storage_key), Some(Value::List(_)))
                             || listing_value_type
@@ -866,7 +876,12 @@ impl Evaluator {
                         let base = match (map.get(&storage_key), &explicit_default) {
                             (Some(existing @ Value::List(_)), _) => existing.clone(),
                             (_, Some(default @ Value::List(_))) => default.clone(),
-                            // Amending nothing makes a `Dynamic`.
+                            // Amending nothing makes a `Dynamic`, unless the
+                            // value type is a `Listing`, whose default the
+                            // body amends.
+                            _ if listing_value_type => {
+                                Value::List(ListValue::new(ListKind::Listing, Vec::new()))
+                            }
                             _ => Value::List(ListValue::new(ListKind::Dynamic, Vec::new())),
                         };
                         let val = self.eval_value_amendment(base, body, entry_scope, depth)?;

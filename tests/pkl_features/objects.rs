@@ -5332,9 +5332,12 @@ fn inherited_module_union_property_without_default_fails() {
     }
 }
 
+// pkl cannot pick a parent for `new { ... }` here ("Tried to read property
+// `default` but its value is undefined"). The untyped body is a `Dynamic`,
+// which neither `R` nor `Listing<Int>` accepts.
 #[test]
-fn typed_mapping_new_entry_with_mixed_union_value_type_stays_untyped() {
-    let result = eval(
+fn typed_mapping_new_entry_with_mixed_union_value_type_is_rejected() {
+    let error = eval_fails(
         r#"
 class R { x: Int = 1 }
 m: Mapping<String, R | Listing<Int>> = new {
@@ -5342,7 +5345,10 @@ m: Mapping<String, R | Listing<Int>> = new {
 }
 "#,
     );
-    assert_eq!(result["m"]["l"], serde_json::json!([1, 2]));
+    assert!(
+        error.contains("expected Mapping<String, R|Listing<Int>>"),
+        "{error}"
+    );
 }
 
 // Amending a property whose default is an explicit `null` amends the `null`,

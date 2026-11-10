@@ -128,7 +128,11 @@ impl Evaluator {
             Expr::InferredNew(ty, entries) => {
                 let (name, params) = inferred_new_type(ty, scope, 0)?;
                 self.eval_expr(
-                    &Expr::New(Some(name), entries.clone(), params),
+                    &Expr::New(
+                        Some(name),
+                        infer_listing_elements(ty, entries, scope),
+                        params,
+                    ),
                     scope,
                     depth + 1,
                 )
@@ -650,6 +654,10 @@ impl Evaluator {
             }
             Expr::Let(name, val_expr, body_expr) => {
                 let val = self.eval_expr(val_expr, scope, depth + 1)?;
+                // `_` binds nothing: the value is only checked.
+                if name == "_" {
+                    return self.eval_expr(body_expr, scope, depth + 1);
+                }
                 let mut child = scope.child();
                 child.set(name, val);
                 self.eval_expr(body_expr, &child, depth + 1)
@@ -694,6 +702,20 @@ impl Evaluator {
                         "cannot cast {} to {}",
                         value_type_name(&val),
                         display_type_expr(ty)
+                    )))
+                }
+            }
+            Expr::Checked(expr, ty) => {
+                let val = self.eval_expr(expr, scope, depth + 1)?;
+                if !type_is_runtime_checkable(ty, scope)
+                    || self.eval_argument_check(&val, ty, scope, depth, &mut Vec::new())?
+                {
+                    Ok(val)
+                } else {
+                    Err(Error::Eval(format!(
+                        "Expected value of type `{}`, but got type `{}`.",
+                        display_type_expr(ty),
+                        pkl_class_name(&val)
                     )))
                 }
             }

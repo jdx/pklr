@@ -99,7 +99,7 @@ struct AliasResolver<'a> {
 impl AliasResolver<'_> {
     fn expr(&mut self, expr: &mut Expr, shadowed: &HashSet<Name>) {
         match expr {
-            Expr::Is(value, ty) | Expr::As(value, ty) => {
+            Expr::Is(value, ty) | Expr::As(value, ty) | Expr::Checked(value, ty) => {
                 self.expr(value, shadowed);
                 self.ty(ty, shadowed);
             }
@@ -915,7 +915,7 @@ pub(super) fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
                 }
                 "Class" => is_class_value(val),
                 "Regex" => matches!(val, Value::Regex(_)),
-                "Function" | "Function0" | "Function1" | "Function2" | "Function3"
+                "Function" | "Mixin" | "Function0" | "Function1" | "Function2" | "Function3"
                 | "Function4" | "Function5" => matches!(val, Value::Lambda(..)),
                 _ => matches!(val, Value::Object(..)),
             }
@@ -938,7 +938,7 @@ pub(super) fn is_class_value(val: &Value) -> bool {
 pub(super) fn list_is_type(kind: ListKind, name: &str) -> bool {
     match name {
         "Any" => true,
-        "List" => kind == ListKind::List,
+        "List" | "IntSeq" => kind == ListKind::List,
         "Listing" => kind == ListKind::Listing,
         "Set" => kind == ListKind::Set,
         "Collection" => matches!(kind, ListKind::List | ListKind::Set),
@@ -1383,4 +1383,62 @@ pub(super) fn merge_values(base: Value, overlay: Value) -> Value {
         }
         (_, overlay) => overlay,
     }
+}
+
+/// The generic `Listing` or `Mapping` type `ty` stands for, through aliases,
+/// nullability and constraints.
+fn resolve_collection_type(
+    ty: &crate::parser::TypeExpr,
+    scope: &Scope,
+    depth: usize,
+) -> Option<crate::parser::TypeExpr> {
+    use crate::parser::TypeExpr;
+    if depth > 8 {
+        return None;
+    }
+    match ty {
+        TypeExpr::Generic(name, _) if matches!(name.as_str(), "Listing" | "Mapping") => {
+            Some(ty.clone())
+        }
+        TypeExpr::Nullable(inner) => resolve_collection_type(inner, scope, depth + 1),
+        TypeExpr::Named(name) => {
+            let alias = scope.get_type_alias(name.trim_start_matches('*'))?;
+            resolve_collection_type(alias, scope, depth + 1)
+        }
+        TypeExpr::Constrained(base, _) if base.contains('<') => {
+            let base = crate::parser::parse_type_name(base.trim_start_matches('*')).ok()?;
+            resolve_collection_type(&base, scope, depth + 1)
+        }
+        _ => None,
+    }
+}
+
+/// An untyped `new { ... }` element of a `Listing<E>` takes its parent from
+/// `E` when that is a `Listing` or `Mapping` (`Listing<Listing<Int>> = new {
+/// new { 1 } }`). Elsewhere it is a `Dynamic`, as pkl does.
+pub(super) fn infer_listing_elements(
+    ty: &crate::parser::TypeExpr,
+    entries: &crate::parser::Body,
+    scope: &Scope,
+) -> crate::parser::Body {
+    use crate::parser::TypeExpr;
+    let Some(TypeExpr::Generic(name, args)) = resolve_collection_type(ty, scope, 0) else {
+        return entries.clone();
+    };
+    let [element_ty] = args.as_slice() else {
+        return entries.clone();
+    };
+    if name != "Listing" || resolve_collection_type(element_ty, scope, 0).is_none() {
+        return entries.clone();
+    }
+    entries
+        .iter()
+        .map(|entry| match entry {
+            Entry::Elem(Expr::New(None, body, _)) => {
+                Entry::Elem(Expr::InferredNew(element_ty.clone(), body.clone()))
+            }
+            other => other.clone(),
+        })
+        .collect::<Vec<_>>()
+        .into()
 }
