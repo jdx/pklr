@@ -1841,7 +1841,11 @@ impl Evaluator {
                 if !referenced_imports.contains(alias.as_str()) {
                     continue;
                 }
-                scope.declare(alias, stdlib_val);
+                scope.declare(alias.clone(), stdlib_val);
+                // The binding records which standard library module it is, so
+                // a type qualified through it (`base.Regex`) can be told from a
+                // member of another value.
+                scope.set_module_identity(alias, format!("pkl:{module_name}"));
                 continue;
             }
 

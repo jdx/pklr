@@ -1554,25 +1554,29 @@ impl TypeResolver<'_> {
     fn check(&mut self, ty: &crate::parser::TypeExpr) -> Option<String> {
         use crate::parser::TypeExpr;
         match ty {
-            // A constrained type or a default-marked variant holds the text of
-            // the type it was made from (`List<Foo>`, `*Int?`), not its parts.
-            TypeExpr::Named(text) | TypeExpr::Constrained(text, _) => {
-                // A quoted name (`` `Step?` ``) is one literal name, whatever
-                // characters it holds. Use it as is when something declares it.
-                let literal = text.trim_start_matches('*');
-                if self.declares_literally(literal) {
-                    return self.check_bare_name(literal);
-                }
-                let whole = text.trim_start_matches('*').trim_end_matches('?');
-                if whole.is_empty() || string_literal_type_value(whole).is_some() {
+            // A plain name is one name, whatever characters its quotes held.
+            TypeExpr::Named(name) if !name.starts_with('*') => {
+                if name.is_empty() || string_literal_type_value(name).is_some() {
                     None
-                } else if !whole.contains(['<', '>', '(', ')', '|', '"']) {
-                    // One name, which can hold a comma its quotes were
-                    // stripped from.
-                    self.check_name(whole)
                 } else {
-                    crate::parser::type_text_names(text)
-                        .find_map(|range| self.check_name(&text[range]))
+                    self.check_name(name)
+                }
+            }
+            // A constrained type or a default-marked variant holds the text of
+            // the type it was made from (`List<Foo>`, `*Int?`), which keeps the
+            // backticks of a quoted name. Read it back as a type.
+            TypeExpr::Named(text) | TypeExpr::Constrained(text, _) => {
+                let whole = text.trim_start_matches('*');
+                if whole.is_empty() || string_literal_type_value(whole).is_some() {
+                    return None;
+                }
+                // A default-marked name is the name as written, quoted or not.
+                if matches!(ty, TypeExpr::Named(_)) && self.declares_literally(whole) {
+                    return self.check_bare_name(whole);
+                }
+                match crate::parser::parse_type_name(whole) {
+                    Ok(parsed) => self.check(&parsed),
+                    Err(_) => None,
                 }
             }
             TypeExpr::Nullable(inner) => self.check(inner),
@@ -1624,7 +1628,9 @@ impl TypeResolver<'_> {
         let Some((alias, module_scope)) = imported else {
             // A type of a standard library module (`import "pkl:base" as base`)
             // is a marker in the module's value, which has no module identity.
-            if scope.module_identity(module).is_none() && STDLIB_TYPE_NAMES.contains(&member) {
+            if scope.module_identity(module).map(String::as_str) == Some("pkl:base")
+                && STDLIB_TYPE_NAMES.contains(&member)
+            {
                 return None;
             }
             return Some(format!("Cannot find type `{member}` in module `{module}`."));

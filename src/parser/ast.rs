@@ -117,14 +117,28 @@ pub enum TypeExpr {
     Constrained(String, Box<Expr>),
 }
 
+/// The text of a type for a constrained or default-marked type. A name that is
+/// no plain identifier (it was quoted in backticks) keeps its backticks, so
+/// the text reads back as the same type.
 pub(super) fn type_expr_runtime_name(ty: &TypeExpr) -> String {
     match ty {
-        TypeExpr::Named(name) => name.clone(),
+        TypeExpr::Named(name)
+            if crate::lexer::is_plain_qualified_name(name)
+                || name.starts_with(['*', '"'])
+                || name.is_empty() =>
+        {
+            name.clone()
+        }
+        TypeExpr::Named(name) => format!("`{name}`"),
         TypeExpr::Nullable(inner) => format!("{}?", type_expr_runtime_name(inner)),
         TypeExpr::Union(_) => "Any".to_string(),
         TypeExpr::Generic(name, args) => format!(
             "{}<{}>",
-            name,
+            if crate::lexer::is_plain_qualified_name(name) {
+                name.clone()
+            } else {
+                format!("`{name}`")
+            },
             args.iter()
                 .map(type_expr_runtime_name)
                 .collect::<Vec<_>>()
@@ -319,59 +333,36 @@ pub struct WhenGenerator {
 /// body (`T` in `typealias L<T> = List<T>`), which names no class or alias.
 pub(crate) const TYPE_PARAM_PREFIX: &str = "$tp$";
 
-/// The byte ranges of the type names written in the text of a type (the
-/// runtime name of a constrained or default-marked type, such as `List<Foo>`
-/// or `*Int?`): identifiers, which can be qualified, outside string literals.
-pub(crate) fn type_text_names(text: &str) -> impl Iterator<Item = std::ops::Range<usize>> + '_ {
-    let bytes = text.as_bytes();
-    let mut index = 0;
-    std::iter::from_fn(move || {
-        while index < bytes.len() {
-            let byte = bytes[index];
-            if byte == b'`' {
-                // A quoted name, which can hold any character.
-                let start = index;
-                index += 1;
-                while index < bytes.len() && bytes[index] != b'`' {
-                    index += 1;
-                }
-                index = (index + 1).min(bytes.len());
-                return Some(start..index);
-            } else if byte == b'"' {
-                index += 1;
-                while index < bytes.len() && bytes[index] != b'"' {
-                    index += if bytes[index] == b'\\' { 2 } else { 1 };
-                }
-                index += 1;
-            } else if byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'$') {
-                let start = index;
-                while index < bytes.len()
-                    && (bytes[index].is_ascii_alphanumeric()
-                        || matches!(bytes[index], b'_' | b'$' | b'.'))
-                {
-                    index += 1;
-                }
-                let end = start + text[start..index].trim_end_matches('.').len();
-                return Some(start..end);
-            } else {
-                index += 1;
-            }
-        }
-        None
-    })
-}
-
 /// `ty` with the type parameters `parameters` of a type alias marked (see
 /// [`TYPE_PARAM_PREFIX`]), so they are not taken for a class or alias.
 pub(super) fn mark_type_parameters(ty: TypeExpr, parameters: &[String]) -> TypeExpr {
+    // The text of a constrained or default-marked type (`List<T>`, `*T?`) is
+    // read with the lexer, so a name is what the lexer takes for one.
     let mark_text = |text: &str| {
+        let Ok(tokens) = crate::lexer::lex(text) else {
+            return text.to_string();
+        };
         let mut out = String::with_capacity(text.len());
         let mut copied = 0;
-        for range in type_text_names(text) {
-            if parameters.iter().any(|name| *name == text[range.clone()]) {
-                out.push_str(&text[copied..range.start]);
+        for (index, token) in tokens.iter().enumerate() {
+            let crate::lexer::TokenKind::Ident(name) = &token.kind else {
+                continue;
+            };
+            // A qualified name (`m.T`) names a member, not the parameter.
+            let qualified = index
+                .checked_sub(1)
+                .is_some_and(|before| matches!(tokens[before].kind, crate::lexer::TokenKind::Dot))
+                || matches!(
+                    tokens.get(index + 1).map(|next| &next.kind),
+                    Some(crate::lexer::TokenKind::Dot)
+                );
+            if !qualified
+                && !text[token.offset..].starts_with('`')
+                && parameters.iter().any(|parameter| parameter == name)
+            {
+                out.push_str(&text[copied..token.offset]);
                 out.push_str(TYPE_PARAM_PREFIX);
-                copied = range.start;
+                copied = token.offset;
             }
         }
         out.push_str(&text[copied..]);

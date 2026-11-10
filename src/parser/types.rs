@@ -197,5 +197,10 @@ impl<'a> Parser<'a> {
 }
 
 pub(super) fn mark_default_type(ty: TypeExpr) -> TypeExpr {
-    TypeExpr::Named(format!("*{}", type_expr_runtime_name(&ty)))
+    // A quoted name stays as written after the marker, which the places that
+    // read a default-marked name expect.
+    match ty {
+        TypeExpr::Named(name) => TypeExpr::Named(format!("*{name}")),
+        ty => TypeExpr::Named(format!("*{}", type_expr_runtime_name(&ty))),
+    }
 }

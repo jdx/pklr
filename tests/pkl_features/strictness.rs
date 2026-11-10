@@ -520,6 +520,37 @@ f = 1 is List<`Step?`>
 }
 
 #[test]
+fn type_names_are_read_from_the_type_and_not_its_text() {
+    let json = eval(
+        r#"
+import "pkl:base" as base
+class `Step?` {}
+typealias L<É> = List<É>
+typealias M<É> = List<É>(isEmpty)
+a = List(1) is L<Int>
+b = List() is M<Int>
+c = 1 is List<`Step?`>(true)
+d = 1 is *List<`Step?`>|Int
+e = 1 is `Step?`(true)
+f = 1 is base.Int
+"#,
+    );
+    assert_eq!(
+        json,
+        serde_json::json!({"a": true, "b": true, "c": false, "d": true, "e": false, "f": true})
+    );
+    // Only the `pkl:base` import qualifies the types of the standard library.
+    for src in [
+        "local m = 1\nr = 1 is m.Int",
+        "import \"pkl:math\" as math\nr = 1 is math.Int",
+        "import \"pkl:math\" as math\nr = 1 as math.Int",
+    ] {
+        let error = eval_fails(src);
+        assert!(error.contains("Cannot find type `Int`"), "{src}: {error}");
+    }
+}
+
+#[test]
 fn to_dynamic_works_on_a_module_that_carries_a_source() {
     let temp = TestTempDir::new("pklr_test_to_dynamic_module");
     std::fs::write(temp.path().join("m.pkl"), "@Deprecated\nold = 1\nx = 2\n").unwrap();

@@ -17,7 +17,6 @@ pub use ast::{
 };
 pub(crate) use ast::{
     TYPE_PARAM_PREFIX, has_untyped_result_new, infer_method_return_new, rewrite_untyped_result_new,
-    type_text_names,
 };
 use ast::{infers_new, mark_type_parameters, type_expr_runtime_name};
 use checks::*;

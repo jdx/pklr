@@ -561,7 +561,7 @@ impl Evaluator {
                 if let Some((module, member)) = name.rsplit_once('.')
                     && !module.contains('.')
                     && scope.get(module).is_some()
-                    && scope.module_identity(module).is_none()
+                    && scope.module_identity(module).map(String::as_str) == Some("pkl:base")
                     && STDLIB_TYPE_NAMES.contains(&member)
                 {
                     return Ok(value_is_type(
@@ -573,36 +573,41 @@ impl Evaluator {
                 Ok(value_is_type(val, ty))
             }
             TypeExpr::Constrained(base, constraint) => {
-                // A quoted name that something declares is one literal name.
-                let literal = base.trim_start_matches('*');
-                let literal_name = (scope.get_type_alias(literal).is_some()
-                    || matches!(scope.get(literal), Some(Value::Object(_, Some(source))) if source.kind == ObjectKind::Class))
-                .then_some(literal);
+                // A quoted name keeps its backticks in the text of the base and
+                // is one name, whatever characters it holds.
+                let (quoted_name, nullable) = match base
+                    .trim_start_matches('*')
+                    .strip_prefix('`')
+                    .and_then(|rest| rest.split_once('`'))
+                {
+                    Some((name, "")) => (Some(name), false),
+                    Some((name, "?")) => (Some(name), true),
+                    _ => (None, base.ends_with('?')),
+                };
                 // First check the base type
-                let class_name = literal_name.unwrap_or_else(|| {
+                let class_name = quoted_name.unwrap_or_else(|| {
                     base.trim_end_matches('?').split('<').next().unwrap_or(base)
                 });
-                let base_matches =
-                    if literal_name.is_none() && base.ends_with('?') && is_null_value(val) {
-                        true
-                    } else if let Some((resolved, module_scope)) =
-                        self.inherited_alias(scope, class_name)
-                    {
-                        self.eval_alias_check(
-                            val,
-                            class_name,
-                            &resolved,
-                            &module_scope,
-                            depth,
-                            resolving,
-                        )?
-                    } else if let Some(resolved) = scope.get_type_alias(class_name) {
-                        let resolved = resolved.clone();
-                        self.eval_alias_check(val, class_name, &resolved, scope, depth, resolving)?
-                    } else {
-                        value_is_class_type(val, class_name, scope)
-                            .unwrap_or_else(|| value_is_named_type(val, base))
-                    };
+                let base_matches = if nullable && is_null_value(val) {
+                    true
+                } else if let Some((resolved, module_scope)) =
+                    self.inherited_alias(scope, class_name)
+                {
+                    self.eval_alias_check(
+                        val,
+                        class_name,
+                        &resolved,
+                        &module_scope,
+                        depth,
+                        resolving,
+                    )?
+                } else if let Some(resolved) = scope.get_type_alias(class_name) {
+                    let resolved = resolved.clone();
+                    self.eval_alias_check(val, class_name, &resolved, scope, depth, resolving)?
+                } else {
+                    value_is_class_type(val, class_name, scope)
+                        .unwrap_or_else(|| value_is_named_type(val, base))
+                };
                 if !base_matches {
                     return Ok(false);
                 }
