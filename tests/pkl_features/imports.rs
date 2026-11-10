@@ -3502,6 +3502,34 @@ fn class_held_by_a_property_is_a_value_not_a_member() {
 }
 
 #[test]
+fn live_module_snapshots_do_not_render_declared_classes() {
+    // `module`, `this` and their `toMap()`/`toDynamic()` views are built from the
+    // module's live member map, which holds the class as a declared member just
+    // like the exported object. Pkl never renders it.
+    for value in ["module", "module.toMap()", "module.toDynamic()"] {
+        let src = format!(
+            "class C {{ a: Int = 1 }}\ntypealias A = C\nvalue = 1\noutput {{ value = new Dynamic {{ snap = {value} }} }}\n"
+        );
+        assert_eq!(
+            eval_files_to_json(&[("main.pkl", src.as_str())]),
+            serde_json::json!({"snap": {"value": 1}}),
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn live_module_snapshot_keeps_a_class_held_by_a_property() {
+    // Only the declared member is skipped: `d` is an ordinary property that
+    // happens to hold a class, so the snapshot still carries it.
+    let val = eval_files_to_json(&[(
+        "main.pkl",
+        "class C { a: Int = 1 }\nd = C\noutput { value = new Dynamic { d = module.toMap().containsKey(\"d\"); c = module.toMap().containsKey(\"C\") } }\n",
+    )]);
+    assert_eq!(val, serde_json::json!({"d": true, "c": false}));
+}
+
+#[test]
 fn imported_module_drops_a_property_named_like_an_inherited_typealias() {
     // As in Pkl, `A = 5` is not a rendered member of a module that inherits
     // `typealias A`, whether the module is evaluated or imported, while an

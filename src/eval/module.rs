@@ -1099,7 +1099,14 @@ impl Evaluator {
                             Ok(defaults) => {
                                 scope.set_member_poison(name, None);
                                 scope.declare(name, defaults.clone());
-                                module_props_insert(scope, all_props, name.clone(), defaults);
+                                // The live `this`/`module` hold the class as a
+                                // declared member too, so rendering them skips it.
+                                module_props_insert(
+                                    scope,
+                                    all_props,
+                                    name.clone(),
+                                    defaults.declared_as_member(name),
+                                );
                                 let snapshot = Value::Object(Arc::clone(all_props), None);
                                 scope.set("this", snapshot.clone());
                                 scope.set("module", snapshot);
