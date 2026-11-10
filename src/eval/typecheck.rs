@@ -576,9 +576,14 @@ impl Evaluator {
                 // The text of the base names a class or alias that something
                 // declares, however its quotes spelled it (`Step?`), as one name.
                 let literal = base.trim_start_matches('*');
-                let (quoted_name, nullable) = if scope.get_type_alias(literal).is_some()
-                    || matches!(scope.get(literal), Some(Value::Object(_, Some(source))) if source.kind == ObjectKind::Class)
-                {
+                let declared = |name: &str| {
+                    scope.get_type_alias(name).is_some()
+                        || matches!(scope.get(name), Some(Value::Object(_, Some(source))) if source.kind == ObjectKind::Class)
+                };
+                // `C?` is the nullable `C` when `C` is declared too.
+                let nullable_syntax =
+                    literal.ends_with('?') && declared(literal.trim_end_matches('?'));
+                let (quoted_name, nullable) = if declared(literal) && !nullable_syntax {
                     (Some(literal), false)
                 } else {
                     (None, base.ends_with('?'))

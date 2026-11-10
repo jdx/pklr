@@ -154,10 +154,18 @@ impl Scope {
     /// body (`x is base.Int`) resolves the import as it does outside.
     pub(super) fn capture_identities(&self, captured: &mut ScopeMap) {
         let mut identities = ObjectMap::default();
-        for (name, identity) in self.flatten_module_identities() {
-            if captured.contains_key(name.as_str()) {
-                identities.insert(name.as_str().into(), Value::String(identity.into()));
+        let mut level = Some(self);
+        while let Some(scope) = level {
+            for (name, identity) in scope.module_identities.iter() {
+                // The innermost level that records a name wins.
+                if captured.contains_key(&**name) && !identities.contains_key(&**name) {
+                    identities.insert(
+                        name.as_ref().into(),
+                        Value::String(identity.as_str().into()),
+                    );
+                }
             }
+            level = scope.parent.as_deref();
         }
         if !identities.is_empty() {
             captured.insert(
@@ -307,11 +315,11 @@ impl Scope {
     }
 
     fn module_identity_walk(&self, name: &str) -> Option<&String> {
-        if self.vars.contains_key(name) {
-            self.module_identities.get(name)
-        } else {
-            self.parent.as_ref()?.module_identity_walk(name)
-        }
+        // A type name resolves to the import, whatever value (a parameter, a
+        // `let`, a `for` variable) shadows the import's name as a value.
+        self.module_identities
+            .get(name)
+            .or_else(|| self.parent.as_ref()?.module_identity_walk(name))
     }
 
     pub(super) fn flatten_module_identities(&self) -> IndexMap<String, String> {

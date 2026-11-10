@@ -570,6 +570,28 @@ d = List(1).map((x) -> x is base.Int)
 }
 
 #[test]
+fn a_type_name_resolves_to_its_import_whatever_shadows_the_value() {
+    let json = eval(
+        r#"
+import "pkl:base" as base
+function f(base) = (x) -> x is base.Int
+a = f(new Dynamic {}).apply(1)
+b = let (base = new Dynamic {}) (1 is base.Int)
+c = new Listing { for (base in List(new Dynamic {})) { 1 is base.Int } }
+"#,
+    );
+    assert_eq!(json, serde_json::json!({"a": true, "b": true, "c": [true]}));
+}
+
+#[test]
+fn a_nullable_constrained_type_is_not_a_quoted_name_when_the_class_is_declared() {
+    let json = eval(
+        "class C {}\nclass `C?` {}\na = null is C?(true)\nb = null as C?(true)\nc = new C {} is C?(true)",
+    );
+    assert_eq!(json, serde_json::json!({"a": true, "b": null, "c": true}));
+}
+
+#[test]
 fn a_constrained_quoted_alias_resolves_in_a_function_and_when_default_marked() {
     let json = eval(
         r#"
