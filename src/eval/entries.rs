@@ -39,10 +39,19 @@ impl Evaluator {
         if let Some(body) = &prop.body {
             // An untyped `new` member of a declared `Listing` or `Mapping`
             // takes its parent from the declared member type.
+            // A listing whose element class the declaring class bound (the
+            // type it names may not be visible here) builds its elements
+            // from that class instead.
+            let bound_class = scope.get(&listing_elem_class_binding(&prop.name)).is_some()
+                && owns_listing_bindings(scope, &prop.name, body);
             let inferred = prop
                 .type_ann
                 .as_ref()
+                .filter(|_| !bound_class)
                 .and_then(|ty| infer_amendment_members(ty, body, scope));
+            // Inferring rewrites the body, which then has another identity
+            // than the one the amended class recorded its listing bindings for.
+            let declared_body = body;
             let body = inferred.as_ref().unwrap_or(body);
             let mut nullable_default = prop
                 .type_ann
@@ -55,7 +64,7 @@ impl Evaluator {
             // listing the declaration gives.
             let declared_listing = matches!(&prop.type_ann, Some(crate::parser::TypeExpr::Nullable(inner))
                     if matches!(**inner, crate::parser::TypeExpr::Named(_)))
-                && owns_listing_bindings(scope, &prop.name, body);
+                && owns_listing_bindings(scope, &prop.name, declared_body);
             if declared_listing {
                 nullable_default = None;
             }
@@ -160,7 +169,7 @@ impl Evaluator {
                     .or_else(|| {
                         match scope
                             .get(&listing_elem_class_binding(&prop.name))
-                            .filter(|_| owns_listing_bindings(scope, &prop.name, body))
+                            .filter(|_| owns_listing_bindings(scope, &prop.name, declared_body))
                         {
                             Some(class @ (Value::Object(..) | Value::List(_))) => {
                                 Some(Arc::new(class.clone()))

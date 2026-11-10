@@ -7143,3 +7143,55 @@ fn untyped_new_in_a_nested_listing_of_a_non_class_type_is_a_listing() {
     assert_eq!(json["b"]["m"], serde_json::json!([[]]));
     assert_eq!(json["c"]["n"], serde_json::json!([["q"], []]));
 }
+
+#[test]
+fn index_replacement_of_a_typed_listing_element_is_an_instance_of_its_class() {
+    // Verified against pkl 0.32.2: `[0] = new { ... }` builds a `T`, with its
+    // defaults, and rejects a property `T` lacks.
+    let src = "class T { x: Int = 1; y: String = \"d\" }\n\
+         class H { xs: Listing<T> }\n\
+         h = new H { xs { new { x = 2 }; new { x = 3 } } }\n";
+    let json = eval(&format!(
+        "{src}h2 = (h) {{ xs {{ [0] = new {{ x = 9 }} }} }}\n"
+    ));
+    assert_eq!(
+        json["h2"]["xs"],
+        serde_json::json!([{"x": 9, "y": "d"}, {"x": 3, "y": "d"}])
+    );
+    let error = eval_fails(&format!(
+        "{src}h3 = (h) {{ xs {{ [0] = new {{ z = 9 }} }} }}\n"
+    ));
+    assert!(error.contains('z'), "{error}");
+}
+
+#[test]
+fn a_type_alias_named_like_a_builtin_shadows_it_for_listing_elements() {
+    // Verified against pkl 0.32.2: `String` here is the alias of a listing.
+    let json = eval(
+        "class T { x: Int = 1 }\n\
+         typealias String = Listing<T>\n\
+         class H { xs: String }\n\
+         h = new H { xs { new {} } }\n",
+    );
+    assert_eq!(json["h"]["xs"], serde_json::json!([{"x": 1}]));
+}
+
+#[test]
+fn nested_listing_of_an_imported_class_builds_elements_from_the_declaring_class() {
+    // Verified against pkl 0.32.2: `T` is not visible in `main.pkl`.
+    let lib = "class T { x: Int = 1; y: String = \"d\" }\n\
+         class H { xs: Listing<Listing<T>>; ys: Listing<Listing<T>>?; zs: Listing<Listing<T>> = new {} }\n";
+    let main = "import \"lib.pkl\" as lib\n\
+         a = new lib.H { xs { new { new { x = 5 } } } }\n\
+         b = new lib.H { ys { new { new { x = 5 } } } }\n\
+         c = new lib.H { zs { new { new { x = 5 } } } }\n";
+    let json = eval_union_files(
+        "nested_listing_import",
+        &[("lib.pkl", lib), ("main.pkl", main)],
+    )
+    .unwrap();
+    let want = serde_json::json!([[{"x": 5, "y": "d"}]]);
+    assert_eq!(json["a"]["xs"], want);
+    assert_eq!(json["b"]["ys"], want);
+    assert_eq!(json["c"]["zs"], want);
+}

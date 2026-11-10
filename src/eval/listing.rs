@@ -66,9 +66,11 @@ impl Evaluator {
                                     depth + 1,
                                 )?
                             } else {
+                                let (expr, elem_scope) =
+                                    typed_listing_elem(expr, &scope, elem_class);
                                 self.eval_expr(
-                                    &with_listing_locals(expr, &locals),
-                                    &scope,
+                                    &with_listing_locals(&expr, &locals),
+                                    &elem_scope,
                                     depth + 1,
                                 )?
                             },
@@ -216,7 +218,11 @@ impl Evaluator {
                             depth + 1,
                         )?
                     } else {
-                        self.eval_expr(value, &listing_scope, depth + 1)?
+                        // A replacement `new { ... }` is an element of the
+                        // declared class too.
+                        let (value, elem_scope) =
+                            typed_listing_elem(value, &listing_scope, elem_class);
+                        self.eval_expr(&value, &elem_scope, depth + 1)?
                     };
                 }
                 Entry::Spread(expr) => {
@@ -476,7 +482,11 @@ impl Evaluator {
         ty: &crate::parser::TypeExpr,
         scope: &Scope,
     ) -> Option<Arc<Value>> {
-        if is_never_listing_type(ty, &|name| scope.get(name).is_some_and(is_class_value)) {
+        if is_never_listing_type(
+            ty,
+            &|name| scope.get(name).is_some_and(is_class_value),
+            &|name| scope.get_type_alias(name).is_some(),
+        ) {
             return None;
         }
         declared_listing_elem_class(ty, scope).or_else(|| {
@@ -512,7 +522,11 @@ impl Evaluator {
             },
             None => base_source.scope().get(name).is_some_and(is_class_value),
         };
-        if is_never_listing_type(ty, &is_class) {
+        let is_alias = |name: &str| match entry_scope {
+            Some(captured) => captured.type_aliases.contains_key(name),
+            None => base_source.scope_type_aliases().contains_key(name),
+        };
+        if is_never_listing_type(ty, &is_class, &is_alias) {
             return None;
         }
         let mut declaring = match entry_scope {
@@ -584,14 +598,16 @@ pub(super) fn check_no_elements(source: &ObjectSource, entries: &[Entry]) -> Res
 pub(super) fn is_never_listing_type(
     ty: &crate::parser::TypeExpr,
     is_class: &impl Fn(&str) -> bool,
+    is_alias: &impl Fn(&str) -> bool,
 ) -> bool {
     use crate::parser::TypeExpr;
     match ty {
-        TypeExpr::Nullable(inner) => is_never_listing_type(inner, is_class),
+        TypeExpr::Nullable(inner) => is_never_listing_type(inner, is_class, is_alias),
         TypeExpr::Generic(name, _) => name != "Listing",
         TypeExpr::Named(name) => {
             let name = name.trim_start_matches('*');
-            matches!(
+            // An alias of the same name shadows the built-in type.
+            (matches!(
                 name,
                 "String"
                     | "Int"
@@ -602,7 +618,8 @@ pub(super) fn is_never_listing_type(
                     | "Dynamic"
                     | "Duration"
                     | "DataSize"
-            ) || is_class(name)
+            ) && !is_alias(name))
+                || is_class(name)
         }
         _ => false,
     }
