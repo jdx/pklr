@@ -444,8 +444,10 @@ impl Evaluator {
             mapping_value_types: Vec::new(),
             deprecated: collect_deprecated(entries),
             poisoned_members: None,
+            declared_as: None,
             kind: ObjectKind::Object,
             is_parsed_json: false,
+            is_module: false,
             prototype: None,
         };
         Ok(Value::Object(Arc::new(st.map), Some(Arc::new(source))))
@@ -1150,8 +1152,10 @@ impl Evaluator {
                         mapping_value_types: Vec::new(),
                         deprecated: merge_deprecated(&src.deprecated, body),
                         poisoned_members: None,
+                        declared_as: None,
                         kind: ObjectKind::Object,
                         is_parsed_json: false,
+                        is_module: false,
                         prototype: None,
                     },
                 };

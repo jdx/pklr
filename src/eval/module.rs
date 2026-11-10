@@ -316,7 +316,7 @@ impl Evaluator {
             };
             if let Some(name) = exported {
                 if let Some(value) = scope.get(name) {
-                    out.insert(name.as_str().into(), value.clone());
+                    out.insert(name.as_str().into(), value.clone().declared_as_member(name));
                 } else if let Some(message) = failed.get(name.as_str()) {
                     poisoned_members.insert(
                         nm(name),
@@ -531,10 +531,13 @@ impl Evaluator {
 
         // A top-level amending or extending module renders data, not the
         // classes it inherited. An imported module keeps those classes so
-        // dotted access (for example `child.Person`) remains available.
-        if depth == 0 {
-            out.retain(|name, _| !inherited_type_names.contains(&**name));
-        }
+        // dotted access (for example `child.Person`) remains available, but a
+        // property named like an inherited type alias is not a member Pkl
+        // renders at any depth.
+        out.retain(|name, value| {
+            !inherited_type_names.contains(&**name)
+                || (depth > 0 && value.is_class_member(name, None))
+        });
 
         // At the top level (depth 0), strip class definitions and lambdas from
         // the serialized output — they're schema/functions, not data.
@@ -575,10 +578,12 @@ impl Evaluator {
                 elements: Vec::new(),
                 mapping_value_types: Vec::new(),
                 deprecated,
+                declared_as: None,
                 poisoned_members: (!poisoned_members.is_empty())
                     .then(|| Arc::new(poisoned_members)),
                 kind: ObjectKind::Object,
                 is_parsed_json: false,
+                is_module: true,
                 prototype: None,
             }))
         };
@@ -1095,7 +1100,14 @@ impl Evaluator {
                             Ok(defaults) => {
                                 scope.set_member_poison(name, None);
                                 scope.declare(name, defaults.clone());
-                                module_props_insert(scope, all_props, name.clone(), defaults);
+                                // The live `this`/`module` hold the class as a
+                                // declared member too, so rendering them skips it.
+                                module_props_insert(
+                                    scope,
+                                    all_props,
+                                    name.clone(),
+                                    defaults.declared_as_member(name),
+                                );
                                 let snapshot = Value::Object(Arc::clone(all_props), None);
                                 scope.set("this", snapshot.clone());
                                 scope.set("module", snapshot);
@@ -1406,7 +1418,10 @@ impl Evaluator {
                         if depth == 0 {
                             base_obj.shift_remove(name.as_str());
                         } else {
-                            base_obj.insert(name.as_str().into(), defaults.clone());
+                            base_obj.insert(
+                                name.as_str().into(),
+                                defaults.clone().declared_as_member(name),
+                            );
                         }
                     }
                     // Extract converters from the base module's output block
@@ -1522,7 +1537,10 @@ impl Evaluator {
                                 if depth == 0 {
                                     base_obj.shift_remove(cls_name.as_str());
                                 } else {
-                                    base_obj.insert(cls_name.as_str().into(), defaults.clone());
+                                    base_obj.insert(
+                                        cls_name.as_str().into(),
+                                        defaults.clone().declared_as_member(cls_name),
+                                    );
                                 }
                             }
                             Entry::TypeAlias(name, ty) => {
@@ -1599,7 +1617,10 @@ impl Evaluator {
                         if depth == 0 {
                             base_obj.shift_remove(cls_name.as_str());
                         } else {
-                            base_obj.insert(cls_name.as_str().into(), defaults.clone());
+                            base_obj.insert(
+                                cls_name.as_str().into(),
+                                defaults.clone().declared_as_member(cls_name),
+                            );
                         }
                     }
                     if let Entry::Property(prop) = entry
