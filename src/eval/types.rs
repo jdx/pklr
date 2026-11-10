@@ -629,6 +629,7 @@ fn object_class_name(
     module_names: Option<&HashMap<String, String>>,
 ) -> String {
     match source {
+        Some(source) if source.kind == ObjectKind::Class => "Class".to_string(),
         Some(ObjectSource {
             type_name: Some(class),
             type_identity,
@@ -868,7 +869,10 @@ pub(super) fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
             "String" => matches!(val, Value::String(_)),
             "Regex" => matches!(val, Value::Regex(_)),
             "List" | "Listing" | "Set" => matches!(val, Value::List(_)),
-            "Map" | "Mapping" | "Object" | "Dynamic" => matches!(val, Value::Object(..)),
+            "Class" => is_class_value(val),
+            "Map" | "Mapping" | "Object" | "Dynamic" => {
+                matches!(val, Value::Object(..)) && !is_class_value(val)
+            }
             "Function" => matches!(val, Value::Lambda(..)),
             "Duration" => matches!(val, Value::Duration(_)),
             "DataSize" => matches!(val, Value::DataSize(_)),
@@ -884,7 +888,8 @@ pub(super) fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
             // Check the base type, ignore type parameters
             match name.as_str() {
                 "List" | "Listing" | "Set" => matches!(val, Value::List(_)),
-                "Map" | "Mapping" => matches!(val, Value::Object(..)),
+                "Map" | "Mapping" => matches!(val, Value::Object(..)) && !is_class_value(val),
+                "Class" => is_class_value(val),
                 "Regex" => matches!(val, Value::Regex(_)),
                 "Function" | "Function0" | "Function1" | "Function2" | "Function3"
                 | "Function4" | "Function5" => matches!(val, Value::Lambda(..)),
@@ -896,6 +901,12 @@ pub(super) fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
             value_is_named_type(val, base)
         }
     }
+}
+
+/// Whether `val` is a `Class` value (`getClass()`'s result or a class name),
+/// which is of type `Class` and not a `Dynamic`, `Object` or `Mapping`.
+pub(super) fn is_class_value(val: &Value) -> bool {
+    matches!(val, Value::Object(_, Some(source)) if source.kind == ObjectKind::Class)
 }
 
 pub(super) fn value_is_named_type(val: &Value, name: &str) -> bool {
@@ -929,6 +940,10 @@ pub(super) fn value_is_class_type(val: &Value, name: &str, scope: &Scope) -> Opt
     let Value::Object(_, Some(source)) = val else {
         return Some(false);
     };
+    // A class value is a `Class`, not an instance of the class it stands for.
+    if source.kind == ObjectKind::Class {
+        return Some(false);
+    }
     let Some(actual_type_identity) = source.type_identity.as_ref() else {
         return Some(false);
     };
@@ -964,6 +979,7 @@ pub(super) fn type_is_runtime_checkable(ty: &crate::parser::TypeExpr, scope: &Sc
                         | "Mapping"
                         | "Object"
                         | "Dynamic"
+                        | "Class"
                         | "Function"
                         | "Regex"
                         | "Duration"
