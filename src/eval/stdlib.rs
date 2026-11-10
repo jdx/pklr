@@ -79,7 +79,26 @@ pub(super) fn dynamic_object(members: ObjectMap) -> Value {
     source.kind = ObjectKind::Dynamic;
     let mut scope = Scope::default();
     scope.set(MEMBERS, Value::Object(Arc::new(members.clone()), None));
-    source.entries = vec![Entry::Spread(Expr::Ident(MEMBERS.into()))].into();
+    // One property per member, read from the bound variable: an amendment
+    // replaces a member in place, and its body reads the members by name.
+    source.entries = members
+        .keys()
+        .map(|name| {
+            Entry::Property(Arc::new(Property {
+                annotations: Vec::new(),
+                modifiers: Vec::new(),
+                name: name.clone(),
+                type_ann: None,
+                value: Some(Expr::Index(
+                    Box::new(Expr::Ident(MEMBERS.into())),
+                    Box::new(Expr::String(name.clone())),
+                )),
+                body: None,
+                is_method: false,
+            }))
+        })
+        .collect::<Vec<_>>()
+        .into();
     source.captured = SourceScope::lazy(&scope, Vec::new(), Vec::new());
     source.evaluated_properties = members.keys().cloned().collect();
     Value::Object(Arc::new(members), Some(Arc::new(source)))

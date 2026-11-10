@@ -584,3 +584,17 @@ merged = (d) { x { b = 2 } }
     assert_eq!(json["replaced"], serde_json::json!({"x": {"b": 2}}));
     assert_eq!(json["merged"], serde_json::json!({"x": {"a": 1, "b": 2}}));
 }
+
+#[test]
+fn an_amendment_of_a_computed_dynamic_reads_its_members_unqualified() {
+    let json = eval(
+        r#"
+class P { x: Int = 1; y: Int = 2 }
+local d = new P {}.toDynamic()
+a = (d) { z = x + y }
+b = (d) { x = 10; w = y }
+"#,
+    );
+    assert_eq!(json["a"], serde_json::json!({"x": 1, "y": 2, "z": 3}));
+    assert_eq!(json["b"], serde_json::json!({"x": 10, "y": 2, "w": 2}));
+}
