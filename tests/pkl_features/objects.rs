@@ -5809,3 +5809,20 @@ fn alias_nullable_default_resolves_in_the_declaring_module() {
     let json = Evaluator::new().eval_file(&main).unwrap().to_json();
     assert_eq!(json["x"]["m"], serde_json::json!({"n": 2}));
 }
+
+#[test]
+fn amending_a_property_typed_by_a_nullable_alias_starts_from_the_class() {
+    // Verified against pkl 0.32.2: looking through the alias's nullable
+    // wrapper, a constrained or parenthesized nullable alias still amends an
+    // `Item` instance rather than null.
+    let json = eval(
+        "class Item { n = 1; m = 5 }\n\
+         typealias A = Item?\n\
+         typealias B = A\n\
+         class U {\n  a: A?(true)\n  b: A\n  c: (A)?\n  d: B?(true)\n  e: A(true)\n  f: B\n}\n\
+         x = new U { a { n = 2 } b { n = 3 } c { n = 4 } d { n = 5 } e { n = 6 } f { n = 7 } }\n",
+    );
+    for (key, n) in [("a", 2), ("b", 3), ("c", 4), ("d", 5), ("e", 6), ("f", 7)] {
+        assert_eq!(json["x"][key], serde_json::json!({"n": n, "m": 5}), "{key}");
+    }
+}

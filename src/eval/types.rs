@@ -528,11 +528,13 @@ fn nullable_inner_default_at(
         scope.get_type_alias(name)
     };
     match ty {
-        TypeExpr::Nullable(inner) => type_default_value(inner, scope)
-            .or_else(|| nullable_inner_default_at(inner, scope, depth + 1)),
+        // Look through a nullable alias first: its own default is null, but an
+        // amendment starts from the type it wraps.
+        TypeExpr::Nullable(inner) => nullable_inner_default_at(inner, scope, depth + 1)
+            .or_else(|| type_default_value(inner, scope)),
         TypeExpr::Constrained(name, _) if name.ends_with('?') => match alias(name) {
-            Some(target) => type_default_value(target, scope)
-                .or_else(|| nullable_inner_default_at(target, scope, depth + 1)),
+            Some(target) => nullable_inner_default_at(target, scope, depth + 1)
+                .or_else(|| type_default_value(target, scope)),
             None => type_default_for_name(name.trim_end_matches('?'), scope),
         },
         // An alias amends like the type it names, so look through it.
