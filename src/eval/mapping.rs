@@ -863,6 +863,39 @@ impl Evaluator {
                         }
                         _ => val_expr,
                     };
+                    // An untyped `new` that an `if` or `let` picks as a
+                    // `Listing` value amends the same listing a plain `new`
+                    // does: an inherited entry's, else the `default`, else an
+                    // empty one.
+                    if listing_value_type
+                        && matches!(
+                            val_expr,
+                            Expr::If(..)
+                                | Expr::Let(..)
+                                | Expr::Trace(..)
+                                | Expr::TemplateLocals(..)
+                        )
+                    {
+                        let base = match (map.get(&storage_key), &explicit_default) {
+                            (Some(Value::List(items)), _) | (_, Some(Value::List(items))) => {
+                                Value::List(items.clone().with_kind(ListKind::Listing))
+                            }
+                            _ => Value::List(ListValue::new(ListKind::Listing, Vec::new())),
+                        };
+                        let mut amended = val_expr.clone();
+                        crate::parser::rewrite_untyped_result_new(&mut amended, &mut |entries| {
+                            Expr::Binop(
+                                BinOp::Add,
+                                Box::new(Expr::Ident("#parent:value".into())),
+                                Box::new(Expr::ObjectBody(entries)),
+                            )
+                        });
+                        let mut amend_scope = entry_scope.child();
+                        amend_scope.set("#parent:value", base);
+                        let val = self.eval_expr(&amended, &amend_scope, depth + 1)?;
+                        map.insert(storage_key, val.into_entry_value());
+                        continue;
+                    }
                     if let Expr::ObjectBody(body) = val_expr
                         && (matches!(map.get(&storage_key), Some(Value::List(_)))
                             || listing_value_type

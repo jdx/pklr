@@ -1591,3 +1591,54 @@ fn an_int_seq_is_not_a_collection() {
         "IntSeq"
     );
 }
+
+// A mapping keyed by a class accepts `Mapping<Class, Int>`: the key is the
+// class `String` (checked with pkl 0.32.2, which only fails to render it as
+// JSON).
+#[test]
+fn class_keys_are_checked_as_classes() {
+    eval("a: Mapping<Class, Int> = new { [String] = 1 }\nb = a.length\n");
+    eval_fails("a: Mapping<String, Int> = new { [String] = 1 }\nb = a.length\n");
+}
+
+// The aliases in the type arguments of a constrained base are expanded
+// (checked with pkl 0.32.2).
+#[test]
+fn aliases_in_constrained_generic_bases_are_expanded() {
+    let src = "typealias I = Int\n\
+               function f(x: List<I>(length == 1)): Int = 1\n";
+    assert_eq!(eval(&format!("{src}a = f(List(1))\n"))["a"], 1);
+    eval_fails(&format!("{src}a = f(List(\"wrong\"))\n"));
+}
+
+// A union's default alternative keeps its type arguments: `*Listing<Int>`
+// is checked as a `Listing<Int>` (checked with pkl 0.32.2).
+#[test]
+fn default_union_alternatives_keep_their_type_arguments() {
+    let src = "function f(x: *Listing<Int> | String): Int = 1\n";
+    assert_eq!(eval(&format!("{src}a = f(\"s\")\n"))["a"], 1);
+    eval_fails(&format!("{src}a = f(true)\n"));
+    eval_fails(
+        "class C { m: *Mapping<String, Int> | String = new Mapping { [\"a\"] = \"x\" } }\nc = new C {}\n",
+    );
+    eval_fails("class C { l: *Listing<Int> | String = new Listing { \"x\" } }\nc = new C {}\n");
+}
+
+// An untyped `new` that an `if` or `let` picks as a mapping value amends the
+// mapping's `default` like a plain `new` does. pkl needs a function `default`
+// for this; pklr also accepts a listing.
+#[test]
+fn selected_untyped_new_mapping_values_amend_the_default() {
+    let json = eval(
+        "a: Mapping<String, Listing<Listing<Int>>> = new {\n\
+           default = new Listing { new Listing { 9 } }\n\
+           [\"k\"] = if (true) new { new Listing { 1 } } else new {}\n\
+           [\"j\"] = let (x = 2) new { new Listing { x } }\n\
+           [\"m\"] = new { new Listing { 3 } }\n\
+         }\n",
+    );
+    assert_eq!(
+        json["a"],
+        serde_json::json!({"k": [[9], [1]], "j": [[9], [2]], "m": [[9], [3]]})
+    );
+}

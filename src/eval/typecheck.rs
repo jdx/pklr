@@ -423,6 +423,9 @@ impl Evaluator {
         use crate::parser::TypeExpr;
         match ty {
             TypeExpr::Named(name) => {
+                if let Some(unmarked) = unmarked_generic(name) {
+                    return self.eval_type_check_in(val, &unmarked, scope, depth, resolving);
+                }
                 if let Some(expected) = string_literal_type_value(name) {
                     return Ok(matches!(val, Value::String(actual) if &**actual == expected));
                 }
@@ -519,6 +522,8 @@ impl Evaluator {
                 Ok(has_uncheckable_variant)
             }
             TypeExpr::Generic(name, args) => {
+                // A `*` marks a union's default alternative.
+                let name = name.trim_start_matches('*');
                 if let Some(resolved) = scope.get_type_alias(name) {
                     let resolved = resolved.clone();
                     return self.eval_alias_check(val, name, &resolved, scope, depth, resolving);
@@ -580,7 +585,14 @@ impl Evaluator {
                             .mapping_key_values
                             .get(stored_key)
                             .cloned()
-                            .unwrap_or_else(|| crate::value::mapping_storage_value(stored_key));
+                            .unwrap_or_else(|| match render::class_key_name(stored_key) {
+                                // `[String] = 1` keys by a class, which no
+                                // evaluated key value was remembered for.
+                                Some(class) => {
+                                    stdlib::class_value(class, format!("pkl:base#{class}"))
+                                }
+                                None => crate::value::mapping_storage_value(stored_key),
+                            });
                         if !self.eval_argument_check(&key, key_ty, scope, depth, resolving)? {
                             return Ok(false);
                         }
