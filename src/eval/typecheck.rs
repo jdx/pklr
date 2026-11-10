@@ -1,8 +1,121 @@
 //! Checking values against declared types and their constraints.
 
 use super::*;
+use crate::parser::TypeExpr;
 
 impl Evaluator {
+    /// The type aliases a loaded module defines, by its identity (canonical
+    /// path or URL). Snapshots are keyed by the path the module was loaded
+    /// with, which need not be canonical.
+    fn module_type_aliases(&mut self, identity: &str) -> Option<TypeAliasMap> {
+        if let Some(snapshot) = self.module_scopes.get(Path::new(identity)) {
+            return Some(snapshot.type_aliases.clone());
+        }
+        let keys: Vec<PathBuf> = self.module_scopes.keys().cloned().collect();
+        keys.into_iter().find_map(|key| {
+            let canonical = self.module_type_namespace(&key);
+            (canonical == identity)
+                .then(|| self.module_scopes.get(&key).map(|s| s.type_aliases.clone()))
+                .flatten()
+        })
+    }
+
+    /// What amending a property declared `ty` would start from, when `ty` is a
+    /// union (possibly nullable, possibly behind aliases). A union has no
+    /// default unless one alternative carries the `*` marker; only a marker
+    /// written on the property's own union counts, since an alias used as an
+    /// alternative contributes none. Imported aliases (`m.A`) resolve through
+    /// the module they come from; one that cannot be resolved is not a union
+    /// here, so it is never rejected.
+    pub(super) fn union_amend_state(&mut self, ty: &TypeExpr, scope: &Scope) -> UnionAmendState {
+        self.union_amend_state_in(ty, scope, None, false, &mut Vec::new())
+    }
+
+    fn union_amend_state_in(
+        &mut self,
+        ty: &TypeExpr,
+        scope: &Scope,
+        aliases: Option<&TypeAliasMap>,
+        nullable: bool,
+        seen: &mut Vec<String>,
+    ) -> UnionAmendState {
+        match ty {
+            TypeExpr::Nullable(inner) => {
+                self.union_amend_state_in(inner, scope, aliases, true, seen)
+            }
+            TypeExpr::Union(variants) if variants.iter().any(is_default_type) => {
+                // The marked alternative's own default is what the property
+                // starts from, and a primitive such as `Int` has none.
+                let marked = variants.iter().find(|variant| is_default_type(variant));
+                let primitive = matches!(marked, Some(TypeExpr::Named(name))
+                    if matches!(
+                        name.trim_start_matches('*'),
+                        "String" | "Int" | "Float" | "Number" | "Boolean"
+                    ) && type_default_value(
+                        &TypeExpr::Named(name.trim_start_matches('*').to_string()),
+                        scope,
+                    )
+                    .is_none());
+                if primitive && !nullable {
+                    UnionAmendState::NoDefault
+                } else {
+                    UnionAmendState::HasDefault
+                }
+            }
+            TypeExpr::Union(variants) if nullable => {
+                // A nullable union's default is null, so the amendment builds
+                // a Dynamic that must itself satisfy the union.
+                let takes_dynamic = variants.iter().any(|variant| {
+                    matches!(variant, TypeExpr::Named(name)
+                        if matches!(name.as_str(), "Dynamic" | "Any" | "Object"))
+                });
+                if takes_dynamic {
+                    UnionAmendState::NotUnion
+                } else {
+                    UnionAmendState::NullDefault(display_type_expr(ty))
+                }
+            }
+            TypeExpr::Union(_) => UnionAmendState::NoDefault,
+            TypeExpr::Named(name) if !name.starts_with('*') && seen.len() < 32 => {
+                let local = match aliases {
+                    Some(map) => map.get(name.as_str()).map(|alias| (**alias).clone()),
+                    None => scope.get_type_alias(name).cloned(),
+                };
+                if let Some(alias) = local {
+                    if seen.iter().any(|s| s == name) {
+                        return UnionAmendState::NotUnion;
+                    }
+                    seen.push(name.clone());
+                    let state = self.union_amend_state_in(&alias, scope, aliases, nullable, seen);
+                    seen.pop();
+                    return state;
+                }
+                // `m.A`: an alias defined by an imported module.
+                if aliases.is_none()
+                    && let Some((root, member)) = name.split_once('.')
+                    && !member.contains('.')
+                    && let Some(identity) = scope.module_identity(root).cloned()
+                    && let Some(module_aliases) = self.module_type_aliases(&identity)
+                    && let Some(alias) = module_aliases.get(member)
+                {
+                    let alias = (**alias).clone();
+                    seen.push(name.clone());
+                    let state = self.union_amend_state_in(
+                        &alias,
+                        scope,
+                        Some(&module_aliases),
+                        nullable,
+                        seen,
+                    );
+                    seen.pop();
+                    return state;
+                }
+                UnionAmendState::NotUnion
+            }
+            _ => UnionAmendState::NotUnion,
+        }
+    }
+
     /// Check a concrete property value after its defining scope is complete.
     /// Defaults and declarations without values are checked when they are
     /// materialized, not merely declared.
@@ -433,4 +546,18 @@ pub(super) fn is_deferred_constraint_evaluator_error(message: &str) -> bool {
     message.starts_with("Operator `")
         && message.contains(" is not defined for operand types `")
         && message.contains("Function")
+}
+
+/// Whether amending a union-typed property has a value to start from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum UnionAmendState {
+    /// Not a union, or one this check cannot decide.
+    NotUnion,
+    /// A union with a `*` alternative.
+    HasDefault,
+    /// A union with no `*` alternative: the property is undefined.
+    NoDefault,
+    /// A nullable union with no `*` alternative: the property is null. Holds
+    /// the union as written, for the error message.
+    NullDefault(String),
 }

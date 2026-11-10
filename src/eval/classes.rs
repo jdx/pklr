@@ -532,6 +532,21 @@ impl Evaluator {
                 typed.push(entry.clone());
                 continue;
             };
+            // A union with no `*` alternative cannot be amended without a value
+            // to start from. A parent's default value is not in scope here, so
+            // leave such an amendment untyped rather than have it rejected as
+            // amending an undefined property.
+            if prop.value.is_none()
+                && !matches!(
+                    self.union_amend_state(ty, child_scope),
+                    UnionAmendState::NotUnion | UnionAmendState::HasDefault
+                )
+                && matches!(parent.entries.get(index), Some(Entry::Property(parent_prop))
+                    if parent_prop.value.is_some() || parent_prop.body.is_some())
+            {
+                typed.push(entry.clone());
+                continue;
+            }
             let mut prop = (**prop).clone();
             prop.type_ann = Some(ty.clone());
             if let Some(expr) = &mut prop.value

@@ -5344,3 +5344,200 @@ m: Mapping<String, R | Listing<Int>> = new {
     );
     assert_eq!(result["m"]["l"], serde_json::json!([1, 2]));
 }
+
+// ============================================================
+// Amending a union-typed property: only a `*` alternative gives a default
+// ============================================================
+
+const UNDEFINED: &str = "Tried to read property `argv` but its value is undefined.";
+
+#[test]
+fn amending_union_property_without_default_is_undefined() {
+    let src = r#"
+class Ref { path: String }
+class C { argv: Listing<String>|Ref }
+c = new C { argv { "a" } }
+"#;
+    assert!(eval_fails(src).contains(UNDEFINED));
+}
+
+#[test]
+fn amending_union_property_with_default_marker_still_works() {
+    let json = eval(
+        r#"
+class Ref { path: String }
+class C {
+    argv: *Listing<String>|Ref
+    ref: Listing<String>|*Ref
+}
+c = new C { argv { "a" } ref { path = "p" } }
+"#,
+    );
+    assert_eq!(json["c"]["argv"], serde_json::json!(["a"]));
+    assert_eq!(json["c"]["ref"], serde_json::json!({ "path": "p" }));
+}
+
+#[test]
+fn amending_union_property_covers_each_alternative_shape() {
+    for ty in [
+        "Listing<String>|Int",
+        "Listing<String>|Int|Null",
+        "Listing<String>|Int?",
+        "Listing<String>?|Int",
+        "Listing<String>|Dynamic",
+        "Listing<String>(length > 0)|Int",
+        "Mapping<String, String>|Int",
+        "Listing<String>|Listing<Int>",
+        "Listing<String>|*Int",
+    ] {
+        let src = format!("class C {{ argv: {ty} }}\nc = new C {{ argv {{ \"a\" }} }}\n");
+        assert!(eval_fails(&src).contains(UNDEFINED), "{ty}");
+    }
+    let src = r#"
+class R { path: String }
+class S { x: Int }
+class C { argv: R|S }
+c = new C { argv { path = "a" } }
+"#;
+    assert!(eval_fails(src).contains(UNDEFINED));
+    let src = "class C { argv: Int|String }\nc = new C { argv { \"a\" } }\n";
+    assert!(eval_fails(src).contains(UNDEFINED));
+}
+
+#[test]
+fn amending_union_property_through_aliases() {
+    let plain = r#"
+typealias A = Listing<String>|Int
+typealias B = A
+class C { argv: B }
+c = new C { argv { "a" } }
+"#;
+    assert!(eval_fails(plain).contains(UNDEFINED));
+    // An alias used as one alternative contributes no default of its own.
+    let nested = r#"
+typealias A = *Listing<String>|Int
+class C { argv: A|String }
+c = new C { argv { "a" } }
+"#;
+    assert!(eval_fails(nested).contains(UNDEFINED));
+    let marked = r#"
+typealias A = *Listing<String>|Int
+typealias B = A
+class C { argv: B }
+c = new C { argv { "a" } }
+"#;
+    assert_eq!(eval(marked)["c"]["argv"], serde_json::json!(["a"]));
+}
+
+#[test]
+fn amending_nullable_union_property_builds_a_dynamic() {
+    let src = r#"
+class Ref { path: String }
+class C { argv: (Listing<String>|Ref)? }
+c = new C { argv { "a" } }
+"#;
+    let error = eval_fails(src);
+    assert!(
+        error.contains("Expected value of type `Listing<String>|Ref`, but got type `Dynamic`."),
+        "{error}"
+    );
+    let alias = r#"
+typealias A = (Listing<String>|Int)?
+class C { argv: A }
+c = new C { argv { "a" } }
+"#;
+    assert!(eval_fails(alias).contains("but got type `Dynamic`"));
+    let marked = r#"
+class C { argv: (*Listing<String>|Int)?; dyn: (Dynamic|Int)? }
+c = new C { argv { "a" } dyn { x = 1 } }
+"#;
+    let json = eval(marked);
+    assert_eq!(json["c"]["argv"], serde_json::json!(["a"]));
+    assert_eq!(json["c"]["dyn"], serde_json::json!({ "x": 1 }));
+}
+
+#[test]
+fn union_property_assignments_and_existing_values_can_still_be_amended() {
+    let json = eval(
+        r#"
+open class C { argv: Listing<String>|Int; other: Listing<String>|Int = new Listing { "z" } }
+class D extends C { other { "y" } }
+e = new D {}
+a = new C { argv = new Listing { "a" } }
+b = (a) { argv { "b" } }
+c = new C { argv = 3 }
+d = new C { argv = new Listing { "q" } other { "w" } }
+local unused = new C { argv { "x" } }
+"#,
+    );
+    assert_eq!(json["b"]["argv"], serde_json::json!(["a", "b"]));
+    assert_eq!(json["c"]["argv"], 3);
+    assert_eq!(json["d"]["other"], serde_json::json!(["z", "w"]));
+}
+
+#[test]
+fn amending_union_property_of_amended_module_without_default_is_undefined() {
+    let temp = TestTempDir::new("pklr_test_union_amend_module");
+    let dir = temp.path();
+    std::fs::write(dir.join("base.pkl"), "argv: Listing<String>|Int\n").unwrap();
+    std::fs::write(dir.join("marked.pkl"), "argv: *Listing<String>|Int\n").unwrap();
+    std::fs::write(
+        dir.join("child.pkl"),
+        "amends \"base.pkl\"\nargv { \"a\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("assign.pkl"),
+        "amends \"base.pkl\"\nargv = new Listing { \"a\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("marked_child.pkl"),
+        "amends \"marked.pkl\"\nargv { \"a\" }\n",
+    )
+    .unwrap();
+    let error = pklr::eval_to_json(&dir.join("child.pkl")).unwrap_err();
+    assert!(error.to_string().contains(UNDEFINED), "{error}");
+    let json = pklr::eval_to_json(&dir.join("assign.pkl")).unwrap();
+    assert_eq!(json["argv"], serde_json::json!(["a"]));
+    let json = pklr::eval_to_json(&dir.join("marked_child.pkl")).unwrap();
+    assert_eq!(json["argv"], serde_json::json!(["a"]));
+}
+
+#[test]
+fn amending_union_property_with_alias_from_imported_module() {
+    let temp = TestTempDir::new("pklr_test_union_amend_import");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("lib.pkl"),
+        "typealias A = Listing<String>|Int\ntypealias D = *Listing<String>|Int\ntypealias N = (Listing<String>|Int)?\n",
+    )
+    .unwrap();
+    let main = |ty: &str| {
+        std::fs::write(
+            dir.join("main.pkl"),
+            format!(
+                "import \"lib.pkl\"\nclass C {{ argv: {ty} }}\nc = new C {{ argv {{ \"a\" }} }}\n"
+            ),
+        )
+        .unwrap();
+        pklr::eval_to_json(&dir.join("main.pkl"))
+    };
+    assert!(main("lib.A").unwrap_err().to_string().contains(UNDEFINED));
+    assert!(
+        main("lib.A|String")
+            .unwrap_err()
+            .to_string()
+            .contains(UNDEFINED)
+    );
+    assert!(
+        main("lib.N")
+            .unwrap_err()
+            .to_string()
+            .contains("Expected value of type `Listing<String>|Int`, but got type `Dynamic`.")
+    );
+    assert_eq!(
+        main("lib.D").unwrap()["c"]["argv"],
+        serde_json::json!(["a"])
+    );
+}
