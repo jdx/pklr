@@ -19,7 +19,8 @@ impl<'a> Parser<'a> {
             local_type_aliases: std::collections::HashSet::new(),
             module_local_type_aliases: std::collections::HashSet::new(),
             type_uses: std::collections::HashSet::new(),
-            in_alias_definition: false,
+            in_alias_definition: None,
+            alias_definition_uses: std::collections::HashMap::new(),
             depth: 0,
         };
         p.skip_semicolons();

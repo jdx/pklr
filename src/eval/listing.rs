@@ -350,24 +350,10 @@ fn resolve_alias_chain<'a>(
 /// `T` when it is a single class (an alias or nullable `T?` included). A
 /// union, a built-in or an unresolved name leaves such an element untyped.
 pub(super) fn listing_elem_class(type_args: &[String], scope: &Scope) -> Option<Arc<Value>> {
-    // `Listing<Listing<T>>`: the argument is itself a listing type.
-    if let [arg] = type_args
-        && let Some(inner) = arg
-            .trim_start_matches('*')
-            .trim_end_matches('?')
-            .strip_prefix("Listing<")
-        && inner.ends_with('>')
-        && let Ok(ty) = crate::parser::parse_type_name(arg.trim_start_matches('*'))
-    {
-        return type_elem_class(&ty, scope);
-    }
-    // `Listing<L>` where `L` is an alias of a listing type.
+    // `Listing<Listing<T>>`, or `Listing<L>` with `L` an alias of a listing
+    // type: the argument is itself a listing type, read structurally.
     if let [arg] = type_args
         && let Ok(ty) = crate::parser::parse_type_name(arg.trim_start_matches('*'))
-        && matches!(
-            ty.clone(),
-            crate::parser::TypeExpr::Named(_) | crate::parser::TypeExpr::Nullable(_)
-        )
         && resolves_to_listing(&ty, scope)
     {
         return type_elem_class(&ty, scope);
@@ -418,6 +404,14 @@ fn type_elem_class_in(
             )))
         }
         TypeExpr::Named(name) => listing_elem_class(std::slice::from_ref(name), scope),
+        // `T(x > 0)`: the element is a `T`, whatever the predicate says.
+        TypeExpr::Constrained(base, _) => {
+            if nesting >= MAX_LISTING_NESTING {
+                return None;
+            }
+            let base = crate::parser::parse_type_name(base.trim_start_matches('*')).ok()?;
+            type_elem_class_in(&base, scope, seen, nesting + 1)
+        }
         other => listing_elem_class(&[display_type_expr(other)], scope),
     }
 }
@@ -474,7 +468,7 @@ impl Evaluator {
         base_source: &ObjectSource,
         ty: &crate::parser::TypeExpr,
         entry_scope: Option<&Arc<CapturedScope>>,
-    ) -> Option<(Value, Scope)> {
+    ) -> Option<(Option<Value>, Scope)> {
         // A class cannot always see itself, or classes declared after it, in
         // the scope it was captured with: the instance's scope has them. A
         // name the declaring scope binds otherwise (an alias, a value) is not
@@ -496,13 +490,18 @@ impl Evaluator {
             Some(captured) => restore_scope(captured),
             None => definition_type_scope(base_source),
         };
-        let class = self.declared_elem_class(ty, &declaring)?;
+        let class = self.declared_elem_class(ty, &declaring);
         // The returned scope is the one `ty` is checked in, so it also holds
         // the classes the declaring module defines after this one.
         if let Some(namespace) = declaring.type_namespace.clone() {
             self.layer_evaluated_module_scope(Path::new(&namespace), &mut declaring);
         }
-        Some(((*class).clone(), declaring))
+        // A listing without an element class (`Listing<String>(length == 1)`)
+        // still has its annotation resolved where it was declared.
+        if class.is_none() && !resolves_to_listing(ty, &declaring) {
+            return None;
+        }
+        Some((class.map(|class| (*class).clone()), declaring))
     }
 }
 

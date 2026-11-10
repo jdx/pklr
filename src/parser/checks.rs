@@ -375,9 +375,7 @@ impl<'a> Parser<'a> {
                             .filter(|name| self.local_type_aliases.contains(*name))
                             .collect::<Vec<_>>();
                         if locals.is_empty()
-                            || locals
-                                .iter()
-                                .any(|name| self.is_type_alias_used(name, &aliases))
+                            || locals.iter().any(|name| self.is_type_alias_used(name))
                         {
                             return Err(self.error_at(
                                 self.prev_end,
@@ -400,18 +398,18 @@ impl<'a> Parser<'a> {
     /// annotation, `is`, `as`, `new`, a type argument or a constraint, or in
     /// the definition of an alias that is used. A property or variable of the
     /// same name is not a use.
-    fn is_type_alias_used(&self, name: &str, aliases: &[(&str, &TypeExpr)]) -> bool {
+    fn is_type_alias_used(&self, name: &str) -> bool {
         let mut used: std::collections::HashSet<String> = self.type_uses.clone();
         let mut pending: Vec<String> = used.iter().cloned().collect();
         while let Some(current) = pending.pop() {
-            let Some((_, ty)) = aliases.iter().find(|(alias, _)| *alias == current) else {
+            // The names the definition parsed as types cover constraint
+            // predicates (`is`, `as`), which `collect_type_names` does not.
+            let Some(names) = self.alias_definition_uses.get(&current) else {
                 continue;
             };
-            let mut names = Vec::new();
-            collect_type_names(ty, &mut names);
             for referenced in names {
                 if used.insert(referenced.clone()) {
-                    pending.push(referenced);
+                    pending.push(referenced.clone());
                 }
             }
         }

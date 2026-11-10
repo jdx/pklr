@@ -123,6 +123,12 @@ impl TypeExpr {
         match self {
             TypeExpr::Nullable(inner) => inner.is_listing_type(),
             TypeExpr::Generic(name, _) => name == "Listing",
+            // A constrained listing, `Listing<T>(length > 0)`, stores its
+            // base type as a name.
+            TypeExpr::Constrained(base, _) => {
+                let base = base.trim_start_matches('*').trim_end_matches('?');
+                base == "Listing" || base.starts_with("Listing<")
+            }
             _ => false,
         }
     }

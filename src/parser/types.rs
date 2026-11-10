@@ -131,8 +131,16 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Ident(_) => {
                 let name = self.parse_qualified_ident()?;
-                if !self.in_alias_definition {
-                    self.type_uses.insert(name.clone());
+                match &self.in_alias_definition {
+                    Some(alias) => {
+                        self.alias_definition_uses
+                            .entry(alias.clone())
+                            .or_default()
+                            .insert(name.clone());
+                    }
+                    None => {
+                        self.type_uses.insert(name.clone());
+                    }
                 }
                 if matches!(self.peek(), TokenKind::Lt) {
                     self.advance();

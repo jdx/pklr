@@ -49,10 +49,10 @@ impl Evaluator {
             let declared_listing = nullable_default.is_some()
                 && matches!(&prop.type_ann, Some(crate::parser::TypeExpr::Nullable(inner))
                     if matches!(**inner, crate::parser::TypeExpr::Named(_)))
-                && matches!(
+                && (matches!(
                     scope.get(&listing_elem_class_binding(&prop.name)),
                     Some(Value::Object(..) | Value::List(_))
-                );
+                ) || scope.get(&declared_listing_binding(&prop.name)).is_some());
             if declared_listing {
                 nullable_default = None;
             }

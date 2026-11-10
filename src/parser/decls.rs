@@ -232,7 +232,7 @@ impl<'a> Parser<'a> {
         }
         self.type_alias_parameters.insert(name.clone(), parameters);
         self.expect(&TokenKind::Equals, "=")?;
-        let outer = std::mem::replace(&mut self.in_alias_definition, true);
+        let outer = self.in_alias_definition.replace(name.clone());
         let ty = self.parse_type();
         self.in_alias_definition = outer;
         Ok(Entry::TypeAlias(name, ty?))

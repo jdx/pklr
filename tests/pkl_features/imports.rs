@@ -4066,3 +4066,69 @@ z = new Listing {{ for (A in List(1)) {{ A }} }}\n"
     assert_eq!(val["y"], 3);
     assert_eq!(val["z"], serde_json::json!([1]));
 }
+
+// A listing whose element type is a constrained alias, a nullable class or a
+// nested listing builds `new { ... }` elements as the class. Checked against
+// pkl 0.32.2.
+#[test]
+fn listing_elements_resolve_constrained_and_nullable_element_types() {
+    let temp = TestTempDir::new("pklr_listing_elem_structural");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "class T { x: Int = 1 }\ntypealias E = T(x > 0)\ntypealias LT = Listing<T?>\n\
+class H { xs: Listing<E>; ys: Listing<Listing<T?>> }\n\
+h = new H { xs { new {} }; ys { new { new {} } } }\n\
+i: Listing<E> = new { new {} }\n\
+a = new Listing<Listing<T?>> { new { new {} } }\n\
+b: Listing<LT> = new { new { new {} } }\n",
+    )
+    .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
+    assert_eq!(val["h"]["xs"], serde_json::json!([{"x": 1}]));
+    assert_eq!(val["h"]["ys"], serde_json::json!([[{"x": 1}]]));
+    assert_eq!(val["i"], serde_json::json!([{"x": 1}]));
+    assert_eq!(val["a"], serde_json::json!([[{"x": 1}]]));
+    assert_eq!(val["b"], serde_json::json!([[{"x": 1}]]));
+}
+
+// Amending an inherited listing of built-in elements resolves its alias where
+// it was declared, even when the amending module binds the alias's name to a
+// class. Checked against pkl 0.32.2.
+#[test]
+fn amended_builtin_listing_alias_resolves_in_the_declaring_module() {
+    let temp = TestTempDir::new("pklr_amended_builtin_listing_alias");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("a.pkl"),
+        "typealias Two = Listing<String>(length <= 2)\nopen class H { xs: Two? }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("ok.pkl"),
+        "import \"a.pkl\" as A\nclass Two { z: Int = 0 }\nh = new A.H { xs { \"a\"; \"b\" } }\n",
+    )
+    .unwrap();
+    let val = pklr::eval_to_json(&dir.join("ok.pkl")).unwrap();
+    assert_eq!(val["h"]["xs"], serde_json::json!(["a", "b"]));
+    std::fs::write(
+        dir.join("bad.pkl"),
+        "import \"a.pkl\" as A\nclass Two { z: Int = 0 }\nh = new A.H { xs { \"a\"; \"b\"; \"c\" } }\n",
+    )
+    .unwrap();
+    assert!(pklr::eval_to_json(&dir.join("bad.pkl")).is_err());
+}
+
+// A cyclic `local` alias named only in another alias's constraint is a use
+// when that alias is used. Checked against pkl 0.32.2.
+#[test]
+fn cyclic_local_alias_named_in_a_constraint_is_rejected_when_used() {
+    let temp = TestTempDir::new("pklr_cyclic_local_alias_constraint");
+    let dir = temp.path();
+    let aliases = "local typealias L = List<L>\ntypealias P = Int(this is L)\n";
+    std::fs::write(dir.join("used.pkl"), format!("{aliases}x: P = 1\n")).unwrap();
+    let err = pklr::eval_to_json(&dir.join("used.pkl")).unwrap_err();
+    assert!(err.to_string().contains("must not be cyclic"), "{err}");
+    std::fs::write(dir.join("unused.pkl"), format!("{aliases}x = 1\n")).unwrap();
+    assert_eq!(pklr::eval_to_json(&dir.join("unused.pkl")).unwrap()["x"], 1);
+}

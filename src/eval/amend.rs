@@ -160,9 +160,15 @@ impl Evaluator {
                 && let Some((class, declaring)) =
                     self.inherited_elem_class(base_source, ty, entry_scope.and_then(Option::as_ref))
             {
-                amendment_scope
-                    .values
-                    .insert(listing_elem_class_binding(&prop.name).into(), class);
+                if let Some(class) = class {
+                    amendment_scope
+                        .values
+                        .insert(listing_elem_class_binding(&prop.name).into(), class);
+                }
+                amendment_scope.values.insert(
+                    declared_listing_binding(&prop.name).into(),
+                    Value::Bool(true),
+                );
                 listing_bound.push((prop.name.clone(), declaring));
             }
         }
@@ -1613,6 +1619,12 @@ pub(super) fn definition_type_scope(base_source: &ObjectSource) -> Scope {
 /// `Listing<T>` property `name` that the amended class declares.
 pub(super) fn listing_elem_class_binding(name: &str) -> String {
     format!("\0listing_elem_class_of:{name}")
+}
+
+/// The name under which an amendment scope marks that the amended class
+/// declares the property `name` as a listing, whatever its element type.
+pub(super) fn declared_listing_binding(name: &str) -> String {
+    format!("\0declared_listing_of:{name}")
 }
 
 /// Whether `prop` is a typed property whose default is an explicit `null`, so
