@@ -1519,6 +1519,7 @@ mod tests {
     /// classes they declare. Pkl keeps both entries (it renders them as
     /// `[new { p = 1 }] = 1` and `[new { p = 1 }] = 2`), so the keys' identity
     /// must keep the classes that rendering leaves out.
+    #[cfg(feature = "native-io")]
     #[test]
     fn converted_keys_differing_only_in_classes_stay_distinct() {
         let dir = std::env::temp_dir().join(format!("pklr-class-keys-{}", std::process::id()));

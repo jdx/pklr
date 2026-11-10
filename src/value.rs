@@ -1184,15 +1184,22 @@ impl Value {
     /// class there is data, not a member a module declares, so it loses the
     /// declared-member marker; otherwise a later conversion of the sourceless
     /// container would take it for a module declaration and drop it.
+    #[inline(always)]
     pub(crate) fn into_entry_value(self) -> Value {
         match self {
             Value::Object(map, Some(source)) if source.declared_as.is_some() => {
-                let mut source = Arc::unwrap_or_clone(source);
-                source.declared_as = None;
-                Value::Object(map, Some(Arc::new(source)))
+                Self::strip_declared_marker(map, source)
             }
             other => other,
         }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn strip_declared_marker(map: Arc<ObjectMap>, source: Arc<ObjectSource>) -> Value {
+        let mut source = Arc::unwrap_or_clone(source);
+        source.declared_as = None;
+        Value::Object(map, Some(Arc::new(source)))
     }
 
     pub fn as_str(&self) -> Option<&str> {
