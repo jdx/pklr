@@ -3599,3 +3599,51 @@ fn converted_collection_keeps_an_entry_holding_an_imported_class() {
         })
     );
 }
+
+#[test]
+fn live_this_view_of_a_body_keeps_an_entry_holding_an_imported_class() {
+    // Inside a `Dynamic`, `Mapping` or typed body, `this.toMap()`
+    // sees the entry that holds a class (even under the class's own name),
+    // matching the completed object. Only a module's own declaration is left
+    // out of its `module`/`this` views. Checked against pkl 0.32.2.
+    let val = eval_files_to_json(&[
+        (
+            "lib.pkl",
+            "class C { a: Int = 1 }\n\
+             function has() = module.toMap().containsKey(\"C\")\n\
+             function hasThis() = this.toMap().containsKey(\"C\")\n",
+        ),
+        (
+            "main.pkl",
+            "import \"lib.pkl\" as lib\n\
+             class T { c: Any = lib.C; f: Function }\n\
+             local x_dyn = new Dynamic { [\"C\"] = lib.C; f = () -> this.toMap().containsKey(\"C\") }\n\
+             local x_prop = new Dynamic { C = lib.C; f = () -> this.toMap().containsKey(\"C\") }\n\
+             local x_outer = new Dynamic { [\"C\"] = lib.C; inner { f = () -> outer.toMap().containsKey(\"C\") } }\n\
+             local x_map = new Mapping { [\"C\"] = lib.C; [\"f\"] = () -> this.toMap().containsKey(\"C\") }\n\
+             local x_mapOuter = new Mapping { [\"C\"] = lib.C; [\"inner\"] { f = () -> outer.toMap().containsKey(\"C\") } }\n\
+\
+             local x_typed = new T { f = () -> this.toMap().containsKey(\"c\") }\n\
+             r {\n\
+               dyn = x_dyn.f.apply()\n\
+               prop = x_prop.f.apply()\n\
+               outerDyn = x_outer.inner.f.apply()\n\
+               map = x_map[\"f\"].apply()\n\
+               outerMap = x_mapOuter[\"inner\"].f.apply()\n\
+\
+               typed = x_typed.f.apply()\n\
+             }\n\
+             r2 { m = lib.has()\n t = lib.hasThis() }\n",
+        ),
+    ]);
+    assert_eq!(
+        val,
+        serde_json::json!({
+            "r": {
+                "dyn": true, "prop": true, "outerDyn": false, "map": true,
+                "outerMap": false, "typed": true,
+            },
+            "r2": {"m": false, "t": false},
+        })
+    );
+}
