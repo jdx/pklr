@@ -1149,9 +1149,11 @@ pub(super) fn values_eq(a: &Value, b: &Value) -> bool {
         | (Value::Object(map, source), Value::List(list))
             if list.kind() == ListKind::Dynamic && list.is_empty() =>
         {
-            source.is_none() && map.is_empty()
-                || source.as_deref().is_some_and(|source| {
-                    source.type_name.is_none() && source.elements.is_empty() && map.is_empty()
+            map.is_empty()
+                && source.as_deref().is_some_and(|source| {
+                    source.kind.dynamic_as_object() == ObjectKind::Object
+                        && source.type_name.is_none()
+                        && source.elements.is_empty()
                 })
         }
         (Value::Lambda(_, a_body, a_captured), Value::Lambda(_, b_body, b_captured)) => {

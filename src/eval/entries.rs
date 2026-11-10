@@ -870,8 +870,20 @@ impl Evaluator {
                             outer: cx.receiver_members,
                         }),
                     )?;
-                    if let Value::Object(m, source) = body_val {
-                        self.merge_generated_members(cx, st, entry_index, &fgen.body, &m, source)?;
+                    match body_val {
+                        Value::Object(m, source) => {
+                            self.merge_generated_members(
+                                cx,
+                                st,
+                                entry_index,
+                                &fgen.body,
+                                &m,
+                                source,
+                            )?;
+                        }
+                        // A body of only elements.
+                        Value::List(items) => st.elements.extend(items.iter().cloned()),
+                        _ => {}
                     }
                 }
             }
@@ -898,8 +910,19 @@ impl Evaluator {
                             outer: cx.receiver_members,
                         }),
                     )?;
-                    if let Value::Object(m, source) = body_val {
-                        self.merge_generated_members(cx, st, entry_index, &wgen.body, &m, source)?;
+                    match body_val {
+                        Value::Object(m, source) => {
+                            self.merge_generated_members(
+                                cx,
+                                st,
+                                entry_index,
+                                &wgen.body,
+                                &m,
+                                source,
+                            )?;
+                        }
+                        Value::List(items) => st.elements.extend(items.iter().cloned()),
+                        _ => {}
                     }
                 } else if let Some(else_body) = &wgen.else_body {
                     let else_val = self.eval_entries_with_lexical_scopes(
@@ -915,8 +938,19 @@ impl Evaluator {
                             outer: cx.receiver_members,
                         }),
                     )?;
-                    if let Value::Object(m, source) = else_val {
-                        self.merge_generated_members(cx, st, entry_index, else_body, &m, source)?;
+                    match else_val {
+                        Value::Object(m, source) => {
+                            self.merge_generated_members(
+                                cx,
+                                st,
+                                entry_index,
+                                else_body,
+                                &m,
+                                source,
+                            )?;
+                        }
+                        Value::List(items) => st.elements.extend(items.iter().cloned()),
+                        _ => {}
                     }
                 }
             }

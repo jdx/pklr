@@ -462,3 +462,63 @@ fn this_is_module_is_false_for_a_dynamic() {
     // In a constraint on the value, too.
     eval_fails("class C { x: Any(this is module) = new Dynamic { 1 } }\nc = new C {}\n");
 }
+
+#[test]
+fn an_amended_dynamic_is_still_a_dynamic() {
+    eval_fails("x: Mapping<String, Int> = (new Dynamic { a = 1 }) { b = 2 }\n");
+    assert!(!is("(new Dynamic { a = 1 }) { b = 2 } is Mapping"));
+    assert!(is("(new Dynamic { a = 1 }) { b = 2 } is Dynamic"));
+}
+
+#[test]
+fn an_empty_dynamic_equals_only_a_dynamic() {
+    for (expr, expected) in [
+        (
+            "new Dynamic { for (x in List()) { x } } == new Dynamic {}",
+            true,
+        ),
+        (
+            "new Dynamic { for (x in List()) { x } } == new Mapping {}",
+            false,
+        ),
+        ("new Dynamic { for (x in List()) { x } } == Map()", false),
+    ] {
+        assert_eq!(is(expr), expected, "{expr}");
+    }
+    // Equal values are the same Mapping key.
+    let json = eval(
+        r#"
+local a = new Dynamic { for (i in List()) { i } }
+local m = new Mapping { [new Dynamic {}] = 1 }
+e = m[a]
+"#,
+    );
+    assert_eq!(json["e"], 1);
+}
+
+#[test]
+fn generators_contribute_elements_beside_members() {
+    for body in [
+        "for (i in List(1, 2)) { ...List(i) }",
+        "for (i in List(1, 2)) { i }",
+        "when (true) { ...List(1, 2) }",
+        "when (false) { 0 } else { ...List(1, 2) }",
+    ] {
+        let json = eval(&format!("e = new Dynamic {{ {body}; x = 3 }}.toList()\n"));
+        assert_eq!(json["e"], serde_json::json!([1, 2]), "{body}");
+    }
+}
+
+#[test]
+fn amending_a_dynamic_with_members_twice_keeps_its_elements() {
+    let json = eval(
+        r#"
+local a = new Dynamic { 1; 2 }
+local b = (a) { x = 3 }
+twice = (b) { y = 4 }.toList()
+more = (b) { 5 }.toList()
+"#,
+    );
+    assert_eq!(json["twice"], serde_json::json!([1, 2]));
+    assert_eq!(json["more"], serde_json::json!([1, 2, 5]));
+}

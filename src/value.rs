@@ -88,6 +88,10 @@ pub(crate) fn mapping_storage_key(value: &Value) -> Option<Arc<str>> {
         // Do not use derived `Debug` for compound keys. Native units carry an
         // internal NaN identity, and Debug would make two equal lists such as
         // `List(1.s)` acquire unrelated mapping identities.
+        // An empty `Dynamic` with no elements is the same value as `new Dynamic {}`.
+        Value::List(value) if value.kind() == ListKind::Dynamic && value.is_empty() => {
+            return mapping_storage_key(&Value::Object(Arc::default(), None));
+        }
         Value::List(value) => (
             "list",
             mapping_compound_identity(&Value::List(value.clone())),

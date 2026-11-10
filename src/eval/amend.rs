@@ -498,6 +498,14 @@ impl Evaluator {
                 new_src.prototype = prototype;
                 Ok(Value::Object(map, Some(Arc::new(new_src))))
             }
+            // An amended `Dynamic` is still a `Dynamic`, not a `Mapping`.
+            (None, Value::Object(map, Some(src)))
+                if base_source.kind == ObjectKind::Dynamic && src.kind == ObjectKind::Object =>
+            {
+                let mut new_src = Arc::unwrap_or_clone(src);
+                new_src.kind = ObjectKind::Dynamic;
+                Ok(Value::Object(map, Some(Arc::new(new_src))))
+            }
             // An amended mapping is still a mapping.
             (None, Value::Object(map, Some(src)))
                 if base_source.kind == ObjectKind::Mapping && src.kind != ObjectKind::Mapping =>
@@ -881,13 +889,19 @@ impl Evaluator {
         {
             // Members make an element-only `Dynamic` one with both, which
             // keeps its elements ahead of the amendment's.
+            // The elements enter the body as a spread of a bound variable, so
+            // a later amendment, which re-evaluates the body, still has them.
+            const ELEMENTS: &str = "\0pklr:elements";
             let mut body_scope = scope.child();
             body_scope.set("super", base.clone());
-            let amended = self.eval_entries(overlay_entries, &body_scope, depth + 1)?;
+            body_scope.set(ELEMENTS, base.clone());
+            let mut entries = vec![Entry::Spread(Expr::Ident(ELEMENTS.into()))];
+            entries.extend(overlay_entries.iter().cloned());
+            let amended = self.eval_entries(&Arc::new(entries), &body_scope, depth + 1)?;
             return Ok(match amended {
                 Value::Object(map, Some(source)) => {
                     let mut source = Arc::unwrap_or_clone(source);
-                    source.elements.splice(0..0, existing.iter().cloned());
+                    source.kind = ObjectKind::Dynamic;
                     Value::Object(map, Some(Arc::new(source)))
                 }
                 other => other,
