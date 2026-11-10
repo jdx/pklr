@@ -54,6 +54,30 @@ impl Evaluator {
                 .filter(|value| !is_null_value(value))
                 .or(nullable_default.as_ref())
                 .or(scoped);
+            // A union without a `*` alternative has no default, so there is
+            // nothing for the body to amend. A nullable one defaults to null,
+            // and the Dynamic that amending null builds must itself satisfy
+            // the union.
+            if let Some(ty) = &prop.type_ann
+                && (amendment_base.is_none() || amendment_base.is_some_and(is_null_value))
+            {
+                let state = recorded_union_amend(scope, &prop.name, ty, body)
+                    .unwrap_or_else(|| self.union_amend_state(ty, scope));
+                match state {
+                    UnionAmendState::NoDefault if amendment_base.is_none() => {
+                        return Err(Error::Eval(format!(
+                            "Tried to read property `{}` but its value is undefined.",
+                            prop.name
+                        )));
+                    }
+                    UnionAmendState::NullDefault(union) => {
+                        return Err(Error::Eval(format!(
+                            "Expected value of type `{union}`, but got type `Dynamic`."
+                        )));
+                    }
+                    _ => {}
+                }
+            }
             if let Some(Value::List(items)) = amendment_base
                 && matches!(items.kind(), ListKind::List | ListKind::Set)
             {
