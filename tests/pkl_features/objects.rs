@@ -5423,3 +5423,17 @@ fn nullable_constrained_default_alternative_keeps_constraint() {
     assert!(v["a"].get("n").is_none());
     eval_fails(&format!("{class}a = new C {{ n = 1 }}"));
 }
+
+#[test]
+fn nullable_constrained_default_alternative_amends_its_own_default() {
+    // The property stays unset without an assignment, but a body amendment
+    // starts from the default alternative's value, as in pkl.
+    let class = "class C { xs: *Listing<String>(true)?|Int }\n";
+    let v = eval(&format!(
+        "{class}a = new C {{ xs {{}} }}\nb = new C {{ xs {{ \"x\" }} }}"
+    ));
+    assert_eq!(v["a"]["xs"], serde_json::json!([]));
+    assert_eq!(v["b"]["xs"], serde_json::json!(["x"]));
+    let v = eval(&format!("{class}c = new C {{ xs = 3 }}"));
+    assert_eq!(v["c"]["xs"], serde_json::json!(3));
+}

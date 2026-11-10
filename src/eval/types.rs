@@ -499,6 +499,13 @@ pub(super) fn nullable_inner_default(ty: &crate::parser::TypeExpr, scope: &Scope
         TypeExpr::Constrained(name, _) if name.ends_with('?') => {
             type_default_for_name(name.trim_end_matches('?'), scope)
         }
+        // A nullable `*` alternative leaves the property unset, but amending it
+        // still starts from that alternative's own default.
+        TypeExpr::Union(variants) => variants
+            .iter()
+            .find(|alt| is_default_type(alt))
+            .filter(|alt| is_nullable_default(alt))
+            .and_then(|alt| nullable_inner_default(alt, scope)),
         _ => None,
     }
 }
