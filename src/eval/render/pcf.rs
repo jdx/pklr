@@ -363,6 +363,10 @@ impl<'a> StringRenderer<'a> for Pcf<'a> {
         "Pcf"
     }
 
+    fn supports_mixed_objects(&self) -> bool {
+        true
+    }
+
     fn visit_null(&mut self) -> Result<()> {
         self.out.push_str("null");
         Ok(())

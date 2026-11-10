@@ -114,7 +114,12 @@ impl Evaluator {
     }
 
     /// Whether `ty` accepts the Dynamic a body amending null builds.
-    fn type_takes_dynamic(&mut self, ty: &TypeExpr, scope: &Scope, seen: &mut Vec<String>) -> bool {
+    pub(super) fn type_takes_dynamic(
+        &mut self,
+        ty: &TypeExpr,
+        scope: &Scope,
+        seen: &mut Vec<String>,
+    ) -> bool {
         let named = |this: &mut Self, name: &str, seen: &mut Vec<String>| {
             let name = name.trim_start_matches('*');
             // An alias or class declaration shadows the standard library type
@@ -336,177 +341,17 @@ impl Evaluator {
         let Some(ty) = &prop.type_ann else {
             return Ok(());
         };
-        // An explicit `new Dynamic { ... }` is a `Dynamic` even when the value
-        // model represents its elements as a `Listing` or its members as an
-        // untyped object, so the declared type must accept a `Dynamic`.
-        if is_explicit_dynamic(prop) && !type_accepts_dynamic(ty, scope) {
-            return Err(Error::Eval(format!(
-                "property '{}' expected {}, got Dynamic",
-                prop.name,
-                display_type_expr(ty),
-            )));
-        }
-        // Its elements are stored as a `Listing`, which a `Dynamic` type
-        // would otherwise not match, so check the type's constraints on it
-        // separately.
-        let accepted = if is_explicit_dynamic(prop) && matches!(value, Value::List(_)) {
-            self.check_element_dynamic(value, ty, scope, depth + 1, &mut Vec::new())?
-        } else {
-            !type_is_runtime_checkable(ty, scope)
-                || self.eval_type_check(value, ty, scope, depth + 1)?
-        };
-        if accepted {
+        if !type_is_runtime_checkable(ty, scope)
+            || self.eval_type_check(value, ty, scope, depth + 1)?
+        {
             return Ok(());
         }
         Err(Error::Eval(format!(
             "property '{}' expected {}, got {}",
             prop.name,
             display_type_expr(ty),
-            if is_explicit_dynamic(prop) {
-                "Dynamic"
-            } else {
-                value_type_name(value)
-            }
+            value_type_display(value)
         )))
-    }
-
-    /// Check an element-only `Dynamic`, which the value model stores as a
-    /// list, against a declared type: the type must accept a `Dynamic` and
-    /// every constraint along the way must hold for the value.
-    pub(super) fn check_element_dynamic(
-        &mut self,
-        val: &Value,
-        ty: &crate::parser::TypeExpr,
-        scope: &Scope,
-        depth: usize,
-        resolving: &mut Vec<String>,
-    ) -> Result<bool> {
-        use crate::parser::TypeExpr;
-        // Walk simple alias chains (`A0 = A1`, ...) in a loop, as
-        // `eval_alias_check` does, so a long chain does not use the Rust
-        // stack once per alias.
-        let mark = resolving.len();
-        let mut current = ty.clone();
-        let result = loop {
-            match &current {
-                TypeExpr::Nullable(inner) => {
-                    let inner = (**inner).clone();
-                    current = inner;
-                }
-                TypeExpr::Union(variants) => {
-                    let mut accepted = false;
-                    for variant in variants {
-                        match self.check_element_dynamic(val, variant, scope, depth + 1, resolving)
-                        {
-                            Ok(true) => {
-                                accepted = true;
-                                break;
-                            }
-                            Ok(false) => {}
-                            Err(err) => {
-                                resolving.truncate(mark);
-                                return Err(err);
-                            }
-                        }
-                    }
-                    break Ok(accepted);
-                }
-                TypeExpr::Named(name) | TypeExpr::Generic(name, _) => {
-                    let base = name.trim_start_matches('*').trim_end_matches('?');
-                    let base = base.split('<').next().unwrap_or(base);
-                    let Some(target) = scope.get_type_alias(base) else {
-                        break Ok(type_accepts_dynamic(&current, scope));
-                    };
-                    if resolving.iter().any(|seen| seen == base) {
-                        break Err(Error::Eval(format!("type alias '{base}' refers to itself")));
-                    }
-                    resolving.push(base.to_string());
-                    let target = target.clone();
-                    current = target;
-                }
-                TypeExpr::Constrained(base, constraint) => {
-                    let base_ty = TypeExpr::Named(base.clone());
-                    match self.check_element_dynamic(val, &base_ty, scope, depth + 1, resolving) {
-                        Ok(true) => {}
-                        other => break other,
-                    }
-                    // The base type accepted it; what is left is the
-                    // predicate, run without resolving a base type again.
-                    break self.eval_element_dynamic_constraint(val, constraint, scope, depth);
-                }
-            }
-        };
-        resolving.truncate(mark);
-        result
-    }
-
-    /// Run a constraint on an element-only `Dynamic`. Its `this` is the
-    /// stored list, which is marked so a type test on it sees a `Dynamic`
-    /// (see `eval_type_check_in`), and it has none of the members the list
-    /// would add to the scope.
-    fn eval_element_dynamic_constraint(
-        &mut self,
-        val: &Value,
-        constraint: &Expr,
-        scope: &Scope,
-        depth: usize,
-    ) -> Result<bool> {
-        let Value::List(items) = val else {
-            return Ok(false);
-        };
-        self.element_dynamics.push(items.items_ptr() as usize);
-        let result = self.eval_constraint(val, constraint, scope, depth, false);
-        self.element_dynamics.pop();
-        result
-    }
-
-    /// Whether `val` is the stored list of an element-only `Dynamic` whose
-    /// constraint is running.
-    fn is_element_dynamic(&self, val: &Value) -> bool {
-        matches!(val, Value::List(items)
-            if items.kind() == ListKind::Listing
-                && self.element_dynamics.contains(&(items.items_ptr() as usize)))
-    }
-
-    /// Evaluate a constraint with `this` bound to the value, for a value that
-    /// has passed its base type.
-    fn eval_constraint(
-        &mut self,
-        val: &Value,
-        constraint: &Expr,
-        scope: &Scope,
-        depth: usize,
-        bind_members: bool,
-    ) -> Result<bool> {
-        let mut constraint_scope = scope.child();
-        constraint_scope.set("this", val.clone());
-        // Also bind common properties directly so `length`, `isEmpty` etc. work
-        if bind_members {
-            match val {
-                Value::String(s) => {
-                    constraint_scope.set("length", Value::Int(s.chars().count() as i64));
-                    constraint_scope.set("isEmpty", Value::Bool(s.is_empty()));
-                }
-                Value::List(items) => {
-                    constraint_scope.set("length", Value::Int(items.len() as i64));
-                    constraint_scope.set("isEmpty", Value::Bool(items.is_empty()));
-                }
-                Value::Object(items, _) => {
-                    constraint_scope.set("length", Value::Int(items.len() as i64));
-                    constraint_scope.set("isEmpty", Value::Bool(items.is_empty()));
-                }
-                _ => {}
-            }
-        }
-        let receiver_constraint = with_constraint_receiver(constraint, &constraint_scope);
-        let constraint = receiver_constraint.as_ref().unwrap_or(constraint);
-        let mut result = self.eval_expr(constraint, &constraint_scope, depth + 1)?;
-        // `Listing(isSorted)` names a predicate function and applies
-        // it to the value being checked.
-        if matches!(result, Value::Lambda(..)) {
-            result = self.invoke_lambda(&result, std::slice::from_ref(val), depth + 1)?;
-        }
-        Ok(is_truthy(&result))
     }
 
     /// Check if a value matches a type expression, including constraint evaluation.
@@ -554,6 +399,23 @@ impl Evaluator {
         let result = self.eval_type_check_in(val, &target, scope, depth + 1, resolving);
         while resolving.pop().as_deref() != Some(name) {}
         result
+    }
+
+    /// Check an element, key, value, argument or result against its declared
+    /// type. An untyped object body is accepted where the type names a class,
+    /// as pkl would have made it an instance of it.
+    pub(super) fn eval_argument_check(
+        &mut self,
+        val: &Value,
+        ty: &crate::parser::TypeExpr,
+        scope: &Scope,
+        depth: usize,
+        resolving: &mut Vec<String>,
+    ) -> Result<bool> {
+        if is_uninferred_object(val) && type_names_user_class(ty, scope, 0) {
+            return Ok(true);
+        }
+        self.eval_type_check_in(val, ty, scope, depth, resolving)
     }
 
     /// Check `val` against an alias an imported module declares, as that
@@ -607,13 +469,11 @@ impl Evaluator {
         resolving: &mut Vec<String>,
     ) -> Result<bool> {
         use crate::parser::TypeExpr;
-        // A type test on the `this` of an element-only `Dynamic` constraint
-        // sees a `Dynamic`, not the list that stores it.
-        if self.is_element_dynamic(val) {
-            return self.check_element_dynamic(val, ty, scope, depth + 1, resolving);
-        }
         match ty {
             TypeExpr::Named(name) => {
+                if let Some(unmarked) = unmarked_generic(name) {
+                    return self.eval_type_check_in(val, &unmarked, scope, depth, resolving);
+                }
                 if let Some(expected) = string_literal_type_value(name) {
                     return Ok(matches!(val, Value::String(actual) if &**actual == expected));
                 }
@@ -629,6 +489,12 @@ impl Evaluator {
                 if let Some(resolved) = scope.get_type_alias(name) {
                     let resolved = resolved.clone();
                     return self.eval_alias_check(val, name, &resolved, scope, depth, resolving);
+                }
+                // A scalar of the built-in type of that name matches without
+                // resolving the name as a class, which only a class instance
+                // could match, unless a user class of that name shadows it.
+                if scalar_is_builtin_type(val, name) && scope.get(name).is_none() {
+                    return Ok(true);
                 }
                 if let Some(matches) = value_is_class_type(val, name, scope) {
                     return Ok(matches);
@@ -650,6 +516,12 @@ impl Evaluator {
                     self.check_imported_alias(val, class_name, scope, depth, resolving)?
                 {
                     accepted
+                } else if base.contains('<')
+                    && let Ok(generic) = crate::parser::parse_type_name(base)
+                {
+                    // `Listing<Int>(length == 2)`: the base keeps its type
+                    // arguments, which constrain the elements.
+                    self.eval_type_check_in(val, &generic, scope, depth, resolving)?
                 } else if let Some(resolved) = scope.get_type_alias(class_name) {
                     let resolved = resolved.clone();
                     self.eval_alias_check(val, class_name, &resolved, scope, depth, resolving)?
@@ -660,7 +532,36 @@ impl Evaluator {
                 if !base_matches {
                     return Ok(false);
                 }
-                self.eval_constraint(val, constraint, scope, depth, true)
+                // Evaluate the constraint with `this` bound to the value
+                let mut constraint_scope = scope.child();
+                constraint_scope.set("this", val.clone());
+                // Also bind common properties directly so `length`, `isEmpty` etc. work
+                match val {
+                    Value::String(s) => {
+                        constraint_scope.set("length", Value::Int(s.chars().count() as i64));
+                        constraint_scope.set("isEmpty", Value::Bool(s.is_empty()));
+                    }
+                    Value::Int(_) | Value::Float(_) => {}
+                    // An element-only `Dynamic` has no `length`.
+                    Value::List(items) if items.kind() != ListKind::Dynamic => {
+                        constraint_scope.set("length", Value::Int(items.len() as i64));
+                        constraint_scope.set("isEmpty", Value::Bool(items.is_empty()));
+                    }
+                    Value::Object(items, _) => {
+                        constraint_scope.set("length", Value::Int(items.len() as i64));
+                        constraint_scope.set("isEmpty", Value::Bool(items.is_empty()));
+                    }
+                    _ => {}
+                }
+                let receiver_constraint = with_constraint_receiver(constraint, &constraint_scope);
+                let constraint = receiver_constraint.as_ref().unwrap_or(constraint);
+                let mut result = self.eval_expr(constraint, &constraint_scope, depth + 1)?;
+                // `Listing(isSorted)` names a predicate function and applies
+                // it to the value being checked.
+                if matches!(result, Value::Lambda(..)) {
+                    result = self.invoke_lambda(&result, std::slice::from_ref(val), depth + 1)?;
+                }
+                Ok(is_truthy(&result))
             }
             TypeExpr::Nullable(inner) => {
                 if is_null_value(val) {
@@ -682,7 +583,9 @@ impl Evaluator {
                 }
                 Ok(has_uncheckable_variant)
             }
-            TypeExpr::Generic(name, _) => {
+            TypeExpr::Generic(name, args) => {
+                // A `*` marks a union's default alternative.
+                let name = name.trim_start_matches('*');
                 if let Some(accepted) =
                     self.check_imported_alias(val, name, scope, depth, resolving)?
                 {
@@ -692,8 +595,84 @@ impl Evaluator {
                     let resolved = resolved.clone();
                     return self.eval_alias_check(val, name, &resolved, scope, depth, resolving);
                 }
-                Ok(value_is_type(val, ty))
+                if !value_is_type(val, ty) {
+                    return Ok(false);
+                }
+                self.check_type_arguments(val, name, args, scope, depth, resolving)
             }
+        }
+    }
+
+    /// Check the elements of a `List<T>`, `Set<T>`, `Listing<T>` or
+    /// `Collection<T>`, and the keys and values of a `Map<K, V>` or
+    /// `Mapping<K, V>`, against their type arguments. The value is already
+    /// known to be an instance of the generic class. An argument pklr cannot
+    /// model (a type parameter, an unresolved class) accepts everything, as
+    /// does `Any`.
+    fn check_type_arguments(
+        &mut self,
+        val: &Value,
+        name: &str,
+        args: &[crate::parser::TypeExpr],
+        scope: &Scope,
+        depth: usize,
+        resolving: &mut Vec<String>,
+    ) -> Result<bool> {
+        fn checked<'t>(
+            ty: Option<&'t crate::parser::TypeExpr>,
+            scope: &Scope,
+        ) -> Option<&'t crate::parser::TypeExpr> {
+            ty.filter(|ty| !type_is_any(ty) && type_is_runtime_checkable(ty, scope))
+        }
+        match (name, val) {
+            ("List" | "Listing" | "Set" | "Collection", Value::List(items)) => {
+                let Some(element_ty) = checked(args.first(), scope) else {
+                    return Ok(true);
+                };
+                for item in items.iter() {
+                    if !self.eval_argument_check(item, element_ty, scope, depth, resolving)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            ("Map" | "Mapping", Value::Object(entries, source))
+                if source
+                    .as_ref()
+                    .is_none_or(|source| source.type_name.is_none()) =>
+            {
+                let key_ty = checked(args.first(), scope);
+                let value_ty = checked(args.get(1), scope);
+                if key_ty.is_none() && value_ty.is_none() {
+                    return Ok(true);
+                }
+                for (stored_key, entry) in entries.iter() {
+                    if let Some(key_ty) = key_ty {
+                        let key = self
+                            .mapping_key_values
+                            .get(stored_key)
+                            .cloned()
+                            .unwrap_or_else(|| match render::class_key_name(stored_key) {
+                                // `[String] = 1` keys by a class, which no
+                                // evaluated key value was remembered for.
+                                Some(class) => {
+                                    stdlib::class_value(class, format!("pkl:base#{class}"))
+                                }
+                                None => crate::value::mapping_storage_value(stored_key),
+                            });
+                        if !self.eval_argument_check(&key, key_ty, scope, depth, resolving)? {
+                            return Ok(false);
+                        }
+                    }
+                    if let Some(value_ty) = value_ty
+                        && !self.eval_argument_check(entry, value_ty, scope, depth, resolving)?
+                    {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            _ => Ok(true),
         }
     }
 }
@@ -765,6 +744,7 @@ pub(super) fn with_constraint_receiver(constraint: &Expr, scope: &Scope) -> Opti
             }
             Expr::Is(value, ty) => Expr::Is(go(value, bound), ty.clone()),
             Expr::As(value, ty) => Expr::As(go(value, bound), ty.clone()),
+            Expr::Checked(value, ty) => Expr::Checked(go(value, bound), ty.clone()),
             Expr::Binop(op, left, right) => Expr::Binop(*op, go(left, bound), go(right, bound)),
             Expr::Unop(op, value) => Expr::Unop(*op, go(value, bound)),
             Expr::Lambda(params, body) => {
@@ -931,6 +911,7 @@ pub(super) fn type_constraint_has_explicit_throw(
             | Expr::InferredNew(..)
             | Expr::Is(..)
             | Expr::As(..)
+            | Expr::Checked(..)
             | Expr::ObjectBody(_)
             | Expr::Import(..)
             | Expr::ImportGlob(..) => false,
@@ -977,6 +958,62 @@ pub(super) fn is_deferred_constraint_evaluator_error(message: &str) -> bool {
     message.starts_with("Operator `")
         && message.contains(" is not defined for operand types `")
         && message.contains("Function")
+}
+
+/// Whether `val` is an object body whose class pklr did not infer: not a
+/// `Dynamic` made by `new Dynamic`, not a `Mapping`, and no class instance.
+/// pkl gives such a `new { ... }` the class its declared type names; pklr does
+/// not always, so it cannot disprove that the type accepts it.
+fn is_uninferred_object(val: &Value) -> bool {
+    matches!(
+        val,
+        Value::Object(_, Some(source))
+            if source.kind == ObjectKind::Object
+                && source.type_name.is_none()
+                && source.type_identity.is_none()
+    )
+}
+
+/// Whether `ty` names a class of the program, directly or through an alias,
+/// a nullable, a constraint or a union.
+fn type_names_user_class(ty: &crate::parser::TypeExpr, scope: &Scope, depth: usize) -> bool {
+    use crate::parser::TypeExpr;
+    if depth > 8 {
+        return false;
+    }
+    let class_name = |name: &str| {
+        let name = name.trim_start_matches('*').trim_end_matches('?');
+        if let Some(alias) = scope.get_type_alias(name) {
+            return type_names_user_class(alias, scope, depth + 1);
+        }
+        matches!(
+            resolve_dotted(scope, name),
+            Some(Value::Object(_, Some(source))) if source.type_identity.is_some()
+        )
+    };
+    match ty {
+        TypeExpr::Named(name) | TypeExpr::Generic(name, _) => class_name(name),
+        TypeExpr::Constrained(base, _) => class_name(base.split('<').next().unwrap_or(base)),
+        TypeExpr::Nullable(inner) => type_names_user_class(inner, scope, depth + 1),
+        TypeExpr::Union(variants) => variants
+            .iter()
+            .any(|variant| type_names_user_class(variant, scope, depth + 1)),
+    }
+}
+
+/// Whether `val` is a scalar (a number, string, boolean, regex, duration or
+/// data size) and `name` is the built-in type it is an instance of.
+fn scalar_is_builtin_type(val: &Value, name: &str) -> bool {
+    match val {
+        Value::Int(_) => matches!(name, "Int" | "Number"),
+        Value::Float(_) => matches!(name, "Float" | "Number"),
+        Value::String(_) => name == "String",
+        Value::Bool(_) => name == "Boolean",
+        Value::Regex(_) => name == "Regex",
+        Value::Duration(_) => name == "Duration",
+        Value::DataSize(_) => name == "DataSize",
+        _ => false,
+    }
 }
 
 /// Whether amending a union-typed property has a value to start from.

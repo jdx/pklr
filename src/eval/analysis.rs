@@ -205,7 +205,7 @@ pub(super) fn collect_expr_import_field_uses(
             insert_name!(body_shadows, name);
             collect_expr_import_field_uses(body, uses, &body_shadows);
         }
-        Expr::Is(value, ty) | Expr::As(value, ty) => {
+        Expr::Is(value, ty) | Expr::As(value, ty) | Expr::Checked(value, ty) => {
             collect_expr_import_field_uses(value, uses, shadows);
             collect_type_import_field_uses(ty, uses, shadows);
         }
@@ -902,6 +902,9 @@ fn with_builtins_unresolved<'a>(
     entries: &'a [Entry],
     declared: &HashSet<&str>,
 ) -> Option<TypeAliases<'a>> {
+    if declared.is_empty() {
+        return None;
+    }
     let redeclared: Vec<&str> = BINDING_BUILTIN_TYPES
         .iter()
         .copied()
@@ -1097,7 +1100,7 @@ fn collect_sibling_field_refs_expr_in(
                 },
             );
         }
-        Expr::Is(value, ty) | Expr::As(value, ty) => {
+        Expr::Is(value, ty) | Expr::As(value, ty) | Expr::Checked(value, ty) => {
             collect_sibling_field_refs_expr_in(value, refs, include_this, shadowed);
             // `module.field` reads in the checked type's constraints.
             collect_sibling_field_refs_type_in(ty, refs, shadowed);
@@ -1980,6 +1983,7 @@ fn collect_field_names_expr(expr: &Expr, out: &mut HashSet<Name>) {
         Expr::Lambda(_, value) => collect_field_names_expr(value, out),
         Expr::Is(value, _)
         | Expr::As(value, _)
+        | Expr::Checked(value, _)
         | Expr::Unop(_, value)
         | Expr::Throw(value)
         | Expr::TemplateLocals(_, value)
@@ -2550,7 +2554,7 @@ fn collect_expr_refs_in(
             insert_name!(body_shadows.values, name);
             collect_expr_refs_in(body, refs, &body_shadows, aliases, definitions);
         }
-        Expr::Is(value, ty) | Expr::As(value, ty) => {
+        Expr::Is(value, ty) | Expr::As(value, ty) | Expr::Checked(value, ty) => {
             collect_expr_refs_in(value, refs, shadows, aliases, definitions);
             collect_type_refs(ty, refs, shadows, aliases, definitions);
         }
@@ -2738,7 +2742,7 @@ pub(super) fn collect_unshadowed_names(expr: &Expr, names: &mut HashSet<Name>) {
             collect_unshadowed_names(value, names);
             collect_unshadowed_names(body, names);
         }
-        Expr::Is(value, ty) | Expr::As(value, ty) => {
+        Expr::Is(value, ty) | Expr::As(value, ty) | Expr::Checked(value, ty) => {
             collect_unshadowed_names(value, names);
             collect_unshadowed_type_names(ty, names);
         }
@@ -2925,7 +2929,7 @@ fn expr_mentions(expr: &Expr, name: &str) -> bool {
                 || expr_mentions(else_expr, name)
         }
         Expr::Let(_, value, body) => expr_mentions(value, name) || expr_mentions(body, name),
-        Expr::Is(value, ty) | Expr::As(value, ty) => {
+        Expr::Is(value, ty) | Expr::As(value, ty) | Expr::Checked(value, ty) => {
             expr_mentions(value, name) || type_mentions(ty, name)
         }
         Expr::Lambda(_, value) => expr_mentions(value, name),
@@ -2978,7 +2982,9 @@ pub(super) fn mapping_entry_mentions_this(expr: &Expr) -> bool {
         // A constructed or amended object provides its own `this`; a type
         // constraint likewise binds `this` to the checked value.
         Expr::New(..) | Expr::InferredNew(..) | Expr::ObjectBody(..) => false,
-        Expr::Is(value, _) | Expr::As(value, _) => mapping_entry_mentions_this(value),
+        Expr::Is(value, _) | Expr::As(value, _) | Expr::Checked(value, _) => {
+            mapping_entry_mentions_this(value)
+        }
         Expr::Unop(_, value)
         | Expr::Throw(value)
         | Expr::TemplateLocals(_, value)
@@ -3104,7 +3110,9 @@ impl InstanceReads {
                 self.expr(body, depth);
             }
             // A type's constraints bind `this` to the checked value.
-            Expr::Is(value, _) | Expr::As(value, _) => self.expr(value, depth),
+            Expr::Is(value, _) | Expr::As(value, _) | Expr::Checked(value, _) => {
+                self.expr(value, depth)
+            }
             Expr::Lambda(_, value) => self.expr(value, depth),
             Expr::Unop(_, value)
             | Expr::Throw(value)

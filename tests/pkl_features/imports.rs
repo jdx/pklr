@@ -2540,7 +2540,7 @@ fn narrowed_import_ignores_checked_value_names_in_is_expressions() {
     .unwrap();
     std::fs::write(
         dir.join("generic.pkl"),
-        "length = throw(\"unused\")\nresult = List(1) is Listing<Int>(length == 1)\n",
+        "length = throw(\"unused\")\nresult = new Listing { 1 } is Listing<Int>(length == 1)\n",
     )
     .unwrap();
     // A nullable base runs its constraint on `null`, which binds no `length`.
@@ -2587,7 +2587,7 @@ fn narrowed_import_resolves_local_aliases_in_constraint_bases() {
     .unwrap();
     std::fs::write(
         dir.join("listing.pkl"),
-        "length = throw(\"unused\")\ntypealias L = Listing<Int>\nresult = List(1) is L(length == 1)\n",
+        "length = throw(\"unused\")\ntypealias L = Listing<Int>\nresult = new Listing { 1 } is L(length == 1)\n",
     )
     .unwrap();
     // An alias of a number or nullable type binds no `length`, so it stays a

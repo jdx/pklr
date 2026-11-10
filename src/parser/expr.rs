@@ -430,9 +430,10 @@ impl<'a> Parser<'a> {
             return Ok((expr, true));
         }
         let start = self.prev_end;
-        let params = self.parse_parameters(&TokenKind::RParen)?;
+        let typed_params = self.parse_typed_parameters(&TokenKind::RParen)?;
         self.expect2(&TokenKind::RParen, ")", ",")?;
         self.expect(&TokenKind::Arrow, "->")?;
+        let params: Vec<String> = typed_params.iter().map(|(name, _)| name.clone()).collect();
         if params.len() > 5 {
             return Err(self.error_at(
                 start.saturating_sub(1),
@@ -440,6 +441,7 @@ impl<'a> Parser<'a> {
             ));
         }
         let body = self.parse_expr()?;
+        let body = check_signature(&typed_params, None, body);
         Ok((
             Expr::Lambda(params.into(), std::sync::Arc::new(body)),
             false,

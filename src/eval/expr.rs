@@ -128,7 +128,11 @@ impl Evaluator {
             Expr::InferredNew(ty, entries) => {
                 let (name, params) = inferred_new_type(ty, scope, 0)?;
                 self.eval_expr(
-                    &Expr::New(Some(name), entries.clone(), params),
+                    &Expr::New(
+                        Some(name),
+                        infer_listing_elements(ty, entries, scope),
+                        params,
+                    ),
                     scope,
                     depth + 1,
                 )
@@ -145,11 +149,12 @@ impl Evaluator {
                 let has_elements = matches!(type_name.as_deref(), None | Some("Dynamic"))
                     && entries_are_listing_amendment(entries);
                 let defines_members = has_elements && entries_define_members(entries);
+                let element_kind = ListKind::Dynamic;
                 let eval_elements = |this: &mut Self| -> Result<Vec<Value>> {
                     let mut listing_scope = scope.child();
                     listing_scope.set(
                         "super",
-                        Value::List(ListValue::new(ListKind::Listing, Vec::new())),
+                        Value::List(ListValue::new(element_kind, Vec::new())),
                     );
                     listing_scope.receiver_list_base = Some(0);
                     let mut items = Vec::new();
@@ -165,7 +170,7 @@ impl Evaluator {
                 match type_name.as_deref() {
                     Some("module") => Err(Error::Eval("`new module` is not supported".into())),
                     _ if has_elements && !defines_members => Ok(Value::List(ListValue::new(
-                        ListKind::Listing,
+                        element_kind,
                         eval_elements(self)?,
                     ))),
                     _ if has_elements => {
@@ -173,10 +178,15 @@ impl Evaluator {
                         if matches!(&object, Value::Object(map, _) if map.is_empty()) {
                             let items = eval_elements(self)?;
                             if !items.is_empty() {
-                                return Ok(Value::List(ListValue::new(ListKind::Listing, items)));
+                                return Ok(Value::List(ListValue::new(element_kind, items)));
                             }
                         }
-                        Ok(object)
+                        // `new Dynamic { 1; x = 2 }` is a Dynamic too.
+                        Ok(if type_name.as_deref() == Some("Dynamic") {
+                            tag_dynamic(object)
+                        } else {
+                            object
+                        })
                     }
                     Some("Listing") => {
                         let elem_class = listing_elem_class(generic_params, scope);
@@ -275,7 +285,10 @@ impl Evaluator {
                         };
                         Ok(Value::Object(Arc::new(map), Some(Arc::new(source))))
                     }
-                    Some("Dynamic") => self.eval_entries(entries, scope, depth + 1),
+                    Some("Dynamic") => {
+                        let object = self.eval_entries(entries, scope, depth + 1)?;
+                        Ok(tag_dynamic(object))
+                    }
                     // `new Mixin { body }` is a function that amends its
                     // argument with `body`.
                     Some("Mixin") => {
@@ -476,6 +489,14 @@ impl Evaluator {
                 {
                     return result;
                 }
+                // An element-only `Dynamic` has no members of a collection.
+                if let Value::List(items) = &obj
+                    && items.kind() == ListKind::Dynamic
+                {
+                    return Err(Error::Eval(format!(
+                        "Cannot find property `{field}` in object of type `Dynamic`."
+                    )));
+                }
                 // Built-in properties
                 match (&obj, field.as_str()) {
                     (Value::Object(..), "simpleName") if class_simple_name(&obj).is_some() => {
@@ -657,6 +678,10 @@ impl Evaluator {
             }
             Expr::Let(name, val_expr, body_expr) => {
                 let val = self.eval_expr(val_expr, scope, depth + 1)?;
+                // `_` binds nothing: the value is only checked.
+                if name == "_" {
+                    return self.eval_expr(body_expr, scope, depth + 1);
+                }
                 let mut child = scope.child();
                 child.set(name, val);
                 self.eval_expr(body_expr, &child, depth + 1)
@@ -701,6 +726,20 @@ impl Evaluator {
                         "cannot cast {} to {}",
                         value_type_name(&val),
                         display_type_expr(ty)
+                    )))
+                }
+            }
+            Expr::Checked(expr, ty) => {
+                let val = self.eval_expr(expr, scope, depth + 1)?;
+                if !type_is_runtime_checkable(ty, scope)
+                    || self.eval_argument_check(&val, ty, scope, depth, &mut Vec::new())?
+                {
+                    Ok(val)
+                } else {
+                    Err(Error::Eval(format!(
+                        "Expected value of type `{}`, but got type `{}`.",
+                        display_type_expr(ty),
+                        pkl_class_name(&val)
                     )))
                 }
             }
@@ -1076,10 +1115,12 @@ pub(super) fn int_seq(start: i64, end: i64, step: i64) -> Result<Value> {
         )));
     }
     Ok(Value::List(
-        (0..len)
-            .map(|i| Value::Int((start_w + i * step_w) as i64))
-            .collect::<Vec<_>>()
-            .into(),
+        ListValue::from(
+            (0..len)
+                .map(|i| Value::Int((start_w + i * step_w) as i64))
+                .collect::<Vec<_>>(),
+        )
+        .into_int_seq(),
     ))
 }
 
@@ -1125,5 +1166,17 @@ pub(super) fn check_iterable(value: &Value) -> Result<()> {
             "Cannot iterate over value of type `{}`.",
             value_type_display(value)
         ))),
+    }
+}
+
+/// An object `new Dynamic { ... }` built, marked as the `Dynamic` it is.
+fn tag_dynamic(object: Value) -> Value {
+    match object {
+        Value::Object(map, Some(source)) if source.kind == ObjectKind::Object => {
+            let mut source = Arc::unwrap_or_clone(source);
+            source.kind = ObjectKind::Dynamic;
+            Value::Object(map, Some(Arc::new(source)))
+        }
+        other => other,
     }
 }

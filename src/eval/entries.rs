@@ -37,6 +37,13 @@ impl Evaluator {
             return Ok(Some(value));
         }
         if let Some(body) = &prop.body {
+            // An untyped `new` member of a declared `Listing` or `Mapping`
+            // takes its parent from the declared member type.
+            let inferred = prop
+                .type_ann
+                .as_ref()
+                .and_then(|ty| infer_amendment_members(ty, body, scope));
+            let body = inferred.as_ref().unwrap_or(body);
             let mut nullable_default = prop
                 .type_ann
                 .as_ref()
@@ -109,6 +116,19 @@ impl Evaluator {
                     scope,
                 )));
             }
+            // Members make an element-only `Dynamic` one with elements and
+            // members.
+            if let Some(base @ Value::List(items)) = amendment_base
+                && items.kind() == ListKind::Dynamic
+                && entries_define_members(body)
+            {
+                return Ok(Some(self.eval_value_amendment(
+                    base.clone(),
+                    body,
+                    scope,
+                    depth,
+                )?));
+            }
             if matches!(amendment_base, Some(Value::List(_)))
                 || (!matches!(amendment_base, Some(Value::Object(..)))
                     && (declared_listing
@@ -117,7 +137,19 @@ impl Evaluator {
             {
                 let mut items = match amendment_base {
                     Some(Value::List(existing)) => existing.clone(),
-                    _ => ListValue::new(ListKind::Listing, Vec::new()),
+                    // Amending nothing makes a `Dynamic`, unless the declared
+                    // type is a `Listing` (or an alias or `*` union of one),
+                    // whose default the body amends. Any declared type that
+                    // does not take a `Dynamic` is amended the same way.
+                    _ if prop.type_ann.as_ref().is_some_and(|ty| {
+                        type_is_listing(ty)
+                            || self.union_amend_state(ty, scope) == UnionAmendState::HasDefault
+                            || !self.type_takes_dynamic(ty, scope, &mut Vec::new())
+                    }) =>
+                    {
+                        ListValue::new(ListKind::Listing, Vec::new())
+                    }
+                    _ => ListValue::new(ListKind::Dynamic, Vec::new()),
                 };
                 // `x: Listing<T>` makes each `new { ... }` element a `T`. A
                 // listing the declaring class built already knows `T`, as does
@@ -496,6 +528,11 @@ impl Evaluator {
             })
             .map(|name| name_of(name))
             .collect();
+        // A body that yields only elements (`...list`, a generator) makes an
+        // element-only `Dynamic`, as `new Dynamic { 1; 2 }` does.
+        if st.map.is_empty() && st.all_props.is_empty() && !st.elements.is_empty() {
+            return Ok(Value::List(ListValue::new(ListKind::Dynamic, st.elements)));
+        }
         let source = ObjectSource {
             entries: entries.clone(),
             captured: SourceScope::lazy(&st.child_scope, hidden_aliases, Vec::new()),
@@ -933,8 +970,20 @@ impl Evaluator {
                             outer: cx.receiver_members,
                         }),
                     )?;
-                    if let Value::Object(m, source) = body_val {
-                        self.merge_generated_members(cx, st, entry_index, &fgen.body, &m, source)?;
+                    match body_val {
+                        Value::Object(m, source) => {
+                            self.merge_generated_members(
+                                cx,
+                                st,
+                                entry_index,
+                                &fgen.body,
+                                &m,
+                                source,
+                            )?;
+                        }
+                        // A body of only elements.
+                        Value::List(items) => st.elements.extend(items.iter().cloned()),
+                        _ => {}
                     }
                 }
             }
@@ -961,8 +1010,19 @@ impl Evaluator {
                             outer: cx.receiver_members,
                         }),
                     )?;
-                    if let Value::Object(m, source) = body_val {
-                        self.merge_generated_members(cx, st, entry_index, &wgen.body, &m, source)?;
+                    match body_val {
+                        Value::Object(m, source) => {
+                            self.merge_generated_members(
+                                cx,
+                                st,
+                                entry_index,
+                                &wgen.body,
+                                &m,
+                                source,
+                            )?;
+                        }
+                        Value::List(items) => st.elements.extend(items.iter().cloned()),
+                        _ => {}
                     }
                 } else if let Some(else_body) = &wgen.else_body {
                     let else_val = self.eval_entries_with_lexical_scopes(
@@ -978,8 +1038,19 @@ impl Evaluator {
                             outer: cx.receiver_members,
                         }),
                     )?;
-                    if let Value::Object(m, source) = else_val {
-                        self.merge_generated_members(cx, st, entry_index, else_body, &m, source)?;
+                    match else_val {
+                        Value::Object(m, source) => {
+                            self.merge_generated_members(
+                                cx,
+                                st,
+                                entry_index,
+                                else_body,
+                                &m,
+                                source,
+                            )?;
+                        }
+                        Value::List(items) => st.elements.extend(items.iter().cloned()),
+                        _ => {}
                     }
                 }
             }
@@ -1680,7 +1751,7 @@ pub(super) fn this_member_reads_non_const(
         }
         Expr::Let(_, value, body) => this_member_reads_non_const(value, non_const_members)
             .or_else(|| this_member_reads_non_const(body, non_const_members)),
-        Expr::Is(value, _) | Expr::As(value, _) => {
+        Expr::Is(value, _) | Expr::As(value, _) | Expr::Checked(value, _) => {
             this_member_reads_non_const(value, non_const_members)
         }
         Expr::Lambda(_, value) => this_member_reads_non_const(value, non_const_members),

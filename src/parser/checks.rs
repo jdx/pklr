@@ -304,7 +304,9 @@ impl<'a> Parser<'a> {
                     }
                 }
             }
-            Expr::Is(value, _) | Expr::As(value, _) => self.check_expr_duplicates(value)?,
+            Expr::Is(value, _) | Expr::As(value, _) | Expr::Checked(value, _) => {
+                self.check_expr_duplicates(value)?
+            }
             Expr::Null
             | Expr::Bool(_)
             | Expr::Int(_)
@@ -531,7 +533,8 @@ pub(super) fn expr_defines_type(expr: &Expr, name: &str) -> bool {
         | Expr::ReadOrNull(value, _)
         | Expr::ReadGlob(value, _)
         | Expr::Is(value, _)
-        | Expr::As(value, _) => expr_defines_type(value, name),
+        | Expr::As(value, _)
+        | Expr::Checked(value, _) => expr_defines_type(value, name),
         Expr::Lambda(_, value) => expr_defines_type(value, name),
         Expr::Index(left, right) | Expr::Binop(_, left, right) => {
             expr_defines_type(left, name) || expr_defines_type(right, name)
