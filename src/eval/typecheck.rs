@@ -19,17 +19,177 @@ impl Evaluator {
         let Some(ty) = &prop.type_ann else {
             return Ok(());
         };
-        if !type_is_runtime_checkable(ty, scope)
-            || self.eval_type_check(value, ty, scope, depth + 1)?
-        {
+        // An explicit `new Dynamic { ... }` is a `Dynamic` even when the value
+        // model represents its elements as a `Listing` or its members as an
+        // untyped object, so the declared type must accept a `Dynamic`.
+        if is_explicit_dynamic(prop) && !type_accepts_dynamic(ty, scope) {
+            return Err(Error::Eval(format!(
+                "property '{}' expected {}, got Dynamic",
+                prop.name,
+                display_type_expr(ty),
+            )));
+        }
+        // Its elements are stored as a `Listing`, which a `Dynamic` type
+        // would otherwise not match, so check the type's constraints on it
+        // separately.
+        let accepted = if is_explicit_dynamic(prop) && matches!(value, Value::List(_)) {
+            self.check_element_dynamic(value, ty, scope, depth + 1, &mut Vec::new())?
+        } else {
+            !type_is_runtime_checkable(ty, scope)
+                || self.eval_type_check(value, ty, scope, depth + 1)?
+        };
+        if accepted {
             return Ok(());
         }
         Err(Error::Eval(format!(
             "property '{}' expected {}, got {}",
             prop.name,
             display_type_expr(ty),
-            value_type_name(value)
+            if is_explicit_dynamic(prop) {
+                "Dynamic"
+            } else {
+                value_type_name(value)
+            }
         )))
+    }
+
+    /// Check an element-only `Dynamic`, which the value model stores as a
+    /// list, against a declared type: the type must accept a `Dynamic` and
+    /// every constraint along the way must hold for the value.
+    pub(super) fn check_element_dynamic(
+        &mut self,
+        val: &Value,
+        ty: &crate::parser::TypeExpr,
+        scope: &Scope,
+        depth: usize,
+        resolving: &mut Vec<String>,
+    ) -> Result<bool> {
+        use crate::parser::TypeExpr;
+        // Walk simple alias chains (`A0 = A1`, ...) in a loop, as
+        // `eval_alias_check` does, so a long chain does not use the Rust
+        // stack once per alias.
+        let mark = resolving.len();
+        let mut current = ty.clone();
+        let result = loop {
+            match &current {
+                TypeExpr::Nullable(inner) => {
+                    let inner = (**inner).clone();
+                    current = inner;
+                }
+                TypeExpr::Union(variants) => {
+                    let mut accepted = false;
+                    for variant in variants {
+                        match self.check_element_dynamic(val, variant, scope, depth + 1, resolving)
+                        {
+                            Ok(true) => {
+                                accepted = true;
+                                break;
+                            }
+                            Ok(false) => {}
+                            Err(err) => {
+                                resolving.truncate(mark);
+                                return Err(err);
+                            }
+                        }
+                    }
+                    break Ok(accepted);
+                }
+                TypeExpr::Named(name) | TypeExpr::Generic(name, _) => {
+                    let base = name.trim_start_matches('*').trim_end_matches('?');
+                    let base = base.split('<').next().unwrap_or(base);
+                    let Some(target) = scope.get_type_alias(base) else {
+                        break Ok(type_accepts_dynamic(&current, scope));
+                    };
+                    if resolving.iter().any(|seen| seen == base) {
+                        break Err(Error::Eval(format!("type alias '{base}' refers to itself")));
+                    }
+                    resolving.push(base.to_string());
+                    let target = target.clone();
+                    current = target;
+                }
+                TypeExpr::Constrained(base, constraint) => {
+                    let base_ty = TypeExpr::Named(base.clone());
+                    match self.check_element_dynamic(val, &base_ty, scope, depth + 1, resolving) {
+                        Ok(true) => {}
+                        other => break other,
+                    }
+                    // The base type accepted it; what is left is the
+                    // predicate, run without resolving a base type again.
+                    break self.eval_element_dynamic_constraint(val, constraint, scope, depth);
+                }
+            }
+        };
+        resolving.truncate(mark);
+        result
+    }
+
+    /// Run a constraint on an element-only `Dynamic`. Its `this` is the
+    /// stored list, which is marked so a type test on it sees a `Dynamic`
+    /// (see `eval_type_check_in`), and it has none of the members the list
+    /// would add to the scope.
+    fn eval_element_dynamic_constraint(
+        &mut self,
+        val: &Value,
+        constraint: &Expr,
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<bool> {
+        let Value::List(items) = val else {
+            return Ok(false);
+        };
+        self.element_dynamics.push(items.items_ptr() as usize);
+        let result = self.eval_constraint(val, constraint, scope, depth, false);
+        self.element_dynamics.pop();
+        result
+    }
+
+    /// Whether `val` is the stored list of an element-only `Dynamic` whose
+    /// constraint is running.
+    fn is_element_dynamic(&self, val: &Value) -> bool {
+        matches!(val, Value::List(items)
+            if items.kind() == ListKind::Listing
+                && self.element_dynamics.contains(&(items.items_ptr() as usize)))
+    }
+
+    /// Evaluate a constraint with `this` bound to the value, for a value that
+    /// has passed its base type.
+    fn eval_constraint(
+        &mut self,
+        val: &Value,
+        constraint: &Expr,
+        scope: &Scope,
+        depth: usize,
+        bind_members: bool,
+    ) -> Result<bool> {
+        let mut constraint_scope = scope.child();
+        constraint_scope.set("this", val.clone());
+        // Also bind common properties directly so `length`, `isEmpty` etc. work
+        if bind_members {
+            match val {
+                Value::String(s) => {
+                    constraint_scope.set("length", Value::Int(s.chars().count() as i64));
+                    constraint_scope.set("isEmpty", Value::Bool(s.is_empty()));
+                }
+                Value::List(items) => {
+                    constraint_scope.set("length", Value::Int(items.len() as i64));
+                    constraint_scope.set("isEmpty", Value::Bool(items.is_empty()));
+                }
+                Value::Object(items, _) => {
+                    constraint_scope.set("length", Value::Int(items.len() as i64));
+                    constraint_scope.set("isEmpty", Value::Bool(items.is_empty()));
+                }
+                _ => {}
+            }
+        }
+        let receiver_constraint = with_constraint_receiver(constraint, &constraint_scope);
+        let constraint = receiver_constraint.as_ref().unwrap_or(constraint);
+        let mut result = self.eval_expr(constraint, &constraint_scope, depth + 1)?;
+        // `Listing(isSorted)` names a predicate function and applies
+        // it to the value being checked.
+        if matches!(result, Value::Lambda(..)) {
+            result = self.invoke_lambda(&result, std::slice::from_ref(val), depth + 1)?;
+        }
+        Ok(is_truthy(&result))
     }
 
     /// Check if a value matches a type expression, including constraint evaluation.
@@ -88,6 +248,11 @@ impl Evaluator {
         resolving: &mut Vec<String>,
     ) -> Result<bool> {
         use crate::parser::TypeExpr;
+        // A type test on the `this` of an element-only `Dynamic` constraint
+        // sees a `Dynamic`, not the list that stores it.
+        if self.is_element_dynamic(val) {
+            return self.check_element_dynamic(val, ty, scope, depth + 1, resolving);
+        }
         match ty {
             TypeExpr::Named(name) => {
                 if let Some(expected) = string_literal_type_value(name) {
@@ -119,35 +284,7 @@ impl Evaluator {
                 if !base_matches {
                     return Ok(false);
                 }
-                // Evaluate the constraint with `this` bound to the value
-                let mut constraint_scope = scope.child();
-                constraint_scope.set("this", val.clone());
-                // Also bind common properties directly so `length`, `isEmpty` etc. work
-                match val {
-                    Value::String(s) => {
-                        constraint_scope.set("length", Value::Int(s.chars().count() as i64));
-                        constraint_scope.set("isEmpty", Value::Bool(s.is_empty()));
-                    }
-                    Value::Int(_) | Value::Float(_) => {}
-                    Value::List(items) => {
-                        constraint_scope.set("length", Value::Int(items.len() as i64));
-                        constraint_scope.set("isEmpty", Value::Bool(items.is_empty()));
-                    }
-                    Value::Object(items, _) => {
-                        constraint_scope.set("length", Value::Int(items.len() as i64));
-                        constraint_scope.set("isEmpty", Value::Bool(items.is_empty()));
-                    }
-                    _ => {}
-                }
-                let receiver_constraint = with_constraint_receiver(constraint, &constraint_scope);
-                let constraint = receiver_constraint.as_ref().unwrap_or(constraint);
-                let mut result = self.eval_expr(constraint, &constraint_scope, depth + 1)?;
-                // `Listing(isSorted)` names a predicate function and applies
-                // it to the value being checked.
-                if matches!(result, Value::Lambda(..)) {
-                    result = self.invoke_lambda(&result, std::slice::from_ref(val), depth + 1)?;
-                }
-                Ok(is_truthy(&result))
+                self.eval_constraint(val, constraint, scope, depth, true)
             }
             TypeExpr::Nullable(inner) => {
                 if is_null_value(val) {
