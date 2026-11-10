@@ -964,3 +964,73 @@ a2 = d.y.q
     assert_eq!(json["a"], serde_json::json!([5, 6]));
     assert_eq!(json["a2"], 2);
 }
+
+// Each expectation below was compared with `pkl eval` 0.32.2.
+#[test]
+fn two_failing_fors_each_resume_at_their_own_iteration() {
+    let json = eval(
+        r#"
+local d = new Dynamic { for (i in List(1, 2)) { if (i == 1) i else z }; for (i in List(5, 6)) { if (i == 5) i else z }; z = 9 }
+a = d.toList()
+local e = new Dynamic { for (i in List(1, 2)) { z + i }; for (i in List(3)) { z + i }; z = 10 }
+b = e.toList()
+local f = new Dynamic { when (true) { for (i in List(1, 2)) { if (i == 1) i else z } }; z = 7 }
+c = f.toList()
+"#,
+    );
+    assert_eq!(json["a"], serde_json::json!([1, 9, 5, 9]));
+    assert_eq!(json["b"], serde_json::json!([11, 12, 13]));
+    assert_eq!(json["c"], serde_json::json!([1, 7]));
+}
+
+#[test]
+fn a_computed_member_is_a_later_member_too() {
+    let json = eval(
+        r#"
+local a = new Dynamic { this["k"]; ["k"] = 1 }
+r1 = a.toList()
+local b = new Dynamic { this["k"]; ["k"] = 1; z = 2 }
+r2 = b.toList()
+local c = new Dynamic { z; ["k"] = 1; z = 2 }
+r3 = c.toList()
+local d = new Dynamic { for (i in List(1, 2)) { i }; this["k"]; ["k"] = 1 }
+r4 = d.toList()
+"#,
+    );
+    assert_eq!(json["r1"], serde_json::json!([1]));
+    assert_eq!(json["r2"], serde_json::json!([1]));
+    assert_eq!(json["r3"], serde_json::json!([2]));
+    assert_eq!(json["r4"], serde_json::json!([1, 2, 1]));
+}
+
+#[test]
+fn the_head_of_a_generator_and_a_spread_do_not_see_the_members_of_the_body() {
+    // pkl evaluates them outside the body, so a later member is not found.
+    for src in [
+        "local d = new Dynamic { for (i in List(1, 2)) { i }; for (i in List(z)) { i }; z = 3 }\nr = d.toList()\n",
+        "local d = new Dynamic { ...List(z); z = 1 }\nr = d.toList()\n",
+        "local d = new Dynamic { when (z == 1) { 5 }; z = 1 }\nr = d.toList()\n",
+        "local d = new Dynamic { for (i in List(1, 2)) { i }; for (i in nope) { i }; z = 1 }\nr = d.toList()\n",
+    ] {
+        let message = eval_fails(src);
+        assert!(
+            message.contains("`z`") || message.contains(" z") || message.contains("nope"),
+            "{src}: {message}"
+        );
+    }
+    // An enclosing binding of that name is what they read.
+    let json = eval(
+        r#"
+local z = 5
+local a = new Dynamic { for (i in List(z)) { i }; z = 1 }
+r1 = a.toList()
+local b = new Dynamic { when (z == 5) { 7 }; z = 1 }
+r2 = b.toList()
+local c = new Dynamic { ...List(z); z = 1 }
+r3 = c.toList()
+"#,
+    );
+    assert_eq!(json["r1"], serde_json::json!([5]));
+    assert_eq!(json["r2"], serde_json::json!([7]));
+    assert_eq!(json["r3"], serde_json::json!([5]));
+}

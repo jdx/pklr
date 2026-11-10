@@ -474,24 +474,23 @@ impl Evaluator {
         let mut shadow_epoch: Option<usize> = None;
         let mut deferred_elements: Vec<(usize, usize, usize)> = Vec::new();
         for (entry_index, entry) in entries.iter().enumerate() {
+            // A spread, and the collection or condition of a generator, are
+            // evaluated outside the body and cannot read its members.
             let element_like = matches!(
                 entry,
-                Entry::Elem(_)
-                    | Entry::Spread(_)
-                    | Entry::ForGenerator(_)
-                    | Entry::WhenGenerator(_)
+                Entry::Elem(_) | Entry::ForGenerator(_) | Entry::WhenGenerator(_)
             );
             // The members of the body that are not bound yet shadow the
             // enclosing bindings of the same name, so the entry fails on them
             // and waits.
             // The set is built again only when a member has been bound since.
             let mut deferrable = false;
-            if element_like && !cx.pending_members.is_empty() {
+            if element_like {
                 let last =
                     *last_member.get_or_insert_with(|| entries.iter().rposition(entry_is_member));
                 deferrable = last.is_some_and(|last| entry_index < last);
             }
-            if deferrable {
+            if deferrable && !cx.pending_members.is_empty() {
                 if shadow_epoch != Some(st.bound_members.len()) {
                     shadow_epoch = Some(st.bound_members.len());
                     let mut pending = cx
@@ -511,6 +510,14 @@ impl Evaluator {
                 st.shadow = None;
                 shadow_epoch = None;
             }
+            // A generator that fails before its body leaves the marker, which
+            // keeps it from waiting; a `for` sets the iteration it stood at.
+            st.failed_iteration =
+                if matches!(entry, Entry::ForGenerator(_) | Entry::WhenGenerator(_)) {
+                    usize::MAX
+                } else {
+                    0
+                };
             // Only a failure while locals are still pending is deferred and
             // retried, so the state is snapshotted only then. Entries never add
             // to `failed_locals`, so empty before means empty after and the
@@ -523,7 +530,7 @@ impl Evaluator {
                     st = rollback.expect("checked by the guard");
                     failed_entries.push((entry_index, message));
                 }
-                Err(Error::Eval(_)) if deferrable => {
+                Err(Error::Eval(_)) if deferrable && st.failed_iteration != usize::MAX => {
                     let resume = std::mem::take(&mut st.failed_iteration);
                     deferred_elements.push((entry_index, st.elements.len(), resume));
                 }
@@ -939,15 +946,12 @@ impl Evaluator {
                 self.eval_dynamic_entry(cx, st, entry_index, key_expr, val_expr)?;
             }
             Entry::Spread(expr) => {
-                let active_scope = shadowed(
-                    scope_for_object_entry(
-                        entry_index,
-                        &st.child_scope,
-                        cx.entry_scopes,
-                        &cx.entry_owners,
-                        cx.own_body_scope(),
-                    ),
-                    &st.shadow,
+                let active_scope = scope_for_object_entry(
+                    entry_index,
+                    &st.child_scope,
+                    cx.entry_scopes,
+                    &cx.entry_owners,
+                    cx.own_body_scope(),
                 );
                 let val = self.eval_expr(expr, &active_scope, cx.depth)?;
                 check_iterable(&val)?;
@@ -981,15 +985,12 @@ impl Evaluator {
                 }
             }
             Entry::ForGenerator(fgen) => {
-                let active_scope = shadowed(
-                    scope_for_object_entry(
-                        entry_index,
-                        &st.child_scope,
-                        cx.entry_scopes,
-                        &cx.entry_owners,
-                        cx.own_body_scope(),
-                    ),
-                    &st.shadow,
+                let active_scope = scope_for_object_entry(
+                    entry_index,
+                    &st.child_scope,
+                    cx.entry_scopes,
+                    &cx.entry_owners,
+                    cx.own_body_scope(),
                 );
                 let collection = self.eval_expr(&fgen.collection, &active_scope, cx.depth)?;
                 let items = collection_to_items(collection)?;
@@ -997,7 +998,7 @@ impl Evaluator {
                 for (iteration, (k, v)) in items.into_iter().enumerate().skip(resume) {
                     // Where the loop stands if this iteration fails.
                     st.failed_iteration = iteration;
-                    let mut iter_scope = active_scope.child();
+                    let mut iter_scope = shadowed(active_scope.child(), &st.shadow);
                     iter_scope.set(&fgen.val_var, v);
                     if let Some(key_var) = &fgen.key_var {
                         iter_scope.set(key_var, k);
@@ -1033,17 +1034,18 @@ impl Evaluator {
                 }
             }
             Entry::WhenGenerator(wgen) => {
-                let active_scope = shadowed(
-                    scope_for_object_entry(
-                        entry_index,
-                        &st.child_scope,
-                        cx.entry_scopes,
-                        &cx.entry_owners,
-                        cx.own_body_scope(),
-                    ),
-                    &st.shadow,
+                let condition_scope = scope_for_object_entry(
+                    entry_index,
+                    &st.child_scope,
+                    cx.entry_scopes,
+                    &cx.entry_owners,
+                    cx.own_body_scope(),
                 );
-                let cond = self.eval_expr(&wgen.condition, &active_scope, cx.depth)?;
+                let cond = self.eval_expr(&wgen.condition, &condition_scope, cx.depth)?;
+                // From here a failure is in the body, which may read a later
+                // member.
+                st.failed_iteration = 0;
+                let active_scope = shadowed(condition_scope, &st.shadow);
                 if is_truthy(&cond) {
                     let body_val = self.eval_entries_with_lexical_scopes(
                         &wgen.body,
