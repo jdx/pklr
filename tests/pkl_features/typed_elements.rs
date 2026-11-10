@@ -1536,3 +1536,23 @@ fn index_amendments_infer_nested_listing_elements() {
          c: C = new { l { [0] { new { 2 } } } }\n",
     );
 }
+
+// An index amendment of a `Mapping` element amends its entries, it does not
+// replace them (checked with pkl 0.32.2).
+#[test]
+fn index_amendments_amend_mapping_element_entries() {
+    let json = eval(
+        "class C { l: Listing<Mapping<String, Listing<Int>>> = new { new { [\"k\"] { 1 } } } }\n\
+         c: C = new { l { [0] { [\"k\"] { 2 } [\"n\"] = new { 3 } } } }\n",
+    );
+    assert_eq!(json["c"]["l"], serde_json::json!([{"k": [1, 2], "n": [3]}]));
+    let json = eval(
+        "class C { l: Listing<Mapping<String, Listing<Listing<Int>>>> = \
+           new { new { [\"k\"] { new { 1 } } } } }\n\
+         c: C = new { l { [0] { [\"k\"] { new { 2 } } [\"n\"] { new { 3 } } } } }\n",
+    );
+    assert_eq!(
+        json["c"]["l"],
+        serde_json::json!([{"k": [[1], [2]], "n": [[3]]}])
+    );
+}

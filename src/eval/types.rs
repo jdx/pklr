@@ -1558,8 +1558,9 @@ fn infer_members_in(
             }
             // An index amendment (`[0] { ... }`) of a listing amends an
             // element, whose own members are inferred from the element type.
+            // The element exists, so its entry bodies amend rather than build.
             Entry::DynProperty(key, Expr::ObjectBody(body)) => {
-                match infer_collection_body(member_ty, body, scope, true) {
+                match infer_collection_body(member_ty, body, scope, !is_listing) {
                     Some(body) => Entry::DynProperty(key.clone(), Expr::ObjectBody(body)),
                     None => entry.clone(),
                 }
