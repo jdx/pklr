@@ -942,8 +942,9 @@ pub(crate) trait StringRenderer<'a> {
         // Pkl keeps an object body's properties ahead of its entries.
         let mut ordered: Vec<(MemberKind, &Arc<str>, &Value)> = map
             .iter()
-            // Methods are stored as function-valued members.
-            .filter(|(_, value)| !matches!(value, Value::Lambda(..)))
+            // Methods are stored as function-valued members, and a module's
+            // classes are members but not properties.
+            .filter(|(_, value)| !matches!(value, Value::Lambda(..)) && !value.is_class())
             .map(|(key, value)| (members.kind_of(key), key, value))
             .collect();
         ordered.sort_by_key(|(member, ..)| *member == MemberKind::Entry);
@@ -1356,7 +1357,7 @@ impl JsonValue<'_> {
                             _ => PathPart::Property(key),
                         });
                     }
-                    let converted = if matches!(member, Value::Lambda(..)) {
+                    let converted = if matches!(member, Value::Lambda(..)) || member.is_class() {
                         None
                     } else {
                         self.convert_member(member)?
@@ -1436,8 +1437,9 @@ impl JsonValue<'_> {
                         return Err(cannot_render_non_string_key(&key_value(key), "JSON"));
                     }
                     // Methods are stored as function-valued members, and an
-                    // object without a source cannot tell them from data.
-                    if matches!(member, Value::Lambda(..)) {
+                    // object without a source cannot tell them from data. A
+                    // module's classes are members but not properties.
+                    if matches!(member, Value::Lambda(..)) || member.is_class() {
                         continue;
                     }
                     if let Some(members) = &members {

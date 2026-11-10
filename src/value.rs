@@ -950,6 +950,13 @@ fn same_data(a: &Value, b: &Value, equal: &mut EqualPairs, nested: bool, depth: 
 }
 
 impl Value {
+    /// Whether this value is a class itself (its defaults), not an instance.
+    /// A module's classes are members, reachable as `module.Class`, but not
+    /// properties, so renderers skip them.
+    pub(crate) fn is_class(&self) -> bool {
+        matches!(self, Value::Object(_, Some(source)) if source.kind == ObjectKind::Class)
+    }
+
     /// Whether `other` holds the same data as `self`: the same members, items
     /// and scalars in the same order, objects of the same kind and class with
     /// the same elements, hidden property names and failed members, and
@@ -1089,7 +1096,7 @@ impl Value {
                     })
                 };
                 for (k, v) in map.iter() {
-                    if matches!(v, Value::Lambda(..)) && is_method(k) {
+                    if (matches!(v, Value::Lambda(..)) && is_method(k)) || v.is_class() {
                         continue;
                     }
                     obj.insert(display_storage_key(k).to_string(), v.to_json());
