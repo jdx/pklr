@@ -680,6 +680,10 @@ impl Evaluator {
                         depth,
                         resolving,
                     )?
+                } else if let Some(accepted) =
+                    self.check_imported_alias(val, class_name, scope, depth, resolving)?
+                {
+                    accepted
                 } else if !*quoted
                     && base.contains('<')
                     && let Ok(generic) = crate::parser::parse_type_name(base)
@@ -687,10 +691,6 @@ impl Evaluator {
                     // `Listing<Int>(length == 2)`: the base keeps its type
                     // arguments, which constrain the elements.
                     self.eval_type_check_in(val, &generic, scope, depth, resolving)?
-                } else if let Some(accepted) =
-                    self.check_imported_alias(val, class_name, scope, depth, resolving)?
-                {
-                    accepted
                 } else if let Some(resolved) = scope.get_type_alias(class_name) {
                     let resolved = resolved.clone();
                     self.eval_alias_check(val, class_name, &resolved, scope, depth, resolving)?
