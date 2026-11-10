@@ -3322,3 +3322,66 @@ fn imported_module_value_does_not_render_its_classes() {
     .unwrap();
     assert_eq!(pklr::eval_to_text(&yaml).unwrap(), "result:\n  value: 1\n");
 }
+
+#[test]
+fn imported_module_keeps_property_named_like_an_inherited_typealias() {
+    // A property can share its name with an inherited non-class typealias
+    // (see `typealias_does_not_replace_inherited_property_of_same_name`).
+    // Rendering the module as an import must keep it, as at the top level.
+    let temp = TestTempDir::new("pklr_test_imported_typealias_named_property");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("P.pkl"),
+        "open module P\nname: String = \"base\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("alias.pkl"),
+        "extends \"P.pkl\"\ntypealias name = String\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("child.pkl"), "amends \"alias.pkl\"\n").unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"child.pkl\" as c\nresult = c\n",
+    )
+    .unwrap();
+    assert_eq!(
+        pklr::eval_to_json(&dir.join("main.pkl")).unwrap(),
+        serde_json::json!({"result": {"name": "base"}})
+    );
+}
+
+#[test]
+fn converted_mapping_keys_keep_imported_module_classes_in_their_identity() {
+    // Two imported modules with the same properties but different classes are
+    // different keys. Hiding classes when rendering must not merge them when
+    // a converter turns mapping keys into those modules.
+    let temp = TestTempDir::new("pklr_test_converted_key_class_identity");
+    let dir = temp.path();
+    std::fs::write(dir.join("one.pkl"), "class First {}\nvalue = 1\n").unwrap();
+    std::fs::write(dir.join("two.pkl"), "class Second {}\nvalue = 1\n").unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"import "one.pkl"
+import "two.pkl"
+m = new Mapping { ["a"] = 1; ["b"] = 2 }
+output {
+  renderer = new JsonRenderer {
+    converters { [String] = (s) -> if (s == "a") one else if (s == "b") two else s }
+  }
+}
+"#,
+    )
+    .unwrap();
+    let mut evaluator = pklr::eval::Evaluator::new();
+    let value = evaluator.eval_file(&dir.join("main.pkl")).unwrap();
+    let converted = evaluator.apply_converters(value).unwrap();
+    let pklr::Value::Object(module, _) = converted else {
+        panic!("module is not an object");
+    };
+    let Some(pklr::Value::Object(entries, _)) = module.get("m") else {
+        panic!("m is not a mapping");
+    };
+    assert_eq!(entries.len(), 2, "converted keys collided: {entries:?}");
+}

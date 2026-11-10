@@ -558,14 +558,18 @@ impl Evaluator {
         let is_abstract = module_is_abstract(module);
         // An imported module keeps its classes as members for dotted access;
         // record them so renderers do not output them as properties.
+        // Only a member whose value is the class itself is a declaration. A
+        // property can share its name with an inherited non-class typealias
+        // and stays data.
         let type_members: Arc<[Arc<str>]> = if depth == 0 {
             Arc::from([])
         } else {
-            out.keys()
-                .filter(|name| {
-                    class_names.contains(&***name) || inherited_type_names.contains(&***name)
+            out.iter()
+                .filter(|(name, value)| {
+                    (class_names.contains(&***name) || inherited_type_names.contains(&***name))
+                        && matches!(value, Value::Object(_, Some(source)) if source.kind == ObjectKind::Class)
                 })
-                .cloned()
+                .map(|(name, _)| name.clone())
                 .collect()
         };
         let source = if deprecated.is_empty()
