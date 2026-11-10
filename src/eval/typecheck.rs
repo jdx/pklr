@@ -116,9 +116,9 @@ impl Evaluator {
                     return self.eval_alias_check(val, name, &resolved, scope, depth, resolving);
                 }
                 // A scalar of the built-in type of that name matches without
-                // looking the name up as a class, which only a class instance
-                // could match.
-                if scalar_is_builtin_type(val, name) {
+                // resolving the name as a class, which only a class instance
+                // could match, unless a user class of that name shadows it.
+                if scalar_is_builtin_type(val, name) && scope.get(name).is_none() {
                     return Ok(true);
                 }
                 if let Some(matches) = value_is_class_type(val, name, scope) {

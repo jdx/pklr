@@ -243,7 +243,24 @@ impl AliasResolver<'_> {
                 };
             }
             TypeExpr::Nullable(inner) => self.ty(inner, shadowed),
-            TypeExpr::Union(types) | TypeExpr::Generic(_, types) => {
+            TypeExpr::Generic(name, args) => {
+                // A generic alias (`L<Int>` with `typealias L<T> = List<T>`)
+                // stands for its erased definition.
+                let (default_marker, plain) = match name.strip_prefix('*') {
+                    Some(plain) => ("*", plain),
+                    None => ("", name.as_str()),
+                };
+                if default_marker.is_empty()
+                    && let Some(resolved) = self.resolved_alias(plain, shadowed)
+                {
+                    *ty = resolved;
+                    return;
+                }
+                for ty in args {
+                    self.ty(ty, shadowed);
+                }
+            }
+            TypeExpr::Union(types) => {
                 for ty in types {
                     self.ty(ty, shadowed);
                 }
@@ -868,7 +885,7 @@ pub(super) fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
         && let TypeExpr::Named(name) | TypeExpr::Generic(name, _) = ty
         && string_literal_type_value(name).is_none()
     {
-        return list_is_type(items.kind(), name.strip_prefix('*').unwrap_or(name));
+        return list_is_type(items, name.strip_prefix('*').unwrap_or(name));
     }
     match ty {
         TypeExpr::Named(name) if string_literal_type_value(name).is_some() => {
@@ -935,10 +952,13 @@ pub(super) fn is_class_value(val: &Value) -> bool {
 
 /// Whether a value of the given list kind is an instance of the built-in
 /// class `name`. `Object` is the superclass of `Dynamic` and `Listing`.
-pub(super) fn list_is_type(kind: ListKind, name: &str) -> bool {
+pub(super) fn list_is_type(list: &crate::value::ListValue, name: &str) -> bool {
+    let kind = list.kind();
     match name {
         "Any" => true,
-        "List" | "IntSeq" => kind == ListKind::List,
+        // An `IntSeq` is its own class, not a `List`.
+        "List" => kind == ListKind::List && !list.is_int_seq(),
+        "IntSeq" => list.is_int_seq(),
         "Listing" => kind == ListKind::Listing,
         "Set" => kind == ListKind::Set,
         "Collection" => matches!(kind, ListKind::List | ListKind::Set),
@@ -1431,11 +1451,34 @@ pub(super) fn infer_listing_elements(
     if name != "Listing" || resolve_collection_type(element_ty, scope, 0).is_none() {
         return entries.clone();
     }
+    infer_elements_in(entries, element_ty)
+}
+
+/// Rewrite the untyped `new` elements of `entries`, including those inside
+/// `for` and `when` generator bodies.
+fn infer_elements_in(
+    entries: &crate::parser::Body,
+    element_ty: &crate::parser::TypeExpr,
+) -> crate::parser::Body {
     entries
         .iter()
         .map(|entry| match entry {
             Entry::Elem(Expr::New(None, body, _)) => {
                 Entry::Elem(Expr::InferredNew(element_ty.clone(), body.clone()))
+            }
+            Entry::ForGenerator(generator) => {
+                let mut generator = generator.clone();
+                generator.body = infer_elements_in(&generator.body, element_ty);
+                Entry::ForGenerator(generator)
+            }
+            Entry::WhenGenerator(generator) => {
+                let mut generator = generator.clone();
+                generator.body = infer_elements_in(&generator.body, element_ty);
+                generator.else_body = generator
+                    .else_body
+                    .as_ref()
+                    .map(|body| infer_elements_in(body, element_ty));
+                Entry::WhenGenerator(generator)
             }
             other => other.clone(),
         })

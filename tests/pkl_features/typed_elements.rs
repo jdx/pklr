@@ -1114,6 +1114,55 @@ const CASES: &[(&str, Option<&str>)] = &[
         Some(r####"{"a":[1,2]}"####),
     ),
     (r####"a: Listing<Int> = new { 1; "a" }"####, None),
+    // A generic alias argument is expanded before a function body keeps it.
+    (
+        r####"typealias L<T> = List<T>; function f(x: L<Int>): Int = 1; a = f(List(1))"####,
+        Some(r####"{"a":1}"####),
+    ),
+    // Untyped `new` elements inside `for` and `when` bodies take the element type.
+    (
+        r####"a: Listing<Listing<Int>> = new { for (i in List(1)) { new { i } } }"####,
+        Some(r####"{"a":[[1]]}"####),
+    ),
+    (
+        r####"a: Listing<Listing<Int>> = new { when (true) { new { 1 } } else { new { 2 } } }"####,
+        Some(r####"{"a":[[1]]}"####),
+    ),
+    (
+        r####"a: Listing<Listing<Int>> = new { when (false) { new { 1 } } else { new { 2 } } }"####,
+        Some(r####"{"a":[[2]]}"####),
+    ),
+    // An explicit `new Listing` makes its untyped `new` a Dynamic, as in pkl.
+    (
+        r####"a: Listing<Listing<Int>> = new Listing { new { 1 } }"####,
+        None,
+    ),
+    // A user class shadows the built-in type of the same name.
+    (r####"class Int {}; a: Int = 1"####, None),
+    (
+        r####"class String {}; a = "x" is String"####,
+        Some(r####"{"a":false}"####),
+    ),
+    // A quoted `_` is not a binding, in pkl as here.
+    (r####"a = let (`_` = 1) `_`"####, None),
+    // `IntSeq` is its own class, not a `List`.
+    (
+        r####"a = List(1) is IntSeq"####,
+        Some(r####"{"a":false}"####),
+    ),
+    (
+        r####"a = IntSeq(1, 3) is IntSeq"####,
+        Some(r####"{"a":true}"####),
+    ),
+    (
+        r####"a = IntSeq(1, 3) is List"####,
+        Some(r####"{"a":false}"####),
+    ),
+    (r####"a = List(1) as IntSeq"####, None),
+    (
+        r####"function f(x: IntSeq): Int = 1; a = f(List(1))"####,
+        None,
+    ),
 ];
 
 const KEY_CASES: &[(&str, Option<&str>)] = &[
