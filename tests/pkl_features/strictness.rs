@@ -551,6 +551,51 @@ f = 1 is base.Int
 }
 
 #[test]
+fn a_function_keeps_the_imports_its_type_checks_name() {
+    let json = eval(
+        r#"
+import "pkl:base" as base
+function f(x) = x is base.Int
+class C { function m(x) = x is base.Int }
+a = f(1)
+b = f("a")
+c = new C {}.m(1)
+d = List(1).map((x) -> x is base.Int)
+"#,
+    );
+    assert_eq!(
+        json,
+        serde_json::json!({"a": true, "b": false, "c": true, "d": [true]})
+    );
+}
+
+#[test]
+fn a_constrained_quoted_alias_resolves_in_a_function_and_when_default_marked() {
+    let json = eval(
+        r#"
+typealias `X Y` = Int
+function f(x) = x is `X Y`(true)
+a = f(1)
+b = f("a")
+c = 1 is *`X Y`(true)|String
+"#,
+    );
+    assert_eq!(json, serde_json::json!({"a": true, "b": false, "c": true}));
+}
+
+#[test]
+fn a_keyword_spelled_type_name_is_not_found() {
+    for src in [
+        "r = 1 is `as`(true)",
+        "r = 1 is *`hidden`|Int",
+        "r = 1 is `as`",
+    ] {
+        let error = eval_fails(src);
+        assert!(error.contains("Cannot find type"), "{src}: {error}");
+    }
+}
+
+#[test]
 fn to_dynamic_works_on_a_module_that_carries_a_source() {
     let temp = TestTempDir::new("pklr_test_to_dynamic_module");
     std::fs::write(temp.path().join("m.pkl"), "@Deprecated\nold = 1\nx = 2\n").unwrap();

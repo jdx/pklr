@@ -29,6 +29,9 @@ pub(super) fn object_type_metadata(source: &ObjectSource) -> Option<ObjectTypeMe
     })
 }
 
+/// The binding that records which module each import a function captured is.
+const CAPTURED_IDENTITIES: &str = "\0pklr:identities";
+
 #[derive(Debug, Clone)]
 pub(super) struct Scope {
     // The maps are shared copy-on-write so cloning a scope, which `child`
@@ -131,11 +134,37 @@ impl Scope {
     /// than copied, under a child layer for the call's own bindings
     /// (parameters, and anything the caller layers over the capture).
     pub(super) fn for_call(captured: &Arc<ScopeMap>) -> Self {
-        Scope {
+        let mut scope = Scope {
             vars: Arc::clone(captured),
             ..Scope::default()
+        };
+        // The modules the captured imports are (see `capture_identities`).
+        if let Some(Value::Object(identities, _)) = captured.get(CAPTURED_IDENTITIES) {
+            for (name, identity) in identities.iter() {
+                if let Value::String(identity) = identity {
+                    scope.set_module_identity(name.clone(), identity.to_string());
+                }
+            }
         }
-        .child()
+        scope.child()
+    }
+
+    /// Record in `captured`, the bindings a function captures from this scope,
+    /// which module each captured import is, so a type check in the function
+    /// body (`x is base.Int`) resolves the import as it does outside.
+    pub(super) fn capture_identities(&self, captured: &mut ScopeMap) {
+        let mut identities = ObjectMap::default();
+        for (name, identity) in self.flatten_module_identities() {
+            if captured.contains_key(name.as_str()) {
+                identities.insert(name.as_str().into(), Value::String(identity.into()));
+            }
+        }
+        if !identities.is_empty() {
+            captured.insert(
+                CAPTURED_IDENTITIES.into(),
+                Value::Object(Arc::new(identities), None),
+            );
+        }
     }
 
     pub(super) fn child(&self) -> Self {

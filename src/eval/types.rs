@@ -1563,16 +1563,25 @@ impl TypeResolver<'_> {
                 }
             }
             // A constrained type or a default-marked variant holds the text of
-            // the type it was made from (`List<Foo>`, `*Int?`), which keeps the
-            // backticks of a quoted name. Read it back as a type.
+            // the type it was made from (`List<Foo>`, `*Int?`), which does not
+            // tell a quoted name (`Step?`) from the syntax around a name.
+            // Where it cannot be read with certainty, accept it.
             TypeExpr::Named(text) | TypeExpr::Constrained(text, _) => {
                 let whole = text.trim_start_matches('*');
                 if whole.is_empty() || string_literal_type_value(whole).is_some() {
                     return None;
                 }
-                // A default-marked name is the name as written, quoted or not.
-                if matches!(ty, TypeExpr::Named(_)) && self.declares_literally(whole) {
+                // The whole text is one declared name, however it was quoted.
+                if self.declares_literally(whole) {
                     return self.check_bare_name(whole);
+                }
+                if crate::lexer::is_plain_qualified_name(whole) {
+                    return self.check_name(whole);
+                }
+                // A declared name that is no plain identifier could be part
+                // of the text, which then cannot be split into names.
+                if self.declares_quoted_name_in(whole) {
+                    return None;
                 }
                 match crate::parser::parse_type_name(whole) {
                     Ok(parsed) => self.check(&parsed),
@@ -1662,6 +1671,26 @@ impl TypeResolver<'_> {
 
     fn alias_key(scope: &Scope, name: &str) -> String {
         alias_key(scope, name)
+    }
+
+    /// Whether a class or type alias in scope has a name that is no plain
+    /// identifier and occurs in `text`.
+    fn declares_quoted_name_in(&self, text: &str) -> bool {
+        let mut level = Some(self.scope);
+        while let Some(scope) = level {
+            let aliases = scope.type_aliases.keys().map(|name| &**name);
+            let classes = scope.vars.iter().filter_map(|(name, value)| {
+                matches!(value, Value::Object(_, Some(source)) if source.kind == ObjectKind::Class)
+                    .then_some(&**name)
+            });
+            for name in aliases.chain(classes) {
+                if !crate::lexer::is_plain_qualified_name(name) && text.contains(name) {
+                    return true;
+                }
+            }
+            level = scope.parent.as_deref();
+        }
+        false
     }
 
     /// Whether `name`, taken literally, is a class or type alias in scope.

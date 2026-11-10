@@ -573,16 +573,15 @@ impl Evaluator {
                 Ok(value_is_type(val, ty))
             }
             TypeExpr::Constrained(base, constraint) => {
-                // A quoted name keeps its backticks in the text of the base and
-                // is one name, whatever characters it holds.
-                let (quoted_name, nullable) = match base
-                    .trim_start_matches('*')
-                    .strip_prefix('`')
-                    .and_then(|rest| rest.split_once('`'))
+                // The text of the base names a class or alias that something
+                // declares, however its quotes spelled it (`Step?`), as one name.
+                let literal = base.trim_start_matches('*');
+                let (quoted_name, nullable) = if scope.get_type_alias(literal).is_some()
+                    || matches!(scope.get(literal), Some(Value::Object(_, Some(source))) if source.kind == ObjectKind::Class)
                 {
-                    Some((name, "")) => (Some(name), false),
-                    Some((name, "?")) => (Some(name), true),
-                    _ => (None, base.ends_with('?')),
+                    (Some(literal), false)
+                } else {
+                    (None, base.ends_with('?'))
                 };
                 // First check the base type
                 let class_name = quoted_name.unwrap_or_else(|| {

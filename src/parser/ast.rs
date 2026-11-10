@@ -117,28 +117,14 @@ pub enum TypeExpr {
     Constrained(String, Box<Expr>),
 }
 
-/// The text of a type for a constrained or default-marked type. A name that is
-/// no plain identifier (it was quoted in backticks) keeps its backticks, so
-/// the text reads back as the same type.
 pub(super) fn type_expr_runtime_name(ty: &TypeExpr) -> String {
     match ty {
-        TypeExpr::Named(name)
-            if crate::lexer::is_plain_qualified_name(name)
-                || name.starts_with(['*', '"'])
-                || name.is_empty() =>
-        {
-            name.clone()
-        }
-        TypeExpr::Named(name) => format!("`{name}`"),
+        TypeExpr::Named(name) => name.clone(),
         TypeExpr::Nullable(inner) => format!("{}?", type_expr_runtime_name(inner)),
         TypeExpr::Union(_) => "Any".to_string(),
         TypeExpr::Generic(name, args) => format!(
             "{}<{}>",
-            if crate::lexer::is_plain_qualified_name(name) {
-                name.clone()
-            } else {
-                format!("`{name}`")
-            },
+            name,
             args.iter()
                 .map(type_expr_runtime_name)
                 .collect::<Vec<_>>()

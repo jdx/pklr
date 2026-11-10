@@ -121,6 +121,10 @@ impl Evaluator {
                             ),
                     )
                 };
+                let mut captured = captured;
+                if names.contains(NAMES_A_TYPE) {
+                    scope.capture_identities(&mut captured);
+                }
                 let captured = Arc::new(captured);
                 self.register_lambda_guard(&captured);
                 Ok(Value::Lambda(Arc::clone(params), captured_body, captured))
