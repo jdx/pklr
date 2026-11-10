@@ -6764,3 +6764,42 @@ fn amending_through_a_long_alias_chain_to_a_nullable_class_starts_from_it() {
     let json = eval(&src);
     assert_eq!(json["c"]["x"], serde_json::json!({"n": 2}));
 }
+
+#[test]
+fn imported_nullable_default_alias_leaves_the_property_unset() {
+    // Verified against pkl 0.32.2: `lib.A` is `B?(true)` with `B = Item`, so
+    // its `*` alternative is nullable and the property stays unset, whether
+    // the alias is named plainly, nullable, or through another module.
+    let temp = TestTempDir::new("pklr_test_imported_nullable_default_alias");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("lib.pkl"),
+        "class Item { n = 1 }\n\
+         typealias B = Item\n\
+         typealias A = B?(true)\n\
+         typealias N = B?\n\
+         typealias X = A\n\
+         typealias Y = N\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("mid.pkl"),
+        "import \"lib.pkl\"\ntypealias M = lib.A\n",
+    )
+    .unwrap();
+    let main = dir.join("main.pkl");
+    std::fs::write(
+        &main,
+        "import \"lib.pkl\"\nimport \"mid.pkl\"\n\
+         class C { x: *lib.A|Int; y: *lib.N|Int; z: *mid.M|Int; w: *lib.A?|Int; v: *lib.X|Int; u: *lib.Y|Int }\n\
+         c = new C {}\n\
+         b = new lib.B {}\n\
+         whole = lib\n",
+    )
+    .unwrap();
+    let json = Evaluator::new().eval_file(&main).unwrap().to_json();
+    for key in ["x", "y", "z", "w", "v", "u"] {
+        assert!(json["c"][key].is_null(), "{key}: {}", json["c"]);
+    }
+    assert_eq!(json["b"], serde_json::json!({"n": 1}));
+}

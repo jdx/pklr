@@ -530,19 +530,22 @@ fn is_nullable_default(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
 /// name the next (`A0 = A1`, ...) in a loop, so a long chain does not use the
 /// stack once per alias. The aliases followed are added to `seen`, and `None`
 /// means there is none, or that following it would close a cycle.
-fn alias_chain_end<'a>(
-    scope: &'a Scope,
+fn alias_chain_end(
+    scope: &Scope,
     name: &str,
     seen: &mut Vec<String>,
-) -> Option<&'a crate::parser::TypeExpr> {
+) -> Option<crate::parser::TypeExpr> {
     use crate::parser::TypeExpr;
     let name = name.trim_start_matches('*').trim_end_matches('?');
     let mut target = alias_of(scope, name)?;
+    // A `?` on a name along the chain makes what the chain ends at nullable.
+    let mut nullable = false;
     if seen.iter().any(|seen| seen == name) {
         return None;
     }
     seen.push(name.to_string());
     while let TypeExpr::Named(next) = target {
+        let next_nullable = next.ends_with('?');
         let next = next.trim_start_matches('*').trim_end_matches('?');
         let Some(following) = alias_of(scope, next) else {
             break;
@@ -551,9 +554,14 @@ fn alias_chain_end<'a>(
             return None;
         }
         seen.push(next.to_string());
+        nullable |= next_nullable;
         target = following;
     }
-    Some(target)
+    Some(if nullable && !matches!(target, TypeExpr::Nullable(_)) {
+        TypeExpr::Nullable(Box::new(target.clone()))
+    } else {
+        target.clone()
+    })
 }
 
 fn is_nullable_default_seen(
@@ -569,7 +577,7 @@ fn is_nullable_default_seen(
         TypeExpr::Named(name) if name.ends_with('?') => true,
         TypeExpr::Named(name) => {
             let mark = seen.len();
-            let nullable = alias_chain_end(scope, name, seen).is_some_and(|target| match target {
+            let nullable = alias_chain_end(scope, name, seen).is_some_and(|target| match &target {
                 // The alias's own `*` alternative decides, as for a direct union.
                 TypeExpr::Union(variants) => variants
                     .iter()
@@ -710,9 +718,9 @@ fn nullable_inner_default_seen(
             let nullable = name.ends_with('?');
             match alias(name, seen) {
                 // Only a nullable type amends from what it wraps.
-                Some(target) => nullable_inner_default_seen(target, scope, seen).or_else(|| {
+                Some(target) => nullable_inner_default_seen(&target, scope, seen).or_else(|| {
                     nullable
-                        .then(|| type_default_value(target, scope))
+                        .then(|| type_default_value(&target, scope))
                         .flatten()
                 }),
                 None if nullable => type_default_for_name(name.trim_end_matches('?'), scope),
@@ -724,7 +732,7 @@ fn nullable_inner_default_seen(
         TypeExpr::Generic(..) => type_default_value(ty, scope),
         // An alias amends like the type it names, so look through it.
         TypeExpr::Named(name) => match alias(name, seen) {
-            Some(target) => nullable_inner_default_seen(target, scope, seen),
+            Some(target) => nullable_inner_default_seen(&target, scope, seen),
             None if name.ends_with('?') => type_default_for_name(name.trim_end_matches('?'), scope),
             None => None,
         },
