@@ -3273,7 +3273,7 @@ fn imported_module_value_does_not_render_its_classes() {
     let temp = TestTempDir::new("pklr_test_imported_module_classes");
     std::fs::write(
         temp.path().join("lib.pkl"),
-        "class C { opt: Int = 1 }\ntypealias Alias = C\nfunction f(x) = x\nvalue = 1\n",
+        "class C { opt: Int = 1 }\nclass Timed { timeout: Duration = 5.s }\ntypealias Alias = C\nfunction f(x) = x\nvalue = 1\n",
     )
     .unwrap();
     let main = temp.path().join("main.pkl");
@@ -3296,10 +3296,13 @@ fn imported_module_value_does_not_render_its_classes() {
 
     // `Value::try_to_json` walks objects separately from `to_json`.
     let value = pklr::eval::Evaluator::new().eval_file(&main).unwrap();
+    // `Timed`'s `Duration` default can't render as JSON; as a declared class
+    // it is never rendered, so this succeeds.
     let checked = value.try_to_json().unwrap();
     assert_eq!(checked["result"]["value"], 1);
     assert!(checked["result"].get("C").is_none(), "{checked}");
     assert!(checked["result"].get("Alias").is_none(), "{checked}");
+    assert!(checked["result"].get("Timed").is_none(), "{checked}");
 
     // A class held by a property is data, not a declaration: a converter for
     // its path still applies (`pkl eval` 0.33.0 renders `"class"`).
