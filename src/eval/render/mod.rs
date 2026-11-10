@@ -943,7 +943,7 @@ pub(crate) trait StringRenderer<'a> {
         let mut ordered: Vec<(MemberKind, &Arc<str>, &Value)> = map
             .iter()
             // Methods are stored as function-valued members.
-            .filter(|(_, value)| !matches!(value, Value::Lambda(..)))
+            .filter(|(_, value)| !value.is_unrendered_member())
             .map(|(key, value)| (members.kind_of(key), key, value))
             .collect();
         ordered.sort_by_key(|(member, ..)| *member == MemberKind::Entry);
@@ -1356,7 +1356,7 @@ impl JsonValue<'_> {
                             _ => PathPart::Property(key),
                         });
                     }
-                    let converted = if matches!(member, Value::Lambda(..)) {
+                    let converted = if member.is_unrendered_member() {
                         None
                     } else {
                         self.convert_member(member)?
@@ -1437,7 +1437,7 @@ impl JsonValue<'_> {
                     }
                     // Methods are stored as function-valued members, and an
                     // object without a source cannot tell them from data.
-                    if matches!(member, Value::Lambda(..)) {
+                    if member.is_unrendered_member() {
                         continue;
                     }
                     if let Some(members) = &members {

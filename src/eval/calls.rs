@@ -468,7 +468,7 @@ impl Evaluator {
                 Ok(Some(Value::Bool(map.contains_key(key))))
             }
             (Value::Object(map, _), "toMap" | "toMapping") => {
-                Ok(Some(Value::Object(map.clone(), None)))
+                Ok(Some(Value::Object(without_class_members(map), None)))
             }
             (Value::Object(map, _), "mapValues") => {
                 let lambda = args
@@ -497,7 +497,9 @@ impl Evaluator {
                 Ok(Some(Value::Object(Arc::new(result), None)))
             }
             (Value::Object(..), "toList") => Ok(Some(obj.clone())),
-            (Value::Object(map, _), "toDynamic") => Ok(Some(Value::Object(map.clone(), None))),
+            (Value::Object(map, _), "toDynamic") => {
+                Ok(Some(Value::Object(without_class_members(map), None)))
+            }
 
             // Int/Float methods
             (Value::Int(n), "toString") => Ok(Some(Value::String(n.to_string().into()))),
@@ -674,4 +676,18 @@ pub(super) fn seed_builtins(scope: &mut Scope) {
     ] {
         scope.set(name, Value::String(name.into()));
     }
+}
+
+/// `map` without the classes a module holds as members. They are not
+/// properties, so a converted copy does not carry them.
+fn without_class_members(map: &Arc<ObjectMap>) -> Arc<ObjectMap> {
+    if !map.values().any(Value::is_class_member) {
+        return map.clone();
+    }
+    Arc::new(
+        map.iter()
+            .filter(|(_, value)| !value.is_class_member())
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+    )
 }

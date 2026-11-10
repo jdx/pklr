@@ -1024,6 +1024,9 @@ impl Value {
                     if unrenderable.is_some() {
                         break;
                     }
+                    if v.is_class_member() {
+                        continue;
+                    }
                     obj.insert(
                         display_storage_key(k).to_string(),
                         v.json_checked(unrenderable),
@@ -1089,7 +1092,7 @@ impl Value {
                     })
                 };
                 for (k, v) in map.iter() {
-                    if matches!(v, Value::Lambda(..)) && is_method(k) {
+                    if v.is_class_member() || matches!(v, Value::Lambda(..)) && is_method(k) {
                         continue;
                     }
                     obj.insert(display_storage_key(k).to_string(), v.to_json());
@@ -1105,6 +1108,19 @@ impl Value {
                 json!(crate::eval::stdlib::render_value(self))
             }
         }
+    }
+
+    /// Whether this is a class (or an alias to one) held as a module member.
+    /// Classes are members of a module, but not properties: Pkl never renders
+    /// them, though dotted access such as `lib.C` resolves them.
+    pub(crate) fn is_class_member(&self) -> bool {
+        matches!(self, Value::Object(_, Some(source)) if source.kind == ObjectKind::Class)
+    }
+
+    /// Whether an object member is left out of the rendered object: a method
+    /// (stored as a function) or a class.
+    pub(crate) fn is_unrendered_member(&self) -> bool {
+        matches!(self, Value::Lambda(..)) || self.is_class_member()
     }
 
     pub fn as_str(&self) -> Option<&str> {

@@ -3267,3 +3267,90 @@ fn late_binding_reaches_through_a_long_chain_of_outer_reads() {
 
     assert_eq!(eval_chain(dir.join("main.pkl"))["res"], 12);
 }
+
+/// Writes the module `lib.pkl` (a class, an alias to it, a property) and the
+/// module `main.pkl` with `main_body` below `import "lib.pkl" as lib`, then
+/// evaluates `main.pkl`.
+fn eval_with_class_module(main_body: &str) -> serde_json::Value {
+    let temp = TestTempDir::new("pklr_test_imported_classes");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("lib.pkl"),
+        "class C { req: Int; opt: Int = 1 }\ntypealias A = C\nvalue = 1\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        format!("import \"lib.pkl\" as lib\n{main_body}\n"),
+    )
+    .unwrap();
+    pklr::eval_to_json(&dir.join("main.pkl")).unwrap()
+}
+
+#[test]
+fn imported_module_value_does_not_render_its_classes() {
+    let val = eval_with_class_module("result = lib");
+    assert_eq!(val, serde_json::json!({"result": {"value": 1}}));
+}
+
+#[test]
+fn imported_module_nested_value_does_not_render_its_classes() {
+    let val = eval_with_class_module(
+        "a { b { m = lib } }\nl = new Listing { lib }\nm = new Mapping { [\"k\"] = lib }",
+    );
+    assert_eq!(
+        val,
+        serde_json::json!({
+            "a": {"b": {"m": {"value": 1}}},
+            "l": [{"value": 1}],
+            "m": {"k": {"value": 1}},
+        })
+    );
+}
+
+#[test]
+fn imported_module_converted_to_dynamic_or_map_does_not_carry_its_classes() {
+    let val = eval_with_class_module(
+        "d = lib.toDynamic()\nm = lib.toMap()\nk = lib.toMap().keys\nn = lib.toDynamic().toMap().keys",
+    );
+    assert_eq!(
+        val,
+        serde_json::json!({
+            "d": {"value": 1},
+            "m": {"value": 1},
+            "k": ["value"],
+            "n": ["value"],
+        })
+    );
+}
+
+#[test]
+fn imported_module_as_output_value_does_not_render_its_classes() {
+    let val = eval_with_class_module("output { value = lib }");
+    assert_eq!(val, serde_json::json!({"value": 1}));
+}
+
+#[test]
+fn imported_module_classes_stay_resolvable_through_dotted_access() {
+    let val = eval_with_class_module(
+        "c = new lib.C { req = 2 }\nd = new lib.A { req = 3; opt = 4 }\nf: lib.C = new lib.C { req = 5 }\nv = lib.value",
+    );
+    assert_eq!(
+        val,
+        serde_json::json!({
+            "c": {"req": 2, "opt": 1},
+            "d": {"req": 3, "opt": 4},
+            "f": {"req": 5, "opt": 1},
+            "v": 1,
+        })
+    );
+}
+
+#[test]
+fn imported_module_rendered_by_the_stdlib_renderers_does_not_include_classes() {
+    let val = eval_with_class_module(
+        "j = new JsonRenderer { omitNullProperties = false }.renderValue(lib)\ny = new YamlRenderer {}.renderValue(lib)\np = new PcfRenderer {}.renderValue(lib)\nt = \"\\(lib)\"",
+    );
+    assert!(!val.to_string().contains("req"), "{val}");
+    assert!(val["j"].as_str().unwrap().contains("value"), "{val}");
+}
