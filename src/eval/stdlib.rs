@@ -66,6 +66,17 @@ pub(super) fn typed_object(type_name: &str, members: ObjectMap) -> Value {
     Value::Object(Arc::new(members), Some(Arc::new(source)))
 }
 
+/// A `Dynamic` with the given members, such as `toDynamic()` builds.
+pub(super) fn dynamic_object(members: ObjectMap) -> Value {
+    let Value::Object(_, Some(source)) = typed_object("Dynamic", ObjectMap::default()) else {
+        unreachable!("typed_object builds an object with a source")
+    };
+    let mut source = Arc::unwrap_or_clone(source);
+    source.type_name = None;
+    source.kind = ObjectKind::Dynamic;
+    Value::Object(Arc::new(members), Some(Arc::new(source)))
+}
+
 /// A `Class` value for the class `type_name` with the given identity. Classes
 /// compare by identity, so it carries no members.
 pub(super) fn class_value(type_name: &str, type_identity: String) -> Value {

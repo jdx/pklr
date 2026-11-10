@@ -530,3 +530,15 @@ fn an_empty_dynamic_is_not_the_key_of_an_empty_map() {
     );
     eval_fails("local m = new Mapping { [new Dynamic {}] = 1 }\ne = m[Map()]\n");
 }
+
+#[test]
+fn a_computed_dynamic_is_a_dynamic_and_a_dynamic_key() {
+    // `toDynamic()` of a class instance or a Map builds a Dynamic.
+    for src in [
+        "class C { x = 1 }\nlocal d = new C {}.toDynamic()\nlocal m = new Mapping { [new Dynamic { x = 1 }] = 7 }\ne = m[d]\n",
+        "local d = Map(\"x\", 1).toDynamic()\nlocal m = new Mapping { [new Dynamic { x = 1 }] = 7 }\ne = m[d]\n",
+    ] {
+        assert_eq!(eval(src)["e"], 7, "{src}");
+    }
+    assert!(is("Map(\"x\", 1).toDynamic() is Dynamic"));
+}

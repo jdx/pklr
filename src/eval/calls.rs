@@ -520,7 +520,9 @@ impl Evaluator {
                 Ok(Some(Value::List(source.elements.clone().into())))
             }
             (Value::Object(..), "toList") => Ok(Some(obj.clone())),
-            (Value::Object(map, _), "toDynamic") => Ok(Some(Value::Object(map.clone(), None))),
+            (Value::Object(map, _), "toDynamic") => {
+                Ok(Some(stdlib::dynamic_object(map.as_ref().clone())))
+            }
 
             // Int/Float methods
             (Value::Int(n), "toString") => Ok(Some(Value::String(n.to_string().into()))),
