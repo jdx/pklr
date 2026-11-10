@@ -716,6 +716,7 @@ pub(super) fn pkl_class_name(value: &Value) -> String {
     match value {
         Value::Object(_, source) => object_class_name(source.as_deref(), None),
         Value::List(items) => match items.kind() {
+            ListKind::List if items.is_int_seq() => "IntSeq".to_string(),
             ListKind::List => "List".to_string(),
             ListKind::Listing => "Listing".to_string(),
             ListKind::Set => "Set".to_string(),
@@ -1002,7 +1003,7 @@ pub(super) fn list_is_type(list: &crate::value::ListValue, name: &str) -> bool {
         "IntSeq" => list.is_int_seq(),
         "Listing" => kind == ListKind::Listing,
         "Set" => kind == ListKind::Set,
-        "Collection" => matches!(kind, ListKind::List | ListKind::Set),
+        "Collection" => matches!(kind, ListKind::List | ListKind::Set) && !list.is_int_seq(),
         "Dynamic" => kind == ListKind::Dynamic,
         "Object" => matches!(kind, ListKind::Listing | ListKind::Dynamic),
         _ => false,
@@ -1606,6 +1607,16 @@ fn infer_members_in(
                     None => entry.clone(),
                 }
             }
+            // An untyped `new` that an `if` or `let` picks as the member takes
+            // the member type as well, when that is a collection.
+            Entry::Elem(expr) if is_listing && selects_untyped_new(expr) => {
+                Entry::Elem(infer_selected_new(expr, member_ty, scope))
+            }
+            Entry::DynProperty(key, expr)
+                if (is_listing || !amended) && selects_untyped_new(expr) =>
+            {
+                Entry::DynProperty(key.clone(), infer_selected_new(expr, member_ty, scope))
+            }
             Entry::ForGenerator(generator) => {
                 let mut generator = generator.clone();
                 generator.body =
@@ -1626,4 +1637,25 @@ fn infer_members_in(
         })
         .collect::<Vec<_>>()
         .into()
+}
+
+/// Whether `expr` is an `if` or `let` (not a plain `new`) whose result may be
+/// an untyped `new`.
+fn selects_untyped_new(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::If(..) | Expr::Let(..) | Expr::Trace(..) | Expr::TemplateLocals(..)
+    )
+}
+
+/// `expr` with the untyped `new` results of its `if` and `let` branches
+/// inferred from `member_ty`, which must be a `Listing` or `Mapping`.
+fn infer_selected_new(expr: &Expr, member_ty: &crate::parser::TypeExpr, scope: &Scope) -> Expr {
+    let mut expr = expr.clone();
+    if resolve_collection_type(member_ty, scope, 0).is_some() {
+        crate::parser::rewrite_untyped_result_new(&mut expr, &mut |entries| {
+            Expr::InferredNew(member_ty.clone(), entries)
+        });
+    }
+    expr
 }

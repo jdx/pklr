@@ -228,7 +228,7 @@ pub(super) fn get_class_unsupported(what: &str) -> Error {
 /// `Any.getClass()`: the `Class` of a value. A class from the standard library
 /// is identified as `pkl:base#Name`. A `Map`, and a `Dynamic` that a method
 /// built, have no source and are not told apart (see `object_kinds_match`), so
-/// they are an error rather than a guess. An `IntSeq` is a plain `List`.
+/// they are an error rather than a guess.
 pub(super) fn get_class(value: &Value) -> Result<Value> {
     let (name, identity) = match value {
         Value::Object(_, Some(source)) if source.kind == ObjectKind::Class => ("Class", None),
@@ -239,6 +239,7 @@ pub(super) fn get_class(value: &Value) -> Result<Value> {
         },
         Value::Object(_, None) => return Err(get_class_unsupported("a Map or a computed Dynamic")),
         Value::List(items) => match items.kind() {
+            ListKind::List if items.is_int_seq() => ("IntSeq", None),
             ListKind::List => ("List", None),
             ListKind::Listing => ("Listing", None),
             ListKind::Set => ("Set", None),

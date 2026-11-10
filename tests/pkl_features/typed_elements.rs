@@ -1556,3 +1556,38 @@ fn index_amendments_amend_mapping_element_entries() {
         serde_json::json!([{"k": [[1], [2]], "n": [[3]]}])
     );
 }
+
+// An untyped `new` that an `if` or `let` picks as a member of a nested
+// listing takes the member type (checked with pkl 0.32.2). pkl rejects a
+// parenthesised untyped `new`; pklr still accepts it (see #393).
+#[test]
+fn selected_untyped_new_members_infer_nested_listing_elements() {
+    for src in [
+        "a: Listing<Listing<Int>> = new { if (true) new { 1 } else new { 2 } }\n",
+        "a: Listing<Listing<Int>> = new { let (x = 1) new { x } }\n",
+        "a: Listing<Listing<Int>> = new { when (true) { new { 1 } } }\n",
+    ] {
+        assert_eq!(eval(src)["a"], serde_json::json!([[1]]), "{src}");
+    }
+    let json = eval(
+        "b: Mapping<String, Listing<Int>> = new { [\"k\"] = if (true) new { 1 } else new { 2 } }\n",
+    );
+    assert_eq!(json["b"], serde_json::json!({"k": [1]}));
+    eval_fails("a: Listing<Listing<Int>> = new { if (true) new { \"x\" } else new { 2 } }\n");
+}
+
+// An `IntSeq` is neither a `List` nor a `Collection`, and errors name it
+// (checked with pkl 0.32.2).
+#[test]
+fn an_int_seq_is_not_a_collection() {
+    assert_eq!(eval("a = IntSeq(1, 3) is Collection\n")["a"], false);
+    assert_eq!(eval("a = IntSeq(1, 3) is List\n")["a"], false);
+    let error = eval_fails("function f(x: Collection<Int>): Int = 1\ny = f(IntSeq(1, 3))\n");
+    assert!(error.contains("but got type `IntSeq`"), "{error}");
+    let error = eval_fails("function f(x: List<Int>): Int = 1\ny = f(IntSeq(1, 3))\n");
+    assert!(error.contains("but got type `IntSeq`"), "{error}");
+    assert_eq!(
+        eval("a = IntSeq(1, 3).getClass().simpleName\n")["a"],
+        "IntSeq"
+    );
+}
