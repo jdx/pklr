@@ -117,16 +117,18 @@ impl Evaluator {
     fn type_takes_dynamic(&mut self, ty: &TypeExpr, scope: &Scope, seen: &mut Vec<String>) -> bool {
         let named = |this: &mut Self, name: &str, seen: &mut Vec<String>| {
             let name = name.trim_start_matches('*');
-            if matches!(name, "Dynamic" | "Any" | "Object") {
-                return true;
+            // An alias or class declaration shadows the standard library type
+            // of its name, so it is resolved before the built-in names.
+            if let Some((alias, alias_scope)) = this.resolve_unvisited_alias(name, scope, seen) {
+                let alias_scope = alias_scope.as_ref().unwrap_or(scope);
+                return this.type_takes_dynamic(&alias, alias_scope, seen);
             }
-            match this.resolve_unvisited_alias(name, scope, seen) {
-                Some((alias, alias_scope)) => {
-                    let alias_scope = alias_scope.as_ref().unwrap_or(scope);
-                    this.type_takes_dynamic(&alias, alias_scope, seen)
-                }
-                None => false,
+            if matches!(resolve_dotted(scope, name),
+                Some(Value::Object(_, Some(source))) if source.kind == ObjectKind::Class)
+            {
+                return false;
             }
+            matches!(name, "Dynamic" | "Any" | "Object")
         };
         match ty {
             TypeExpr::Named(name) => named(self, name, seen),

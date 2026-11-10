@@ -6262,3 +6262,99 @@ fn union_amend_follows_a_very_long_alias_chain_without_overflowing_the_stack() {
     src.push_str("c = new C { argv { x = 1 } }\n");
     assert_eq!(eval(&src)["c"]["argv"]["x"], serde_json::json!(1));
 }
+
+/// A type alias or class named `Dynamic`, `Any` or `Object` shadows the
+/// standard library type of that name (stock pkl accepts the declaration), so
+/// a nullable union naming it does not take the `Dynamic` a body builds.
+#[test]
+fn union_amend_does_not_treat_an_alias_named_like_a_builtin_as_taking_a_dynamic() {
+    for name in ["Dynamic", "Any", "Object"] {
+        for property_type in [
+            format!("({name}|Int)?"),
+            "(B|Int)?".to_string(),
+            "(B|Int|Null)".to_string(),
+        ] {
+            for body in ["argv { \"a\" }", "argv { x = 1 }"] {
+                let src = format!(
+                    "typealias {name} = Listing<String>\ntypealias B = {name}\n\
+                     class C {{ argv: {property_type} }}\nc = new C {{ {body} }}\n"
+                );
+                let error = Evaluator::new()
+                    .eval_source(&src, std::path::Path::new("test.pkl"))
+                    .unwrap_err()
+                    .to_string();
+                let expected = if property_type.ends_with("Null)") {
+                    UNDEFINED
+                } else {
+                    "Expected value of type"
+                };
+                assert!(
+                    error.contains(expected),
+                    "{name} {property_type} {body}: {error}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn union_amend_rejects_an_unmarked_nullable_union_of_an_alias_named_like_a_builtin() {
+    for name in ["Dynamic", "Any", "Object"] {
+        let src = format!(
+            "typealias {name} = Listing<String>\nclass C {{ argv: {name}|Int|Null }}\n\
+             c = new C {{ argv {{ \"a\" }} }}\n"
+        );
+        let error = Evaluator::new()
+            .eval_source(&src, std::path::Path::new("test.pkl"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(UNDEFINED), "{name}: {error}");
+    }
+}
+
+#[test]
+fn union_amend_does_not_treat_a_class_named_like_a_builtin_as_taking_a_dynamic() {
+    for name in ["Dynamic", "Any", "Object"] {
+        let src = format!(
+            "class {name} {{ a: Int = 1 }}\nclass C {{ argv: ({name}|Int)? }}\n\
+             c = new C {{ argv {{ \"a\" }} }}\n"
+        );
+        let error = Evaluator::new()
+            .eval_source(&src, std::path::Path::new("test.pkl"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Dynamic"), "{name}: {error}");
+    }
+}
+
+#[test]
+fn union_amend_does_not_treat_an_imported_alias_or_class_named_like_a_builtin_as_taking_a_dynamic()
+{
+    for name in ["Dynamic", "Any", "Object"] {
+        for lib in [
+            format!("typealias {name} = Listing<String>\n"),
+            format!("class {name} {{ a: Int = 1 }}\n"),
+        ] {
+            let main = format!(
+                "import \"lib.pkl\" as m\nclass C {{ argv: (m.{name}|Int)? }}\n\
+                 c = new C {{ argv {{ \"a\" }} }}\n"
+            );
+            let error =
+                eval_union_files("shadow_import", &[("lib.pkl", &lib), ("main.pkl", &main)])
+                    .unwrap_err()
+                    .to_string();
+            assert!(
+                error.contains("Expected value of type") && error.contains("Dynamic"),
+                "{name} {lib}: {error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn union_amend_still_accepts_a_dynamic_for_the_builtin_names_unshadowed() {
+    for name in ["Dynamic", "Any", "Object"] {
+        let src = format!("class C {{ argv: ({name}|Int)? }}\nc = new C {{ argv {{ x = 1 }} }}\n");
+        assert_eq!(eval(&src)["c"]["argv"]["x"], serde_json::json!(1));
+    }
+}
