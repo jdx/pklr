@@ -853,14 +853,46 @@ impl Evaluator {
                     let dynamic_value_type = expanded_value_type_names.iter().any(|name| {
                         selected_value_type(name) && mapping_value_type_base(name) == "Dynamic"
                     });
-                    // `new { ... }` for a selected `Listing` value type makes a
-                    // fresh `Listing`; it never amends a default or an inherited entry.
-                    if let Expr::New(None, body, _) = val_expr
-                        && listing_value_type
-                        && is_element_only_body(body)
+                    // `["a"] = new { 1 }` for a `Listing` value type builds the
+                    // listing like the body `["a"] { 1 }` does.
+                    let listing_body;
+                    let val_expr = match val_expr {
+                        Expr::New(None, body, _) if listing_value_type => {
+                            listing_body = Expr::ObjectBody(body.clone());
+                            &listing_body
+                        }
+                        _ => val_expr,
+                    };
+                    // An untyped `new` that an `if` or `let` picks as a
+                    // `Listing` value amends the same listing a plain `new`
+                    // does: an inherited entry's, else the `default`, else an
+                    // empty one.
+                    if listing_value_type
+                        && matches!(
+                            val_expr,
+                            Expr::If(..)
+                                | Expr::Let(..)
+                                | Expr::Trace(..)
+                                | Expr::TemplateLocals(..)
+                        )
                     {
-                        let base = Value::List(ListValue::new(ListKind::Listing, Vec::new()));
-                        let val = self.eval_value_amendment(base, body, entry_scope, depth)?;
+                        let base = match (map.get(&storage_key), &explicit_default) {
+                            (Some(Value::List(items)), _) | (_, Some(Value::List(items))) => {
+                                Value::List(items.clone().with_kind(ListKind::Listing))
+                            }
+                            _ => Value::List(ListValue::new(ListKind::Listing, Vec::new())),
+                        };
+                        let mut amended = val_expr.clone();
+                        crate::parser::rewrite_untyped_result_new(&mut amended, &mut |entries| {
+                            Expr::Binop(
+                                BinOp::Add,
+                                Box::new(Expr::Ident("#parent:value".into())),
+                                Box::new(Expr::ObjectBody(entries)),
+                            )
+                        });
+                        let mut amend_scope = entry_scope.child();
+                        amend_scope.set("#parent:value", base);
+                        let val = self.eval_expr(&amended, &amend_scope, depth + 1)?;
                         map.insert(storage_key, val.into_entry_value());
                         continue;
                     }

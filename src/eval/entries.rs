@@ -37,6 +37,13 @@ impl Evaluator {
             return Ok(Some(value));
         }
         if let Some(body) = &prop.body {
+            // An untyped `new` member of a declared `Listing` or `Mapping`
+            // takes its parent from the declared member type.
+            let inferred = prop
+                .type_ann
+                .as_ref()
+                .and_then(|ty| infer_amendment_members(ty, body, scope));
+            let body = inferred.as_ref().unwrap_or(body);
             let mut nullable_default = prop
                 .type_ann
                 .as_ref()
@@ -1697,7 +1704,7 @@ pub(super) fn this_member_reads_non_const(
         }
         Expr::Let(_, value, body) => this_member_reads_non_const(value, non_const_members)
             .or_else(|| this_member_reads_non_const(body, non_const_members)),
-        Expr::Is(value, _) | Expr::As(value, _) => {
+        Expr::Is(value, _) | Expr::As(value, _) | Expr::Checked(value, _) => {
             this_member_reads_non_const(value, non_const_members)
         }
         Expr::Lambda(_, value) => this_member_reads_non_const(value, non_const_members),
