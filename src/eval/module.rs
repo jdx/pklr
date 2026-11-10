@@ -85,6 +85,13 @@ impl Evaluator {
         members
     }
 
+    /// Evaluate `module`, read from `path`, into its module object.
+    ///
+    /// `inherited_scope` is the scope an amending or extending module inherits
+    /// from its base. `requested_fields`, when set, limits evaluation to the
+    /// properties an importer reads. At import `depth` above 0 the object keeps
+    /// the module's classes as members, recorded in its source's `type_members` so
+    /// renderers skip them.
     pub(super) fn eval_module_with_scope(
         &mut self,
         module: &Module,

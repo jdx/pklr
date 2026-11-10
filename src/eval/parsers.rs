@@ -263,6 +263,7 @@ impl JsonParser<'_> {
         Ok(Value::List(ListValue::new(ListKind::Listing, items)))
     }
 
+    /// Parse a JSON object at the cursor into a `Dynamic` object.
     fn object(&mut self) -> Result<Value> {
         if self.depth >= Self::MAX_NESTING {
             return Err(self.error("Maximum nesting depth exceeded"));

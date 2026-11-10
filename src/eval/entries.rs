@@ -229,6 +229,14 @@ impl Evaluator {
         )
     }
 
+    /// Evaluate an object body's entries into an object.
+    ///
+    /// `entry_scopes`, parallel to `entries`, gives each entry that an earlier
+    /// amendment introduced the scope it was written in; `None` uses `scope`.
+    /// `inherited_source` is the source of the object being amended: its evaluated
+    /// properties seed the new object's members, and a `Mapping` source keeps
+    /// mapping-key identity. `initial_non_const_members` adds members that a
+    /// `const` member may not reference.
     #[allow(clippy::too_many_arguments)] // Mapping context is independent of inherited source.
     pub(super) fn eval_entries_with_lexical_scopes(
         &mut self,

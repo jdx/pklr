@@ -930,6 +930,8 @@ pub(crate) trait StringRenderer<'a> {
         self.end_listing(items.is_empty())
     }
 
+    /// Visit an object's members for a text renderer, properties before entries.
+    /// Methods and a module's declared classes are not members it outputs.
     fn visit_object(
         &mut self,
         kind: Kind,
@@ -1393,6 +1395,9 @@ impl JsonValue<'_> {
         Ok((self.value(value, kind)?, kind))
     }
 
+    /// Render `value`, already classified as `kind`, as JSON. A module's declared
+    /// classes and its methods are skipped, and with `omit_nulls` so are null
+    /// members.
     #[cfg(feature = "native-io")]
     fn value(&mut self, value: &Value, kind: Kind) -> Result<serde_json::Value> {
         if kind == Kind::Typed

@@ -15,6 +15,9 @@ impl Evaluator {
         self.eval_expr_boxed(expr, scope, depth)
     }
 
+    /// Evaluate `expr` in `scope` at nesting `depth`. Every expression form is
+    /// handled here; [`Self::eval_expr`] answers literals and plain name lookups
+    /// first and calls this for the rest.
     pub(super) fn eval_expr_boxed(
         &mut self,
         expr: &Expr,
