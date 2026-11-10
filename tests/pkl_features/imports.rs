@@ -3267,3 +3267,111 @@ fn late_binding_reaches_through_a_long_chain_of_outer_reads() {
 
     assert_eq!(eval_chain(dir.join("main.pkl"))["res"], 12);
 }
+
+// A mapping property's value type is a name written in the declaring module.
+// Amending the mapping from another module must still resolve it, so entry
+// bodies get the class's defaults and an empty `Listing` amend stays a list.
+#[test]
+fn empty_listing_amend_in_imported_class_mapping_entry_renders_list() {
+    let temp = TestTempDir::new("pklr_test_empty_listing_amend_imported_mapping");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("lib.pkl"),
+        r#"
+typealias Names = Listing<String>
+typealias NodeAlias = Node
+class Node {
+    fast: Listing<String>
+    bulk: Listing<String>
+    maybe: Listing<String>?
+    named: Names
+    byKey: Mapping<String, Listing<String>>
+}
+open class Cluster {
+    nodes: Mapping<String, Node>
+    aliased: Mapping<String, NodeAlias>
+    inner: Inner
+}
+class Inner { nodes: Mapping<String, Node> }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("wrap.pkl"),
+        "import \"lib.pkl\"\nclass Wrapper { cluster: lib.Cluster }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        r#"
+import "lib.pkl" as M
+import "wrap.pkl" as W
+
+class Local extends M.Cluster {}
+
+cluster: M.Cluster = new {
+    nodes {
+        ["a"] {
+            fast { "x" }
+            bulk {}
+            maybe {}
+            named {}
+            byKey { ["k"] {} }
+        }
+    }
+    aliased { ["z"] { bulk {} } }
+    inner { nodes { ["q"] { bulk {} } } }
+}
+wrapped: W.Wrapper = new { cluster { nodes { ["a"] { bulk {} } } } }
+subclass: Local = new { nodes { ["a"] { bulk {} } } }
+amended: M.Cluster = (cluster) { nodes { ["b"] { bulk {} } } }
+"#,
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
+    let node = &val["cluster"]["nodes"]["a"];
+    assert_eq!(node["fast"], serde_json::json!(["x"]));
+    assert_eq!(node["bulk"], serde_json::json!([]));
+    assert_eq!(node["maybe"], serde_json::json!([]));
+    assert_eq!(node["named"], serde_json::json!([]));
+    assert_eq!(node["byKey"], serde_json::json!({"k": []}));
+    assert_eq!(
+        val["cluster"]["aliased"]["z"]["bulk"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        val["cluster"]["inner"]["nodes"]["q"]["bulk"],
+        serde_json::json!([])
+    );
+    // Properties the entry body does not mention take the class defaults.
+    assert_eq!(
+        val["cluster"]["inner"]["nodes"]["q"]["fast"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        val["wrapped"]["cluster"]["nodes"]["a"]["bulk"],
+        serde_json::json!([])
+    );
+    assert_eq!(val["subclass"]["nodes"]["a"]["bulk"], serde_json::json!([]));
+    assert_eq!(val["amended"]["nodes"]["a"]["bulk"], serde_json::json!([]));
+    assert_eq!(val["amended"]["nodes"]["b"]["bulk"], serde_json::json!([]));
+}
+
+#[test]
+fn empty_listing_amend_through_amends_of_imported_mapping_property() {
+    let temp = TestTempDir::new("pklr_test_empty_listing_amend_amends_mapping");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("base.pkl"),
+        "open module base\nclass Node { bulk: Listing<String> }\nnodes: Mapping<String, Node>\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "amends \"base.pkl\"\nnodes { [\"a\"] { bulk {} } }\n",
+    )
+    .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
+    assert_eq!(val["nodes"]["a"]["bulk"], serde_json::json!([]));
+}

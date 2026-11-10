@@ -369,6 +369,7 @@ pub(super) fn mapping_entry_body(expr: &Expr) -> Option<&[Entry]> {
 pub(super) fn apply_mapping_type_annotation(
     value: &mut Value,
     type_ann: Option<&crate::parser::TypeExpr>,
+    scope: &Scope,
 ) {
     let Some(type_ann) = type_ann else {
         return;
@@ -397,6 +398,13 @@ pub(super) fn apply_mapping_type_annotation(
     }
     let src = src_slot.get_or_insert_with(|| Arc::new(mapping_source()));
     let src = Arc::make_mut(src);
+    // The value types are names, resolved later in whatever scope amends the
+    // mapping. A class from an imported module is not visible there under
+    // that name, so a metadata-only mapping remembers the scope its
+    // annotation was written in.
+    if src.is_metadata_only() && src.mapping_value_types.is_empty() {
+        src.captured = SourceScope::lazy(scope, Vec::new(), Vec::new());
+    }
     for name in type_names {
         if !src.mapping_value_types.contains(&name) {
             src.mapping_value_types.push(name);
