@@ -373,9 +373,26 @@ pub(crate) fn erase_type_parameters(ty: TypeExpr, parameters: &[String]) -> Type
             }
             word.clear();
         };
+        // Words inside a string literal type (`Listing<"T">`) are text, not
+        // type names.
+        let mut in_string = false;
+        let mut escaped = false;
         for c in text.chars() {
-            if c.is_alphanumeric() || c == '_' || c == '.' {
+            if in_string {
+                out.push(c);
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == '"' {
+                    in_string = false;
+                }
+            } else if c.is_alphanumeric() || c == '_' || c == '.' {
                 word.push(c);
+            } else if c == '"' {
+                flush(&mut word, &mut out);
+                out.push(c);
+                in_string = true;
             } else {
                 flush(&mut word, &mut out);
                 out.push(c);

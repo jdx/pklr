@@ -1435,49 +1435,111 @@ fn resolve_collection_type(
 
 /// An untyped `new { ... }` element of a `Listing<E>` takes its parent from
 /// `E` when that is a `Listing` or `Mapping` (`Listing<Listing<Int>> = new {
-/// new { 1 } }`). Elsewhere it is a `Dynamic`, as pkl does.
+/// new { 1 } }`), as does the value of a `Mapping<K, V>` entry
+/// (`Mapping<String, Listing<Int>> = new { ["k"] = new { 1 } }`). Elsewhere it
+/// is a `Dynamic`, as pkl does.
 pub(super) fn infer_listing_elements(
     ty: &crate::parser::TypeExpr,
     entries: &crate::parser::Body,
     scope: &Scope,
 ) -> crate::parser::Body {
-    use crate::parser::TypeExpr;
-    let Some(TypeExpr::Generic(name, args)) = resolve_collection_type(ty, scope, 0) else {
-        return entries.clone();
-    };
-    let [element_ty] = args.as_slice() else {
-        return entries.clone();
-    };
-    if name != "Listing" || resolve_collection_type(element_ty, scope, 0).is_none() {
-        return entries.clone();
-    }
-    infer_elements_in(entries, element_ty)
+    infer_collection_body(ty, entries, scope, false).unwrap_or_else(|| entries.clone())
 }
 
-/// Rewrite the untyped `new` elements of `entries`, including those inside
-/// `for` and `when` generator bodies.
-fn infer_elements_in(
+/// The element type of a `Listing` or the value type of a `Mapping` that is a
+/// collection itself: the members of such a body need their parent inferred.
+fn nested_collection_type(
+    ty: &crate::parser::TypeExpr,
+    scope: &Scope,
+) -> Option<crate::parser::TypeExpr> {
+    use crate::parser::TypeExpr;
+    let Some(TypeExpr::Generic(name, args)) = resolve_collection_type(ty, scope, 0) else {
+        return None;
+    };
+    let member_ty = match (name.as_str(), args.as_slice()) {
+        ("Listing", [element_ty]) => element_ty,
+        ("Mapping", [_, value_ty]) => value_ty,
+        _ => return None,
+    };
+    resolve_collection_type(member_ty, scope, 0).map(|_| member_ty.clone())
+}
+
+/// `entries` with the members of a body of type `ty` rewritten, or `None` when
+/// the type has no collection members to infer. `amended` is set for the body
+/// of an entry amendment (`["k"] { ... }`), whose members have no value types
+/// of their own to fall back on.
+fn infer_collection_body(
+    ty: &crate::parser::TypeExpr,
     entries: &crate::parser::Body,
-    element_ty: &crate::parser::TypeExpr,
+    scope: &Scope,
+    amended: bool,
+) -> Option<crate::parser::Body> {
+    let member_ty = nested_collection_type(ty, scope)?;
+    let is_listing = matches!(
+        resolve_collection_type(ty, scope, 0),
+        Some(crate::parser::TypeExpr::Generic(name, _)) if name == "Listing"
+    );
+    Some(infer_members_in(
+        entries, &member_ty, is_listing, amended, scope,
+    ))
+}
+
+/// Rewrite the untyped `new` members of `entries` (elements of a listing,
+/// entry values of a mapping), including those inside `for` and `when`
+/// generator bodies and the bodies of entry amendments (`["k"] { ... }`).
+fn infer_members_in(
+    entries: &crate::parser::Body,
+    member_ty: &crate::parser::TypeExpr,
+    is_listing: bool,
+    amended: bool,
+    scope: &Scope,
 ) -> crate::parser::Body {
     entries
         .iter()
         .map(|entry| match entry {
-            Entry::Elem(Expr::New(None, body, _)) => {
-                Entry::Elem(Expr::InferredNew(element_ty.clone(), body.clone()))
+            Entry::Elem(Expr::New(None, body, _)) if is_listing => {
+                Entry::Elem(Expr::InferredNew(member_ty.clone(), body.clone()))
+            }
+            // A mapping value whose own members need inferring, or any value
+            // of an amended body. Other values keep their untyped `new`,
+            // which honors the mapping's `default`.
+            Entry::DynProperty(key, Expr::New(None, body, _))
+                if !is_listing
+                    && (amended || nested_collection_type(member_ty, scope).is_some()) =>
+            {
+                Entry::DynProperty(
+                    key.clone(),
+                    Expr::InferredNew(member_ty.clone(), body.clone()),
+                )
+            }
+            // The body of an amended entry has no parent to amend, so the
+            // entry is a new value of the member type.
+            Entry::DynProperty(key, Expr::ObjectBody(body)) if !is_listing && amended => {
+                Entry::DynProperty(
+                    key.clone(),
+                    Expr::InferredNew(member_ty.clone(), body.clone()),
+                )
+            }
+            Entry::DynProperty(key, Expr::ObjectBody(body)) if !is_listing => {
+                match infer_collection_body(member_ty, body, scope, true) {
+                    Some(body) => Entry::DynProperty(key.clone(), Expr::ObjectBody(body)),
+                    None => entry.clone(),
+                }
             }
             Entry::ForGenerator(generator) => {
                 let mut generator = generator.clone();
-                generator.body = infer_elements_in(&generator.body, element_ty);
+                generator.body =
+                    infer_members_in(&generator.body, member_ty, is_listing, amended, scope);
                 Entry::ForGenerator(generator)
             }
             Entry::WhenGenerator(generator) => {
                 let mut generator = generator.clone();
-                generator.body = infer_elements_in(&generator.body, element_ty);
+                generator.body =
+                    infer_members_in(&generator.body, member_ty, is_listing, amended, scope);
                 generator.else_body = generator
                     .else_body
                     .as_ref()
-                    .map(|body| infer_elements_in(body, element_ty));
+                    .map(|body| infer_members_in(body, member_ty, is_listing, amended, scope));
                 Entry::WhenGenerator(generator)
             }
             other => other.clone(),

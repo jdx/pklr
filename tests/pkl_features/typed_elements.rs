@@ -1163,6 +1163,74 @@ const CASES: &[(&str, Option<&str>)] = &[
         r####"function f(x: IntSeq): Int = 1; a = f(List(1))"####,
         None,
     ),
+    (
+        "typealias L<T> = Listing<\"T\">(length == 1)\na: L<Int> = new Listing { \"T\" }",
+        Some(r####"{"a":["T"]}"####),
+    ),
+    (
+        "typealias L<T> = Listing<\"T\">(length == 1)\na: L<Int> = new Listing { \"unknown\" }",
+        None,
+    ),
+    (
+        "typealias L<T> = Listing<\"a\\\"T\">\na: L<Int> = new Listing { \"a\\\"T\" }",
+        Some(r####"{"a":["a\"T"]}"####),
+    ),
+    (
+        r####"a: Mapping<String, Listing<Listing<Int>>> = new { ["k"] = new { new { 1 } } }"####,
+        Some(r####"{"a":{"k":[[1]]}}"####),
+    ),
+    (
+        r####"a: Mapping<String, Listing<Listing<Int>>> = new { ["k"] { new { 1 } } }"####,
+        Some(r####"{"a":{"k":[[1]]}}"####),
+    ),
+    (
+        r####"a: Mapping<String, Listing<Listing<Int>>> = new { ["k"] = new { new { "x" } } }"####,
+        None,
+    ),
+    (
+        r####"a: Mapping<String, Mapping<String, Listing<Int>>> = new { ["k"] = new { ["j"] = new { 1 } } }"####,
+        Some(r####"{"a":{"k":{"j":[1]}}}"####),
+    ),
+    (
+        r####"a: Mapping<String, Mapping<String, Listing<Int>>> = new { ["k"] { ["j"] { 1 } } }"####,
+        Some(r####"{"a":{"k":{"j":[1]}}}"####),
+    ),
+    (
+        r####"a: Mapping<String, Mapping<String, Listing<Int>>> = new { ["k"] { ["j"] = new { 1 } } }"####,
+        Some(r####"{"a":{"k":{"j":[1]}}}"####),
+    ),
+    (
+        r####"a: Mapping<String, Mapping<String, Listing<Int>>> = new { ["k"] = new { ["j"] { 1 } } }"####,
+        Some(r####"{"a":{"k":{"j":[1]}}}"####),
+    ),
+    (
+        "class C { x: Int }\na: Mapping<String, Listing<C>> = new { [\"k\"] = new { new { x = 1 } } }",
+        Some(r####"{"a":{"k":[{"x":1}]}}"####),
+    ),
+    (
+        "class C { x: Int }\na: Mapping<String, Mapping<String, Listing<C>>> = new { [\"k\"] { [\"j\"] { new { x = 1 } } } }",
+        Some(r####"{"a":{"k":{"j":[{"x":1}]}}}"####),
+    ),
+    (
+        "class C { x: Int }\na: Mapping<String, Mapping<String, Listing<C>>> = new { [\"k\"] = new { [\"j\"] = new { new { x = 1 } } } }",
+        Some(r####"{"a":{"k":{"j":[{"x":1}]}}}"####),
+    ),
+    (
+        r####"a: Mapping<String, Mapping<String, Listing<Listing<Int>>>> = new { ["k"] { ["j"] { new { 1 } } } }"####,
+        Some(r####"{"a":{"k":{"j":[[1]]}}}"####),
+    ),
+    (
+        r####"a: Mapping<String, Listing<Listing<Int>>> = new { for (i in List(1, 2)) { ["k\(i)"] = new { new { i } } } when (true) { ["w"] { new { 3 } } } }"####,
+        Some(r####"{"a":{"k1":[[1]],"k2":[[2]],"w":[[3]]}}"####),
+    ),
+    (
+        r####"a: Mapping<String, Listing<Listing<Int>>> = new { for (i in List(1, 2)) { ["k\(i)"] { new { i } } } }"####,
+        Some(r####"{"a":{"k1":[[1]],"k2":[[2]]}}"####),
+    ),
+    (
+        r####"a: Mapping<String, Listing<Listing<Int>>> = new { when (true) { ["w"] = new { new { 3 } } } else { ["w"] = new { new { 4 } } } }"####,
+        Some(r####"{"a":{"w":[[3]]}}"####),
+    ),
 ];
 
 const KEY_CASES: &[(&str, Option<&str>)] = &[
