@@ -5751,3 +5751,61 @@ fn element_only_dynamic_is_rejected_by_function_types() {
         assert!(err.contains("Dynamic"), "{ty}: {err}");
     }
 }
+
+#[test]
+fn amending_a_property_whose_alias_has_a_nullable_default_starts_from_it() {
+    // Verified against pkl 0.32.2: the nullable `*` alternative leaves the
+    // property unset, but a body amendment still starts from its default,
+    // however many aliases lead to it.
+    let json = eval(
+        "class Item { n = 1; m = 5 }\n\
+         typealias A = *Item(true)?|Int\n\
+         typealias B = A\n\
+         typealias C = Item?\n\
+         typealias D = *Item?|Int\n\
+         typealias E = D\n\
+         typealias Star = *C|Int\n\
+         class U {\n  a: A\n  b: B\n  c: C\n  d: D\n  e: E\n  f: *Item(true)?|Int\n  g: Star\n  h: D?\n}\n\
+         x = new U { a { n = 2 } b { n = 2 } c { n = 2 } d { n = 2 } e { n = 2 } f { n = 2 } g { n = 2 } h { n = 2 } }\n\
+         y = new U {}\n",
+    );
+    for key in ["a", "b", "c", "d", "e", "f", "g", "h"] {
+        assert_eq!(json["x"][key], serde_json::json!({"n": 2, "m": 5}), "{key}");
+    }
+    // Nothing is amended, so every nullable default stays unset.
+    for key in ["a", "b", "d", "e", "f", "g"] {
+        assert!(json["y"].get(key).is_none(), "{key}: {}", json["y"]);
+    }
+    let listing = eval(
+        "typealias L = *Listing<String>(true)?|Int\nclass U { l: L }\nx = new U { l { \"1\" } }\n",
+    );
+    assert_eq!(listing["x"]["l"], serde_json::json!(["1"]));
+}
+
+#[test]
+fn amending_through_a_cyclic_alias_does_not_loop() {
+    let err = eval_fails(
+        "typealias A = B?\ntypealias B = A?\nclass U { a: A }\nx = new U { a { \"1\" } }\n",
+    );
+    assert!(!err.is_empty());
+}
+
+#[test]
+fn alias_nullable_default_resolves_in_the_declaring_module() {
+    // Verified against pkl 0.32.2.
+    let temp = TestTempDir::new("pklr_test_alias_nullable_default");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("lib.pkl"),
+        "class Item { n = 1 }\ntypealias MaybeItem = *Item(true)?|Int\n",
+    )
+    .unwrap();
+    let main = dir.join("main.pkl");
+    std::fs::write(
+        &main,
+        "import \"lib.pkl\"\nclass U { m: lib.MaybeItem }\nx = new U { m { n = 2 } }\n",
+    )
+    .unwrap();
+    let json = Evaluator::new().eval_file(&main).unwrap().to_json();
+    assert_eq!(json["x"]["m"], serde_json::json!({"n": 2}));
+}

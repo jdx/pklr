@@ -390,16 +390,33 @@ pub(super) fn type_default_value(ty: &crate::parser::TypeExpr, scope: &Scope) ->
             .find(|ty| is_default_type(ty))
             // A nullable default alternative leaves the property unset, as
             // `*Int?` does.
-            .filter(|ty| !is_nullable_default(ty))
+            .filter(|ty| !is_nullable_default(ty, scope))
             .and_then(|ty| type_default_value(ty, scope)),
     }
 }
 
-fn is_nullable_default(ty: &crate::parser::TypeExpr) -> bool {
+/// Whether a `*` default alternative is nullable, directly or through an alias.
+fn is_nullable_default(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
+    is_nullable_default_at(ty, scope, 0)
+}
+
+fn is_nullable_default_at(ty: &crate::parser::TypeExpr, scope: &Scope, depth: usize) -> bool {
     use crate::parser::TypeExpr;
     match ty {
         TypeExpr::Nullable(_) => true,
-        TypeExpr::Constrained(base, _) => base.ends_with('?'),
+        // A bare `*Item?` keeps its `?` on the name.
+        TypeExpr::Constrained(name, _) if name.ends_with('?') => true,
+        TypeExpr::Named(name) if name.ends_with('?') => true,
+        TypeExpr::Named(name) if depth <= 32 => scope
+            .get_type_alias(name.trim_start_matches('*'))
+            .is_some_and(|target| match target {
+                // The alias's own `*` alternative decides, as for a direct union.
+                TypeExpr::Union(variants) => variants
+                    .iter()
+                    .find(|alt| is_default_type(alt))
+                    .is_some_and(|alt| is_nullable_default_at(alt, scope, depth + 1)),
+                _ => is_nullable_default_at(target, scope, depth + 1),
+            }),
         _ => false,
     }
 }
@@ -493,19 +510,44 @@ fn empty_collection(name: &str) -> Value {
 }
 
 pub(super) fn nullable_inner_default(ty: &crate::parser::TypeExpr, scope: &Scope) -> Option<Value> {
+    nullable_inner_default_at(ty, scope, 0)
+}
+
+fn nullable_inner_default_at(
+    ty: &crate::parser::TypeExpr,
+    scope: &Scope,
+    depth: usize,
+) -> Option<Value> {
     use crate::parser::TypeExpr;
+    // Aliases can chain or (erroneously) cycle; stop rather than loop.
+    if depth > 32 {
+        return None;
+    }
+    let alias = |name: &str| {
+        let name = name.trim_start_matches('*').trim_end_matches('?');
+        scope.get_type_alias(name)
+    };
     match ty {
-        TypeExpr::Nullable(inner) => type_default_value(inner, scope),
-        TypeExpr::Constrained(name, _) if name.ends_with('?') => {
-            type_default_for_name(name.trim_end_matches('?'), scope)
-        }
+        TypeExpr::Nullable(inner) => type_default_value(inner, scope)
+            .or_else(|| nullable_inner_default_at(inner, scope, depth + 1)),
+        TypeExpr::Constrained(name, _) if name.ends_with('?') => match alias(name) {
+            Some(target) => type_default_value(target, scope)
+                .or_else(|| nullable_inner_default_at(target, scope, depth + 1)),
+            None => type_default_for_name(name.trim_end_matches('?'), scope),
+        },
+        // An alias amends like the type it names, so look through it.
+        TypeExpr::Named(name) => match alias(name) {
+            Some(target) => nullable_inner_default_at(target, scope, depth + 1),
+            None if name.ends_with('?') => type_default_for_name(name.trim_end_matches('?'), scope),
+            None => None,
+        },
         // A nullable `*` alternative leaves the property unset, but amending it
         // still starts from that alternative's own default.
         TypeExpr::Union(variants) => variants
             .iter()
             .find(|alt| is_default_type(alt))
-            .filter(|alt| is_nullable_default(alt))
-            .and_then(|alt| nullable_inner_default(alt, scope)),
+            .filter(|alt| is_nullable_default(alt, scope))
+            .and_then(|alt| nullable_inner_default_at(alt, scope, depth + 1)),
         _ => None,
     }
 }
