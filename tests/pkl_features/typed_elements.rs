@@ -1513,3 +1513,26 @@ fn nested_listing_values_amend_the_mapping_default() {
          }\n",
     );
 }
+
+// An index amendment (`[0] { new { 2 } }`) of a listing infers the nested
+// element type like an index assignment does (checked with pkl 0.32.2). pkl
+// rejects the form when the amended element has no nested collection type
+// (`Listing<Listing<Int>>` with `[0] { new { 2 } }`), as pklr does.
+#[test]
+fn index_amendments_infer_nested_listing_elements() {
+    let json = eval(
+        "class C { l: Listing<Listing<Listing<Int>>> = new { new { new { 1 } } } }\n\
+         c: C = new { l { [0] { new { 2 } } } }\n",
+    );
+    assert_eq!(json["c"]["l"], serde_json::json!([[[1], [2]]]));
+    let json = eval(
+        "class D { x: Int }\n\
+         class C { l: Listing<Listing<D>> = new { new { new { x = 1 } } } }\n\
+         c: C = new { l { [0] { new { x = 2 } } } }\n",
+    );
+    assert_eq!(json["c"]["l"], serde_json::json!([[{"x": 1}, {"x": 2}]]));
+    eval_fails(
+        "class C { l: Listing<Listing<Int>> = new { new { 1 } } }\n\
+         c: C = new { l { [0] { new { 2 } } } }\n",
+    );
+}
