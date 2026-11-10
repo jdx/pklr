@@ -713,6 +713,38 @@ fn an_alias_expanded_in_a_constrained_type_keeps_the_use_sites_nullable_suffix()
 }
 
 #[test]
+fn an_alias_of_a_non_identifier_quoted_name_keeps_the_use_sites_nullable_suffix() {
+    // Results are pkl 0.32.2's, for `LS(c)`, `LS?(c)`, `LS?` and `LS`
+    // against null and two instances, directly and in a function.
+    const EXPECTED: &str = "001101101001";
+    let mut direct = String::from("class C {}\nclass `X Y` {}\ntypealias LS = `X Y`\n");
+    let mut in_function = direct.clone();
+    let mut n = 0;
+    for usage in ["LS(true)", "LS?(true)", "LS?", "LS"] {
+        for value in ["null", "new C {}", "new `X Y` {}"] {
+            n += 1;
+            direct.push_str(&format!("d{n} = {value} is {usage}\n"));
+            in_function.push_str(&format!(
+                "function f{n}(x) = x is {usage}\nd{n} = f{n}({value})\n"
+            ));
+        }
+    }
+    for (name, src) in [("direct", direct), ("in a function", in_function)] {
+        let json = eval(&src);
+        let bits: String = (1..=n)
+            .map(|i| {
+                if json[format!("d{i}")] == true {
+                    '1'
+                } else {
+                    '0'
+                }
+            })
+            .collect();
+        assert_eq!(bits, EXPECTED, "{name}");
+    }
+}
+
+#[test]
 fn a_constrained_quoted_alias_resolves_in_a_function_and_when_default_marked() {
     let json = eval(
         r#"
