@@ -212,8 +212,8 @@ struct MappingInheritedDefault {
 
 #[derive(Clone, Default)]
 struct ModuleScopeSnapshot {
-    values: ScopeMap,
-    type_aliases: TypeAliasMap,
+    values: Arc<ScopeMap>,
+    type_aliases: Arc<TypeAliasMap>,
     module_identities: IndexMap<String, String>,
     late_properties: Vec<Arc<Property>>,
 }
