@@ -791,6 +791,7 @@ fn module_object(map: &Arc<ObjectMap>, path: &Path) -> Value {
         mapping_value_types: Vec::new(),
         deprecated: Default::default(),
         poisoned_members: None,
+        declared_as: None,
         kind: crate::value::ObjectKind::Object,
         is_parsed_json: false,
         is_module: false,

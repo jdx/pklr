@@ -5351,6 +5351,554 @@ m: Mapping<String, R | Listing<Int>> = new {
     assert_eq!(result["m"]["l"], serde_json::json!([1, 2]));
 }
 
+// ============================================================
+// Amending a union-typed property: only a `*` alternative gives a default
+// ============================================================
+
+const UNDEFINED: &str = "Tried to read property `argv` but its value is undefined.";
+
+#[test]
+fn amending_union_property_without_default_is_undefined() {
+    let src = r#"
+class Ref { path: String }
+class C { argv: Listing<String>|Ref }
+c = new C { argv { "a" } }
+"#;
+    assert!(eval_fails(src).contains(UNDEFINED));
+}
+
+#[test]
+fn amending_union_property_with_default_marker_still_works() {
+    let json = eval(
+        r#"
+class Ref { path: String }
+class C {
+    argv: *Listing<String>|Ref
+    ref: Listing<String>|*Ref
+}
+c = new C { argv { "a" } ref { path = "p" } }
+"#,
+    );
+    assert_eq!(json["c"]["argv"], serde_json::json!(["a"]));
+    assert_eq!(json["c"]["ref"], serde_json::json!({ "path": "p" }));
+}
+
+#[test]
+fn amending_union_property_covers_each_alternative_shape() {
+    for ty in [
+        "Listing<String>|Int",
+        "Listing<String>|Int|Null",
+        "Listing<String>|Int?",
+        "Listing<String>?|Int",
+        "Listing<String>|Dynamic",
+        "Listing<String>(length > 0)|Int",
+        "Mapping<String, String>|Int",
+        "Listing<String>|Listing<Int>",
+        "Listing<String>|*Int",
+    ] {
+        let src = format!("class C {{ argv: {ty} }}\nc = new C {{ argv {{ \"a\" }} }}\n");
+        assert!(eval_fails(&src).contains(UNDEFINED), "{ty}");
+    }
+    let src = r#"
+class R { path: String }
+class S { x: Int }
+class C { argv: R|S }
+c = new C { argv { path = "a" } }
+"#;
+    assert!(eval_fails(src).contains(UNDEFINED));
+    let src = "class C { argv: Int|String }\nc = new C { argv { \"a\" } }\n";
+    assert!(eval_fails(src).contains(UNDEFINED));
+}
+
+#[test]
+fn amending_union_property_through_aliases() {
+    let plain = r#"
+typealias A = Listing<String>|Int
+typealias B = A
+class C { argv: B }
+c = new C { argv { "a" } }
+"#;
+    assert!(eval_fails(plain).contains(UNDEFINED));
+    // An alias used as one alternative contributes no default of its own.
+    let nested = r#"
+typealias A = *Listing<String>|Int
+class C { argv: A|String }
+c = new C { argv { "a" } }
+"#;
+    assert!(eval_fails(nested).contains(UNDEFINED));
+    let marked = r#"
+typealias A = *Listing<String>|Int
+typealias B = A
+class C { argv: B }
+c = new C { argv { "a" } }
+"#;
+    assert_eq!(eval(marked)["c"]["argv"], serde_json::json!(["a"]));
+}
+
+#[test]
+fn amending_nullable_union_property_builds_a_dynamic() {
+    let src = r#"
+class Ref { path: String }
+class C { argv: (Listing<String>|Ref)? }
+c = new C { argv { "a" } }
+"#;
+    let error = eval_fails(src);
+    assert!(
+        error.contains("Expected value of type `Listing<String>|Ref`, but got type `Dynamic`."),
+        "{error}"
+    );
+    let alias = r#"
+typealias A = (Listing<String>|Int)?
+class C { argv: A }
+c = new C { argv { "a" } }
+"#;
+    assert!(eval_fails(alias).contains("but got type `Dynamic`"));
+    let marked = r#"
+class C { argv: (*Listing<String>|Int)?; dyn: (Dynamic|Int)? }
+c = new C { argv { "a" } dyn { x = 1 } }
+"#;
+    let json = eval(marked);
+    assert_eq!(json["c"]["argv"], serde_json::json!(["a"]));
+    assert_eq!(json["c"]["dyn"], serde_json::json!({ "x": 1 }));
+}
+
+#[test]
+fn union_property_assignments_and_existing_values_can_still_be_amended() {
+    let json = eval(
+        r#"
+open class C { argv: Listing<String>|Int; other: Listing<String>|Int = new Listing { "z" } }
+class D extends C { other { "y" } }
+e = new D {}
+a = new C { argv = new Listing { "a" } }
+b = (a) { argv { "b" } }
+c = new C { argv = 3 }
+d = new C { argv = new Listing { "q" } other { "w" } }
+local unused = new C { argv { "x" } }
+"#,
+    );
+    assert_eq!(json["b"]["argv"], serde_json::json!(["a", "b"]));
+    assert_eq!(json["c"]["argv"], 3);
+    assert_eq!(json["d"]["other"], serde_json::json!(["z", "w"]));
+}
+
+#[test]
+fn amending_union_property_of_amended_module_without_default_is_undefined() {
+    let temp = TestTempDir::new("pklr_test_union_amend_module");
+    let dir = temp.path();
+    std::fs::write(dir.join("base.pkl"), "argv: Listing<String>|Int\n").unwrap();
+    std::fs::write(dir.join("marked.pkl"), "argv: *Listing<String>|Int\n").unwrap();
+    std::fs::write(
+        dir.join("child.pkl"),
+        "amends \"base.pkl\"\nargv { \"a\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("assign.pkl"),
+        "amends \"base.pkl\"\nargv = new Listing { \"a\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("marked_child.pkl"),
+        "amends \"marked.pkl\"\nargv { \"a\" }\n",
+    )
+    .unwrap();
+    let error = pklr::eval_to_json(&dir.join("child.pkl")).unwrap_err();
+    assert!(error.to_string().contains(UNDEFINED), "{error}");
+    let json = pklr::eval_to_json(&dir.join("assign.pkl")).unwrap();
+    assert_eq!(json["argv"], serde_json::json!(["a"]));
+    let json = pklr::eval_to_json(&dir.join("marked_child.pkl")).unwrap();
+    assert_eq!(json["argv"], serde_json::json!(["a"]));
+}
+
+#[test]
+fn amending_union_property_with_alias_from_imported_module() {
+    let temp = TestTempDir::new("pklr_test_union_amend_import");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("lib.pkl"),
+        "typealias A = Listing<String>|Int\ntypealias D = *Listing<String>|Int\ntypealias N = (Listing<String>|Int)?\n",
+    )
+    .unwrap();
+    let main = |ty: &str| {
+        std::fs::write(
+            dir.join("main.pkl"),
+            format!(
+                "import \"lib.pkl\"\nclass C {{ argv: {ty} }}\nc = new C {{ argv {{ \"a\" }} }}\n"
+            ),
+        )
+        .unwrap();
+        pklr::eval_to_json(&dir.join("main.pkl"))
+    };
+    assert!(main("lib.A").unwrap_err().to_string().contains(UNDEFINED));
+    assert!(
+        main("lib.A|String")
+            .unwrap_err()
+            .to_string()
+            .contains(UNDEFINED)
+    );
+    assert!(
+        main("lib.N")
+            .unwrap_err()
+            .to_string()
+            .contains("Expected value of type `Listing<String>|Int`, but got type `Dynamic`.")
+    );
+    assert_eq!(
+        main("lib.D").unwrap()["c"]["argv"],
+        serde_json::json!(["a"])
+    );
+}
+
+/// Evaluate `main.pkl` of a temporary directory holding `files`.
+fn eval_union_files(tag: &str, files: &[(&str, &str)]) -> Result<serde_json::Value, pklr::Error> {
+    let temp = TestTempDir::new(&format!("pklr_test_union_amend_{tag}"));
+    for (name, source) in files {
+        std::fs::write(temp.path().join(name), source).unwrap();
+    }
+    pklr::eval_to_json(&temp.path().join("main.pkl"))
+}
+
+const UNION_MAIN: &str = "import \"lib.pkl\" as L\nx = new L.C { argv { \"a\" } }\n";
+
+#[test]
+fn amending_union_property_resolves_alias_in_declaring_module() {
+    // `Args` is visible only in lib.pkl, where the class was declared.
+    let lib = "typealias Args = Listing<String>|Ref\nclass Ref { path: String }\nclass C { argv: Args }\n";
+    let error =
+        eval_union_files("decl", &[("lib.pkl", lib), ("main.pkl", UNION_MAIN)]).unwrap_err();
+    assert!(error.to_string().contains(UNDEFINED), "{error}");
+
+    // The same with a nullable property or a nullable alias.
+    for lib in [
+        "typealias Args = Listing<String>|Ref\nclass Ref { path: String }\nclass C { argv: Args? }\n",
+        "typealias Args = (Listing<String>|Ref)?\nclass Ref { path: String }\nclass C { argv: Args }\n",
+    ] {
+        let error = eval_union_files("decl_null", &[("lib.pkl", lib), ("main.pkl", UNION_MAIN)])
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Expected value of type `Listing<String>|Ref`"),
+            "{error}"
+        );
+    }
+
+    // A `*` default alternative keeps the amendment valid.
+    for lib in [
+        "typealias Args = *Listing<String>|Ref\nclass Ref { path: String }\nclass C { argv: Args }\n",
+        "typealias Args = Listing<String>|Ref\nclass Ref { path: String }\nclass C { argv: *Args|Int }\n",
+    ] {
+        let json = eval_union_files(
+            "decl_default",
+            &[("lib.pkl", lib), ("main.pkl", UNION_MAIN)],
+        );
+        // pkl rejects the second form: an alias alternative gives no default.
+        if lib.contains("*Args") {
+            assert!(json.is_err());
+        } else {
+            assert_eq!(json.unwrap()["x"]["argv"], serde_json::json!(["a"]));
+        }
+    }
+}
+
+#[test]
+fn amending_union_property_ignores_importer_alias_of_the_same_name() {
+    // The importer's `Args` has a default; the declaring module's does not.
+    let lib = "typealias Args = Listing<String>|Ref\nclass Ref { path: String }\nclass C { argv: Args }\n";
+    let main = "import \"lib.pkl\" as L\ntypealias Args = *Listing<String>|L.Ref\nx = new L.C { argv { \"a\" } }\n";
+    let error = eval_union_files("shadow", &[("lib.pkl", lib), ("main.pkl", main)]).unwrap_err();
+    assert!(error.to_string().contains(UNDEFINED), "{error}");
+
+    // And the other way round: the declaring module's `*` default wins.
+    let lib = "typealias Args = *Listing<String>|Ref\nclass Ref { path: String }\nclass C { argv: Args }\n";
+    let main = "import \"lib.pkl\" as L\ntypealias Args = Listing<String>|L.Ref\nx = new L.C { argv { \"a\" } }\n";
+    let json = eval_union_files("shadow_default", &[("lib.pkl", lib), ("main.pkl", main)]).unwrap();
+    assert_eq!(json["x"]["argv"], serde_json::json!(["a"]));
+}
+
+#[test]
+fn amending_nullable_union_with_dynamic_alternative_checks_the_built_value() {
+    // `D` resolves to Dynamic, so the Dynamic the body builds satisfies it.
+    let main = "import \"lib.pkl\" as L\nx = new L.C { argv { y = 1 } }\n";
+    for lib in [
+        "typealias D = Dynamic\nclass C { argv: (D|Int)? }\n",
+        "class C { argv: (Dynamic(y == 1)|Int)? }\n",
+    ] {
+        let json = eval_union_files("dynamic", &[("lib.pkl", lib), ("main.pkl", main)]).unwrap();
+        assert_eq!(json["x"]["argv"], serde_json::json!({"y": 1}));
+    }
+    // A constraint the built value fails is still reported.
+    let lib = "class C { argv: (Dynamic(y == 1)|Int)? }\n";
+    let main = "import \"lib.pkl\" as L\nx = new L.C { argv { y = 2 } }\n";
+    assert!(eval_union_files("dynamic_fail", &[("lib.pkl", lib), ("main.pkl", main)]).is_err());
+}
+
+#[test]
+fn amending_union_with_marked_type_that_has_no_default() {
+    // `Duration` supplies no default, directly or behind an alias.
+    for lib in [
+        "class C { argv: Listing<String>|*Duration }\n",
+        "typealias T = Duration\nclass C { argv: Listing<String>|*T }\n",
+    ] {
+        let error = eval_union_files("no_default", &[("lib.pkl", lib), ("main.pkl", UNION_MAIN)])
+            .unwrap_err();
+        assert!(error.to_string().contains(UNDEFINED), "{error}");
+    }
+}
+
+#[test]
+fn amending_union_property_follows_aliases_across_several_modules() {
+    // lib.pkl's alias names an alias of another module it imports.
+    let types = "typealias U = Listing<String>|Int\n";
+    let lib = "import \"types.pkl\"\ntypealias A = types.U\nclass C { argv: A }\n";
+    let error = eval_union_files(
+        "chain",
+        &[
+            ("types.pkl", types),
+            ("lib.pkl", lib),
+            ("main.pkl", UNION_MAIN),
+        ],
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains(UNDEFINED), "{error}");
+
+    // Declared in the importer as `L.A`, whose own import `types` it cannot see.
+    let main = "import \"lib.pkl\" as L\nclass E { argv: L.A }\nx = new E { argv { \"a\" } }\n";
+    let error = eval_union_files(
+        "chain_imported",
+        &[("types.pkl", types), ("lib.pkl", lib), ("main.pkl", main)],
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains(UNDEFINED), "{error}");
+}
+
+#[test]
+fn amending_nullable_union_marking_a_type_with_no_default_builds_a_dynamic() {
+    // The marked `Int` supplies no value, so the nullable property is null and
+    // the body builds a Dynamic that neither alternative accepts.
+    for lib in [
+        "class C { argv: (*Int|Listing<String>)? }\n",
+        "class C { argv: (*Duration|Listing<String>)? }\n",
+    ] {
+        let error = eval_union_files("marked_null", &[("lib.pkl", lib), ("main.pkl", UNION_MAIN)])
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("but got type `Dynamic`"),
+            "{error}"
+        );
+    }
+    // A Dynamic alternative still takes it.
+    let lib = "class C { argv: (*Int|Dynamic)? }\n";
+    let main = "import \"lib.pkl\" as L\nx = new L.C { argv { y = 1 } }\n";
+    let json = eval_union_files(
+        "marked_null_dynamic",
+        &[("lib.pkl", lib), ("main.pkl", main)],
+    )
+    .unwrap();
+    assert_eq!(json["x"]["argv"], serde_json::json!({"y": 1}));
+}
+
+#[test]
+fn amending_union_marking_a_standard_library_type_without_default_is_undefined() {
+    for ty in [
+        "*Duration",
+        "*DataSize",
+        "*Regex",
+        "*Pair<Int, Int>",
+        "*Map<String, Int>",
+        "*Boolean",
+        "*Any",
+    ] {
+        let lib = format!("class C {{ argv: Listing<String>|{ty} }}\n");
+        let error = eval_union_files("marked_std", &[("lib.pkl", &lib), ("main.pkl", UNION_MAIN)])
+            .unwrap_err();
+        assert!(error.to_string().contains(UNDEFINED), "{ty}: {error}");
+    }
+}
+
+#[test]
+fn amending_nullable_union_with_aliased_dynamic_alternative_is_accepted() {
+    // `D` is Dynamic behind an alias, so the Dynamic the body builds fits.
+    let lib = "typealias D = Dynamic\nclass Ref { path: String }\nclass C { argv: (Ref|D)? }\n";
+    let main = "import \"lib.pkl\" as L\nx = new L.C { argv { y = 1 } }\n";
+    let json =
+        eval_union_files("aliased_dynamic", &[("lib.pkl", lib), ("main.pkl", main)]).unwrap();
+    assert_eq!(json["x"]["argv"], serde_json::json!({"y": 1}));
+    // Accepted with a Listing alternative too.
+    let lib = "typealias D = Dynamic\nclass C { argv: (Listing<String>|D)? }\n";
+    assert!(
+        eval_union_files(
+            "aliased_dynamic_listing",
+            &[("lib.pkl", lib), ("main.pkl", main)]
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn marked_cyclic_local_alias_is_an_error_not_a_crash() {
+    // A recursion here would overflow the stack and abort the test binary.
+    for src in [
+        "local typealias A = *A|Int\nclass C { x: A }\nc = new C {}\n",
+        "local typealias A = *B|Int\nlocal typealias B = *A|String\nclass C { x: A }\nc = new C {}\n",
+        "local typealias A = *A|Int\nx: A\n",
+    ] {
+        let error = eval_fails(src);
+        assert!(error.contains("cyclic"), "{src}: {error}");
+    }
+}
+
+#[test]
+fn marked_user_class_named_like_a_builtin_keeps_its_default() {
+    // A class declaration shadows `Map` and `IntSeq`, so `*Map` takes the
+    // class's default as pkl does.
+    for name in [
+        "Map", "IntSeq", "Duration", "DataSize", "Regex", "Pair", "Any",
+    ] {
+        let src = format!(
+            "class {name} {{ n: Int = 1 }}\nclass C {{ value: *{name}|String }}\nc = new C {{}}\n"
+        );
+        assert_eq!(
+            eval(&src)["c"],
+            serde_json::json!({"value": {"n": 1}}),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn marked_builtin_map_and_intseq_have_no_default() {
+    let json = eval("class C { value: *Map<String, Int>|String }\nc = new C {}\n");
+    assert_eq!(json["c"], serde_json::json!({}));
+    let json = eval("class C { value: *IntSeq|String }\nc = new C {}\n");
+    assert_eq!(json["c"], serde_json::json!({}));
+}
+
+#[test]
+fn amending_marked_alias_of_unmarked_union_is_undefined() {
+    // An alias alternative supplies the default its own union marks, and the
+    // alias here marks none.
+    let lib = "typealias Args = Listing<String>|Ref\nclass Ref { path: String }\nclass C { argv: *Args|Int }\n";
+    let error = eval_union_files(
+        "marked_alias",
+        &[("lib.pkl", lib), ("main.pkl", UNION_MAIN)],
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains(UNDEFINED), "{error}");
+}
+
+#[test]
+fn amending_inherited_union_property_uses_the_declaring_modules_aliases() {
+    // `Args` is private to lib.pkl; `D` is declared where it is not visible.
+    let main = "import \"lib.pkl\" as L\nclass D extends L.C {}\nx = new D { argv { \"a\" } }\n";
+    let lib = "typealias Args = Listing<String>|Ref\nclass Ref { path: String }\nopen class C { argv: Args }\n";
+    let error = eval_union_files("inherited", &[("lib.pkl", lib), ("main.pkl", main)]).unwrap_err();
+    assert!(error.to_string().contains(UNDEFINED), "{error}");
+
+    // A `*` default alternative on the declaring alias keeps it valid.
+    let lib = "typealias Args = *Listing<String>|Ref\nclass Ref { path: String }\nopen class C { argv: Args }\n";
+    let json =
+        eval_union_files("inherited_default", &[("lib.pkl", lib), ("main.pkl", main)]).unwrap();
+    assert_eq!(json["x"]["argv"], serde_json::json!(["a"]));
+}
+
+#[test]
+fn amending_constrained_union_alias_follows_the_alias_for_a_default() {
+    // A constraint is checked on the value and supplies no default, so the
+    // alias's own `*` marker decides.
+    for (tag, lib) in [
+        (
+            "constrained",
+            "typealias U = Listing<String>|Int\nclass C { argv: U(true) }\n",
+        ),
+        (
+            "constrained_marked_use",
+            "typealias U = Listing<String>|Int\nclass C { argv: *U(true)|String }\n",
+        ),
+    ] {
+        let error =
+            eval_union_files(tag, &[("lib.pkl", lib), ("main.pkl", UNION_MAIN)]).unwrap_err();
+        assert!(error.to_string().contains(UNDEFINED), "{tag}: {error}");
+    }
+    // Nullable, through the property or the alias.
+    for lib in [
+        "typealias U = Listing<String>|Int\nclass C { argv: U(true)? }\n",
+        "typealias U = (Listing<String>|Int)?\nclass C { argv: U(true) }\n",
+    ] {
+        let error = eval_union_files(
+            "constrained_null",
+            &[("lib.pkl", lib), ("main.pkl", UNION_MAIN)],
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Expected value of type `Listing<String>|Int`"),
+            "{error}"
+        );
+    }
+    // A marked alias or a non-union alias keeps the amendment valid.
+    for lib in [
+        "typealias U = *Listing<String>|Int\nclass C { argv: U(true) }\n",
+        "typealias U = Listing<String>\nclass C { argv: U(true) }\n",
+    ] {
+        let json = eval_union_files(
+            "constrained_ok",
+            &[("lib.pkl", lib), ("main.pkl", UNION_MAIN)],
+        )
+        .unwrap();
+        assert_eq!(json["x"]["argv"], serde_json::json!(["a"]));
+    }
+}
+
+#[test]
+fn amending_an_instance_with_undefined_union_property_uses_the_declaring_aliases() {
+    let lib = "typealias Args = Listing<String>|Ref\nclass Ref { path: String }\nclass C { argv: Args }\n";
+    for main in [
+        "import \"lib.pkl\" as L\nx = (new L.C {}) { argv { \"a\" } }\n",
+        "import \"lib.pkl\" as L\nlocal c = new L.C {}\nx = (c) { argv { \"a\" } }\n",
+    ] {
+        let error =
+            eval_union_files("instance", &[("lib.pkl", lib), ("main.pkl", main)]).unwrap_err();
+        assert!(error.to_string().contains(UNDEFINED), "{error}");
+    }
+    // Assigning the value instead of amending it is fine, and so is amending
+    // a value the instance already holds.
+    let main = "import \"lib.pkl\" as L\nlocal c = new L.C { argv = new Listing { \"a\" } }\nx = (c) { argv { \"b\" } }\n";
+    let json = eval_union_files("instance_set", &[("lib.pkl", lib), ("main.pkl", main)]).unwrap();
+    assert_eq!(json["x"]["argv"], serde_json::json!(["a", "b"]));
+}
+
+#[test]
+fn amending_marked_nullable_alternative_starts_from_its_default_or_null() {
+    // A nullable alternative takes the default of the type it wraps.
+    for lib in [
+        "typealias A = Listing<String>?\nclass C { argv: *A|Int }\n",
+        "class C { argv: *Listing<String>?|Int }\n",
+        "typealias A = Listing<String>?\nclass C { argv: (*A|Int)? }\n",
+        "typealias B = Listing<String>?\ntypealias A = B\nclass C { argv: *A|Int }\n",
+    ] {
+        let json = eval_union_files(
+            "marked_nullable",
+            &[("lib.pkl", lib), ("main.pkl", UNION_MAIN)],
+        )
+        .unwrap();
+        assert_eq!(json["x"]["argv"], serde_json::json!(["a"]), "{lib}");
+    }
+    // One without a default starts from null, which the built Dynamic fails.
+    let lib = "class C { argv: *Int?|Listing<String> }\n";
+    let error = eval_union_files(
+        "marked_nullable_none",
+        &[("lib.pkl", lib), ("main.pkl", UNION_MAIN)],
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Expected value of type `*Int?|Listing<String>`"),
+        "{error}"
+    );
+}
+
 // Amending a property whose default is an explicit `null` amends the `null`,
 // which makes a `Dynamic` that the declared type then checks (jdx/pklr#386).
 #[test]
@@ -5630,5 +6178,189 @@ fn element_only_dynamic_is_rejected_by_function_types() {
     ] {
         let err = eval_fails(&format!("x: {ty} = new Dynamic {{ \"a\" }}\n"));
         assert!(err.contains("Dynamic"), "{ty}: {err}");
+    }
+}
+
+#[test]
+fn union_amend_follows_a_long_alias_chain_to_dynamic() {
+    // A chain longer than any fixed step limit still ends at `Dynamic`, which
+    // the null default of `argv` satisfies once the body has run.
+    let mut src = String::new();
+    for i in 0..39 {
+        src.push_str(&format!("typealias A{i} = A{}\n", i + 1));
+    }
+    src.push_str("typealias A39 = Dynamic\nclass C { argv: (A0|Int)? }\n");
+    src.push_str("c = new C { argv { x = 1 } }\n");
+    assert_eq!(eval(&src)["c"]["argv"]["x"], serde_json::json!(1));
+}
+
+#[test]
+fn union_amend_state_is_not_shared_with_same_named_properties_of_nested_objects() {
+    // The outer amendment of `lib.Outer.argv` (which takes a Dynamic) must not
+    // decide the same-named, same-printing `Args?` property of a nested `C`.
+    let temp = TestTempDir::new("pklr_test_union_amend_nested");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("lib.pkl"),
+        "typealias Args = Dynamic|Int\nclass Outer { argv: Args?; inner: Any? }\n",
+    )
+    .unwrap();
+    let main = dir.join("main.pkl");
+    std::fs::write(
+        &main,
+        r#"
+import "lib.pkl"
+typealias Args = Int|String
+class C { argv: Args? }
+o = (new lib.Outer {}) {
+  argv { x = 1 }
+  inner = new C { argv { x = 1 } }
+}
+"#,
+    )
+    .unwrap();
+    let err = Evaluator::new().eval_file(&main).unwrap_err().to_string();
+    assert!(
+        err.contains("Int|String") && err.contains("Dynamic"),
+        "{err}"
+    );
+}
+
+/// Modules `m1`..`m3` each import their successor as `m` and declare
+/// `typealias A = m.A`, so the lookups print identically yet are distinct
+/// aliases; `m4` ends the chain in `end`.
+fn eval_import_chain(end: &str, property_type: &str) -> Result<serde_json::Value, pklr::Error> {
+    let end_src = format!("typealias A = {end}\n");
+    let main = format!(
+        "import \"m1.pkl\" as m\nclass C {{ argv: {property_type} }}\nc = new C {{ argv {{ x = 1 }} }}\n"
+    );
+    eval_union_files(
+        "import_chain",
+        &[
+            ("m4.pkl", &end_src),
+            ("m3.pkl", "import \"m4.pkl\" as m\ntypealias A = m.A\n"),
+            ("m2.pkl", "import \"m3.pkl\" as m\ntypealias A = m.A\n"),
+            ("m1.pkl", "import \"m2.pkl\" as m\ntypealias A = m.A\n"),
+            ("main.pkl", &main),
+        ],
+    )
+}
+
+#[test]
+fn union_amend_accepts_a_dynamic_behind_modules_that_each_import_the_next_as_m() {
+    let value = eval_import_chain("Dynamic", "(m.A|Int)?").unwrap();
+    assert_eq!(value["c"]["argv"]["x"], serde_json::json!(1));
+}
+
+#[test]
+fn union_amend_rejects_an_unmarked_union_behind_modules_that_each_import_the_next_as_m() {
+    let error = eval_import_chain("Int|String", "m.A").unwrap_err();
+    assert!(error.to_string().contains(UNDEFINED), "{error}");
+}
+
+#[test]
+fn union_amend_follows_a_very_long_alias_chain_without_overflowing_the_stack() {
+    let mut src = String::new();
+    for i in 0..5000 {
+        src.push_str(&format!("typealias A{i} = A{}\n", i + 1));
+    }
+    src.push_str("typealias A5000 = Dynamic\nclass C { argv: (A0|Int)? }\n");
+    src.push_str("c = new C { argv { x = 1 } }\n");
+    assert_eq!(eval(&src)["c"]["argv"]["x"], serde_json::json!(1));
+}
+
+/// A type alias or class named `Dynamic`, `Any` or `Object` shadows the
+/// standard library type of that name (stock pkl accepts the declaration), so
+/// a nullable union naming it does not take the `Dynamic` a body builds.
+#[test]
+fn union_amend_does_not_treat_an_alias_named_like_a_builtin_as_taking_a_dynamic() {
+    for name in ["Dynamic", "Any", "Object"] {
+        for property_type in [
+            format!("({name}|Int)?"),
+            "(B|Int)?".to_string(),
+            "(B|Int|Null)".to_string(),
+        ] {
+            for body in ["argv { \"a\" }", "argv { x = 1 }"] {
+                let src = format!(
+                    "typealias {name} = Listing<String>\ntypealias B = {name}\n\
+                     class C {{ argv: {property_type} }}\nc = new C {{ {body} }}\n"
+                );
+                let error = Evaluator::new()
+                    .eval_source(&src, std::path::Path::new("test.pkl"))
+                    .unwrap_err()
+                    .to_string();
+                let expected = if property_type.ends_with("Null)") {
+                    UNDEFINED
+                } else {
+                    "Expected value of type"
+                };
+                assert!(
+                    error.contains(expected),
+                    "{name} {property_type} {body}: {error}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn union_amend_rejects_an_unmarked_nullable_union_of_an_alias_named_like_a_builtin() {
+    for name in ["Dynamic", "Any", "Object"] {
+        let src = format!(
+            "typealias {name} = Listing<String>\nclass C {{ argv: {name}|Int|Null }}\n\
+             c = new C {{ argv {{ \"a\" }} }}\n"
+        );
+        let error = Evaluator::new()
+            .eval_source(&src, std::path::Path::new("test.pkl"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(UNDEFINED), "{name}: {error}");
+    }
+}
+
+#[test]
+fn union_amend_does_not_treat_a_class_named_like_a_builtin_as_taking_a_dynamic() {
+    for name in ["Dynamic", "Any", "Object"] {
+        let src = format!(
+            "class {name} {{ a: Int = 1 }}\nclass C {{ argv: ({name}|Int)? }}\n\
+             c = new C {{ argv {{ \"a\" }} }}\n"
+        );
+        let error = Evaluator::new()
+            .eval_source(&src, std::path::Path::new("test.pkl"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Dynamic"), "{name}: {error}");
+    }
+}
+
+#[test]
+fn union_amend_does_not_treat_an_imported_alias_or_class_named_like_a_builtin_as_taking_a_dynamic()
+{
+    for name in ["Dynamic", "Any", "Object"] {
+        for lib in [
+            format!("typealias {name} = Listing<String>\n"),
+            format!("class {name} {{ a: Int = 1 }}\n"),
+        ] {
+            let main = format!(
+                "import \"lib.pkl\" as m\nclass C {{ argv: (m.{name}|Int)? }}\n\
+                 c = new C {{ argv {{ \"a\" }} }}\n"
+            );
+            let error =
+                eval_union_files("shadow_import", &[("lib.pkl", &lib), ("main.pkl", &main)])
+                    .unwrap_err()
+                    .to_string();
+            assert!(
+                error.contains("Expected value of type") && error.contains("Dynamic"),
+                "{name} {lib}: {error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn union_amend_still_accepts_a_dynamic_for_the_builtin_names_unshadowed() {
+    for name in ["Dynamic", "Any", "Object"] {
+        let src = format!("class C {{ argv: ({name}|Int)? }}\nc = new C {{ argv {{ x = 1 }} }}\n");
+        assert_eq!(eval(&src)["c"]["argv"]["x"], serde_json::json!(1));
     }
 }

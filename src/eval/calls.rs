@@ -176,7 +176,7 @@ impl Evaluator {
                             let storage_key =
                                 equivalent_mapping_key(&map, &key).unwrap_or_else(|| key.clone());
                             self.remember_mapping_key(storage_key.clone(), k);
-                            map.insert(storage_key, v.clone());
+                            map.insert(storage_key, v.clone().into_entry_value());
                         }
                     }
                     return Ok(Value::Object(Arc::new(map), None));
@@ -483,9 +483,10 @@ impl Evaluator {
                 let key = args.first().and_then(|v| v.as_str()).unwrap_or("");
                 Ok(Some(Value::Bool(map.contains_key(key))))
             }
-            (Value::Object(map, _), "toMap" | "toMapping") => {
-                Ok(Some(Value::Object(map.clone(), None)))
-            }
+            (Value::Object(map, source), "toMap" | "toMapping") => Ok(Some(Value::Object(
+                without_class_members(map, source.as_deref()),
+                None,
+            ))),
             (Value::Object(map, _), "mapValues") => {
                 let lambda = args
                     .first()
@@ -494,7 +495,7 @@ impl Evaluator {
                 for (k, v) in map.iter() {
                     let new_v =
                         self.invoke_lambda(lambda, &[Value::String(k.clone()), v.clone()], depth)?;
-                    result.insert(k.clone(), new_v);
+                    result.insert(k.clone(), new_v.into_entry_value());
                 }
                 Ok(Some(Value::Object(Arc::new(result), None)))
             }
@@ -507,7 +508,7 @@ impl Evaluator {
                     let keep =
                         self.invoke_lambda(lambda, &[Value::String(k.clone()), v.clone()], depth)?;
                     if is_truthy(&keep) {
-                        result.insert(k.clone(), v.clone());
+                        result.insert(k.clone(), v.clone().into_entry_value());
                     }
                 }
                 Ok(Some(Value::Object(Arc::new(result), None)))
@@ -531,8 +532,9 @@ impl Evaluator {
             {
                 Ok(None)
             }
-            (Value::Object(map, _), "toDynamic") => {
-                Ok(Some(stdlib::dynamic_object(map.as_ref().clone())))
+            (Value::Object(map, source), "toDynamic") => {
+                let members = without_class_members(map, source.as_deref());
+                Ok(Some(stdlib::dynamic_object(members.as_ref().clone())))
             }
 
             // Int/Float methods
@@ -735,4 +737,21 @@ fn dynamic_elements_method(
             "Cannot find method `{method}` in class `Dynamic`."
         ))),
     }
+}
+
+/// `map` as the entries of a converted object: without the classes a module
+/// holds as members (they are not properties), and with any other class held
+/// as plain data, so a further conversion does not take it for a declaration.
+fn without_class_members(map: &Arc<ObjectMap>, source: Option<&ObjectSource>) -> Arc<ObjectMap> {
+    let marked =
+        |value: &Value| matches!(value, Value::Object(_, Some(s)) if s.declared_as.is_some());
+    if !map.values().any(marked) {
+        return map.clone();
+    }
+    Arc::new(
+        map.iter()
+            .filter(|(key, value)| !value.is_class_member(key, source))
+            .map(|(key, value)| (key.clone(), value.clone().into_entry_value()))
+            .collect(),
+    )
 }

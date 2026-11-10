@@ -449,7 +449,8 @@ pub(crate) struct SourceScopeParts {
 /// itself is kept: its maps are copy-on-write, so later changes to the live
 /// scopes do not show through.
 pub(crate) struct SourceScope {
-    parts: std::sync::OnceLock<SourceScopeParts>,
+    /// Shared between clones, which copy it on write (`parts_mut`).
+    parts: std::sync::OnceLock<Arc<SourceScopeParts>>,
     pending: std::sync::Mutex<Option<PendingScope>>,
 }
 
@@ -551,7 +552,7 @@ impl SourceScope {
 
     pub(crate) fn from_parts(parts: SourceScopeParts) -> Self {
         Self {
-            parts: std::sync::OnceLock::from(parts),
+            parts: std::sync::OnceLock::from(Arc::new(parts)),
             pending: std::sync::Mutex::new(None),
         }
     }
@@ -566,16 +567,22 @@ impl SourceScope {
     pub(crate) fn parts(&self) -> &SourceScopeParts {
         // Flattening drops the pending scope, so the source stops holding the
         // enclosing scopes' maps.
+        self.shared_parts()
+    }
+
+    fn shared_parts(&self) -> &Arc<SourceScopeParts> {
         self.parts.get_or_init(|| {
-            self.take_pending()
-                .map(PendingScope::flatten)
-                .unwrap_or_default()
+            Arc::new(
+                self.take_pending()
+                    .map(PendingScope::flatten)
+                    .unwrap_or_default(),
+            )
         })
     }
 
     pub(crate) fn parts_mut(&mut self) -> &mut SourceScopeParts {
         self.parts();
-        self.parts.get_mut().expect("flattened above")
+        Arc::make_mut(self.parts.get_mut().expect("flattened above"))
     }
 }
 
@@ -588,7 +595,10 @@ impl Default for SourceScope {
 impl Clone for SourceScope {
     fn clone(&self) -> Self {
         if let Some(parts) = self.parts.get() {
-            return Self::from_parts(parts.clone());
+            return Self {
+                parts: std::sync::OnceLock::from(Arc::clone(parts)),
+                pending: std::sync::Mutex::new(None),
+            };
         }
         let pending = self
             .pending
@@ -601,7 +611,10 @@ impl Clone for SourceScope {
                 pending: std::sync::Mutex::new(Some(pending)),
             },
             // Another thread is flattening it.
-            None => Self::from_parts(self.parts().clone()),
+            None => Self {
+                parts: std::sync::OnceLock::from(Arc::clone(self.shared_parts())),
+                pending: std::sync::Mutex::new(None),
+            },
         }
     }
 }

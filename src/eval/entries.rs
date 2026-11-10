@@ -54,6 +54,30 @@ impl Evaluator {
                 .filter(|value| !is_null_value(value))
                 .or(nullable_default.as_ref())
                 .or(scoped);
+            // A union without a `*` alternative has no default, so there is
+            // nothing for the body to amend. A nullable one defaults to null,
+            // and the Dynamic that amending null builds must itself satisfy
+            // the union.
+            if let Some(ty) = &prop.type_ann
+                && (amendment_base.is_none() || amendment_base.is_some_and(is_null_value))
+            {
+                let state = recorded_union_amend(scope, &prop.name, ty, body)
+                    .unwrap_or_else(|| self.union_amend_state(ty, scope));
+                match state {
+                    UnionAmendState::NoDefault if amendment_base.is_none() => {
+                        return Err(Error::Eval(format!(
+                            "Tried to read property `{}` but its value is undefined.",
+                            prop.name
+                        )));
+                    }
+                    UnionAmendState::NullDefault(union) => {
+                        return Err(Error::Eval(format!(
+                            "Expected value of type `{union}`, but got type `Dynamic`."
+                        )));
+                    }
+                    _ => {}
+                }
+            }
             if let Some(Value::List(items)) = amendment_base
                 && matches!(items.kind(), ListKind::List | ListKind::Set)
             {
@@ -95,8 +119,15 @@ impl Evaluator {
                 let mut items = match amendment_base {
                     Some(Value::List(existing)) => existing.clone(),
                     // Amending nothing makes a `Dynamic`, unless the declared
-                    // type is a `Listing`, whose default the body amends.
-                    _ if prop.type_ann.as_ref().is_some_and(type_is_listing) => {
+                    // type is a `Listing` (or an alias or `*` union of one),
+                    // whose default the body amends. Any declared type that
+                    // does not take a `Dynamic` is amended the same way.
+                    _ if prop.type_ann.as_ref().is_some_and(|ty| {
+                        type_is_listing(ty)
+                            || self.union_amend_state(ty, scope) == UnionAmendState::HasDefault
+                            || !self.type_takes_dynamic(ty, scope, &mut Vec::new())
+                    }) =>
+                    {
                         ListValue::new(ListKind::Listing, Vec::new())
                     }
                     _ => ListValue::new(ListKind::Dynamic, Vec::new()),
@@ -467,6 +498,7 @@ impl Evaluator {
             mapping_value_types: Vec::new(),
             deprecated: collect_deprecated(entries),
             poisoned_members: None,
+            declared_as: None,
             kind: ObjectKind::Object,
             is_parsed_json: false,
             is_module: false,
@@ -1208,6 +1240,7 @@ impl Evaluator {
                         mapping_value_types: Vec::new(),
                         deprecated: merge_deprecated(&src.deprecated, body),
                         poisoned_members: None,
+                        declared_as: None,
                         kind: ObjectKind::Object,
                         is_parsed_json: false,
                         is_module: false,
