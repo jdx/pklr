@@ -143,15 +143,26 @@ impl Evaluator {
             if prop.body.is_none() || prop.value.is_some() {
                 continue;
             }
-            let declared = base_entries.iter().find_map(|base| match base {
-                Entry::Property(inherited) if inherited.name == prop.name => {
-                    inherited.type_ann.as_ref()
-                }
-                _ => None,
-            });
-            if let Some(ty) = declared
-                && let Some(class) =
-                    self.declared_elem_class(ty, &definition_type_scope(base_source))
+            // An inherited property's type is written where its class
+            // declares it, which `entry_scopes` records for each entry.
+            let declared = base_entries
+                .iter()
+                .enumerate()
+                .find_map(|(index, base)| match base {
+                    Entry::Property(inherited) if inherited.name == prop.name => inherited
+                        .type_ann
+                        .as_ref()
+                        .map(|ty| (ty, base_source.entry_scopes.get(index))),
+                    _ => None,
+                });
+            if let Some((ty, entry_scope)) = declared
+                && let Some(class) = self.declared_elem_class(
+                    ty,
+                    &match entry_scope.and_then(Option::as_ref) {
+                        Some(captured) => restore_scope(captured),
+                        None => definition_type_scope(base_source),
+                    },
+                )
             {
                 amendment_scope.values.insert(
                     listing_elem_class_binding(&prop.name).into(),

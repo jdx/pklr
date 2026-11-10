@@ -5632,3 +5632,22 @@ d: Listing<L> = new { new { new { n = "d" } } }
     assert_eq!(result["c"], serde_json::json!([[{"n": "c", "d": 1}]]));
     assert_eq!(result["d"], serde_json::json!([[{"n": "d", "d": 1}]]));
 }
+
+#[test]
+fn typed_listing_elements_through_if_let_and_trace_get_the_class() {
+    let result = eval(
+        r#"
+class T { x: Int = 1 }
+a = new Listing<T> { if (true) new {} else new {} }
+b = new Listing<T> { let (q = 1) new {} }
+c = new Listing<T> { trace(new {}) }
+class H { l: Listing<T>; m: Listing<T> = new { if (true) new {} else new {} } }
+h = new H { l { let (q = 1) new {} } }
+"#,
+    );
+    assert_eq!(result["a"], serde_json::json!([{"x": 1}]));
+    assert_eq!(result["b"], serde_json::json!([{"x": 1}]));
+    assert_eq!(result["c"], serde_json::json!([{"x": 1}]));
+    assert_eq!(result["h"]["l"], serde_json::json!([{"x": 1}]));
+    assert_eq!(result["h"]["m"], serde_json::json!([{"x": 1}]));
+}

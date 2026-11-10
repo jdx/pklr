@@ -3437,3 +3437,26 @@ fn empty_listing_amend_through_amends_of_imported_mapping_property() {
     let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["nodes"]["a"]["bulk"], serde_json::json!([]));
 }
+
+#[test]
+fn inherited_listing_property_elements_use_the_declaring_modules_class() {
+    let temp = TestTempDir::new("pklr_inherited_listing_elem_class");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("base.pkl"),
+        "class T { x: Int = 1 }\nopen class Base { nested: Listing<T>? }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("sub.pkl"),
+        "import \"base.pkl\" as B\nclass T { y: Int = 2 }\nclass Sub extends B.Base {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "import \"sub.pkl\" as S\nv = new S.Sub { nested { new {} } }\n",
+    )
+    .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
+    assert_eq!(val["v"]["nested"], serde_json::json!([{"x": 1}]));
+}

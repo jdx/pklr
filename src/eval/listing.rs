@@ -279,28 +279,34 @@ fn typed_listing_elem(
     scope: &Scope,
     elem_class: Option<&Arc<Value>>,
 ) -> (Expr, Scope) {
-    let (Expr::New(None, body, params), Some(class)) = (expr, elem_class) else {
+    let Some(class) = elem_class else {
         return (expr.clone(), scope.clone());
     };
+    if !parser::has_untyped_result_new(expr) {
+        return (expr.clone(), scope.clone());
+    }
     let mut elem_scope = scope.child();
     elem_scope.set(LISTING_ELEM_CLASS, (**class).clone());
-    if matches!(**class, Value::List(_)) {
-        // The elements are listings: `new { new { ... } }` of a
-        // `Listing<Listing<T>>`.
-        let typed = Expr::New(
-            Some("Listing".into()),
-            body.clone(),
-            vec![LISTING_ELEM_CLASS.to_string()],
-        );
-        return (typed, elem_scope);
+    let listings = matches!(**class, Value::List(_));
+    if !listings {
+        // A class bound under another name is a value, not a type.
+        elem_scope.set(type_alias_marker(LISTING_ELEM_CLASS), Value::Null);
     }
-    // A class bound under another name is a value, not a type.
-    elem_scope.set(type_alias_marker(LISTING_ELEM_CLASS), Value::Null);
-    let typed = Expr::New(
-        Some(LISTING_ELEM_CLASS.into()),
-        body.clone(),
-        params.clone(),
-    );
+    // Reach `new { ... }` through `if`, `let` and `trace` result positions.
+    let mut typed = expr.clone();
+    parser::rewrite_untyped_result_new(&mut typed, &mut |body| {
+        if listings {
+            // The elements are listings: `new { new { ... } }` of a
+            // `Listing<Listing<T>>`.
+            Expr::New(
+                Some("Listing".into()),
+                body,
+                vec![LISTING_ELEM_CLASS.to_string()],
+            )
+        } else {
+            Expr::New(Some(LISTING_ELEM_CLASS.into()), body, Vec::new())
+        }
+    });
     (typed, elem_scope)
 }
 
