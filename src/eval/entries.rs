@@ -480,21 +480,18 @@ impl Evaluator {
             // Only a failure while locals are still pending is deferred and
             // retried, so the state is snapshotted only then. Entries never add
             // to `failed_locals`, so empty before means empty after and the
-            // rollback arm below cannot be taken. A bare element changes
-            // nothing when it fails; a generator may have added some.
-            let rollback = (!st.failed_locals.is_empty()
-                || (deferrable && !matches!(entry, Entry::Elem(_))))
-            .then(|| st.clone());
+            // rollback arm below cannot be taken.
+            let rollback = (!st.failed_locals.is_empty()).then(|| st.clone());
+            // A deferred entry is evaluated again, so it must have left
+            // nothing behind; its sizes before tell whether it did.
+            let progress = deferrable.then(|| st.progress());
             match self.eval_output_entry(&cx, &mut st, entry_index, entry) {
                 Ok(()) => {}
                 Err(Error::Eval(message)) if rollback.is_some() && !st.failed_locals.is_empty() => {
                     st = rollback.expect("checked by the guard");
                     failed_entries.push((entry_index, message));
                 }
-                Err(Error::Eval(_)) if deferrable => {
-                    if let Some(rollback) = rollback {
-                        st = rollback;
-                    }
+                Err(Error::Eval(_)) if progress == Some(st.progress()) => {
                     deferred_elements.push((entry_index, st.elements.len()));
                 }
                 Err(error) => return Err(error),
@@ -1814,5 +1811,19 @@ fn entry_is_member(entry: &Entry) -> bool {
         Entry::Property(prop) => !has_modifier(&prop.modifiers, crate::parser::Modifier::Local),
         Entry::DynProperty(..) => true,
         _ => false,
+    }
+}
+
+impl BodyState<'_> {
+    /// The sizes of what an entry can add to. An entry that fails with these
+    /// unchanged has left nothing behind.
+    fn progress(&self) -> (usize, usize, usize, usize, usize) {
+        (
+            self.elements.len(),
+            self.map.len(),
+            self.all_props.len(),
+            self.generated.len(),
+            self.member_entry_indices.len(),
+        )
     }
 }

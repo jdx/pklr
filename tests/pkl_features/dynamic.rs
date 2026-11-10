@@ -851,3 +851,24 @@ a = d.y.z
     );
     assert_eq!(json["a"], 2);
 }
+
+#[test]
+fn many_spreads_before_a_member_keep_every_element() {
+    let spreads = "...a; ".repeat(200);
+    let json = eval(&format!(
+        "local a = List(1, 2, 3)\nlocal d = new Dynamic {{ {spreads}z = 1 }}\nr = d.toList().length\nr2 = d.z\n"
+    ));
+    assert_eq!(json["r"], 600);
+    assert_eq!(json["r2"], 1);
+}
+
+#[test]
+fn a_partly_evaluated_generator_before_a_member_still_reads_it() {
+    let json = eval(
+        r#"
+local d = new Dynamic { y { when (true) { 1; z }; z = 2 } }
+r = d.y.toList()
+"#,
+    );
+    assert_eq!(json["r"], serde_json::json!([1, 2]));
+}
