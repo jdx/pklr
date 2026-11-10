@@ -534,6 +534,38 @@ impl Evaluator {
                 typed.push(entry.clone());
                 continue;
             };
+            // A union with no `*` alternative cannot be amended without a value
+            // to start from. Its aliases resolve where the parent declared the
+            // property, which the amending scope may not see.
+            if prop.value.is_none()
+                && let Some(body) = &prop.body
+            {
+                let declaring = match parent.entry_scopes.get(index).and_then(Clone::clone) {
+                    Some(captured) => restore_scope(&captured),
+                    None => parent_scope
+                        .get_or_insert_with(|| restore_scope(&capture_object_source_scope(parent)))
+                        .clone(),
+                };
+                let state = self.union_amend_state(ty, &declaring);
+                if matches!(
+                    state,
+                    UnionAmendState::NoDefault | UnionAmendState::NullDefault(_)
+                ) {
+                    // A parent's default value is not in scope here, so leave
+                    // such an amendment untyped rather than have it rejected
+                    // as amending an undefined property.
+                    if matches!(parent.entries.get(index), Some(Entry::Property(parent_prop))
+                        if parent_prop.value.is_some() || parent_prop.body.is_some())
+                    {
+                        typed.push(entry.clone());
+                        continue;
+                    }
+                }
+                child_scope.set(
+                    union_amend_marker(&prop.name),
+                    Value::String(encode_union_amend(ty, body, &state).into()),
+                );
+            }
             let mut prop = (**prop).clone();
             prop.type_ann = Some(ty.clone());
             if let Some(expr) = &mut prop.value
@@ -743,4 +775,63 @@ pub(super) fn check_instantiable(
 /// The NUL prefix keeps it apart from any pkl identifier.
 pub(super) fn type_alias_marker(name: &str) -> String {
     format!("\0typealias:{name}")
+}
+
+/// The binding that carries a property's union-amend state, decided where its
+/// type was declared, to the place its body is evaluated.
+pub(super) fn union_amend_marker(name: &str) -> String {
+    format!("#union-amend:{name}")
+}
+
+/// `state` for the declared type `ty`, tagged with the type so that a
+/// same-named property of another type does not read it.
+pub(super) fn encode_union_amend(
+    ty: &crate::parser::TypeExpr,
+    body: &Body,
+    state: &UnionAmendState,
+) -> String {
+    let (kind, union) = match state {
+        UnionAmendState::NullDefault(union) => ("null", union.as_str()),
+        UnionAmendState::NoDefault => ("none", ""),
+        _ => ("ok", ""),
+    };
+    format!(
+        "{kind}\u{1}{}\u{1}{}\u{1}{union}",
+        body_identity(body),
+        display_type_expr(ty)
+    )
+}
+
+/// Identifies the object body of the amendment that recorded a state. Bodies
+/// are shared (`Arc`) across the clones the evaluator makes of a property, so
+/// this tells apart amendments that merely print the same.
+fn body_identity(body: &Body) -> usize {
+    Arc::as_ptr(body) as usize
+}
+
+/// The union-amend state recorded in `scope` for the property `name` declared
+/// `ty`, whose amending `body` is being evaluated. The binding is visible to
+/// every object nested in that body, so a state counts only when it was
+/// recorded for this very body and type: a same-named property of a nested
+/// object, or one whose alias merely prints the same, decides for itself.
+pub(super) fn recorded_union_amend(
+    scope: &Scope,
+    name: &str,
+    ty: &crate::parser::TypeExpr,
+    body: &Body,
+) -> Option<UnionAmendState> {
+    let Some(Value::String(recorded)) = scope.get(&union_amend_marker(name)) else {
+        return None;
+    };
+    let mut parts = recorded.splitn(4, '\u{1}');
+    let (kind, recorded_body, recorded_ty, union) =
+        (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+    if recorded_body != body_identity(body).to_string() || recorded_ty != display_type_expr(ty) {
+        return None;
+    }
+    Some(match kind {
+        "null" => UnionAmendState::NullDefault(union.to_string()),
+        "none" => UnionAmendState::NoDefault,
+        _ => UnionAmendState::NotUnion,
+    })
 }

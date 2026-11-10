@@ -52,7 +52,7 @@ pub(super) fn props_insert(
     value: Value,
 ) {
     release_this_aliases(scope, aliases);
-    Arc::make_mut(properties).insert(key.into(), value);
+    Arc::make_mut(properties).insert(key.into(), value.into_entry_value());
 }
 
 /// Insert a recovered property at its declaration position after later body
@@ -66,7 +66,7 @@ pub(super) fn props_shift_insert(
     value: Value,
 ) {
     release_this_aliases(scope, aliases);
-    Arc::make_mut(properties).shift_insert(index, key.into(), value);
+    Arc::make_mut(properties).shift_insert(index, key.into(), value.into_entry_value());
 }
 
 /// Insert a receiver member while preserving Mapping key identity for `this`
@@ -81,6 +81,7 @@ pub(super) fn props_insert_mapping(
 ) {
     release_this_aliases(scope, aliases);
     let properties = Arc::make_mut(properties);
+    let value = value.into_entry_value();
     if mapping_entries {
         super::insert_mapping_entry(properties, key, value);
     } else {
@@ -100,6 +101,7 @@ pub(super) fn props_extend_mapping(
     release_this_aliases(scope, aliases);
     let properties = Arc::make_mut(properties);
     for (key, value) in entries {
+        let value = value.into_entry_value();
         if mapping_entries {
             super::insert_mapping_entry(properties, key, value);
         } else {
@@ -437,8 +439,10 @@ pub(super) fn mapping_source() -> ObjectSource {
         mapping_value_types: Vec::new(),
         deprecated: IndexMap::new(),
         poisoned_members: None,
+        declared_as: None,
         kind: ObjectKind::Mapping,
         is_parsed_json: false,
+        is_module: false,
         prototype: None,
     }
 }
@@ -825,7 +829,7 @@ impl Evaluator {
                             entry_scope,
                             depth,
                         )?;
-                        map.insert(storage_key, val);
+                        map.insert(storage_key, val.into_entry_value());
                         continue;
                     }
                     // An entry body of a `Listing` value amends a listing: an
@@ -885,7 +889,7 @@ impl Evaluator {
                             _ => Value::List(ListValue::new(ListKind::Dynamic, Vec::new())),
                         };
                         let val = self.eval_value_amendment(base, body, entry_scope, depth)?;
-                        map.insert(storage_key, val);
+                        map.insert(storage_key, val.into_entry_value());
                         continue;
                     }
                     // An element-only entry body is valid only for an
@@ -920,7 +924,7 @@ impl Evaluator {
                     {
                         let mixin = Expr::New(Some("Mixin".into()), body.clone(), params.clone());
                         let val = self.eval_expr(&mixin, entry_scope, depth + 1)?;
-                        map.insert(storage_key, val);
+                        map.insert(storage_key, val.into_entry_value());
                         continue;
                     }
                     // `new { ... }` takes its type from the Mapping's value type
@@ -1078,8 +1082,10 @@ impl Evaluator {
                                         mapping_value_types: Vec::new(),
                                         deprecated: merge_deprecated(&src.deprecated, body),
                                         poisoned_members: None,
+                                        declared_as: None,
                                         kind: ObjectKind::Object,
                                         is_parsed_json: false,
+                                        is_module: false,
                                         prototype: None,
                                     },
                                 };
@@ -1095,7 +1101,7 @@ impl Evaluator {
                                 entry_scope,
                             )?
                         };
-                    map.insert(storage_key, val);
+                    map.insert(storage_key, val.into_entry_value());
                 }
                 Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {}
                 Entry::Property(prop)
@@ -1200,7 +1206,7 @@ pub(super) fn insert_mapping_key(keys: &mut HashSet<Arc<str>>, key: &Arc<str>) -
 
 pub(super) fn insert_mapping_entry(map: &mut ObjectMap, key: Arc<str>, value: Value) {
     let storage_key = equivalent_mapping_key(map, &key).unwrap_or(key);
-    map.insert(storage_key, value);
+    map.insert(storage_key, value.into_entry_value());
 }
 
 pub(super) fn extend_object_entries(
@@ -1212,7 +1218,7 @@ pub(super) fn extend_object_entries(
         if mapping_entries {
             insert_mapping_entry(target, key.clone(), value.clone());
         } else {
-            target.insert(key.clone(), value.clone());
+            target.insert(key.clone(), value.clone().into_entry_value());
         }
     }
 }
