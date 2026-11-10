@@ -255,6 +255,33 @@ fn eval_to_json_omits_null_properties_by_default() {
 
 #[cfg(feature = "native-io")]
 #[test]
+fn eval_to_json_omits_null_entries_with_non_string_keys() {
+    // As pkl: the null check precedes the key check, so a null-valued entry
+    // under a non-string key vanishes, while a non-null one still errors.
+    let (_dir, path) = module_file(
+        "pklr_render_json_null_int_key",
+        "m = new Mapping { [1] = null }\nn { a = new Mapping { [2] = null; [\"k\"] = 1 } }\n",
+    );
+    assert_eq!(
+        pklr::eval_to_json(&path).unwrap(),
+        serde_json::json!({"m": {}, "n": {"a": {"k": 1}}})
+    );
+    for src in [
+        "m = new Mapping { [1] = null; [2] = 3 }\n",
+        "m = new Mapping { [1] = 5 }\n",
+        "m = new Mapping { [1] = null }\noutput { renderer = new JsonRenderer { omitNullProperties = false } }\n",
+    ] {
+        let (_dir, path) = module_file("pklr_render_json_int_key_errors", src);
+        let err = pklr::eval_to_json(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("Cannot render object with non-string key as JSON"),
+            "{src}: {err}"
+        );
+    }
+}
+
+#[cfg(feature = "native-io")]
+#[test]
 fn eval_to_json_keeps_nulls_when_renderer_sets_omit_false() {
     let (_dir, path) = module_file(
         "pklr_render_json_keep_nulls",

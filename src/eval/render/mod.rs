@@ -1433,6 +1433,11 @@ impl JsonValue<'_> {
                 let mut out = serde_json::Map::new();
                 for (key, member) in map.iter() {
                     if is_non_string_key(key) {
+                        // As pkl: an entry dropped for its null value is
+                        // never rendered, so its key is not checked.
+                        if self.omit_nulls && kind_of(member) == Kind::Null {
+                            continue;
+                        }
                         return Err(cannot_render_non_string_key(&key_value(key), "JSON"));
                     }
                     // Methods are stored as function-valued members, and an
