@@ -2657,16 +2657,23 @@ fn collect_name_root(name: &str, refs: &mut Names, shadows: &Names) {
 
 /// The names in the text of the base of a constrained type. A quoted base is
 /// one name, whatever it holds.
-pub(super) fn constrained_type_components(name: &str, form: crate::parser::BaseForm) -> Vec<&str> {
+pub(super) fn constrained_type_components(
+    name: &str,
+    form: crate::parser::BaseForm,
+) -> impl Iterator<Item = &str> {
     let name = name.trim_start_matches('*');
-    if form != crate::parser::BaseForm::Text {
-        return vec![name];
-    }
-    name.trim_end_matches('?')
-        .split(['<', '>', ','])
-        .map(str::trim)
-        .filter(|component| !component.is_empty())
-        .collect()
+    let quoted = form != crate::parser::BaseForm::Text;
+    // A quoted base is the single component; text is split into names.
+    let text = if quoted {
+        ""
+    } else {
+        name.trim_end_matches('?')
+    };
+    quoted.then_some(name).into_iter().chain(
+        text.split(['<', '>', ','])
+            .map(str::trim)
+            .filter(|component| !component.is_empty()),
+    )
 }
 
 /// `declared_entry_roots` by namespace.

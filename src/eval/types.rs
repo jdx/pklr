@@ -568,9 +568,8 @@ fn type_default_value_seen(
             // A name the parser read (no `*`) is one name, which can hold a
             // `?` of its own when it was quoted.
             if !name.starts_with('*')
-                && let Some(class) = resolve_dotted(scope, name).filter(|value| {
-                    matches!(value, Value::Object(_, Some(source)) if source.kind == ObjectKind::Class)
-                })
+                && name.contains(['?', '<'])
+                && let Some(class) = declared_class(scope, name)
             {
                 return Some(as_instance(class));
             }
@@ -842,7 +841,10 @@ fn nullable_inner_default_seen(
         TypeExpr::Named(name) => match alias(name, seen) {
             Some(target) => nullable_inner_default_seen(&target, scope, seen),
             // A quoted class named `C?` is that class, not the nullable `C`.
-            None if !name.starts_with('*') && declared_class(scope, name).is_some() => {
+            None if !name.starts_with('*')
+                && name.ends_with('?')
+                && declared_class(scope, name).is_some() =>
+            {
                 declared_class(scope, name).map(as_instance)
             }
             None if name.ends_with('?') => type_default_for_name(name.trim_end_matches('?'), scope),
