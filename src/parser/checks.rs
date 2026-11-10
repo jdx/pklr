@@ -407,7 +407,13 @@ impl<'a> Parser<'a> {
             let Some(names) = self.alias_definition_uses.get(&current) else {
                 continue;
             };
+            // A type parameter of the alias is not a use of a module alias of
+            // the same name.
+            let parameters = self.type_alias_parameters.get(&current);
             for referenced in names {
+                if parameters.is_some_and(|parameters| parameters.contains(referenced)) {
+                    continue;
+                }
                 if used.insert(referenced.clone()) {
                     pending.push(referenced.clone());
                 }

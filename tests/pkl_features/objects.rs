@@ -7109,3 +7109,13 @@ fn imported_nullable_default_alias_leaves_the_property_unset() {
     }
     assert_eq!(json["b"], serde_json::json!({"n": 1}));
 }
+
+#[test]
+fn a_type_parameter_is_not_a_use_of_a_local_alias_of_the_same_name() {
+    // Verified against pkl 0.32.2: the `T` in `Items<T>` is the alias's own
+    // parameter, so the unused cyclic local alias `T` stays unresolved.
+    let json = eval(
+        "local typealias T = List<T>\ntypealias Items<T> = List<T>\nx: Items<Int> = List(1)\n",
+    );
+    assert_eq!(json["x"], serde_json::json!([1]));
+}
