@@ -853,6 +853,17 @@ impl Evaluator {
                     let dynamic_value_type = expanded_value_type_names.iter().any(|name| {
                         selected_value_type(name) && mapping_value_type_base(name) == "Dynamic"
                     });
+                    // `new { ... }` for a selected `Listing` value type makes a
+                    // fresh `Listing`; it never amends a default or an inherited entry.
+                    if let Expr::New(None, body, _) = val_expr
+                        && listing_value_type
+                        && is_element_only_body(body)
+                    {
+                        let base = Value::List(ListValue::new(ListKind::Listing, Vec::new()));
+                        let val = self.eval_value_amendment(base, body, entry_scope, depth)?;
+                        map.insert(storage_key, val.into_entry_value());
+                        continue;
+                    }
                     if let Expr::ObjectBody(body) = val_expr
                         && (matches!(map.get(&storage_key), Some(Value::List(_)))
                             || listing_value_type
@@ -870,8 +881,23 @@ impl Evaluator {
                         let base = match (map.get(&storage_key), &explicit_default) {
                             (Some(existing @ Value::List(_)), _) => existing.clone(),
                             (_, Some(default @ Value::List(_))) => default.clone(),
-                            // Amending nothing makes a `Dynamic`.
+                            // Amending nothing makes the selected `Listing`,
+                            // else a `Dynamic`.
+                            _ if listing_value_type => {
+                                Value::List(ListValue::new(ListKind::Listing, Vec::new()))
+                            }
                             _ => Value::List(ListValue::new(ListKind::Dynamic, Vec::new())),
+                        };
+                        // A `default { 1 }` is evaluated without the value type,
+                        // as an element-only `Dynamic`; amended as an entry of a
+                        // `Listing` type it is a `Listing`.
+                        let base = match base {
+                            Value::List(items)
+                                if listing_value_type && items.kind() == ListKind::Dynamic =>
+                            {
+                                Value::List(items.with_kind(ListKind::Listing))
+                            }
+                            other => other,
                         };
                         let val = self.eval_value_amendment(base, body, entry_scope, depth)?;
                         map.insert(storage_key, val.into_entry_value());

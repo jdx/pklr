@@ -534,7 +534,12 @@ impl Evaluator {
             }
             (Value::Object(map, source), "toDynamic") => {
                 let members = without_class_members(map, source.as_deref());
-                Ok(Some(stdlib::dynamic_object(members)))
+                Ok(Some(stdlib::dynamic_object(members, |key| {
+                    self.mapping_key_values
+                        .get(key)
+                        .cloned()
+                        .unwrap_or_else(|| crate::value::mapping_storage_value(key))
+                })))
             }
 
             // Int/Float methods

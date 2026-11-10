@@ -644,3 +644,56 @@ z = (d) { z = a + ok_1 }.z
     );
     assert_eq!(json["z"], 5);
 }
+
+// An entry body of only elements in a mapping whose value type is a `Listing`
+// (or a `*Listing|Int` union) makes a `Listing`, as `pkl eval` 0.32.2 does.
+#[test]
+fn typed_mapping_entries_of_listing_type_are_listings() {
+    let json = eval(
+        r#"
+class C { m: Mapping<String, Listing<Int>> }
+class Base { m: Mapping<String, Listing<Int>> = new { ["x"] { 1 } } }
+class D { m: Mapping<String, Listing<Int>> = new { default { 5 }; ["p"] {} } }
+a = new Mapping<String, Listing<Int>> { ["k"] { 1 } }
+b = new Mapping<String, Listing<Int>> { ["k"] = new { 1 } }
+c = new Mapping<String, Listing<Int>> { default { 1 }; ["k"] {} }
+d = new C { m { ["k"] { 1 } } }
+e = new Base { m { ["x"] { 2 } } }
+f = new Mapping<String, *Listing<Int>|Int> { ["k"] { 1 } }
+g = new D {}
+h = new Mapping<String, *Listing<Int>|Int> { ["k"] = new { 1 } }
+j = new Mapping<String, Dynamic> { ["k"] { 1 } }
+isa = a["k"] is Listing
+isb = b["k"] is Listing
+isc = c["k"] is Listing
+isd = d.m["k"] is Listing
+ise = e.m["x"] is Listing
+isf = f["k"] is Listing
+isg = g.m["p"] is Listing
+ish = h["k"] is Listing
+isj = j["k"] is Dynamic
+len = a["k"].length
+lend = d.m["k"].length
+"#,
+    );
+    for name in [
+        "isa", "isb", "isc", "isd", "ise", "isf", "isg", "ish", "isj",
+    ] {
+        assert_eq!(json[name], true, "{name}");
+    }
+    assert_eq!(json["len"], 1);
+    assert_eq!(json["lend"], 1);
+    assert_eq!(json["e"]["m"]["x"], serde_json::json!([1, 2]));
+}
+
+#[test]
+fn to_dynamic_keeps_compound_keys_as_entries() {
+    let json = eval(
+        r#"
+r = new PcfRenderer {}.renderValue(Map(List(1), "v").toDynamic())
+"#,
+    );
+    let rendered = json["r"].as_str().unwrap();
+    assert!(!rendered.contains("pklr:"), "{rendered}");
+    assert!(rendered.starts_with("{\n  ["), "{rendered}");
+}
