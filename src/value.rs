@@ -1103,9 +1103,7 @@ impl Value {
                     })
                 };
                 for (k, v) in map.iter() {
-                    if (matches!(v, Value::Lambda(..)) && is_method(k))
-                        || is_type_member(source.as_deref(), k)
-                    {
+                    if matches!(v, Value::Lambda(..)) && is_method(k) {
                         continue;
                     }
                     obj.insert(display_storage_key(k).to_string(), v.to_json());
