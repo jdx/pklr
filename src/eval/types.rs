@@ -523,7 +523,9 @@ fn type_default_value_seen(
 ) -> Option<Value> {
     use crate::parser::TypeExpr;
     match ty {
-        TypeExpr::Constrained(_, _, BaseForm::NullableQuoted) => Some(Value::Null),
+        TypeExpr::Constrained(base, _, form) if *form != BaseForm::Text => {
+            type_default_value_seen(&quoted_base_type(base, *form)?, scope, seen)
+        }
         TypeExpr::Constrained(base, _, BaseForm::Text) if base.ends_with('?') => Some(Value::Null),
         // A quoted name is one name, which is not trimmed to another class.
         TypeExpr::Constrained(base, _, BaseForm::Quoted) => {
@@ -817,6 +819,9 @@ fn nullable_inner_default_seen(
         // amendment starts from the type it wraps.
         TypeExpr::Nullable(inner) => nullable_inner_default_seen(inner, scope, seen)
             .or_else(|| type_default_value(inner, scope)),
+        TypeExpr::Constrained(base, _, form) if *form != BaseForm::Text => {
+            nullable_inner_default_seen(&quoted_base_type(base, *form)?, scope, seen)
+        }
         TypeExpr::Constrained(name, _, form) => {
             let (name, nullable) = constrained_name(name, *form);
             match alias(name, seen) {
@@ -836,6 +841,10 @@ fn nullable_inner_default_seen(
         // An alias amends like the type it names, so look through it.
         TypeExpr::Named(name) => match alias(name, seen) {
             Some(target) => nullable_inner_default_seen(&target, scope, seen),
+            // A quoted class named `C?` is that class, not the nullable `C`.
+            None if !name.starts_with('*') && declared_class(scope, name).is_some() => {
+                declared_class(scope, name).map(as_instance)
+            }
             None if name.ends_with('?') => type_default_for_name(name.trim_end_matches('?'), scope),
             None => None,
         },
@@ -2349,6 +2358,19 @@ fn infer_selected_new(
     expr
 }
 
+/// The type a quoted base of a constrained type stands for: its name, as the
+/// parser reads a plain name, and nullable when the form says null matches.
+/// `None` for the text of a type, which readers take apart themselves.
+pub(super) fn quoted_base_type(base: &str, form: BaseForm) -> Option<crate::parser::TypeExpr> {
+    use crate::parser::TypeExpr;
+    let name = TypeExpr::Named(base.trim_start_matches('*').to_string());
+    match form {
+        BaseForm::Text => None,
+        BaseForm::Quoted => Some(name),
+        BaseForm::NullableQuoted => Some(TypeExpr::Nullable(Box::new(name))),
+    }
+}
+
 /// The name in the text of the base of a constrained type (without a default
 /// marker or a nullable suffix) and whether the type is nullable. A quoted
 /// base is one name, so a trailing `?` belongs to it.
@@ -2359,4 +2381,11 @@ pub(super) fn constrained_name(base: &str, form: BaseForm) -> (&str, bool) {
         BaseForm::Quoted => (base, false),
         BaseForm::NullableQuoted => (base, true),
     }
+}
+
+/// The class `name` names in `scope`, exactly as written.
+fn declared_class(scope: &Scope, name: &str) -> Option<Value> {
+    resolve_dotted(scope, name).filter(
+        |value| matches!(value, Value::Object(_, Some(source)) if source.kind == ObjectKind::Class),
+    )
 }

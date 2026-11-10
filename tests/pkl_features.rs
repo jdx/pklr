@@ -69,6 +69,8 @@ mod imports;
 mod numbers;
 #[path = "pkl_features/objects.rs"]
 mod objects;
+#[path = "pkl_features/quoted_types.rs"]
+mod quoted_types;
 #[path = "pkl_features/render.rs"]
 mod render;
 #[path = "pkl_features/strictness.rs"]

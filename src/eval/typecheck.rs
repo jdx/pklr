@@ -234,6 +234,9 @@ impl Evaluator {
             TypeExpr::Nullable(_) => return true,
             TypeExpr::Named(name) => name.trim_start_matches('*'),
             TypeExpr::Constrained(base, _, form) => {
+                if let Some(quoted) = quoted_base_type(base, *form) {
+                    return self.selected_type_nullable(&quoted, scope, seen);
+                }
                 let (name, nullable) = constrained_name(base, *form);
                 if nullable {
                     return true;
@@ -317,12 +320,12 @@ impl Evaluator {
             // A constraint is checked on the value afterwards and gives it no
             // default: follow its base, which names an alias or spells a union.
             TypeExpr::Constrained(base, _, form) => {
+                // A quoted name is one name, not a type to parse.
+                if let Some(quoted) = quoted_base_type(base, *form) {
+                    return self.union_amend_state_in(&quoted, scope, nullable, seen);
+                }
                 let (name, base_nullable) = constrained_name(base, *form);
                 let nullable = nullable || base_nullable;
-                // A quoted name is one name, not a type to parse.
-                if *form != BaseForm::Text {
-                    return UnionAmendState::NotUnion;
-                }
                 match crate::parser::parse_type_name(name) {
                     Ok(base) => self.union_amend_state_in(&base, scope, nullable, seen),
                     Err(_) => UnionAmendState::NotUnion,

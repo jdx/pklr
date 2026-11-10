@@ -914,3 +914,21 @@ fn a_long_alias_chain_is_walked_without_recursion() {
         assert_eq!(json["r"], true);
     }
 }
+
+#[test]
+fn quoted_bases_keep_their_defaults_and_unions_when_amended() {
+    // A nullable use of a quoted alias target amends the class named `C?`,
+    // not `C`.
+    let json = eval(
+        "class C { x = 1 }\nclass `C?` { y = 2 }\ntypealias L = `C?`\nclass H { p: L?(true) }\nr = new H { p { y = 5 } }",
+    );
+    assert_eq!(json, serde_json::json!({"r": {"p": {"y": 5}}}));
+    // A quoted built-in is that built-in: its default is the empty listing.
+    let json = eval("class H { items: `Listing`(true) }\nr = new H {}.items");
+    assert_eq!(json, serde_json::json!({"r": []}));
+    // A quoted alias of a union with no default cannot be amended.
+    let error = eval_fails(
+        "typealias U = Dynamic|String\nclass H { p: `U`(true) }\nr = new H { p { x = 1 } }",
+    );
+    assert!(error.contains("undefined"), "{error}");
+}
