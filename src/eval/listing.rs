@@ -333,6 +333,8 @@ fn resolves_to_listing_in(
                 && crate::parser::parse_type_name(base.trim_start_matches('*'))
                     .is_ok_and(|base| resolves_to_listing_in(&base, scope, seen, nesting + 1))
         }
+        // A bare `Listing` (`Listing(length <= 2)`) has no type arguments.
+        Some(TypeExpr::Named(name)) => name == "Listing",
         Some(other) => other.is_listing_type(),
         None => false,
     }
@@ -423,6 +425,11 @@ fn type_elem_class_in(
                 ListValue::new(ListKind::Listing, Vec::new()).with_elem_class(Some(inner)),
             )))
         }
+        // A bare `Listing`: its own elements have no class to build.
+        TypeExpr::Named(name) if name == "Listing" => Some(Arc::new(Value::List(ListValue::new(
+            ListKind::Listing,
+            Vec::new(),
+        )))),
         TypeExpr::Named(name) => listing_elem_class(std::slice::from_ref(name), scope),
         // `T(x > 0)`: the element is a `T`, whatever the predicate says.
         TypeExpr::Constrained(base, _) => {

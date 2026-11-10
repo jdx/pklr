@@ -4173,3 +4173,33 @@ class H { xs: Listing<CL> }\nh = new H { xs { new { new {} } } }\n",
         assert_eq!(*value, serde_json::json!([[{"x": 1}]]));
     }
 }
+
+// A constrained alias of a bare `Listing`, or of another constrained alias,
+// is a listing: empty amends of a nullable one give an empty listing and the
+// inner `new { ... }` elements of a `Listing` of it are listings. Checked
+// against pkl 0.32.2.
+#[test]
+fn constrained_bare_listing_aliases_resolve_to_listings() {
+    let temp = TestTempDir::new("pklr_constrained_bare_listing_alias");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "class T { x: Int = 1 }\ntypealias Two = Listing(length <= 2)\n\
+typealias TwoT = Listing<T>(length <= 2)\ntypealias Nest = TwoT(length >= 0)\n\
+typealias NestB = Two(length >= 0)\n\
+class H { a: Two?; b: TwoT?; c: Nest?; d: NestB? }\n\
+h = new H { a {}; b { new {} }; c { new {} }; d {} }\n\
+x: Listing<Two> = new { new {} }\ny: Listing<TwoT> = new { new { new {} } }\n\
+z: Listing<Nest> = new { new { new {} } }\nw: Listing<NestB> = new { new {} }\n",
+    )
+    .unwrap();
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
+    assert_eq!(
+        val["h"],
+        serde_json::json!({"a": [], "b": [{"x": 1}], "c": [{"x": 1}], "d": []})
+    );
+    assert_eq!(val["x"], serde_json::json!([[]]));
+    assert_eq!(val["y"], serde_json::json!([[{"x": 1}]]));
+    assert_eq!(val["z"], serde_json::json!([[{"x": 1}]]));
+    assert_eq!(val["w"], serde_json::json!([[]]));
+}
