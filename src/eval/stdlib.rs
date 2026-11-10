@@ -68,6 +68,88 @@ pub(super) fn typed_object(type_name: &str, members: ObjectMap) -> Value {
     Value::Object(Arc::new(members), Some(Arc::new(source)))
 }
 
+/// A `Dynamic` with the given members, such as `toDynamic()` builds. Its body
+/// spreads the members from a bound variable, so an amendment of it, which
+/// rebuilds the object from its body, keeps them and can replace any of them.
+pub(super) fn dynamic_object(
+    members: Arc<ObjectMap>,
+    entry_key: impl Fn(&Arc<str>) -> Value,
+) -> Value {
+    const MEMBERS: &str = "\0pklr:members";
+    const KEYS: &str = "\0pklr:member-keys";
+    let Value::Object(_, Some(source)) = typed_object("Dynamic", ObjectMap::default()) else {
+        unreachable!("typed_object builds an object with a source")
+    };
+    let mut source = Arc::unwrap_or_clone(source);
+    source.type_name = None;
+    source.kind = ObjectKind::Dynamic;
+    let mut scope = Scope::default();
+    scope.set(MEMBERS, Value::Object(members.clone(), None));
+    // A string key is a property, read from the bound variable: an amendment
+    // replaces it in place, and its body reads it by name. Any other key is an
+    // entry (`Map(1, "a").toDynamic()` is `[1] = "a"`), keyed by its value.
+    // Only an entry's key is resolved (to its original value, which the
+    // storage key cannot always give back), and only when there is one, so the
+    // usual object of properties builds no key list.
+    let is_entry = |key: &str| key.starts_with(crate::value::MAPPING_KEY_PREFIX);
+    let keys: Vec<Option<Value>> = if members.keys().any(|key| is_entry(key)) {
+        members
+            .keys()
+            .map(|key| is_entry(key).then(|| entry_key(key)))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let is_property = |i: usize| keys.get(i).is_none_or(Option::is_none);
+    if !keys.is_empty() {
+        let list = keys
+            .iter()
+            .map(|key| key.clone().unwrap_or(Value::Null))
+            .collect::<Vec<_>>();
+        scope.set(KEYS, Value::List(list.into()));
+    }
+    let member = |name: &Arc<str>| {
+        Expr::Index(
+            Box::new(Expr::Ident(MEMBERS.into())),
+            Box::new(Expr::String(name.clone())),
+        )
+    };
+    source.entries = members
+        .keys()
+        .enumerate()
+        .map(|(i, name)| {
+            if is_property(i) {
+                Entry::Property(Arc::new(Property {
+                    annotations: Vec::new(),
+                    modifiers: Vec::new(),
+                    name: name.clone(),
+                    type_ann: None,
+                    value: Some(member(name)),
+                    body: None,
+                    is_method: false,
+                }))
+            } else {
+                Entry::DynProperty(
+                    Expr::Index(
+                        Box::new(Expr::Ident(KEYS.into())),
+                        Box::new(Expr::Int(i as i64)),
+                    ),
+                    member(name),
+                )
+            }
+        })
+        .collect::<Vec<_>>()
+        .into();
+    source.captured = SourceScope::lazy(&scope, Vec::new(), Vec::new());
+    source.evaluated_properties = members
+        .keys()
+        .enumerate()
+        .filter(|(i, _)| is_property(*i))
+        .map(|(_, name)| name.clone())
+        .collect();
+    Value::Object(members, Some(Arc::new(source)))
+}
+
 /// A `Class` value for the class `type_name` with the given identity. Classes
 /// compare by identity, so it carries no members.
 pub(super) fn class_value(type_name: &str, type_identity: String) -> Value {
@@ -145,7 +227,7 @@ pub(super) fn get_class_unsupported(what: &str) -> Error {
 /// `Any.getClass()`: the `Class` of a value. A class from the standard library
 /// is identified as `pkl:base#Name`. A `Map`, and a `Dynamic` that a method
 /// built, have no source and are not told apart (see `object_kinds_match`), so
-/// they are an error rather than a guess. An `IntSeq` is a plain `List`.
+/// they are an error rather than a guess.
 pub(super) fn get_class(value: &Value) -> Result<Value> {
     let (name, identity) = match value {
         Value::Object(_, Some(source)) if source.kind == ObjectKind::Class => ("Class", None),
@@ -156,9 +238,11 @@ pub(super) fn get_class(value: &Value) -> Result<Value> {
         },
         Value::Object(_, None) => return Err(get_class_unsupported("a Map or a computed Dynamic")),
         Value::List(items) => match items.kind() {
+            ListKind::List if items.is_int_seq() => ("IntSeq", None),
             ListKind::List => ("List", None),
             ListKind::Listing => ("Listing", None),
             ListKind::Set => ("Set", None),
+            ListKind::Dynamic => ("Dynamic", None),
         },
         other => (other.type_name(), None),
     };

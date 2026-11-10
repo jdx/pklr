@@ -383,7 +383,9 @@ pub(super) fn expr_reads_module_super(expr: &Expr) -> bool {
         Expr::Let(_, value, body) => {
             expr_reads_module_super(value) || expr_reads_module_super(body)
         }
-        Expr::Is(value, _) | Expr::As(value, _) => expr_reads_module_super(value),
+        Expr::Is(value, _) | Expr::As(value, _) | Expr::Checked(value, _) => {
+            expr_reads_module_super(value)
+        }
         Expr::Lambda(_, body) => expr_reads_module_super(body),
         Expr::StringInterpolation(parts) => parts.iter().any(
             |part| matches!(part, StringInterpPart::Expr(expr) if expr_reads_module_super(expr)),

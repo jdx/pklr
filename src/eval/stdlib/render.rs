@@ -2,7 +2,7 @@
 //! produce, and how error messages quote values. Ports pkl-core's
 //! `VmValueRenderer` (single-line mode) and `ValueFormatter`.
 
-use crate::value::{ObjectKind, ObjectSource, Value};
+use crate::value::{ListKind, ListValue, ObjectKind, ObjectSource, Value};
 
 /// Java's `Double.toString`, which pkl uses to print a `Float`: the shortest
 /// digits that round-trip, in plain notation for magnitudes in
@@ -269,6 +269,12 @@ fn class_display_name(source: &ObjectSource) -> String {
     }
 }
 
+/// Whether pkl writes a list as an object body (`{ 1; 2 }`) rather than as a
+/// `List(...)` or `Set(...)` call: a `Listing` and an element-only `Dynamic`.
+fn is_braced_list(items: &ListValue) -> bool {
+    matches!(items.kind(), ListKind::Listing | ListKind::Dynamic)
+}
+
 /// Render `value`. `explicit` is false for an object that is a property's
 /// value, which pkl writes without its `new <Class>` prefix.
 fn render(value: &Value, explicit: bool, out: &mut String) {
@@ -278,8 +284,30 @@ fn render(value: &Value, explicit: bool, out: &mut String) {
         Value::Int(n) => out.push_str(&n.to_string()),
         Value::Float(f) => out.push_str(&format_float(*f)),
         Value::String(s) => out.push_str(&quote_string(s, false)),
+        Value::List(items) if is_braced_list(items) => {
+            if explicit {
+                out.push_str(if items.kind() == ListKind::Dynamic {
+                    "new Dynamic "
+                } else {
+                    "new Listing "
+                });
+            }
+            out.push('{');
+            for (i, item) in items.iter().enumerate() {
+                out.push_str(if i == 0 { " " } else { "; " });
+                render(item, true, out);
+            }
+            if !items.is_empty() {
+                out.push(' ');
+            }
+            out.push('}');
+        }
         Value::List(items) => {
-            out.push_str("List(");
+            out.push_str(if items.kind() == ListKind::Set {
+                "Set("
+            } else {
+                "List("
+            });
             for (i, item) in items.iter().enumerate() {
                 if i > 0 {
                     out.push_str(", ");
@@ -312,12 +340,25 @@ fn render(value: &Value, explicit: bool, out: &mut String) {
                     out.push_str(&quote_string(key, false));
                     out.push(']');
                 }
-                out.push_str(if matches!(member, Value::Object(..)) {
-                    " "
-                } else {
-                    " = "
-                });
+                out.push_str(
+                    if matches!(member, Value::Object(..))
+                        || matches!(member, Value::List(items) if is_braced_list(items))
+                    {
+                        " "
+                    } else {
+                        " = "
+                    },
+                );
                 render(member, false, out);
+            }
+            // The elements of a `Dynamic` that has members too follow them.
+            for element in source
+                .as_deref()
+                .map_or(&[][..], |source| &source.elements[..])
+            {
+                out.push_str(if first { " " } else { "; " });
+                first = false;
+                render(element, true, out);
             }
             if !first {
                 out.push(' ');
