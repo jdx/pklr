@@ -105,7 +105,10 @@ fn write_trace_value(value: &Value, out: &mut String, top: bool) {
                 out.push_str(type_name);
                 out.push(' ');
             }
-            if map.is_empty() {
+            // A Dynamic with members and elements prints its members first,
+            // then its elements, as `toString()` does.
+            let elements: &[Value] = source.as_ref().map_or(&[], |source| &source.elements);
+            if map.is_empty() && elements.is_empty() {
                 out.push_str("{}");
                 return;
             }
@@ -135,6 +138,12 @@ fn write_trace_value(value: &Value, out: &mut String, top: bool) {
                     out.push_str(" = ");
                     write_trace_value(member, out, true);
                 }
+            }
+            for (i, element) in elements.iter().enumerate() {
+                if i > 0 || !map.is_empty() {
+                    out.push_str("; ");
+                }
+                write_trace_value(element, out, true);
             }
             out.push_str(" }");
         }
@@ -243,6 +252,47 @@ mod tests {
         assert_eq!(
             trace_value(&Value::Object(Arc::new(outer), None)),
             r#"new Dynamic { Parrot { name = "Parrot" }; ["a b"] = 1 }"#
+        );
+        // A Dynamic with members and elements prints its members, then its
+        // elements, as pkl 0.32.2 does for `new Dynamic { 1; x = 2 }`.
+        let mixed = |members: ObjectMap, elements: Vec<Value>| {
+            let source = crate::value::ObjectSource {
+                entries: Vec::new().into(),
+                captured: Default::default(),
+                body_members: Default::default(),
+                is_open: true,
+                is_abstract: false,
+                type_name: None,
+                type_identity: None,
+                parent_type_names: Vec::new(),
+                parent_type_identities: Vec::new(),
+                entry_scopes: Vec::new(),
+                evaluated_properties: Vec::new(),
+                elements,
+                mapping_value_types: Vec::new(),
+                deprecated: Default::default(),
+                poisoned_members: None,
+                declared_as: None,
+                kind: crate::value::ObjectKind::Dynamic,
+                is_parsed_json: false,
+                is_module: false,
+                prototype: None,
+            };
+            Value::Object(Arc::new(members), Some(Arc::new(source)))
+        };
+        let mut members = ObjectMap::default();
+        members.insert("x".into(), Value::Int(2));
+        assert_eq!(
+            trace_value(&mixed(members.clone(), vec![Value::Int(1), Value::Int(3)])),
+            "new Dynamic { x = 2; 1; 3 }"
+        );
+        assert_eq!(
+            trace_value(&mixed(ObjectMap::default(), vec![Value::Int(1)])),
+            "new Dynamic { 1 }"
+        );
+        assert_eq!(
+            trace_value(&mixed(ObjectMap::default(), Vec::new())),
+            "new Dynamic {}"
         );
         assert_eq!(
             trace_message(
