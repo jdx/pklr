@@ -536,9 +536,12 @@ impl Evaluator {
             // to start from. Its aliases resolve where the parent declared the
             // property, which the amending scope may not see.
             if prop.value.is_none() && prop.body.is_some() {
-                let declaring = parent_scope
-                    .get_or_insert_with(|| restore_scope(&capture_object_source_scope(parent)))
-                    .clone();
+                let declaring = match parent.entry_scopes.get(index).and_then(Clone::clone) {
+                    Some(captured) => restore_scope(&captured),
+                    None => parent_scope
+                        .get_or_insert_with(|| restore_scope(&capture_object_source_scope(parent)))
+                        .clone(),
+                };
                 let state = self.union_amend_state(ty, &declaring);
                 if matches!(
                     state,

@@ -5727,3 +5727,70 @@ fn amending_nullable_union_with_aliased_dynamic_alternative_is_accepted() {
         .is_ok()
     );
 }
+
+#[test]
+fn marked_cyclic_local_alias_is_an_error_not_a_crash() {
+    // A recursion here would overflow the stack and abort the test binary.
+    for src in [
+        "local typealias A = *A|Int\nclass C { x: A }\nc = new C {}\n",
+        "local typealias A = *B|Int\nlocal typealias B = *A|String\nclass C { x: A }\nc = new C {}\n",
+        "local typealias A = *A|Int\nx: A\n",
+    ] {
+        let error = eval_fails(src);
+        assert!(error.contains("cyclic"), "{src}: {error}");
+    }
+}
+
+#[test]
+fn marked_user_class_named_like_a_builtin_keeps_its_default() {
+    // A class declaration shadows `Map` and `IntSeq`, so `*Map` takes the
+    // class's default as pkl does.
+    for name in [
+        "Map", "IntSeq", "Duration", "DataSize", "Regex", "Pair", "Any",
+    ] {
+        let src = format!(
+            "class {name} {{ n: Int = 1 }}\nclass C {{ value: *{name}|String }}\nc = new C {{}}\n"
+        );
+        assert_eq!(
+            eval(&src)["c"],
+            serde_json::json!({"value": {"n": 1}}),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn marked_builtin_map_and_intseq_have_no_default() {
+    let json = eval("class C { value: *Map<String, Int>|String }\nc = new C {}\n");
+    assert_eq!(json["c"], serde_json::json!({}));
+    let json = eval("class C { value: *IntSeq|String }\nc = new C {}\n");
+    assert_eq!(json["c"], serde_json::json!({}));
+}
+
+#[test]
+fn amending_marked_alias_of_unmarked_union_is_undefined() {
+    // An alias alternative supplies the default its own union marks, and the
+    // alias here marks none.
+    let lib = "typealias Args = Listing<String>|Ref\nclass Ref { path: String }\nclass C { argv: *Args|Int }\n";
+    let error = eval_union_files(
+        "marked_alias",
+        &[("lib.pkl", lib), ("main.pkl", UNION_MAIN)],
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains(UNDEFINED), "{error}");
+}
+
+#[test]
+fn amending_inherited_union_property_uses_the_declaring_modules_aliases() {
+    // `Args` is private to lib.pkl; `D` is declared where it is not visible.
+    let main = "import \"lib.pkl\" as L\nclass D extends L.C {}\nx = new D { argv { \"a\" } }\n";
+    let lib = "typealias Args = Listing<String>|Ref\nclass Ref { path: String }\nopen class C { argv: Args }\n";
+    let error = eval_union_files("inherited", &[("lib.pkl", lib), ("main.pkl", main)]).unwrap_err();
+    assert!(error.to_string().contains(UNDEFINED), "{error}");
+
+    // A `*` default alternative on the declaring alias keeps it valid.
+    let lib = "typealias Args = *Listing<String>|Ref\nclass Ref { path: String }\nopen class C { argv: Args }\n";
+    let json =
+        eval_union_files("inherited_default", &[("lib.pkl", lib), ("main.pkl", main)]).unwrap();
+    assert_eq!(json["x"]["argv"], serde_json::json!(["a"]));
+}

@@ -162,15 +162,31 @@ impl Evaluator {
                 if prop.value.is_some() || prop.body.is_none() || prop.type_ann.is_some() {
                     continue;
                 }
-                let Some(ty) = base_entries.iter().rev().find_map(|base| match base {
-                    Entry::Property(base) if base.name == prop.name => base.type_ann.as_ref(),
-                    _ => None,
-                }) else {
+                let Some((index, ty)) =
+                    base_entries
+                        .iter()
+                        .enumerate()
+                        .rev()
+                        .find_map(|(index, base)| match base {
+                            Entry::Property(base) if base.name == prop.name => {
+                                base.type_ann.as_ref().map(|ty| (index, ty))
+                            }
+                            _ => None,
+                        })
+                else {
                     continue;
                 };
-                let declaring = declaring.get_or_insert_with(|| {
-                    restore_scope(&capture_object_source_scope(base_source))
-                });
+                // An inherited property keeps the scope of the class that
+                // declared it, which can be another module with private aliases.
+                let declaring = match base_source.entry_scopes.get(index).and_then(Clone::clone) {
+                    Some(captured) => restore_scope(&captured),
+                    None => declaring
+                        .get_or_insert_with(|| {
+                            restore_scope(&capture_object_source_scope(base_source))
+                        })
+                        .clone(),
+                };
+                let declaring = &declaring;
                 let state = self.union_amend_state(ty, declaring);
                 amendment_scope.values.insert(
                     union_amend_marker(&prop.name).as_str().into(),

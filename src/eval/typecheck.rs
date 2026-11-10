@@ -97,7 +97,16 @@ impl Evaluator {
             TypeExpr::Named(name) => name.trim_start_matches('*'),
             TypeExpr::Constrained(base, _) => base.trim_end_matches('?'),
             TypeExpr::Generic(name, _) => name.as_str(),
-            _ => return false,
+            // An alias to a union supplies the default of the alternative it
+            // marks with `*`, and none when it marks nothing. A nullable one
+            // starts from null.
+            TypeExpr::Union(variants) => {
+                return match variants.iter().find(|variant| is_default_type(variant)) {
+                    Some(marked) => self.selected_type_lacks_default(marked, scope, depth + 1),
+                    None => true,
+                };
+            }
+            TypeExpr::Nullable(_) => return true,
         };
         let name = name.split('<').next().unwrap_or(name);
         if let Some((alias, alias_scope)) = self.resolve_type_alias(name, scope) {
