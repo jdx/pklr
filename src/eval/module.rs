@@ -35,6 +35,46 @@ impl Evaluator {
         self.eval_module_with_scope(module, path, depth, None, None)
     }
 
+    /// For each type alias `path` inherits from the module it amends or
+    /// extends, the module that declares it. Aliases the module declares
+    /// itself, and those of a base that is not a local file, are left out.
+    fn inherited_alias_definers(
+        &mut self,
+        module: &Module,
+        path: &Path,
+        type_aliases: &crate::value::TypeAliasMap,
+    ) -> HashMap<Arc<str>, PathBuf> {
+        let mut definers = HashMap::default();
+        let Some(uri) = module.amends.as_ref().or(module.extends.as_ref()) else {
+            return definers;
+        };
+        if uri.contains("://") && !uri.starts_with("file://") {
+            return definers;
+        }
+        let Ok(parent) = self.local_file_path(path, uri) else {
+            return definers;
+        };
+        let Some(base) = self.module_scopes.get(&parent) else {
+            return definers;
+        };
+        for name in type_aliases.keys() {
+            let own = module
+                .body
+                .iter()
+                .any(|entry| matches!(entry, Entry::TypeAlias(own, _) if own == &**name));
+            if own || !base.type_aliases.contains_key(name) {
+                continue;
+            }
+            let definer = base
+                .alias_definers
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| parent.clone());
+            definers.insert(name.clone(), definer);
+        }
+        definers
+    }
+
     pub(super) fn layer_evaluated_module_scope(&self, path: &Path, scope: &mut Scope) {
         let Some(inherited) = self.module_scopes.get(path) else {
             return;
@@ -611,11 +651,14 @@ impl Evaluator {
             };
             effective_late_properties.insert(prop.name.clone(), prop);
         }
+        let type_aliases = scope.flatten_type_aliases();
+        let alias_definers = self.inherited_alias_definers(module, path, &type_aliases);
         self.module_scopes.insert(
             path.to_path_buf(),
             ModuleScopeSnapshot {
                 values: scope.flatten(),
-                type_aliases: scope.flatten_type_aliases(),
+                type_aliases,
+                alias_definers,
                 module_identities: scope.flatten_module_identities(),
                 late_properties: effective_late_properties.into_values().collect(),
             },

@@ -52,7 +52,15 @@ impl Evaluator {
         identity: &str,
         name: &str,
     ) -> Option<(crate::parser::TypeExpr, Scope)> {
-        let key = self.module_scope_key(identity)?;
+        let mut key = self.module_scope_key(identity)?;
+        // An inherited alias resolves in the module that declares it.
+        if let Some(definer) = self
+            .module_scopes
+            .get(&key)
+            .and_then(|snapshot| snapshot.alias_definers.get(name))
+        {
+            key = definer.clone();
+        }
         let mut module_scope = Scope::default();
         self.layer_evaluated_module_scope(&key, &mut module_scope);
         // The module's own imports resolve the aliases it names.

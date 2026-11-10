@@ -362,6 +362,54 @@ fn the_names_in_an_imported_type_alias_are_checked() {
 }
 
 #[test]
+fn an_inherited_type_alias_resolves_in_the_module_that_declares_it() {
+    let temp = TestTempDir::new("pklr_test_is_inherited_alias");
+    let write = |name: &str, src: &str| std::fs::write(temp.path().join(name), src).unwrap();
+    write("dep.pkl", "class T {}\ntypealias U = Int|Zed\n");
+    write("dep2.pkl", "class Other {}\n");
+    write(
+        "base.pkl",
+        "open module base\nimport \"dep.pkl\"\ntypealias A = dep.T\ntypealias B = dep.U\ntypealias E = A|Int\n",
+    );
+    write("child.pkl", "open module child\nextends \"base.pkl\"\n");
+    write("gc.pkl", "extends \"child.pkl\"\n");
+    write("ch2.pkl", "amends \"base.pkl\"\n");
+    // The same local name is bound to another module here.
+    write(
+        "shadow.pkl",
+        "extends \"base.pkl\"\nimport \"dep2.pkl\" as dep\ntypealias F = dep.T\ntypealias G = A\n",
+    );
+    let eval_main = |module: &str, body: &str| {
+        let path = temp.path().join("main.pkl");
+        std::fs::write(&path, format!("import \"{module}.pkl\"\nr = {body}\n")).unwrap();
+        pklr::eval_to_json(&path)
+    };
+    for (module, body, expected) in [
+        ("child", "1 is child.A", false),
+        ("child", "1 is child.E", true),
+        ("gc", "1 is gc.A", false),
+        ("ch2", "1 is ch2.A", false),
+        ("shadow", "1 is shadow.A", false),
+        ("shadow", "1 is shadow.G", false),
+    ] {
+        assert_eq!(
+            eval_main(module, body).unwrap(),
+            serde_json::json!({"r": expected}),
+            "{body}"
+        );
+    }
+    for (module, body) in [
+        ("child", "null is child.B"),
+        ("gc", "null is gc.B"),
+        ("ch2", "null is ch2.B"),
+        ("shadow", "null is shadow.B"),
+    ] {
+        let error = eval_main(module, body).unwrap_err().to_string();
+        assert!(error.contains("Cannot find type `Zed`."), "{body}: {error}");
+    }
+}
+
+#[test]
 fn to_dynamic_works_on_a_module_that_carries_a_source() {
     let temp = TestTempDir::new("pklr_test_to_dynamic_module");
     std::fs::write(temp.path().join("m.pkl"), "@Deprecated\nold = 1\nx = 2\n").unwrap();
