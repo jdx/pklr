@@ -459,17 +459,43 @@ impl Evaluator {
         );
         cx.default_template = self.eval_default_template(&cx, &st)?;
         let cx = cx;
+        // An element, spread or generator may read a member declared after it
+        // (`new Dynamic { z; z = 1 }`). One that fails while a member follows
+        // is retried once the members are bound.
+        let last_member = entries
+            .iter()
+            .any(|entry| matches!(entry, Entry::Elem(_) | Entry::Spread(_)))
+            .then(|| entries.iter().rposition(entry_is_member))
+            .flatten();
+        let mut deferred_elements: Vec<(usize, usize)> = Vec::new();
         for (entry_index, entry) in entries.iter().enumerate() {
+            let deferrable = last_member.is_some_and(|last| entry_index < last)
+                && matches!(
+                    entry,
+                    Entry::Elem(_)
+                        | Entry::Spread(_)
+                        | Entry::ForGenerator(_)
+                        | Entry::WhenGenerator(_)
+                );
             // Only a failure while locals are still pending is deferred and
             // retried, so the state is snapshotted only then. Entries never add
             // to `failed_locals`, so empty before means empty after and the
-            // rollback arm below cannot be taken.
-            let rollback = (!st.failed_locals.is_empty()).then(|| st.clone());
+            // rollback arm below cannot be taken. A bare element changes
+            // nothing when it fails; a generator may have added some.
+            let rollback = (!st.failed_locals.is_empty()
+                || (deferrable && !matches!(entry, Entry::Elem(_))))
+            .then(|| st.clone());
             match self.eval_output_entry(&cx, &mut st, entry_index, entry) {
                 Ok(()) => {}
                 Err(Error::Eval(message)) if rollback.is_some() && !st.failed_locals.is_empty() => {
                     st = rollback.expect("checked by the guard");
                     failed_entries.push((entry_index, message));
+                }
+                Err(Error::Eval(_)) if deferrable => {
+                    if let Some(rollback) = rollback {
+                        st = rollback;
+                    }
+                    deferred_elements.push((entry_index, st.elements.len()));
                 }
                 Err(error) => return Err(error),
             }
@@ -478,6 +504,17 @@ impl Evaluator {
         // read a still-pending local. Once no deferred property recovers, the
         // first current error is the one Pkl surfaces.
         self.retry_failed_properties(&cx, &mut st)?;
+        // Elements that read a later member are evaluated now that it is
+        // bound, and keep their place among the elements.
+        let mut inserted = 0;
+        for (entry_index, position) in deferred_elements {
+            let before = st.elements.len();
+            self.eval_output_entry(&cx, &mut st, entry_index, &entries[entry_index])?;
+            let added = st.elements.split_off(before);
+            let at = position + inserted;
+            inserted += added.len();
+            st.elements.splice(at..at, added);
+        }
         // Retry non-property output entries only after ordinary properties
         // have had a chance to resolve their deferred local dependencies.
         // This includes nested generator bodies, spreads, elements, and
@@ -1767,5 +1804,15 @@ impl ReceiverMembers<'_> {
         self.own
             .get(name)
             .or_else(|| self.outer.and_then(|outer| outer.get(name)))
+    }
+}
+
+/// Whether `entry` declares a member of its body that an earlier element can
+/// read: a property that is not local, or a dynamic one.
+fn entry_is_member(entry: &Entry) -> bool {
+    match entry {
+        Entry::Property(prop) => !has_modifier(&prop.modifiers, crate::parser::Modifier::Local),
+        Entry::DynProperty(..) => true,
+        _ => false,
     }
 }

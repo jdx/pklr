@@ -799,3 +799,55 @@ b = c.l
     assert_eq!(json["a"], true);
     assert_eq!(json["b"], serde_json::json!([1, 2]));
 }
+
+// An element, spread or generator may read a member declared after it, and
+// keeps its place among the elements. Compared with `pkl eval` 0.32.2.
+#[test]
+fn an_element_may_read_a_member_declared_later() {
+    let json = eval(
+        r#"
+local d = new Dynamic { y { z; z = 1 } }
+a1 = d.y.toList()
+a2 = d.y.z
+local t = new Dynamic { z; z = 1 }
+b = t.toList()
+local o = new Dynamic { z; 5; z = 1 }
+c1 = o.toList()
+local e = new Dynamic { 5; z; k = 2; w; w = 3; z = 1 }
+c2 = e.toList()
+"#,
+    );
+    assert_eq!(json["a1"], serde_json::json!([1]));
+    assert_eq!(json["a2"], 1);
+    assert_eq!(json["b"], serde_json::json!([1]));
+    assert_eq!(json["c1"], serde_json::json!([1, 5]));
+    assert_eq!(json["c2"], serde_json::json!([5, 1, 3]));
+}
+
+#[test]
+fn a_generator_may_read_a_member_declared_later() {
+    let json = eval(
+        r#"
+local d = new Dynamic { y { when (true) { z }; z = 1 } }
+a = d.y.toList()
+local e = new Dynamic { y { for (i in List(1)) { z + i }; z = 1 } }
+b = e.y.toList()
+local f = new Dynamic { y { 7; for (i in List(1, 2)) { z + i }; z = 10 } }
+c = f.y.toList()
+"#,
+    );
+    assert_eq!(json["a"], serde_json::json!([1]));
+    assert_eq!(json["b"], serde_json::json!([2]));
+    assert_eq!(json["c"], serde_json::json!([7, 11, 12]));
+}
+
+#[test]
+fn a_member_may_read_an_earlier_member_of_a_mixed_body() {
+    let json = eval(
+        r#"
+local d = new Dynamic { y { 5; k = 2; z = k } }
+a = d.y.z
+"#,
+    );
+    assert_eq!(json["a"], 2);
+}
