@@ -467,25 +467,35 @@ impl Evaluator {
                 let Some(value) = value else {
                     continue;
                 };
-                let check_scope: &Scope = if let Some(declaring) = declaring_scope {
-                    declaring
+                // `map` omits hidden members, while an object's saved scope
+                // keeps their final values. Both are visible to a property
+                // constraint on this instance.
+                let add_members = |members: &mut Scope| {
+                    if let Some(source) = source {
+                        let object_scope = source.scope();
+                        for name in &source.evaluated_properties {
+                            if let Some(value) = object_scope.get(&**name) {
+                                members.set(name, value.clone());
+                            }
+                        }
+                    }
+                    for (name, value) in map.iter() {
+                        members.set_name(Arc::clone(name), value.clone());
+                    }
+                };
+                // The declaring scope supplies types and aliases; the final
+                // members of this instance win over its saved values.
+                let declared_scope = declaring_scope.map(|declaring| {
+                    let mut members = declaring.child();
+                    add_members(&mut members);
+                    members
+                });
+                let check_scope: &Scope = if let Some(declared) = &declared_scope {
+                    declared
                 } else if type_has_constraint(type_ann, &eval_scope) {
                     member_scope.get_or_insert_with(|| {
                         let mut members = eval_scope.child();
-                        // `map` omits hidden members, while an object's saved
-                        // scope keeps their final values. Both are visible to
-                        // a property constraint on this instance.
-                        if let Some(source) = source {
-                            let object_scope = source.scope();
-                            for name in &source.evaluated_properties {
-                                if let Some(value) = object_scope.get(&**name) {
-                                    members.set(name, value.clone());
-                                }
-                            }
-                        }
-                        for (name, value) in map.iter() {
-                            members.set_name(Arc::clone(name), value.clone());
-                        }
+                        add_members(&mut members);
                         members
                     })
                 } else {

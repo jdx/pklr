@@ -396,21 +396,26 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// Whether the module names the type alias `name` anywhere besides its
-    /// own declaration and the module-level aliases' definitions.
+    /// Whether the module uses the type alias `name` as a type: in an
+    /// annotation, `is`, `as`, `new`, a type argument or a constraint, or in
+    /// the definition of an alias that is used. A property or variable of the
+    /// same name is not a use.
     fn is_type_alias_used(&self, name: &str, aliases: &[(&str, &TypeExpr)]) -> bool {
-        let mentions = self
-            .tokens
-            .iter()
-            .filter(|token| matches!(&token.kind, TokenKind::Ident(ident) if ident == name))
-            .count();
-        let mut declared = 1;
-        for (_, ty) in aliases {
+        let mut used: std::collections::HashSet<String> = self.type_uses.clone();
+        let mut pending: Vec<String> = used.iter().cloned().collect();
+        while let Some(current) = pending.pop() {
+            let Some((_, ty)) = aliases.iter().find(|(alias, _)| *alias == current) else {
+                continue;
+            };
             let mut names = Vec::new();
             collect_type_names(ty, &mut names);
-            declared += names.iter().filter(|other| *other == name).count();
+            for referenced in names {
+                if used.insert(referenced.clone()) {
+                    pending.push(referenced);
+                }
+            }
         }
-        mentions > declared
+        used.contains(name)
     }
 }
 

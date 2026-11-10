@@ -3687,3 +3687,110 @@ fn self_referential_module_aliases_are_rejected() {
         );
     }
 }
+
+// A constraint on an inherited listing property reads the amended instance's
+// final members (overrides, later amendments, hidden members), while its types
+// and aliases come from the declaring scope. Checked against pkl 0.32.2.
+#[test]
+fn listing_constraints_read_the_amended_instance_members() {
+    let temp = TestTempDir::new("pklr_listing_constraint_members");
+    let dir = temp.path();
+    let ok = [
+        "class T {}\nclass H { limit: Int = 0; xs: Listing<T>(length <= limit) }\n\
+h = new H { limit = 1; xs { new {} } }\n",
+        "class T {}\nopen class H { limit: Int = 0; xs: Listing<T>(length <= limit) }\n\
+class S extends H { limit = 1 }\nh = new S { xs { new {} } }\n",
+        "class T {}\nclass H { limit: Int = 0; xs: Listing<T>(length <= limit) }\n\
+base = new H { limit = 1; xs { new {} } }\nh = (base) { limit = 2; xs { new {} } }\n",
+        "class T {}\ntypealias Lim = Listing<T>(this.length <= 1)\nclass H { limit: Int = 0; xs: Lim }\n\
+h = new H { limit = 1; xs { new {} } }\n",
+        "class T {}\nclass H { hidden limit: Int = 0; xs: Listing<T>(length <= limit) }\n\
+h = new H { limit = 1; xs { new {} } }\n",
+    ];
+    for (index, source) in ok.into_iter().enumerate() {
+        let path = dir.join(format!("ok{index}.pkl"));
+        std::fs::write(&path, source).unwrap();
+        let val = pklr::eval_to_json(&path).unwrap_or_else(|err| panic!("{source}: {err}"));
+        // The amended-twice case appends a second element.
+        let expected = if source.contains("limit = 2") {
+            serde_json::json!([{}, {}])
+        } else {
+            serde_json::json!([{}])
+        };
+        assert_eq!(val["h"]["xs"], expected, "{source}");
+    }
+    let bad = [
+        "class T {}\nclass H { limit: Int = 0; xs: Listing<T>(length <= limit) }\n\
+h = new H { limit = 1; xs { new {}; new {} } }\n",
+        "class T {}\ntypealias Lim = Listing<T>(length <= 2)\nclass H { limit: Int = 0; xs: Lim }\n\
+h = new H { limit = 1; xs { new {}; new {}; new {} } }\n",
+    ];
+    for (index, source) in bad.into_iter().enumerate() {
+        let path = dir.join(format!("bad{index}.pkl"));
+        std::fs::write(&path, source).unwrap();
+        assert!(pklr::eval_to_json(&path).is_err(), "{source}");
+    }
+}
+
+// A cyclic `local` alias is an error only where it is used as a type. A
+// property or variable of the same name is not a use. Checked against pkl
+// 0.32.2.
+#[test]
+fn cyclic_local_alias_is_an_error_only_when_used_as_a_type() {
+    let temp = TestTempDir::new("pklr_cyclic_local_alias_use");
+    let dir = temp.path();
+    let alias = "local typealias L = List<L>\n";
+    let unused = [
+        "class C { L: Int = 1 }\nx = 1\n",
+        "local typealias M = L\nx = 1\n",
+        "typealias P = Int(this is L)\nx = 1\n",
+        "x = new Dynamic { L = 2 }\n",
+    ];
+    for (index, tail) in unused.into_iter().enumerate() {
+        let path = dir.join(format!("unused{index}.pkl"));
+        std::fs::write(&path, format!("{alias}{tail}")).unwrap();
+        let val = pklr::eval_to_json(&path).unwrap_or_else(|err| panic!("{tail}: {err}"));
+        assert!(val.get("x").is_some(), "{tail}");
+    }
+    let used = [
+        "x = 1 is L\n",
+        "x = 1 as L\n",
+        "function f(a: L) = 1\nx = 1\n",
+        "class C { y: Listing<L> }\nx = 1\n",
+        "local typealias M = L\ny: M = List()\n",
+        "x = new Listing<L> {}\n",
+    ];
+    for (index, tail) in used.into_iter().enumerate() {
+        let path = dir.join(format!("used{index}.pkl"));
+        std::fs::write(&path, format!("{alias}{tail}")).unwrap();
+        let err = pklr::eval_to_json(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("must not be cyclic"),
+            "{tail}: {err}"
+        );
+    }
+}
+
+// A cycle between two `local` aliases is an error when one is used as a type,
+// and not when only a parameter, generator variable or property shares their
+// names. Checked against pkl 0.32.2.
+#[test]
+fn cyclic_local_aliases_follow_uses_through_each_other() {
+    let temp = TestTempDir::new("pklr_cyclic_local_alias_through_alias");
+    let dir = temp.path();
+    let aliases = "local typealias A = B\nlocal typealias B = A\n";
+    std::fs::write(dir.join("used.pkl"), format!("{aliases}x: A = 1\n")).unwrap();
+    let err = pklr::eval_to_json(&dir.join("used.pkl")).unwrap_err();
+    assert!(err.to_string().contains("must not be cyclic"), "{err}");
+    std::fs::write(
+        dir.join("unused.pkl"),
+        format!(
+            "{aliases}function f(A: Int, B: Int) = A + B\ny = f(1, 2)\n\
+z = new Listing {{ for (A in List(1)) {{ A }} }}\n"
+        ),
+    )
+    .unwrap();
+    let val = pklr::eval_to_json(&dir.join("unused.pkl")).unwrap();
+    assert_eq!(val["y"], 3);
+    assert_eq!(val["z"], serde_json::json!([1]));
+}
