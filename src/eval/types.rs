@@ -1510,13 +1510,39 @@ fn infer_members_in(
             Entry::Elem(Expr::New(None, body, _)) if is_listing => {
                 Entry::Elem(Expr::InferredNew(member_ty.clone(), body.clone()))
             }
-            // A mapping value whose own members need inferring, or any value
-            // of an amended body. Other values keep their untyped `new`,
-            // which honors the mapping's `default`.
+            // A listing index assignment (`[0] = new { ... }`) takes the
+            // element type like a plain element does.
+            Entry::DynProperty(key, Expr::New(None, body, _)) if is_listing => Entry::DynProperty(
+                key.clone(),
+                Expr::InferredNew(member_ty.clone(), body.clone()),
+            ),
+            // A mapping value whose own members need inferring stays an entry
+            // body, which amends the mapping's `default`, with its members
+            // inferred. Other values keep their untyped `new`, which honors
+            // the `default` too.
             Entry::DynProperty(key, Expr::New(None, body, _))
                 if !is_listing
-                    && (amended || nested_collection_type(member_ty, scope).is_some()) =>
+                    && !amended
+                    && nested_collection_type(member_ty, scope).is_some() =>
             {
+                let body = infer_collection_body(member_ty, body, scope, false)
+                    .unwrap_or_else(|| body.clone());
+                let is_listing_value = matches!(
+                    resolve_collection_type(member_ty, scope, 0),
+                    Some(crate::parser::TypeExpr::Generic(name, _)) if name == "Listing"
+                );
+                if is_listing_value {
+                    Entry::DynProperty(key.clone(), Expr::ObjectBody(body))
+                } else {
+                    Entry::DynProperty(
+                        key.clone(),
+                        Expr::InferredNew(member_ty.clone(), body.clone()),
+                    )
+                }
+            }
+            // Any value of an amended body: it has no value types of its own
+            // to fall back on.
+            Entry::DynProperty(key, Expr::New(None, body, _)) if !is_listing && amended => {
                 Entry::DynProperty(
                     key.clone(),
                     Expr::InferredNew(member_ty.clone(), body.clone()),

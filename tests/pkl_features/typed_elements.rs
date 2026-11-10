@@ -1467,3 +1467,49 @@ fn function_typed_parameters_accept_std_values() {
     }
     eval_fails("function f(x: Function1<Int, Int>): Int = 1\na = f(1)\n");
 }
+
+// pkl infers the element type of an index assignment in a listing amendment
+// (`[0] = new { 2 }`) like that of a plain element (checked with pkl 0.32.2).
+#[test]
+fn index_assignments_infer_nested_listing_elements() {
+    let json = eval(
+        "class C { l: Listing<Listing<Int>> = new { new { 1 } } }\n\
+         c: C = new { l { [0] = new { 2 } } }\n",
+    );
+    assert_eq!(json["c"]["l"], serde_json::json!([[2]]));
+    eval_fails(
+        "class C { l: Listing<Listing<Int>> = new { new { 1 } } }\n\
+         c: C = new { l { [0] = new { \"x\" } } }\n",
+    );
+}
+
+// An untyped mapping value of a nested listing type amends the mapping's
+// `default` instead of replacing it. pkl takes `default` as a function and
+// applies it the same way (`default = (k) -> new Listing { ... }` gives
+// `[[9], [1]]`); pklr also accepts a listing as the `default`, which pkl
+// rejects.
+#[test]
+fn nested_listing_values_amend_the_mapping_default() {
+    let json = eval(
+        "a: Mapping<String, Listing<Listing<Int>>> = new {\n\
+           default = new Listing { new Listing { 9 } }\n\
+           [\"k\"] = new { new Listing { 1 } }\n\
+           [\"e\"] = new {}\n\
+           [\"j\"] { new Listing { 2 } }\n\
+           for (i in List(3)) { [\"f\"] = new { new Listing { i } } }\n\
+           when (true) { [\"w\"] = new { new Listing { 4 } } }\n\
+         }\n",
+    );
+    assert_eq!(
+        json["a"],
+        serde_json::json!({
+            "k": [[9], [1]], "e": [[9]], "j": [[9], [2]], "f": [[9], [3]], "w": [[9], [4]]
+        })
+    );
+    eval_fails(
+        "a: Mapping<String, Listing<Listing<Int>>> = new {\n\
+           default = new Listing { new Listing { 9 } }\n\
+           [\"k\"] = new { new Listing { \"x\" } }\n\
+         }\n",
+    );
+}
