@@ -49,7 +49,9 @@ impl Evaluator {
             }
             Expr::Ident(name) => scope
                 .get(name)
-                .cloned()
+                .map(|value| {
+                    stdlib::builtin_marker_class(name, value).unwrap_or_else(|| value.clone())
+                })
                 .or_else(|| {
                     scope
                         .poison_of(name)
@@ -452,10 +454,8 @@ impl Evaluator {
                 }
                 // Built-in properties
                 match (&obj, field.as_str()) {
-                    (Value::Object(map, Some(source)), "simpleName")
-                        if source.kind == ObjectKind::Class && !map.contains_key("simpleName") =>
-                    {
-                        return Ok(Value::String(source.type_name().unwrap_or("Class").into()));
+                    (Value::Object(..), "simpleName") if class_simple_name(&obj).is_some() => {
+                        return Ok(class_simple_name(&obj).unwrap());
                     }
                     (Value::List(items), "length") => return Ok(Value::Int(items.len() as i64)),
                     (Value::List(items), "isEmpty") => return Ok(Value::Bool(items.is_empty())),
@@ -536,6 +536,11 @@ impl Evaluator {
                 let obj = self.eval_field_base(obj_expr, field, scope, depth)?;
                 match &obj {
                     Value::Null => Ok(Value::Null),
+                    Value::Object(..)
+                        if field == "simpleName" && class_simple_name(&obj).is_some() =>
+                    {
+                        Ok(class_simple_name(&obj).unwrap())
+                    }
                     _ if self.stdlib_property(&obj, field).is_some() => {
                         self.stdlib_property(&obj, field).unwrap()
                     }
@@ -837,7 +842,7 @@ pub(super) fn eval_simple_expr(
         Expr::String(s) => Ok(Value::String(Arc::clone(s))),
         Expr::Ident(name) => scope
             .get(name)
-            .cloned()
+            .map(|value| stdlib::builtin_marker_class(name, value).unwrap_or_else(|| value.clone()))
             .or_else(|| {
                 scope
                     .poison_of(name)
@@ -1003,6 +1008,18 @@ pub(super) fn regex_value(pattern: Value) -> Result<Value> {
     match pattern {
         Value::String(pattern) => Ok(Value::Regex(Arc::new(stdlib::compile_regex(&pattern)?))),
         other => Err(stdlib::type_mismatch("String", &other)),
+    }
+}
+
+/// `Class.simpleName`: the name of a `Class` value, which a member of the same
+/// name on the class's template does not shadow (pkl: `Bar.simpleName` is
+/// `"Bar"` for `class Bar { simpleName = "x" }`).
+fn class_simple_name(value: &Value) -> Option<Value> {
+    match value {
+        Value::Object(_, Some(source)) if source.kind == ObjectKind::Class => {
+            Some(Value::String(source.type_name().unwrap_or("Class").into()))
+        }
+        _ => None,
     }
 }
 

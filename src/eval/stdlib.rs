@@ -68,7 +68,7 @@ pub(super) fn typed_object(type_name: &str, members: ObjectMap) -> Value {
 
 /// A `Class` value for the class `type_name` with the given identity. Classes
 /// compare by identity, so it carries no members.
-fn class_value(type_name: &str, type_identity: String) -> Value {
+pub(super) fn class_value(type_name: &str, type_identity: String) -> Value {
     let Value::Object(_, Some(source)) = typed_object(type_name, ObjectMap::default()) else {
         unreachable!("typed_object builds an object with a source")
     };
@@ -88,6 +88,19 @@ pub(super) fn stdlib_class(name: &str) -> Option<Value> {
     NAMES
         .contains(&name)
         .then(|| class_value(name, format!("pkl:base#{name}")))
+}
+
+/// The `Class` value for a name `seed_builtins` bound to a marker string of its
+/// own name (`Duration`, `DataSize`, `Regex`, `Dynamic`), when `value` is that
+/// marker. Any other binding of the name is the user's and is left alone.
+pub(super) fn builtin_marker_class(name: &str, value: &Value) -> Option<Value> {
+    match value {
+        Value::String(marker) if &**marker == name => {
+            matches!(name, "Duration" | "DataSize" | "Regex" | "Dynamic")
+                .then(|| stdlib_class(name))?
+        }
+        _ => None,
+    }
 }
 
 /// The error for a `getClass()` pklr cannot answer faithfully.

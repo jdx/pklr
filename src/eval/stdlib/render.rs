@@ -259,7 +259,7 @@ fn class_display_name(source: &ObjectSource) -> String {
     match namespace {
         Some(namespace) => {
             let module = namespace
-                .rsplit('/')
+                .rsplit(['/', '\\'])
                 .next()
                 .unwrap_or(namespace)
                 .trim_end_matches(".pkl");
@@ -381,6 +381,18 @@ pub(crate) fn group_digits(n: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn class_display_name_strips_either_path_separator() {
+        for namespace in ["/tmp/dir/test.pkl", "C:\\dir\\test.pkl"] {
+            let Value::Object(_, Some(source)) =
+                crate::eval::stdlib::class_value("Foo", format!("{namespace}.Foo"))
+            else {
+                unreachable!()
+            };
+            assert_eq!(class_display_name(&source), "test#Foo", "{namespace}");
+        }
+    }
 
     #[test]
     fn floats_print_like_java() {

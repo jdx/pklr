@@ -153,3 +153,88 @@ fn get_class_takes_no_arguments() {
     let error = eval_fails("a = 1.getClass(1)");
     assert!(error.contains("unknown method 'getClass'"), "{error}");
 }
+
+#[test]
+fn builtin_class_names_are_class_values() {
+    // `Duration`, `DataSize`, `Regex` and `Dynamic` are seeded as markers.
+    let result = eval(
+        r#"
+a = 1.s.getClass() == Duration
+b = 1.kb.getClass() == DataSize
+c = Regex("a").getClass() == Regex
+d = new Dynamic {}.getClass() == Dynamic
+e = Regex.simpleName
+f = Duration.simpleName
+g = "\(DataSize)"
+h = Map(Duration, 1)[1.s.getClass()]
+"#,
+    );
+    assert_eq!(
+        result,
+        json!({"a": true, "b": true, "c": true, "d": true, "e": "Regex",
+               "f": "Duration", "g": "DataSize", "h": 1})
+    );
+}
+
+#[test]
+fn builtin_class_names_keep_working_as_constructors_and_types() {
+    let result = eval(
+        r#"
+a = Regex("a+").matchEntire("aa") != null
+b = (1.s) is Duration
+c = new Dynamic { x = 1 }.x
+"#,
+    );
+    assert_eq!(result, json!({"a": true, "b": true, "c": 1}));
+}
+
+#[test]
+fn user_binding_shadows_builtin_class_name() {
+    let result = eval("local Int = 5\na = Int\nb = 1.getClass().simpleName");
+    assert_eq!(result, json!({"a": 5, "b": "Int"}));
+}
+
+#[test]
+fn simple_name_works_through_null_safe_access() {
+    let result = eval(
+        r#"
+class Foo {}
+a = 1.getClass()?.simpleName
+b = Foo?.simpleName
+c = Duration?.simpleName
+"#,
+    );
+    assert_eq!(result, json!({"a": "Int", "b": "Foo", "c": "Duration"}));
+}
+
+#[test]
+fn simple_name_is_not_shadowed_by_a_property_named_simple_name() {
+    let result = eval(
+        r#"
+class Bar { simpleName = "inst" }
+a = Bar.simpleName
+b = Bar?.simpleName
+c = new Bar {}.getClass().simpleName
+d = new Bar {}.simpleName
+"#,
+    );
+    assert_eq!(
+        result,
+        json!({"a": "Bar", "b": "Bar", "c": "Bar", "d": "inst"})
+    );
+}
+
+#[test]
+fn class_keys_match_by_identity() {
+    let result = eval(
+        r#"
+class Foo { x = 1 }
+local m = Map(Foo, "hit")
+a = m[new Foo {}.getClass()]
+b = m[Foo]
+d = Map(new Foo {}.getClass(), "hit")[Foo]
+e = Set(Foo, new Foo {}.getClass()).length
+"#,
+    );
+    assert_eq!(result, json!({"a": "hit", "b": "hit", "d": "hit", "e": 1}));
+}
