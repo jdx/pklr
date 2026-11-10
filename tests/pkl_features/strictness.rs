@@ -666,6 +666,53 @@ m = new `C?` {} as `L`(true)
 }
 
 #[test]
+fn an_alias_expanded_in_a_constrained_type_keeps_the_use_sites_nullable_suffix() {
+    // Every alias target (`C?` quoted and not, `C`, `List<Int>`) used as
+    // `L(c)`, `L?(c)`, `L?` and `L`, checked against null and three
+    // instances, directly and in a function. The results are pkl 0.32.2's.
+    const EXPECTED: &str = "0010101010100010110011001100110001001100110001000001100110010001";
+    let mut direct = String::from(
+        "class C {}\nclass `C?` {}\ntypealias LQ = `C?`\ntypealias LU = C?\ntypealias LC = C\ntypealias LG = List<Int>\n",
+    );
+    let mut in_function = direct.clone();
+    let mut n = 0;
+    for alias in ["LQ", "LU", "LC", "LG"] {
+        for usage in [
+            format!("{alias}(true)"),
+            format!("{alias}?(true)"),
+            format!("{alias}?"),
+            alias.to_string(),
+        ] {
+            for value in ["null", "new C {}", "new `C?` {}", "List(1)"] {
+                n += 1;
+                direct.push_str(&format!("d{n} = {value} is {usage}\n"));
+                in_function.push_str(&format!(
+                    "function f{n}(x) = x is {usage}\nd{n} = f{n}({value})\n"
+                ));
+            }
+        }
+    }
+    for (name, src) in [("direct", direct), ("in a function", in_function)] {
+        let json = eval(&src);
+        let bits: String = (1..=n)
+            .map(|i| {
+                if json[format!("d{i}")] == true {
+                    '1'
+                } else {
+                    '0'
+                }
+            })
+            .collect();
+        assert_eq!(bits, EXPECTED, "{name}");
+    }
+    // The casts that succeed also return the value.
+    let json = eval(
+        "class `C?` {}\ntypealias LQ = `C?`\nfunction f(x) = x as LQ?(true)\na = f(null)\nb = f(new `C?` {})",
+    );
+    assert_eq!(json, serde_json::json!({"a": null, "b": {}}));
+}
+
+#[test]
 fn a_constrained_quoted_alias_resolves_in_a_function_and_when_default_marked() {
     let json = eval(
         r#"

@@ -267,10 +267,15 @@ impl AliasResolver<'_> {
             }
             TypeExpr::Constrained(base, constraint, quoted) => {
                 self.expr(constraint, shadowed);
-                let nullable = base.ends_with('?');
-                let (default_marker, plain) = match base.trim_end_matches('?').strip_prefix('*') {
+                // A quoted base is one name: a trailing `?` belongs to it.
+                let (nullable, unsuffixed) = if *quoted {
+                    (false, base.as_str())
+                } else {
+                    (base.ends_with('?'), base.trim_end_matches('?'))
+                };
+                let (default_marker, plain) = match unsuffixed.strip_prefix('*') {
                     Some(plain) => ("*", plain),
-                    None => ("", base.trim_end_matches('?')),
+                    None => ("", unsuffixed),
                 };
                 // `List<I>(length == 1)`: the aliases are in the type
                 // arguments of the base, not in its name.
@@ -316,6 +321,17 @@ impl AliasResolver<'_> {
                         None => return,
                     },
                 };
+                // `L?(c)` with `L` a quoted name: the use site's `?` is not part
+                // of the name, so build the nullable type around it.
+                if nullable && target_quoted {
+                    let inner = TypeExpr::Constrained(
+                        format!("{default_marker}{target}"),
+                        Box::new(constraint_expr),
+                        true,
+                    );
+                    *ty = TypeExpr::Nullable(Box::new(inner));
+                    return;
+                }
                 let suffix = if nullable && !target.ends_with('?') {
                     "?"
                 } else {
@@ -503,7 +519,7 @@ fn type_default_value_seen(
 ) -> Option<Value> {
     use crate::parser::TypeExpr;
     match ty {
-        TypeExpr::Constrained(base, _, _) if base.ends_with('?') => Some(Value::Null),
+        TypeExpr::Constrained(base, _, false) if base.ends_with('?') => Some(Value::Null),
         // A constraint supplies no default: the type it constrains does.
         TypeExpr::Constrained(base, _, _) => {
             type_default_value_seen(&TypeExpr::Named(base.clone()), scope, seen)
@@ -616,7 +632,7 @@ fn is_nullable_default_seen(
     match ty {
         TypeExpr::Nullable(_) => true,
         // A bare `*Item?` keeps its `?` on the name.
-        TypeExpr::Constrained(name, _, _) if name.ends_with('?') => true,
+        TypeExpr::Constrained(name, _, false) if name.ends_with('?') => true,
         TypeExpr::Named(name) if name.ends_with('?') => true,
         TypeExpr::Named(name) => {
             let mark = seen.len();
@@ -673,7 +689,7 @@ pub(super) fn type_default_error(ty: &crate::parser::TypeExpr, scope: &Scope) ->
         use crate::parser::TypeExpr;
 
         match ty {
-            TypeExpr::Constrained(base, _, _) if !base.ends_with('?') => {
+            TypeExpr::Constrained(base, _, quoted) if *quoted || !base.ends_with('?') => {
                 named_error(base, scope, seen)
             }
             TypeExpr::Constrained(..) | TypeExpr::Nullable(_) => None,
