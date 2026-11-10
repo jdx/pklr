@@ -7119,3 +7119,21 @@ fn a_type_parameter_is_not_a_use_of_a_local_alias_of_the_same_name() {
     );
     assert_eq!(json["x"], serde_json::json!([1]));
 }
+
+#[test]
+fn untyped_new_in_a_nested_listing_of_a_non_class_type_is_a_listing() {
+    // Verified against pkl 0.32.2: the inner `new {}` is an empty `Listing`
+    // (`[]`) even when its element type is not a class.
+    let json = eval(
+        "class C { l: Listing<Listing<String>> }\n\
+         a = new C { l { new { \"x\" } new {} } }\n\
+         class D { m: Listing<Listing<Int>> }\n\
+         b = new D { m { new {} } }\n\
+         typealias S = Listing<String>(true)\n\
+         class E { n: Listing<S> }\n\
+         c = new E { n { new { \"q\" } new {} } }\n",
+    );
+    assert_eq!(json["a"]["l"], serde_json::json!([["x"], []]));
+    assert_eq!(json["b"]["m"], serde_json::json!([[]]));
+    assert_eq!(json["c"]["n"], serde_json::json!([["q"], []]));
+}

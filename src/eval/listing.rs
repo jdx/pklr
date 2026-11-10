@@ -420,9 +420,11 @@ fn type_elem_class_in(
             if nesting >= MAX_LISTING_NESTING {
                 return None;
             }
-            let inner = type_elem_class_in(&args[0], scope, seen, nesting + 1)?;
+            // An element type with no class to build (`Listing<String>`) still
+            // makes this element a `Listing`, as pkl does.
+            let inner = type_elem_class_in(&args[0], scope, seen, nesting + 1);
             Some(Arc::new(Value::List(
-                ListValue::new(ListKind::Listing, Vec::new()).with_elem_class(Some(inner)),
+                ListValue::new(ListKind::Listing, Vec::new()).with_elem_class(inner),
             )))
         }
         // A bare `Listing`: its own elements have no class to build.
