@@ -489,12 +489,22 @@ impl Evaluator {
         ) {
             return None;
         }
-        declared_listing_elem_class(ty, scope).or_else(|| {
-            let namespace = scope.type_namespace.clone()?;
-            let mut declaring = scope.clone();
-            self.layer_evaluated_module_scope(Path::new(&namespace), &mut declaring);
-            declared_listing_elem_class(ty, &declaring)
-        })
+        let class = declared_listing_elem_class(ty, scope);
+        // A nested listing (`Listing<Listing<Node>>`) is a listing even when
+        // its innermost class is not visible in the saved scope (a class
+        // cannot see itself, or classes declared after it), so also look again
+        // in the module's final scope when that class is unresolved.
+        let unresolved_leaf = class.is_some()
+            && listing_leaf_name(ty, scope)
+                .is_some_and(|leaf| resolve_dotted(scope, &leaf).is_none())
+            && class.as_deref().is_some_and(|class| !has_leaf_class(class));
+        if class.is_some() && !unresolved_leaf {
+            return class;
+        }
+        let namespace = scope.type_namespace.clone()?;
+        let mut declaring = scope.clone();
+        self.layer_evaluated_module_scope(Path::new(&namespace), &mut declaring);
+        declared_listing_elem_class(ty, &declaring).or(class)
     }
 
     /// The element class of an inherited property of `base_source` whose
@@ -623,4 +633,49 @@ pub(super) fn is_never_listing_type(
         }
         _ => false,
     }
+}
+
+/// Whether a listing prototype, however deeply nested, ends in an element
+/// class.
+pub(super) fn has_leaf_class(value: &Value) -> bool {
+    match value {
+        Value::List(list) => list.elem_class().is_some_and(|inner| has_leaf_class(inner)),
+        _ => true,
+    }
+}
+
+/// The name a nested `Listing<...<Name>>` type ends in, through aliases and
+/// nullability, when it is not a built-in type.
+fn listing_leaf_name(ty: &crate::parser::TypeExpr, scope: &Scope) -> Option<String> {
+    use crate::parser::TypeExpr;
+    let mut ty = ty.clone();
+    for _ in 0..64 {
+        ty = match resolve_alias_chain(&ty, scope, &mut HashSet::default())? {
+            TypeExpr::Generic(name, args) if name == "Listing" && args.len() == 1 => {
+                args[0].clone()
+            }
+            TypeExpr::Named(name) => {
+                let name = name
+                    .trim_start_matches('*')
+                    .trim_end_matches('?')
+                    .to_string();
+                return (!matches!(
+                    name.as_str(),
+                    "String"
+                        | "Int"
+                        | "Float"
+                        | "Boolean"
+                        | "Number"
+                        | "Any"
+                        | "Dynamic"
+                        | "Duration"
+                        | "DataSize"
+                        | "Listing"
+                ))
+                .then_some(name);
+            }
+            _ => return None,
+        };
+    }
+    None
 }

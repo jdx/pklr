@@ -7344,3 +7344,29 @@ fn mapping_members_keep_default_markers_and_constraints_and_declared_checks() {
     .unwrap();
     assert_eq!(json["v"], serde_json::json!(["d", "d"]));
 }
+
+#[test]
+fn nested_listings_of_a_class_naming_itself_build_their_innermost_elements() {
+    // Verified against pkl 0.32.2: a class cannot see itself, or a class
+    // declared after it, in the scope it was saved with. Same module and
+    // imported, directly recursive and mutually recursive.
+    let classes = "class Node { x: Int = 1; s: String = \"d\"; children: Listing<Listing<Node>>? }\n\
+         class N2 { x: Int = 1; s: String = \"d\"; kids: Listing<Node2>? }\n\
+         class Node2 { s: String = \"d\"; back: Listing<Listing<N2>>? }\n";
+    let uses = "a = new Node { children { new { new { x = 3 } } } }\n\
+         b = new N2 { kids { new { back { new { new { x = 4 } } } } } }\n\
+         v = List(a.children[0][0].s, b.kids[0].back[0][0].s)\n";
+    let json = eval(&format!("{classes}{uses}"));
+    assert_eq!(json["v"], serde_json::json!(["d", "d"]));
+    let main = format!(
+        "import \"lib.pkl\" as L\n{}",
+        uses.replace("new Node", "new L.Node")
+            .replace("new N2", "new L.N2")
+    );
+    let json = eval_union_files(
+        "nested_self_listing",
+        &[("lib.pkl", classes), ("main.pkl", &main)],
+    )
+    .unwrap();
+    assert_eq!(json["v"], serde_json::json!(["d", "d"]));
+}
