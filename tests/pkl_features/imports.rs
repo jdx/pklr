@@ -1239,7 +1239,8 @@ fn unassigned_inherited_property_does_not_shadow_amendment_scope() {
         r#"
 local collision = "definition"
 open class Item {
-    collision: String
+    hidden collision: String
+    selected: String?
 }
 item = new Item {}
 "#,

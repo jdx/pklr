@@ -729,6 +729,10 @@ impl Evaluator {
     #[cfg(feature = "native-io")]
     fn module_json(&mut self, module: Value) -> Result<serde_json::Value> {
         let (value, top_kind) = self.output_value(module);
+        // An object `output.value` holds can carry a member that failed.
+        if let Some(message) = super::rendered_member_failure(&value) {
+            return Err(Error::Eval(message.to_string()));
+        }
         let (kind, renderer) = self.output_renderer(RendererKind::Json);
         let converters = renderer_converters(&renderer)?;
         // As `pkl eval -f json`: null properties and mapping entries are

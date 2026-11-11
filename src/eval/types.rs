@@ -2579,3 +2579,32 @@ pub(super) fn infer_declared_members(
 ) -> Option<crate::parser::Body> {
     infer_collection_body(ty, entries, declaring, false, true)
 }
+
+/// The error of reading a declared property that never received a value.
+pub(super) fn undefined_property_message(name: &str) -> String {
+    format!("Tried to read property `{name}` but its value is undefined.")
+}
+
+/// Whether a property declared with this type and no value stays undefined:
+/// its type supplies no default. Only plain primitives (and unions of them or
+/// of string literals) are recognised, so a type this cannot resolve is never
+/// reported as lacking one.
+pub(super) fn type_lacks_default(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
+    use crate::parser::TypeExpr;
+    fn primitive(name: &str, scope: &Scope) -> bool {
+        matches!(name, "String" | "Int" | "Float" | "Number" | "Boolean")
+            && alias_of(scope, name).is_none()
+            && !names_user_class(name, scope)
+    }
+    match ty {
+        TypeExpr::Named(name) => primitive(name, scope),
+        TypeExpr::Constrained(name, _, BaseForm::Text) => primitive(name, scope),
+        TypeExpr::Union(variants) => variants.iter().all(|variant| match variant {
+            TypeExpr::Named(name) => {
+                primitive(name, scope) || string_literal_type_value(name).is_some()
+            }
+            _ => false,
+        }),
+        _ => false,
+    }
+}
