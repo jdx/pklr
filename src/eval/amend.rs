@@ -163,12 +163,17 @@ impl Evaluator {
         // the scope that declared it, which the amending scope may not see or
         // may mean something else by. The amending scope only evaluates the
         // body expressions.
-        let inferred_overlay =
-            self.infer_declared_members(base_source, overlay_entries, &mut listing_bound);
+        let mut default_scopes: Vec<(Name, Scope)> = Vec::new();
+        let inferred_overlay = self.infer_declared_members(
+            base_source,
+            overlay_entries,
+            &mut listing_bound,
+            &mut default_scopes,
+        );
         let overlay_entries = inferred_overlay.as_deref().unwrap_or(overlay_entries);
         // The declaring scope travels with the amended property: the amending
         // scope reads a `Mapping` default from it.
-        for (name, declaring) in &listing_bound {
+        for (name, declaring) in listing_bound.iter().chain(&default_scopes) {
             let Some(body) = overlay_entries.iter().find_map(|entry| match entry {
                 Entry::Property(prop) if prop.name == *name => prop.body.as_ref(),
                 _ => None,
@@ -1731,6 +1736,7 @@ impl Evaluator {
         base_source: &Arc<ObjectSource>,
         overlay_entries: &[Entry],
         declaring_scopes: &mut Vec<(Name, Scope)>,
+        default_scopes: &mut Vec<(Name, Scope)>,
     ) -> Option<Vec<Entry>> {
         let mut rewritten: Option<Vec<Entry>> = None;
         for (position, entry) in overlay_entries.iter().enumerate() {
@@ -1792,7 +1798,11 @@ impl Evaluator {
                 }
                 // A `Mapping` with no members to infer still reads its type
                 // (its alias, its nullable default) where it was declared.
-                None if mapping_top => {}
+                // The type is then not checked there, only its default read.
+                None if mapping_top => {
+                    default_scopes.push((prop_name(entry), declaring));
+                    continue;
+                }
                 None => continue,
             }
             declaring_scopes.push((prop_name(entry), declaring));

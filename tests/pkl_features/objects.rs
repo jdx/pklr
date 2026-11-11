@@ -7473,3 +7473,43 @@ fn nested_listing_fallback_only_completes_unresolved_class_names() {
         serde_json::json!([false, false, true, "d", "d", "d", "d", "z"])
     );
 }
+
+#[test]
+fn starred_mapping_value_alternatives_keep_their_default_in_declared_members() {
+    // Verified against pkl 0.32.2: `*E | F` builds `E` for the members of a
+    // listing, nested listings, a nullable alternative and a top-level
+    // mapping, in one module and imported under an unrelated `E`.
+    let classes = "class E { x: Int = 1; s: String = \"E\" }\n\
+         class F { y: Int = 2; s: String = \"F\" }\n\
+         class H {\n\
+           lm: Listing<Mapping<String, *E | F>>\n\
+           m: Mapping<String, *E | F>\n\
+           llm: Listing<Listing<Mapping<String, *E | F>>>\n\
+           nul: Listing<Mapping<String, (*E | F)?>>\n\
+         }\n";
+    let uses = "r = new H {\n\
+           lm { new { [\"k\"] { x = 5 } } }\n\
+           m { [\"k\"] { x = 5 } }\n\
+           llm { new { new { [\"k\"] { x = 5 } } } }\n\
+           nul { new { [\"k\"] { x = 5 } } }\n\
+         }\n\
+         v = List(r.lm[0][\"k\"] is E, r.m[\"k\"] is E, r.llm[0][0][\"k\"] is E, r.nul[0][\"k\"] is E,\n\
+                  r.lm[0][\"k\"].s, r.nul[0][\"k\"].s)\n";
+    let want = serde_json::json!([true, true, true, true, "E", "E"]);
+    assert_eq!(eval(&format!("{classes}{uses}"))["v"], want);
+    let main = format!(
+        "import \"lib.pkl\" as L\nclass E {{ x: Int = 7; s: String = \"caller\" }}\n{}",
+        "r = new L.H {\n\
+           lm { new { [\"k\"] { x = 5 } } }\n\
+           llm { new { new { [\"k\"] { x = 5 } } } }\n\
+           nul { new { [\"k\"] { x = 5 } } }\n\
+         }\n\
+         v = List(r.lm[0][\"k\"].s, r.llm[0][0][\"k\"].s, r.nul[0][\"k\"].s, r.lm[0][\"k\"].x)\n"
+    );
+    let json = eval_union_files(
+        "starred_alternatives",
+        &[("lib.pkl", classes), ("main.pkl", &main)],
+    )
+    .unwrap();
+    assert_eq!(json["v"], serde_json::json!(["E", "E", "E", 5]));
+}

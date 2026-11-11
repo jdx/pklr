@@ -2053,7 +2053,13 @@ fn typed_member(
                     bindings.push((key.as_str().into(), class.clone()));
                     bindings.push((type_alias_marker(&key).as_str().into(), Value::Null));
                 }
-                key
+                // The `*` default marker selects the alternative, so it stays
+                // with the name.
+                if written.starts_with('*') {
+                    format!("*{key}")
+                } else {
+                    key
+                }
             }
             _ => written.to_string(),
         }
