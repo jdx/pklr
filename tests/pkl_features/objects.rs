@@ -7651,3 +7651,18 @@ miss = n.getOrDefault("zed")
     );
     assert_eq!(json["miss"]["name"], "zed");
 }
+
+#[test]
+fn mapping_function_default_is_not_called_for_plain_replacements() {
+    let json = eval(
+        r#"
+m = new Mapping {
+  default = (key) -> throw("unused")
+  ["a"] = 1
+}
+n = (m) { ["a"] = 42; ["b"] = "x" }
+"#,
+    );
+    assert_eq!(json["n"]["a"], 42);
+    assert_eq!(json["n"]["b"], "x");
+}
