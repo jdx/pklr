@@ -158,6 +158,14 @@ impl Evaluator {
         // default is null. `T` is resolved where the class declares it, which
         // the amending scope may not see.
         let mut listing_bound: Vec<(Name, Scope)> = Vec::new();
+        // The members of a `Mapping`, or of listings holding one, are inferred
+        // from the type as declared: its aliases and classes are resolved in
+        // the scope that declared it, which the amending scope may not see or
+        // may mean something else by. The amending scope only evaluates the
+        // body expressions.
+        let inferred_overlay =
+            self.infer_declared_members(base_source, overlay_entries, &mut listing_bound);
+        let overlay_entries = inferred_overlay.as_deref().unwrap_or(overlay_entries);
         for entry in overlay_entries {
             let Entry::Property(prop) = entry else {
                 continue;
@@ -1676,4 +1684,98 @@ pub(super) fn declared_listing_binding(name: &str) -> String {
 /// amendment amends as the `null` it is.
 fn is_null_default(prop: &Property) -> bool {
     matches!(prop.value, Some(Expr::Null))
+}
+
+impl Evaluator {
+    /// `overlay_entries` with the untyped `new` members of each body
+    /// amendment of an inherited `Mapping` property (or listing of mappings)
+    /// built from the type where it was declared. `None` when no body needs
+    /// it. The declaring scope of each rewritten property is added to
+    /// `declaring_scopes`, where its declared type is checked afterwards.
+    fn infer_declared_members(
+        &self,
+        base_source: &Arc<ObjectSource>,
+        overlay_entries: &[Entry],
+        declaring_scopes: &mut Vec<(Name, Scope)>,
+    ) -> Option<Vec<Entry>> {
+        let mut rewritten: Option<Vec<Entry>> = None;
+        for (position, entry) in overlay_entries.iter().enumerate() {
+            let Entry::Property(prop) = entry else {
+                continue;
+            };
+            let Some(body) = &prop.body else {
+                continue;
+            };
+            if prop.value.is_some() || prop.type_ann.is_some() {
+                continue;
+            }
+            let Some((index, ty)) =
+                base_source
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find_map(|(index, base)| match base {
+                        Entry::Property(inherited)
+                            if inherited.name == prop.name
+                                && !has_modifier(&inherited.modifiers, Modifier::Local) =>
+                        {
+                            inherited.type_ann.as_ref().map(|ty| (index, ty))
+                        }
+                        _ => None,
+                    })
+            else {
+                continue;
+            };
+            if never_collection_by_text(ty) {
+                continue;
+            }
+            let entry_scope = base_source.entry_scopes.get(index).and_then(Clone::clone);
+            let mut declaring = match &entry_scope {
+                Some(captured) => restore_scope(captured),
+                None => definition_type_scope(base_source),
+            };
+            if let Some(namespace) = declaring.type_namespace.clone() {
+                self.layer_evaluated_module_scope(Path::new(&namespace), &mut declaring);
+            }
+            // A chain of listings down to a class is covered by the element
+            // class the declaring class saves for the property.
+            let mapping_top = matches!(
+                resolve_collection_type(ty, &declaring, 0),
+                Some(crate::parser::TypeExpr::Generic(name, _)) if name == "Mapping"
+            );
+            if !mapping_top && is_listing_chain(ty, &declaring) {
+                continue;
+            }
+            let Some(inferred) = infer_declared_members(ty, body, &declaring) else {
+                continue;
+            };
+            let mut prop = (**prop).clone();
+            prop.body = Some(inferred);
+            rewritten.get_or_insert_with(|| overlay_entries.to_vec())[position] =
+                Entry::Property(Arc::new(prop));
+            declaring_scopes.push((prop_name(entry), declaring));
+        }
+        rewritten
+    }
+}
+
+fn prop_name(entry: &Entry) -> Name {
+    match entry {
+        Entry::Property(prop) => prop.name.clone(),
+        _ => unreachable!("only properties are rewritten"),
+    }
+}
+
+/// Whether `ty` cannot be a `Listing` or `Mapping` by its text alone: a
+/// primitive or a generic of something else. A constrained type is not, and a
+/// built-in name may still be an alias in the declaring scope, so the caller
+/// only skips what no alias can change (a generic is never an alias).
+fn never_collection_by_text(ty: &crate::parser::TypeExpr) -> bool {
+    use crate::parser::TypeExpr;
+    match ty {
+        TypeExpr::Nullable(inner) => never_collection_by_text(inner),
+        TypeExpr::Generic(name, _) => !matches!(name.as_str(), "Listing" | "Mapping"),
+        _ => false,
+    }
 }

@@ -7264,3 +7264,83 @@ fn a_mapping_alias_of_the_declaring_module_is_inferred_below_a_listing() {
     .unwrap();
     assert_eq!(json["isMapping"], serde_json::json!(true));
 }
+
+#[test]
+fn imported_mapping_members_are_built_from_the_declared_type() {
+    // Verified against pkl 0.32.2: `E` and `M` are private to `lib.pkl`, and
+    // `main.pkl` declares aliases of the same names.
+    let lib = "class E { x: Int = 1; s: String = \"d\" }\n\
+         typealias M = Mapping<String, E>\n\
+         class H {\n\
+           m: Mapping<String, E>\n\
+           mm: M\n\
+           lm: Listing<Mapping<String, E>>\n\
+           llm: Listing<Listing<M>>\n\
+         }\n";
+    let body = "r = new L.H {\n\
+           m { [\"k\"] { x = 5 } }\n\
+           mm { [\"k\"] { x = 5 } }\n\
+           lm { new { [\"k\"] { x = 5 } } }\n\
+           llm { new { new { [\"k\"] { x = 5 } } } }\n\
+         }\n\
+         v = List(r.m[\"k\"].s, r.mm[\"k\"].s, r.lm[0][\"k\"].s, r.llm[0][0][\"k\"].s)\n";
+    for (tag, aliases) in [
+        ("plain", ""),
+        (
+            "shadowed",
+            "typealias E = Mapping<String, Int>\ntypealias M = Listing<Int>\n",
+        ),
+    ] {
+        let main = format!("import \"lib.pkl\" as L\n{aliases}{body}");
+        let json = eval_union_files(
+            &format!("declared_mapping_{tag}"),
+            &[("lib.pkl", lib), ("main.pkl", &main)],
+        )
+        .unwrap();
+        assert_eq!(json["v"], serde_json::json!(["d", "d", "d", "d"]), "{tag}");
+    }
+}
+
+#[test]
+fn same_named_classes_of_different_modules_stay_apart_in_mapping_members() {
+    // Verified against pkl 0.32.2: `a.pkl` and `b.pkl` each declare an `E`.
+    let a = "class E { x: Int = 1; s: String = \"a\" }\n\
+         open class Base { xs: Listing<Mapping<String, E>> }\n";
+    let b = "import \"a.pkl\" as A\n\
+         class E { x: Int = 2; s: String = \"b\" }\n\
+         class Sub extends A.Base { ys: Listing<Mapping<String, E>> }\n";
+    let main = "import \"b.pkl\" as B\n\
+         r = new B.Sub { xs { new { [\"k\"] { x = 5 } } }; ys { new { [\"k\"] { x = 6 } } } }\n\
+         v = List(r.xs[0][\"k\"].s, r.ys[0][\"k\"].s)\n";
+    let json = eval_union_files(
+        "declared_same_names",
+        &[("a.pkl", a), ("b.pkl", b), ("main.pkl", main)],
+    )
+    .unwrap();
+    assert_eq!(json["v"], serde_json::json!(["a", "b"]));
+}
+
+#[test]
+fn mapping_members_keep_default_markers_and_constraints_and_declared_checks() {
+    // Verified against pkl 0.32.2: a `*L` default alternative, constrained
+    // mappings, and an amending module whose alias `E` differs from the class.
+    let json = eval(
+        "typealias L = Listing<String>\n\
+         class H { m: Listing<Mapping<String, *L | Int>> }\n\
+         r = new H { m { new { [\"k\"] { \"x\" } } } }\n\
+         v = r.m[0][\"k\"]\n",
+    );
+    assert_eq!(json["v"], serde_json::json!(["x"]));
+    let lib = "class E { x: Int = 1; s: String = \"d\" }\n\
+         class H { cm: Listing<Mapping<String, E>(true)>; ccm: Listing<Mapping<String, E>(length > 0)> }\n";
+    let main = "import \"lib.pkl\" as L\n\
+         typealias E = Mapping<String, Int>\n\
+         r = new L.H { cm { new { [\"k\"] { x = 5 } } }; ccm { new { [\"k\"] { x = 5 } } } }\n\
+         v = List(r.cm[0][\"k\"].s, r.ccm[0][\"k\"].s)\n";
+    let json = eval_union_files(
+        "declared_constrained",
+        &[("lib.pkl", lib), ("main.pkl", main)],
+    )
+    .unwrap();
+    assert_eq!(json["v"], serde_json::json!(["d", "d"]));
+}

@@ -2032,6 +2032,13 @@ fn typed_member(
     let Ok((name, params)) = inferred_new_type(member_ty, scope, 0) else {
         return Expr::InferredNew(member_ty.clone(), body);
     };
+    // A member that is a collection itself has members of its own to build
+    // from the declared type.
+    let body = if nested_collection_type(member_ty, scope).is_some() {
+        infer_collection_body(member_ty, &body, scope, false, true).unwrap_or(body)
+    } else {
+        body
+    };
     let mut bindings: Vec<(Arc<str>, Value)> = Vec::new();
     let mut bind = |written: &str| -> String {
         let plain = written.trim_start_matches('*').trim_end_matches('?');
@@ -2057,4 +2064,14 @@ fn typed_member(
         crate::parser::LocalBindings(Arc::new(bindings)),
         Box::new(Expr::New(Some(name), body, params)),
     )
+}
+
+/// [`infer_amendment_members`] for a type read in the scope that declared it:
+/// the members are built from the classes resolved there.
+pub(super) fn infer_declared_members(
+    ty: &crate::parser::TypeExpr,
+    entries: &crate::parser::Body,
+    declaring: &Scope,
+) -> Option<crate::parser::Body> {
+    infer_collection_body(ty, entries, declaring, false, true)
 }
