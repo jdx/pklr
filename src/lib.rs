@@ -86,6 +86,7 @@ pub struct EvaluatorBuilder {
     package_cache_dir: Option<std::path::PathBuf>,
     offline: bool,
     allowed_resources: Option<Vec<String>>,
+    module_path: Vec<std::path::PathBuf>,
     environment: Option<std::collections::BTreeMap<String, String>>,
     external_properties: std::collections::BTreeMap<String, String>,
     preloaded_packages: Vec<PreloadedPackage>,
@@ -150,6 +151,18 @@ impl EvaluatorBuilder {
     /// Disable network access while allowing cached packages to load.
     pub fn offline(mut self, offline: bool) -> Self {
         self.offline = offline;
+        self
+    }
+
+    /// Directories to search, in order, when resolving `modulepath:` module
+    /// URIs, like `pkl eval --module-path`. The first directory holding the
+    /// requested file wins; relative directories are relative to the working
+    /// directory. Zip and jar archives are not supported.
+    pub fn module_path(
+        mut self,
+        dirs: impl IntoIterator<Item = impl Into<std::path::PathBuf>>,
+    ) -> Self {
+        self.module_path = dirs.into_iter().map(Into::into).collect();
         self
     }
 
@@ -227,6 +240,7 @@ impl EvaluatorBuilder {
             evaluator.set_package_cache_dir(cache_dir);
         }
         evaluator.set_offline(self.offline);
+        evaluator.set_module_path(self.module_path);
         if let Some(resources) = self.allowed_resources {
             evaluator.set_allowed_resources(resources);
         }

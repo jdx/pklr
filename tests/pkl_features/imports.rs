@@ -4224,3 +4224,96 @@ g = new H { ys { \"a\" }; xs { new T { inner { ys { new {} } } } } }\n",
     assert_eq!(val["h"]["xs"][0]["x"], 1);
     assert_eq!(val["g"]["xs"][0]["inner"]["ys"], serde_json::json!([{}]));
 }
+
+// ============================================================
+// modulepath: imports
+// ============================================================
+
+fn eval_with_module_path(
+    entry: &std::path::Path,
+    dirs: &[&std::path::Path],
+) -> Result<serde_json::Value, String> {
+    pklr::EvaluatorBuilder::new()
+        .module_path(dirs.iter().copied())
+        .eval_to_json(entry)
+        .map_err(|e| e.to_string())
+}
+
+#[test]
+fn modulepath_import_found_in_first_matching_dir() {
+    let temp = TestTempDir::new("pklr_test_modulepath_order");
+    let (d1, d2) = (temp.path().join("d1"), temp.path().join("d2"));
+    std::fs::create_dir_all(d1.join("lib")).unwrap();
+    std::fs::create_dir_all(d2.join("lib")).unwrap();
+    std::fs::write(d1.join("lib/a.pkl"), "v = \"d1\"\n").unwrap();
+    std::fs::write(d2.join("lib/a.pkl"), "v = \"d2\"\n").unwrap();
+    std::fs::write(d2.join("lib/b.pkl"), "v = \"d2b\"\n").unwrap();
+    let main = temp.path().join("main.pkl");
+    std::fs::write(
+        &main,
+        "import \"modulepath:/lib/a.pkl\" as A\nimport \"modulepath:/lib/b.pkl\" as B\na = A.v\nb = B.v\n",
+    )
+    .unwrap();
+    let json = eval_with_module_path(&main, &[&d1, &d2]).unwrap();
+    assert_eq!(json, serde_json::json!({"a": "d1", "b": "d2b"}));
+    let json = eval_with_module_path(&main, &[&d2, &d1]).unwrap();
+    assert_eq!(json["a"], "d2");
+}
+
+#[test]
+fn modulepath_import_not_found() {
+    let temp = TestTempDir::new("pklr_test_modulepath_missing");
+    let main = temp.path().join("main.pkl");
+    std::fs::write(&main, "x = import(\"modulepath:/nope.pkl\")\n").unwrap();
+    let err = eval_with_module_path(&main, &[temp.path()]).unwrap_err();
+    assert!(err.contains("modulepath:/nope.pkl"), "{err}");
+    // Without a module path nothing resolves, and a file of the same name
+    // next to the importer is not a fallback.
+    std::fs::write(temp.path().join("nope.pkl"), "y = 1\n").unwrap();
+    let err = eval_with_module_path(&main, &[]).unwrap_err();
+    assert!(err.contains("modulepath:/nope.pkl"), "{err}");
+}
+
+#[test]
+fn modulepath_module_relative_and_nested_imports() {
+    let temp = TestTempDir::new("pklr_test_modulepath_nested");
+    let mp = temp.path().join("mp");
+    std::fs::create_dir_all(mp.join("lib/sub")).unwrap();
+    std::fs::write(
+        mp.join("lib/a.pkl"),
+        "import \"sub/s.pkl\" as S\nimport \"modulepath:/lib/sub/s.pkl\" as S2\nv = \"a\"\nrel = S.x\nabs = S2.x\n",
+    )
+    .unwrap();
+    std::fs::write(mp.join("lib/sub/s.pkl"), "x = \"sub\"\n").unwrap();
+    let main = temp.path().join("main.pkl");
+    std::fs::write(
+        &main,
+        "import \"modulepath:/lib/a.pkl\" as A\nr = A.rel\nb = A.abs\n",
+    )
+    .unwrap();
+    let json = eval_with_module_path(&main, &[&mp]).unwrap();
+    assert_eq!(json, serde_json::json!({"r": "sub", "b": "sub"}));
+
+    let amending = temp.path().join("amending.pkl");
+    std::fs::write(
+        &amending,
+        "amends \"modulepath:/lib/a.pkl\"\nv = \"over\"\n",
+    )
+    .unwrap();
+    let json = eval_with_module_path(&amending, &[&mp]).unwrap();
+    assert_eq!(json["v"], "over");
+    assert_eq!(json["rel"], "sub");
+}
+
+#[test]
+fn modulepath_uri_requires_slash_and_cannot_escape() {
+    let temp = TestTempDir::new("pklr_test_modulepath_bad");
+    let mp = temp.path().join("mp");
+    std::fs::create_dir_all(&mp).unwrap();
+    std::fs::write(temp.path().join("secret.pkl"), "s = 1\n").unwrap();
+    let main = temp.path().join("main.pkl");
+    std::fs::write(&main, "x = import(\"modulepath:lib/a.pkl\")\n").unwrap();
+    assert!(eval_with_module_path(&main, &[&mp]).is_err());
+    std::fs::write(&main, "x = import(\"modulepath:/../secret.pkl\")\n").unwrap();
+    assert!(eval_with_module_path(&main, &[&mp]).is_err());
+}

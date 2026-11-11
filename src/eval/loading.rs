@@ -8,9 +8,40 @@ impl Evaluator {
     pub(super) fn local_file_path(&mut self, current_path: &Path, uri: &str) -> Result<PathBuf> {
         if uri.starts_with("file:") {
             file_uri_path(uri)
+        } else if uri.starts_with("modulepath:") {
+            self.module_path_file(uri)
         } else {
             self.resolve_local_path(current_path, uri)
         }
+    }
+
+    /// The file a `modulepath:/path` module URI names: the first module path
+    /// directory containing it. A miss resolves to the URI itself, a path that
+    /// does not exist, so callers report it as a missing import. This is the
+    /// single place module path lookups happen.
+    fn module_path_file(&mut self, uri: &str) -> Result<PathBuf> {
+        let Some(rest) = uri.strip_prefix("modulepath:/") else {
+            return Err(Error::Eval(format!(
+                "Module URI `{uri}` is missing a `/` after `modulepath:`."
+            )));
+        };
+        // A `..` that climbs out of the module path directory finds nothing.
+        let mut depth = 0usize;
+        for part in rest.split('/') {
+            match part {
+                "" | "." => {}
+                ".." if depth == 0 => return Ok(PathBuf::from(uri)),
+                ".." => depth -= 1,
+                _ => depth += 1,
+            }
+        }
+        for dir in self.module_path.clone() {
+            let candidate = dir.join(rest);
+            if self.path_exists_io(&candidate)? {
+                return Ok(candidate);
+            }
+        }
+        Ok(PathBuf::from(uri))
     }
 
     /// Resolve a local module or resource URI against the module at

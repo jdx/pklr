@@ -89,6 +89,7 @@ impl Evaluator {
             #[cfg(test)]
             late_passes_run: 0,
             resource_cache: HashMap::default(),
+            module_path: Vec::new(),
             allowed_resources: DEFAULT_ALLOWED_RESOURCES
                 .iter()
                 .map(|s| (*s).to_string())
@@ -129,6 +130,11 @@ impl Evaluator {
 
     pub fn set_base_path(&mut self, path: &Path) {
         self.base_path = path.to_path_buf();
+    }
+
+    /// Set the directories `modulepath:` module URIs are searched in, in order.
+    pub fn set_module_path(&mut self, dirs: Vec<PathBuf>) {
+        self.module_path = dirs;
     }
 
     pub fn set_allowed_resources(&mut self, resources: Vec<String>) {

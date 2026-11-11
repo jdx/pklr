@@ -136,6 +136,8 @@ pub struct Evaluator {
     resource_cache: HashMap<String, Value>,
     /// URI prefixes resources may be read from. Empty denies all resources.
     allowed_resources: Vec<String>,
+    /// Directories searched, in order, for `modulepath:` module URIs.
+    module_path: Vec<PathBuf>,
     environment: Option<BTreeMap<String, String>>,
     external_properties: BTreeMap<String, String>,
     /// Final scopes for modules evaluated in this run, used to preserve inherited locals.
