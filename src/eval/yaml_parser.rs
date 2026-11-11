@@ -273,6 +273,9 @@ impl Yaml<'_> {
         let mut moved = false;
         let mut own_line = false;
         self.skip_spaces();
+        // Where the node starts: properties on the key's own line are part
+        // of the mapping's column.
+        let mut start_col = self.col();
         self.read_props(&mut props)?;
         if self.at_eol() {
             own_line = !props.is_empty();
@@ -291,6 +294,7 @@ impl Yaml<'_> {
                 });
             }
             if props.is_empty() {
+                start_col = self.col();
                 self.read_props(&mut props)?;
                 if self.at_eol() {
                     own_line = !props.is_empty();
@@ -298,7 +302,11 @@ impl Yaml<'_> {
                 }
             }
         }
-        let c = self.col();
+        let c = if own_line || props.is_empty() {
+            self.col()
+        } else {
+            start_col
+        };
         let body = match self.peek() {
             Some('-') if is_blank(self.peek_at(1)) => Body::Seq(self.block_seq(c, depth)?),
             Some('?') if is_blank(self.peek_at(1)) => Body::Map(self.block_map(c, None, depth)?),

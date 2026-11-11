@@ -1363,3 +1363,17 @@ over = test.catch(() -> new yaml.Parser { maxCollectionAliases = 2 }.parse(text)
     assert_eq!(json["within"]["d"], serde_json::json!([1]));
     assert_eq!(json["over"], "Error parsing YAML document.");
 }
+
+#[test]
+fn yaml_parser_anchored_keys_keep_the_mapping_column() {
+    let json = eval(
+        r##"import "pkl:yaml"
+anchored = new yaml.Parser {}.parse("&x a: 1\nb: 2")
+explicit = new yaml.Parser {}.parse("&x a: 1\n? c\n: 3")
+aliased = new yaml.Parser {}.parse("&x a: 1\nb: *x")
+"##,
+    );
+    assert_eq!(json["anchored"], serde_json::json!({"a": 1, "b": 2}));
+    assert_eq!(json["explicit"], serde_json::json!({"a": 1, "c": 3}));
+    assert_eq!(json["aliased"], serde_json::json!({"a": 1, "b": "a"}));
+}
