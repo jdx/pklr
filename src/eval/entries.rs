@@ -39,15 +39,35 @@ impl Evaluator {
         if let Some(body) = &prop.body {
             // An untyped `new` member of a declared `Listing` or `Mapping`
             // takes its parent from the declared member type.
+            // A listing whose element class the declaring class bound (the
+            // type it names may not be visible here) builds its elements
+            // from that class instead.
+            let bound_class = scope.get(&listing_elem_class_binding(&prop.name)).is_some()
+                && owns_listing_bindings(scope, &prop.name, body);
             let inferred = prop
                 .type_ann
                 .as_ref()
+                .filter(|_| !bound_class)
                 .and_then(|ty| infer_amendment_members(ty, body, scope));
+            // Inferring rewrites the body, which then has another identity
+            // than the one the amended class recorded its listing bindings for.
+            let declared_body = body;
             let body = inferred.as_ref().unwrap_or(body);
             let mut nullable_default = prop
                 .type_ann
                 .as_ref()
                 .and_then(|ty| nullable_inner_default(ty, scope));
+            // An amendment of an inherited `Listing` property records its
+            // element class where the class declared the type. The type name
+            // may mean something else here (an alias the amending module
+            // shadows with a class), so the default read from it is not the
+            // listing the declaration gives.
+            let declared_listing = matches!(&prop.type_ann, Some(crate::parser::TypeExpr::Nullable(inner))
+                    if matches!(**inner, crate::parser::TypeExpr::Named(_)))
+                && owns_listing_bindings(scope, &prop.name, declared_body);
+            if declared_listing {
+                nullable_default = None;
+            }
             if let Some(default) = &mut nullable_default {
                 apply_mapping_type_annotation(default, prop.type_ann.as_ref(), scope);
             }
@@ -120,7 +140,8 @@ impl Evaluator {
             }
             if matches!(amendment_base, Some(Value::List(_)))
                 || (!matches!(amendment_base, Some(Value::Object(..)))
-                    && (prop.type_ann.as_ref().is_some_and(type_is_listing)
+                    && (declared_listing
+                        || prop.type_ann.as_ref().is_some_and(type_is_listing)
                         || entries_are_listing_amendment(body)))
             {
                 let mut items = match amendment_base {
@@ -153,12 +174,51 @@ impl Evaluator {
                         depth,
                     )?));
                 }
+                // `x: Listing<T>` makes each `new { ... }` element a `T`. A
+                // listing the declaring class built already knows `T`, as does
+                // an amendment of a class's `Listing<T>?` property.
+                // The class the declaring class bound is resolved where the type
+                // was declared, which an element class read from a default
+                // built in this scope (aliases here may shadow it) is not.
+                let bound = match scope
+                    .get(&listing_elem_class_binding(&prop.name))
+                    .filter(|_| owns_listing_bindings(scope, &prop.name, declared_body))
+                {
+                    Some(class @ (Value::Object(..) | Value::List(_))) => {
+                        Some(Arc::new(class.clone()))
+                    }
+                    _ => None,
+                };
+                // A nested listing whose innermost class the declaring scope
+                // could not see (a class naming itself) has no class bound
+                // there: the amending scope may know it.
+                let bound_is_complete = bound.as_deref().is_none_or(has_leaf_class)
+                    || scope
+                        .get(&listing_leaf_unresolved_binding(&prop.name))
+                        .is_none();
+                let elem_class = bound
+                    .clone()
+                    .filter(|_| bound_is_complete)
+                    .or_else(|| items.elem_class().cloned())
+                    .or_else(|| {
+                        prop.type_ann
+                            .as_ref()
+                            .and_then(|ty| self.declared_elem_class(ty, scope))
+                    })
+                    .or(bound);
+                items = items.with_elem_class(elem_class.clone());
                 let mut amendment_scope = scope.child();
                 amendment_scope.set("super", Value::List(items.clone()));
                 amendment_scope.receiver_entries = Some(body.clone());
                 amendment_scope.receiver_list_base = Some(items.len());
-                self.eval_listing_entries(body, &amendment_scope, depth, items.make_mut())?;
-                return Ok(Some(Value::List(items)));
+                self.eval_listing_entries(
+                    body,
+                    &amendment_scope,
+                    depth,
+                    items.make_mut(),
+                    elem_class.as_ref(),
+                )?;
+                return Ok(Some(Value::List(items.with_elem_class(elem_class))));
             }
             // `foo { ... }` — object body amendment.
             // If the property already has a value in scope (e.g., from a base class),
@@ -263,6 +323,12 @@ impl Evaluator {
             }
             if let Some(default) = &mut default {
                 apply_mapping_type_annotation(default, Some(ty), scope);
+                if let Value::List(list) = default
+                    && list.kind() == ListKind::Listing
+                {
+                    *list =
+                        std::mem::take(list).with_elem_class(self.declared_elem_class(ty, scope));
+                }
             }
             if require_union_default
                 && default.is_none()

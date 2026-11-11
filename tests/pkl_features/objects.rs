@@ -821,7 +821,7 @@ fn class_local_this_alias_tracks_amended_inputs() {
 class Factory {
     local factory = this
     staged: Boolean = false
-    fixed step = (new { staged = false }) {
+    fixed step = (new Dynamic { staged = false }) {
         staged = factory.staged
     }
 }
@@ -6095,6 +6095,203 @@ x = new U { g { "adm" }; m { ["a"] = 1 }; f { a = 2 }; u { "z" } }
 }
 
 #[test]
+fn typed_listing_new_element_class_only_visible_in_the_declaring_module() {
+    let dir = TestTempDir::new("pklr_typed_listing_import");
+    std::fs::write(
+        dir.path().join("lib.pkl"),
+        "class Task { name: String; loopVar: String = \"item\" }\nclass Play { tasks: Listing<Task> }\n",
+    )
+    .unwrap();
+    let main = dir.path().join("main.pkl");
+    std::fs::write(
+        &main,
+        "import \"lib.pkl\" as L\np = new L.Play { tasks { new { name = \"t\" } } }\n",
+    )
+    .unwrap();
+    let result = pklr::eval_to_json(&main).unwrap();
+    assert_eq!(
+        result["p"]["tasks"],
+        serde_json::json!([{"name": "t", "loopVar": "item"}])
+    );
+    std::fs::write(
+        &main,
+        "import \"lib.pkl\" as L\np = new L.Play { tasks { new { nme = \"t\" } } }\n",
+    )
+    .unwrap();
+    let error = pklr::eval_to_json(&main).unwrap_err().to_string();
+    assert!(error.contains("nme"), "{error}");
+}
+
+#[test]
+fn typed_listing_new_element_with_union_or_builtin_element_type_stays_untyped() {
+    let result = eval(
+        r#"
+class A { a: Int = 1 }
+class B { b: Int = 2 }
+u: Listing<A | B> = new { new { a = 3 } }
+d: Listing<Dynamic> = new { new { k = 1 } }
+"#,
+    );
+    assert_eq!(result["u"], serde_json::json!([{"a": 3}]));
+    assert_eq!(result["d"], serde_json::json!([{"k": 1}]));
+}
+
+#[test]
+fn typed_listing_direct_amendment_keeps_the_element_class() {
+    let result = eval(
+        r#"
+class T { x: Int = 1 }
+a = new Listing<T> {}
+b = (a) { new {} }
+"#,
+    );
+    assert_eq!(result["a"], serde_json::json!([]));
+    assert_eq!(result["b"], serde_json::json!([{"x": 1}]));
+    let error = eval_fails(
+        r#"
+class T { x: Int = 1 }
+a = new Listing<T> {}
+b = (a) { new { x = "s" } }
+"#,
+    );
+    assert!(error.contains("expected Int"), "{error}");
+}
+
+#[test]
+fn typed_listing_super_reads_see_typed_elements() {
+    let result = eval(
+        r#"
+class T { x: Int = 1 }
+a = new Listing<T> { new {}; super.first }
+b = new Listing<T> { new {}; super.last; new {} }
+"#,
+    );
+    assert_eq!(result["a"], serde_json::json!([{"x": 1}, {"x": 1}]));
+    assert_eq!(
+        result["b"],
+        serde_json::json!([{"x": 1}, {"x": 1}, {"x": 1}])
+    );
+}
+
+#[test]
+fn typed_listing_abstract_element_class_error_names_the_class() {
+    let error = eval_fails(
+        r#"
+abstract class Task {}
+a = new Listing<Task> { new {} }
+"#,
+    );
+    assert!(error.contains("abstract class `"), "{error}");
+    assert!(error.contains("Task"), "{error}");
+    assert!(!error.contains("listing_elem_class"), "{error}");
+}
+
+#[test]
+fn typed_nullable_listing_amendment_uses_the_declaring_scope_class() {
+    let dir = TestTempDir::new("pklr_typed_nullable_listing_import");
+    std::fs::write(
+        dir.path().join("lib.pkl"),
+        "class T { x: Int = 1 }\nclass P { nested: Listing<T>? }\n",
+    )
+    .unwrap();
+    let main = dir.path().join("main.pkl");
+    std::fs::write(
+        &main,
+        "import \"lib.pkl\" as L\np = new L.P { nested { new {} } }\n",
+    )
+    .unwrap();
+    let result = pklr::eval_to_json(&main).unwrap();
+    assert_eq!(result["p"]["nested"], serde_json::json!([{"x": 1}]));
+    std::fs::write(
+        &main,
+        "import \"lib.pkl\" as L\np = new L.P { nested { new { x = \"s\" } } }\n",
+    )
+    .unwrap();
+    let error = pklr::eval_to_json(&main).unwrap_err().to_string();
+    assert!(error.contains("expected Int"), "{error}");
+}
+
+#[test]
+fn typed_listing_of_listings_builds_inner_elements_as_the_class() {
+    let result = eval(
+        r#"
+class T { name: String; d: Int = 1 }
+class P { ll: Listing<Listing<T>> }
+p = new P { ll { new { new { name = "t" } } } }
+x: Listing<Listing<T>> = new { new { new { name = "u" } } }
+y = new Listing<Listing<T>> { new { new { name = "v" } } }
+"#,
+    );
+    assert_eq!(
+        result["p"]["ll"],
+        serde_json::json!([[{"name": "t", "d": 1}]])
+    );
+    assert_eq!(result["x"], serde_json::json!([[{"name": "u", "d": 1}]]));
+    assert_eq!(result["y"], serde_json::json!([[{"name": "v", "d": 1}]]));
+    let error = eval_fails(
+        r#"
+class T { name: String }
+x: Listing<Listing<T>> = new { new { new { name = 5 } } }
+"#,
+    );
+    assert!(error.contains("expected String"), "{error}");
+}
+
+#[test]
+fn typed_listing_class_declared_after_its_use_in_a_recursive_class() {
+    let result = eval(
+        r#"
+class Task { name: String; loopVar: String = "item"; steps: Listing<Step>? }
+class Step { id: String = "s"; sub: Listing<Task>? }
+p = new Task { name = "t"; steps { new { sub { new { name = "z" } } } } }
+"#,
+    );
+    assert_eq!(result["p"]["steps"][0]["id"], "s");
+    assert_eq!(result["p"]["steps"][0]["sub"][0]["loopVar"], "item");
+}
+
+#[test]
+fn typed_listing_of_nullable_or_aliased_listings_builds_inner_elements_as_the_class() {
+    let result = eval(
+        r#"
+class T { n: String; d: Int = 1 }
+typealias L = Listing<T>
+class H { x: Listing<Listing<T>?>; y: Listing<L> }
+h = new H { x { new { new { n = "p" } } }; y { new { new { n = "q" } } } }
+a = new Listing<Listing<T>?> { new { new { n = "a" } } }
+b = new Listing<L> { new { new { n = "b" } } }
+c: Listing<Listing<T>?> = new { new { new { n = "c" } } }
+d: Listing<L> = new { new { new { n = "d" } } }
+"#,
+    );
+    assert_eq!(result["h"]["x"], serde_json::json!([[{"n": "p", "d": 1}]]));
+    assert_eq!(result["h"]["y"], serde_json::json!([[{"n": "q", "d": 1}]]));
+    assert_eq!(result["a"], serde_json::json!([[{"n": "a", "d": 1}]]));
+    assert_eq!(result["b"], serde_json::json!([[{"n": "b", "d": 1}]]));
+    assert_eq!(result["c"], serde_json::json!([[{"n": "c", "d": 1}]]));
+    assert_eq!(result["d"], serde_json::json!([[{"n": "d", "d": 1}]]));
+}
+
+#[test]
+fn typed_listing_elements_through_if_let_and_trace_get_the_class() {
+    let result = eval(
+        r#"
+class T { x: Int = 1 }
+a = new Listing<T> { if (true) new {} else new {} }
+b = new Listing<T> { let (q = 1) new {} }
+c = new Listing<T> { trace(new {}) }
+class H { l: Listing<T>; m: Listing<T> = new { if (true) new {} else new {} } }
+h = new H { l { let (q = 1) new {} } }
+"#,
+    );
+    assert_eq!(result["a"], serde_json::json!([{"x": 1}]));
+    assert_eq!(result["b"], serde_json::json!([{"x": 1}]));
+    assert_eq!(result["c"], serde_json::json!([{"x": 1}]));
+    assert_eq!(result["h"]["l"], serde_json::json!([{"x": 1}]));
+    assert_eq!(result["h"]["m"], serde_json::json!([{"x": 1}]));
+}
+
+#[test]
 fn amend_non_null_default_still_amends_it() {
     let json = eval(
         "class U { g: Listing<String> = new Listing { \"z\" } }\nx = new U { g { \"adm\" } }\n",
@@ -6744,6 +6941,115 @@ fn union_amend_still_accepts_a_dynamic_for_the_builtin_names_unshadowed() {
         assert_eq!(eval(&src)["c"]["argv"]["x"], serde_json::json!(1));
     }
 }
+#[test]
+fn typed_listing_new_element_takes_the_element_class() {
+    let result = eval(
+        r#"
+class Task { name: String; loopVar: String = "item" }
+class Play { tasks: Listing<Task> }
+p = new Play { tasks { new { name = "t" } } }
+n = p.tasks[0] is Task
+"#,
+    );
+    assert_eq!(
+        result["p"]["tasks"],
+        serde_json::json!([{"name": "t", "loopVar": "item"}])
+    );
+    assert_eq!(result["n"], true);
+}
+
+#[test]
+fn typed_listing_new_element_runs_the_class_type_checks() {
+    let error = eval_fails(
+        r#"
+class Task { name: String }
+class Play { tasks: Listing<Task> }
+p = new Play { tasks { new { name = 5 } } }
+"#,
+    );
+    assert!(error.contains("String"), "{error}");
+    let error = eval_fails(
+        r#"
+class Task { name: String }
+class Play { tasks: Listing<Task> }
+p = new Play { tasks { new { nme = "t" } } }
+"#,
+    );
+    assert!(error.contains("nme"), "{error}");
+}
+
+#[test]
+fn typed_listing_new_element_recomputes_class_properties() {
+    let result = eval(
+        r#"
+class Task { x: Int = 1; y: Int = x + 1 }
+class Play { tasks: Listing<Task> }
+local base = 10
+p = new Play {
+  tasks {
+    new { x = 5 }
+    for (i in List(1, 2)) { new { x = base + i } }
+    when (true) { new {} }
+    ...List(new Task { x = 20 })
+  }
+}
+"#,
+    );
+    let ys: Vec<_> = result["p"]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|task| task["y"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ys, [6, 12, 13, 2, 21]);
+}
+
+#[test]
+fn typed_listing_new_element_in_declared_listing_forms() {
+    let result = eval(
+        r#"
+class Task { name: String; loopVar: String = "item" }
+typealias T = Task
+class Play {
+  tasks: Listing<Task> = new { new { name = "d" } }
+  opt: Listing<T?>
+  nested: Listing<Task>?
+}
+a: Listing<Task> = new { new { name = "a" } }
+b = new Listing<T> { new { name = "b" } }
+p = new Play { opt { new { name = "o" } null } }
+q = (p) { tasks { new { name = "e" } } }
+r = new Play { nested { new { name = "n" } } }
+"#,
+    );
+    let item = |name: &str| serde_json::json!({"name": name, "loopVar": "item"});
+    assert_eq!(result["a"], serde_json::json!([item("a")]));
+    assert_eq!(result["b"], serde_json::json!([item("b")]));
+    assert_eq!(
+        result["p"]["opt"],
+        serde_json::json!([item("o"), serde_json::Value::Null])
+    );
+    assert_eq!(
+        result["q"]["tasks"],
+        serde_json::json!([item("d"), item("e")])
+    );
+    assert_eq!(result["r"]["nested"], serde_json::json!([item("n")]));
+}
+
+#[test]
+fn typed_listing_new_element_of_a_self_referential_class() {
+    let result = eval(
+        r#"
+class Task { name: String; loopVar: String = "item"; block: Listing<Task>? }
+class Play { tasks: Listing<Task> }
+p = new Play { tasks { new { name = "t"; block { new { name = "inner" } } } } }
+"#,
+    );
+    assert_eq!(
+        result["p"]["tasks"][0]["block"],
+        serde_json::json!([{"name": "inner", "loopVar": "item", "block": null}])
+    );
+}
 
 #[test]
 fn constrained_default_of_a_type_with_no_default_leaves_the_property_unset() {
@@ -6808,4 +7114,204 @@ fn imported_nullable_default_alias_leaves_the_property_unset() {
         assert!(json["c"][key].is_null(), "{key}: {}", json["c"]);
     }
     assert_eq!(json["b"], serde_json::json!({"n": 1}));
+}
+
+#[test]
+fn a_type_parameter_is_not_a_use_of_a_local_alias_of_the_same_name() {
+    // Verified against pkl 0.32.2: the `T` in `Items<T>` is the alias's own
+    // parameter, so the unused cyclic local alias `T` stays unresolved.
+    let json = eval(
+        "local typealias T = List<T>\ntypealias Items<T> = List<T>\nx: Items<Int> = List(1)\n",
+    );
+    assert_eq!(json["x"], serde_json::json!([1]));
+}
+
+#[test]
+fn untyped_new_in_a_nested_listing_of_a_non_class_type_is_a_listing() {
+    // Verified against pkl 0.32.2: the inner `new {}` is an empty `Listing`
+    // (`[]`) even when its element type is not a class.
+    let json = eval(
+        "class C { l: Listing<Listing<String>> }\n\
+         a = new C { l { new { \"x\" } new {} } }\n\
+         class D { m: Listing<Listing<Int>> }\n\
+         b = new D { m { new {} } }\n\
+         typealias S = Listing<String>(true)\n\
+         class E { n: Listing<S> }\n\
+         c = new E { n { new { \"q\" } new {} } }\n",
+    );
+    assert_eq!(json["a"]["l"], serde_json::json!([["x"], []]));
+    assert_eq!(json["b"]["m"], serde_json::json!([[]]));
+    assert_eq!(json["c"]["n"], serde_json::json!([["q"], []]));
+}
+
+#[test]
+fn index_replacement_of_a_typed_listing_element_is_an_instance_of_its_class() {
+    // Verified against pkl 0.32.2: `[0] = new { ... }` builds a `T`, with its
+    // defaults, and rejects a property `T` lacks.
+    let src = "class T { x: Int = 1; y: String = \"d\" }\n\
+         class H { xs: Listing<T> }\n\
+         h = new H { xs { new { x = 2 }; new { x = 3 } } }\n";
+    let json = eval(&format!(
+        "{src}h2 = (h) {{ xs {{ [0] = new {{ x = 9 }} }} }}\n"
+    ));
+    assert_eq!(
+        json["h2"]["xs"],
+        serde_json::json!([{"x": 9, "y": "d"}, {"x": 3, "y": "d"}])
+    );
+    let error = eval_fails(&format!(
+        "{src}h3 = (h) {{ xs {{ [0] = new {{ z = 9 }} }} }}\n"
+    ));
+    assert!(error.contains('z'), "{error}");
+}
+
+#[test]
+fn a_type_alias_named_like_a_builtin_shadows_it_for_listing_elements() {
+    // Verified against pkl 0.32.2: `String` here is the alias of a listing.
+    let json = eval(
+        "class T { x: Int = 1 }\n\
+         typealias String = Listing<T>\n\
+         class H { xs: String }\n\
+         h = new H { xs { new {} } }\n",
+    );
+    assert_eq!(json["h"]["xs"], serde_json::json!([{"x": 1}]));
+}
+
+#[test]
+fn nested_listing_of_an_imported_class_builds_elements_from_the_declaring_class() {
+    // Verified against pkl 0.32.2: `T` is not visible in `main.pkl`.
+    let lib = "class T { x: Int = 1; y: String = \"d\" }\n\
+         class H { xs: Listing<Listing<T>>; ys: Listing<Listing<T>>?; zs: Listing<Listing<T>> = new {} }\n";
+    let main = "import \"lib.pkl\" as lib\n\
+         a = new lib.H { xs { new { new { x = 5 } } } }\n\
+         b = new lib.H { ys { new { new { x = 5 } } } }\n\
+         c = new lib.H { zs { new { new { x = 5 } } } }\n";
+    let json = eval_union_files(
+        "nested_listing_import",
+        &[("lib.pkl", lib), ("main.pkl", main)],
+    )
+    .unwrap();
+    let want = serde_json::json!([[{"x": 5, "y": "d"}]]);
+    assert_eq!(json["a"]["xs"], want);
+    assert_eq!(json["b"]["ys"], want);
+    assert_eq!(json["c"]["zs"], want);
+}
+
+#[test]
+fn nested_listing_amendment_still_infers_mapping_values_below_the_saved_class() {
+    // Verified against pkl 0.32.2: a `Mapping` below a `Listing` of listings
+    // builds a `Mapping` (and its values a `Foo`) when the class declaring
+    // the property saved an element class for the listings above it.
+    let json = eval(
+        "class Foo { n: Int = 1; s: String = \"d\" }\n\
+         class H {\n\
+           a: Listing<Listing<Mapping<String, Int>>>\n\
+           c: Listing<Mapping<String, Foo>>\n\
+           d: Listing<Listing<Mapping<String, Foo>>>\n\
+           b: Listing<Listing<Listing<Foo>>>\n\
+         }\n\
+         h = new H {\n\
+           a { new { new { [\"k\"] = 1 } } }\n\
+           b { new { new { new { n = 5 } } } }\n\
+           c { new { [\"k\"] { n = 5 } } }\n\
+           d { new { new { [\"k\"] { n = 5 } } } }\n\
+         }\n\
+         isMapping = h.a[0][0] is Mapping\n\
+         ds = h.d[0][0][\"k\"].s\n\
+         cs = h.c[0][\"k\"].s\n\
+         bs = h.b[0][0][0].s\n",
+    );
+    assert_eq!(json["isMapping"], serde_json::json!(true));
+    assert_eq!(json["ds"], serde_json::json!("d"));
+    assert_eq!(json["cs"], serde_json::json!("d"));
+    assert_eq!(json["bs"], serde_json::json!("d"));
+}
+
+#[test]
+fn listing_element_types_are_judged_where_the_property_was_declared() {
+    // Verified against pkl 0.32.2 with `a.pkl` declaring the classes and
+    // aliases and `main.pkl` an alias of its own named like a class of `a.pkl`.
+    let lib = "class E { x: Int = 1 }\n\
+         typealias M = Mapping<String, E>\n\
+         class H { xs: Listing<E>?; ls: Listing<Listing<E>>; ms: Listing<Listing<M>> }\n";
+    let main = "import \"a.pkl\" as A\n\
+         typealias E = Mapping<String, Int>\n\
+         r = new A.H {\n\
+           xs { new {} }\n\
+           ls { new { new {} } }\n\
+           ms { new { new { [\"k\"] { x = 4 } } } }\n\
+         }\n";
+    let json = eval_union_files(
+        "declaring_scope_chain",
+        &[("a.pkl", lib), ("main.pkl", main)],
+    )
+    .unwrap();
+    assert_eq!(json["r"]["xs"], serde_json::json!([{"x": 1}]));
+    assert_eq!(json["r"]["ls"], serde_json::json!([[{"x": 1}]]));
+    assert_eq!(json["r"]["ms"], serde_json::json!([[{"k": {"x": 4}}]]));
+}
+
+#[test]
+fn a_mapping_alias_of_the_declaring_module_is_inferred_below_a_listing() {
+    // Verified against pkl 0.32.2: the alias `M` is private to `lib.pkl`.
+    let lib = "typealias M = Mapping<String, Int>\nclass H { ys: Listing<Listing<M>> }\n";
+    let main = "import \"lib.pkl\" as L\n\
+         r = new L.H { ys { new { new { [\"k\"] = 4 } } } }\n\
+         isMapping = r.ys[0][0] is Mapping\n";
+    let json = eval_union_files(
+        "declaring_mapping_alias",
+        &[("lib.pkl", lib), ("main.pkl", main)],
+    )
+    .unwrap();
+    assert_eq!(json["isMapping"], serde_json::json!(true));
+}
+
+#[test]
+fn nested_listings_of_a_class_naming_itself_build_their_innermost_elements() {
+    // Verified against pkl 0.32.2: a class cannot see itself, or a class
+    // declared after it, in the scope it was saved with. Same module and
+    // imported, directly recursive and mutually recursive.
+    let classes = "class Node { x: Int = 1; s: String = \"d\"; children: Listing<Listing<Node>>? }\n\
+         class N2 { x: Int = 1; s: String = \"d\"; kids: Listing<Node2>? }\n\
+         class Node2 { s: String = \"d\"; back: Listing<Listing<N2>>? }\n";
+    let uses = "a = new Node { children { new { new { x = 3 } } } }\n\
+         b = new N2 { kids { new { back { new { new { x = 4 } } } } } }\n\
+         v = List(a.children[0][0].s, b.kids[0].back[0][0].s)\n";
+    let json = eval(&format!("{classes}{uses}"));
+    assert_eq!(json["v"], serde_json::json!(["d", "d"]));
+    let main = format!(
+        "import \"lib.pkl\" as L\n{}",
+        uses.replace("new Node", "new L.Node")
+            .replace("new N2", "new L.N2")
+    );
+    let json = eval_union_files(
+        "nested_self_listing",
+        &[("lib.pkl", classes), ("main.pkl", &main)],
+    )
+    .unwrap();
+    assert_eq!(json["v"], serde_json::json!(["d", "d"]));
+}
+
+#[test]
+fn nested_listing_fallback_only_completes_unresolved_class_names() {
+    // Verified against pkl 0.32.2: a built-in element type of the declaring
+    // module stays what it is when the importing module declares an alias of
+    // the same name, and a constrained self-referential listing is completed.
+    let lib = "class H { xs: Listing<Listing<Dynamic>>?; ys: Listing<Listing<String>>?; ms: Listing<Listing<Mapping<String, Int>>>? }\n\
+         class Node { x: Int = 1; s: String = \"d\"; c1: Listing<Listing<Node>(true)>?; c2: Listing<Node>(!isEmpty)?; c3: Listing<Listing<Node>>(!isEmpty)? }\n\
+         class N2 { s: String = \"d\"; kids: Listing<Node2(true)>? }\n\
+         class Node2 { s: String = \"d\"; back: Listing<Listing<N2>(true)>? }\n";
+    let main = "import \"lib.pkl\" as L\n\
+         class T { x: Int = 1 }\n\
+         typealias Dynamic = T\n\
+         h = new L.H { xs { new { new {} } }; ys { new { \"a\" } }; ms { new { new { [\"k\"] = 1 } } } }\n\
+         r = new L.Node { c1 { new { new { x = 3 } } }; c2 { new { x = 4 } }; c3 { new { new { x = 5 } } } }\n\
+         a = new L.N2 { kids { new { back { new { new { s = \"z\" } } } } } }\n\
+         v = List(h.xs[0][0] is T, h.ys[0][0] is T, h.ms[0][0] is Mapping,\n\
+                  r.c1[0][0].s, r.c2[0].s, r.c3[0][0].s, a.kids[0].s, a.kids[0].back[0][0].s)\n";
+    let json =
+        eval_union_files("nested_fallback", &[("lib.pkl", lib), ("main.pkl", main)]).unwrap();
+    assert_eq!(
+        json["v"],
+        serde_json::json!([false, false, true, "d", "d", "d", "d", "z"])
+    );
 }

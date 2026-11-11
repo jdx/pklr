@@ -154,6 +154,62 @@ impl Evaluator {
             "super".into(),
             Value::Object(Arc::new(parent_members), Some(Arc::clone(base_source))),
         );
+        // `nested { new { ... } }` amends a property declared `Listing<T>?`, whose
+        // default is null. `T` is resolved where the class declares it, which
+        // the amending scope may not see.
+        let mut listing_bound: Vec<(Name, Scope)> = Vec::new();
+        for entry in overlay_entries {
+            let Entry::Property(prop) = entry else {
+                continue;
+            };
+            if prop.body.is_none() || prop.value.is_some() {
+                continue;
+            }
+            // An inherited property's type is written where its class
+            // declares it, which `entry_scopes` records for each entry.
+            let declared = base_entries
+                .iter()
+                .enumerate()
+                .find_map(|(index, base)| match base {
+                    Entry::Property(inherited) if inherited.name == prop.name => inherited
+                        .type_ann
+                        .as_ref()
+                        .map(|ty| (ty, base_source.entry_scopes.get(index))),
+                    _ => None,
+                });
+            if let Some((ty, entry_scope)) = declared
+                && let Some((class, declaring)) =
+                    self.inherited_elem_class(base_source, ty, entry_scope.and_then(Option::as_ref))
+            {
+                // The class stands for the whole type only when it is
+                // `Listing`s down to a non-collection type, judged by the
+                // aliases where the type was declared; a `Mapping` among them
+                // needs its values inferred instead.
+                if let Some(class) = class.filter(|_| is_listing_chain(ty, &declaring)) {
+                    amendment_scope
+                        .values
+                        .insert(listing_elem_class_binding(&prop.name).into(), class);
+                }
+                // A nested listing whose innermost class the declaring scope
+                // could not resolve (a class naming itself) is completed by the
+                // amending scope; one that resolves to a built-in type there is
+                // left as it is.
+                if class_unresolved(ty, &declaring) {
+                    amendment_scope.values.insert(
+                        listing_leaf_unresolved_binding(&prop.name).into(),
+                        Value::Bool(true),
+                    );
+                }
+                // The marker records which amending body owns the bindings, so
+                // a same-named property of a body nested inside it does not
+                // reuse them.
+                amendment_scope.values.insert(
+                    declared_listing_binding(&prop.name).into(),
+                    Value::Int(prop.body.as_ref().map_or(0, body_identity)),
+                );
+                listing_bound.push((prop.name.clone(), declaring));
+            }
+        }
         let prototype = base_source.prototype.clone().or_else(|| {
             (base_source.kind == ObjectKind::Class)
                 .then(|| Value::Object(Arc::clone(base_map), Some(Arc::clone(base_source))))
@@ -483,6 +539,13 @@ impl Evaluator {
                 let Some(type_ann) = &prop.type_ann else {
                     continue;
                 };
+                // A name the class declares as a listing alias may mean
+                // another type in the amending scope (a class of the same
+                // name). The declaring scope resolved it as a listing, so
+                // check the value, constraints included, where it was declared.
+                let declaring_scope = listing_bound
+                    .iter()
+                    .find_map(|(name, scope)| (*name == prop.name).then_some(scope));
                 let value = map.get(prop.name.as_ref()).or_else(|| {
                     assigned_property_names
                         .contains(prop.name.as_ref())
@@ -496,23 +559,35 @@ impl Evaluator {
                 let Some(value) = value else {
                     continue;
                 };
-                let check_scope: &Scope = if type_has_constraint(type_ann, &eval_scope) {
-                    member_scope.get_or_insert_with(|| {
-                        let mut members = eval_scope.child();
-                        // `map` omits hidden members, while an object's saved
-                        // scope keeps their final values. Both are visible to
-                        // a property constraint on this instance.
-                        if let Some(source) = source {
-                            let object_scope = source.scope();
-                            for name in &source.evaluated_properties {
-                                if let Some(value) = object_scope.get(&**name) {
-                                    members.set(name, value.clone());
-                                }
+                // `map` omits hidden members, while an object's saved scope
+                // keeps their final values. Both are visible to a property
+                // constraint on this instance.
+                let add_members = |members: &mut Scope| {
+                    if let Some(source) = source {
+                        let object_scope = source.scope();
+                        for name in &source.evaluated_properties {
+                            if let Some(value) = object_scope.get(&**name) {
+                                members.set(name, value.clone());
                             }
                         }
-                        for (name, value) in map.iter() {
-                            members.set_name(Arc::clone(name), value.clone());
-                        }
+                    }
+                    for (name, value) in map.iter() {
+                        members.set_name(Arc::clone(name), value.clone());
+                    }
+                };
+                // The declaring scope supplies types and aliases; the final
+                // members of this instance win over its saved values.
+                let declared_scope = declaring_scope.map(|declaring| {
+                    let mut members = declaring.child();
+                    add_members(&mut members);
+                    members
+                });
+                let check_scope: &Scope = if let Some(declared) = &declared_scope {
+                    declared
+                } else if type_has_constraint(type_ann, &eval_scope) {
+                    member_scope.get_or_insert_with(|| {
+                        let mut members = eval_scope.child();
+                        add_members(&mut members);
                         members
                     })
                 } else {
@@ -640,31 +715,7 @@ impl Evaluator {
         // Property annotations belong to the definition site of the class.
         // An imported class's aliases and sibling classes may not be visible
         // in the scope that amends one of its instances.
-        let mut type_scope = Scope {
-            type_namespace: object_source_type_namespace(base_source),
-            ..Scope::default()
-        };
-        let base_scope = base_source.scope();
-        if !base_scope.is_empty() {
-            type_scope.vars = Arc::new(base_scope.clone());
-            let declared = base_source.scope_declared();
-            if !declared.is_empty() {
-                type_scope.declared = Arc::new(
-                    declared
-                        .iter()
-                        .filter(|name| base_scope.contains_key(&***name))
-                        .cloned()
-                        .collect(),
-                );
-            }
-        }
-        for (name, identity) in base_source.scope_module_identities() {
-            type_scope.set_module_identity(name.clone(), identity.clone());
-        }
-        let aliases = base_source.scope_type_aliases();
-        if !aliases.is_empty() {
-            type_scope.type_aliases = Arc::new(aliases.clone());
-        }
+        let type_scope = definition_type_scope(base_source);
 
         let base_properties = base_source
             .entries
@@ -986,6 +1037,7 @@ impl Evaluator {
                 ));
             }
             let mut amended = existing;
+            let elem_class = amended.elem_class().cloned();
             let mut amendment_scope = scope.child();
             amendment_scope.set("super", Value::List(amended.clone()));
             amendment_scope.receiver_entries = Some(overlay_entries.clone());
@@ -995,6 +1047,7 @@ impl Evaluator {
                 &amendment_scope,
                 depth + 1,
                 amended.make_mut(),
+                elem_class.as_ref(),
             )?;
             return Ok(Value::List(amended));
         }
@@ -1573,8 +1626,77 @@ pub(super) fn amended_function(arity: usize, function: Value, body: &Body, scope
     )
 }
 
+/// The scope a class instance's property annotations are resolved in: the
+/// definition site of the class.
+pub(super) fn definition_type_scope(base_source: &ObjectSource) -> Scope {
+    let mut type_scope = Scope {
+        type_namespace: object_source_type_namespace(base_source),
+        ..Scope::default()
+    };
+    let base_scope = base_source.scope();
+    if !base_scope.is_empty() {
+        type_scope.vars = Arc::new(base_scope.clone());
+        let declared = base_source.scope_declared();
+        if !declared.is_empty() {
+            type_scope.declared = Arc::new(
+                declared
+                    .iter()
+                    .filter(|name| base_scope.contains_key(&***name))
+                    .cloned()
+                    .collect(),
+            );
+        }
+    }
+    for (name, identity) in base_source.scope_module_identities() {
+        type_scope.set_module_identity(name.clone(), identity.clone());
+    }
+    let aliases = base_source.scope_type_aliases();
+    if !aliases.is_empty() {
+        type_scope.type_aliases = Arc::new(aliases.clone());
+    }
+    type_scope
+}
+
+/// The name under which an amendment scope carries the element class of the
+/// `Listing<T>` property `name` that the amended class declares.
+pub(super) fn listing_elem_class_binding(name: &str) -> String {
+    format!("\0listing_elem_class_of:{name}")
+}
+
+/// The name under which an amendment scope marks that the amended class
+/// declares the property `name` as a listing, whatever its element type.
+pub(super) fn body_identity(body: &crate::parser::Body) -> i64 {
+    Arc::as_ptr(body) as usize as i64
+}
+
+/// Whether the listing bindings of `name` in `scope` belong to the amending
+/// body `body`.
+pub(super) fn owns_listing_bindings(scope: &Scope, name: &str, body: &crate::parser::Body) -> bool {
+    matches!(
+        scope.get(&declared_listing_binding(name)),
+        Some(Value::Int(owner)) if *owner == body_identity(body)
+    )
+}
+
+pub(super) fn declared_listing_binding(name: &str) -> String {
+    format!("\0declared_listing_of:{name}")
+}
+
 /// Whether `prop` is declared with an explicit `null` default, which a body
 /// amendment amends as the `null` it is.
 fn is_null_default(prop: &Property) -> bool {
     matches!(prop.value, Some(Expr::Null))
+}
+
+/// The binding that marks the saved element class of the listing property
+/// `name` as lacking its innermost class because that class name did not
+/// resolve where the type was declared.
+pub(super) fn listing_leaf_unresolved_binding(name: &str) -> String {
+    format!("\0listing_leaf_unresolved_of:{name}")
+}
+
+/// Whether a nested listing type ends in a class name that does not resolve in
+/// `declaring`.
+fn class_unresolved(ty: &crate::parser::TypeExpr, declaring: &Scope) -> bool {
+    listing_leaf_name(ty, declaring).is_some_and(|leaf| resolve_dotted(declaring, &leaf).is_none())
 }
