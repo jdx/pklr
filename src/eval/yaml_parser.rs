@@ -51,6 +51,9 @@ pub(crate) fn parse_yaml(
         invoke,
         path: vec![PathPart::TopLevel],
         anchors: HashMap::new(),
+        tag_handles: HashMap::new(),
+        in_key: false,
+        key_original: None,
     };
     parser.documents()
 }
@@ -97,6 +100,11 @@ struct Yaml<'a> {
     invoke: &'a mut dyn Invoke,
     path: Vec<PathPart>,
     anchors: HashMap<String, Value>,
+    /// Tag handles declared by `%TAG` in the current document.
+    tag_handles: HashMap<String, String>,
+    /// Set while parsing an explicit `?` key: only class converters apply.
+    in_key: bool,
+    key_original: Option<Value>,
 }
 
 fn is_blank(c: Option<char>) -> bool {
@@ -180,8 +188,22 @@ impl Yaml<'_> {
         loop {
             self.skip_to_content(true)?;
             let mut directive = false;
+            self.tag_handles.clear();
             while self.col() == 0 && self.peek() == Some('%') {
-                self.skip_comment();
+                let start = self.pos;
+                while self.peek().is_some_and(|c| c != '\n') {
+                    self.pos += 1;
+                }
+                let line: String = self.s[start..self.pos].iter().collect();
+                let mut words = line.split_whitespace();
+                if words.next() == Some("%TAG") {
+                    if let (Some(handle), Some(prefix)) = (words.next(), words.next()) {
+                        self.tag_handles
+                            .insert(handle.to_string(), prefix.to_string());
+                    } else {
+                        return fail();
+                    }
+                }
                 self.skip_to_content(true)?;
                 directive = true;
             }
@@ -368,13 +390,27 @@ impl Yaml<'_> {
             }
             let tag: String = self.s[start..self.pos].iter().collect();
             self.pos += 1;
-            return Ok(tag
-                .strip_prefix("tag:yaml.org,2002:")
-                .map(|t| format!("!!{t}"))
-                .unwrap_or(tag));
+            return Ok(Self::normalize_tag(tag));
         }
         let name = self.token();
-        Ok(format!("!{name}"))
+        // `!handle!suffix` (including `!!suffix`) expands through `%TAG`.
+        let split = name
+            .rfind('!')
+            .map(|i| (format!("!{}", &name[..=i]), &name[i + 1..]));
+        match split {
+            Some((handle, suffix)) => match self.tag_handles.get(&handle) {
+                Some(prefix) => Ok(Self::normalize_tag(format!("{prefix}{suffix}"))),
+                None if handle == "!!" => Ok(format!("!!{suffix}")),
+                None => fail(),
+            },
+            None => Ok(format!("!{name}")),
+        }
+    }
+
+    fn normalize_tag(tag: String) -> String {
+        tag.strip_prefix("tag:yaml.org,2002:")
+            .map(|t| format!("!!{t}"))
+            .unwrap_or(tag)
     }
 
     fn block_seq(&mut self, c: usize, depth: usize) -> Result<Vec<Value>> {
@@ -414,8 +450,16 @@ impl Yaml<'_> {
                 Some(key) => key,
                 None if self.peek() == Some('?') && is_blank(self.peek_at(1)) => {
                     self.pos += 1;
-                    let key = self.block_node(c as isize, false, false, depth + 1)?;
-                    let key = (key.clone(), key);
+                    self.in_key = true;
+                    self.key_original = None;
+                    let converted = self.block_node(c as isize, false, false, depth + 1);
+                    self.in_key = false;
+                    let converted = converted?;
+                    let original = self
+                        .key_original
+                        .take()
+                        .unwrap_or_else(|| converted.clone());
+                    let key = (converted, original);
                     self.skip_to_content(true)?;
                     if self.col() == c && self.peek() == Some(':') && is_blank(self.peek_at(1)) {
                         entries.push(self.map_value(key, c, depth)?);
@@ -995,10 +1039,20 @@ impl Yaml<'_> {
     fn finish(&mut self, raw: Raw) -> Result<Value> {
         let Raw { props, body } = raw;
         let value = match body {
-            Body::Alias(value) => return Ok(value),
+            Body::Alias(value) => {
+                if self.in_key {
+                    self.key_original = Some(value.clone());
+                }
+                return Ok(value);
+            }
             body => self.build(body, props.tag.as_deref())?,
         };
-        let value = self.convert(value, true)?;
+        let value = if self.in_key {
+            self.key_original = Some(value.clone());
+            self.convert(value, false)?
+        } else {
+            self.convert(value, true)?
+        };
         if let Some(anchor) = props.anchor {
             self.anchors.insert(anchor, value.clone());
         }

@@ -1326,3 +1326,22 @@ userError = test.catch(() -> throw("Error parsing mine.\n\ndetail"))
     assert_eq!(json["missing"], "Error parsing YAML document.");
     assert_eq!(json["userError"], "Error parsing mine.\n\ndetail");
 }
+
+#[test]
+fn yaml_parser_explicit_keys_and_tag_handles() {
+    let json = eval(
+        r##"import "pkl:yaml"
+local parser = new yaml.Parser {
+  converters {
+    [String] = (it) -> it + "x"
+    ["a"] = (it) -> it * 10
+  }
+}
+explicit = parser.parse("? a\n: 2")
+implicit = parser.parse("a: 2")
+handle = new yaml.Parser {}.parse("%TAG !e! tag:yaml.org,2002:\n--- !e!str 123")
+"##,
+    );
+    assert_eq!(json["explicit"], json["implicit"]);
+    assert_eq!(json["handle"], "123");
+}
