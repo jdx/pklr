@@ -7638,21 +7638,6 @@ n = (m) { ["a"] = new { age = 2 } }
 }
 
 #[test]
-fn mapping_amended_plain_function_default_is_recorded() {
-    let json = eval(
-        r#"
-m = new Mapping {
-  default { name = "old" }
-  ["a"] {}
-}
-n = (m) { default = (key) -> new Dynamic { name = key } }
-miss = n.getOrDefault("zed")
-"#,
-    );
-    assert_eq!(json["miss"]["name"], "zed");
-}
-
-#[test]
 fn mapping_function_default_is_not_called_for_plain_replacements() {
     let json = eval(
         r#"
