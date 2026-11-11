@@ -424,13 +424,6 @@ impl Evaluator {
         if module.contains('.') {
             return Ok(None);
         }
-        let is_import_value = match scope.get(module) {
-            Some(Value::Object(_, source)) => source.as_ref().is_none_or(|source| source.is_module),
-            _ => false,
-        };
-        if is_import_value {
-            return Ok(None);
-        }
         let Some(identity) = scope.module_identity(module).cloned() else {
             return Ok(None);
         };
