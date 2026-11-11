@@ -815,7 +815,8 @@ fn check_failed_members(
     if converters.find(value, kind, &[]).is_some() {
         return Ok(());
     }
-    let failure = module_failure.or_else(|| unconverted_member_failure(value, converters));
+    let failure =
+        module_failure.or_else(|| unconverted_member_failure(value, Some(kind), converters));
     match failure {
         Some(message) => Err(Error::Eval(message.to_string())),
         None => Ok(()),
@@ -827,12 +828,11 @@ fn check_failed_members(
 #[cfg(feature = "native-io")]
 fn unconverted_member_failure<'a>(
     value: &'a Value,
+    kind: Option<Kind>,
     converters: &render::Converters,
 ) -> Option<&'a str> {
-    if converters
-        .find(value, render::kind_of(value), &[])
-        .is_some()
-    {
+    let kind = kind.unwrap_or_else(|| render::kind_of(value));
+    if converters.find(value, kind, &[]).is_some() {
         return None;
     }
     match value {
@@ -845,11 +845,11 @@ fn unconverted_member_failure<'a>(
                 return Some(member.message.as_str());
             }
             map.values()
-                .find_map(|value| unconverted_member_failure(value, converters))
+                .find_map(|value| unconverted_member_failure(value, None, converters))
         }
         Value::List(items) => items
             .iter()
-            .find_map(|value| unconverted_member_failure(value, converters)),
+            .find_map(|value| unconverted_member_failure(value, None, converters)),
         _ => None,
     }
 }

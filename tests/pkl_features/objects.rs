@@ -7901,3 +7901,11 @@ fn undefined_property_is_not_read_when_a_broad_converter_replaces_the_value() {
     .unwrap();
     assert_eq!(json, serde_json::json!("ok"));
 }
+
+#[test]
+fn dynamic_converter_does_not_replace_a_module_with_an_undefined_property() {
+    let result = render_json(
+        "name: String\noutput { renderer = new JsonRenderer { converters { [Dynamic] = (_) -> \"ok\" } } }",
+    );
+    assert!(result.is_err(), "{result:?}");
+}
