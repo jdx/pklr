@@ -706,6 +706,23 @@ impl Evaluator {
             .any(|name| converters.class(name).is_some()))
     }
 
+    /// The failed member of `module` when the module itself is rendered. The
+    /// output built for it does not carry the module's failed members.
+    #[cfg(feature = "native-io")]
+    fn implicit_module_failure(&self, module: &Value) -> Option<String> {
+        if self.output_sets_value {
+            return None;
+        }
+        match module {
+            Value::Object(_, Some(source)) => source
+                .poisoned_members
+                .as_ref()
+                .and_then(|members| members.values().find(|member| member.rendered))
+                .map(|member| member.message.clone()),
+            _ => None,
+        }
+    }
+
     /// The value the module renders: `output.value`, or the module itself.
     #[cfg(feature = "native-io")]
     fn output_value(&self, module: Value) -> (Value, Option<Kind>) {
@@ -728,9 +745,11 @@ impl Evaluator {
 
     #[cfg(feature = "native-io")]
     fn module_json(&mut self, module: Value) -> Result<serde_json::Value> {
+        let module_failure = self.implicit_module_failure(&module);
         let (value, top_kind) = self.output_value(module);
         let (kind, renderer) = self.output_renderer(RendererKind::Json);
         let converters = renderer_converters(&renderer)?;
+        check_failed_members(&value, top_kind, &converters, module_failure.as_deref())?;
         // As `pkl eval -f json`: null properties and mapping entries are
         // omitted unless the evaluated renderer sets `omitNullProperties`
         // to false.
@@ -762,10 +781,76 @@ impl Evaluator {
             }
             None => {}
         }
+        let module_failure = self.implicit_module_failure(&module);
         let (value, top_kind) = self.output_value(module);
         let (kind, renderer) = self.output_renderer(RendererKind::Pcf);
+        check_failed_members(
+            &value,
+            top_kind,
+            &renderer_converters(&renderer)?,
+            module_failure.as_deref(),
+        )?;
         let settings = Settings::read(kind, &renderer)?;
         settings.render(&value, true, top_kind, &mut Invoker(self, 0))
+    }
+}
+
+/// Fail rendering `value` when it holds a member that failed (an undefined
+/// property, say). The renderer never reads such a member from an object a
+/// converter replaces, so those objects (matched as the renderer matches them)
+/// are not checked. A path converter cannot be matched here and leaves the
+/// check to the read. `module_failure` is the failed member of the module
+/// itself, which counts when the module is what gets rendered.
+#[cfg(feature = "native-io")]
+fn check_failed_members(
+    value: &Value,
+    top_kind: Option<Kind>,
+    converters: &render::Converters,
+    module_failure: Option<&str>,
+) -> Result<()> {
+    if converters.has_paths() {
+        return Ok(());
+    }
+    let kind = top_kind.unwrap_or_else(|| render::kind_of(value));
+    if converters.find(value, kind, &[]).is_some() {
+        return Ok(());
+    }
+    let failure =
+        module_failure.or_else(|| unconverted_member_failure(value, Some(kind), converters));
+    match failure {
+        Some(message) => Err(Error::Eval(message.to_string())),
+        None => Ok(()),
+    }
+}
+
+/// The first failed member of `value`'s children (and of itself, when it has
+/// no converter), skipping every value a converter replaces.
+#[cfg(feature = "native-io")]
+fn unconverted_member_failure<'a>(
+    value: &'a Value,
+    kind: Option<Kind>,
+    converters: &render::Converters,
+) -> Option<&'a str> {
+    let kind = kind.unwrap_or_else(|| render::kind_of(value));
+    if converters.find(value, kind, &[]).is_some() {
+        return None;
+    }
+    match value {
+        Value::Object(map, source) => {
+            if let Some(member) = source
+                .as_ref()
+                .and_then(|source| source.poisoned_members.as_ref())
+                .and_then(|members| members.values().find(|member| member.rendered))
+            {
+                return Some(member.message.as_str());
+            }
+            map.values()
+                .find_map(|value| unconverted_member_failure(value, None, converters))
+        }
+        Value::List(items) => items
+            .iter()
+            .find_map(|value| unconverted_member_failure(value, None, converters)),
+        _ => None,
     }
 }
 
