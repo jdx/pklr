@@ -1145,6 +1145,16 @@ pub(crate) fn validate_xml_characters(
 }
 
 /// A short Pkl rendering of `value` for error messages.
+/// The module and declared name of an alias identity. The name may hold dots
+/// (a quoted name), so it is taken from the value and not by splitting.
+fn alias_split<'a>(identity: &'a str, members: &ObjectMap) -> Option<(&'a str, &'a str)> {
+    let Some(Value::String(name)) = members.get(crate::eval::stdlib::TYPE_ALIAS_NAME_KEY) else {
+        return None;
+    };
+    let module = identity.strip_suffix(&**name)?.strip_suffix('.')?;
+    Some((module, &identity[module.len() + 1..]))
+}
+
 /// The deepest nesting `display_value` expands: shared contents can make an
 /// expanded value exponentially larger than the value itself.
 const DISPLAY_DEPTH: usize = 6;
@@ -1788,14 +1798,4 @@ mod tests {
         assert_eq!(k1.to_json(), k2.to_json());
         assert_ne!(object_key(k1), object_key(k2));
     }
-}
-
-/// The module and declared name of an alias identity. The name may hold dots
-/// (a quoted name), so it is taken from the value and not by splitting.
-fn alias_split<'a>(identity: &'a str, members: &ObjectMap) -> Option<(&'a str, &'a str)> {
-    let Some(Value::String(name)) = members.get(crate::eval::stdlib::TYPE_ALIAS_NAME_KEY) else {
-        return None;
-    };
-    let module = identity.strip_suffix(&**name)?.strip_suffix('.')?;
-    Some((module, &identity[module.len() + 1..]))
 }
