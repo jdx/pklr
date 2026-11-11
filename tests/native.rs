@@ -864,7 +864,8 @@ fn deeply_nested_unused_remote_modules_do_not_crash_prefetching() {
 
 #[test]
 fn nesting_past_the_limit_is_a_parse_error() {
-    let depth = pklr::parser::MAX_NESTING_DEPTH + 1;
+    // Far past what any stack holds; `tests/nesting.rs` covers depths that evaluate.
+    let depth = 1_000_000;
     let path = common::write_entry(
         "nesting_limit",
         "main.pkl",

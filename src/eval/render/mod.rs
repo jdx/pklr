@@ -948,6 +948,7 @@ pub(crate) trait StringRenderer<'a> {
     }
 
     fn visit(&mut self, value: &Value) -> Result<()> {
+        crate::stack::check_depth()?;
         let kind = self.walk().kind(value);
         if kind == Kind::Typed
             && typed_class_is(value, "pkl:xml", "CommentClass")
@@ -1644,6 +1645,7 @@ impl JsonValue<'_> {
 
     #[cfg(feature = "native-io")]
     fn value(&mut self, value: &Value, kind: Kind) -> Result<serde_json::Value> {
+        crate::stack::check_depth()?;
         if kind == Kind::Typed
             && typed_class_is(value, "pkl:xml", "CommentClass")
             && matches!(value, Value::Object(map, _) if map.get("text").and_then(Value::as_str).is_some_and(|text| text.contains("--") || text.ends_with('-')))

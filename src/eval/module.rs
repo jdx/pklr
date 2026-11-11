@@ -275,7 +275,8 @@ impl Evaluator {
         inherited_scope: Option<Scope>,
         requested_fields: Option<HashSet<Name>>,
     ) -> Result<Value> {
-        if depth > self.max_depth {
+        if depth > self.max_depth || crate::stack::exhausted() {
+            crate::stack::limit_hit();
             return Err(Error::Eval(format!(
                 "max import depth {} exceeded",
                 self.max_depth

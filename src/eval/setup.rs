@@ -77,7 +77,8 @@ impl Evaluator {
     pub fn with_capabilities(capabilities: impl EvalCapabilities + 'static) -> Self {
         Self {
             base_path: PathBuf::from("."),
-            max_depth: 32,
+            max_depth: crate::stack::SMALL_STACK_EVAL_DEPTH,
+            max_depth_set: false,
             http_cache: HashMap::default(),
             import_cache: HashMap::default(),
             imports_in_flight: HashSet::default(),
@@ -132,6 +133,48 @@ impl Evaluator {
             mapping_key_values: HashMap::default(),
             module_names: HashMap::default(),
         }
+    }
+
+    /// Limit how deeply evaluation may recurse before it fails with an error.
+    /// The default suits the large stack that evaluation runs on.
+    pub fn set_max_depth(&mut self, depth: usize) {
+        self.max_depth = depth;
+        self.max_depth_set = true;
+    }
+
+    /// Run `body`, which starts an evaluation, on the caller's stack and, if
+    /// that reaches the nesting limit, again on a large one with a higher
+    /// default limit.
+    pub(super) fn on_grown_stack<R: Send>(
+        &mut self,
+        mut body: impl FnMut(&mut Self) -> R + Send,
+    ) -> R {
+        /// Restores the evaluator's depth limit even if `body` panics.
+        struct Restore<'a>(&'a mut Evaluator, usize);
+
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                self.0.max_depth = self.1;
+            }
+        }
+
+        crate::stack::run(|large| {
+            let saved = self.max_depth;
+            let guard = Restore(&mut *self, saved);
+            if large && !guard.0.max_depth_set {
+                guard.0.max_depth = crate::stack::EVAL_DEPTH;
+            }
+            let result = body(&mut *guard.0);
+            drop(guard);
+            if large {
+                // These hold the parsed trees, which free recursively; do it
+                // here rather than on the caller's small stack.
+                self.parse_cache.clear();
+                self.plan_cache.clear();
+                self.body_roots_cache.clear();
+            }
+            result
+        })
     }
 
     pub fn set_base_path(&mut self, path: &Path) {

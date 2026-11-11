@@ -12,9 +12,12 @@ impl<'a> Parser<'a> {
     }
 
     pub(super) fn deepen(&mut self) -> Result<()> {
-        if self.depth >= MAX_NESTING_DEPTH {
+        let limit = nesting_limit();
+        if self.depth >= limit || crate::stack::exhausted() {
+            crate::stack::limit_hit();
+            let limit = limit.min(self.depth);
             return Err(self.parse_error(format!(
-                "expressions cannot be nested more than {MAX_NESTING_DEPTH} levels deep"
+                "expressions cannot be nested more than {limit} levels deep"
             )));
         }
         self.depth += 1;

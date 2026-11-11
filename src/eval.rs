@@ -96,8 +96,10 @@ const QUIET_PASS_MARGIN: usize = 2;
 /// Evaluates pkl source files to [`Value`].
 pub struct Evaluator {
     base_path: PathBuf,
-    /// Maximum import depth to prevent infinite recursion
+    /// Maximum recursion depth, which also bounds import and amends chains
     max_depth: usize,
+    /// Whether the host set `max_depth`, which then applies on any stack
+    max_depth_set: bool,
     /// Cache for fetched HTTP sources (URL → source text)
     http_cache: HashMap<String, String>,
     /// Cache for evaluated local imports (canonical path → Value)

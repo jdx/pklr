@@ -106,7 +106,8 @@ impl Evaluator {
         // Class defaults can recursively materialize more class defaults
         // without passing through `eval_expr`. Keep that path under the same
         // depth ceiling as ordinary expression evaluation.
-        if depth > self.max_depth {
+        if depth > self.max_depth || crate::stack::exhausted() {
+            crate::stack::limit_hit();
             return Err(Error::Eval("maximum recursion depth exceeded".into()));
         }
         // A module object's source can carry only error metadata. It has no

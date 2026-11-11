@@ -17,7 +17,8 @@ impl Evaluator {
         inherited_locals: &[(String, Expr)],
         elem_class: Option<&Arc<Value>>,
     ) -> Result<()> {
-        if depth > self.max_depth {
+        if depth > self.max_depth || crate::stack::exhausted() {
+            crate::stack::limit_hit();
             return Err(Error::Eval("maximum recursion depth exceeded".into()));
         }
         let scope = scope.child();

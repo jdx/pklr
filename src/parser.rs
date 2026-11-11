@@ -49,8 +49,19 @@ pub(crate) fn parse_type_name(name: &str) -> Result<TypeExpr> {
     Parser::new(&tokens, name, "<type>").parse_type()
 }
 
-/// The shared parser and lexer nesting limit.
-pub const MAX_NESTING_DEPTH: usize = 128;
+/// The nesting limit of the parser and lexer on a stack of unknown size, such
+/// as a direct call to [`parse`]. Evaluation runs on a large stack of its own,
+/// where the parser allows far deeper nesting.
+pub const MAX_NESTING_DEPTH: usize = crate::stack::SMALL_STACK_PARSER_DEPTH;
+
+/// The nesting limit that applies on the current thread's stack.
+fn nesting_limit() -> usize {
+    if crate::stack::on_large_stack() {
+        crate::stack::PARSER_DEPTH
+    } else {
+        MAX_NESTING_DEPTH
+    }
+}
 
 /// The doc comment, annotations and modifiers in front of a member.
 #[derive(Default)]

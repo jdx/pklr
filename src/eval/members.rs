@@ -10,7 +10,8 @@ impl Evaluator {
         depth: usize,
         property_access: bool,
     ) -> Result<Value> {
-        if depth > self.max_depth {
+        if depth > self.max_depth || crate::stack::exhausted() {
+            crate::stack::limit_hit();
             return Err(Error::Eval("maximum recursion depth exceeded".into()));
         }
         if let Some(Value::List(items)) = scope.get("super") {
@@ -172,7 +173,8 @@ impl Evaluator {
         depth: usize,
         keys: &mut IndexMap<Arc<str>, ()>,
     ) -> Result<()> {
-        if depth > self.max_depth {
+        if depth > self.max_depth || crate::stack::exhausted() {
+            crate::stack::limit_hit();
             return Err(Error::Eval("maximum recursion depth exceeded".into()));
         }
         let scope = scope.child();
@@ -235,7 +237,8 @@ impl Evaluator {
         depth: usize,
         length: &mut usize,
     ) -> Result<()> {
-        if depth > self.max_depth {
+        if depth > self.max_depth || crate::stack::exhausted() {
+            crate::stack::limit_hit();
             return Err(Error::Eval("maximum recursion depth exceeded".into()));
         }
         let scope = scope.child();
