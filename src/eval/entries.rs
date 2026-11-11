@@ -53,24 +53,10 @@ impl Evaluator {
             // than the one the amended class recorded its listing bindings for.
             let declared_body = body;
             let body = inferred.as_ref().unwrap_or(body);
-            // The scope that declared the property's type, when an amendment of
-            // an inherited property carries it.
-            let declaring = match (
-                scope.get(&declared_type_scope_binding(&prop.name)),
-                scope.get(&declared_type_owner_binding(&prop.name)),
-            ) {
-                (Some(Value::Object(_, Some(source))), Some(Value::Int(owner)))
-                    if *owner == body_identity(declared_body) =>
-                {
-                    Some(restore_scope(&capture_object_source_scope(source)))
-                }
-                _ => None,
-            };
-            let type_scope = declaring.as_ref().unwrap_or(scope);
             let mut nullable_default = prop
                 .type_ann
                 .as_ref()
-                .and_then(|ty| nullable_inner_default(ty, type_scope));
+                .and_then(|ty| nullable_inner_default(ty, scope));
             // An amendment of an inherited `Listing` property records its
             // element class where the class declared the type. The type name
             // may mean something else here (an alias the amending module
@@ -83,7 +69,7 @@ impl Evaluator {
                 nullable_default = None;
             }
             if let Some(default) = &mut nullable_default {
-                apply_mapping_type_annotation(default, prop.type_ann.as_ref(), type_scope);
+                apply_mapping_type_annotation(default, prop.type_ann.as_ref(), scope);
             }
             // A body amendment amends a member the receiver itself holds. A
             // same-named property of an enclosing object, declared or
@@ -255,32 +241,15 @@ impl Evaluator {
                         .collect::<Vec<_>>();
                     receiver_entries.extend_from_slice(body);
                     amendment_scope.receiver_entries = Some(Arc::new(receiver_entries));
-                    // The mapping's own saved classes first; the property's
-                    // declaring scope only for a name it did not save.
-                    // The annotation's declaring scope leads only when the
-                    // annotation wrote these value types itself; a broader one
-                    // (`Mapping<String, Any>`) holding a mapping typed elsewhere
-                    // must not rename its classes.
-                    let annotation_names = prop
-                        .type_ann
-                        .as_ref()
-                        .map(|ty| {
-                            let resolved =
-                                resolve_collection_type(ty, declaring.as_ref().unwrap_or(scope), 0);
-                            mapping_value_type_names(resolved.as_ref().unwrap_or(ty))
+                    let value_type_defaults = src
+                        .mapping_value_types
+                        .iter()
+                        .filter_map(|name| {
+                            let name = mapping_value_type_base(name);
+                            resolve_dotted(&inherited_scope, name)
+                                .map(|value| (name.to_string(), value))
                         })
-                        .unwrap_or_default();
-                    let annotated = !src.mapping_value_types.is_empty()
-                        && src
-                            .mapping_value_types
-                            .iter()
-                            .all(|name| annotation_names.contains(name));
-                    let value_type_defaults = mapping_value_type_classes(
-                        &src.mapping_value_types,
-                        src,
-                        declaring.as_ref().filter(|_| annotated),
-                        &[&inherited_scope],
-                    );
+                        .collect::<Vec<_>>();
                     let inherited_default =
                         self.find_default_template(&src.entries, &inherited_scope, depth)?;
                     let mut amended = ObjectMap::default();

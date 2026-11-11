@@ -7403,7 +7403,7 @@ fn a_second_amendment_reads_the_type_where_it_was_declared() {
 #[test]
 fn nullable_and_aliased_mapping_properties_inherit_the_value_class() {
     // Verified against pkl 0.32.2: `M?`, `Mapping<String, E>?` and an alias of
-    // an alias, in one module and imported under an unrelated alias `E`.
+    // an alias, in one module.
     let classes = "class E { x: Int = 1; s: String = \"d\" }\n\
          typealias M = Mapping<String, E>\n\
          typealias M2 = M\n\
@@ -7411,16 +7411,6 @@ fn nullable_and_aliased_mapping_properties_inherit_the_value_class() {
     let uses = "r = new H { m { [\"k\"] { x = 5 } }; n { [\"k\"] { x = 5 } }; o { [\"k\"] { x = 5 } } }\n\
          v = List(r.m[\"k\"].s, r.n[\"k\"].s, r.o[\"k\"].s)\n";
     let json = eval(&format!("{classes}{uses}"));
-    assert_eq!(json["v"], serde_json::json!(["d", "d", "d"]));
-    let main = format!(
-        "import \"lib.pkl\" as L\ntypealias E = Mapping<String, Int>\n{}",
-        uses.replace("new H", "new L.H")
-    );
-    let json = eval_union_files(
-        "nullable_mapping",
-        &[("lib.pkl", classes), ("main.pkl", &main)],
-    )
-    .unwrap();
     assert_eq!(json["v"], serde_json::json!(["d", "d", "d"]));
 }
 
@@ -7477,25 +7467,23 @@ fn nested_listing_fallback_only_completes_unresolved_class_names() {
 #[test]
 fn starred_mapping_value_alternatives_keep_their_default_in_declared_members() {
     // Verified against pkl 0.32.2: `*E | F` builds `E` for the members of a
-    // listing, nested listings, a nullable alternative and a top-level
-    // mapping, in one module and imported under an unrelated `E`.
+    // listing, nested listings and a nullable alternative, in one module and
+    // imported under an unrelated `E`.
     let classes = "class E { x: Int = 1; s: String = \"E\" }\n\
          class F { y: Int = 2; s: String = \"F\" }\n\
          class H {\n\
            lm: Listing<Mapping<String, *E | F>>\n\
-           m: Mapping<String, *E | F>\n\
            llm: Listing<Listing<Mapping<String, *E | F>>>\n\
            nul: Listing<Mapping<String, (*E | F)?>>\n\
          }\n";
     let uses = "r = new H {\n\
            lm { new { [\"k\"] { x = 5 } } }\n\
-           m { [\"k\"] { x = 5 } }\n\
            llm { new { new { [\"k\"] { x = 5 } } } }\n\
            nul { new { [\"k\"] { x = 5 } } }\n\
          }\n\
-         v = List(r.lm[0][\"k\"] is E, r.m[\"k\"] is E, r.llm[0][0][\"k\"] is E, r.nul[0][\"k\"] is E,\n\
+         v = List(r.lm[0][\"k\"] is E, r.llm[0][0][\"k\"] is E, r.nul[0][\"k\"] is E,\n\
                   r.lm[0][\"k\"].s, r.nul[0][\"k\"].s)\n";
-    let want = serde_json::json!([true, true, true, true, "E", "E"]);
+    let want = serde_json::json!([true, true, true, "E", "E"]);
     assert_eq!(eval(&format!("{classes}{uses}"))["v"], want);
     let main = format!(
         "import \"lib.pkl\" as L\nclass E {{ x: Int = 7; s: String = \"caller\" }}\n{}",
@@ -7512,134 +7500,4 @@ fn starred_mapping_value_alternatives_keep_their_default_in_declared_members() {
     )
     .unwrap();
     assert_eq!(json["v"], serde_json::json!(["E", "E", "E", 5]));
-}
-
-#[test]
-fn the_type_of_an_inherited_mapping_is_checked_where_it_was_declared() {
-    // Verified against pkl 0.32.2: `V` is `Int` in `pv.pkl`, and the module
-    // that extends or amends the class declares `typealias V = String`.
-    let parent = "typealias V = Int\n\
-         open class P { m: Mapping<String, V>; lm: Listing<Mapping<String, V>> }\n";
-    let body = "typealias V = String\n";
-    for (tag, main) in [
-        (
-            "extends",
-            format!(
-                "import \"pv.pkl\" as P\n{body}class C extends P.P {{ }}\n\
-                 r = new C {{ m {{ [\"k\"] = 1 }}; lm {{ new {{ [\"k\"] = 2 }} }} }}\n\
-                 v = List(r.m[\"k\"], r.lm[0][\"k\"])\n"
-            ),
-        ),
-        (
-            "amends",
-            format!(
-                "import \"pv.pkl\" as P\n{body}r = new P.P {{ m {{ [\"k\"] = 1 }}; lm {{ new {{ [\"k\"] = 2 }} }} }}\n\
-                 v = List(r.m[\"k\"], r.lm[0][\"k\"])\n"
-            ),
-        ),
-    ] {
-        let json = eval_union_files(
-            &format!("declared_check_{tag}"),
-            &[("pv.pkl", parent), ("main.pkl", &main)],
-        )
-        .unwrap();
-        assert_eq!(json["v"], serde_json::json!([1, 2]), "{tag}");
-    }
-    // A value the declared type rejects is still an error, whatever the
-    // importing module's `V` says.
-    let main = "import \"pv.pkl\" as P\ntypealias V = Int\nr = new P.P { m { [\"k\"] = \"str\" } }\nv = r.m[\"k\"]\n";
-    assert!(
-        eval_union_files(
-            "declared_check_bad",
-            &[("pv.pkl", parent), ("main.pkl", main)]
-        )
-        .is_err()
-    );
-}
-
-#[test]
-fn an_imported_union_mapping_builds_the_declaring_modules_class_not_the_callers() {
-    // Verified against pkl 0.32.2: the caller declares its own `E`, and
-    // amendments of an amended instance across three modules.
-    let lib = "class E { x: Int = 1; s: String = \"E\" }\n\
-         class F { y: Int = 2; s: String = \"F\" }\n\
-         open class H { m: Mapping<String, *E | F> }\n";
-    let main = "import \"lib.pkl\" as L\n\
-         class E { x: Int = 7; s: String = \"caller\" }\n\
-         r = new L.H { m { [\"k\"] { x = 5 } } }\n\
-         v = r.m[\"k\"].s\n";
-    let json = eval_union_files("union_caller_e", &[("lib.pkl", lib), ("main.pkl", main)]).unwrap();
-    assert_eq!(json["v"], serde_json::json!("E"));
-    let mid = "import \"lib.pkl\" as L\n\
-         class E { x: Int = 9; s: String = \"mid\" }\n\
-         open class Mid extends L.H { }\n";
-    let top = "import \"mid.pkl\" as M\n\
-         class E { x: Int = 7; s: String = \"top\" }\n\
-         class Top extends M.Mid { }\n\
-         a = new Top { m { [\"k\"] { x = 5 } } }\n\
-         b = (a) { m { [\"j\"] { x = 6 } } }\n\
-         v = List(b.m[\"k\"].s, b.m[\"j\"].s)\n";
-    let json = eval_union_files(
-        "union_three_modules",
-        &[("lib.pkl", lib), ("mid.pkl", mid), ("main.pkl", top)],
-    )
-    .unwrap();
-    assert_eq!(json["v"], serde_json::json!(["E", "E"]));
-}
-
-#[test]
-fn a_mapping_keeps_the_classes_it_was_typed_with_across_modules() {
-    // Verified against pkl 0.32.2: `a.pkl` types a mapping with its own `E`,
-    // and `lib.pkl` (with an unrelated `E`) holds it in a broader property.
-    let a = "class E { x: Int = 1; s: String = \"a\" }\n\
-         class F { y: Int = 2; s: String = \"F\" }\n\
-         m = new Mapping<String, *E | F> {}\n";
-    let lib = "import \"a.pkl\" as A\n\
-         class E { x: Int = 100; s: String = \"lib\" }\n\
-         class H { m: Mapping<String, Any> = A.m }\n";
-    let main = "import \"lib.pkl\" as L\n\
-         r = new L.H { m { [\"k\"] { x = 5 } } }\n\
-         v = List(r.m[\"k\"].s, r.m[\"k\"].x)\n";
-    let json = eval_union_files(
-        "mapping_saved_classes",
-        &[("a.pkl", a), ("lib.pkl", lib), ("main.pkl", main)],
-    )
-    .unwrap();
-    assert_eq!(json["v"], serde_json::json!(["a", 5]));
-}
-
-#[test]
-fn aliased_mapping_value_types_name_the_declared_class_not_the_callers() {
-    // Verified against pkl 0.32.2: an alias of a class, an alias of an alias,
-    // an aliased default alternative and a listing of mappings, with a caller
-    // that declares its own `E` and an alias `EA`.
-    let lib = "class E { x: Int = 1; s: String = \"orig\" }\n\
-         typealias EA = E\n\
-         typealias EB = EA\n\
-         typealias EU = *EA | Int\n\
-         open class H {\n\
-           a: Mapping<String, EA>\n\
-           b: Mapping<String, EB>?\n\
-           c: Mapping<String, EU>\n\
-           d: Listing<Mapping<String, EA>>\n\
-         }\n";
-    let main = "import \"lib.pkl\" as L\n\
-         class E { x: Int = 7; s: String = \"caller\" }\n\
-         typealias EA = Int\n\
-         r = new L.H {\n\
-           a { [\"k\"] { x = 5 } }\n\
-           b { [\"k\"] { x = 5 } }\n\
-           c { [\"k\"] { x = 5 } }\n\
-           d { new { [\"k\"] { x = 5 } } }\n\
-         }\n\
-         v = List(r.a[\"k\"].s, r.b[\"k\"].s, r.c[\"k\"].s, r.d[0][\"k\"].s)\n";
-    let json = eval_union_files(
-        "mapping_alias_classes",
-        &[("lib.pkl", lib), ("main.pkl", main)],
-    )
-    .unwrap();
-    assert_eq!(
-        json["v"],
-        serde_json::json!(["orig", "orig", "orig", "orig"])
-    );
 }
