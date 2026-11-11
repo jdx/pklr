@@ -140,7 +140,7 @@ pub struct Evaluator {
     /// A pattern that fails to compile is kept as its error message, which
     /// every module load then reports.
     allowed_modules: Option<std::result::Result<Vec<fancy_regex::Regex>, String>>,
-    /// The `package:` URI (without `#` fragment or checksum) of each package
+    /// The `package:` URI (without its `#` fragment) of each package
     /// loaded under a module policy, by the zip URL or HTTP root its modules
     /// are read from, so a module inside it is checked by its package URI.
     package_bases: HashMap<String, String>,

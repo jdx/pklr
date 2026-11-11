@@ -231,3 +231,11 @@ fn a_denied_symlink_is_not_served_from_the_cache() {
     let error = eval(&a, &[pat(&a), pat(&dir.join("sub/b.pkl"))]).unwrap_err();
     assert!(error.contains("link.pkl"), "{error}");
 }
+
+#[test]
+fn a_denied_entry_is_refused_before_it_is_read() {
+    let (_temp, dir) = project("pklr_modules_entry");
+    // The entry does not exist: a read would report that instead.
+    let error = eval(&dir.join("missing.pkl"), &["https:".into()]).unwrap_err();
+    assert!(error.contains("Refusing to load module"), "{error}");
+}

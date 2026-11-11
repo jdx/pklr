@@ -215,7 +215,6 @@ impl Evaluator {
             PackageSource::Zip(zip_url, _) => zip_url.clone(),
         };
         let base = uri.split_once('#').map_or(uri, |(base, _)| base);
-        let base = base.split_once("::").map_or(base, |(base, _)| base);
         self.package_bases.insert(key, base.to_string());
     }
 
@@ -324,6 +323,7 @@ impl Evaluator {
     /// Evaluate a local pkl file by path.
     pub fn eval_file(&mut self, path: &Path) -> Result<Value> {
         self.begin_evaluation();
+        self.check_module_path_allowed(path)?;
         let source = self.read_to_string_io(path)?;
         self.eval_source_inner(&source, path)
     }
