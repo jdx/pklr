@@ -180,7 +180,7 @@ impl Evaluator {
                 // The class the declaring class bound is resolved where the type
                 // was declared, which an element class read from a default
                 // built in this scope (aliases here may shadow it) is not.
-                let elem_class = match scope
+                let bound = match scope
                     .get(&listing_elem_class_binding(&prop.name))
                     .filter(|_| owns_listing_bindings(scope, &prop.name, declared_body))
                 {
@@ -188,13 +188,21 @@ impl Evaluator {
                         Some(Arc::new(class.clone()))
                     }
                     _ => None,
-                }
-                .or_else(|| items.elem_class().cloned())
-                .or_else(|| {
-                    prop.type_ann
-                        .as_ref()
-                        .and_then(|ty| self.declared_elem_class(ty, scope))
-                });
+                };
+                // A nested listing whose innermost class the declaring scope
+                // could not see (a class naming itself) has no class bound
+                // there: the amending scope may know it.
+                let bound_is_complete = bound.as_deref().is_none_or(has_leaf_class);
+                let elem_class = bound
+                    .clone()
+                    .filter(|_| bound_is_complete)
+                    .or_else(|| items.elem_class().cloned())
+                    .or_else(|| {
+                        prop.type_ann
+                            .as_ref()
+                            .and_then(|ty| self.declared_elem_class(ty, scope))
+                    })
+                    .or(bound);
                 items = items.with_elem_class(elem_class.clone());
                 let mut amendment_scope = scope.child();
                 amendment_scope.set("super", Value::List(items.clone()));
