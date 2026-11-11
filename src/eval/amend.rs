@@ -1350,11 +1350,20 @@ impl Evaluator {
             .flatten();
         let same =
             declared.is_some_and(|declared| declared.identity_json() == recorded.identity_json());
-        // A function default may read the default it amends through `super`
-        // or close over names that only exist where the amendment is written;
-        // the saved source can rebind neither, and every function compares
-        // equal above, so a function default is not recorded.
-        if !same || matches!(assigned_default.value, Some(Expr::Lambda(..))) {
+        // A function default is recorded as the function itself: it already
+        // holds the bindings where the amendment is written, which the saved
+        // source cannot rebind, and it reads the default it amends through
+        // `super` as it did when it was made.
+        if let Value::Lambda(..) = recorded {
+            let mut saved = (*assigned_default).clone();
+            saved.value = Some(Expr::TemplateLocals(
+                LocalBindings(Arc::new(vec![(Arc::from(RECORDED_DEFAULT), recorded)])),
+                Box::new(Expr::Ident(RECORDED_DEFAULT.to_string())),
+            ));
+            saved.body = None;
+            return Ok(Some(Arc::new(saved)));
+        }
+        if !same {
             return Ok(None);
         }
         // The recorded default is the inherited body followed by the new one.
@@ -1369,6 +1378,9 @@ impl Evaluator {
         })
     }
 }
+
+/// The name a recorded function default is bound to in its saved source.
+const RECORDED_DEFAULT: &str = "#recorded-default";
 
 /// The function `(function) { body }` evaluates to: one that calls `function`
 /// with its `arity` arguments and amends the result with `body`, evaluated

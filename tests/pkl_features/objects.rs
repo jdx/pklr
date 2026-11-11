@@ -7787,3 +7787,39 @@ miss = m.getOrDefault("zed")
     );
     assert_eq!(json["miss"]["n"], 10);
 }
+
+#[test]
+fn mapping_get_or_default_amended_body_function_default() {
+    let json = eval(
+        r#"
+base = new Mapping {
+  default { key -> name = key; age = 42 }
+}
+m = (base) { default { key -> age = 45 } }
+miss = m.getOrDefault("zed")
+again = (m) { ["k"] { age = 5 } }
+miss2 = again.getOrDefault("zed")
+"#,
+    );
+    assert_eq!(json["miss"], serde_json::json!({"name": "zed", "age": 45}));
+    assert_eq!(json["miss2"], serde_json::json!({"name": "zed", "age": 45}));
+    assert_eq!(
+        json["again"]["k"],
+        serde_json::json!({"name": "k", "age": 5})
+    );
+}
+
+#[test]
+fn mapping_get_or_default_amended_assigned_function_default() {
+    let json = eval(
+        r#"
+local suffix = "!"
+base = new Mapping { default = (k) -> "v-\(k)" }
+m = (base) { default = (k) -> "w-\(k)\(suffix)" }
+miss = m.getOrDefault("z")
+kept = (base) { ["x"] = "y" }.getOrDefault("z")
+"#,
+    );
+    assert_eq!(json["miss"], "w-z!");
+    assert_eq!(json["kept"], "v-z");
+}
