@@ -258,34 +258,84 @@ fn eval_mp(dir: &std::path::Path, patterns: &[&str]) -> Result<serde_json::Value
         .map_err(|e| e.to_string())
 }
 
-const MODULEPATH_ROOTS: [(&str, &str); 4] = [
-    ("import", "import \"modulepath:/lib/a.pkl\"\ny = a.x\n"),
-    ("amends", "amends \"modulepath:/lib/a.pkl\"\n"),
-    ("extends", "extends \"modulepath:/lib/a.pkl\"\n"),
-    ("import_expr", "y = import(\"modulepath:/lib/a.pkl\").x\n"),
+/// A root module, the pointer to read from its result, and the value there.
+const MODULEPATH_ROOTS: [(&str, &str, &str); 4] = [
+    (
+        "import",
+        "import \"modulepath:/lib/a.pkl\"\ny = a.x\n",
+        "/y",
+    ),
+    ("amends", "amends \"modulepath:/lib/a.pkl\"\n", "/x"),
+    ("extends", "extends \"modulepath:/lib/a.pkl\"\n", "/x"),
+    (
+        "import_expr",
+        "y = import(\"modulepath:/lib/a.pkl\").x\n",
+        "/y",
+    ),
 ];
 
 /// Pkl matches the patterns against the `modulepath:` URI, not the file it
 /// resolves to: `^file:` alone refuses the module, `^modulepath:` admits it.
 #[test]
 fn modulepath_modules_are_matched_by_their_uri() {
-    for (kind, root) in MODULEPATH_ROOTS {
+    for (kind, root, pointer) in MODULEPATH_ROOTS {
         let (_temp, dir) = modulepath_project(&format!("pklr_modules_mp_{kind}"), root);
         let refused = "Refusing to load module `modulepath:/lib/a.pkl` because it does not match any entry in the module allowlist";
         for patterns in [&["^file:"][..], &["^repl:", "^file:"], &["^pkl:", "^file:"]] {
             let err = eval_mp(&dir, patterns).unwrap_err();
             assert!(err.contains(refused), "{kind} {patterns:?}: {err}");
         }
-        let ok = eval_mp(&dir, &["^file:", "^modulepath:"]);
-        // The URI is allowed; any failure left is not the policy.
-        if let Err(err) = ok {
-            assert!(!err.contains("Refusing"), "{kind}: {err}");
-        }
-        let ok = eval_mp(&dir, &["^file:", "^modulepath:/lib/a\\.pkl$"]);
-        if let Err(err) = ok {
-            assert!(!err.contains("Refusing"), "{kind}: {err}");
+        for patterns in [
+            &["^file:", "^modulepath:"][..],
+            &["^file:", "^modulepath:/lib/a\\.pkl$"],
+        ] {
+            let json = eval_mp(&dir, patterns).unwrap_or_else(|e| panic!("{kind}: {e}"));
+            assert_eq!(json.pointer(pointer), Some(&serde_json::json!(1)), "{kind}");
         }
     }
+}
+
+/// An unused `modulepath:` import does not admit a `file:` import of the same
+/// file, and a denied `modulepath:` URI is refused even if nothing is there.
+#[test]
+fn modulepath_admission_is_per_import() {
+    let root =
+        "import \"modulepath:/lib/a.pkl\" as unused\nimport \"mp/lib/a.pkl\" as used\ny = used.x\n";
+    let (_temp, dir) = modulepath_project("pklr_modules_mp_unused", root);
+    let only_root_and_uri = [
+        pat(&dir.join("root.pkl")),
+        "^modulepath:/lib/a\\.pkl$".to_string(),
+    ];
+    let err = eval(&dir.join("root.pkl"), &only_root_and_uri).unwrap_err();
+    assert!(err.contains("Refusing to load module `file://"), "{err}");
+
+    let missing = "import \"modulepath:/lib/none.pkl\"\ny = none.x\n";
+    let (_temp, dir) = modulepath_project("pklr_modules_mp_missing", missing);
+    let err = eval_mp(&dir, &["^file:"]).unwrap_err();
+    assert!(
+        err.contains("Refusing to load module `modulepath:/lib/none.pkl`"),
+        "{err}"
+    );
+}
+
+/// Reusing an evaluator does not carry one run's admissions into the next.
+#[test]
+fn modulepath_admission_does_not_outlive_the_run() {
+    let (_temp, dir) = modulepath_project("pklr_modules_mp_reuse", MODULEPATH_ROOTS[0].1);
+    let mut evaluator = EvaluatorBuilder::new()
+        .module_path([dir.join("mp")])
+        .allowed_modules([
+            "^file:///.*/root\\.pkl$".to_string(),
+            "^modulepath:".to_string(),
+        ])
+        .build();
+    let value = evaluator.eval_file(&dir.join("root.pkl")).unwrap();
+    assert_eq!(value.to_json()["y"], 1);
+    let err = evaluator.eval_file(&dir.join("mp/lib/a.pkl")).unwrap_err();
+    assert!(
+        err.to_string().contains("Refusing to load module `file://"),
+        "{err}"
+    );
 }
 
 /// A pattern naming only `modulepath:` does not admit the importing file.

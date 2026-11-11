@@ -146,9 +146,10 @@ pub struct Evaluator {
     /// loaded under a module policy, by the zip URL or HTTP root its modules
     /// are read from, so a module inside it is checked by its package URI.
     package_bases: HashMap<String, String>,
-    /// The `modulepath:` URI of each file resolved from the module path under
-    /// a module policy, by absolute path, so the file is checked by that URI.
-    module_path_uris: HashMap<PathBuf, String>,
+    /// The files whose `modulepath:` URI the module policy has admitted in
+    /// this evaluation, by absolute path. Such a file is not checked again as
+    /// a `file:` URI when it is loaded.
+    module_path_admitted: HashSet<PathBuf>,
     environment: Option<BTreeMap<String, String>>,
     external_properties: BTreeMap<String, String>,
     /// Final scopes for modules evaluated in this run, used to preserve inherited locals.
