@@ -852,21 +852,12 @@ impl Evaluator {
                     // A function `default` builds each entry's template from the
                     // entry's key.
                     let applied_default;
-                    // A literal value and `new T { ... }` never read the `default`,
-                    // and an entry body that amends an existing entry amends
-                    // itself, so the function is not called for any of them. A
-                    // replacement that may build an object still gets its template.
+                    // Only an object body or an untyped `new { ... }` (possibly
+                    // behind `if`, `let` or `trace`) reads the `default`. An entry
+                    // body that amends an existing entry amends itself instead.
                     let explicit_default = if let Some(function @ Value::Lambda(..)) =
                         &explicit_default
-                        && !matches!(
-                            val_expr,
-                            Expr::Null
-                                | Expr::Bool(_)
-                                | Expr::Int(_)
-                                | Expr::Float(_)
-                                | Expr::String(_)
-                                | Expr::New(Some(_), _, _)
-                        )
+                        && reads_mapping_default(val_expr)
                         && !(map.contains_key(&storage_key)
                             && matches!(val_expr, Expr::ObjectBody(_)))
                     {
@@ -1354,5 +1345,22 @@ mod mapping_key_tests {
         evaluator.begin_evaluation();
 
         assert!(evaluator.mapping_key_values.is_empty());
+    }
+}
+
+/// Whether an entry value is built from the mapping's `default`: an object
+/// body or an untyped `new { ... }`, also as the result of `if`, `let` or
+/// `trace`. Other values, such as literals, expressions and `new T { ... }`,
+/// never read it.
+fn reads_mapping_default(expr: &Expr) -> bool {
+    match expr {
+        Expr::ObjectBody(_) | Expr::New(None, _, _) | Expr::InferredNew(..) => true,
+        Expr::If(_, then, otherwise) => {
+            reads_mapping_default(then) || reads_mapping_default(otherwise)
+        }
+        Expr::Let(_, _, body) | Expr::Trace(body, _) | Expr::TemplateLocals(_, body) => {
+            reads_mapping_default(body)
+        }
+        _ => false,
     }
 }

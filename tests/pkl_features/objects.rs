@@ -7664,3 +7664,19 @@ m = new Mapping<String, Listing<String>> {
     );
     assert_eq!(json["m"]["a"], serde_json::json!(["seed", "tail"]));
 }
+
+#[test]
+fn mapping_function_default_is_not_called_for_computed_replacements() {
+    let json = eval(
+        r#"
+x = 3
+m = new Mapping {
+  default = (key) -> throw("unused")
+  ["a"] = 1
+}
+n = (m) { ["a"] = x + 1; ["b"] = -x; ["c"] = 2.s }
+"#,
+    );
+    assert_eq!(json["n"]["a"], 4);
+    assert_eq!(json["n"]["b"], -3);
+}
