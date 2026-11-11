@@ -134,6 +134,22 @@ pub(super) fn apply_mapping_entry_template(
     let Some(actual) = value_src.type_name.as_deref() else {
         return Ok(merge(value));
     };
+    // A class bound by value where the type was declared (see `typed_member`)
+    // accepts an instance of that very class, whatever name this scope gives
+    // its own `E`.
+    let declared_class = |name: &str| match resolve_dotted(scope, name) {
+        Some(Value::Object(_, Some(source))) if name.starts_with('\0') => Some(source),
+        _ => None,
+    };
+    for name in value_type_names {
+        if let Some(source) = declared_class(mapping_value_type_base(name))
+            && let Some(identity) = &source.type_identity
+            && (value_src.type_identity.as_ref() == Some(identity)
+                || value_src.parent_type_identities.contains(identity))
+        {
+            return Ok(value);
+        }
+    }
     let allowed = expand_type_alias_names(value_type_names, scope)
         .into_iter()
         .map(|name| mapping_value_type_base(&name).to_string())
@@ -169,9 +185,16 @@ pub(super) fn apply_mapping_entry_template(
             )
     });
     if all_known {
+        let shown = allowed
+            .iter()
+            .map(|name| match declared_class(name) {
+                Some(source) => source.type_name.clone().unwrap_or_else(|| name.clone()),
+                None => name.clone(),
+            })
+            .collect::<Vec<_>>();
         return Err(Error::Eval(format!(
             "Expected value of type `{}`, but got type `{}`.",
-            allowed.join(" | "),
+            shown.join(" | "),
             actual
         )));
     }
@@ -378,6 +401,24 @@ pub(super) fn apply_mapping_type_annotation(
     };
     let Value::Object(_, src_slot) = value else {
         return;
+    };
+    // A type alias of a `Mapping` (`typealias M = Mapping<String, E>`) records
+    // the value types of the type it stands for, for a mapping that has none
+    // yet: the alias is read in `scope`, which is where the property type was
+    // declared only when the mapping is built there (a default). An assigned or
+    // nullable value, handled in an amending scope, keeps what it was typed with.
+    let untyped = src_slot
+        .as_ref()
+        .is_none_or(|source| source.mapping_value_types.is_empty());
+    let resolved;
+    let type_ann = if untyped
+        && matches!(type_ann, crate::parser::TypeExpr::Named(_))
+        && let Some(generic) = resolve_collection_type(type_ann, scope, 0)
+    {
+        resolved = generic;
+        &resolved
+    } else {
+        type_ann
     };
     // An untagged object declared a `Mapping` is a mapping.
     if src_slot.is_none() && is_mapping_type(type_ann) {

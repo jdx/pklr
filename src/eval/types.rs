@@ -1786,7 +1786,7 @@ pub(super) fn infer_listing_elements(
     entries: &crate::parser::Body,
     scope: &Scope,
 ) -> crate::parser::Body {
-    infer_collection_body(ty, entries, scope, false).unwrap_or_else(|| entries.clone())
+    infer_collection_body(ty, entries, scope, false, false).unwrap_or_else(|| entries.clone())
 }
 
 /// [`infer_listing_elements`] for the body of a property amendment (`xs { ...
@@ -1796,7 +1796,7 @@ pub(super) fn infer_amendment_members(
     entries: &crate::parser::Body,
     scope: &Scope,
 ) -> Option<crate::parser::Body> {
-    infer_collection_body(ty, entries, scope, false)
+    infer_collection_body(ty, entries, scope, false, false)
 }
 
 /// The element type of a `Listing` or the value type of a `Mapping` that is a
@@ -1826,6 +1826,7 @@ fn infer_collection_body(
     entries: &crate::parser::Body,
     scope: &Scope,
     amended: bool,
+    declared: bool,
 ) -> Option<crate::parser::Body> {
     let member_ty = nested_collection_type(ty, scope)?;
     let is_listing = matches!(
@@ -1833,7 +1834,7 @@ fn infer_collection_body(
         Some(crate::parser::TypeExpr::Generic(name, _)) if name == "Listing"
     );
     Some(infer_members_in(
-        entries, &member_ty, is_listing, amended, scope,
+        entries, &member_ty, is_listing, amended, scope, declared,
     ))
 }
 
@@ -1846,18 +1847,19 @@ fn infer_members_in(
     is_listing: bool,
     amended: bool,
     scope: &Scope,
+    declared: bool,
 ) -> crate::parser::Body {
     entries
         .iter()
         .map(|entry| match entry {
             Entry::Elem(Expr::New(None, body, _)) if is_listing => {
-                Entry::Elem(Expr::InferredNew(member_ty.clone(), body.clone()))
+                Entry::Elem(typed_member(member_ty, body.clone(), scope, declared))
             }
             // A listing index assignment (`[0] = new { ... }`) takes the
             // element type like a plain element does.
             Entry::DynProperty(key, Expr::New(None, body, _)) if is_listing => Entry::DynProperty(
                 key.clone(),
-                Expr::InferredNew(member_ty.clone(), body.clone()),
+                typed_member(member_ty, body.clone(), scope, declared),
             ),
             // A mapping value whose own members need inferring stays an entry
             // body, which amends the mapping's `default`, with its members
@@ -1868,7 +1870,7 @@ fn infer_members_in(
                     && !amended
                     && nested_collection_type(member_ty, scope).is_some() =>
             {
-                let body = infer_collection_body(member_ty, body, scope, false)
+                let body = infer_collection_body(member_ty, body, scope, false, declared)
                     .unwrap_or_else(|| body.clone());
                 let is_listing_value = matches!(
                     resolve_collection_type(member_ty, scope, 0),
@@ -1879,7 +1881,7 @@ fn infer_members_in(
                 } else {
                     Entry::DynProperty(
                         key.clone(),
-                        Expr::InferredNew(member_ty.clone(), body.clone()),
+                        typed_member(member_ty, body.clone(), scope, declared),
                     )
                 }
             }
@@ -1888,7 +1890,7 @@ fn infer_members_in(
             Entry::DynProperty(key, Expr::New(None, body, _)) if !is_listing && amended => {
                 Entry::DynProperty(
                     key.clone(),
-                    Expr::InferredNew(member_ty.clone(), body.clone()),
+                    typed_member(member_ty, body.clone(), scope, declared),
                 )
             }
             // The body of an amended entry has no parent to amend, so the
@@ -1896,14 +1898,14 @@ fn infer_members_in(
             Entry::DynProperty(key, Expr::ObjectBody(body)) if !is_listing && amended => {
                 Entry::DynProperty(
                     key.clone(),
-                    Expr::InferredNew(member_ty.clone(), body.clone()),
+                    typed_member(member_ty, body.clone(), scope, declared),
                 )
             }
             // An index amendment (`[0] { ... }`) of a listing amends an
             // element, whose own members are inferred from the element type.
             // The element exists, so its entry bodies amend rather than build.
             Entry::DynProperty(key, Expr::ObjectBody(body)) => {
-                match infer_collection_body(member_ty, body, scope, !is_listing) {
+                match infer_collection_body(member_ty, body, scope, !is_listing, declared) {
                     Some(body) => Entry::DynProperty(key.clone(), Expr::ObjectBody(body)),
                     None => entry.clone(),
                 }
@@ -1911,30 +1913,41 @@ fn infer_members_in(
             // An untyped `new` that an `if` or `let` picks as the member takes
             // the member type as well, when that is a collection.
             Entry::Elem(expr) if is_listing && selects_untyped_new(expr) => {
-                Entry::Elem(infer_selected_new(expr, member_ty, false, scope))
+                Entry::Elem(infer_selected_new(expr, member_ty, false, scope, declared))
             }
             Entry::DynProperty(key, expr)
                 if (is_listing || !amended) && selects_untyped_new(expr) =>
             {
                 Entry::DynProperty(
                     key.clone(),
-                    infer_selected_new(expr, member_ty, !is_listing, scope),
+                    infer_selected_new(expr, member_ty, !is_listing, scope, declared),
                 )
             }
             Entry::ForGenerator(generator) => {
                 let mut generator = generator.clone();
-                generator.body =
-                    infer_members_in(&generator.body, member_ty, is_listing, amended, scope);
+                generator.body = infer_members_in(
+                    &generator.body,
+                    member_ty,
+                    is_listing,
+                    amended,
+                    scope,
+                    declared,
+                );
                 Entry::ForGenerator(generator)
             }
             Entry::WhenGenerator(generator) => {
                 let mut generator = generator.clone();
-                generator.body =
-                    infer_members_in(&generator.body, member_ty, is_listing, amended, scope);
-                generator.else_body = generator
-                    .else_body
-                    .as_ref()
-                    .map(|body| infer_members_in(body, member_ty, is_listing, amended, scope));
+                generator.body = infer_members_in(
+                    &generator.body,
+                    member_ty,
+                    is_listing,
+                    amended,
+                    scope,
+                    declared,
+                );
+                generator.else_body = generator.else_body.as_ref().map(|body| {
+                    infer_members_in(body, member_ty, is_listing, amended, scope, declared)
+                });
                 Entry::WhenGenerator(generator)
             }
             other => other.clone(),
@@ -1961,6 +1974,7 @@ fn infer_selected_new(
     member_ty: &crate::parser::TypeExpr,
     mapping_value: bool,
     scope: &Scope,
+    declared: bool,
 ) -> Expr {
     let mut expr = expr.clone();
     let Some(crate::parser::TypeExpr::Generic(kind, _)) =
@@ -1970,11 +1984,11 @@ fn infer_selected_new(
     };
     crate::parser::rewrite_untyped_result_new(&mut expr, &mut |entries| {
         if mapping_value && kind == "Listing" {
-            let entries =
-                infer_collection_body(member_ty, &entries, scope, false).unwrap_or(entries);
+            let entries = infer_collection_body(member_ty, &entries, scope, false, declared)
+                .unwrap_or(entries);
             Expr::New(None, entries, Vec::new())
         } else {
-            Expr::InferredNew(member_ty.clone(), entries)
+            typed_member(member_ty, entries, scope, declared)
         }
     });
     expr
@@ -1998,4 +2012,72 @@ pub(super) fn is_listing_chain(ty: &crate::parser::TypeExpr, scope: &Scope) -> b
         }
     }
     true
+}
+
+/// The expression for the untyped `new` member of declared type `member_ty`.
+/// With `declared` set, `scope` is where the type was declared: the class it
+/// names is resolved there and bound by value (under a key made from the class
+/// itself, so same-named classes of different modules stay apart), so that the
+/// amending scope, which may not see it or may mean something else by its name,
+/// is not consulted.
+fn typed_member(
+    member_ty: &crate::parser::TypeExpr,
+    body: crate::parser::Body,
+    scope: &Scope,
+    declared: bool,
+) -> Expr {
+    if !declared {
+        return Expr::InferredNew(member_ty.clone(), body);
+    }
+    let Ok((name, params)) = inferred_new_type(member_ty, scope, 0) else {
+        return Expr::InferredNew(member_ty.clone(), body);
+    };
+    // A member that is a collection itself has members of its own to build
+    // from the declared type.
+    let body = if nested_collection_type(member_ty, scope).is_some() {
+        infer_collection_body(member_ty, &body, scope, false, true).unwrap_or(body)
+    } else {
+        body
+    };
+    let mut bindings: Vec<(Arc<str>, Value)> = Vec::new();
+    let mut bind = |written: &str| -> String {
+        let plain = written.trim_start_matches('*').trim_end_matches('?');
+        match resolve_dotted(scope, plain) {
+            Some(class @ Value::Object(_, Some(_))) if matches!(&class, Value::Object(_, Some(source)) if source.type_name.is_some()) =>
+            {
+                let Value::Object(_, Some(source)) = &class else {
+                    unreachable!()
+                };
+                let key = format!("\0declared:{:p}", Arc::as_ptr(source));
+                if !bindings.iter().any(|(bound, _)| **bound == *key) {
+                    bindings.push((key.as_str().into(), class.clone()));
+                    bindings.push((type_alias_marker(&key).as_str().into(), Value::Null));
+                }
+                // The `*` default marker selects the alternative, so it stays
+                // with the name.
+                if written.starts_with('*') {
+                    format!("*{key}")
+                } else {
+                    key
+                }
+            }
+            _ => written.to_string(),
+        }
+    };
+    let name = bind(&name);
+    let params = params.iter().map(|param| bind(param)).collect();
+    Expr::TemplateLocals(
+        crate::parser::LocalBindings(Arc::new(bindings)),
+        Box::new(Expr::New(Some(name), body, params)),
+    )
+}
+
+/// [`infer_amendment_members`] for a type read in the scope that declared it:
+/// the members are built from the classes resolved there.
+pub(super) fn infer_declared_members(
+    ty: &crate::parser::TypeExpr,
+    entries: &crate::parser::Body,
+    declaring: &Scope,
+) -> Option<crate::parser::Body> {
+    infer_collection_body(ty, entries, declaring, false, true)
 }

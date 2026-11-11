@@ -742,7 +742,7 @@ pub(super) fn check_instantiable(
             qualified_class_name(
                 source.type_identity.as_deref(),
                 // A `Listing<T>` element is built through a synthetic name.
-                if type_name == LISTING_ELEM_CLASS {
+                if type_name == LISTING_ELEM_CLASS || type_name.starts_with('\0') {
                     source.type_name.as_deref().unwrap_or(type_name)
                 } else {
                     type_name
