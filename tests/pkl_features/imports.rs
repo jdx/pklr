@@ -4340,11 +4340,23 @@ fn modulepath_decodes_and_confines_uris() {
     assert!(eval("modulepath:/../secret.pkl").is_err());
     assert!(eval("modulepath:/..\\\\secret.pkl").is_err());
     assert!(eval("modulepath:/%2e%2e/secret.pkl").is_err());
-    // A file named like the URI in the working directory is not a fallback.
+}
+
+// `modulepath:` is not a valid directory name on Windows.
+#[cfg(unix)]
+#[test]
+fn modulepath_does_not_fall_back_to_cwd_file() {
+    let temp = TestTempDir::new("pklr_test_modulepath_cwd");
+    let main = temp.path().join("main.pkl");
+    std::fs::write(
+        &main,
+        "x = import(\"modulepath:/lib/zz_cwd_probe.pkl\").v\n",
+    )
+    .unwrap();
     let cwd_file = std::path::Path::new("modulepath:/lib/zz_cwd_probe.pkl");
-    let _ = std::fs::create_dir_all(cwd_file.parent().unwrap());
+    std::fs::create_dir_all(cwd_file.parent().unwrap()).unwrap();
     std::fs::write(cwd_file, "v = 1\n").unwrap();
-    let result = eval("modulepath:/lib/zz_cwd_probe.pkl");
+    let result = eval_with_module_path(&main, &[temp.path()]);
     let _ = std::fs::remove_dir_all("modulepath:");
     assert!(result.is_err());
 }
