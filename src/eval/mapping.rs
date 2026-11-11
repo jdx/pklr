@@ -852,11 +852,13 @@ impl Evaluator {
                     // A function `default` builds each entry's template from the
                     // entry's key.
                     let applied_default;
-                    // `new T { ... }` never reads the `default`, so the function is
-                    // not called for it.
+                    // `new T { ... }` never reads the `default`, and an entry that is
+                    // already there amends itself, so the function is not called
+                    // for either.
                     let explicit_default = if let Some(function @ Value::Lambda(..)) =
                         &explicit_default
                         && !matches!(val_expr, Expr::New(Some(_), _, _))
+                        && !map.contains_key(&storage_key)
                     {
                         let arg = key
                             .clone()

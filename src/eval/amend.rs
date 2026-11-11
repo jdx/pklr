@@ -1350,7 +1350,9 @@ impl Evaluator {
             .flatten();
         let same =
             declared.is_some_and(|declared| declared.identity_json() == recorded.identity_json());
-        if !same {
+        // A function default reads the default it amends through `super`,
+        // which the saved source cannot rebind, so it is not recorded.
+        if !same || matches!(assigned_default.value, Some(Expr::Lambda(..))) {
             return Ok(None);
         }
         // The recorded default is the inherited body followed by the new one.
