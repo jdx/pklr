@@ -4317,3 +4317,34 @@ fn modulepath_uri_requires_slash_and_cannot_escape() {
     std::fs::write(&main, "x = import(\"modulepath:/../secret.pkl\")\n").unwrap();
     assert!(eval_with_module_path(&main, &[&mp]).is_err());
 }
+
+#[test]
+fn modulepath_decodes_and_confines_uris() {
+    let temp = TestTempDir::new("pklr_test_modulepath_decode");
+    let (d1, d2) = (temp.path().join("d1"), temp.path().join("d2"));
+    std::fs::create_dir_all(d1.join("lib/a.pkl")).unwrap();
+    std::fs::create_dir_all(&d2).unwrap();
+    std::fs::create_dir_all(d2.join("lib")).unwrap();
+    std::fs::write(d2.join("lib/a.pkl"), "v = \"d2\"\n").unwrap();
+    std::fs::write(d2.join("a b.pkl"), "v = \"space\"\n").unwrap();
+    std::fs::write(temp.path().join("secret.pkl"), "s = 1\n").unwrap();
+    let main = temp.path().join("main.pkl");
+    let eval = |uri: &str| {
+        std::fs::write(&main, format!("x = import(\"{uri}\").v\n")).unwrap();
+        eval_with_module_path(&main, &[&d1, &d2])
+    };
+    // A directory in an earlier entry does not hide a file in a later one.
+    assert_eq!(eval("modulepath:/lib/a.pkl").unwrap()["x"], "d2");
+    assert_eq!(eval("modulepath:/unused/../lib/a.pkl").unwrap()["x"], "d2");
+    assert_eq!(eval("modulepath:/a%20b.pkl").unwrap()["x"], "space");
+    assert!(eval("modulepath:/../secret.pkl").is_err());
+    assert!(eval("modulepath:/..\\\\secret.pkl").is_err());
+    assert!(eval("modulepath:/%2e%2e/secret.pkl").is_err());
+    // A file named like the URI in the working directory is not a fallback.
+    let cwd_file = std::path::Path::new("modulepath:/lib/zz_cwd_probe.pkl");
+    let _ = std::fs::create_dir_all(cwd_file.parent().unwrap());
+    std::fs::write(cwd_file, "v = 1\n").unwrap();
+    let result = eval("modulepath:/lib/zz_cwd_probe.pkl");
+    let _ = std::fs::remove_dir_all("modulepath:");
+    assert!(result.is_err());
+}

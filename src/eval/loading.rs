@@ -16,32 +16,42 @@ impl Evaluator {
     }
 
     /// The file a `modulepath:/path` module URI names: the first module path
-    /// directory containing it. A miss resolves to the URI itself, a path that
-    /// does not exist, so callers report it as a missing import. This is the
-    /// single place module path lookups happen.
+    /// directory holding a regular file at that path. A URI that names nothing
+    /// is [`Error::ImportNotFound`]. This is the single place module path
+    /// lookups happen.
     fn module_path_file(&mut self, uri: &str) -> Result<PathBuf> {
         let Some(rest) = uri.strip_prefix("modulepath:/") else {
             return Err(Error::Eval(format!(
                 "Module URI `{uri}` is missing a `/` after `modulepath:`."
             )));
         };
-        // A `..` that climbs out of the module path directory finds nothing.
-        let mut depth = 0usize;
-        for part in rest.split('/') {
+        let not_found = || Error::ImportNotFound(uri.to_string());
+        // Decode the URI path and remove dot segments. A segment that could be
+        // a host path root, prefix or separator (`\`, `:`, NUL), or a `..` that
+        // climbs out of the module path directory, finds nothing.
+        let decoded = super::resource::percent_decode(rest);
+        let mut segments: Vec<&str> = Vec::new();
+        for part in decoded.split('/') {
             match part {
                 "" | "." => {}
-                ".." if depth == 0 => return Ok(PathBuf::from(uri)),
-                ".." => depth -= 1,
-                _ => depth += 1,
+                ".." => {
+                    segments.pop().ok_or_else(not_found)?;
+                }
+                _ if part.contains(['\\', ':', '\0']) => return Err(not_found()),
+                _ => segments.push(part),
             }
         }
+        if segments.is_empty() {
+            return Err(not_found());
+        }
         for dir in self.module_path.clone() {
-            let candidate = dir.join(rest);
-            if self.path_exists_io(&candidate)? {
+            let mut candidate = dir;
+            candidate.extend(&segments);
+            if self.is_file_io(&candidate)? {
                 return Ok(candidate);
             }
         }
-        Ok(PathBuf::from(uri))
+        Err(not_found())
     }
 
     /// Resolve a local module or resource URI against the module at
@@ -202,7 +212,11 @@ impl Evaluator {
         if uri.starts_with("pkl:") || (uri.contains("://") && !uri.starts_with("file://")) {
             return Ok(None);
         }
-        let import_path = self.local_file_path(path, uri)?;
+        let import_path = match self.local_file_path(path, uri) {
+            Ok(import_path) => import_path,
+            Err(Error::ImportNotFound(_)) if uri.starts_with("modulepath:") => return Ok(None),
+            Err(error) => return Err(error),
+        };
         if !self.path_exists_io(&import_path)? {
             return Ok(None);
         }

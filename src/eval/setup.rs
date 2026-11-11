@@ -14,6 +14,10 @@ impl Evaluator {
         self.capabilities.path_exists(path)
     }
 
+    pub(super) fn is_file_io(&mut self, path: &Path) -> Result<bool> {
+        self.capabilities.is_file(path)
+    }
+
     pub(super) fn canonicalize_io(&mut self, path: &Path) -> Result<PathBuf> {
         self.capabilities.canonicalize(path)
     }

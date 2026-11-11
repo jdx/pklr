@@ -44,6 +44,12 @@ pub trait EvalCapabilities: Send + Sync {
 
     fn path_exists(&mut self, path: &Path) -> Result<bool>;
 
+    /// Whether `path` names a file rather than a directory. Defaults to
+    /// [`Self::path_exists`] for hosts that cannot tell them apart.
+    fn is_file(&mut self, path: &Path) -> Result<bool> {
+        self.path_exists(path)
+    }
+
     fn canonicalize(&mut self, path: &Path) -> Result<PathBuf>;
 
     fn read_bytes(&mut self, path: &Path) -> Result<Vec<u8>> {
@@ -398,6 +404,21 @@ impl EvalCapabilities for NativeCapabilities {
     fn path_exists(&mut self, path: &Path) -> Result<bool> {
         match std::fs::metadata(path) {
             Ok(_) => Ok(true),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput
+                ) =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(crate::Error::Io(path.to_path_buf(), error)),
+        }
+    }
+
+    fn is_file(&mut self, path: &Path) -> Result<bool> {
+        match std::fs::metadata(path) {
+            Ok(metadata) => Ok(metadata.is_file()),
             Err(error)
                 if matches!(
                     error.kind(),

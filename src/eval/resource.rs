@@ -436,7 +436,7 @@ fn percent_encode(text: &str) -> String {
         })
         .collect()
 }
-fn percent_decode(text: &str) -> String {
+pub(super) fn percent_decode(text: &str) -> String {
     let mut out = Vec::new();
     let bytes = text.as_bytes();
     let mut i = 0;
