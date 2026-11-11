@@ -368,7 +368,7 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        let (mut value, body) = match self.peek() {
+        let (value, body) = match self.peek() {
             TokenKind::Equals => {
                 self.advance();
                 (Some(self.parse_expr()?), None)
@@ -398,6 +398,15 @@ impl<'a> Parser<'a> {
                 }
                 (None, None)
             }
+        };
+        // A module's `local obj { ... }` defines the local from the default of
+        // its (absent) type, which is `Dynamic`, as `local obj = new Dynamic { ... }`.
+        let (mut value, body) = match (value, body) {
+            (None, Some(entries)) if local && type_ann.is_none() => (
+                Some(Expr::New(Some("Dynamic".into()), entries.into(), vec![])),
+                None,
+            ),
+            other => other,
         };
         // A declared Mapping, Listing, class, or alias makes an untyped
         // `new { ... }` construct that declared type, so nested entry bodies

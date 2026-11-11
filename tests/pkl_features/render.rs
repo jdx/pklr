@@ -1198,3 +1198,182 @@ res = new json.Parser {}.parse("\"\\uD800\\u0041\"")
     ));
     assert!(err.contains("Maximum nesting depth exceeded"), "{err}");
 }
+
+#[test]
+fn json_parser_caught_error_is_the_message_only() {
+    let json = eval(
+        r##"import "pkl:json"
+import "pkl:test"
+local parser = new json.Parser {}
+res = List("0123", "b1001", "", "   ", "!@#$%").map((s) -> test.catch(() -> parser.parse(s)))
+"##,
+    );
+    assert_eq!(
+        json["res"],
+        serde_json::json!(vec!["Error parsing JSON document."; 5])
+    );
+}
+
+#[test]
+fn yaml_parser_documents() {
+    let json = eval(
+        r##"import "pkl:yaml"
+import "pkl:test"
+local parser = new yaml.Parser {}
+anchors = parser.parse("a: &one hello\nb: *one\nc: [1, 2.5, true, ~]\n")
+empty = parser.parse("")
+all = parser.parseAll("---\n123\n---\n---\nname: pigeon\n...\n")
+none = parser.parseAll("   ")
+multiple = test.catch(() -> parser.parse("---\na: 1\n---\nb: 2\n"))
+blocks = parser.parse("lit: |\n  one\n  two\nfold: >-\n  one\n  two\nstr: \"a\\tb\"\nseq:\n- x\n- w: 1\n  z: 2\n")
+mappingKeys = (new yaml.Parser { useMapping = true }).parse("a: 1").length
+"##,
+    );
+    assert_eq!(
+        json["anchors"],
+        serde_json::json!({"a": "hello", "b": "hello", "c": [1, 2.5, true, null]})
+    );
+    assert_eq!(
+        json["all"],
+        serde_json::json!([123, null, {"name": "pigeon"}])
+    );
+    assert_eq!(json["none"], serde_json::json!([]));
+    assert_eq!(json["multiple"], "Error parsing YAML document.");
+    assert_eq!(
+        json["blocks"],
+        serde_json::json!({"lit": "one\ntwo\n", "fold": "one two", "str": "a\tb", "seq": ["x", {"w": 1, "z": 2}]})
+    );
+    assert_eq!(json["mappingKeys"], 1);
+    assert!(json["empty"].is_null());
+}
+
+#[test]
+fn yaml_parser_modes() {
+    let json = eval(
+        r##"import "pkl:yaml"
+local doc = "[yes, 0o17, 017, 1_0, 0b1, 0x1f]"
+compat = new yaml.Parser {}.parse(doc)
+v11 = new yaml.Parser { mode = "1.1" }.parse(doc)
+v12 = new yaml.Parser { mode = "1.2" }.parse(doc)
+"##,
+    );
+    assert_eq!(json["compat"], serde_json::json!([true, 15, 15, 10, 1, 31]));
+    assert_eq!(
+        json["v11"],
+        serde_json::json!([true, "0o17", 15, 10, 1, 31])
+    );
+    assert_eq!(
+        json["v12"],
+        serde_json::json!(["yes", 15, 17, "1_0", "0b1", 31])
+    );
+}
+
+#[test]
+fn yaml_parser_converters() {
+    let json = eval(
+        r##"import "pkl:yaml"
+local parser = new yaml.Parser {
+  converters {
+    [String] = (it) -> it + "x"
+    [Int] = (it) -> it + 1
+    ["list[*]"] = (_) -> 0
+    ["a.b"] = (it) -> it * 10
+  }
+}
+res = parser.parse("a: {b: 2}\nanchor: &p 1\nalias: *p\nlist: [5, 6]\n")
+"##,
+    );
+    assert_eq!(
+        json["res"],
+        serde_json::json!({"ax": {"bx": 20}, "anchorx": 2, "aliasx": 2, "listx": [0, 0]})
+    );
+}
+
+#[test]
+fn yaml_parser_rejects_malformed_documents() {
+    for doc in [
+        "a: [1",
+        "a: 'x",
+        "a: *missing",
+        "a: 1\na: 2",
+        "a: b: c",
+        "- 1\nx: 2",
+    ] {
+        let err = eval_fails(&format!(
+            "import \"pkl:yaml\"\nres = new yaml.Parser {{}}.parse({doc:?})"
+        ));
+        assert!(err.contains("Error parsing YAML document."), "{doc}: {err}");
+    }
+}
+
+#[test]
+fn yaml_parser_flow_edge_cases() {
+    let json = eval(
+        r##"import "pkl:yaml"
+import "pkl:test"
+local parser = new yaml.Parser {}
+min = parser.parse("-9223372036854775808")
+multiline = parser.parse("[multi\n  line, {k: a\n  b}]")
+missing = test.catch(() -> parser.parse("[a, , b]"))
+userError = test.catch(() -> throw("Error parsing mine.\n\ndetail"))
+"##,
+    );
+    assert_eq!(json["min"], i64::MIN);
+    assert_eq!(
+        json["multiline"],
+        serde_json::json!(["multi line", {"k": "a b"}])
+    );
+    assert_eq!(json["missing"], "Error parsing YAML document.");
+    assert_eq!(json["userError"], "Error parsing mine.\n\ndetail");
+}
+
+#[test]
+fn yaml_parser_explicit_keys_and_tag_handles() {
+    let json = eval(
+        r##"import "pkl:yaml"
+local parser = new yaml.Parser {
+  converters {
+    [String] = (it) -> it + "x"
+    ["a"] = (it) -> it * 10
+  }
+}
+explicit = parser.parse("? a\n: 2")
+implicit = parser.parse("a: 2")
+handle = new yaml.Parser {}.parse("%TAG !e! tag:yaml.org,2002:\n--- !e!str 123")
+primary = new yaml.Parser {}.parse("%TAG ! tag:yaml.org,2002:\n--- !str 123")
+"##,
+    );
+    assert_eq!(json["explicit"], json["implicit"]);
+    assert_eq!(json["handle"], "123");
+    assert_eq!(json["primary"], "123");
+}
+
+#[test]
+fn yaml_parser_limits_collection_aliases() {
+    let json = eval(
+        r##"import "pkl:yaml"
+import "pkl:test"
+local text = "a: &x [1]\nb: *x\nc: *x\nd: *x"
+scalars = new yaml.Parser { maxCollectionAliases = 0 }.parse("a: &x 1\nb: *x\nc: *x")
+within = new yaml.Parser { maxCollectionAliases = 3 }.parse(text)
+over = test.catch(() -> new yaml.Parser { maxCollectionAliases = 2 }.parse(text))
+"##,
+    );
+    assert_eq!(json["scalars"], serde_json::json!({"a": 1, "b": 1, "c": 1}));
+    assert_eq!(json["within"]["d"], serde_json::json!([1]));
+    assert_eq!(json["over"], "Error parsing YAML document.");
+}
+
+#[test]
+fn yaml_parser_anchored_keys_keep_the_mapping_column() {
+    let json = eval(
+        r##"import "pkl:yaml"
+anchored = new yaml.Parser {}.parse("&x a: 1\nb: 2")
+explicit = new yaml.Parser {}.parse("&x a: 1\n? c\n: 3")
+aliased = new yaml.Parser {}.parse("&x a: 1\nb: *x")
+"##,
+    );
+    assert_eq!(json["anchored"], serde_json::json!({"a": 1, "b": 2}));
+    assert_eq!(json["explicit"], serde_json::json!({"a": 1, "c": 3}));
+    assert_eq!(json["aliased"], serde_json::json!({"a": 1, "b": "a"}));
+}

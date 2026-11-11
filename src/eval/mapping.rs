@@ -1223,6 +1223,12 @@ impl Evaluator {
                     }
                     if let Value::Object(m, _) = val {
                         for (key, value) in m.iter() {
+                            if !insert_mapping_key(defined_keys, key) {
+                                return Err(Error::Eval(format!(
+                                    "Cannot spread object because the enclosing object already has a declaration of entry key `{:?}`.",
+                                    crate::value::display_storage_key(key)
+                                )));
+                            }
                             insert_mapping_entry(map, key.clone(), value.clone());
                         }
                     }
