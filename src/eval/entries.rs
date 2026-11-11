@@ -1743,7 +1743,9 @@ fn bind_outer(
     // which would otherwise force a full copy on every parent insert.
     outer_map.shift_remove("this");
     // The saved import identities of a function are no member of `outer`.
-    outer_map.shift_remove(CAPTURED_IDENTITIES);
+    if outer_map.contains_key(CAPTURED_IDENTITIES) {
+        outer_map.shift_remove(CAPTURED_IDENTITIES);
+    }
     for name in unused_this_aliases {
         outer_map.shift_remove(&**name);
     }
