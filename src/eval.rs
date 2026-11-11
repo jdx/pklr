@@ -67,7 +67,7 @@ use package::*;
 use remote::*;
 pub(crate) use remote::{parse_triple_dot_path, resolve_triple_dot};
 pub(crate) use resource::file_uri_path;
-use resource::{DEFAULT_ALLOWED_RESOURCES, file_uri};
+use resource::{DEFAULT_ALLOWED_RESOURCES, absolute_clean, file_uri};
 pub(crate) use scope::SourceScope;
 use scope::*;
 use typecheck::*;
@@ -138,6 +138,14 @@ pub struct Evaluator {
     allowed_resources: Vec<String>,
     /// Directories searched, in order, for `modulepath:` module URIs.
     module_path: Vec<PathBuf>,
+    /// Patterns module URIs must match to load; `None` allows every module.
+    /// A pattern that fails to compile is kept as its error message, which
+    /// every module load then reports.
+    allowed_modules: Option<std::result::Result<Vec<fancy_regex::Regex>, String>>,
+    /// The `package:` URI (without its `#` fragment) of each package
+    /// loaded under a module policy, by the zip URL or HTTP root its modules
+    /// are read from, so a module inside it is checked by its package URI.
+    package_bases: HashMap<String, String>,
     environment: Option<BTreeMap<String, String>>,
     external_properties: BTreeMap<String, String>,
     /// Final scopes for modules evaluated in this run, used to preserve inherited locals.

@@ -174,7 +174,9 @@ impl Evaluator {
     /// Does nothing beyond scanning the module's import URIs when none of
     /// them is remote, or when the evaluator is offline.
     pub(super) fn prefetch_remote_imports(&mut self, module: &Module, path: &Path) {
-        if self.offline || self.prefetch.exhausted() {
+        // Under a module policy every module is fetched lazily, after its
+        // check, never eagerly.
+        if self.offline || self.prefetch.exhausted() || self.allowed_modules.is_some() {
             return;
         }
         // Only a remote module's relative imports and absolute remote URIs
