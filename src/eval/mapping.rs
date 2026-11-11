@@ -403,12 +403,17 @@ pub(super) fn apply_mapping_type_annotation(
         return;
     };
     // A type alias of a `Mapping` (`typealias M = Mapping<String, E>`) records
-    // the value types of the type it stands for.
+    // the value types of the type it stands for, for a mapping that has none
+    // yet: the alias is read in `scope`, which is where the property type was
+    // declared only when the mapping is built there (a default). An assigned or
+    // nullable value, handled in an amending scope, keeps what it was typed with.
+    let untyped = src_slot
+        .as_ref()
+        .is_none_or(|source| source.mapping_value_types.is_empty());
     let resolved;
-    let type_ann = if matches!(
-        type_ann,
-        crate::parser::TypeExpr::Named(_) | crate::parser::TypeExpr::Nullable(_)
-    ) && let Some(generic) = resolve_collection_type(type_ann, scope, 0)
+    let type_ann = if untyped
+        && matches!(type_ann, crate::parser::TypeExpr::Named(_))
+        && let Some(generic) = resolve_collection_type(type_ann, scope, 0)
     {
         resolved = generic;
         &resolved

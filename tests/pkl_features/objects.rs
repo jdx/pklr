@@ -7402,12 +7402,12 @@ fn a_second_amendment_reads_the_type_where_it_was_declared() {
 
 #[test]
 fn nullable_and_aliased_mapping_properties_inherit_the_value_class() {
-    // Verified against pkl 0.32.2: `M?`, `Mapping<String, E>?` and an alias of
+    // Verified against pkl 0.32.2: `M`, `Mapping<String, E>?` and an alias of
     // an alias, in one module.
     let classes = "class E { x: Int = 1; s: String = \"d\" }\n\
          typealias M = Mapping<String, E>\n\
          typealias M2 = M\n\
-         class H { m: M?; n: Mapping<String, E>?; o: M2? }\n";
+         class H { m: M; n: Mapping<String, E>?; o: M2 }\n";
     let uses = "r = new H { m { [\"k\"] { x = 5 } }; n { [\"k\"] { x = 5 } }; o { [\"k\"] { x = 5 } } }\n\
          v = List(r.m[\"k\"].s, r.n[\"k\"].s, r.o[\"k\"].s)\n";
     let json = eval(&format!("{classes}{uses}"));
@@ -7500,4 +7500,21 @@ fn starred_mapping_value_alternatives_keep_their_default_in_declared_members() {
     )
     .unwrap();
     assert_eq!(json["v"], serde_json::json!(["E", "E", "E", 5]));
+}
+
+#[test]
+fn a_callers_alias_of_the_same_name_does_not_retype_an_imported_mapping() {
+    // Verified against pkl 0.32.2: `lib.pkl` declares `typealias M =
+    // Mapping<String, E>`, the caller declares its own `M` over another class.
+    let lib = "class E { x: Int = 1; s: String = \"E\" }\n\
+         typealias M = Mapping<String, E>\n\
+         class H { mm: M; mn: M?; lm: Listing<M> }\n";
+    let main = "import \"lib.pkl\" as L\n\
+         class Other { y: Int = 3; s: String = \"callerOther\" }\n\
+         typealias M = Mapping<String, Other>\n\
+         a = new L.H { mm = new Mapping<String, L.E> {}; mn { [\"k\"] { x = 5 } }; lm { new { [\"k\"] { x = 5 } } } }\n\
+         b = (a) { mm { [\"k\"] { x = 5 } } }\n\
+         v = List(b.mm[\"k\"].s, b.lm[0][\"k\"].s)\n";
+    let json = eval_union_files("caller_alias", &[("lib.pkl", lib), ("main.pkl", main)]);
+    assert_eq!(json.unwrap()["v"], serde_json::json!(["E", "E"]));
 }
