@@ -89,7 +89,7 @@ fn scalar_text(value: &Value) -> String {
         Value::Int(n) => n.to_string(),
         Value::Float(f) => java_double_to_string(*f),
         Value::String(s) => s.to_string(),
-        other => super::display_value(other),
+        other => super::display_value_full(other),
     }
 }
 

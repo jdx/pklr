@@ -1150,11 +1150,17 @@ pub(crate) fn validate_xml_characters(
 const DISPLAY_DEPTH: usize = 6;
 
 pub(crate) fn display_value(value: &Value) -> String {
-    display_value_at(value, 0)
+    display_value_at(value, 0, DISPLAY_DEPTH)
 }
 
-fn display_value_at(value: &Value, depth: usize) -> String {
-    if depth > DISPLAY_DEPTH && matches!(value, Value::List(_) | Value::Object(..)) {
+/// `display_value` without the depth cap, for text that is part of rendered
+/// output, where cutting a value short could make distinct values alike.
+pub(crate) fn display_value_full(value: &Value) -> String {
+    display_value_at(value, 0, usize::MAX)
+}
+
+fn display_value_at(value: &Value, depth: usize, max: usize) -> String {
+    if depth > max && matches!(value, Value::List(_) | Value::Object(..)) {
         return "...".into();
     }
     match (kind_of(value), value) {
@@ -1198,10 +1204,10 @@ fn display_value_at(value: &Value, depth: usize) -> String {
         (Kind::Pair, Value::Object(map, _)) => format!(
             "Pair({}, {})",
             map.get("first")
-                .map(|item| display_value_at(item, depth + 1))
+                .map(|item| display_value_at(item, depth + 1, max))
                 .unwrap_or_default(),
             map.get("second")
-                .map(|item| display_value_at(item, depth + 1))
+                .map(|item| display_value_at(item, depth + 1, max))
                 .unwrap_or_default()
         ),
         (Kind::Class | Kind::TypeAlias, Value::Object(members, Some(source))) => {
@@ -1238,8 +1244,8 @@ fn display_value_at(value: &Value, depth: usize) -> String {
                     .map(|(key, value)| {
                         format!(
                             "{}, {}",
-                            display_value_at(&key_value(key), depth + 1),
-                            display_value_at(value, depth + 1)
+                            display_value_at(&key_value(key), depth + 1, max),
+                            display_value_at(value, depth + 1, max)
                         )
                     })
                     .collect::<Vec<_>>()
@@ -1248,7 +1254,12 @@ fn display_value_at(value: &Value, depth: usize) -> String {
             } else {
                 let shown = map
                     .keys()
-                    .map(|key| format!("[{}] = ?", display_value_at(&key_value(key), depth + 1)))
+                    .map(|key| {
+                        format!(
+                            "[{}] = ?",
+                            display_value_at(&key_value(key), depth + 1, max)
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join("; ");
                 format!("new Mapping {{ {shown} }}")
@@ -1272,7 +1283,7 @@ fn display_value_at(value: &Value, depth: usize) -> String {
             let shown = |items: &ListValue| {
                 items
                     .iter()
-                    .map(|item| display_value_at(item, depth + 1))
+                    .map(|item| display_value_at(item, depth + 1, max))
                     .collect::<Vec<_>>()
                     .join(", ")
             };
