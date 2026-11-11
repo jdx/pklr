@@ -2019,7 +2019,22 @@ impl Evaluator {
                 continue;
             }
 
-            let import_path = self.local_file_path(path, uri)?;
+            let import_path = match self.local_file_path(path, uri) {
+                Ok(import_path) => import_path,
+                // A `modulepath:` URI naming nothing is an error only if the
+                // import is used, like any other missing local import.
+                Err(error @ Error::ImportNotFound(_)) if uri.starts_with("modulepath:") => {
+                    let alias = import.alias.clone().unwrap_or_else(|| {
+                        let name = uri.rsplit('/').next().unwrap_or_default();
+                        name.strip_suffix(".pkl").unwrap_or(name).to_string()
+                    });
+                    if referenced_imports.contains(alias.as_str()) {
+                        return Err(error);
+                    }
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             let alias = import.alias.clone().unwrap_or_else(|| {
                 import_path
                     .file_stem()

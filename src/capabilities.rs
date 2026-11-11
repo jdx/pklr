@@ -422,7 +422,9 @@ impl EvalCapabilities for NativeCapabilities {
             Err(error)
                 if matches!(
                     error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput
+                    std::io::ErrorKind::NotFound
+                        | std::io::ErrorKind::InvalidInput
+                        | std::io::ErrorKind::NotADirectory
                 ) =>
             {
                 Ok(false)

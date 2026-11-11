@@ -4323,6 +4323,8 @@ fn modulepath_decodes_and_confines_uris() {
     let temp = TestTempDir::new("pklr_test_modulepath_decode");
     let (d1, d2) = (temp.path().join("d1"), temp.path().join("d2"));
     std::fs::create_dir_all(d1.join("lib/a.pkl")).unwrap();
+    std::fs::create_dir_all(d1.join("other")).unwrap();
+    std::fs::write(d1.join("file"), "").unwrap();
     std::fs::create_dir_all(&d2).unwrap();
     std::fs::create_dir_all(d2.join("lib")).unwrap();
     std::fs::write(d2.join("lib/a.pkl"), "v = \"d2\"\n").unwrap();
@@ -4337,6 +4339,11 @@ fn modulepath_decodes_and_confines_uris() {
     assert_eq!(eval("modulepath:/lib/a.pkl").unwrap()["x"], "d2");
     assert_eq!(eval("modulepath:/unused/../lib/a.pkl").unwrap()["x"], "d2");
     assert_eq!(eval("modulepath:/a%20b.pkl").unwrap()["x"], "space");
+    // A plain file where an earlier entry would need a directory is a miss.
+    std::fs::write(d2.join("file.pkl"), "v = \"d2file\"\n").unwrap();
+    std::fs::create_dir_all(d2.join("file")).unwrap();
+    std::fs::write(d2.join("file/x.pkl"), "v = \"deep\"\n").unwrap();
+    assert_eq!(eval("modulepath:/file/x.pkl").unwrap()["x"], "deep");
     assert!(eval("modulepath:/../secret.pkl").is_err());
     assert!(eval("modulepath:/..\\\\secret.pkl").is_err());
     assert!(eval("modulepath:/%2e%2e/secret.pkl").is_err());
@@ -4359,4 +4366,24 @@ fn modulepath_does_not_fall_back_to_cwd_file() {
     let result = eval_with_module_path(&main, &[temp.path()]);
     let _ = std::fs::remove_dir_all("modulepath:");
     assert!(result.is_err());
+}
+
+#[test]
+fn modulepath_unused_missing_import_is_lazy() {
+    let temp = TestTempDir::new("pklr_test_modulepath_lazy");
+    let main = temp.path().join("main.pkl");
+    std::fs::write(
+        &main,
+        "import \"modulepath:/missing.pkl\" as Unused\nimport \"modulepath:/other.pkl\"\nanswer = 42\n",
+    )
+    .unwrap();
+    let json = eval_with_module_path(&main, &[temp.path()]).unwrap();
+    assert_eq!(json, serde_json::json!({"answer": 42}));
+    std::fs::write(
+        &main,
+        "import \"modulepath:/missing.pkl\" as Used\nanswer = Used.v\n",
+    )
+    .unwrap();
+    let err = eval_with_module_path(&main, &[temp.path()]).unwrap_err();
+    assert!(err.contains("modulepath:/missing.pkl"), "{err}");
 }
