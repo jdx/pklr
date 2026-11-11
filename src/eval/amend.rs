@@ -1298,16 +1298,23 @@ impl Evaluator {
         };
         // The default may read the locals the amendment declares.
         let mut default_scope = amendment_scope.clone();
+        // Whether `default_scope` holds everything the amendment declares: a
+        // function default recorded from a partial scope would mis-bind names.
+        let mut complete = true;
         for entry in overlay_entries.iter() {
-            if let Entry::Property(prop) = entry
-                && has_modifier(&prop.modifiers, Modifier::Local)
-                && let Some(expr) = &prop.value
-            {
-                // A local the default does not read may need declarations this
-                // does not set up (a local class); the mapping body binds it.
-                if let Ok(value) = self.eval_expr(expr, &default_scope, depth + 1) {
-                    default_scope.declare(&prop.name, value);
+            match entry {
+                Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {
+                    let evaluated = prop
+                        .value
+                        .as_ref()
+                        .and_then(|expr| self.eval_expr(expr, &default_scope, depth + 1).ok());
+                    match evaluated {
+                        Some(value) => default_scope.declare(&prop.name, value),
+                        None => complete = false,
+                    }
                 }
+                Entry::ClassDef(..) | Entry::TypeAlias(..) => complete = false,
+                _ => {}
             }
         }
         let Some(default) = self.find_default_template(overlay_entries, &default_scope, depth)?
@@ -1412,6 +1419,9 @@ impl Evaluator {
         // source cannot rebind, and it reads the default it amends through
         // `super` as it did when it was made.
         if let Value::Lambda(..) = recorded {
+            if !complete {
+                return Ok(None);
+            }
             let mut saved = (*assigned_default).clone();
             saved.value = Some(Expr::TemplateLocals(
                 LocalBindings(Arc::new(vec![(Arc::from(RECORDED_DEFAULT), recorded)])),
