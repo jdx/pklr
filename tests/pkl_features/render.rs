@@ -1564,3 +1564,25 @@ obj = (new Dynamic { alias = Email }).toString()
     assert_eq!(json["quoted"], "contact.email");
     assert_eq!(json["obj"], "new Dynamic { alias = Email }");
 }
+
+#[test]
+fn renderer_errors_do_not_expand_shared_values_exponentially() {
+    let json = eval(
+        r#"
+import "pkl:test"
+local w0 = List(1)
+local w1 = List(w0, w0)
+local w2 = List(w1, w1)
+local w3 = List(w2, w2)
+local w4 = List(w3, w3)
+local w5 = List(w4, w4)
+local w6 = List(w5, w5)
+local w7 = List(w6, w6)
+local w8 = List(w7, w7)
+local w9 = List(w8, w8)
+local w10 = List(w9, w9)
+msg = test.catch(() -> new PcfRenderer {}.renderDocument(w10))
+"#,
+    );
+    assert!(json["msg"].as_str().unwrap().len() < 10_000);
+}

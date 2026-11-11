@@ -1145,7 +1145,18 @@ pub(crate) fn validate_xml_characters(
 }
 
 /// A short Pkl rendering of `value` for error messages.
+/// The deepest nesting `display_value` expands: shared contents can make an
+/// expanded value exponentially larger than the value itself.
+const DISPLAY_DEPTH: usize = 6;
+
 pub(crate) fn display_value(value: &Value) -> String {
+    display_value_at(value, 0)
+}
+
+fn display_value_at(value: &Value, depth: usize) -> String {
+    if depth > DISPLAY_DEPTH && matches!(value, Value::List(_) | Value::Object(..)) {
+        return "...".into();
+    }
     match (kind_of(value), value) {
         (Kind::Null, _) => "null".into(),
         (_, Value::Bool(b)) => b.to_string(),
@@ -1186,8 +1197,12 @@ pub(crate) fn display_value(value: &Value) -> String {
         }
         (Kind::Pair, Value::Object(map, _)) => format!(
             "Pair({}, {})",
-            map.get("first").map(display_value).unwrap_or_default(),
-            map.get("second").map(display_value).unwrap_or_default()
+            map.get("first")
+                .map(|item| display_value_at(item, depth + 1))
+                .unwrap_or_default(),
+            map.get("second")
+                .map(|item| display_value_at(item, depth + 1))
+                .unwrap_or_default()
         ),
         (Kind::Class | Kind::TypeAlias, Value::Object(members, Some(source))) => {
             (if kind_of(value) == Kind::TypeAlias {
@@ -1223,8 +1238,8 @@ pub(crate) fn display_value(value: &Value) -> String {
                     .map(|(key, value)| {
                         format!(
                             "{}, {}",
-                            display_value(&key_value(key)),
-                            display_value(value)
+                            display_value_at(&key_value(key), depth + 1),
+                            display_value_at(value, depth + 1)
                         )
                     })
                     .collect::<Vec<_>>()
@@ -1233,7 +1248,7 @@ pub(crate) fn display_value(value: &Value) -> String {
             } else {
                 let shown = map
                     .keys()
-                    .map(|key| format!("[{}] = ?", display_value(&key_value(key))))
+                    .map(|key| format!("[{}] = ?", display_value_at(&key_value(key), depth + 1)))
                     .collect::<Vec<_>>()
                     .join("; ");
                 format!("new Mapping {{ {shown} }}")
@@ -1257,7 +1272,7 @@ pub(crate) fn display_value(value: &Value) -> String {
             let shown = |items: &ListValue| {
                 items
                     .iter()
-                    .map(display_value)
+                    .map(|item| display_value_at(item, depth + 1))
                     .collect::<Vec<_>>()
                     .join(", ")
             };
