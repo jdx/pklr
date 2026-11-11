@@ -160,6 +160,20 @@ impl Evaluator {
                     }
                     _ => ListValue::new(ListKind::Dynamic, Vec::new()),
                 };
+                // A body that amends nothing and defines members besides its
+                // elements makes a `Dynamic` with both, as it does on an
+                // existing element-only one.
+                if items.kind() == ListKind::Dynamic
+                    && !matches!(amendment_base, Some(Value::List(_)))
+                    && entries_define_members(body)
+                {
+                    return Ok(Some(self.eval_value_amendment(
+                        Value::List(items),
+                        body,
+                        scope,
+                        depth,
+                    )?));
+                }
                 // `x: Listing<T>` makes each `new { ... }` element a `T`. A
                 // listing the declaring class built already knows `T`, as does
                 // an amendment of a class's `Listing<T>?` property.
@@ -485,6 +499,9 @@ impl Evaluator {
             map: ObjectMap::default(),
             member_entry_indices: HashMap::default(),
             elements: Vec::new(),
+            shadow: None,
+            failed_iteration: 0,
+            resume_from: 0,
             generated: HashSet::default(),
             defined_by_layer: None,
         };
@@ -500,25 +517,98 @@ impl Evaluator {
         );
         cx.default_template = self.eval_default_template(&cx, &st)?;
         let cx = cx;
+        // An element, spread or generator may read a member declared after it
+        // (`new Dynamic { z; z = 1 }`). One that fails while a member follows
+        // is retried once the members are bound.
+        //
+        // A bare element, a spread and a `when` change nothing when they fail.
+        // A `for` may have emitted its earlier iterations, so it is resumed at
+        // the iteration that failed. No copy of the state is made, and where
+        // a member follows is looked up only for the first such entry.
+        let mut last_member: Option<Option<usize>> = None;
+        let mut shadow_epoch: Option<usize> = None;
+        let mut deferred_elements: Vec<(usize, usize, usize)> = Vec::new();
         for (entry_index, entry) in entries.iter().enumerate() {
+            // A spread, and the collection or condition of a generator, are
+            // evaluated outside the body and cannot read its members.
+            let element_like = matches!(
+                entry,
+                Entry::Elem(_) | Entry::ForGenerator(_) | Entry::WhenGenerator(_)
+            );
+            // The members of the body that are not bound yet shadow the
+            // enclosing bindings of the same name, so the entry fails on them
+            // and waits.
+            // The set is built again only when a member has been bound since.
+            let mut deferrable = false;
+            if element_like {
+                let last =
+                    *last_member.get_or_insert_with(|| entries.iter().rposition(entry_is_member));
+                deferrable = last.is_some_and(|last| entry_index < last);
+            }
+            if deferrable && !cx.pending_members.is_empty() {
+                if shadow_epoch != Some(st.bound_members.len()) {
+                    shadow_epoch = Some(st.bound_members.len());
+                    let mut pending = cx
+                        .pending_members
+                        .iter()
+                        .filter(|name| !st.bound_members.contains(*name))
+                        .peekable();
+                    st.shadow = pending.peek().is_some().then(|| {
+                        let mut poisoned = (*st.child_scope.poisoned).clone();
+                        for name in pending {
+                            poisoned.insert(name.clone(), format!("undefined variable: {name}"));
+                        }
+                        Arc::new(poisoned)
+                    });
+                }
+            } else if st.shadow.is_some() {
+                st.shadow = None;
+                shadow_epoch = None;
+            }
+            // A generator that fails before its body leaves the marker, which
+            // keeps it from waiting; a `for` sets the iteration it stood at.
+            st.failed_iteration =
+                if matches!(entry, Entry::ForGenerator(_) | Entry::WhenGenerator(_)) {
+                    usize::MAX
+                } else {
+                    0
+                };
             // Only a failure while locals are still pending is deferred and
             // retried, so the state is snapshotted only then. Entries never add
             // to `failed_locals`, so empty before means empty after and the
             // rollback arm below cannot be taken.
             let rollback = (!st.failed_locals.is_empty()).then(|| st.clone());
-            match self.eval_output_entry(&cx, &mut st, entry_index, entry) {
+            let result = self.eval_output_entry(&cx, &mut st, entry_index, entry);
+            match result {
                 Ok(()) => {}
                 Err(Error::Eval(message)) if rollback.is_some() && !st.failed_locals.is_empty() => {
                     st = rollback.expect("checked by the guard");
                     failed_entries.push((entry_index, message));
                 }
+                Err(Error::Eval(_)) if deferrable && st.failed_iteration != usize::MAX => {
+                    let resume = std::mem::take(&mut st.failed_iteration);
+                    deferred_elements.push((entry_index, st.elements.len(), resume));
+                }
                 Err(error) => return Err(error),
             }
         }
+        st.shadow = None;
         // Revisit only the ordinary value properties deferred because they
         // read a still-pending local. Once no deferred property recovers, the
         // first current error is the one Pkl surfaces.
         self.retry_failed_properties(&cx, &mut st)?;
+        // Elements that read a later member are evaluated now that it is
+        // bound, and keep their place among the elements.
+        let mut inserted = 0;
+        for (entry_index, position, resume) in deferred_elements {
+            let before = st.elements.len();
+            st.resume_from = resume;
+            self.eval_output_entry(&cx, &mut st, entry_index, &entries[entry_index])?;
+            let added = st.elements.split_off(before);
+            let at = position + inserted;
+            inserted += added.len();
+            st.elements.splice(at..at, added);
+        }
         // Retry non-property output entries only after ordinary properties
         // have had a chance to resolve their deferred local dependencies.
         // This includes nested generator bodies, spreads, elements, and
@@ -959,8 +1049,11 @@ impl Evaluator {
                 );
                 let collection = self.eval_expr(&fgen.collection, &active_scope, cx.depth)?;
                 let items = collection_to_items(collection)?;
-                for (k, v) in items {
-                    let mut iter_scope = active_scope.child();
+                let resume = std::mem::take(&mut st.resume_from);
+                for (iteration, (k, v)) in items.into_iter().enumerate().skip(resume) {
+                    // Where the loop stands if this iteration fails.
+                    st.failed_iteration = iteration;
+                    let mut iter_scope = shadowed(active_scope.child(), &st.shadow);
                     iter_scope.set(&fgen.val_var, v);
                     if let Some(key_var) = &fgen.key_var {
                         iter_scope.set(key_var, k);
@@ -996,14 +1089,18 @@ impl Evaluator {
                 }
             }
             Entry::WhenGenerator(wgen) => {
-                let active_scope = scope_for_object_entry(
+                let condition_scope = scope_for_object_entry(
                     entry_index,
                     &st.child_scope,
                     cx.entry_scopes,
                     &cx.entry_owners,
                     cx.own_body_scope(),
                 );
-                let cond = self.eval_expr(&wgen.condition, &active_scope, cx.depth)?;
+                let cond = self.eval_expr(&wgen.condition, &condition_scope, cx.depth)?;
+                // From here a failure is in the body, which may read a later
+                // member.
+                st.failed_iteration = 0;
+                let active_scope = shadowed(condition_scope, &st.shadow);
                 if is_truthy(&cond) {
                     let body_val = self.eval_entries_with_lexical_scopes(
                         &wgen.body,
@@ -1063,12 +1160,15 @@ impl Evaluator {
                 }
             }
             Entry::Elem(expr) => {
-                let active_scope = scope_for_object_entry(
-                    entry_index,
-                    &st.child_scope,
-                    cx.entry_scopes,
-                    &cx.entry_owners,
-                    cx.own_body_scope(),
+                let active_scope = shadowed(
+                    scope_for_object_entry(
+                        entry_index,
+                        &st.child_scope,
+                        cx.entry_scopes,
+                        &cx.entry_owners,
+                        cx.own_body_scope(),
+                    ),
+                    &st.shadow,
                 );
                 st.elements
                     .push(self.eval_expr(expr, &active_scope, cx.depth + 1)?);
@@ -1576,6 +1676,15 @@ struct BodyState<'a> {
     /// Keep the former separately so XML elements can render precisely the
     /// values Pkl gives them, in source order.
     elements: Vec<Value>,
+    /// The poisoned names an element, spread or generator evaluates with: its
+    /// own scope's, and the members of the body not bound yet, which shadow
+    /// the enclosing bindings of the same name.
+    shadow: Option<Arc<FxIndexMap<Name, String>>>,
+    /// The iteration of the `for` generator that is evaluating, set as each
+    /// begins, so one that fails can be resumed there.
+    failed_iteration: usize,
+    /// The iteration a `for` generator being evaluated again starts at.
+    resume_from: usize,
     /// Names of members produced by generators and not since rebound by a
     /// property entry.
     generated: HashSet<Arc<str>>,
@@ -1809,4 +1918,19 @@ impl ReceiverMembers<'_> {
             .get(name)
             .or_else(|| self.outer.and_then(|outer| outer.get(name)))
     }
+}
+
+/// Whether `entry` declares a member of its body that an earlier element can
+/// read, as [`entries_define_members`] decides for the whole body: a property
+/// that is not local, a dynamic one, or one a generator produces.
+fn entry_is_member(entry: &Entry) -> bool {
+    entries_define_members(std::slice::from_ref(entry))
+}
+
+/// `scope` with the poisoned names an entry evaluates with, if it has any.
+fn shadowed(mut scope: Scope, shadow: &Option<Arc<FxIndexMap<Name, String>>>) -> Scope {
+    if let Some(poisoned) = shadow {
+        scope.poisoned = Arc::clone(poisoned);
+    }
+    scope
 }
