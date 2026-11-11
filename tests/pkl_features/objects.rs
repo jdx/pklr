@@ -7603,3 +7603,18 @@ u = new Mapping {
     );
     assert_eq!(json["u"]["a"]["x"], 1);
 }
+
+#[test]
+fn mapping_amended_body_default_keeps_inherited_default_members() {
+    let json = eval(
+        r#"
+res1 = new Mapping {
+  default { name = "x"; age = 42 }
+  ["pigeon"] { }
+}
+res2 = (res1) { default { age = 45 } }
+"#,
+    );
+    assert_eq!(json["res2"]["pigeon"]["name"], "x");
+    assert_eq!(json["res2"]["pigeon"]["age"], 45);
+}

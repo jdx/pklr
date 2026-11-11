@@ -1258,6 +1258,21 @@ impl Evaluator {
         else {
             return Ok(None);
         };
+        // A body default amends the inherited one instead of replacing it.
+        let body_only = assigned_default.value.is_none();
+        let fresh_entries = match (
+            find_default_body_entries(&base_src.entries),
+            &assigned_default.body,
+        ) {
+            (Some(old), Some(new)) if body_only => Some(
+                old.iter()
+                    .chain(new.iter())
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .into(),
+            ),
+            _ => None,
+        };
         let recorded = default.clone();
         // Entries the amendment replaces outright are never built from the base.
         let replaced: HashSet<&str> = overlay_entries
@@ -1296,7 +1311,7 @@ impl Evaluator {
                 &base_src.mapping_value_types,
                 MappingInheritedDefault {
                     value: Some(default),
-                    entries: None,
+                    entries: fresh_entries,
                 },
             )?;
             // An entry an earlier amendment changed is no longer what the base
@@ -1334,7 +1349,7 @@ impl Evaluator {
             .flatten();
         let same =
             declared.is_some_and(|declared| declared.identity_json() == recorded.identity_json());
-        Ok(same.then_some(assigned_default))
+        Ok((same && !body_only).then_some(assigned_default))
     }
 }
 
