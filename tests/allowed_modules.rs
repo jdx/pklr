@@ -24,8 +24,19 @@ impl Drop for TestTempDir {
     }
 }
 
+/// The `file:` URI of `path`, as pklr spells it.
 fn uri(path: &std::path::Path) -> String {
-    format!("file://{}", path.display())
+    let path = path.display().to_string().replace('\\', "/");
+    if path.starts_with('/') {
+        format!("file://{path}")
+    } else {
+        format!("file:///{path}")
+    }
+}
+
+/// A pattern matching exactly the URI of `path` (patterns are regular expressions).
+fn pat(path: &std::path::Path) -> String {
+    fancy_regex::escape(&uri(path)).into_owned()
 }
 
 fn project(name: &str) -> (TestTempDir, std::path::PathBuf) {
@@ -61,11 +72,11 @@ fn allowed_and_denied_imports() {
     let a = dir.join("a.pkl");
 
     assert_eq!(eval(&a, &["file:".into()]).unwrap()["v"], 1);
-    assert_eq!(eval(&a, &[uri(&dir) + "/"]).unwrap()["v"], 1);
+    assert_eq!(eval(&a, &[pat(&dir) + "/"]).unwrap()["v"], 1);
     // A pattern is a regular expression anchored at the start of the URI.
     assert_eq!(eval(&a, &["file:.*\\.pkl".into()]).unwrap()["v"], 1);
 
-    let only_entry = vec![uri(&a)];
+    let only_entry = vec![pat(&a)];
     let error = eval(&a, &only_entry).unwrap_err();
     assert!(
         error.contains(&format!(
@@ -93,7 +104,7 @@ fn stdlib_modules_are_always_allowed() {
     let (_temp, dir) = project("pklr_modules_stdlib");
     let a = dir.join("a.pkl");
     std::fs::write(&a, "import \"pkl:math\"\nv = math.pi > 3\n").unwrap();
-    assert_eq!(eval(&a, &[uri(&a)]).unwrap()["v"], true);
+    assert_eq!(eval(&a, &[pat(&a)]).unwrap()["v"], true);
 }
 
 #[test]
@@ -101,7 +112,7 @@ fn reads_are_not_gated_by_the_module_policy() {
     let (_temp, dir) = project("pklr_modules_read");
     let a = dir.join("a.pkl");
     std::fs::write(&a, "v = read(\"sub/b.pkl\").text\n").unwrap();
-    assert_eq!(eval(&a, &[uri(&a)]).unwrap()["v"], "x = 1\n");
+    assert_eq!(eval(&a, &[pat(&a)]).unwrap()["v"], "x = 1\n");
 }
 
 #[test]
@@ -112,7 +123,7 @@ fn amends_and_extends_are_checked() {
         let a = dir.join(format!("{keyword}.pkl"));
         std::fs::write(&a, format!("{keyword} \"sub/open.pkl\"\n")).unwrap();
         assert_eq!(eval(&a, &["file:".into()]).unwrap()["x"], 1);
-        let error = eval(&a, &[uri(&a)]).unwrap_err();
+        let error = eval(&a, &[pat(&a)]).unwrap_err();
         assert!(
             error.contains("Refusing to load module") && error.contains("sub/open.pkl"),
             "{keyword}: {error}"
@@ -126,16 +137,16 @@ fn import_expressions_and_globs_are_checked() {
     let a = dir.join("a.pkl");
     std::fs::write(&a, "v = import(\"sub/b.pkl\").x\n").unwrap();
     assert_eq!(eval(&a, &["file:".into()]).unwrap()["v"], 1);
-    assert!(eval(&a, &[uri(&a)]).is_err());
+    assert!(eval(&a, &[pat(&a)]).is_err());
 
     let g = dir.join("g.pkl");
     std::fs::write(&g, "import* \"sub/*.pkl\" as m\nv = m.keys.toList()\n").unwrap();
-    let json = eval(&g, &[uri(&g), uri(&dir) + "/sub/"]).unwrap();
+    let json = eval(&g, &[pat(&g), pat(&dir) + "/sub/"]).unwrap();
     assert_eq!(json["v"], serde_json::json!(["sub/b.pkl", "sub/c.pkl"]));
     // Allowing the matches alone is not enough: the searched directory is checked.
     let error = eval(
         &g,
-        &[uri(&g), uri(&dir) + "/sub/b.pkl", uri(&dir) + "/sub/c.pkl"],
+        &[pat(&g), pat(&dir) + "/sub/b.pkl", pat(&dir) + "/sub/c.pkl"],
     )
     .unwrap_err();
     assert!(error.contains("Refusing to load module"), "{error}");
@@ -147,15 +158,15 @@ fn transitive_imports_are_checked() {
     let a = dir.join("a.pkl");
     std::fs::write(&a, "import \"sub/c.pkl\"\nv = c.y\n").unwrap();
     // c.pkl is allowed but the module it imports, sub/b.pkl, is not.
-    let error = eval(&a, &[uri(&a), uri(&dir.join("sub/c.pkl"))]).unwrap_err();
+    let error = eval(&a, &[pat(&a), pat(&dir.join("sub/c.pkl"))]).unwrap_err();
     assert!(
         error.contains(&format!("`{}/sub/b.pkl`", uri(&dir))),
         "{error}"
     );
     let all = vec![
-        uri(&a),
-        uri(&dir.join("sub/c.pkl")),
-        uri(&dir.join("sub/b.pkl")),
+        pat(&a),
+        pat(&dir.join("sub/c.pkl")),
+        pat(&dir.join("sub/b.pkl")),
     ];
     assert_eq!(eval(&a, &all).unwrap()["v"], 2);
 }
@@ -166,9 +177,9 @@ fn relative_paths_are_normalized_before_matching() {
     std::fs::create_dir_all(dir.join("allowed")).unwrap();
     let a = dir.join("allowed/a.pkl");
     std::fs::write(&a, "import \"../sub/b.pkl\"\nv = b.x\n").unwrap();
-    let error = eval(&a, &[uri(&dir) + "/allowed/"]).unwrap_err();
+    let error = eval(&a, &[pat(&dir) + "/allowed/"]).unwrap_err();
     assert!(error.contains("Refusing to load module"), "{error}");
-    assert_eq!(eval(&a, &[uri(&dir) + "/"]).unwrap()["v"], 1);
+    assert_eq!(eval(&a, &[pat(&dir) + "/"]).unwrap()["v"], 1);
 }
 
 #[test]
@@ -177,4 +188,27 @@ fn invalid_pattern_is_an_error() {
     let a = dir.join("sub/b.pkl");
     let error = eval(&a, &["[".into()]).unwrap_err();
     assert!(error.contains("invalid allowed-modules pattern"), "{error}");
+}
+
+#[test]
+fn denied_modules_are_refused_before_any_io() {
+    let (_temp, dir) = project("pklr_modules_before_io");
+    let a = dir.join("a.pkl");
+
+    // A denied module that does not exist is refused, not reported missing.
+    std::fs::write(&a, "import \"sub/missing.pkl\" as m\nv = m.x\n").unwrap();
+    let error = eval(&a, &[pat(&a)]).unwrap_err();
+    assert!(error.contains("Refusing to load module"), "{error}");
+
+    // A denied HTTP import is refused without a request (nothing listens there).
+    std::fs::write(&a, "import \"http://127.0.0.1:1/m.pkl\" as m\nv = m.x\n").unwrap();
+    let error = eval(&a, &["file:".into()]).unwrap_err();
+    assert!(
+        error.contains("Refusing to load module `http://127.0.0.1:1/m.pkl`"),
+        "{error}"
+    );
+
+    // As in pkl, an import that is never used is never loaded.
+    std::fs::write(&a, "import \"sub/b.pkl\" as b\nv = 1\n").unwrap();
+    assert_eq!(eval(&a, &[pat(&a)]).unwrap()["v"], 1);
 }

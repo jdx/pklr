@@ -94,6 +94,7 @@ impl Evaluator {
                 .map(|s| (*s).to_string())
                 .collect(),
             allowed_modules: None,
+            package_bases: HashMap::default(),
             environment: None,
             external_properties: BTreeMap::default(),
             module_scopes: HashMap::default(),

@@ -76,6 +76,7 @@ impl Evaluator {
     }
 
     pub(super) fn fetch_source(&mut self, url: &str) -> Result<String> {
+        self.check_module_path_allowed(Path::new(url))?;
         if self
             .package_http_roots
             .iter()
@@ -146,6 +147,7 @@ impl Evaluator {
         if uri.starts_with("package://") {
             self.check_module_allowed(uri)?;
             let pkg = self.resolve_package(uri)?;
+            self.note_package_base(uri, &pkg);
             match &pkg {
                 PackageSource::Direct { url, root } => {
                     let source = self.fetch_direct_package_source(url, root)?;
@@ -173,6 +175,7 @@ impl Evaluator {
             return Ok(None);
         }
         let import_path = self.local_file_path(path, uri)?;
+        self.check_module_path_allowed(&import_path)?;
         if !self.path_exists_io(&import_path)? {
             return Ok(None);
         }
@@ -201,31 +204,48 @@ impl Evaluator {
         )))
     }
 
+    /// Remember the package `uri` (a `package:` module URI) names, so modules
+    /// read from it are checked by their package URI. A no-op without a policy.
+    pub(super) fn note_package_base(&mut self, uri: &str, pkg: &PackageSource) {
+        if self.allowed_modules.is_none() {
+            return;
+        }
+        let key = match pkg {
+            PackageSource::Direct { root, .. } => root.clone(),
+            PackageSource::Zip(zip_url, _) => zip_url.clone(),
+        };
+        let base = uri.split_once('#').map_or(uri, |(base, _)| base);
+        let base = base.split_once("::").map_or(base, |(base, _)| base);
+        self.package_bases.insert(key, base.to_string());
+    }
+
     /// [`Self::check_module_allowed`] for the module at `path`, which is a URL
-    /// for a remote module and a file otherwise. A file inside an extracted
-    /// package is covered by the check on its `package:` URI.
+    /// for a remote module and a file otherwise. A module read from a package
+    /// is checked by its `package:` URI.
     pub(super) fn check_module_path_allowed(&mut self, path: &Path) -> Result<()> {
         if self.allowed_modules.is_none() {
             return Ok(());
         }
         let name = path.to_string_lossy();
         if name.contains("://") {
-            if self
-                .package_http_roots
-                .iter()
-                .any(|root| name.starts_with(root.as_str()))
-            {
-                return Ok(());
-            }
-            return self.check_module_allowed(&name);
+            let package = self.package_bases.iter().find_map(|(root, base)| {
+                let rest = name.strip_prefix(root.as_str())?;
+                Some(format!("{base}#/{rest}"))
+            });
+            return match package {
+                Some(uri) => self.check_module_allowed(&uri),
+                None => self.check_module_allowed(&name),
+            };
         }
         let absolute = absolute_clean(&self.host_absolute_path(path.to_path_buf()));
-        if self
-            .package_dirs
-            .values()
-            .any(|dir| absolute.starts_with(dir))
-        {
-            return Ok(());
+        #[cfg(feature = "package-zip")]
+        for (zip_url, dir) in &self.package_dirs {
+            if let Ok(rest) = absolute.strip_prefix(dir)
+                && let Some(base) = self.package_bases.get(zip_url)
+            {
+                let rest = rest.to_string_lossy().replace('\\', "/");
+                return self.check_module_allowed(&format!("{base}#/{rest}"));
+            }
         }
         self.check_module_allowed(&file_uri(&absolute))
     }
@@ -425,6 +445,7 @@ impl Evaluator {
     }
 
     pub(super) fn parse_file(&mut self, path: &Path) -> Result<Arc<Module>> {
+        self.check_module_path_allowed(path)?;
         let canonical = self.canonicalize_io(path).ok();
         if let Some(module) = canonical.as_ref().and_then(|c| self.parse_cache.get(c)) {
             return Ok(Arc::clone(module));
@@ -513,10 +534,10 @@ impl Evaluator {
             let fixed = uri.find(['*', '?', '[', '{']).map_or(uri, |i| &uri[..i]);
             let dir = fixed.rfind('/').map_or("", |i| &fixed[..=i]);
             let dir_path = self.local_file_path(path, dir)?;
-            let dir_uri = format!(
-                "{}/",
-                file_uri(&absolute_clean(&self.host_absolute_path(dir_path))).trim_end_matches('/')
-            );
+            let mut dir_uri = file_uri(&absolute_clean(&self.host_absolute_path(dir_path)));
+            if !dir_uri.ends_with('/') {
+                dir_uri.push('/');
+            }
             self.check_module_allowed(&dir_uri)?;
         }
         let matched = self.glob_io(base_dir, uri)?;
@@ -570,6 +591,7 @@ impl Evaluator {
 
         if !uri.contains("://") || uri.starts_with("file://") {
             let import_path = self.local_file_path(path, uri)?;
+            self.check_module_path_allowed(&import_path)?;
             if !self.path_exists_io(&import_path)? {
                 return Err(Error::ImportNotFound(import_path.display().to_string()));
             }
