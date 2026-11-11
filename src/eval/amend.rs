@@ -970,15 +970,12 @@ impl Evaluator {
                     .collect::<Vec<_>>();
                 receiver_entries.extend_from_slice(overlay_entries);
                 amendment_scope.receiver_entries = Some(Arc::new(receiver_entries));
-                let value_type_defaults = base_src
-                    .mapping_value_types
-                    .iter()
-                    .filter_map(|name| {
-                        let name = mapping_value_type_base(name);
-                        resolve_dotted(&inherited_scope, name)
-                            .map(|value| (name.to_string(), value))
-                    })
-                    .collect::<Vec<_>>();
+                let value_type_defaults = mapping_value_type_classes(
+                    &base_src.mapping_value_types,
+                    base_src,
+                    None,
+                    &[&inherited_scope],
+                );
                 let inherited_default =
                     self.find_default_template(&base_src.entries, &inherited_scope, depth)?;
                 let mut amended = ObjectMap::default();
@@ -1104,15 +1101,12 @@ impl Evaluator {
                     .collect::<Vec<_>>();
                 receiver_entries.extend_from_slice(overlay_entries);
                 amendment_scope.receiver_entries = Some(Arc::new(receiver_entries));
-                let value_type_defaults = base_src
-                    .mapping_value_types
-                    .iter()
-                    .filter_map(|name| {
-                        let name = mapping_value_type_base(name);
-                        resolve_dotted(&inherited_scope, name)
-                            .map(|value| (name.to_string(), value))
-                    })
-                    .collect::<Vec<_>>();
+                let value_type_defaults = mapping_value_type_classes(
+                    &base_src.mapping_value_types,
+                    base_src,
+                    None,
+                    &[&inherited_scope],
+                );
                 let inherited_default =
                     self.find_default_template(&base_src.entries, &inherited_scope, depth)?;
                 let mut amended = ObjectMap::default();

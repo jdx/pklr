@@ -1321,3 +1321,40 @@ mod mapping_key_tests {
         assert!(evaluator.mapping_key_values.is_empty());
     }
 }
+
+/// The classes a mapping's value types name, resolved where the mapping was
+/// typed rather than by name in whichever scope amends it: first the scope the
+/// mapping saved, then the `fallbacks` (the scope that declared the property,
+/// then the amending one) for a name the saved scope does not hold. Type
+/// aliases are followed the way the type checker follows them, so an alias of a
+/// class stands for that class.
+pub(super) fn mapping_value_type_classes(
+    names: &[String],
+    source: &ObjectSource,
+    declared: Option<&Scope>,
+    fallbacks: &[&Scope],
+) -> Vec<(String, Value)> {
+    let saved = super::amend::definition_type_scope(source);
+    let mut resolved = Vec::new();
+    for name in names {
+        // `declared` is the scope of a property annotation that wrote these
+        // value types itself; it comes before the saved scope, which an
+        // instance of the class rebuilds with the amending module's names.
+        let found = declared
+            .into_iter()
+            .chain(std::iter::once(&saved))
+            .chain(fallbacks.iter().copied())
+            .find_map(|scope| {
+                let classes = expand_type_alias_names(std::slice::from_ref(name), scope)
+                    .iter()
+                    .filter_map(|expanded| {
+                        let base = mapping_value_type_base(expanded);
+                        resolve_dotted(scope, base).map(|value| (base.to_string(), value))
+                    })
+                    .collect::<Vec<_>>();
+                (!classes.is_empty()).then_some(classes)
+            });
+        resolved.extend(found.into_iter().flatten());
+    }
+    resolved
+}

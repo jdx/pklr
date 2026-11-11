@@ -255,20 +255,32 @@ impl Evaluator {
                         .collect::<Vec<_>>();
                     receiver_entries.extend_from_slice(body);
                     amendment_scope.receiver_entries = Some(Arc::new(receiver_entries));
-                    let value_type_defaults = src
-                        .mapping_value_types
-                        .iter()
-                        .filter_map(|name| {
-                            let name = mapping_value_type_base(name);
-                            // The classes of the declared value types are the
-                            // ones where the type was declared.
-                            declaring
-                                .as_ref()
-                                .and_then(|declaring| resolve_dotted(declaring, name))
-                                .or_else(|| resolve_dotted(&inherited_scope, name))
-                                .map(|value| (name.to_string(), value))
+                    // The mapping's own saved classes first; the property's
+                    // declaring scope only for a name it did not save.
+                    // The annotation's declaring scope leads only when the
+                    // annotation wrote these value types itself; a broader one
+                    // (`Mapping<String, Any>`) holding a mapping typed elsewhere
+                    // must not rename its classes.
+                    let annotation_names = prop
+                        .type_ann
+                        .as_ref()
+                        .map(|ty| {
+                            let resolved =
+                                resolve_collection_type(ty, declaring.as_ref().unwrap_or(scope), 0);
+                            mapping_value_type_names(resolved.as_ref().unwrap_or(ty))
                         })
-                        .collect::<Vec<_>>();
+                        .unwrap_or_default();
+                    let annotated = !src.mapping_value_types.is_empty()
+                        && src
+                            .mapping_value_types
+                            .iter()
+                            .all(|name| annotation_names.contains(name));
+                    let value_type_defaults = mapping_value_type_classes(
+                        &src.mapping_value_types,
+                        src,
+                        declaring.as_ref().filter(|_| annotated),
+                        &[&inherited_scope],
+                    );
                     let inherited_default =
                         self.find_default_template(&src.entries, &inherited_scope, depth)?;
                     let mut amended = ObjectMap::default();

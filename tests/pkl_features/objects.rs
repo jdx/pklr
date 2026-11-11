@@ -7586,3 +7586,60 @@ fn an_imported_union_mapping_builds_the_declaring_modules_class_not_the_callers(
     .unwrap();
     assert_eq!(json["v"], serde_json::json!(["E", "E"]));
 }
+
+#[test]
+fn a_mapping_keeps_the_classes_it_was_typed_with_across_modules() {
+    // Verified against pkl 0.32.2: `a.pkl` types a mapping with its own `E`,
+    // and `lib.pkl` (with an unrelated `E`) holds it in a broader property.
+    let a = "class E { x: Int = 1; s: String = \"a\" }\n\
+         class F { y: Int = 2; s: String = \"F\" }\n\
+         m = new Mapping<String, *E | F> {}\n";
+    let lib = "import \"a.pkl\" as A\n\
+         class E { x: Int = 100; s: String = \"lib\" }\n\
+         class H { m: Mapping<String, Any> = A.m }\n";
+    let main = "import \"lib.pkl\" as L\n\
+         r = new L.H { m { [\"k\"] { x = 5 } } }\n\
+         v = List(r.m[\"k\"].s, r.m[\"k\"].x)\n";
+    let json = eval_union_files(
+        "mapping_saved_classes",
+        &[("a.pkl", a), ("lib.pkl", lib), ("main.pkl", main)],
+    )
+    .unwrap();
+    assert_eq!(json["v"], serde_json::json!(["a", 5]));
+}
+
+#[test]
+fn aliased_mapping_value_types_name_the_declared_class_not_the_callers() {
+    // Verified against pkl 0.32.2: an alias of a class, an alias of an alias,
+    // an aliased default alternative and a listing of mappings, with a caller
+    // that declares its own `E` and an alias `EA`.
+    let lib = "class E { x: Int = 1; s: String = \"orig\" }\n\
+         typealias EA = E\n\
+         typealias EB = EA\n\
+         typealias EU = *EA | Int\n\
+         open class H {\n\
+           a: Mapping<String, EA>\n\
+           b: Mapping<String, EB>?\n\
+           c: Mapping<String, EU>\n\
+           d: Listing<Mapping<String, EA>>\n\
+         }\n";
+    let main = "import \"lib.pkl\" as L\n\
+         class E { x: Int = 7; s: String = \"caller\" }\n\
+         typealias EA = Int\n\
+         r = new L.H {\n\
+           a { [\"k\"] { x = 5 } }\n\
+           b { [\"k\"] { x = 5 } }\n\
+           c { [\"k\"] { x = 5 } }\n\
+           d { new { [\"k\"] { x = 5 } } }\n\
+         }\n\
+         v = List(r.a[\"k\"].s, r.b[\"k\"].s, r.c[\"k\"].s, r.d[0][\"k\"].s)\n";
+    let json = eval_union_files(
+        "mapping_alias_classes",
+        &[("lib.pkl", lib), ("main.pkl", main)],
+    )
+    .unwrap();
+    assert_eq!(
+        json["v"],
+        serde_json::json!(["orig", "orig", "orig", "orig"])
+    );
+}
