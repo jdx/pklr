@@ -7853,3 +7853,29 @@ fn undefined_property_is_not_read_when_output_or_a_converter_avoids_it() {
     let json = pklr::eval_to_json(&temp.path().join("main.pkl")).unwrap();
     assert_eq!(json, serde_json::json!(1));
 }
+
+#[test]
+fn undefined_property_is_reported_despite_unrelated_converters_or_inherited_renderer() {
+    let error = render_json(
+        "class C { x: Int }\noutput { value = new C {}; renderer = new JsonRenderer { converters { [String] = (s) -> s } } }",
+    )
+    .unwrap_err();
+    assert!(error.contains("but its value is undefined."), "{error}");
+
+    let temp = TestTempDir::new("pklr_test_inherited_renderer_undefined");
+    std::fs::write(
+        temp.path().join("P.pkl"),
+        "open module P\noutput { renderer = new JsonRenderer {} }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("main.pkl"),
+        "extends \"P.pkl\"\nname: String\n",
+    )
+    .unwrap();
+    let error = pklr::eval_to_json(&temp.path().join("main.pkl")).unwrap_err();
+    assert!(
+        error.to_string().contains("but its value is undefined."),
+        "{error}"
+    );
+}
