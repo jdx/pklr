@@ -464,7 +464,7 @@ fn hex(byte: u8) -> Option<u8> {
         _ => None,
     }
 }
-fn absolute_clean(path: &Path) -> PathBuf {
+pub(super) fn absolute_clean(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {
         match component {

@@ -72,6 +72,10 @@ name = "native"
 required-features = ["http", "package-zip"]
 
 [[test]]
+name = "allowed_modules"
+required-features = ["native-io"]
+
+[[test]]
 name = "async"
 required-features = ["async", "package-zip"]
 
