@@ -1251,9 +1251,6 @@ impl Evaluator {
         let Some(assigned_default) = assigned_default else {
             return Ok(None);
         };
-        if !plain_base {
-            return Ok(None);
-        }
         let Some(default) = self.find_default_template(overlay_entries, amendment_scope, depth)?
         else {
             return Ok(None);
@@ -1291,11 +1288,12 @@ impl Evaluator {
             .entries
             .iter()
             .filter(|entry| {
-                matches!(
-                    entry,
-                    Entry::DynProperty(Expr::String(key), Expr::ObjectBody(_) | Expr::New(None, ..))
-                        if !replaced.contains(&**key)
-                )
+                plain_base
+                    && matches!(
+                        entry,
+                        Entry::DynProperty(Expr::String(key), Expr::ObjectBody(_) | Expr::New(None, ..))
+                            if !replaced.contains(&**key)
+                    )
             })
             .cloned()
             .collect();
@@ -1363,7 +1361,7 @@ impl Evaluator {
             saved.body = None;
             return Ok(Some(Arc::new(saved)));
         }
-        if !same {
+        if !same || !plain_base {
             return Ok(None);
         }
         // The recorded default is the inherited body followed by the new one.
