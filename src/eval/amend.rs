@@ -1258,8 +1258,11 @@ impl Evaluator {
                 && has_modifier(&prop.modifiers, Modifier::Local)
                 && let Some(expr) = &prop.value
             {
-                let value = self.eval_expr(expr, &default_scope, depth + 1)?;
-                default_scope.declare(&prop.name, value);
+                // A local the default does not read may need declarations this
+                // does not set up (a local class); the mapping body binds it.
+                if let Ok(value) = self.eval_expr(expr, &default_scope, depth + 1) {
+                    default_scope.declare(&prop.name, value);
+                }
             }
         }
         let Some(default) = self.find_default_template(overlay_entries, &default_scope, depth)?
