@@ -416,6 +416,24 @@ impl Scope {
         }
     }
 
+    /// Whether the nearest binding of `name` was made by the alias declaration
+    /// itself, which marks its own level, and not by a nearer binding that
+    /// reuses the name.
+    pub(super) fn bound_by_alias(&self, name: &str) -> bool {
+        let mut level = self;
+        loop {
+            if level.vars.contains_key(name) {
+                return level
+                    .vars
+                    .contains_key(&super::classes::type_alias_marker(name)[..]);
+            }
+            match level.parent.as_deref() {
+                Some(parent) => level = parent,
+                None => return false,
+            }
+        }
+    }
+
     pub(super) fn get_type_alias(&self, name: &str) -> Option<&crate::parser::TypeExpr> {
         self.type_aliases
             .get(name)

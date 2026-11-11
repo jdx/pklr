@@ -1237,7 +1237,9 @@ pub(super) fn pair_is_builtin(scope: &Scope) -> bool {
 /// `eval_type_alias` binds under the alias's name so `new Alias {}` works.
 fn alias_over_class(name: &str, value: &Value, scope: &Scope) -> Option<Value> {
     match value {
-        Value::Object(_, Some(source)) if source.kind == ObjectKind::Class => {
+        Value::Object(_, Some(source))
+            if source.kind == ObjectKind::Class && scope.bound_by_alias(name) =>
+        {
             type_alias_value(name, scope)
         }
         _ => None,

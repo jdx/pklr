@@ -1343,3 +1343,20 @@ mapping = test.catch(() -> new PcfRenderer {}.renderDocument(new Mapping {}))
             .ends_with("Value: new Mapping {}")
     );
 }
+
+#[test]
+fn type_aliases_stay_distinct_and_local_class_bindings_win() {
+    let json = eval(
+        r#"
+typealias A = String
+typealias B = Int
+class Person {}
+same = A == B
+count = Set(A, B).length
+localName = let (A = Person) A.simpleName
+"#,
+    );
+    assert_eq!(json["same"], false);
+    assert_eq!(json["count"], 2);
+    assert_eq!(json["localName"], "Person");
+}

@@ -1189,9 +1189,12 @@ pub(crate) fn display_value(value: &Value) -> String {
             map.get("first").map(display_value).unwrap_or_default(),
             map.get("second").map(display_value).unwrap_or_default()
         ),
-        (Kind::Class | Kind::TypeAlias, Value::Object(_, Some(source))) => {
+        (Kind::Class | Kind::TypeAlias, Value::Object(members, Some(source))) => {
             (if kind_of(value) == Kind::TypeAlias {
-                source.declared_as.as_deref()
+                match members.get(crate::eval::stdlib::TYPE_ALIAS_IDENTITY_KEY) {
+                    Some(Value::String(identity)) => Some(&**identity),
+                    _ => None,
+                }
             } else {
                 source.type_identity.as_deref()
             })

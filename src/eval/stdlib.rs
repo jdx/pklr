@@ -164,17 +164,26 @@ pub(super) fn class_value(type_name: &str, type_identity: String) -> Value {
 }
 
 /// A `TypeAlias` value with the given identity.
+/// The member of a `TypeAlias` value that holds the alias's identity.
+pub(crate) const TYPE_ALIAS_IDENTITY_KEY: &str = "\0alias";
+
 pub(super) fn type_alias_value(identity: String) -> Value {
     let Value::Object(_, Some(source)) = typed_object("TypeAlias", ObjectMap::default()) else {
         unreachable!("typed_object builds an object with a source")
     };
     let mut source = Arc::unwrap_or_clone(source);
     source.type_name = Some("TypeAlias".into());
-    // The alias's own identity is kept apart from the built-in class's, which
-    // tells this value from an instance of a user class named `TypeAlias`.
+    // The built-in class's identity tells this value from an instance of a
+    // user class named `TypeAlias`, and `getClass()` is shared.
     source.type_identity = Some("pkl:base#TypeAlias".into());
-    source.declared_as = Some(identity.into());
-    Value::Object(Arc::default(), Some(Arc::new(source)))
+    // The alias's own identity is a member, so it survives being stored in a
+    // `Map` and tells one alias from another when values are compared.
+    let mut members = ObjectMap::default();
+    members.insert(
+        TYPE_ALIAS_IDENTITY_KEY.into(),
+        Value::String(identity.into()),
+    );
+    Value::Object(Arc::new(members), Some(Arc::new(source)))
 }
 
 /// The `Class` value a standard library class name stands for, when it is not
