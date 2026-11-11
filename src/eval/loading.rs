@@ -710,7 +710,7 @@ pub(super) fn module_display_name(module: &Module, path: &Path) -> String {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native-io"))]
 mod requested_field_tests {
     use std::collections::HashSet;
 

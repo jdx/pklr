@@ -41,6 +41,7 @@ jobs:
       # features use are dead. The examples and tests need native-io.
       - run: cargo clippy --lib --no-default-features --features eval-core -- -D warnings
       - run: cargo clippy --lib --no-default-features --features package-zip -- -D warnings
+      - run: cargo check --no-default-features --features eval-core --tests
       - run: cargo fmt --check
   windows:
     runs-on: windows-latest
