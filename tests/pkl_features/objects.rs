@@ -7969,3 +7969,22 @@ miss = m.getOrDefault("z")
     );
     assert_eq!(json["miss"], 2);
 }
+
+#[test]
+fn mapping_get_or_default_amended_function_default_with_unsaveable_replacement() {
+    let json = eval(
+        r#"
+base = new Mapping {
+  default = (k) -> 1
+  ["x"] = new Dynamic { a = 1 }
+  ["y"] = this["x"]
+}
+m = (base) {
+  default = (k) -> 2
+  ["x"] = new Dynamic { a = 2 }
+}
+miss = m.getOrDefault("z")
+"#,
+    );
+    assert_eq!(json["miss"], 2);
+}

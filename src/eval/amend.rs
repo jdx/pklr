@@ -1222,7 +1222,21 @@ impl Evaluator {
                             source.entries = entries.into();
                             Arc::new(source)
                         } else {
-                            Arc::clone(base_src)
+                            // The replaced entries cannot be saved, but the
+                            // default still is.
+                            let mut source = Arc::unwrap_or_clone(Arc::clone(base_src));
+                            source.entries = base_src
+                                .entries
+                                .iter()
+                                .map(|entry| match entry {
+                                    Entry::Property(prop) if &*prop.name == "default" => {
+                                        Entry::Property(default.clone())
+                                    }
+                                    entry => entry.clone(),
+                                })
+                                .collect::<Vec<_>>()
+                                .into();
+                            Arc::new(source)
                         }
                     }
                     None => Arc::clone(base_src),
