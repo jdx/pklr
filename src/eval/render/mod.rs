@@ -1173,7 +1173,7 @@ pub(crate) fn display_value(value: &Value) -> String {
             };
             match (int(items.first()), int(items.last())) {
                 (Some(start), Some(end)) if items.len() > 1 => {
-                    let step = int(items.get(1)).unwrap_or(start + 1) - start;
+                    let step = int(items.get(1)).map_or(1, |second| second.wrapping_sub(start));
                     if step == 1 {
                         format!("IntSeq({start}, {end})")
                     } else {
