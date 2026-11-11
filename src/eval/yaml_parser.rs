@@ -510,6 +510,10 @@ impl Yaml<'_> {
                 if text.is_empty() {
                     return fail();
                 }
+                let mut text = text;
+                if in_flow {
+                    self.extend_flow_plain(&mut text);
+                }
                 Body::Scalar(text, false)
             }
         };
@@ -537,6 +541,47 @@ impl Yaml<'_> {
         }
         let text: String = self.s[start..self.pos].iter().collect();
         text.trim_end_matches([' ', '\t']).to_string()
+    }
+
+    /// Fold the continuation lines of a plain scalar inside a flow
+    /// collection.
+    fn extend_flow_plain(&mut self, text: &mut String) {
+        loop {
+            let save = self.pos;
+            self.skip_spaces();
+            if self.peek() != Some('\n') {
+                self.pos = save;
+                return;
+            }
+            let mut blanks = 0;
+            while self.peek() == Some('\n') {
+                self.pos += 1;
+                self.skip_spaces();
+                if self.peek() == Some('\n') {
+                    blanks += 1;
+                }
+            }
+            let ends = match self.peek() {
+                None | Some(',' | '[' | ']' | '{' | '}') => true,
+                Some(':') => is_blank(self.peek_at(1)),
+                _ => self.at_comment() || self.at_doc_marker(),
+            };
+            if ends {
+                self.pos = save;
+                return;
+            }
+            let segment = self.plain_segment(true);
+            if segment.is_empty() {
+                self.pos = save;
+                return;
+            }
+            if blanks == 0 {
+                text.push(' ');
+            } else {
+                text.push_str(&"\n".repeat(blanks));
+            }
+            text.push_str(&segment);
+        }
     }
 
     /// Fold the continuation lines of a block-context plain scalar.
@@ -861,6 +906,9 @@ impl Yaml<'_> {
                 }
                 _ => {}
             }
+            if self.peek() == Some(',') {
+                return fail();
+            }
             if self.peek() == Some('?') && is_blank(self.peek_at(1)) {
                 self.pos += 1;
             }
@@ -911,6 +959,9 @@ impl Yaml<'_> {
                     break;
                 }
                 _ => {}
+            }
+            if self.peek() == Some(',') {
+                return fail();
             }
             if self.peek() == Some('?') && is_blank(self.peek_at(1)) {
                 self.pos += 1;
@@ -1097,7 +1148,6 @@ impl Yaml<'_> {
         }
         let v12 = self.mode != Mode::V11;
         let v11 = self.mode != Mode::V12;
-        let sign = |n: i64| Value::Int(if negative { -n } else { n });
         let radix = |digits: &str, radix: u32, underscores: bool| -> Option<Option<Value>> {
             let cleaned: String = if underscores {
                 digits.chars().filter(|&c| c != '_').collect()
@@ -1110,8 +1160,13 @@ impl Yaml<'_> {
             if underscores && digits.starts_with('_') {
                 return None;
             }
-            let magnitude = i64::from_str_radix(&cleaned, radix).ok();
-            Some(magnitude.map(sign))
+            // Parse with the sign, so the minimum integer fits.
+            let signed = if negative {
+                format!("-{cleaned}")
+            } else {
+                cleaned
+            };
+            Some(i64::from_str_radix(&signed, radix).ok().map(Value::Int))
         };
         let overflow = |parsed: Option<Option<Value>>| -> Option<Value> {
             parsed.map(|v| v.unwrap_or(Value::Float(f64::INFINITY)))

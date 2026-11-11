@@ -1305,3 +1305,24 @@ fn yaml_parser_rejects_malformed_documents() {
         assert!(err.contains("Error parsing YAML document."), "{doc}: {err}");
     }
 }
+
+#[test]
+fn yaml_parser_flow_edge_cases() {
+    let json = eval(
+        r##"import "pkl:yaml"
+import "pkl:test"
+local parser = new yaml.Parser {}
+min = parser.parse("-9223372036854775808")
+multiline = parser.parse("[multi\n  line, {k: a\n  b}]")
+missing = test.catch(() -> parser.parse("[a, , b]"))
+userError = test.catch(() -> throw("Error parsing mine.\n\ndetail"))
+"##,
+    );
+    assert_eq!(json["min"], i64::MIN);
+    assert_eq!(
+        json["multiline"],
+        serde_json::json!(["multi line", {"k": "a b"}])
+    );
+    assert_eq!(json["missing"], "Error parsing YAML document.");
+    assert_eq!(json["userError"], "Error parsing mine.\n\ndetail");
+}
