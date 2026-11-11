@@ -1251,7 +1251,18 @@ impl Evaluator {
         let Some(assigned_default) = assigned_default else {
             return Ok(None);
         };
-        let Some(default) = self.find_default_template(overlay_entries, amendment_scope, depth)?
+        // The default may read the locals the amendment declares.
+        let mut default_scope = amendment_scope.clone();
+        for entry in overlay_entries.iter() {
+            if let Entry::Property(prop) = entry
+                && has_modifier(&prop.modifiers, Modifier::Local)
+                && let Some(expr) = &prop.value
+            {
+                let value = self.eval_expr(expr, &default_scope, depth + 1)?;
+                default_scope.declare(&prop.name, value);
+            }
+        }
+        let Some(default) = self.find_default_template(overlay_entries, &default_scope, depth)?
         else {
             return Ok(None);
         };

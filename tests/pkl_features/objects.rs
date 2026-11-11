@@ -7835,3 +7835,15 @@ miss = m.getOrDefault("z")
     );
     assert_eq!(json["miss"], "new-z");
 }
+
+#[test]
+fn mapping_get_or_default_amended_function_default_reads_amendment_local() {
+    let json = eval(
+        r#"
+base = new Mapping { local unused = 0; default = (k) -> 1 }
+m = (base) { local r = 2; default = (k) -> r }
+miss = m.getOrDefault("z")
+"#,
+    );
+    assert_eq!(json["miss"], 2);
+}
