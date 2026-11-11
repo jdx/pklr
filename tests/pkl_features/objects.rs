@@ -7524,3 +7524,56 @@ fn a_callers_alias_of_the_same_name_does_not_retype_an_imported_mapping() {
     let json = eval_union_files("caller_alias", &[("lib.pkl", lib), ("main.pkl", main)]);
     assert_eq!(json.unwrap()["v"], serde_json::json!(["E", "E"]));
 }
+
+// ============================================================
+// Mapping `default`
+// ============================================================
+
+#[test]
+fn mapping_function_default_builds_entries_from_keys() {
+    let json = eval(
+        r#"
+m = new Mapping {
+  default { key -> name = key }
+  ["a"] { age = 1 }
+  ["b"] { name = super.name + "!" }
+}
+"#,
+    );
+    assert_eq!(json["m"]["a"]["name"], "a");
+    assert_eq!(json["m"]["a"]["age"], 1);
+    assert_eq!(json["m"]["b"]["name"], "b!");
+}
+
+#[test]
+fn mapping_amended_default_rebuilds_entries() {
+    let json = eval(
+        r#"
+res1 = new Mapping {
+  default { age = 42 }
+  ["pigeon"] { name = "Pigeon" }
+  ["parrot"] { name = "Parrot"; age = 50 }
+}
+res2 = (res1) { default { age = 45 } }
+"#,
+    );
+    assert_eq!(json["res2"]["pigeon"]["age"], 45);
+    assert_eq!(json["res2"]["parrot"]["age"], 50);
+}
+
+#[test]
+fn mapping_get_or_default_reads_missing_entry_from_default() {
+    let json = eval(
+        r#"
+m = new Mapping {
+  default { key -> name = key }
+  ["a"] { age = 1 }
+}
+hit = m.getOrDefault("a")
+miss = (m.getOrDefault("zed")) { age = 99 }
+"#,
+    );
+    assert_eq!(json["hit"]["age"], 1);
+    assert_eq!(json["miss"]["name"], "zed");
+    assert_eq!(json["miss"]["age"], 99);
+}

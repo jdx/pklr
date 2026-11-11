@@ -1230,7 +1230,7 @@ impl Evaluator {
         let assigned_default = overlay_entries.iter().find_map(|entry| match entry {
             Entry::Property(prop)
                 if &*prop.name == "default"
-                    && prop.value.is_some()
+                    && (prop.value.is_some() || prop.body.is_some())
                     && !has_modifier(&prop.modifiers, Modifier::Local) =>
             {
                 Some(prop.clone())
@@ -1244,6 +1244,8 @@ impl Evaluator {
                 &*prop.name == "default" && !has_modifier(&prop.modifiers, Modifier::Local)
             }
             Entry::DynProperty(key, _) => matches!(key, Expr::String(_)),
+            // The entries a generator makes keep the value they had.
+            Entry::WhenGenerator(_) | Entry::ForGenerator(_) => true,
             _ => false,
         });
         let Some(assigned_default) = assigned_default else {

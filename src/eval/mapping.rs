@@ -849,6 +849,20 @@ impl Evaluator {
                     if let Some(key) = key.as_ref() {
                         self.remember_mapping_key(storage_key.clone(), key);
                     }
+                    // A function `default` builds each entry's template from the
+                    // entry's key.
+                    let applied_default;
+                    let explicit_default =
+                        if let Some(function @ Value::Lambda(..)) = &explicit_default {
+                            let arg = key
+                                .clone()
+                                .unwrap_or_else(|| Value::String(key_str.clone()));
+                            applied_default =
+                                Some(self.apply_function(function, &[arg], entry_scope, depth)?);
+                            &applied_default
+                        } else {
+                            &explicit_default
+                        };
                     if !insert_mapping_key(defined_keys, &key_str) {
                         let key = match key.as_ref() {
                             None => key_str.to_string(),

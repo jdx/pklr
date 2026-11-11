@@ -53,6 +53,15 @@ impl Evaluator {
                     _ => {}
                 }
             }
+            // A `default` that is an object stands for the function that
+            // returns it for every key or index.
+            if method == "apply"
+                && evaled_args.len() == 1
+                && matches!(obj, Value::Object(..) | Value::List(_))
+                && is_default_member_ref(obj_expr)
+            {
+                return Ok(obj);
+            }
             if let Some(result) = self.eval_method_call(&obj, method, &evaled_args, depth)? {
                 return Ok(result);
             }
@@ -479,6 +488,27 @@ impl Evaluator {
             }
 
             // Object/Mapping methods
+            (Value::Object(map, Some(source)), "getOrDefault")
+                if source.kind == ObjectKind::Mapping && args.len() == 1 =>
+            {
+                let key = value_to_key(&args[0])?;
+                if let Some(value) = map.get(&key) {
+                    return Ok(Some(value.clone()));
+                }
+                let mut scope = Scope::for_call(&Arc::new(source.scope().clone()));
+                scope.set("super", obj.clone());
+                let Some(default) = self.find_default_template(&source.entries, &scope, depth)?
+                else {
+                    return Err(Error::Eval(format!(
+                        "Tried to read missing entry with key `{}` of `Mapping`, which has no default.",
+                        value_to_display(&args[0])
+                    )));
+                };
+                if let Value::Lambda(..) = default {
+                    return Ok(Some(self.apply_function(&default, args, &scope, depth)?));
+                }
+                Ok(Some(default))
+            }
             (Value::Object(map, _), "containsKey") => {
                 let key = args.first().and_then(|v| v.as_str()).unwrap_or("");
                 Ok(Some(Value::Bool(map.contains_key(key))))
@@ -759,4 +789,15 @@ fn without_class_members(map: &Arc<ObjectMap>, source: Option<&ObjectSource>) ->
             .map(|(key, value)| (key.clone(), value.clone().into_entry_value()))
             .collect(),
     )
+}
+
+/// Whether `expr` reads a `default`: the bare name, or `super.default`.
+fn is_default_member_ref(expr: &Expr) -> bool {
+    match expr {
+        Expr::Ident(name) => name == "default",
+        Expr::Field(base, name) => {
+            name == "default" && matches!(base.as_ref(), Expr::Ident(base) if base == "super")
+        }
+        _ => false,
+    }
 }
