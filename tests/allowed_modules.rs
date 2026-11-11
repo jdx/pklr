@@ -306,7 +306,12 @@ fn modulepath_admission_is_per_import() {
         pat(&dir.join("root.pkl")),
         "^modulepath:/lib/a\\.pkl$".to_string(),
     ];
-    let err = eval(&dir.join("root.pkl"), &only_root_and_uri).unwrap_err();
+    let err = EvaluatorBuilder::new()
+        .module_path([dir.join("mp")])
+        .allowed_modules(only_root_and_uri)
+        .eval_to_json(&dir.join("root.pkl"))
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("Refusing to load module `file://"), "{err}");
 
     let missing = "import \"modulepath:/lib/none.pkl\"\ny = none.x\n";
