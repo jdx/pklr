@@ -142,6 +142,15 @@ impl Evaluator {
                     let (start, end) = self.eval_int_seq_bounds(args, scope, depth)?;
                     return int_seq(start, end, 1);
                 }
+                "Pair" if pair_is_builtin(scope) => {
+                    let [first, second] = args else {
+                        return Err(Error::Eval("Pair() expects 2 arguments".into()));
+                    };
+                    let mut members = ObjectMap::default();
+                    members.insert("first".into(), self.eval_expr(first, scope, depth + 1)?);
+                    members.insert("second".into(), self.eval_expr(second, scope, depth + 1)?);
+                    return Ok(stdlib::typed_object("Pair", members));
+                }
                 "Regex" => {
                     if let Some(arg) = args.first() {
                         let val = self.eval_expr(arg, scope, depth + 1)?;
@@ -699,10 +708,20 @@ pub(super) fn is_evaluator_control_error(error: &Error) -> bool {
 }
 
 pub(super) fn caught_error_message(error: Error) -> String {
-    match error {
+    let message = match error {
         Error::Eval(message) => message,
         error => error.to_string(),
-    }
+    };
+    // pkl renders a caught error without its source frame, so the value
+    // pklr puts on its own line follows the message, and a renderer's hint to
+    // add a converter is dropped.
+    message
+        .replace(
+            "\n\nConsider adding a converter to `output.converters`.",
+            "",
+        )
+        .replace("\nValue: ", " Value: ")
+        .replace("\nObject: ", " Object: ")
 }
 
 pub(super) fn seed_builtins(scope: &mut Scope) {

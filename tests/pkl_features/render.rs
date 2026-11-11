@@ -1198,3 +1198,95 @@ res = new json.Parser {}.parse("\"\\uD800\\u0041\"")
     ));
     assert!(err.contains("Maximum nesting depth exceeded"), "{err}");
 }
+
+// ============================================================
+// Values a renderer cannot render: errors match `pkl eval` 0.32.2
+// ============================================================
+
+#[test]
+fn renderers_reject_pair_class_type_alias_and_int_seq() {
+    for (class, name) in [
+        ("JsonRenderer", "JSON"),
+        ("YamlRenderer", "YAML"),
+        ("PListRenderer", "XML property list"),
+    ] {
+        let json = eval(&format!(
+            r#"
+import "pkl:test"
+class Person {{ name: String }}
+typealias Email = String
+local r = new {class} {{}}
+pair = test.catch(() -> r.renderValue(Pair(1, 2)))
+cls = test.catch(() -> r.renderValue(Person))
+alias = test.catch(() -> r.renderValue(Email))
+seq = test.catch(() -> r.renderValue(IntSeq(1, 4)))
+"#
+        ));
+        let msg = |ty: &str, value: &str| {
+            format!("Cannot render value of type `{ty}` as {name}. Value: {value}")
+        };
+        assert_eq!(json["pair"], msg("Pair", "Pair(1, 2)"), "{class}");
+        assert!(
+            json["cls"].as_str().unwrap().starts_with(&msg("Class", "")),
+            "{class}"
+        );
+        assert!(
+            json["cls"].as_str().unwrap().ends_with("#Person"),
+            "{class}"
+        );
+        assert!(
+            json["alias"]
+                .as_str()
+                .unwrap()
+                .starts_with(&msg("TypeAlias", "")),
+            "{class}"
+        );
+        assert!(
+            json["alias"].as_str().unwrap().ends_with("#Email"),
+            "{class}"
+        );
+        assert_eq!(json["seq"], msg("IntSeq", "IntSeq(1, 4)"), "{class}");
+    }
+}
+
+#[test]
+fn pair_is_a_value_with_first_and_second() {
+    let json = eval(
+        r#"
+p = Pair(1, "x")
+first = p.first
+second = p.second
+"#,
+    );
+    assert_eq!(json["first"], 1);
+    assert_eq!(json["second"], "x");
+}
+
+#[test]
+fn renderer_document_errors_name_the_value_class() {
+    let json = eval(
+        r#"
+import "pkl:test"
+list = test.catch(() -> new PcfRenderer {}.renderDocument(List("a", "b")))
+set = test.catch(() -> new PropertiesRenderer {}.renderDocument(Set("a")))
+map = test.catch(() -> new PcfRenderer {}.renderDocument(Map("a", 1)))
+mixed = test.catch(() -> new YamlRenderer {}.renderDocument(new Dynamic { foo = "foo"; 5 }))
+"#,
+    );
+    assert_eq!(
+        json["list"],
+        "The top-level value of a Pcf document must have type `Typed` or `Dynamic`, but got type `List`. Value: List(\"a\", \"b\")"
+    );
+    assert_eq!(
+        json["set"],
+        "The top-level value of a Java properties file must have type `Typed`, `Dynamic`, `Mapping`, or `Map`, but got type `Set`. Value: Set(\"a\")"
+    );
+    assert_eq!(
+        json["map"],
+        "The top-level value of a Pcf document must have type `Typed` or `Dynamic`, but got type `Map`. Value: Map(\"a\", 1)"
+    );
+    assert_eq!(
+        json["mixed"],
+        "Cannot render object with both elements and properties/entries as YAML. Object: new Dynamic { foo = \"foo\"; 5 }"
+    );
+}

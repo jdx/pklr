@@ -162,6 +162,17 @@ pub(super) fn class_value(type_name: &str, type_identity: String) -> Value {
     Value::Object(Arc::default(), Some(Arc::new(source)))
 }
 
+/// A `TypeAlias` value with the given identity.
+pub(super) fn type_alias_value(identity: String) -> Value {
+    let Value::Object(_, Some(source)) = typed_object("TypeAlias", ObjectMap::default()) else {
+        unreachable!("typed_object builds an object with a source")
+    };
+    let mut source = Arc::unwrap_or_clone(source);
+    source.type_name = Some("TypeAlias".into());
+    source.type_identity = Some(identity);
+    Value::Object(Arc::default(), Some(Arc::new(source)))
+}
+
 /// The `Class` value a standard library class name stands for, when it is not
 /// bound in scope: the classes `getClass()` can answer.
 pub(super) fn stdlib_class(name: &str) -> Option<Value> {

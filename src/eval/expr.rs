@@ -58,6 +58,7 @@ impl Evaluator {
                         .is_none()
                         .then(|| stdlib::stdlib_class(name))?
                 })
+                .or_else(|| type_alias_value(name, scope))
                 .ok_or_else(|| {
                     Error::Eval(
                         scope
@@ -122,6 +123,13 @@ impl Evaluator {
                     )
                 };
                 let mut captured = captured;
+                // A type alias named as a value is a `TypeAlias`, which the
+                // lambda needs bound to reach it.
+                for name in &refs {
+                    if let Some(value) = type_alias_value(name, scope) {
+                        captured.insert(nm(format!("{TYPE_ALIAS_VALUE_PREFIX}{name}")), value);
+                    }
+                }
                 if names.contains(NAMES_A_TYPE) {
                     scope.capture_identities(&mut captured);
                 }
@@ -922,6 +930,7 @@ pub(super) fn eval_simple_expr(
                     .is_none()
                     .then(|| stdlib::stdlib_class(name))?
             })
+            .or_else(|| type_alias_value(name, scope))
             .ok_or_else(|| {
                 Error::Eval(
                     scope
@@ -1189,4 +1198,28 @@ fn tag_dynamic(object: Value) -> Value {
         }
         other => other,
     }
+}
+
+/// Prefix of the hidden binding that carries a `TypeAlias` value into a lambda.
+const TYPE_ALIAS_VALUE_PREFIX: &str = "\0alias:";
+
+/// The `TypeAlias` value for `name`, when it names a type alias in scope.
+fn type_alias_value(name: &str, scope: &Scope) -> Option<Value> {
+    if scope.poison_of(name).is_some() {
+        return None;
+    }
+    if scope.get_type_alias(name).is_none() {
+        // A lambda captured the alias under a hidden name, so naming a type in
+        // its body does not shadow the alias.
+        return scope
+            .get(&format!("{TYPE_ALIAS_VALUE_PREFIX}{name}"))
+            .cloned();
+    }
+    Some(stdlib::type_alias_value(scope.runtime_type_identity(name)))
+}
+
+/// Whether `Pair` in `scope` is still the built-in marker rather than a user
+/// binding of that name.
+pub(super) fn pair_is_builtin(scope: &Scope) -> bool {
+    matches!(scope.get("Pair"), Some(Value::String(name)) if &**name == "Pair")
 }
