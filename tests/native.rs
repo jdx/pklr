@@ -1614,3 +1614,45 @@ fn amended_mapping_default_replay_keeps_replaced_values_readable() {
     assert_eq!(json["v"]["a"], 3);
     assert_eq!(json["v"]["c"], 4);
 }
+
+#[test]
+fn a_module_that_amends_a_remote_base_exports_the_types_of_that_base() {
+    let base = spawn_test_http_server(
+        "/Base.pkl",
+        "typealias A = Int\nlocal typealias LA = Int\nclass C {}\nx = 1\n",
+    );
+    let dir = std::env::temp_dir().join(format!(
+        "pklr_test_remote_base_exports_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("m.pkl"),
+        "amends \"https://example.com/Base.pkl\"\nx = 2\n",
+    )
+    .unwrap();
+    let path = dir.join("main.pkl");
+    std::fs::write(
+        &path,
+        "import \"m.pkl\"\na = 1 is m.A\nb = \"x\" is m.A\nc = new m.C {} is m.C\n",
+    )
+    .unwrap();
+    let mut evaluator = Evaluator::new();
+    evaluator.set_http_rewrites(&[format!("https://example.com/={base}/")]);
+    let value = evaluator.eval_file(&path).unwrap();
+    assert_eq!(
+        value.to_json(),
+        serde_json::json!({"a": true, "b": false, "c": true})
+    );
+    // A local alias of the base is no member an importer can name.
+    std::fs::write(&path, "import \"m.pkl\"\na = 1 is m.LA\n").unwrap();
+    let base = spawn_test_http_server(
+        "/Base.pkl",
+        "typealias A = Int\nlocal typealias LA = Int\nclass C {}\nx = 1\n",
+    );
+    let mut evaluator = Evaluator::new();
+    evaluator.set_http_rewrites(&[format!("https://example.com/={base}/")]);
+    assert!(evaluator.eval_file(&path).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}

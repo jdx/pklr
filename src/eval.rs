@@ -139,6 +139,9 @@ pub struct Evaluator {
     external_properties: BTreeMap<String, String>,
     /// Final scopes for modules evaluated in this run, used to preserve inherited locals.
     module_scopes: HashMap<PathBuf, ModuleScopeSnapshot>,
+    /// The key of the saved scope of the module each module amends or extends,
+    /// whether that module is a local file, a remote one or a package's.
+    inherited_bases: HashMap<PathBuf, PathBuf>,
     /// Whether a module evaluated in this run has a failed property that
     /// rendering it would output (see `PoisonedMember::rendered`), so the
     /// output must be checked for one.

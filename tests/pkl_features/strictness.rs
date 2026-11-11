@@ -957,3 +957,44 @@ g = let (m = 0) (1 is m.A)
         serde_json::json!({"a": true, "b": false, "c": {}, "d": true, "e": [true], "g": true})
     );
 }
+
+#[test]
+fn a_module_exports_the_types_of_every_base_it_amends_or_extends() {
+    let temp = TestTempDir::new("pklr_test_inherited_exports");
+    let write = |name: &str, src: &str| std::fs::write(temp.path().join(name), src).unwrap();
+    write(
+        "base.pkl",
+        "open module base\ntypealias A = Int\nlocal typealias LA = Int\nclass C {}\nlocal class LC {}\nx = 1\n",
+    );
+    write(
+        "mid.pkl",
+        "open module mid\nextends \"base.pkl\"\ntypealias B = String\n",
+    );
+    write("top.pkl", "extends \"mid.pkl\"\n");
+    write("amend.pkl", "amends \"base.pkl\"\nx = 2\n");
+    let eval = |module: &str, body: &str| {
+        let path = temp.path().join("main.pkl");
+        std::fs::write(&path, format!("import \"{module}.pkl\"\n{body}\n")).unwrap();
+        pklr::eval_to_json(&path)
+    };
+    // Through two levels of extends, and through amends.
+    assert_eq!(
+        eval(
+            "top",
+            "a = 1 is top.A\nb = \"s\" is top.B\nc = new top.C {} is top.C"
+        )
+        .unwrap(),
+        serde_json::json!({"a": true, "b": true, "c": true})
+    );
+    assert_eq!(
+        eval("amend", "a = 1 is amend.A\nc = new amend.C {} is amend.C").unwrap(),
+        serde_json::json!({"a": true, "c": true})
+    );
+    // A local type of a base is no member of the module that inherits it.
+    for (module, name) in [("top", "LA"), ("top", "LC"), ("amend", "LA"), ("mid", "LC")] {
+        assert!(
+            eval(module, &format!("r = 1 is {module}.{name}")).is_err(),
+            "{module}.{name}"
+        );
+    }
+}

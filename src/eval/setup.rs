@@ -96,6 +96,7 @@ impl Evaluator {
             environment: None,
             external_properties: BTreeMap::default(),
             module_scopes: HashMap::default(),
+            inherited_bases: HashMap::default(),
             rendered_member_failed: false,
             env_reads: BTreeMap::new(),
             scoped_imports_in_flight: HashSet::default(),

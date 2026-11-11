@@ -38,6 +38,10 @@ impl Evaluator {
     /// The key of the saved scope of the local module `module` amends or
     /// extends.
     fn parent_module_key(&mut self, module: &Module, path: &Path) -> Option<PathBuf> {
+        // The base the module loaded, however it was found.
+        if let Some(base) = self.inherited_bases.get(path) {
+            return Some(base.clone());
+        }
         let uri = module.amends.as_ref().or(module.extends.as_ref())?;
         if uri.contains("://") && !uri.starts_with("file://") {
             return None;
@@ -99,6 +103,14 @@ impl Evaluator {
             definers.insert(name.clone(), definer);
         }
         definers
+    }
+
+    /// Layer the scope of the base `base` that `child` amends or extends into
+    /// `scope`, and remember it as the child's base.
+    fn layer_inherited_scope(&mut self, child: &Path, base: &Path, scope: &mut Scope) {
+        self.inherited_bases
+            .insert(child.to_path_buf(), base.to_path_buf());
+        self.layer_evaluated_module_scope(base, scope);
     }
 
     pub(super) fn layer_evaluated_module_scope(&self, path: &Path, scope: &mut Scope) {
@@ -1458,7 +1470,7 @@ impl Evaluator {
                     Some(scope.clone()),
                     None,
                 )?;
-                self.layer_evaluated_module_scope(Path::new(uri), scope);
+                self.layer_inherited_scope(path, Path::new(uri), scope);
                 late_inherited_properties.extend(self.inherited_late_properties(Path::new(uri)));
                 if let Value::Object(m, _) = base_val {
                     *base_obj = (*m).clone();
@@ -1483,7 +1495,7 @@ impl Evaluator {
                             Some(scope.clone()),
                             None,
                         )?;
-                        self.layer_evaluated_module_scope(&local_path, scope);
+                        self.layer_inherited_scope(path, &local_path, scope);
                         late_inherited_properties
                             .extend(self.inherited_late_properties(&local_path));
                         if let Value::Object(m, _) = base_val {
@@ -1511,7 +1523,7 @@ impl Evaluator {
                         Some(scope.clone()),
                         None,
                     )?;
-                    self.layer_evaluated_module_scope(Path::new(url.as_str()), scope);
+                    self.layer_inherited_scope(path, Path::new(url.as_str()), scope);
                     late_inherited_properties
                         .extend(self.inherited_late_properties(Path::new(url.as_str())));
                     if let Value::Object(m, _) = base_val {
@@ -1530,7 +1542,7 @@ impl Evaluator {
                     self.check_not_self(module, path, &amends_path, "amend")?;
                     let base_val =
                         self.eval_file_with_scope(&amends_path, depth + 1, Some(scope.clone()))?;
-                    self.layer_evaluated_module_scope(&amends_path, scope);
+                    self.layer_inherited_scope(path, &amends_path, scope);
                     late_inherited_properties.extend(self.inherited_late_properties(&amends_path));
                     if let Value::Object(m, _) = &base_val {
                         self.bind_deferred_inherited_imports(
@@ -1662,7 +1674,7 @@ impl Evaluator {
                     }
                     let ext_val =
                         self.eval_file_with_scope(&extends_path, depth + 1, Some(scope.clone()))?;
-                    self.layer_evaluated_module_scope(&extends_path, scope);
+                    self.layer_inherited_scope(path, &extends_path, scope);
                     late_inherited_properties.extend(self.inherited_late_properties(&extends_path));
                     let name = extends_path.display().to_string();
                     let source = self.read_to_string_io(&extends_path)?;
@@ -1768,7 +1780,7 @@ impl Evaluator {
                     Some(scope.clone()),
                     None,
                 )?;
-                self.layer_evaluated_module_scope(Path::new(uri), scope);
+                self.layer_inherited_scope(path, Path::new(uri), scope);
                 late_inherited_properties.extend(self.inherited_late_properties(Path::new(uri)));
                 if let Value::Object(m, _) = ext_val {
                     *base_obj = (*m).clone();
