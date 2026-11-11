@@ -1190,11 +1190,13 @@ impl Value {
             ));
         }
         let type_name = match self {
-            Value::Object(_, Some(source)) => match source.type_identity.as_deref() {
-                Some("pkl:base#Pair") => "Pair",
-                Some("pkl:base#TypeAlias") => "TypeAlias",
-                _ => self.type_name(),
-            },
+            Value::Object(_, Some(source)) if source.kind != ObjectKind::Class => {
+                match source.type_identity.as_deref() {
+                    Some("pkl:base#Pair") => "Pair",
+                    Some("pkl:base#TypeAlias") => "TypeAlias",
+                    _ => self.type_name(),
+                }
+            }
             _ => self.type_name(),
         };
         crate::Error::Eval(format!(
