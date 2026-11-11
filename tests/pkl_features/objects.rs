@@ -7570,7 +7570,7 @@ fn spread_cannot_add_a_member_to_a_closed_class_instance() {
 #[test]
 fn spread_cannot_add_a_local_or_method_name_to_a_closed_class_instance() {
     let msg = eval_fails(
-        "class P { name: String\n local hidden = 1 }\nlocal d { hidden = 2 }\nres: P = new { name = \"a\"; ...d }",
+        "class P { name: String\n local secret = 1 }\nlocal d { secret = 2 }\nres: P = new { name = \"a\"; ...d }",
     );
-    assert!(msg.contains("hidden"), "{msg}");
+    assert!(msg.contains("Cannot find property `secret`"), "{msg}");
 }
