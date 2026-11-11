@@ -7666,3 +7666,16 @@ n = (m) { ["a"] = 42; ["b"] = "x" }
     assert_eq!(json["n"]["a"], 42);
     assert_eq!(json["n"]["b"], "x");
 }
+
+#[test]
+fn mapping_function_default_applies_to_wrapped_untyped_new() {
+    let json = eval(
+        r#"
+m = new Mapping<String, Listing<String>> {
+  default = (key) -> new Listing { "seed" }
+  ["a"] = if (true) new { "tail" } else new {}
+}
+"#,
+    );
+    assert_eq!(json["m"]["a"], serde_json::json!(["seed", "tail"]));
+}

@@ -852,15 +852,20 @@ impl Evaluator {
                     // A function `default` builds each entry's template from the
                     // entry's key.
                     let applied_default;
-                    // Only an object body or an untyped `new { ... }` reads the `default`
-                    // (`new T { ... }` and plain values never do), and an entry body that
-                    // amends an existing entry amends itself, so the function is
-                    // not called for either. A replacement still gets its template.
+                    // A literal value and `new T { ... }` never read the `default`,
+                    // and an entry body that amends an existing entry amends
+                    // itself, so the function is not called for any of them. A
+                    // replacement that may build an object still gets its template.
                     let explicit_default = if let Some(function @ Value::Lambda(..)) =
                         &explicit_default
-                        && matches!(
+                        && !matches!(
                             val_expr,
-                            Expr::ObjectBody(_) | Expr::New(None, _, _) | Expr::InferredNew(..)
+                            Expr::Null
+                                | Expr::Bool(_)
+                                | Expr::Int(_)
+                                | Expr::Float(_)
+                                | Expr::String(_)
+                                | Expr::New(Some(_), _, _)
                         )
                         && !(map.contains_key(&storage_key)
                             && matches!(val_expr, Expr::ObjectBody(_)))
