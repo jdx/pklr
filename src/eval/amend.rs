@@ -1304,16 +1304,32 @@ impl Evaluator {
         for entry in overlay_entries.iter() {
             match entry {
                 Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {
-                    let evaluated = prop
-                        .value
-                        .as_ref()
-                        .and_then(|expr| self.eval_expr(expr, &default_scope, depth + 1).ok());
+                    let evaluated = match (&prop.value, &prop.body) {
+                        (Some(expr), _) => self.eval_expr(expr, &default_scope, depth + 1).ok(),
+                        (None, Some(body)) => {
+                            self.eval_entries(body, &default_scope, depth + 1).ok()
+                        }
+                        _ => None,
+                    };
                     match evaluated {
                         Some(value) => default_scope.declare(&prop.name, value),
                         None => complete = false,
                     }
                 }
-                Entry::ClassDef(..) | Entry::TypeAlias(..) => complete = false,
+                Entry::ClassDef(name, mods, parent, body) => {
+                    match self.eval_class_def(
+                        name,
+                        mods,
+                        parent.as_deref(),
+                        body,
+                        &default_scope,
+                        depth + 1,
+                    ) {
+                        Ok(defaults) => default_scope.set(name, defaults),
+                        Err(_) => complete = false,
+                    }
+                }
+                Entry::TypeAlias(name, ty) => self.eval_type_alias(name, ty, &mut default_scope),
                 _ => {}
             }
         }
