@@ -1054,7 +1054,10 @@ impl Evaluator {
                             && let Some(class) = &inherited.type_name
                             && let Some(key) = m.keys().find(|key| {
                                 !inherited.entries.iter().any(|entry| {
-                                    matches!(entry, Entry::Property(p) if *p.name == ***key)
+                                    matches!(entry, Entry::Property(p)
+                                        if *p.name == ***key
+                                            && !p.is_method
+                                            && !has_modifier(&p.modifiers, Modifier::Local))
                                 })
                             })
                         {
