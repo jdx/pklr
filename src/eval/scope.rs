@@ -423,9 +423,14 @@ impl Scope {
         let mut level = self;
         loop {
             if level.vars.contains_key(name) {
+                // A lambda holds the alias under a hidden name beside its
+                // binding, in place of the marker.
                 return level
                     .vars
-                    .contains_key(&super::classes::type_alias_marker(name)[..]);
+                    .contains_key(&super::classes::type_alias_marker(name)[..])
+                    || level.vars.contains_key(
+                        &format!("{}{name}", super::expr::TYPE_ALIAS_VALUE_PREFIX)[..],
+                    );
             }
             match level.parent.as_deref() {
                 Some(parent) => level = parent,

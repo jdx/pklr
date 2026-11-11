@@ -1586,3 +1586,34 @@ msg = test.catch(() -> new PcfRenderer {}.renderDocument(w10))
     );
     assert!(json["msg"].as_str().unwrap().len() < 10_000);
 }
+
+#[test]
+fn type_alias_values_survive_builtin_bindings_and_lambdas() {
+    let json = eval(
+        r#"
+import "pkl:test"
+typealias Email = String
+typealias `contact.email` = String
+typealias Dyn = Dynamic
+local r = new JsonRenderer {}
+dyn = test.catch(() -> r.renderValue(Dyn))
+"#,
+    );
+    let dyn_ = json["dyn"].as_str().unwrap();
+    assert!(dyn_.contains("`TypeAlias`"), "{dyn_}");
+}
+
+#[test]
+fn quoted_type_alias_names_show_in_backticks() {
+    let json = eval(
+        r#"
+import "pkl:test"
+typealias `contact.email` = String
+local r = new JsonRenderer {}
+quoted = test.catch(() -> r.renderValue(`contact.email`))
+"#,
+    );
+    let quoted = json["quoted"].as_str().unwrap();
+    assert!(quoted.contains("`TypeAlias`"), "{quoted}");
+    assert!(quoted.ends_with("#`contact.email`"), "{quoted}");
+}

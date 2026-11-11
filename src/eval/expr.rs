@@ -1207,7 +1207,7 @@ fn tag_dynamic(object: Value) -> Value {
 }
 
 /// Prefix of the hidden binding that carries a `TypeAlias` value into a lambda.
-const TYPE_ALIAS_VALUE_PREFIX: &str = "\0alias:";
+pub(super) const TYPE_ALIAS_VALUE_PREFIX: &str = "\0alias:";
 
 /// The `TypeAlias` value for `name`, when it names a type alias in scope.
 fn type_alias_value(name: &str, scope: &Scope) -> Option<Value> {
@@ -1239,12 +1239,11 @@ pub(super) fn pair_is_builtin(scope: &Scope) -> bool {
 /// The `TypeAlias` for `name` when `value` is the class the alias names, which
 /// `eval_type_alias` binds under the alias's name so `new Alias {}` works.
 fn alias_over_class(name: &str, value: &Value, scope: &Scope) -> Option<Value> {
-    match value {
-        Value::Object(_, Some(source))
-            if source.kind == ObjectKind::Class && scope.bound_by_alias(name) =>
-        {
-            type_alias_value(name, scope)
-        }
-        _ => None,
-    }
+    // A class, a built-in's marker or any other value the alias declaration
+    // bound under the alias's name.
+    let _ = value;
+    scope
+        .bound_by_alias(name)
+        .then(|| type_alias_value(name, scope))
+        .flatten()
 }

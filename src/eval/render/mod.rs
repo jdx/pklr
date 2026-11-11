@@ -1219,17 +1219,23 @@ fn display_value_at(value: &Value, depth: usize, max: usize) -> String {
             } else {
                 source.type_identity.as_deref()
             })
-            .map(|identity| match identity.rsplit_once('.') {
-                _ if identity.starts_with("pkl:") => identity
-                    .rsplit_once('#')
-                    .map_or(identity, |(_, name)| name)
-                    .to_string(),
-                Some((module, name)) => {
-                    let module = module.rsplit(['/', '\\']).next().unwrap_or(module);
-                    let module = module.strip_suffix(".pkl").unwrap_or(module);
-                    format!("{module}#{name}")
+            .map(|identity| {
+                match alias_split(identity, members).or_else(|| identity.rsplit_once('.')) {
+                    _ if identity.starts_with("pkl:") => identity
+                        .rsplit_once('#')
+                        .map_or(identity, |(_, name)| name)
+                        .to_string(),
+                    Some((module, name)) => {
+                        let module = module.rsplit(['/', '\\']).next().unwrap_or(module);
+                        let module = module.strip_suffix(".pkl").unwrap_or(module);
+                        if crate::eval::stdlib::render::is_regular_identifier(name) {
+                            format!("{module}#{name}")
+                        } else {
+                            format!("{module}#`{name}`")
+                        }
+                    }
+                    None => identity.to_string(),
                 }
-                None => identity.to_string(),
             })
             .or_else(|| source.type_name.clone())
             .unwrap_or_default()
@@ -1782,4 +1788,14 @@ mod tests {
         assert_eq!(k1.to_json(), k2.to_json());
         assert_ne!(object_key(k1), object_key(k2));
     }
+}
+
+/// The module and declared name of an alias identity. The name may hold dots
+/// (a quoted name), so it is taken from the value and not by splitting.
+fn alias_split<'a>(identity: &'a str, members: &ObjectMap) -> Option<(&'a str, &'a str)> {
+    let Some(Value::String(name)) = members.get(crate::eval::stdlib::TYPE_ALIAS_NAME_KEY) else {
+        return None;
+    };
+    let module = identity.strip_suffix(&**name)?.strip_suffix('.')?;
+    Some((module, &identity[module.len() + 1..]))
 }
