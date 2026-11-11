@@ -523,32 +523,20 @@ fn type_default_value_seen(
 ) -> Option<Value> {
     use crate::parser::TypeExpr;
     match ty {
-        TypeExpr::Constrained(base, _, form) if *form != BaseForm::Text => {
-            type_default_value_seen(&quoted_base_type(base, *form)?, scope, seen)
+        TypeExpr::Constrained(_, _, BaseForm::NullableQuoted) => Some(Value::Null),
+        // A quoted name is one name, looked up as it is written.
+        TypeExpr::Constrained(base, _, BaseForm::Quoted) => {
+            quoted_default(base.trim_start_matches('*'), scope, seen)
         }
         TypeExpr::Constrained(base, _, BaseForm::Text) if base.ends_with('?') => Some(Value::Null),
-        // A quoted name is one name, which is not trimmed to another class.
-        TypeExpr::Constrained(base, _, BaseForm::Quoted) => {
-            let base = base.trim_start_matches('*');
-            if let Some(alias) = alias_of(scope, base).cloned() {
-                if seen.iter().any(|seen| seen == base) {
-                    return None;
-                }
-                seen.push(base.to_string());
-                let value = type_default_value_seen(&alias, scope, seen);
-                seen.pop();
-                return value;
-            }
-            resolve_dotted(scope, base)
-                .filter(|value| matches!(value, Value::Object(_, Some(source)) if source.kind == ObjectKind::Class))
-                .map(as_instance)
-        }
         // A constraint supplies no default: the type it constrains does.
         TypeExpr::Constrained(base, _, _) => {
             type_default_value_seen(&TypeExpr::Named(base.clone()), scope, seen)
         }
         TypeExpr::Nullable(_) => Some(Value::Null),
-        TypeExpr::Named(name) if name == "Null" => Some(Value::Null),
+        TypeExpr::Named(name) if name == "Null" && declared_class(scope, name).is_none() => {
+            Some(Value::Null)
+        }
         TypeExpr::Named(name) => {
             if let Some(value) = string_literal_type_value(name) {
                 return Some(Value::String(value.into()));
@@ -565,13 +553,10 @@ fn type_default_value_seen(
                 seen.pop();
                 return value;
             }
-            // A name the parser read (no `*`) is one name, which can hold a
-            // `?` of its own when it was quoted.
-            if !name.starts_with('*')
-                && name.contains(['?', '<'])
-                && let Some(class) = declared_class(scope, name)
-            {
-                return Some(as_instance(class));
+            // A name the parser read (no `*`) that ends in `?` was quoted, and is
+            // looked up as it is written.
+            if !name.starts_with('*') && name.ends_with('?') {
+                return exact_default(name, scope);
             }
             type_default_for_name(name, scope)
         }
@@ -767,7 +752,27 @@ fn names_user_class(name: &str, scope: &Scope) -> bool {
 
 pub(super) fn type_default_for_name(name: &str, scope: &Scope) -> Option<Value> {
     let name = name.trim_start_matches('*').trim_end_matches('?');
-    let base_name = name.split('<').next().unwrap_or(name);
+    exact_default(name.split('<').next().unwrap_or(name), scope)
+}
+
+/// The default of the alias, class or built-in type called `name`, which is
+/// looked up as it is written: it is not trimmed of a `?`, so a quoted
+/// `C?` is not `C`. `None` when nothing is called that.
+fn quoted_default(name: &str, scope: &Scope, seen: &mut Vec<String>) -> Option<Value> {
+    if let Some(alias) = alias_of(scope, name).cloned() {
+        if seen.iter().any(|seen| seen == name) {
+            return None;
+        }
+        seen.push(name.to_string());
+        let value = type_default_value_seen(&alias, scope, seen);
+        seen.pop();
+        return value;
+    }
+    exact_default(name, scope)
+}
+
+/// The default of the class or built-in type called `base_name`.
+fn exact_default(base_name: &str, scope: &Scope) -> Option<Value> {
     // A class declaration shadows the built-in type with the same name.
     // Check it before the built-in default cases, whose scope bindings are
     // marker strings rather than class objects.
@@ -818,8 +823,19 @@ fn nullable_inner_default_seen(
         // amendment starts from the type it wraps.
         TypeExpr::Nullable(inner) => nullable_inner_default_seen(inner, scope, seen)
             .or_else(|| type_default_value(inner, scope)),
+        // A quoted name is one name, looked up as it is written; only a
+        // nullable one amends from what it wraps.
         TypeExpr::Constrained(base, _, form) if *form != BaseForm::Text => {
-            nullable_inner_default_seen(&quoted_base_type(base, *form)?, scope, seen)
+            let name = base.trim_start_matches('*');
+            let nullable = *form == BaseForm::NullableQuoted;
+            match alias(name, seen) {
+                Some(target) => nullable_inner_default_seen(&target, scope, seen).or_else(|| {
+                    nullable
+                        .then(|| type_default_value(&target, scope))
+                        .flatten()
+                }),
+                None => nullable.then(|| exact_default(name, scope)).flatten(),
+            }
         }
         TypeExpr::Constrained(name, _, form) => {
             let (name, nullable) = constrained_name(name, *form);
@@ -840,13 +856,8 @@ fn nullable_inner_default_seen(
         // An alias amends like the type it names, so look through it.
         TypeExpr::Named(name) => match alias(name, seen) {
             Some(target) => nullable_inner_default_seen(&target, scope, seen),
-            // A quoted class named `C?` is that class, not the nullable `C`.
-            None if !name.starts_with('*')
-                && name.ends_with('?')
-                && declared_class(scope, name).is_some() =>
-            {
-                declared_class(scope, name).map(as_instance)
-            }
+            // A quoted name ending in `?` is that name, not a nullable type.
+            None if !name.starts_with('*') && name.ends_with('?') => exact_default(name, scope),
             None if name.ends_with('?') => type_default_for_name(name.trim_end_matches('?'), scope),
             None => None,
         },
