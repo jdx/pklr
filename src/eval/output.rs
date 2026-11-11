@@ -729,12 +729,9 @@ impl Evaluator {
     #[cfg(feature = "native-io")]
     fn module_json(&mut self, module: Value) -> Result<serde_json::Value> {
         let (value, top_kind) = self.output_value(module);
-        // An object `output.value` holds can carry a member that failed.
-        if let Some(message) = super::rendered_member_failure(&value) {
-            return Err(Error::Eval(message.to_string()));
-        }
         let (kind, renderer) = self.output_renderer(RendererKind::Json);
         let converters = renderer_converters(&renderer)?;
+        check_failed_members(&value, &converters)?;
         // As `pkl eval -f json`: null properties and mapping entries are
         // omitted unless the evaluated renderer sets `omitNullProperties`
         // to false.
@@ -768,9 +765,23 @@ impl Evaluator {
         }
         let (value, top_kind) = self.output_value(module);
         let (kind, renderer) = self.output_renderer(RendererKind::Pcf);
+        check_failed_members(&value, &renderer_converters(&renderer)?)?;
         let settings = Settings::read(kind, &renderer)?;
         settings.render(&value, true, top_kind, &mut Invoker(self, 0))
     }
+}
+
+/// Fail rendering `value` when it holds a member that failed (an undefined
+/// property, say). A converter may replace an object without reading its
+/// members, so with converters present the check is left to the read itself.
+#[cfg(feature = "native-io")]
+fn check_failed_members(value: &Value, converters: &render::Converters) -> Result<()> {
+    if converters.is_empty()
+        && let Some(message) = super::rendered_member_failure(value)
+    {
+        return Err(Error::Eval(message.to_string()));
+    }
+    Ok(())
 }
 
 /// Resolve `output.value` exactly as `pkl eval`: the implicit module is used

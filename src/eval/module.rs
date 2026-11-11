@@ -488,10 +488,6 @@ impl Evaluator {
         // failed property that would be rendered fails the module.
         let mut out = base_obj;
         let mut poisoned_members = IndexMap::new();
-        // A module that sets its own `output` may not render this property.
-        let child_declares_output = body
-            .iter()
-            .any(|entry| matches!(entry, Entry::Property(prop) if &*prop.name == "output"));
         for entry in body.iter() {
             // A typealias to a class is a module member too, so an importer
             // can write `new Alias.Name {}`.
@@ -504,7 +500,6 @@ impl Evaluator {
             // member, so rendering the module renders the alias, which Pkl
             // rejects.
             if let Entry::TypeAlias(name, _) = entry
-                && !child_declares_output
                 && out.contains_key(name.as_str())
             {
                 let module_name = path.file_stem().and_then(|stem| stem.to_str());
@@ -512,9 +507,6 @@ impl Evaluator {
                     "Cannot render value of type `TypeAlias` as JSON.\nValue: {}#{name}",
                     module_name.unwrap_or_default()
                 );
-                if depth == 0 {
-                    return Err(Error::Eval(message));
-                }
                 self.rendered_member_failed = true;
                 poisoned_members.insert(
                     nm(name),
@@ -571,7 +563,6 @@ impl Evaluator {
             {
                 out.insert(prop.name.as_ref().into(), value);
             } else if rendered
-                && !child_declares_output
                 && prop.value.is_none()
                 && prop.body.is_none()
                 && !has_modifier(&prop.modifiers, Modifier::Abstract)
@@ -583,9 +574,6 @@ impl Evaluator {
                     .is_some_and(|ty| type_lacks_default(ty, &scope))
             {
                 let message = undefined_property_message(&prop.name);
-                if depth == 0 {
-                    return Err(Error::Eval(message));
-                }
                 self.rendered_member_failed = true;
                 poisoned_members.insert(
                     prop.name.clone(),
@@ -770,7 +758,7 @@ impl Evaluator {
         // renders at any depth.
         // Pkl replaces the property of that name with the alias, and rejects
         // rendering it.
-        if !child_declares_output {
+        {
             let own_names: HashSet<&str> = body
                 .iter()
                 .filter_map(|entry| match entry {
@@ -796,9 +784,6 @@ impl Evaluator {
                         .and_then(|stem| stem.to_str())
                         .unwrap_or_default()
                 );
-                if depth == 0 {
-                    return Err(Error::Eval(message));
-                }
                 self.rendered_member_failed = true;
                 poisoned_members.insert(
                     name,
