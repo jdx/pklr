@@ -94,6 +94,8 @@ impl Evaluator {
                 .iter()
                 .map(|s| (*s).to_string())
                 .collect(),
+            allowed_modules: None,
+            package_bases: HashMap::default(),
             environment: None,
             external_properties: BTreeMap::default(),
             module_scopes: HashMap::default(),
@@ -176,6 +178,25 @@ impl Evaluator {
 
     pub fn set_allowed_resources(&mut self, resources: Vec<String>) {
         self.allowed_resources = resources;
+    }
+
+    /// Restrict which modules may be loaded, like `pkl --allowed-modules`.
+    ///
+    /// Each pattern is a regular expression matched against the start of a
+    /// module's URI (the entry module, and every module reached through
+    /// `import`, `import*`, `amends` and `extends`). `pkl:` standard library
+    /// modules are always allowed. An empty list denies every other module.
+    /// An invalid pattern makes every module load fail with its error.
+    pub fn set_allowed_modules(&mut self, patterns: Vec<String>) {
+        self.allowed_modules = Some(
+            patterns
+                .iter()
+                .map(|pattern| {
+                    fancy_regex::Regex::new(&format!("^(?:{pattern})"))
+                        .map_err(|e| format!("invalid allowed-modules pattern `{pattern}`: {e}"))
+                })
+                .collect(),
+        );
     }
 
     pub fn set_environment_variables(&mut self, vars: BTreeMap<String, String>) {

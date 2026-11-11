@@ -76,6 +76,7 @@ impl Evaluator {
     }
 
     pub(super) fn fetch_source(&mut self, url: &str) -> Result<String> {
+        self.check_module_path_allowed(Path::new(url))?;
         if self
             .package_http_roots
             .iter()
@@ -145,7 +146,9 @@ impl Evaluator {
             return Ok(Some((source, uri.to_string())));
         }
         if uri.starts_with("package://") {
+            self.check_module_allowed(uri)?;
             let pkg = self.resolve_package(uri)?;
+            self.note_package_base(uri, &pkg);
             match &pkg {
                 PackageSource::Direct { url, root } => {
                     let source = self.fetch_direct_package_source(url, root)?;
@@ -173,11 +176,81 @@ impl Evaluator {
             return Ok(None);
         }
         let import_path = self.local_file_path(path, uri)?;
+        self.check_module_path_allowed(&import_path)?;
         if !self.path_exists_io(&import_path)? {
             return Ok(None);
         }
         let source = self.read_to_string_io(&import_path)?;
         Ok(Some((source, import_path.display().to_string())))
+    }
+
+    /// Fail unless the module policy allows loading the module `uri`.
+    pub(super) fn check_module_allowed(&self, uri: &str) -> Result<()> {
+        let Some(policy) = &self.allowed_modules else {
+            return Ok(());
+        };
+        let patterns = policy.as_ref().map_err(|e| Error::Eval(e.clone()))?;
+        // The standard library is always loadable.
+        if uri.starts_with("pkl:") {
+            return Ok(());
+        }
+        if patterns
+            .iter()
+            .any(|pattern| pattern.is_match(uri).unwrap_or(false))
+        {
+            return Ok(());
+        }
+        Err(Error::Eval(format!(
+            "Refusing to load module `{uri}` because it does not match any entry in the module allowlist."
+        )))
+    }
+
+    /// Remember the package `uri` (a `package:` module URI) names, so modules
+    /// read from it are checked by their package URI. A no-op without a policy.
+    pub(super) fn note_package_base(&mut self, uri: &str, pkg: &PackageSource) {
+        if self.allowed_modules.is_none() {
+            return;
+        }
+        let key = match pkg {
+            PackageSource::Direct { root, .. } => root.clone(),
+            PackageSource::Zip(zip_url, _) => zip_url.clone(),
+        };
+        let base = uri.split_once('#').map_or(uri, |(base, _)| base);
+        self.package_bases.insert(key, base.to_string());
+    }
+
+    /// The URI the module policy sees for the module at `path`, which is a URL
+    /// for a remote module and a file otherwise. A module read from a package
+    /// is named by its `package:` URI.
+    fn module_policy_uri(&mut self, path: &Path) -> String {
+        let name = path.to_string_lossy();
+        if name.contains("://") {
+            let package = self.package_bases.iter().find_map(|(root, base)| {
+                let rest = name.strip_prefix(root.as_str())?;
+                Some(format!("{base}#/{rest}"))
+            });
+            return package.unwrap_or_else(|| name.into_owned());
+        }
+        let absolute = absolute_clean(&self.host_absolute_path(path.to_path_buf()));
+        #[cfg(feature = "package-zip")]
+        for (zip_url, dir) in &self.package_dirs {
+            if let Ok(rest) = absolute.strip_prefix(dir)
+                && let Some(base) = self.package_bases.get(zip_url)
+            {
+                let rest = rest.to_string_lossy().replace('\\', "/");
+                return format!("{base}#/{rest}");
+            }
+        }
+        file_uri(&absolute)
+    }
+
+    /// [`Self::check_module_allowed`] for the module at `path`.
+    pub(super) fn check_module_path_allowed(&mut self, path: &Path) -> Result<()> {
+        if self.allowed_modules.is_none() {
+            return Ok(());
+        }
+        let uri = self.module_policy_uri(path);
+        self.check_module_allowed(&uri)
     }
 
     /// Load and parse the module `uri` names, sharing the parse cache with
@@ -254,6 +327,7 @@ impl Evaluator {
     pub fn eval_file(&mut self, path: &Path) -> Result<Value> {
         self.on_grown_stack(|this| {
             this.begin_evaluation();
+            this.check_module_path_allowed(path)?;
             let source = this.read_to_string_io(path)?;
             this.eval_source_inner(&source, path)
         })
@@ -262,6 +336,8 @@ impl Evaluator {
     /// Read, lex, parse, and evaluate a local file (with caching).
     /// Inserts a placeholder before evaluation to break circular imports.
     pub(super) fn eval_import_file(&mut self, path: &Path, depth: usize) -> Result<Value> {
+        // Check the requested path, not just the canonical file a cache keys on.
+        self.check_module_path_allowed(path)?;
         let canonical = self.canonicalize_io(path)?;
         if let Some(cached) = self.cached_import(&canonical) {
             return Ok(cached);
@@ -288,6 +364,7 @@ impl Evaluator {
         if requested_fields.is_none() {
             return self.eval_import_file(path, depth);
         }
+        self.check_module_path_allowed(path)?;
         let canonical = self.canonicalize_io(path)?;
         if let Some(cached) = self.cached_import(&canonical) {
             return Ok(cached);
@@ -357,6 +434,7 @@ impl Evaluator {
         if inherited_scope.is_none() {
             return self.eval_import_file(path, depth);
         }
+        self.check_module_path_allowed(path)?;
         let canonical = self.canonicalize_io(path)?;
         if !self.scoped_imports_in_flight.insert(canonical.clone()) {
             self.placeholder_reads += 1;
@@ -379,6 +457,7 @@ impl Evaluator {
     }
 
     pub(super) fn parse_file(&mut self, path: &Path) -> Result<Arc<Module>> {
+        self.check_module_path_allowed(path)?;
         let canonical = self.canonicalize_io(path).ok();
         if let Some(module) = canonical.as_ref().and_then(|c| self.parse_cache.get(c)) {
             return Ok(Arc::clone(module));
@@ -462,6 +541,17 @@ impl Evaluator {
         // Match `expand_glob`, which walks `.` for a bare entry path, so the
         // matched paths share this prefix and the keys come out relative.
         let base_dir = module_dir(path.parent().unwrap_or(Path::new(".")));
+        if self.allowed_modules.is_some() {
+            // Pkl checks the directory the pattern searches before any match.
+            let fixed = uri.find(['*', '?', '[', '{']).map_or(uri, |i| &uri[..i]);
+            let dir = fixed.rfind('/').map_or("", |i| &fixed[..=i]);
+            let dir_path = self.local_file_path(path, dir)?;
+            let mut dir_uri = self.module_policy_uri(&dir_path);
+            if !dir_uri.ends_with('/') {
+                dir_uri.push('/');
+            }
+            self.check_module_allowed(&dir_uri)?;
+        }
         let matched = self.glob_io(base_dir, uri)?;
         let matched = matched
             .into_iter()
@@ -513,6 +603,7 @@ impl Evaluator {
 
         if !uri.contains("://") || uri.starts_with("file://") {
             let import_path = self.local_file_path(path, uri)?;
+            self.check_module_path_allowed(&import_path)?;
             if !self.path_exists_io(&import_path)? {
                 return Err(Error::ImportNotFound(import_path.display().to_string()));
             }

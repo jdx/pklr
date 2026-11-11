@@ -87,6 +87,7 @@ pub struct EvaluatorBuilder {
     package_cache_dir: Option<std::path::PathBuf>,
     offline: bool,
     allowed_resources: Option<Vec<String>>,
+    allowed_modules: Option<Vec<String>>,
     environment: Option<std::collections::BTreeMap<String, String>>,
     external_properties: std::collections::BTreeMap<String, String>,
     preloaded_packages: Vec<PreloadedPackage>,
@@ -160,6 +161,18 @@ impl EvaluatorBuilder {
         self
     }
 
+    /// Restrict which modules may be loaded, like `pkl --allowed-modules`.
+    ///
+    /// Each pattern is a regular expression matched against the start of a
+    /// module URI, for the entry module and every `import`, `import*`,
+    /// `amends` and `extends` target (for example `file:///project/`). `pkl:`
+    /// standard library modules are always allowed. Without this call every
+    /// module may load; an empty list denies all others.
+    pub fn allowed_modules(mut self, patterns: impl IntoIterator<Item = String>) -> Self {
+        self.allowed_modules = Some(patterns.into_iter().collect());
+        self
+    }
+
     /// Replace the environment visible through `env:` resources.
     pub fn environment_variables(
         mut self,
@@ -230,6 +243,9 @@ impl EvaluatorBuilder {
         evaluator.set_offline(self.offline);
         if let Some(resources) = self.allowed_resources {
             evaluator.set_allowed_resources(resources);
+        }
+        if let Some(modules) = self.allowed_modules {
+            evaluator.set_allowed_modules(modules);
         }
         if let Some(environment) = self.environment {
             evaluator.set_environment_variables(environment);

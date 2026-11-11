@@ -283,6 +283,7 @@ impl Evaluator {
             )));
         }
         self.check_cancelled()?;
+        self.check_module_path_allowed(path)?;
         self.prefetch_remote_imports(module, path);
         if let Some(name) = &module.name {
             let identity = self.module_type_namespace(path);
@@ -1481,7 +1482,9 @@ impl Evaluator {
                 }
                 *super_members = Some(self.module_super_members(Path::new(uri), base_obj, false));
             } else if uri.starts_with("package://") {
+                self.check_module_allowed(uri)?;
                 let pkg = self.resolve_package(uri)?;
+                self.note_package_base(uri, &pkg);
                 if let PackageSource::Zip(zip_url, entry) = &pkg {
                     #[cfg(feature = "package-zip")]
                     {
@@ -1914,7 +1917,9 @@ impl Evaluator {
             }
 
             if uri.starts_with("package://") {
+                self.check_module_allowed(uri)?;
                 let pkg = self.resolve_package(uri)?;
+                self.note_package_base(uri, &pkg);
                 let fragment = uri.split_once('#').map(|(_, f)| f).unwrap_or("");
                 let file_path = fragment.strip_prefix('/').unwrap_or(fragment);
                 let alias = import.alias.clone().unwrap_or_else(|| {
@@ -2028,6 +2033,7 @@ impl Evaluator {
                 // reported only if the imported binding is actually referenced.
                 continue;
             }
+            self.check_module_path_allowed(&import_path)?;
             if !self.path_exists_io(&import_path)? {
                 return Err(Error::ImportNotFound(import_path.display().to_string()));
             }
