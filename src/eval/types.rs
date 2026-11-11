@@ -1906,6 +1906,9 @@ pub(super) fn unresolved_type_error(
 pub(super) enum AliasLookup<'a> {
     /// The alias `name` of the imported module with this identity.
     Imported { identity: &'a str, name: &'a str },
+    /// Whether the imported module with this identity has a saved scope that
+    /// does not export `name` (it is `local`): answers `Some` when so.
+    ImportedPrivate { identity: &'a str, name: &'a str },
     /// The class `name` of the imported module with this identity. The
     /// lookup answers with the module's scope when it declares the class.
     ImportedClass { identity: &'a str, name: &'a str },
@@ -1997,17 +2000,28 @@ impl TypeResolver<'_> {
         {
             return Some(format!("Cannot find module import `{first}`."));
         }
-        let names_class = matches!(
-            resolve_dotted(scope, name),
-            Some(Value::Object(_, Some(source))) if source.kind == ObjectKind::Class
-        ) || (!enclosing
+        // A `local` class of an imported module is no member an importer can name.
+        let is_private = !enclosing
             && scope.module_identity(module).is_some_and(|identity| {
-                (self.module_alias)(AliasLookup::ImportedClass {
+                (self.module_alias)(AliasLookup::ImportedPrivate {
                     identity,
                     name: member,
                 })
                 .is_some()
-            }));
+            });
+        let names_class = (!is_private
+            && matches!(
+                resolve_dotted(scope, name),
+                Some(Value::Object(_, Some(source))) if source.kind == ObjectKind::Class
+            ))
+            || (!enclosing
+                && scope.module_identity(module).is_some_and(|identity| {
+                    (self.module_alias)(AliasLookup::ImportedClass {
+                        identity,
+                        name: member,
+                    })
+                    .is_some()
+                }));
         if names_class {
             return None;
         }

@@ -372,6 +372,11 @@ impl Evaluator {
     ) -> Option<String> {
         unresolved_type_error(ty, scope, &mut |lookup| match lookup {
             AliasLookup::Imported { identity, name } => self.module_alias(identity, name),
+            AliasLookup::ImportedPrivate { identity, name } => {
+                let key = self.module_scope_key(identity)?;
+                (self.module_scopes.contains_key(&key) && !self.module_exports(&key, name))
+                    .then(|| (TypeExpr::Named(name.to_string()), Scope::default()))
+            }
             AliasLookup::ImportedClass { identity, name } => self
                 .module_class_scope(identity, name)
                 .map(|scope| (TypeExpr::Named(name.to_string()), scope)),
@@ -389,13 +394,64 @@ impl Evaluator {
         name: &str,
     ) -> Option<(crate::parser::TypeExpr, Scope)> {
         let key = self.module_scope_key(identity)?;
+        self.module_exports(&key, name).then_some(())?;
         self.alias_in_module(&key, name)
+    }
+
+    /// Whether the module with the scope key `key` exports the class or type
+    /// alias `name`: a `local` one is no member an importer can name.
+    fn module_exports(&self, key: &Path, name: &str) -> bool {
+        self.module_scopes
+            .get(key)
+            .is_some_and(|snapshot| snapshot.exported_types.contains(name))
+    }
+
+    /// Check `val` against `m.Name` when a value shadows the import `m`: a type
+    /// resolves through the import, never through a value of that name.
+    /// `None` when `m` is the import itself or `Name` is not an exported
+    /// class or alias of it.
+    fn shadowed_import_check(
+        &mut self,
+        val: &Value,
+        name: &str,
+        scope: &Scope,
+        depth: usize,
+        resolving: &mut Vec<String>,
+    ) -> Result<Option<bool>> {
+        let Some((module, member)) = name.rsplit_once('.') else {
+            return Ok(None);
+        };
+        if module.contains('.') {
+            return Ok(None);
+        }
+        let is_import_value = match scope.get(module) {
+            Some(Value::Object(_, source)) => source.as_ref().is_none_or(|source| source.is_module),
+            _ => false,
+        };
+        if is_import_value {
+            return Ok(None);
+        }
+        let Some(identity) = scope.module_identity(module).cloned() else {
+            return Ok(None);
+        };
+        if identity.starts_with("pkl:") {
+            return Ok(None);
+        }
+        if let Some((alias, module_scope)) = self.module_alias(&identity, member) {
+            return self
+                .eval_alias_check(val, name, &alias, &module_scope, depth, resolving)
+                .map(Some);
+        }
+        Ok(self
+            .module_class_scope(&identity, member)
+            .map(|module_scope| value_is_class_type(val, member, &module_scope).unwrap_or(false)))
     }
 
     /// The scope of the imported module with the given identity, when it
     /// declares the class `name`.
     fn module_class_scope(&mut self, identity: &str, name: &str) -> Option<Scope> {
         let key = self.module_scope_key(identity)?;
+        self.module_exports(&key, name).then_some(())?;
         let mut module_scope = Scope::default();
         self.layer_evaluated_module_scope(&key, &mut module_scope);
         matches!(
@@ -644,18 +700,13 @@ impl Evaluator {
                 if scalar_is_builtin_type(val, name) && scope.get(name).is_none() {
                     return Ok(true);
                 }
+                if let Some(accepted) =
+                    self.shadowed_import_check(val, name, scope, depth, resolving)?
+                {
+                    return Ok(accepted);
+                }
                 if let Some(matches) = value_is_class_type(val, name, scope) {
                     return Ok(matches);
-                }
-                // A class an import declares, when a value shadows the import's
-                // name: the type resolves through the import.
-                if let Some((module, member)) = name.rsplit_once('.')
-                    && !module.contains('.')
-                    && resolve_dotted(scope, name).is_none()
-                    && let Some(identity) = scope.module_identity(module).cloned()
-                    && let Some(module_scope) = self.module_class_scope(&identity, member)
-                {
-                    return Ok(value_is_class_type(val, member, &module_scope).unwrap_or(false));
                 }
                 // An alias of an imported module is no member of its value.
                 if name.contains('.')
@@ -718,6 +769,10 @@ impl Evaluator {
                     )?
                 } else if let Some(accepted) =
                     self.check_imported_alias(val, class_name, scope, depth, resolving)?
+                {
+                    accepted
+                } else if let Some(accepted) =
+                    self.shadowed_import_check(val, class_name, scope, depth, resolving)?
                 {
                     accepted
                 } else if *form == BaseForm::Text

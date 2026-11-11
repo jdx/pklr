@@ -35,6 +35,38 @@ impl Evaluator {
         self.eval_module_with_scope(module, path, depth, None, None)
     }
 
+    /// The key of the saved scope of the local module `module` amends or
+    /// extends.
+    fn parent_module_key(&mut self, module: &Module, path: &Path) -> Option<PathBuf> {
+        let uri = module.amends.as_ref().or(module.extends.as_ref())?;
+        if uri.contains("://") && !uri.starts_with("file://") {
+            return None;
+        }
+        self.local_file_path(path, uri).ok()
+    }
+
+    /// The names of the classes and type aliases an importer can use as
+    /// `m.Name`: the module's own that are not `local`, and those it inherits.
+    fn exported_types(&mut self, module: &Module, path: &Path) -> HashSet<Arc<str>> {
+        let mut exported: HashSet<Arc<str>> = self
+            .parent_module_key(module, path)
+            .and_then(|parent| self.module_scopes.get(&parent))
+            .map(|base| base.exported_types.clone())
+            .unwrap_or_default();
+        for entry in module.body.iter() {
+            match entry {
+                Entry::ClassDef(name, modifiers, ..) if !modifiers.contains(&Modifier::Local) => {
+                    exported.insert(name.as_str().into());
+                }
+                Entry::TypeAlias(name, _) if !module.local_type_aliases.contains(name) => {
+                    exported.insert(name.as_str().into());
+                }
+                _ => {}
+            }
+        }
+        exported
+    }
+
     /// For each type alias `path` inherits from the module it amends or
     /// extends, the module that declares it. Aliases the module declares
     /// itself, and those of a base that is not a local file, are left out.
@@ -45,13 +77,7 @@ impl Evaluator {
         type_aliases: &crate::value::TypeAliasMap,
     ) -> HashMap<Arc<str>, PathBuf> {
         let mut definers = HashMap::default();
-        let Some(uri) = module.amends.as_ref().or(module.extends.as_ref()) else {
-            return definers;
-        };
-        if uri.contains("://") && !uri.starts_with("file://") {
-            return definers;
-        }
-        let Ok(parent) = self.local_file_path(path, uri) else {
+        let Some(parent) = self.parent_module_key(module, path) else {
             return definers;
         };
         let Some(base) = self.module_scopes.get(&parent) else {
@@ -759,12 +785,14 @@ impl Evaluator {
         }
         let type_aliases = scope.flatten_type_aliases();
         let alias_definers = self.inherited_alias_definers(module, path, &type_aliases);
+        let exported_types = self.exported_types(module, path);
         self.module_scopes.insert(
             path.to_path_buf(),
             ModuleScopeSnapshot {
                 values: Arc::new(scope.flatten()),
                 type_aliases: Arc::new(type_aliases),
                 alias_definers,
+                exported_types,
                 module_identities: scope.flatten_module_identities(),
                 late_properties: effective_late_properties.into_values().collect(),
             },

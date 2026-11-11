@@ -215,6 +215,8 @@ struct ModuleScopeSnapshot {
     /// The module that declares each inherited type alias, when it is not
     /// the module itself. Its imports resolve the names in the alias.
     alias_definers: HashMap<Arc<str>, PathBuf>,
+    /// The classes and type aliases an importer can name as `m.Name`.
+    exported_types: HashSet<Arc<str>>,
     late_properties: Vec<Arc<Property>>,
 }
 
