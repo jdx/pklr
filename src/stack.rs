@@ -93,6 +93,17 @@ pub(crate) fn exhausted() -> bool {
     floor != 0 && (std::ptr::addr_of!(marker) as usize) < floor
 }
 
+/// An error if recursion has used the stack it may; see [`exhausted`].
+pub(crate) fn check_depth() -> crate::Result<()> {
+    if exhausted() {
+        limit_hit();
+        return Err(crate::Error::Eval(
+            "maximum recursion depth exceeded".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Run `f` with `false` on the current stack. If that reached a nesting
 /// limit, run it again with `true` on a thread with a large stack, where the
 /// limits are far higher. `f` must be able to start over. If the thread cannot

@@ -142,13 +142,23 @@ impl Evaluator {
         &mut self,
         mut body: impl FnMut(&mut Self) -> R + Send,
     ) -> R {
+        /// Restores the evaluator's depth limit even if `body` panics.
+        struct Restore<'a>(&'a mut Evaluator, usize);
+
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                self.0.max_depth = self.1;
+            }
+        }
+
         crate::stack::run(|large| {
             let saved = self.max_depth;
-            if large && !self.max_depth_set {
-                self.max_depth = crate::stack::EVAL_DEPTH;
+            let guard = Restore(&mut *self, saved);
+            if large && !guard.0.max_depth_set {
+                guard.0.max_depth = crate::stack::EVAL_DEPTH;
             }
-            let result = body(self);
-            self.max_depth = saved;
+            let result = body(&mut *guard.0);
+            drop(guard);
             if large {
                 // These hold the parsed trees, which free recursively; do it
                 // here rather than on the caller's small stack.
