@@ -7730,3 +7730,30 @@ fn spread_cannot_add_a_local_or_method_name_to_a_closed_class_instance() {
     );
     assert!(msg.contains("Cannot find property `secret`"), "{msg}");
 }
+
+#[test]
+fn mapping_function_default_is_not_called_for_unselected_branch() {
+    let json = eval(
+        r#"
+m = new Mapping {
+  default = (key) -> throw("unused")
+  ["a"] = if (true) 42 else new {}
+}
+"#,
+    );
+    assert_eq!(json["m"]["a"], 42);
+}
+
+#[test]
+fn default_named_value_keeps_its_own_apply_method() {
+    let json = eval(
+        r#"
+class Adder {
+  function apply(x) = x + 1
+}
+local f = (default) -> default.apply(1)
+r = f.apply(new Adder {})
+"#,
+    );
+    assert_eq!(json["r"], 2);
+}

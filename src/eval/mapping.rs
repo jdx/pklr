@@ -739,6 +739,27 @@ impl Evaluator {
         )
     }
 
+    /// Whether an entry value is built from the mapping's `default`: an object
+    /// body or an untyped `new { ... }`, also as the selected result of `if`,
+    /// `let` or `trace`. Other values, such as literals, expressions and
+    /// `new T { ... }`, never read it.
+    fn reads_mapping_default(&mut self, expr: &Expr, scope: &Scope, depth: usize) -> Result<bool> {
+        Ok(match expr {
+            Expr::ObjectBody(_) | Expr::New(None, _, _) | Expr::InferredNew(..) => true,
+            Expr::If(condition, then, otherwise) => {
+                let branch = match self.eval_expr(condition, scope, depth + 1)? {
+                    Value::Bool(true) => then,
+                    _ => otherwise,
+                };
+                self.reads_mapping_default(branch, scope, depth)?
+            }
+            Expr::Let(_, _, body) | Expr::Trace(body, _) | Expr::TemplateLocals(_, body) => {
+                self.reads_mapping_default(body, scope, depth)?
+            }
+            _ => false,
+        })
+    }
+
     /// Evaluate the entries of one mapping body into `map`. `defined_keys`
     /// holds the keys the body has defined so far, including those its
     /// generators produced: a body may amend its parent's entries, but may
@@ -857,7 +878,7 @@ impl Evaluator {
                     // body that amends an existing entry amends itself instead.
                     let explicit_default = if let Some(function @ Value::Lambda(..)) =
                         &explicit_default
-                        && reads_mapping_default(val_expr)
+                        && self.reads_mapping_default(val_expr, entry_scope, depth)?
                         && !(map.contains_key(&storage_key)
                             && matches!(val_expr, Expr::ObjectBody(_)))
                     {
@@ -1351,22 +1372,5 @@ mod mapping_key_tests {
         evaluator.begin_evaluation();
 
         assert!(evaluator.mapping_key_values.is_empty());
-    }
-}
-
-/// Whether an entry value is built from the mapping's `default`: an object
-/// body or an untyped `new { ... }`, also as the result of `if`, `let` or
-/// `trace`. Other values, such as literals, expressions and `new T { ... }`,
-/// never read it.
-fn reads_mapping_default(expr: &Expr) -> bool {
-    match expr {
-        Expr::ObjectBody(_) | Expr::New(None, _, _) | Expr::InferredNew(..) => true,
-        Expr::If(_, then, otherwise) => {
-            reads_mapping_default(then) || reads_mapping_default(otherwise)
-        }
-        Expr::Let(_, _, body) | Expr::Trace(body, _) | Expr::TemplateLocals(_, body) => {
-            reads_mapping_default(body)
-        }
-        _ => false,
     }
 }

@@ -53,15 +53,6 @@ impl Evaluator {
                     _ => {}
                 }
             }
-            // A `default` that is an object stands for the function that
-            // returns it for every key or index.
-            if method == "apply"
-                && evaled_args.len() == 1
-                && matches!(obj, Value::Object(..) | Value::List(_))
-                && is_default_member_ref(obj_expr)
-            {
-                return Ok(obj);
-            }
             if let Some(result) = self.eval_method_call(&obj, method, &evaled_args, depth)? {
                 return Ok(result);
             }
@@ -73,6 +64,16 @@ impl Evaluator {
             }
             if let Some(result) = self.eval_object_field_call(&obj, method, &evaled_args)? {
                 return Ok(result);
+            }
+            // A `default` that is an object stands for the function that
+            // returns it for every key or index, unless the object has its own
+            // `apply`.
+            if method == "apply"
+                && evaled_args.len() == 1
+                && matches!(obj, Value::Object(..) | Value::List(_))
+                && is_default_member_ref(obj_expr)
+            {
+                return Ok(obj);
             }
             if method == "getClass" && evaled_args.is_empty() {
                 if matches!(obj_expr.as_ref(), Expr::Ident(name) if name == "module") {
