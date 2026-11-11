@@ -1117,6 +1117,16 @@ impl Value {
                 serde_json::Value::Null
             }
             Value::Object(map, source) => {
+                // A built-in `Pair` or `TypeAlias` has no JSON form.
+                if source.as_deref().is_some_and(|source| {
+                    matches!(
+                        source.type_identity.as_deref(),
+                        Some("pkl:base#Pair" | "pkl:base#TypeAlias")
+                    )
+                }) {
+                    unrenderable.get_or_insert(self);
+                    return serde_json::Value::Null;
+                }
                 // A `Dynamic` with elements and members has no JSON form.
                 if self.has_elements_and_members() {
                     unrenderable.get_or_insert(self);

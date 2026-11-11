@@ -1145,6 +1145,20 @@ pub(crate) fn validate_xml_characters(
 }
 
 /// A short Pkl rendering of `value` for error messages.
+/// A `Map` or `Mapping` key as it reads in an error: a class key by its name.
+fn map_key_display(key: &Arc<str>, depth: usize, max: usize) -> String {
+    if let Some(class) = key
+        .strip_prefix(crate::value::MAPPING_KEY_PREFIX)
+        .filter(|rest| rest.starts_with("object:") && rest.contains("class:"))
+    {
+        return class.rsplit(['#', ':']).next().unwrap_or(class).to_string();
+    }
+    match class_key_name(key) {
+        Some(name) => name.rsplit(['#', ':']).next().unwrap_or(name).to_string(),
+        None => display_value_at(&key_value(key), depth + 1, max),
+    }
+}
+
 /// The module and declared name of an alias identity. The name may hold dots
 /// (a quoted name), so it is taken from the value and not by splitting.
 fn alias_split<'a>(identity: &'a str, members: &ObjectMap) -> Option<(&'a str, &'a str)> {
@@ -1250,9 +1264,7 @@ fn display_value_at(value: &Value, depth: usize, max: usize) -> String {
             .or_else(|| source.type_name.clone())
             .unwrap_or_default()
         }
-        (Kind::Mapping, Value::Object(map, source))
-            if !map.is_empty() && map.keys().all(|key| class_key_name(key).is_none()) =>
-        {
+        (Kind::Mapping, Value::Object(map, source)) if !map.is_empty() => {
             if source.is_none() {
                 // A `Map`, which keeps its entries in view.
                 let shown = map
@@ -1260,7 +1272,7 @@ fn display_value_at(value: &Value, depth: usize, max: usize) -> String {
                     .map(|(key, value)| {
                         format!(
                             "{}, {}",
-                            display_value_at(&key_value(key), depth + 1, max),
+                            map_key_display(key, depth, max),
                             display_value_at(value, depth + 1, max)
                         )
                     })
@@ -1270,12 +1282,7 @@ fn display_value_at(value: &Value, depth: usize, max: usize) -> String {
             } else {
                 let shown = map
                     .keys()
-                    .map(|key| {
-                        format!(
-                            "[{}] = ?",
-                            display_value_at(&key_value(key), depth + 1, max)
-                        )
-                    })
+                    .map(|key| format!("[{}] = ?", map_key_display(key, depth, max)))
                     .collect::<Vec<_>>()
                     .join("; ");
                 format!("new Mapping {{ {shown} }}")

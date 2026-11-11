@@ -1628,3 +1628,21 @@ res = let (A = 42) (() -> A + 1).apply()
     );
     assert_eq!(json["res"], 43);
 }
+
+#[test]
+fn maps_with_class_keys_display_as_maps() {
+    let json = eval(
+        r#"
+import "pkl:test"
+msg = test.catch(() -> new PcfRenderer {}.renderDocument(Map(String, 1)))
+"#,
+    );
+    assert!(
+        json["msg"]
+            .as_str()
+            .unwrap()
+            .ends_with("Value: Map(String, 1)"),
+        "{}",
+        json["msg"]
+    );
+}
