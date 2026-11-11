@@ -265,56 +265,6 @@ impl Evaluator {
                 );
             }
         }
-        // A body amendment of a `Mapping`, or of listings holding one, reads
-        // the type where it was declared: its aliases and classes may not be
-        // visible here. The classes are bound by value in the amendment scope.
-        let mut closed_types: FxIndexMap<&str, crate::parser::TypeExpr> = FxIndexMap::default();
-        for entry in overlay_entries {
-            let Entry::Property(prop) = entry else {
-                continue;
-            };
-            if prop.body.is_none() || prop.value.is_some() || prop.type_ann.is_some() {
-                continue;
-            }
-            let Some((index, ty)) =
-                base_entries
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .find_map(|(index, base)| match base {
-                        Entry::Property(inherited) if inherited.name == prop.name => {
-                            inherited.type_ann.as_ref().map(|ty| (index, ty))
-                        }
-                        _ => None,
-                    })
-            else {
-                continue;
-            };
-            if is_never_collection_type(ty) {
-                continue;
-            }
-            let mut declaring = match base_source.entry_scopes.get(index).and_then(Clone::clone) {
-                Some(captured) => restore_scope(&captured),
-                None => definition_type_scope(base_source),
-            };
-            if let Some(namespace) = declaring.type_namespace.clone() {
-                self.layer_evaluated_module_scope(Path::new(&namespace), &mut declaring);
-            }
-            let needs_closing = matches!(
-                resolve_collection_type(ty, &declaring, 0),
-                Some(crate::parser::TypeExpr::Generic(name, _)) if name == "Mapping"
-            ) || !is_listing_chain(ty, &declaring);
-            if needs_closing
-                && let Some(closed) = close_type_over(ty, &declaring, &mut |name, value| {
-                    amendment_scope.values.insert(name.into(), value);
-                    amendment_scope
-                        .values
-                        .insert(type_alias_marker(name).as_str().into(), Value::Null);
-                })
-            {
-                closed_types.insert(prop.name.as_ref(), closed);
-            }
-        }
         let amendment_captured = Arc::new(CapturedScope {
             body_members: overlay_entries
                 .iter()
@@ -385,10 +335,7 @@ impl Evaluator {
                 if let Entry::Property(overlay_prop) = &mut replacement {
                     let overlay_prop = Arc::make_mut(overlay_prop);
                     if overlay_prop.type_ann.is_none() {
-                        overlay_prop.type_ann = closed_types
-                            .get(prop.name.as_ref())
-                            .cloned()
-                            .or_else(|| prop.type_ann.clone());
+                        overlay_prop.type_ann = prop.type_ann.clone();
                     }
                     // `x = null` amended with `x { ... }` amends the `null`,
                     // which makes a `Dynamic` (that a declared type then

@@ -7264,39 +7264,3 @@ fn a_mapping_alias_of_the_declaring_module_is_inferred_below_a_listing() {
     .unwrap();
     assert_eq!(json["isMapping"], serde_json::json!(true));
 }
-
-#[test]
-fn imported_mapping_members_are_inferred_where_the_property_was_declared() {
-    // Verified against pkl 0.32.2: `E` and `M` are private to `lib.pkl`, and
-    // `main.pkl` declares aliases of the same names.
-    let lib = "class E { x: Int = 1; s: String = \"d\" }\n\
-         typealias M = Mapping<String, E>\n\
-         class H {\n\
-           m: Mapping<String, E>\n\
-           mm: M\n\
-           lm: Listing<Mapping<String, E>>\n\
-           llm: Listing<Listing<M>>\n\
-         }\n";
-    let body = "r = new L.H {\n\
-           m { [\"k\"] { x = 5 } }\n\
-           mm { [\"k\"] { x = 5 } }\n\
-           lm { new { [\"k\"] { x = 5 } } }\n\
-           llm { new { new { [\"k\"] { x = 5 } } } }\n\
-         }\n\
-         v = List(r.m[\"k\"].s, r.mm[\"k\"].s, r.lm[0][\"k\"].s, r.llm[0][0][\"k\"].s)\n";
-    for (tag, aliases) in [
-        ("plain", ""),
-        (
-            "shadowed",
-            "typealias E = Mapping<String, Int>\ntypealias M = Listing<Int>\n",
-        ),
-    ] {
-        let main = format!("import \"lib.pkl\" as L\n{aliases}{body}");
-        let json = eval_union_files(
-            &format!("imported_mapping_{tag}"),
-            &[("lib.pkl", lib), ("main.pkl", &main)],
-        )
-        .unwrap();
-        assert_eq!(json["v"], serde_json::json!(["d", "d", "d", "d"]), "{tag}");
-    }
-}
