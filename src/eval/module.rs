@@ -2137,8 +2137,7 @@ impl Evaluator {
                 // reported only if the imported binding is actually referenced.
                 continue;
             }
-            self.admit_module_path(uri, &import_path)?;
-            self.check_module_path_allowed(&import_path)?;
+            self.check_import_allowed(uri, &import_path)?;
             if !self.path_exists_io(&import_path)? {
                 return Err(Error::ImportNotFound(import_path.display().to_string()));
             }

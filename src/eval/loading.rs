@@ -221,8 +221,7 @@ impl Evaluator {
             Err(Error::ImportNotFound(_)) if uri.starts_with("modulepath:") => return Ok(None),
             Err(error) => return Err(error),
         };
-        self.admit_module_path(uri, &import_path)?;
-        self.check_module_path_allowed(&import_path)?;
+        self.check_import_allowed(uri, &import_path)?;
         if !self.path_exists_io(&import_path)? {
             return Ok(None);
         }
@@ -301,8 +300,28 @@ impl Evaluator {
                 return Ok(());
             }
         }
+        self.check_file_path_allowed(path)
+    }
+
+    /// Check the module at `path` by its `file:` (or remote) URI, even if the
+    /// file was admitted earlier through a `modulepath:` import.
+    fn check_file_path_allowed(&mut self, path: &Path) -> Result<()> {
+        if self.allowed_modules.is_none() {
+            return Ok(());
+        }
         let uri = self.module_policy_uri(path);
         self.check_module_allowed(&uri)
+    }
+
+    /// Check the import `uri` that resolved to the file `path`: a `modulepath:`
+    /// import by its URI, any other import by the file it names, so one
+    /// import's admission never covers another import of the same file.
+    pub(super) fn check_import_allowed(&mut self, uri: &str, path: &Path) -> Result<()> {
+        if uri.starts_with("modulepath:") {
+            self.admit_module_path(uri, path)
+        } else {
+            self.check_file_path_allowed(path)
+        }
     }
 
     /// Check the `modulepath:` URI `uri`, which Pkl matches against the
@@ -675,8 +694,7 @@ impl Evaluator {
         if !uri.contains("://") || uri.starts_with("file://") {
             self.check_module_path_uri(uri)?;
             let import_path = self.local_file_path(path, uri)?;
-            self.admit_module_path(uri, &import_path)?;
-            self.check_module_path_allowed(&import_path)?;
+            self.check_import_allowed(uri, &import_path)?;
             if !self.path_exists_io(&import_path)? {
                 return Err(Error::ImportNotFound(import_path.display().to_string()));
             }

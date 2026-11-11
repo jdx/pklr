@@ -314,6 +314,17 @@ fn modulepath_admission_is_per_import() {
         .to_string();
     assert!(err.contains("Refusing to load module `file://"), "{err}");
 
+    // Both imports used: the `modulepath:` admission does not cover the file.
+    let both = "import \"modulepath:/lib/a.pkl\" as viaModulePath\nimport \"mp/lib/a.pkl\" as viaFile\ny = viaModulePath.x + viaFile.x\n";
+    let (_temp, dir) = modulepath_project("pklr_modules_mp_both", both);
+    let err = EvaluatorBuilder::new()
+        .module_path([dir.join("mp")])
+        .allowed_modules([pat(&dir.join("root.pkl")), "^modulepath:".to_string()])
+        .eval_to_json(&dir.join("root.pkl"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("Refusing to load module `file://"), "{err}");
+
     let missing = "import \"modulepath:/lib/none.pkl\"\ny = none.x\n";
     let (_temp, dir) = modulepath_project("pklr_modules_mp_missing", missing);
     let err = eval_mp(&dir, &["^file:"]).unwrap_err();
