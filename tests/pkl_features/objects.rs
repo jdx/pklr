@@ -7577,3 +7577,29 @@ miss = (m.getOrDefault("zed")) { age = 99 }
     assert_eq!(json["miss"]["name"], "zed");
     assert_eq!(json["miss"]["age"], 99);
 }
+
+#[test]
+fn mapping_get_or_default_sees_locals_and_equivalent_keys() {
+    let json = eval(
+        r#"
+m = new Mapping { local n = 42; default { value = n }; [1.s] = 7 }
+missing = m.getOrDefault("missing")
+hit = m.getOrDefault(1000.ms)
+"#,
+    );
+    assert_eq!(json["missing"]["value"], 42);
+    assert_eq!(json["hit"], 7);
+}
+
+#[test]
+fn mapping_function_default_is_not_called_for_typed_new_entries() {
+    let json = eval(
+        r#"
+u = new Mapping {
+  default = (key) -> throw("unused")
+  ["a"] = new Dynamic { x = 1 }
+}
+"#,
+    );
+    assert_eq!(json["u"]["a"]["x"], 1);
+}

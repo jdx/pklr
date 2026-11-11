@@ -492,11 +492,23 @@ impl Evaluator {
                 if source.kind == ObjectKind::Mapping && args.len() == 1 =>
             {
                 let key = value_to_key(&args[0])?;
-                if let Some(value) = map.get(&key) {
+                if let Some(stored) = equivalent_mapping_key(map, &key)
+                    && let Some(value) = map.get(&stored)
+                {
                     return Ok(Some(value.clone()));
                 }
                 let mut scope = Scope::for_call(&Arc::new(source.scope().clone()));
                 scope.set("super", obj.clone());
+                // The default may read the mapping's own locals.
+                for entry in source.entries.iter() {
+                    if let Entry::Property(prop) = entry
+                        && has_modifier(&prop.modifiers, Modifier::Local)
+                        && let Some(expr) = &prop.value
+                    {
+                        let value = self.eval_expr(expr, &scope, depth + 1)?;
+                        scope.declare(&prop.name, value);
+                    }
+                }
                 let Some(default) = self.find_default_template(&source.entries, &scope, depth)?
                 else {
                     return Err(Error::Eval(format!(
