@@ -1371,3 +1371,17 @@ text = Email.toString()
     );
     assert_eq!(json["text"], "Email");
 }
+
+#[test]
+fn type_alias_text_keeps_quoted_names_and_property_equals() {
+    let json = eval(
+        r#"
+typealias `contact.email` = String
+typealias Email = String
+quoted = `contact.email`.toString()
+obj = (new Dynamic { alias = Email }).toString()
+"#,
+    );
+    assert_eq!(json["quoted"], "contact.email");
+    assert_eq!(json["obj"], "new Dynamic { alias = Email }");
+}

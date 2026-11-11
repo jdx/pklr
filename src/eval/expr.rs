@@ -1221,7 +1221,10 @@ fn type_alias_value(name: &str, scope: &Scope) -> Option<Value> {
             .get(&format!("{TYPE_ALIAS_VALUE_PREFIX}{name}"))
             .cloned();
     }
-    Some(stdlib::type_alias_value(scope.runtime_type_identity(name)))
+    Some(stdlib::type_alias_value(
+        scope.runtime_type_identity(name),
+        name,
+    ))
 }
 
 /// Whether `Pair` in `scope` is still the built-in marker rather than a user

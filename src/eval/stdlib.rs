@@ -167,7 +167,10 @@ pub(super) fn class_value(type_name: &str, type_identity: String) -> Value {
 /// The member of a `TypeAlias` value that holds the alias's identity.
 pub(crate) const TYPE_ALIAS_IDENTITY_KEY: &str = "\0alias";
 
-pub(super) fn type_alias_value(identity: String) -> Value {
+/// The member of a `TypeAlias` value that holds the name it was declared with.
+pub(crate) const TYPE_ALIAS_NAME_KEY: &str = "\0name";
+
+pub(super) fn type_alias_value(identity: String, name: &str) -> Value {
     let Value::Object(_, Some(source)) = typed_object("TypeAlias", ObjectMap::default()) else {
         unreachable!("typed_object builds an object with a source")
     };
@@ -183,6 +186,7 @@ pub(super) fn type_alias_value(identity: String) -> Value {
         TYPE_ALIAS_IDENTITY_KEY.into(),
         Value::String(identity.into()),
     );
+    members.insert(TYPE_ALIAS_NAME_KEY.into(), Value::String(name.into()));
     Value::Object(Arc::new(members), Some(Arc::new(source)))
 }
 

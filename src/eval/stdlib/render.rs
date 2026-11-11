@@ -323,15 +323,10 @@ fn render(value: &Value, explicit: bool, out: &mut String) {
             if source.type_identity.as_deref() == Some("pkl:base#TypeAlias") =>
         {
             // The alias's identity is an internal member, not public text.
-            let name = match map.get(super::TYPE_ALIAS_IDENTITY_KEY) {
-                Some(Value::String(identity)) => identity
-                    .rsplit(['.', '#'])
-                    .next()
-                    .unwrap_or(identity)
-                    .to_string(),
-                _ => "TypeAlias".to_string(),
-            };
-            out.push_str(&name);
+            match map.get(super::TYPE_ALIAS_NAME_KEY) {
+                Some(Value::String(name)) => out.push_str(name),
+                _ => out.push_str("TypeAlias"),
+            }
         }
         Value::Object(map, source) => {
             if explicit {
@@ -355,7 +350,9 @@ fn render(value: &Value, explicit: bool, out: &mut String) {
                     out.push(']');
                 }
                 out.push_str(
-                    if matches!(member, Value::Object(..))
+                    if matches!(member, Value::Object(_, source)
+                        if !source.as_deref().is_some_and(|s| s.kind == ObjectKind::Class
+                            || s.type_identity.as_deref() == Some("pkl:base#TypeAlias")))
                         || matches!(member, Value::List(items) if is_braced_list(items))
                     {
                         " "
