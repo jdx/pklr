@@ -547,6 +547,24 @@ impl Evaluator {
                 let Some(type_ann) = &prop.type_ann else {
                     continue;
                 };
+                if prop.value.is_none()
+                    && prop.body.is_none()
+                    && !assigned_property_names.contains(prop.name.as_ref())
+                    && !map.contains_key(prop.name.as_ref())
+                    && ![Modifier::Hidden, Modifier::Local, Modifier::Abstract]
+                        .into_iter()
+                        .any(|m| has_modifier(&prop.modifiers, m))
+                    && type_lacks_default(type_ann, &eval_scope)
+                {
+                    type_failures.insert(
+                        prop.name.clone(),
+                        PoisonedMember {
+                            message: undefined_property_message(&prop.name),
+                            rendered: true,
+                        },
+                    );
+                    continue;
+                }
                 // A name the class declares as a listing alias may mean
                 // another type in the amending scope (a class of the same
                 // name). The declaring scope resolved it as a listing, so
@@ -623,7 +641,17 @@ impl Evaluator {
                 }
             }
         }
-        if !type_failures.is_empty()
+        // An amendment that now gives a member its value ends its earlier
+        // undefined state.
+        let has_stale_undefined = |source: &ObjectSource, map: &ObjectMap| {
+            source.poisoned_members.as_deref().is_some_and(|members| {
+                members.iter().any(|(name, member)| {
+                    map.contains_key(&**name) && member.message == undefined_property_message(name)
+                })
+            })
+        };
+        if (!type_failures.is_empty()
+            || matches!(&result, Value::Object(map, Some(source)) if has_stale_undefined(source, map)))
             && let Value::Object(map, Some(source)) = result
         {
             self.rendered_member_failed |= type_failures.values().any(|member| member.rendered);
@@ -633,6 +661,9 @@ impl Evaluator {
                 .as_deref()
                 .cloned()
                 .unwrap_or_default();
+            poisoned.retain(|name, member| {
+                !(map.contains_key(&**name) && member.message == undefined_property_message(name))
+            });
             poisoned.extend(type_failures);
             source.poisoned_members = Some(Arc::new(poisoned));
             result = Value::Object(map, Some(Arc::new(source)));

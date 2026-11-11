@@ -1503,7 +1503,7 @@ hooks { ["a"] { check = new Alias.Script { linux = "echo hi" } } }
 }
 
 #[test]
-fn typealias_does_not_replace_inherited_property_of_same_name() {
+fn typealias_replacing_inherited_property_cannot_be_rendered() {
     let temp = TestTempDir::new("pklr_test_typealias_inherited_property_name");
     let dir = temp.path();
     std::fs::write(
@@ -1517,8 +1517,14 @@ fn typealias_does_not_replace_inherited_property_of_same_name() {
     )
     .unwrap();
 
-    let json = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
-    assert_eq!(json["name"], "base");
+    // The alias replaces the property, and Pkl rejects rendering it.
+    let error = pklr::eval_to_json(&dir.join("main.pkl")).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Cannot render value of type `TypeAlias` as JSON"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -3538,4 +3544,32 @@ result {
     );
     assert_eq!(json["result"]["a"], true);
     assert_eq!(json["result"]["b"], false);
+}
+
+#[test]
+fn typealias_replacing_inherited_property_is_rejected_through_amends_and_imports() {
+    let temp = TestTempDir::new("pklr_test_typealias_inherited_property_chain");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("P.pkl"),
+        "open module P\nname: String = \"base\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("alias.pkl"),
+        "extends \"P.pkl\"\ntypealias name = String\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("child.pkl"), "amends \"alias.pkl\"\n").unwrap();
+    std::fs::write(dir.join("main.pkl"), "result = import(\"child.pkl\")\n").unwrap();
+
+    for file in ["child.pkl", "main.pkl"] {
+        let error = pklr::eval_to_json(&dir.join(file)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Cannot render value of type `TypeAlias` as JSON"),
+            "{file}: {error}"
+        );
+    }
 }

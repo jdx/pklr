@@ -497,6 +497,26 @@ impl Evaluator {
                 Entry::TypeAlias(name, _) if class_names.contains(name.as_str()) => Some(name),
                 _ => None,
             };
+            // A type alias named like an inherited property replaces that
+            // member, so rendering the module renders the alias, which Pkl
+            // rejects.
+            if let Entry::TypeAlias(name, _) = entry
+                && out.contains_key(name.as_str())
+            {
+                let module_name = path.file_stem().and_then(|stem| stem.to_str());
+                let message = format!(
+                    "Cannot render value of type `TypeAlias` as JSON.\nValue: {}#{name}",
+                    module_name.unwrap_or_default()
+                );
+                self.rendered_member_failed = true;
+                poisoned_members.insert(
+                    nm(name),
+                    PoisonedMember {
+                        message,
+                        rendered: true,
+                    },
+                );
+            }
             if let Some(name) = exported {
                 if let Some(value) = scope.get(name) {
                     out.insert(name.as_str().into(), value.clone().declared_as_member(name));
@@ -543,6 +563,26 @@ impl Evaluator {
                 && (depth > 0 || should_render_property_value(prop, &value))
             {
                 out.insert(prop.name.as_ref().into(), value);
+            } else if rendered
+                && prop.value.is_none()
+                && prop.body.is_none()
+                && !has_modifier(&prop.modifiers, Modifier::Abstract)
+                && !out.contains_key(prop.name.as_ref())
+                && scope.get(&prop.name).is_none()
+                && prop
+                    .type_ann
+                    .as_ref()
+                    .is_some_and(|ty| type_lacks_default(ty, &scope))
+            {
+                let message = undefined_property_message(&prop.name);
+                self.rendered_member_failed = true;
+                poisoned_members.insert(
+                    prop.name.clone(),
+                    PoisonedMember {
+                        message,
+                        rendered: true,
+                    },
+                );
             }
         }
 
@@ -717,6 +757,44 @@ impl Evaluator {
         // dotted access (for example `child.Person`) remains available, but a
         // property named like an inherited type alias is not a member Pkl
         // renders at any depth.
+        // Pkl replaces the property of that name with the alias, and rejects
+        // rendering it.
+        {
+            let own_names: HashSet<&str> = body
+                .iter()
+                .filter_map(|entry| match entry {
+                    Entry::Property(prop) => Some(prop.name.as_ref()),
+                    Entry::TypeAlias(name, _) | Entry::ClassDef(name, ..) => Some(name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            let shadowed: Vec<Arc<str>> = out
+                .iter()
+                .filter(|(name, value)| {
+                    inherited_type_names.contains(&***name)
+                        && !own_names.contains(&***name)
+                        && !value.is_class_member(name, None)
+                        && !matches!(value, Value::Lambda(..))
+                })
+                .map(|(name, _)| Arc::clone(name))
+                .collect();
+            for name in shadowed {
+                let message = format!(
+                    "Cannot render value of type `TypeAlias` as JSON.\nValue: {}#{name}",
+                    path.file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .unwrap_or_default()
+                );
+                self.rendered_member_failed = true;
+                poisoned_members.insert(
+                    name,
+                    PoisonedMember {
+                        message,
+                        rendered: true,
+                    },
+                );
+            }
+        }
         out.retain(|name, value| {
             !inherited_type_names.contains(&**name)
                 || (depth > 0 && value.is_class_member(name, None))

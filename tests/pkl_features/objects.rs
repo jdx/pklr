@@ -7787,3 +7787,125 @@ miss = m.getOrDefault("zed")
     );
     assert_eq!(json["miss"]["n"], 10);
 }
+
+/// Render `src` as `pkl eval -f json` does, which reads every rendered
+/// property.
+fn render_json(src: &str) -> Result<serde_json::Value, String> {
+    let temp = TestTempDir::new("pklr_test_render_json");
+    let path = temp.path().join("main.pkl");
+    std::fs::write(&path, src).unwrap();
+    pklr::eval_to_json(&path).map_err(|error| error.to_string())
+}
+
+#[test]
+fn property_without_value_or_default_is_undefined_when_rendered() {
+    let message = "Tried to read property";
+    // A primitive type supplies no default, so the property has no value.
+    for src in [
+        "name: String",
+        "class C { x: Int }\nc: C = new C {}",
+        "class C { x: Int }\nc: C = new C {}\ny = c.x",
+        "class C { x: Int }\noutput { value = new C {} }",
+    ] {
+        let error = render_json(src).unwrap_err();
+        assert!(
+            error.contains(message) && error.contains("but its value is undefined."),
+            "{src}: {error}"
+        );
+    }
+}
+
+#[test]
+fn property_without_value_is_fine_when_it_has_a_default_or_is_not_read() {
+    let json = render_json(
+        "class D { q: Int = 1 }\nclass C { x: Int; hidden h: Int; y: Int?; z: Listing<Int>; w: D }\nc: C = new C { x = 1 }\nhidden k: String",
+    )
+    .unwrap();
+    assert_eq!(
+        json["c"],
+        serde_json::json!({"x": 1, "z": [], "w": {"q": 1}})
+    );
+    // A module that renders something else never reads the property.
+    let json = render_json("name: String\noutput { value = 1 }").unwrap();
+    assert_eq!(json, serde_json::json!(1));
+}
+
+#[test]
+fn undefined_property_is_not_read_when_output_or_a_converter_avoids_it() {
+    let json = render_json(
+        "class C { x: Int }\noutput { value = new C {}; renderer = new JsonRenderer { converters { [C] = (_) -> \"ok\" } } }",
+    )
+    .unwrap();
+    assert_eq!(json, serde_json::json!("ok"));
+
+    // An inherited `output` that does not render the property.
+    let temp = TestTempDir::new("pklr_test_inherited_output_undefined");
+    std::fs::write(
+        temp.path().join("P.pkl"),
+        "open module P\noutput { value = 1 }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("main.pkl"),
+        "extends \"P.pkl\"\nname: String\n",
+    )
+    .unwrap();
+    let json = pklr::eval_to_json(&temp.path().join("main.pkl")).unwrap();
+    assert_eq!(json, serde_json::json!(1));
+}
+
+#[test]
+fn undefined_property_is_reported_despite_unrelated_converters_or_inherited_renderer() {
+    let error = render_json(
+        "class C { x: Int }\noutput { value = new C {}; renderer = new JsonRenderer { converters { [String] = (s) -> s } } }",
+    )
+    .unwrap_err();
+    assert!(error.contains("but its value is undefined."), "{error}");
+
+    let temp = TestTempDir::new("pklr_test_inherited_renderer_undefined");
+    std::fs::write(
+        temp.path().join("P.pkl"),
+        "open module P\noutput { renderer = new JsonRenderer {} }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("main.pkl"),
+        "extends \"P.pkl\"\nname: String\n",
+    )
+    .unwrap();
+    let error = pklr::eval_to_json(&temp.path().join("main.pkl")).unwrap_err();
+    assert!(
+        error.to_string().contains("but its value is undefined."),
+        "{error}"
+    );
+}
+
+#[test]
+fn undefined_property_is_not_read_when_a_broad_converter_replaces_the_value() {
+    for converters in ["[Any] = (_) -> \"ok\"", "[Typed] = (_) -> \"ok\""] {
+        let json = render_json(&format!(
+            "class C {{ x: Int }}\noutput {{ value = new C {{}}; renderer = new JsonRenderer {{ converters {{ {converters} }} }} }}"
+        ))
+        .unwrap();
+        assert_eq!(json, serde_json::json!("ok"), "{converters}");
+    }
+    let json = render_json(
+        "class C { x: Int }\noutput { value = List(new C {}); renderer = new JsonRenderer { converters { [List] = (_) -> \"ok\" } } }",
+    )
+    .unwrap();
+    assert_eq!(json, serde_json::json!("ok"));
+    // The module itself is replaced without reading its properties.
+    let json = render_json(
+        "name: String\noutput { renderer = new JsonRenderer { converters { [Any] = (_) -> \"ok\" } } }",
+    )
+    .unwrap();
+    assert_eq!(json, serde_json::json!("ok"));
+}
+
+#[test]
+fn dynamic_converter_does_not_replace_a_module_with_an_undefined_property() {
+    let result = render_json(
+        "name: String\noutput { renderer = new JsonRenderer { converters { [Dynamic] = (_) -> \"ok\" } } }",
+    );
+    assert!(result.is_err(), "{result:?}");
+}
