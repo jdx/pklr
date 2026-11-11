@@ -453,13 +453,32 @@ pub(super) fn inferred_new_type(
     if depth > 32 {
         return Err(Error::Eval("recursive inferred return type".into()));
     }
+    // Nullability and chains of aliases are followed in a loop, so a long
+    // chain cannot overflow the stack and a cyclic one is an error.
+    let mut ty = ty;
+    let mut seen = HashSet::default();
+    loop {
+        match ty {
+            TypeExpr::Nullable(inner) => ty = inner,
+            TypeExpr::Named(name) => {
+                let name = name.trim_start_matches('*');
+                let Some(alias) = scope.get_type_alias(name) else {
+                    break;
+                };
+                if !seen.insert(name) {
+                    return Err(Error::Eval(
+                        "Type alias definitions must not be cyclic.".into(),
+                    ));
+                }
+                ty = alias;
+            }
+            _ => break,
+        }
+    }
     match ty {
         TypeExpr::Nullable(inner) => inferred_new_type(inner, scope, depth + 1),
         TypeExpr::Named(name) => {
             let name = name.trim_start_matches('*');
-            if let Some(alias) = scope.get_type_alias(name) {
-                return inferred_new_type(alias, scope, depth + 1);
-            }
             // Default union alternatives are stored as Named("*Type<...>").
             if name.contains('<') || name.ends_with('?') {
                 let ty = crate::parser::parse_type_name(name)?;
@@ -475,6 +494,10 @@ pub(super) fn inferred_new_type(
                     // The mapping constructor reserves one slot for its key
                     // type, followed by all value-type alternatives.
                     if index == 0 && matches!(name.as_str(), "Mapping" | "Map") {
+                        return vec![display_type_expr(arg)];
+                    }
+                    // `Listing<Listing<T>>` keeps the inner listing type.
+                    if name == "Listing" && resolves_to_listing(arg, scope) {
                         return vec![display_type_expr(arg)];
                     }
                     let mut names = Vec::new();
@@ -534,31 +557,43 @@ fn type_default_value_seen(
             type_default_value_seen(&TypeExpr::Named(base.clone()), scope, seen)
         }
         TypeExpr::Nullable(_) => Some(Value::Null),
-        TypeExpr::Named(name) if name == "Null" && declared_class(scope, name).is_none() => {
-            Some(Value::Null)
-        }
         TypeExpr::Named(name) => {
-            if let Some(value) = string_literal_type_value(name) {
-                return Some(Value::String(value.into()));
-            }
-            // A marked alternative (`*A`) takes its default from what `A`
-            // aliases.
-            let base = name.trim_start_matches('*');
-            if let Some(alias) = alias_of(scope, base).cloned() {
-                if seen.iter().any(|seen| seen == base) {
-                    return None;
+            // Follow a chain of plain aliases in a loop, not by recursion; a
+            // cyclic one has no default.
+            let mark = seen.len();
+            let mut name = name;
+            let value = loop {
+                // A class named `Null` is that class, not the null type.
+                if name == "Null" && declared_class(scope, name).is_none() {
+                    break Some(Value::Null);
                 }
-                seen.push(base.to_string());
-                let value = type_default_value_seen(&alias, scope, seen);
-                seen.pop();
-                return value;
-            }
-            // A name the parser read (no `*`) that ends in `?` was quoted, and is
-            // looked up as it is written.
-            if !name.starts_with('*') && name.ends_with('?') {
-                return exact_default(name, scope);
-            }
-            type_default_for_name(name, scope)
+                if let Some(value) = string_literal_type_value(name) {
+                    break Some(Value::String(value.into()));
+                }
+                // A marked alternative (`*A`) takes its default from what `A`
+                // aliases.
+                let base = name.trim_start_matches('*');
+                match alias_of(scope, base) {
+                    Some(alias) => {
+                        if seen.iter().any(|seen| seen == base) {
+                            break None;
+                        }
+                        seen.push(base.to_string());
+                        match alias {
+                            TypeExpr::Named(next) => name = next,
+                            other => break type_default_value_seen(other, scope, seen),
+                        }
+                    }
+                    // A name the parser read (no `*`) that ends in `?` was quoted,
+                    // and is looked up as it is written.
+                    None if !name.starts_with('*') && name.ends_with('?') => {
+                        break exact_default(name, scope);
+                    }
+                    None => break type_default_for_name(name, scope),
+                }
+            };
+            seen.truncate(mark);
+            value
         }
         TypeExpr::Generic(name, _) => match name.as_str() {
             "Collection" | "List" | "Set" | "Listing" => Some(empty_collection(name)),
@@ -678,32 +713,44 @@ pub(super) fn type_default_error(ty: &crate::parser::TypeExpr, scope: &Scope) ->
     // own when it was quoted. Other text is a type, whose `?` and type
     // arguments are not part of the name.
     fn named_error(name: &str, raw: bool, scope: &Scope, seen: &mut Vec<String>) -> Option<String> {
-        let name = name.trim_start_matches('*');
-        let base = if raw {
-            name
-        } else {
-            let name = name.trim_end_matches('?');
-            name.split('<').next().unwrap_or(name)
-        };
-        if let Some(alias) = alias_of(scope, base) {
+        let mark = seen.len();
+        let mut name = name;
+        let mut raw = raw;
+        // A chain of aliases is followed in a loop, not by recursion.
+        let error = loop {
+            let starless = name.trim_start_matches('*');
+            let base = if raw {
+                starless
+            } else {
+                let plain = starless.trim_end_matches('?');
+                plain.split('<').next().unwrap_or(plain)
+            };
+            let Some(alias) = alias_of(scope, base) else {
+                // A qualified class can be absent from an imported module's
+                // rendered map because evaluating its definition failed. Walk
+                // the dotted path so its ObjectSource poison is still reported
+                // when this default is actually materialized.
+                break poisoned_member(scope, base);
+            };
             if seen.iter().any(|seen| seen == base) {
                 // An alias an importer bound names the next module's alias
                 // of the same name as it was written (`A = m.A`): that is
                 // another alias, not a cycle.
-                return scope
+                break scope
                     .get_type_alias(base)
                     .map(|_| "Type alias definitions must not be cyclic.".to_string());
             }
             seen.push(base.to_string());
-            let error = visit(alias, scope, seen);
-            seen.pop();
-            return error;
-        }
-        // A qualified class can be absent from an imported module's rendered
-        // map because evaluating its definition failed. Walk the dotted path
-        // so its ObjectSource poison is still reported when this default is
-        // actually materialized.
-        poisoned_member(scope, base)
+            match alias {
+                crate::parser::TypeExpr::Named(next) if next != "Null" => {
+                    name = next;
+                    raw = !next.starts_with('*');
+                }
+                other => break visit(other, scope, seen),
+            }
+        };
+        seen.truncate(mark);
+        error
     }
 
     fn visit(
@@ -2169,7 +2216,7 @@ pub(super) fn alias_key(scope: &Scope, name: &str) -> String {
 
 /// The generic `Listing` or `Mapping` type `ty` stands for, through aliases,
 /// nullability and constraints.
-fn resolve_collection_type(
+pub(super) fn resolve_collection_type(
     ty: &crate::parser::TypeExpr,
     scope: &Scope,
     depth: usize,
@@ -2429,4 +2476,24 @@ fn declared_class(scope: &Scope, name: &str) -> Option<Value> {
     resolve_dotted(scope, name).filter(
         |value| matches!(value, Value::Object(_, Some(source)) if source.kind == ObjectKind::Class),
     )
+}
+
+/// Whether `ty` is built only of `Listing`s down to a type that is not a
+/// collection (`Listing<Listing<T>>`), so that an element class saved for it
+/// covers every level. A `Mapping` on the way needs its values inferred.
+pub(super) fn is_listing_chain(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
+    let mut ty = ty.clone();
+    for _ in 0..64 {
+        match resolve_collection_type(&ty, scope, 0) {
+            None => return true,
+            Some(crate::parser::TypeExpr::Generic(name, args)) if name == "Listing" => {
+                match args.as_slice() {
+                    [arg] => ty = arg.clone(),
+                    _ => return true,
+                }
+            }
+            Some(_) => return false,
+        }
+    }
+    true
 }

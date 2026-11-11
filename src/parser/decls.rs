@@ -233,7 +233,10 @@ impl<'a> Parser<'a> {
         self.type_alias_parameters
             .insert(name.clone(), parameters.clone());
         self.expect(&TokenKind::Equals, "=")?;
-        let ty = erase_type_parameters(self.parse_type()?, &parameters);
+        let outer = self.in_alias_definition.replace(name.clone());
+        let ty = self.parse_type();
+        self.in_alias_definition = outer;
+        let ty = erase_type_parameters(ty?, &parameters);
         Ok(Entry::TypeAlias(name, ty))
     }
 

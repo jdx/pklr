@@ -152,6 +152,14 @@ struct Parser<'a> {
     local_type_aliases: std::collections::HashSet<String>,
     /// The module-level subset of `local_type_aliases`, which importers cannot see.
     module_local_type_aliases: std::collections::HashSet<String>,
+    /// Simple type names written in annotations, `is`/`as`, type arguments,
+    /// constraints and `new` outside a type alias's own definition.
+    type_uses: std::collections::HashSet<String>,
+    /// Whether the type being parsed is a type alias's definition.
+    in_alias_definition: Option<String>,
+    /// The type names each alias's definition uses, constraint predicates
+    /// (`is`, `as`) included.
+    alias_definition_uses: std::collections::HashMap<String, std::collections::HashSet<String>>,
     /// Expressions and type constraints currently nested around the cursor.
     depth: usize,
 }

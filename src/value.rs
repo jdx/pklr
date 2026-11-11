@@ -477,6 +477,10 @@ pub enum ListKind {
 pub struct ListValue {
     items: Arc<Vec<Value>>,
     kind: ListKind,
+    /// For a `Listing<T>` whose `T` is a class: that class, so an untyped
+    /// `new { ... }` element added later is an instance of it. It is not part
+    /// of the value's identity.
+    elem_class: Option<Arc<Value>>,
     /// Made by `IntSeq(...)`: a `List` that is also of type `IntSeq`. Any
     /// change of the items or the kind clears it, and equality ignores it.
     int_seq: bool,
@@ -493,8 +497,20 @@ impl ListValue {
         ListValue {
             items: items.into(),
             kind,
+            elem_class: None,
             int_seq: false,
         }
+    }
+
+    /// The class of a `Listing<T>`'s elements, if `T` is a class.
+    pub(crate) fn elem_class(&self) -> Option<&Arc<Value>> {
+        self.elem_class.as_ref()
+    }
+
+    /// The same listing with the class its elements are declared to be.
+    pub(crate) fn with_elem_class(mut self, class: Option<Arc<Value>>) -> Self {
+        self.elem_class = class;
+        self
     }
 
     /// The same list, marked as the result of `IntSeq(...)`.

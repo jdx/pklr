@@ -15,6 +15,7 @@ impl Evaluator {
         position: &mut usize,
         value: &mut Option<Value>,
         inherited_locals: &[(String, Expr)],
+        elem_class: Option<&Arc<Value>>,
     ) -> Result<()> {
         if depth > self.max_depth {
             return Err(Error::Eval("maximum recursion depth exceeded".into()));
@@ -30,9 +31,10 @@ impl Evaluator {
                 }
                 Entry::Elem(expr) => {
                     if *position == target {
+                        let (expr, elem_scope) = typed_listing_elem(expr, &scope, elem_class);
                         *value = Some(self.eval_expr(
-                            &with_listing_locals(expr, &locals),
-                            &scope,
+                            &with_listing_locals(&expr, &locals),
+                            &elem_scope,
                             depth + 1,
                         )?);
                     }
@@ -64,9 +66,11 @@ impl Evaluator {
                                     depth + 1,
                                 )?
                             } else {
+                                let (expr, elem_scope) =
+                                    typed_listing_elem(expr, &scope, elem_class);
                                 self.eval_expr(
-                                    &with_listing_locals(expr, &locals),
-                                    &scope,
+                                    &with_listing_locals(&expr, &locals),
+                                    &elem_scope,
                                     depth + 1,
                                 )?
                             },
@@ -106,6 +110,7 @@ impl Evaluator {
                             position,
                             value,
                             &iter_locals,
+                            elem_class,
                         )?;
                     }
                 }
@@ -125,6 +130,7 @@ impl Evaluator {
                             position,
                             value,
                             &locals,
+                            elem_class,
                         )?;
                     }
                 }
@@ -141,6 +147,7 @@ impl Evaluator {
         scope: &Scope,
         depth: usize,
         items: &mut Vec<Value>,
+        elem_class: Option<&Arc<Value>>,
     ) -> Result<()> {
         let mut listing_scope = scope.child();
         // A body's locals and properties (`default`) are visible to all of
@@ -177,7 +184,10 @@ impl Evaluator {
             match entry {
                 Entry::Predicate(..) => return Err(member_predicates_unsupported()),
                 Entry::Property(_) => {}
-                Entry::Elem(expr) => items.push(self.eval_expr(expr, &listing_scope, depth + 1)?),
+                Entry::Elem(expr) => {
+                    let (expr, elem_scope) = typed_listing_elem(expr, &listing_scope, elem_class);
+                    items.push(self.eval_expr(&expr, &elem_scope, depth + 1)?)
+                }
                 Entry::DynProperty(index, value) => {
                     let index = self.eval_expr(index, &listing_scope, depth + 1)?;
                     let Value::Int(index) = index else {
@@ -208,7 +218,11 @@ impl Evaluator {
                             depth + 1,
                         )?
                     } else {
-                        self.eval_expr(value, &listing_scope, depth + 1)?
+                        // A replacement `new { ... }` is an element of the
+                        // declared class too.
+                        let (value, elem_scope) =
+                            typed_listing_elem(value, &listing_scope, elem_class);
+                        self.eval_expr(&value, &elem_scope, depth + 1)?
                     };
                 }
                 Entry::Spread(expr) => {
@@ -224,7 +238,13 @@ impl Evaluator {
                         if let Some(key_var) = &generator.key_var {
                             iter_scope.set(key_var, key);
                         }
-                        self.eval_listing_entries(&generator.body, &iter_scope, depth + 1, items)?;
+                        self.eval_listing_entries(
+                            &generator.body,
+                            &iter_scope,
+                            depth + 1,
+                            items,
+                            elem_class,
+                        )?;
                     }
                 }
                 Entry::WhenGenerator(generator) => {
@@ -236,13 +256,305 @@ impl Evaluator {
                         generator.else_body.as_deref().map(Vec::as_slice)
                     };
                     if let Some(selected) = selected {
-                        self.eval_listing_entries(selected, &listing_scope, depth + 1, items)?;
+                        self.eval_listing_entries(
+                            selected,
+                            &listing_scope,
+                            depth + 1,
+                            items,
+                            elem_class,
+                        )?;
                     }
                 }
                 _ => {}
             }
         }
         Ok(())
+    }
+}
+
+/// The scope name an untyped `new { ... }` element of a `Listing<T>` is
+/// constructed through.
+pub(super) const LISTING_ELEM_CLASS: &str = "\0listing_elem_class";
+
+/// An element expression, and the scope to evaluate it in. An untyped
+/// `new { ... }` of a `Listing<T>` becomes a `T`; any other element is kept.
+/// The class is bound by value: `T` may be visible only where the listing's
+/// type was declared, not in this scope.
+fn typed_listing_elem(
+    expr: &Expr,
+    scope: &Scope,
+    elem_class: Option<&Arc<Value>>,
+) -> (Expr, Scope) {
+    let Some(class) = elem_class else {
+        return (expr.clone(), scope.clone());
+    };
+    if !parser::has_untyped_result_new(expr) {
+        return (expr.clone(), scope.clone());
+    }
+    let mut elem_scope = scope.child();
+    elem_scope.set(LISTING_ELEM_CLASS, (**class).clone());
+    let listings = matches!(**class, Value::List(_));
+    if !listings {
+        // A class bound under another name is a value, not a type.
+        elem_scope.set(type_alias_marker(LISTING_ELEM_CLASS), Value::Null);
+    }
+    // Reach `new { ... }` through `if`, `let` and `trace` result positions.
+    let mut typed = expr.clone();
+    parser::rewrite_untyped_result_new(&mut typed, &mut |body| {
+        if listings {
+            // The elements are listings: `new { new { ... } }` of a
+            // `Listing<Listing<T>>`.
+            Expr::New(
+                Some("Listing".into()),
+                body,
+                vec![LISTING_ELEM_CLASS.to_string()],
+            )
+        } else {
+            Expr::New(Some(LISTING_ELEM_CLASS.into()), body, Vec::new())
+        }
+    });
+    (typed, elem_scope)
+}
+
+/// Whether `ty` is a `Listing<...>`, through nullability and type aliases.
+pub(super) fn resolves_to_listing(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
+    // A chain of aliases is walked in a loop, so a long one cannot overflow
+    // the stack and a cyclic one ends at its first repeat.
+    let mut seen = HashSet::default();
+    resolves_to_listing_in(ty, scope, &mut seen, 0)
+}
+
+/// [`resolves_to_listing`], following a constrained type (`CL = L(pred)`) to
+/// its base, which names another alias or a listing.
+fn resolves_to_listing_in(
+    ty: &crate::parser::TypeExpr,
+    scope: &Scope,
+    seen: &mut HashSet<String>,
+    nesting: usize,
+) -> bool {
+    use crate::parser::TypeExpr;
+    match resolve_alias_chain(ty, scope, seen) {
+        Some(TypeExpr::Constrained(base, _, _)) => {
+            nesting < MAX_LISTING_NESTING
+                && crate::parser::parse_type_name(base.trim_start_matches('*'))
+                    .is_ok_and(|base| resolves_to_listing_in(&base, scope, seen, nesting + 1))
+        }
+        // A bare `Listing` (`Listing(length <= 2)`) has no type arguments.
+        Some(TypeExpr::Named(name)) => name == "Listing",
+        Some(other) => other.is_listing_type(),
+        None => false,
+    }
+}
+
+/// Follow `ty` through nullability and type aliases to the first type that is
+/// neither. `seen` holds the aliases already followed; reaching one again is a
+/// cyclic alias (a `local` one escapes the parser's cycle check), which yields
+/// `None` rather than looping.
+fn resolve_alias_chain<'a>(
+    mut ty: &'a crate::parser::TypeExpr,
+    scope: &'a Scope,
+    seen: &mut HashSet<String>,
+) -> Option<&'a crate::parser::TypeExpr> {
+    use crate::parser::TypeExpr;
+    loop {
+        match ty {
+            TypeExpr::Nullable(inner) => ty = inner,
+            TypeExpr::Named(name) => {
+                let name = name.trim_start_matches('*').trim_end_matches('?');
+                let Some(alias) = scope.get_type_alias(name) else {
+                    return Some(ty);
+                };
+                if !seen.insert(name.to_string()) {
+                    return None;
+                }
+                ty = alias;
+            }
+            other => return Some(other),
+        }
+    }
+}
+
+/// The class an untyped `new { ... }` element of a `Listing<T>` constructs:
+/// `T` when it is a single class (an alias or nullable `T?` included). A
+/// union, a built-in or an unresolved name leaves such an element untyped.
+pub(super) fn listing_elem_class(type_args: &[String], scope: &Scope) -> Option<Arc<Value>> {
+    // `Listing<Listing<T>>`, or `Listing<L>` with `L` an alias of a listing
+    // type: the argument is itself a listing type, read structurally.
+    if let [arg] = type_args
+        && let Ok(ty) = crate::parser::parse_type_name(arg.trim_start_matches('*'))
+        && resolves_to_listing(&ty, scope)
+    {
+        return type_elem_class(&ty, scope);
+    }
+    let names = expand_type_alias_names(type_args, scope);
+    let [name] = names.as_slice() else {
+        return None;
+    };
+    let name = mapping_value_type_base(name).trim_end_matches('?');
+    match resolve_dotted(scope, name) {
+        Some(class @ Value::Object(_, Some(_))) if matches!(&class, Value::Object(_, Some(source)) if source.type_name.is_some()) => {
+            Some(Arc::new(class))
+        }
+        // An element class bound by `typed_listing_elem` for an inner
+        // listing: its own elements are of the class the listing holds.
+        Some(Value::List(inner)) if name == LISTING_ELEM_CLASS => inner.elem_class().cloned(),
+        _ => None,
+    }
+}
+
+/// What an untyped `new { ... }` element of a listing of `ty` constructs: a
+/// class, or for a `Listing<..>` element type a listing prototype holding
+/// the class of its own elements.
+fn type_elem_class(ty: &crate::parser::TypeExpr, scope: &Scope) -> Option<Arc<Value>> {
+    type_elem_class_in(ty, scope, &mut HashSet::default(), 0)
+}
+
+/// `Listing<Listing<...>>` nests this deep at most; a cyclic alias or an
+/// absurd nesting leaves the element untyped instead of overflowing the stack.
+const MAX_LISTING_NESTING: usize = 64;
+
+/// `type_elem_class`, with the aliases `seen` on the way down to `ty`.
+fn type_elem_class_in(
+    ty: &crate::parser::TypeExpr,
+    scope: &Scope,
+    seen: &mut HashSet<String>,
+    nesting: usize,
+) -> Option<Arc<Value>> {
+    use crate::parser::TypeExpr;
+    match resolve_alias_chain(ty, scope, seen)? {
+        TypeExpr::Generic(name, args) if name == "Listing" && args.len() == 1 => {
+            if nesting >= MAX_LISTING_NESTING {
+                return None;
+            }
+            // An element type with no class to build (`Listing<String>`) still
+            // makes this element a `Listing`, as pkl does.
+            let inner = type_elem_class_in(&args[0], scope, seen, nesting + 1);
+            Some(Arc::new(Value::List(
+                ListValue::new(ListKind::Listing, Vec::new()).with_elem_class(inner),
+            )))
+        }
+        // A bare `Listing`: its own elements have no class to build.
+        TypeExpr::Named(name) if name == "Listing" => Some(Arc::new(Value::List(ListValue::new(
+            ListKind::Listing,
+            Vec::new(),
+        )))),
+        TypeExpr::Named(name) => listing_elem_class(std::slice::from_ref(name), scope),
+        // `T(x > 0)`: the element is a `T`, whatever the predicate says.
+        TypeExpr::Constrained(base, _, _) => {
+            if nesting >= MAX_LISTING_NESTING {
+                return None;
+            }
+            let base = crate::parser::parse_type_name(base.trim_start_matches('*')).ok()?;
+            type_elem_class_in(&base, scope, seen, nesting + 1)
+        }
+        other => listing_elem_class(&[display_type_expr(other)], scope),
+    }
+}
+
+/// The element class of a property declared `ty`, when that is a `Listing<T>`.
+pub(super) fn declared_listing_elem_class(
+    ty: &crate::parser::TypeExpr,
+    scope: &Scope,
+) -> Option<Arc<Value>> {
+    use crate::parser::TypeExpr;
+    let mut seen = HashSet::default();
+    match resolve_alias_chain(ty, scope, &mut seen)? {
+        TypeExpr::Generic(name, args) if name == "Listing" && args.len() == 1 => {
+            type_elem_class_in(&args[0], scope, &mut seen, 1)
+        }
+        TypeExpr::Named(_) => None,
+        _ => {
+            let (name, args) = inferred_new_type(ty, scope, 0).ok()?;
+            (name == "Listing")
+                .then(|| listing_elem_class(&args, scope))
+                .flatten()
+        }
+    }
+}
+
+impl Evaluator {
+    /// The element class of a property declared `ty`, resolved where the
+    /// property's class is declared. A class cannot see itself, or classes
+    /// declared after it, in the scope it was captured with, so fall back to
+    /// the final scope of its module.
+    pub(super) fn declared_elem_class(
+        &self,
+        ty: &crate::parser::TypeExpr,
+        scope: &Scope,
+    ) -> Option<Arc<Value>> {
+        if is_never_listing_type(
+            ty,
+            &|name| scope.get(name).is_some_and(is_class_value),
+            &|name| scope.get_type_alias(name).is_some(),
+        ) {
+            return None;
+        }
+        let class = declared_listing_elem_class(ty, scope);
+        // A nested listing (`Listing<Listing<Node>>`) is a listing even when
+        // its innermost class is not visible in the saved scope (a class
+        // cannot see itself, or classes declared after it), so also look again
+        // in the module's final scope when that class is unresolved.
+        let unresolved_leaf = class.is_some()
+            && listing_leaf_name(ty, scope)
+                .is_some_and(|leaf| resolve_dotted(scope, &leaf).is_none())
+            && class.as_deref().is_some_and(|class| !has_leaf_class(class));
+        if class.is_some() && !unresolved_leaf {
+            return class;
+        }
+        let namespace = scope.type_namespace.clone()?;
+        let mut declaring = scope.clone();
+        self.layer_evaluated_module_scope(Path::new(&namespace), &mut declaring);
+        declared_listing_elem_class(ty, &declaring).or(class)
+    }
+
+    /// The element class of an inherited property of `base_source` whose
+    /// annotation is `ty`, resolved in the scope that declared `ty`, never in
+    /// the scope that assigned a value to the property. `entry_scope` is the
+    /// scope recorded for the inherited entry, or `None` for the object's own
+    /// definition scope.
+    pub(super) fn inherited_elem_class(
+        &self,
+        base_source: &ObjectSource,
+        ty: &crate::parser::TypeExpr,
+        entry_scope: Option<&Arc<CapturedScope>>,
+    ) -> Option<(Option<Value>, Scope)> {
+        // A class cannot always see itself, or classes declared after it, in
+        // the scope it was captured with: the instance's scope has them. A
+        // name the declaring scope binds otherwise (an alias, a value) is not
+        // the instance's class of that name.
+        let is_class = |name: &str| match entry_scope {
+            Some(captured) => match captured.values.get(name) {
+                Some(value) => is_class_value(value),
+                None => {
+                    !captured.type_aliases.contains_key(name)
+                        && base_source.scope().get(name).is_some_and(is_class_value)
+                }
+            },
+            None => base_source.scope().get(name).is_some_and(is_class_value),
+        };
+        let is_alias = |name: &str| match entry_scope {
+            Some(captured) => captured.type_aliases.contains_key(name),
+            None => base_source.scope_type_aliases().contains_key(name),
+        };
+        if is_never_listing_type(ty, &is_class, &is_alias) {
+            return None;
+        }
+        let mut declaring = match entry_scope {
+            Some(captured) => restore_scope(captured),
+            None => definition_type_scope(base_source),
+        };
+        let class = self.declared_elem_class(ty, &declaring);
+        // The returned scope is the one `ty` is checked in, so it also holds
+        // the classes the declaring module defines after this one.
+        if let Some(namespace) = declaring.type_namespace.clone() {
+            self.layer_evaluated_module_scope(Path::new(&namespace), &mut declaring);
+        }
+        // A listing without an element class (`Listing<String>(length == 1)`)
+        // still has its annotation resolved where it was declared.
+        if class.is_none() && !resolves_to_listing(ty, &declaring) {
+            return None;
+        }
+        Some((class.map(|class| (*class).clone()), declaring))
     }
 }
 
@@ -288,4 +600,86 @@ pub(super) fn check_no_elements(source: &ObjectSource, entries: &[Entry]) -> Res
         None if source.kind == ObjectKind::Mapping => check_member_kinds("Mapping", entries, false),
         None => Ok(()),
     }
+}
+
+/// Whether `ty` cannot declare a listing, judged without resolving aliases or
+/// module scopes: a non-`Listing` generic, a primitive, or a name that
+/// `is_class` says is a class. Lets hot paths skip building a type scope.
+pub(super) fn is_never_listing_type(
+    ty: &crate::parser::TypeExpr,
+    is_class: &impl Fn(&str) -> bool,
+    is_alias: &impl Fn(&str) -> bool,
+) -> bool {
+    use crate::parser::TypeExpr;
+    match ty {
+        TypeExpr::Nullable(inner) => is_never_listing_type(inner, is_class, is_alias),
+        TypeExpr::Generic(name, _) => name != "Listing",
+        TypeExpr::Named(name) => {
+            let name = name.trim_start_matches('*');
+            // An alias of the same name shadows the built-in type.
+            (matches!(
+                name,
+                "String"
+                    | "Int"
+                    | "Float"
+                    | "Boolean"
+                    | "Number"
+                    | "Any"
+                    | "Dynamic"
+                    | "Duration"
+                    | "DataSize"
+            ) && !is_alias(name))
+                || is_class(name)
+        }
+        _ => false,
+    }
+}
+
+/// Whether a listing prototype, however deeply nested, ends in an element
+/// class.
+pub(super) fn has_leaf_class(value: &Value) -> bool {
+    match value {
+        Value::List(list) => list.elem_class().is_some_and(|inner| has_leaf_class(inner)),
+        _ => true,
+    }
+}
+
+/// The name a nested `Listing<...<Name>>` type ends in, through aliases and
+/// nullability, when it is not a built-in type.
+pub(super) fn listing_leaf_name(ty: &crate::parser::TypeExpr, scope: &Scope) -> Option<String> {
+    use crate::parser::TypeExpr;
+    let mut ty = ty.clone();
+    for _ in 0..64 {
+        ty = match resolve_alias_chain(&ty, scope, &mut HashSet::default())? {
+            TypeExpr::Generic(name, args) if name == "Listing" && args.len() == 1 => {
+                args[0].clone()
+            }
+            // `Listing<Node>(!isEmpty)`: the type it constrains.
+            TypeExpr::Constrained(base, ..) => {
+                crate::parser::parse_type_name(base.trim_start_matches('*')).ok()?
+            }
+            TypeExpr::Named(name) => {
+                let name = name
+                    .trim_start_matches('*')
+                    .trim_end_matches('?')
+                    .to_string();
+                return (!matches!(
+                    name.as_str(),
+                    "String"
+                        | "Int"
+                        | "Float"
+                        | "Boolean"
+                        | "Number"
+                        | "Any"
+                        | "Dynamic"
+                        | "Duration"
+                        | "DataSize"
+                        | "Listing"
+                ))
+                .then_some(name);
+            }
+            _ => return None,
+        };
+    }
+    None
 }

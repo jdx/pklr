@@ -131,6 +131,23 @@ pub enum BaseForm {
     NullableQuoted,
 }
 
+impl TypeExpr {
+    /// Whether this is a `Listing<...>` type, possibly nullable.
+    pub(crate) fn is_listing_type(&self) -> bool {
+        match self {
+            TypeExpr::Nullable(inner) => inner.is_listing_type(),
+            TypeExpr::Generic(name, _) => name == "Listing",
+            // A constrained listing, `Listing<T>(length > 0)`, stores its
+            // base type as a name.
+            TypeExpr::Constrained(base, _, _) => {
+                let base = base.trim_start_matches('*').trim_end_matches('?');
+                base == "Listing" || base.starts_with("Listing<")
+            }
+            _ => false,
+        }
+    }
+}
+
 pub(super) fn type_expr_runtime_name(ty: &TypeExpr) -> String {
     match ty {
         TypeExpr::Named(name) => name.clone(),

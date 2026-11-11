@@ -386,7 +386,13 @@ impl<'a> Parser<'a> {
             TypeExpr::Generic(name, args) => {
                 let mut params = Vec::new();
                 for arg in &args {
-                    generic_param_names(arg, &mut params);
+                    // `Listing<Listing<T>>` keeps the inner listing type, so
+                    // its elements can be built as `T`.
+                    if name == "Listing" && arg.is_listing_type() {
+                        params.push(type_expr_runtime_name(arg));
+                    } else {
+                        generic_param_names(arg, &mut params);
+                    }
                 }
                 (Some(name), params)
             }
@@ -411,6 +417,16 @@ impl<'a> Parser<'a> {
         if !is_lambda {
             let expr = self.parse_expr()?;
             self.expect(&TokenKind::RParen, ")")?;
+            // Pkl infers an untyped `new { ... }` from the type expected
+            // where it stands; a parenthesised one has no parent to amend,
+            // whatever type is expected. The error is raised when it is
+            // evaluated.
+            let expr = match expr {
+                Expr::New(None, ..) => Expr::Throw(Box::new(Expr::String(
+                    "Cannot tell which parent to amend.".into(),
+                ))),
+                other => other,
+            };
             return Ok((expr, true));
         }
         let start = self.prev_end;

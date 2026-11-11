@@ -740,7 +740,15 @@ pub(super) fn check_instantiable(
     match class {
         Some(Value::Object(_, Some(source))) if source.is_abstract => Err(Error::Eval(format!(
             "Cannot instantiate abstract class `{}`.",
-            qualified_class_name(source.type_identity.as_deref(), type_name)
+            qualified_class_name(
+                source.type_identity.as_deref(),
+                // A `Listing<T>` element is built through a synthetic name.
+                if type_name == LISTING_ELEM_CLASS {
+                    source.type_name.as_deref().unwrap_or(type_name)
+                } else {
+                    type_name
+                }
+            )
         ))),
         // A class is bound under its own name, or under a type alias of it.
         // Any other binding of an object (`local Foo2 = Foo`) is a value.

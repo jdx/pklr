@@ -323,9 +323,7 @@ impl<'a> Parser<'a> {
         let aliases: Vec<(&str, &TypeExpr)> = entries
             .iter()
             .filter_map(|entry| match entry {
-                Entry::TypeAlias(name, ty) if !self.local_type_aliases.contains(name) => {
-                    Some((name.as_str(), ty))
-                }
+                Entry::TypeAlias(name, ty) => Some((name.as_str(), ty)),
                 _ => None,
             })
             .collect();
@@ -365,10 +363,27 @@ impl<'a> Parser<'a> {
                 *next += 1;
                 match state[target] {
                     1 => {
-                        return Err(self.error_at(
-                            self.prev_end,
-                            "Type alias definitions must not be cyclic.",
-                        ));
+                        // Pkl resolves a `local` alias only where something
+                        // uses it, so a cycle through one is an error only
+                        // when the module names it besides its declaration
+                        // and the aliases that refer to it.
+                        let from = stack
+                            .iter()
+                            .position(|(member, _)| *member == target)
+                            .unwrap_or(0);
+                        let locals = stack[from..]
+                            .iter()
+                            .map(|(member, _)| aliases[*member].0)
+                            .filter(|name| self.local_type_aliases.contains(*name))
+                            .collect::<Vec<_>>();
+                        if locals.is_empty()
+                            || locals.iter().any(|name| self.is_type_alias_used(name))
+                        {
+                            return Err(self.error_at(
+                                self.prev_end,
+                                "Type alias definitions must not be cyclic.",
+                            ));
+                        }
                     }
                     0 => {
                         state[target] = 1;
@@ -379,6 +394,34 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Whether the module uses the type alias `name` as a type: in an
+    /// annotation, `is`, `as`, `new`, a type argument or a constraint, or in
+    /// the definition of an alias that is used. A property or variable of the
+    /// same name is not a use.
+    fn is_type_alias_used(&self, name: &str) -> bool {
+        let mut used: std::collections::HashSet<String> = self.type_uses.clone();
+        let mut pending: Vec<String> = used.iter().cloned().collect();
+        while let Some(current) = pending.pop() {
+            // The names the definition parsed as types cover constraint
+            // predicates (`is`, `as`), which `collect_type_names` does not.
+            let Some(names) = self.alias_definition_uses.get(&current) else {
+                continue;
+            };
+            // A type parameter of the alias is not a use of a module alias of
+            // the same name.
+            let parameters = self.type_alias_parameters.get(&current);
+            for referenced in names {
+                if parameters.is_some_and(|parameters| parameters.contains(referenced)) {
+                    continue;
+                }
+                if used.insert(referenced.clone()) {
+                    pending.push(referenced.clone());
+                }
+            }
+        }
+        used.contains(name)
     }
 }
 

@@ -134,6 +134,17 @@ impl<'a> Parser<'a> {
             TokenKind::Ident(_) => {
                 quoted_name = self.is_quoted(self.peek_tok());
                 let name = self.parse_qualified_ident()?;
+                match &self.in_alias_definition {
+                    Some(alias) => {
+                        self.alias_definition_uses
+                            .entry(alias.clone())
+                            .or_default()
+                            .insert(name.clone());
+                    }
+                    None => {
+                        self.type_uses.insert(name.clone());
+                    }
+                }
                 if matches!(self.peek(), TokenKind::Lt) {
                     self.advance();
                     let mut args = Vec::new();
