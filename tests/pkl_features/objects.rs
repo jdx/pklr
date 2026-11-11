@@ -7879,3 +7879,25 @@ fn undefined_property_is_reported_despite_unrelated_converters_or_inherited_rend
         "{error}"
     );
 }
+
+#[test]
+fn undefined_property_is_not_read_when_a_broad_converter_replaces_the_value() {
+    for converters in ["[Any] = (_) -> \"ok\"", "[Typed] = (_) -> \"ok\""] {
+        let json = render_json(&format!(
+            "class C {{ x: Int }}\noutput {{ value = new C {{}}; renderer = new JsonRenderer {{ converters {{ {converters} }} }} }}"
+        ))
+        .unwrap();
+        assert_eq!(json, serde_json::json!("ok"), "{converters}");
+    }
+    let json = render_json(
+        "class C { x: Int }\noutput { value = List(new C {}); renderer = new JsonRenderer { converters { [List] = (_) -> \"ok\" } } }",
+    )
+    .unwrap();
+    assert_eq!(json, serde_json::json!("ok"));
+    // The module itself is replaced without reading its properties.
+    let json = render_json(
+        "name: String\noutput { renderer = new JsonRenderer { converters { [Any] = (_) -> \"ok\" } } }",
+    )
+    .unwrap();
+    assert_eq!(json, serde_json::json!("ok"));
+}
