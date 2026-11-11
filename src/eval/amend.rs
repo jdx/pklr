@@ -1274,6 +1274,7 @@ impl Evaluator {
             _ => None,
         };
         let recorded = default.clone();
+        let recorded_entries = fresh_entries.clone();
         // Entries the amendment replaces outright are never built from the base.
         let replaced: HashSet<&str> = overlay_entries
             .iter()
@@ -1311,7 +1312,7 @@ impl Evaluator {
                 &base_src.mapping_value_types,
                 MappingInheritedDefault {
                     value: Some(default),
-                    entries: fresh_entries,
+                    entries: fresh_entries.clone(),
                 },
             )?;
             // An entry an earlier amendment changed is no longer what the base
@@ -1349,7 +1350,19 @@ impl Evaluator {
             .flatten();
         let same =
             declared.is_some_and(|declared| declared.identity_json() == recorded.identity_json());
-        Ok((same && !body_only).then_some(assigned_default))
+        if !same {
+            return Ok(None);
+        }
+        // The recorded default is the inherited body followed by the new one.
+        Ok(match (body_only, recorded_entries) {
+            (false, _) => Some(assigned_default),
+            (true, Some(entries)) => {
+                let mut merged = (*assigned_default).clone();
+                merged.body = Some(entries);
+                Some(Arc::new(merged))
+            }
+            (true, None) => None,
+        })
     }
 }
 

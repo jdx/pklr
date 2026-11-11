@@ -7613,8 +7613,11 @@ res1 = new Mapping {
   ["pigeon"] { }
 }
 res2 = (res1) { default { age = 45 } }
+miss = res2.getOrDefault("missing")
 "#,
     );
     assert_eq!(json["res2"]["pigeon"]["name"], "x");
     assert_eq!(json["res2"]["pigeon"]["age"], 45);
+    assert_eq!(json["miss"]["name"], "x");
+    assert_eq!(json["miss"]["age"], 45);
 }
