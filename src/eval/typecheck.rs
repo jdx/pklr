@@ -953,7 +953,7 @@ impl Evaluator {
                 Ok(true)
             }
             ("Pair", Value::Object(members, Some(source)))
-                if source.type_name.as_deref() == Some("Pair") =>
+                if source.type_identity.as_deref() == Some("pkl:base#Pair") =>
             {
                 for (member, ty) in [("first", args.first()), ("second", args.get(1))] {
                     if let (Some(ty), Some(item)) = (checked(ty, scope), members.get(member))

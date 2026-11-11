@@ -1290,3 +1290,33 @@ mixed = test.catch(() -> new YamlRenderer {}.renderDocument(new Dynamic { foo = 
         "Cannot render object with both elements and properties/entries as YAML. Object: new Dynamic { foo = \"foo\"; 5 }"
     );
 }
+
+#[test]
+fn user_classes_named_pair_or_type_alias_are_ordinary_objects() {
+    let json = eval(
+        r#"
+class Pair { first = 1; second = 2 }
+class TypeAlias { name = "x" }
+pairOut = new JsonRenderer {}.renderValue(new Pair {})
+aliasOut = new JsonRenderer {}.renderValue(new TypeAlias {})
+"#,
+    );
+    assert!(json["pairOut"].as_str().unwrap().contains("\"first\": 1"));
+    assert!(
+        json["aliasOut"]
+            .as_str()
+            .unwrap()
+            .contains("\"name\": \"x\"")
+    );
+}
+
+#[test]
+fn thrown_text_with_value_lines_is_not_rewritten_by_catch() {
+    let json = eval(
+        r#"
+import "pkl:test"
+msg = test.catch(() -> throw("bad\nValue: x"))
+"#,
+    );
+    assert_eq!(json["msg"], "bad\nValue: x");
+}

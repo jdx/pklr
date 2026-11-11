@@ -714,7 +714,11 @@ pub(super) fn caught_error_message(error: Error) -> String {
     };
     // pkl renders a caught error without its source frame, so the value
     // pklr puts on its own line follows the message, and a renderer's hint to
-    // add a converter is dropped.
+    // add a converter is dropped. Only a renderer's own errors are rewritten:
+    // text a program throws is returned as it is.
+    if !(message.starts_with("Cannot render ") || message.starts_with("The top-level value of ")) {
+        return message;
+    }
     message
         .replace(
             "\n\nConsider adding a converter to `output.converters`.",

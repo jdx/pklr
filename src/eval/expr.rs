@@ -50,7 +50,9 @@ impl Evaluator {
             Expr::Ident(name) => scope
                 .get(name)
                 .map(|value| {
-                    stdlib::builtin_marker_class(name, value).unwrap_or_else(|| value.clone())
+                    stdlib::builtin_marker_class(name, value)
+                        .or_else(|| alias_over_class(name, value, scope))
+                        .unwrap_or_else(|| value.clone())
                 })
                 .or_else(|| {
                     scope
@@ -923,7 +925,11 @@ pub(super) fn eval_simple_expr(
         Expr::String(s) => Ok(Value::String(Arc::clone(s))),
         Expr::Ident(name) => scope
             .get(name)
-            .map(|value| stdlib::builtin_marker_class(name, value).unwrap_or_else(|| value.clone()))
+            .map(|value| {
+                stdlib::builtin_marker_class(name, value)
+                    .or_else(|| alias_over_class(name, value, scope))
+                    .unwrap_or_else(|| value.clone())
+            })
             .or_else(|| {
                 scope
                     .poison_of(name)
@@ -1221,5 +1227,19 @@ fn type_alias_value(name: &str, scope: &Scope) -> Option<Value> {
 /// Whether `Pair` in `scope` is still the built-in marker rather than a user
 /// binding of that name.
 pub(super) fn pair_is_builtin(scope: &Scope) -> bool {
-    matches!(scope.get("Pair"), Some(Value::String(name)) if &**name == "Pair")
+    matches!(
+        (scope.get("Pair"), stdlib::builtin_marker("Pair")),
+        (Some(Value::String(got)), Value::String(marker)) if Arc::ptr_eq(got, &marker)
+    )
+}
+
+/// The `TypeAlias` for `name` when `value` is the class the alias names, which
+/// `eval_type_alias` binds under the alias's name so `new Alias {}` works.
+fn alias_over_class(name: &str, value: &Value, scope: &Scope) -> Option<Value> {
+    match value {
+        Value::Object(_, Some(source)) if source.kind == ObjectKind::Class => {
+            type_alias_value(name, scope)
+        }
+        _ => None,
+    }
 }

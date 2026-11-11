@@ -50,7 +50,8 @@ pub(super) fn typed_object(type_name: &str, members: ObjectMap) -> Value {
         is_open: false,
         is_abstract: false,
         type_name: Some(type_name.to_string()),
-        type_identity: (type_name == "RegexMatch").then(|| "pkl:base#RegexMatch".to_string()),
+        type_identity: matches!(type_name, "RegexMatch" | "Pair")
+            .then(|| format!("pkl:base#{type_name}")),
         parent_type_names: Vec::new(),
         parent_type_identities: Vec::new(),
         entry_scopes: Vec::new(),
@@ -169,7 +170,10 @@ pub(super) fn type_alias_value(identity: String) -> Value {
     };
     let mut source = Arc::unwrap_or_clone(source);
     source.type_name = Some("TypeAlias".into());
-    source.type_identity = Some(identity);
+    // The alias's own identity is kept apart from the built-in class's, which
+    // tells this value from an instance of a user class named `TypeAlias`.
+    source.type_identity = Some("pkl:base#TypeAlias".into());
+    source.declared_as = Some(identity.into());
     Value::Object(Arc::default(), Some(Arc::new(source)))
 }
 

@@ -337,8 +337,10 @@ pub(crate) fn kind_of(value: &Value) -> Kind {
         }
         Value::Object(_, Some(source)) => match source.type_name.as_deref() {
             Some("RenderDirective") => Kind::RenderDirective,
-            Some("Pair") => Kind::Pair,
-            Some("TypeAlias") => Kind::TypeAlias,
+            Some("Pair") if source.type_identity.as_deref() == Some("pkl:base#Pair") => Kind::Pair,
+            Some("TypeAlias") if source.type_identity.as_deref() == Some("pkl:base#TypeAlias") => {
+                Kind::TypeAlias
+            }
             Some("Dynamic") => Kind::Dynamic,
             Some("Mapping" | "Map") => Kind::Mapping,
             Some(_) => Kind::Typed,
@@ -1165,16 +1167,13 @@ pub(crate) fn display_value(value: &Value) -> String {
         (Kind::Regex, Value::Regex(regex)) => format!("Regex({:?})", regex.pattern()),
         (kind @ Kind::Function, _) => format!("new {} {{}}", kind.pkl_class(value)),
         (Kind::IntSeq, Value::List(items)) => {
-            let items: Vec<i64> = items
-                .iter()
-                .filter_map(|item| match item {
-                    Value::Int(n) => Some(*n),
-                    _ => None,
-                })
-                .collect();
-            match (items.first(), items.last()) {
+            let int = |item: Option<&Value>| match item {
+                Some(Value::Int(n)) => Some(*n),
+                _ => None,
+            };
+            match (int(items.first()), int(items.last())) {
                 (Some(start), Some(end)) if items.len() > 1 => {
-                    let step = items[1] - start;
+                    let step = int(items.get(1)).unwrap_or(start + 1) - start;
                     if step == 1 {
                         format!("IntSeq({start}, {end})")
                     } else {
@@ -1190,9 +1189,12 @@ pub(crate) fn display_value(value: &Value) -> String {
             map.get("first").map(display_value).unwrap_or_default(),
             map.get("second").map(display_value).unwrap_or_default()
         ),
-        (Kind::Class | Kind::TypeAlias, Value::Object(_, Some(source))) => source
-            .type_identity
-            .as_deref()
+        (Kind::Class | Kind::TypeAlias, Value::Object(_, Some(source))) => {
+            (if kind_of(value) == Kind::TypeAlias {
+                source.declared_as.as_deref()
+            } else {
+                source.type_identity.as_deref()
+            })
             .map(|identity| match identity.rsplit_once('.') {
                 Some((module, name)) => {
                     let module = module.rsplit(['/', '\\']).next().unwrap_or(module);
@@ -1202,7 +1204,8 @@ pub(crate) fn display_value(value: &Value) -> String {
                 None => identity.to_string(),
             })
             .or_else(|| source.type_name.clone())
-            .unwrap_or_default(),
+            .unwrap_or_default()
+        }
         (Kind::Mapping, Value::Object(map, source))
             if !map.is_empty() && map.keys().all(|key| class_key_name(key).is_none()) =>
         {
