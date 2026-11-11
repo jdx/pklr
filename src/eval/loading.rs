@@ -219,23 +219,17 @@ impl Evaluator {
         self.package_bases.insert(key, base.to_string());
     }
 
-    /// [`Self::check_module_allowed`] for the module at `path`, which is a URL
+    /// The URI the module policy sees for the module at `path`, which is a URL
     /// for a remote module and a file otherwise. A module read from a package
-    /// is checked by its `package:` URI.
-    pub(super) fn check_module_path_allowed(&mut self, path: &Path) -> Result<()> {
-        if self.allowed_modules.is_none() {
-            return Ok(());
-        }
+    /// is named by its `package:` URI.
+    fn module_policy_uri(&mut self, path: &Path) -> String {
         let name = path.to_string_lossy();
         if name.contains("://") {
             let package = self.package_bases.iter().find_map(|(root, base)| {
                 let rest = name.strip_prefix(root.as_str())?;
                 Some(format!("{base}#/{rest}"))
             });
-            return match package {
-                Some(uri) => self.check_module_allowed(&uri),
-                None => self.check_module_allowed(&name),
-            };
+            return package.unwrap_or_else(|| name.into_owned());
         }
         let absolute = absolute_clean(&self.host_absolute_path(path.to_path_buf()));
         #[cfg(feature = "package-zip")]
@@ -244,10 +238,19 @@ impl Evaluator {
                 && let Some(base) = self.package_bases.get(zip_url)
             {
                 let rest = rest.to_string_lossy().replace('\\', "/");
-                return self.check_module_allowed(&format!("{base}#/{rest}"));
+                return format!("{base}#/{rest}");
             }
         }
-        self.check_module_allowed(&file_uri(&absolute))
+        file_uri(&absolute)
+    }
+
+    /// [`Self::check_module_allowed`] for the module at `path`.
+    pub(super) fn check_module_path_allowed(&mut self, path: &Path) -> Result<()> {
+        if self.allowed_modules.is_none() {
+            return Ok(());
+        }
+        let uri = self.module_policy_uri(path);
+        self.check_module_allowed(&uri)
     }
 
     /// Load and parse the module `uri` names, sharing the parse cache with
@@ -328,6 +331,8 @@ impl Evaluator {
     /// Read, lex, parse, and evaluate a local file (with caching).
     /// Inserts a placeholder before evaluation to break circular imports.
     pub(super) fn eval_import_file(&mut self, path: &Path, depth: usize) -> Result<Value> {
+        // Check the requested path, not just the canonical file a cache keys on.
+        self.check_module_path_allowed(path)?;
         let canonical = self.canonicalize_io(path)?;
         if let Some(cached) = self.cached_import(&canonical) {
             return Ok(cached);
@@ -354,6 +359,7 @@ impl Evaluator {
         if requested_fields.is_none() {
             return self.eval_import_file(path, depth);
         }
+        self.check_module_path_allowed(path)?;
         let canonical = self.canonicalize_io(path)?;
         if let Some(cached) = self.cached_import(&canonical) {
             return Ok(cached);
@@ -423,6 +429,7 @@ impl Evaluator {
         if inherited_scope.is_none() {
             return self.eval_import_file(path, depth);
         }
+        self.check_module_path_allowed(path)?;
         let canonical = self.canonicalize_io(path)?;
         if !self.scoped_imports_in_flight.insert(canonical.clone()) {
             self.placeholder_reads += 1;
@@ -534,7 +541,7 @@ impl Evaluator {
             let fixed = uri.find(['*', '?', '[', '{']).map_or(uri, |i| &uri[..i]);
             let dir = fixed.rfind('/').map_or("", |i| &fixed[..=i]);
             let dir_path = self.local_file_path(path, dir)?;
-            let mut dir_uri = file_uri(&absolute_clean(&self.host_absolute_path(dir_path)));
+            let mut dir_uri = self.module_policy_uri(&dir_path);
             if !dir_uri.ends_with('/') {
                 dir_uri.push('/');
             }

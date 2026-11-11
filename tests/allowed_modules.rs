@@ -26,7 +26,11 @@ impl Drop for TestTempDir {
 
 /// The `file:` URI of `path`, as pklr spells it.
 fn uri(path: &std::path::Path) -> String {
-    let path = path.display().to_string().replace('\\', "/");
+    let path = path
+        .display()
+        .to_string()
+        .replace('\\', "/")
+        .replace(' ', "%20");
     if path.starts_with('/') {
         format!("file://{path}")
     } else {
@@ -211,4 +215,19 @@ fn denied_modules_are_refused_before_any_io() {
     // As in pkl, an import that is never used is never loaded.
     std::fs::write(&a, "import \"sub/b.pkl\" as b\nv = 1\n").unwrap();
     assert_eq!(eval(&a, &[pat(&a)]).unwrap()["v"], 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_denied_symlink_is_not_served_from_the_cache() {
+    let (_temp, dir) = project("pklr_modules_symlink");
+    std::os::unix::fs::symlink(dir.join("sub/b.pkl"), dir.join("link.pkl")).unwrap();
+    let a = dir.join("a.pkl");
+    std::fs::write(
+        &a,
+        "import \"sub/b.pkl\" as b\nimport \"link.pkl\" as l\nv = b.x + l.x\n",
+    )
+    .unwrap();
+    let error = eval(&a, &[pat(&a), pat(&dir.join("sub/b.pkl"))]).unwrap_err();
+    assert!(error.contains("link.pkl"), "{error}");
 }
