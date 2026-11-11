@@ -998,3 +998,22 @@ fn a_module_exports_the_types_of_every_base_it_amends_or_extends() {
         );
     }
 }
+
+#[test]
+fn a_reused_evaluator_forgets_the_base_a_module_used_to_extend() {
+    let temp = TestTempDir::new("pklr_test_reused_evaluator_bases");
+    let write = |name: &str, src: &str| std::fs::write(temp.path().join(name), src).unwrap();
+    write("base.pkl", "open module base\nclass C {}\n");
+    write("m.pkl", "extends \"base.pkl\"\n");
+    write("main.pkl", "import \"m.pkl\"\nr = 1 is m.C\n");
+    let mut evaluator = Evaluator::new();
+    let main = temp.path().join("main.pkl");
+    assert_eq!(
+        evaluator.eval_file(&main).unwrap().to_json(),
+        serde_json::json!({"r": false})
+    );
+    // The module no longer extends the base and keeps `C` to itself.
+    write("m.pkl", "import \"base.pkl\"\nlocal class C {}\nx = base\n");
+    let error = evaluator.eval_file(&main).unwrap_err().to_string();
+    assert!(error.contains("Cannot find type `C`"), "{error}");
+}

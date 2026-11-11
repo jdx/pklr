@@ -38,11 +38,13 @@ impl Evaluator {
     /// The key of the saved scope of the local module `module` amends or
     /// extends.
     fn parent_module_key(&mut self, module: &Module, path: &Path) -> Option<PathBuf> {
-        // The base the module loaded, however it was found.
+        let uri = module.amends.as_ref().or(module.extends.as_ref())?;
+        // The base the module loaded, however it was found. A module that
+        // no longer amends or extends anything has none, whatever an earlier
+        // load of it recorded.
         if let Some(base) = self.inherited_bases.get(path) {
             return Some(base.clone());
         }
-        let uri = module.amends.as_ref().or(module.extends.as_ref())?;
         if uri.contains("://") && !uri.starts_with("file://") {
             return None;
         }

@@ -199,6 +199,7 @@ impl Evaluator {
         self.resource_cache.clear();
         clear_names();
         self.module_scopes.clear();
+        self.inherited_bases.clear();
         self.rendered_member_failed = false;
         self.scoped_imports_in_flight.clear();
         self.converters.clear();
