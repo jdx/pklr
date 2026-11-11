@@ -303,33 +303,38 @@ impl JsonParser<'_> {
             }
         }
         // The object itself is converted by its parent (or as the document).
-        let source = ObjectSource {
-            entries: Vec::new().into(),
-            captured: super::SourceScope::default(),
-            body_members: Default::default(),
-            is_open: true,
-            is_abstract: false,
-            type_name: None,
-            type_identity: None,
-            parent_type_names: Vec::new(),
-            parent_type_identities: Vec::new(),
-            entry_scopes: Vec::new(),
-            evaluated_properties: Vec::new(),
-            elements: Vec::new(),
-            mapping_value_types: Vec::new(),
-            deprecated: Default::default(),
-            poisoned_members: None,
-            declared_as: None,
-            kind: if self.use_mapping {
-                ObjectKind::Mapping
-            } else {
-                ObjectKind::Object
-            },
-            is_parsed_json: true,
-            is_module: false,
-            prototype: None,
-        };
         self.depth -= 1;
-        Ok(Value::Object(Arc::new(map), Some(Arc::new(source))))
+        Ok(parsed_object(map, self.use_mapping))
     }
+}
+
+/// A parsed object: a `Dynamic`, or a `Mapping` with `use_mapping`.
+pub(super) fn parsed_object(map: ObjectMap, use_mapping: bool) -> Value {
+    let source = ObjectSource {
+        entries: Vec::new().into(),
+        captured: super::SourceScope::default(),
+        body_members: Default::default(),
+        is_open: true,
+        is_abstract: false,
+        type_name: None,
+        type_identity: None,
+        parent_type_names: Vec::new(),
+        parent_type_identities: Vec::new(),
+        entry_scopes: Vec::new(),
+        evaluated_properties: Vec::new(),
+        elements: Vec::new(),
+        mapping_value_types: Vec::new(),
+        deprecated: Default::default(),
+        poisoned_members: None,
+        declared_as: None,
+        kind: if use_mapping {
+            ObjectKind::Mapping
+        } else {
+            ObjectKind::Object
+        },
+        is_parsed_json: true,
+        is_module: false,
+        prototype: None,
+    };
+    Value::Object(Arc::new(map), Some(Arc::new(source)))
 }

@@ -700,6 +700,16 @@ pub(super) fn is_evaluator_control_error(error: &Error) -> bool {
 
 pub(super) fn caught_error_message(error: Error) -> String {
     match error {
+        // A parser's detail is the cause of the error, which `catch` does
+        // not report: only the first paragraph is its message.
+        Error::Eval(message)
+            if message.starts_with("Error parsing JSON document.")
+                || message.starts_with("Error parsing YAML document.") =>
+        {
+            message
+                .split_once("\n\n")
+                .map_or(message.clone(), |(first, _)| first.to_string())
+        }
         Error::Eval(message) => message,
         error => error.to_string(),
     }

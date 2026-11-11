@@ -46,6 +46,7 @@ pub(crate) mod stdlib;
 mod trace;
 mod typecheck;
 mod types;
+mod yaml_parser;
 
 use amend::*;
 use analysis::*;
