@@ -325,6 +325,21 @@ fn modulepath_admission_is_per_import() {
         .to_string();
     assert!(err.contains("Refusing to load module `file://"), "{err}");
 
+    // The same through a glob that only its directory is allowed for.
+    let glob = "import \"modulepath:/lib/a.pkl\" as viaModulePath\nimport* \"mp/lib/*.pkl\" as viaGlob\ny = viaModulePath.x\nz = viaGlob\n";
+    let (_temp, dir) = modulepath_project("pklr_modules_mp_glob", glob);
+    let err = EvaluatorBuilder::new()
+        .module_path([dir.join("mp")])
+        .allowed_modules([
+            pat(&dir.join("root.pkl")),
+            "^modulepath:".to_string(),
+            pat(&dir.join("mp/lib")) + "/$",
+        ])
+        .eval_to_json(&dir.join("root.pkl"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("Refusing to load module `file://"), "{err}");
+
     let missing = "import \"modulepath:/lib/none.pkl\"\ny = none.x\n";
     let (_temp, dir) = modulepath_project("pklr_modules_mp_missing", missing);
     let err = eval_mp(&dir, &["^file:"]).unwrap_err();

@@ -665,6 +665,9 @@ impl Evaluator {
             if self.same_local_path(&matched_path, path)? {
                 continue;
             }
+            // A match is checked by its own file URI, not by an earlier
+            // `modulepath:` admission of the same file.
+            self.check_file_path_allowed(&matched_path)?;
             let val = self.eval_file_with_requested_fields(&matched_path, depth + 1, None)?;
             mapping.insert(rel_key.into(), val);
         }
