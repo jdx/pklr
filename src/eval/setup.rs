@@ -97,6 +97,8 @@ impl Evaluator {
             external_properties: BTreeMap::default(),
             module_scopes: HashMap::default(),
             inherited_bases: HashMap::default(),
+            scope_keys: HashMap::default(),
+            layered_scopes: HashMap::default(),
             rendered_member_failed: false,
             env_reads: BTreeMap::new(),
             scoped_imports_in_flight: HashSet::default(),
@@ -200,6 +202,8 @@ impl Evaluator {
         clear_names();
         self.module_scopes.clear();
         self.inherited_bases.clear();
+        self.scope_keys.clear();
+        self.layered_scopes.clear();
         self.rendered_member_failed = false;
         self.scoped_imports_in_flight.clear();
         self.converters.clear();

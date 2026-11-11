@@ -800,6 +800,7 @@ impl Evaluator {
         let type_aliases = scope.flatten_type_aliases();
         let alias_definers = self.inherited_alias_definers(module, path, &type_aliases);
         let exported_types = self.exported_types(module, path);
+        self.layered_scopes.remove(path);
         self.module_scopes.insert(
             path.to_path_buf(),
             ModuleScopeSnapshot {

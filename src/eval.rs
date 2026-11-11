@@ -142,6 +142,10 @@ pub struct Evaluator {
     /// The key of the saved scope of the module each module amends or extends,
     /// whether that module is a local file, a remote one or a package's.
     inherited_bases: HashMap<PathBuf, PathBuf>,
+    /// The saved-scope key of each import identity looked up in this run.
+    scope_keys: HashMap<String, PathBuf>,
+    /// The scope each module's saved bindings make, built once per run.
+    layered_scopes: HashMap<PathBuf, Scope>,
     /// Whether a module evaluated in this run has a failed property that
     /// rendering it would output (see `PoisonedMember::rendered`), so the
     /// output must be checked for one.

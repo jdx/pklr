@@ -445,13 +445,24 @@ impl Evaluator {
     fn module_class_scope(&mut self, identity: &str, name: &str) -> Option<Scope> {
         let key = self.module_scope_key(identity)?;
         self.module_exports(&key, name).then_some(())?;
-        let mut module_scope = Scope::default();
-        self.layer_evaluated_module_scope(&key, &mut module_scope);
+        let module_scope = self.layered_module_scope(&key);
         matches!(
             module_scope.get(name),
             Some(Value::Object(_, Some(source))) if source.kind == ObjectKind::Class
         )
         .then_some(module_scope)
+    }
+
+    /// The scope the saved bindings of the module with the key `key` make,
+    /// kept for the evaluation: building it copies every binding.
+    fn layered_module_scope(&mut self, key: &Path) -> Scope {
+        if let Some(scope) = self.layered_scopes.get(key) {
+            return scope.clone();
+        }
+        let mut scope = Scope::default();
+        self.layer_evaluated_module_scope(key, &mut scope);
+        self.layered_scopes.insert(key.to_path_buf(), scope.clone());
+        scope
     }
 
     /// The type alias `name` of the module with the scope key `module`, with
@@ -469,8 +480,7 @@ impl Evaluator {
             .get(module)
             .and_then(|snapshot| snapshot.alias_definers.get(name))
             .map_or_else(|| module.to_path_buf(), Clone::clone);
-        let mut module_scope = Scope::default();
-        self.layer_evaluated_module_scope(&definer, &mut module_scope);
+        let mut module_scope = self.layered_module_scope(&definer);
         module_scope.alias_module = Some(Arc::new(definer));
         let alias = module_scope.get_type_alias(name)?.clone();
         Some((alias, module_scope))
@@ -499,8 +509,13 @@ impl Evaluator {
 
     /// The key of the final scope of the module with the given identity.
     fn module_scope_key(&mut self, identity: &str) -> Option<PathBuf> {
+        if let Some(key) = self.scope_keys.get(identity)
+            && self.module_scopes.contains_key(key)
+        {
+            return Some(key.clone());
+        }
         let keys: Vec<PathBuf> = self.module_scopes.keys().cloned().collect();
-        keys.into_iter().find(|key| {
+        let found = keys.into_iter().find(|key| {
             let key_identity = if key.to_string_lossy().contains("://") {
                 key.display().to_string()
             } else {
@@ -510,7 +525,11 @@ impl Evaluator {
                     .to_string()
             };
             key_identity == identity
-        })
+        });
+        if let Some(key) = &found {
+            self.scope_keys.insert(identity.to_string(), key.clone());
+        }
+        found
     }
 
     /// The type alias `module.member` of an imported module, with the scope
