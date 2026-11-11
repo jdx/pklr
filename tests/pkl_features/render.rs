@@ -1347,3 +1347,19 @@ primary = new yaml.Parser {}.parse("%TAG ! tag:yaml.org,2002:\n--- !str 123")
     assert_eq!(json["handle"], "123");
     assert_eq!(json["primary"], "123");
 }
+
+#[test]
+fn yaml_parser_limits_collection_aliases() {
+    let json = eval(
+        r##"import "pkl:yaml"
+import "pkl:test"
+local text = "a: &x [1]\nb: *x\nc: *x\nd: *x"
+scalars = new yaml.Parser { maxCollectionAliases = 0 }.parse("a: &x 1\nb: *x\nc: *x")
+within = new yaml.Parser { maxCollectionAliases = 3 }.parse(text)
+over = test.catch(() -> new yaml.Parser { maxCollectionAliases = 2 }.parse(text))
+"##,
+    );
+    assert_eq!(json["scalars"], serde_json::json!({"a": 1, "b": 1, "c": 1}));
+    assert_eq!(json["within"]["d"], serde_json::json!([1]));
+    assert_eq!(json["over"], "Error parsing YAML document.");
+}

@@ -37,6 +37,7 @@ pub(crate) fn parse_yaml(
     text: &str,
     mode: Mode,
     use_mapping: bool,
+    max_aliases: i64,
     converters: &Converters,
     invoke: &mut dyn Invoke,
 ) -> Result<Vec<Value>> {
@@ -47,6 +48,8 @@ pub(crate) fn parse_yaml(
         pos: 0,
         mode,
         use_mapping,
+        max_aliases,
+        aliases: 0,
         converters,
         invoke,
         path: vec![PathPart::TopLevel],
@@ -96,6 +99,10 @@ struct Yaml<'a> {
     pos: usize,
     mode: Mode,
     use_mapping: bool,
+    /// `maxCollectionAliases`, and the aliases of collections seen in the
+    /// current document.
+    max_aliases: i64,
+    aliases: i64,
     converters: &'a Converters,
     invoke: &'a mut dyn Invoke,
     path: Vec<PathPart>,
@@ -225,6 +232,7 @@ impl Yaml<'_> {
                 continue;
             }
             self.anchors.clear();
+            self.aliases = 0;
             self.path.truncate(1);
             let value = self.block_node(-1, false, false, 0)?;
             docs.push(value);
@@ -544,7 +552,15 @@ impl Yaml<'_> {
                 self.pos += 1;
                 let name = self.token();
                 match self.anchors.get(&name) {
-                    Some(value) if props.is_empty() => Body::Alias(value.clone()),
+                    Some(value) if props.is_empty() => {
+                        if matches!(value, Value::Object(..) | Value::List(..)) {
+                            self.aliases += 1;
+                            if self.aliases > self.max_aliases {
+                                return fail();
+                            }
+                        }
+                        Body::Alias(value.clone())
+                    }
                     _ => return fail(),
                 }
             }

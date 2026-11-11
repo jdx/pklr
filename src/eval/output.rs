@@ -345,11 +345,16 @@ impl Evaluator {
         }
         .ok_or_else(|| Error::Eval("Invalid YAML parser mode.".into()))?;
         let use_mapping = matches!(settings.get("useMapping"), Some(Value::Bool(true)));
+        let max_aliases = match settings.get("maxCollectionAliases") {
+            Some(Value::Int(limit)) => *limit,
+            _ => 50,
+        };
         let converters = Converters::from_mapping(settings.get("converters"))?;
         let mut docs = super::yaml_parser::parse_yaml(
             &text,
             mode,
             use_mapping,
+            max_aliases,
             &converters,
             &mut Invoker(self, depth),
         )?;
