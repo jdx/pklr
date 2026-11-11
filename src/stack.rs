@@ -26,7 +26,7 @@ const RESERVE: usize = 32 << 20;
 /// Unit tests read thread-local counters that an evaluation must update on the
 /// test's own thread, so there it is unlimited; `tests/nesting.rs` covers the
 /// move.
-const CALLER_BUDGET: usize = if cfg!(test) { usize::MAX } else { 1 << 20 };
+const CALLER_BUDGET: usize = if cfg!(test) { usize::MAX } else { 512 << 10 };
 
 /// Nesting limit of the parser on the large stack.
 pub(crate) const PARSER_DEPTH: usize = 50_000;
