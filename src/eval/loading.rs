@@ -48,6 +48,10 @@ impl Evaluator {
             let mut candidate = dir;
             candidate.extend(&segments);
             if self.is_file_io(&candidate)? {
+                if self.allowed_modules.is_some() {
+                    let absolute = absolute_clean(&self.host_absolute_path(candidate.clone()));
+                    self.module_path_uris.insert(absolute, uri.to_string());
+                }
                 return Ok(candidate);
             }
         }
@@ -276,6 +280,10 @@ impl Evaluator {
             return package.unwrap_or_else(|| name.into_owned());
         }
         let absolute = absolute_clean(&self.host_absolute_path(path.to_path_buf()));
+        // A module found on the module path is named by its `modulepath:` URI.
+        if let Some(uri) = self.module_path_uris.get(&absolute) {
+            return uri.clone();
+        }
         #[cfg(feature = "package-zip")]
         for (zip_url, dir) in &self.package_dirs {
             if let Ok(rest) = absolute.strip_prefix(dir)

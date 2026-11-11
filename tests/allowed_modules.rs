@@ -239,3 +239,62 @@ fn a_denied_entry_is_refused_before_it_is_read() {
     let error = eval(&dir.join("missing.pkl"), &["https:".into()]).unwrap_err();
     assert!(error.contains("Refusing to load module"), "{error}");
 }
+
+/// A project whose `lib/a.pkl` is found through the module path `dir/mp`.
+fn modulepath_project(name: &str, root: &str) -> (TestTempDir, std::path::PathBuf) {
+    let temp = TestTempDir::new(name);
+    let dir = std::fs::canonicalize(temp.path()).unwrap();
+    std::fs::create_dir_all(dir.join("mp/lib")).unwrap();
+    std::fs::write(dir.join("mp/lib/a.pkl"), "open module a\nx = 1\n").unwrap();
+    std::fs::write(dir.join("root.pkl"), root).unwrap();
+    (temp, dir)
+}
+
+fn eval_mp(dir: &std::path::Path, patterns: &[&str]) -> Result<serde_json::Value, String> {
+    EvaluatorBuilder::new()
+        .module_path([dir.join("mp")])
+        .allowed_modules(patterns.iter().map(|p| p.to_string()))
+        .eval_to_json(&dir.join("root.pkl"))
+        .map_err(|e| e.to_string())
+}
+
+const MODULEPATH_ROOTS: [(&str, &str); 4] = [
+    ("import", "import \"modulepath:/lib/a.pkl\"\ny = a.x\n"),
+    ("amends", "amends \"modulepath:/lib/a.pkl\"\n"),
+    ("extends", "extends \"modulepath:/lib/a.pkl\"\n"),
+    ("import_expr", "y = import(\"modulepath:/lib/a.pkl\").x\n"),
+];
+
+/// Pkl matches the patterns against the `modulepath:` URI, not the file it
+/// resolves to: `^file:` alone refuses the module, `^modulepath:` admits it.
+#[test]
+fn modulepath_modules_are_matched_by_their_uri() {
+    for (kind, root) in MODULEPATH_ROOTS {
+        let (_temp, dir) = modulepath_project(&format!("pklr_modules_mp_{kind}"), root);
+        let refused = "Refusing to load module `modulepath:/lib/a.pkl` because it does not match any entry in the module allowlist";
+        for patterns in [&["^file:"][..], &["^repl:", "^file:"], &["^pkl:", "^file:"]] {
+            let err = eval_mp(&dir, patterns).unwrap_err();
+            assert!(err.contains(refused), "{kind} {patterns:?}: {err}");
+        }
+        let ok = eval_mp(&dir, &["^file:", "^modulepath:"]);
+        // The URI is allowed; any failure left is not the policy.
+        if let Err(err) = ok {
+            assert!(!err.contains("Refusing"), "{kind}: {err}");
+        }
+        let ok = eval_mp(&dir, &["^file:", "^modulepath:/lib/a\\.pkl$"]);
+        if let Err(err) = ok {
+            assert!(!err.contains("Refusing"), "{kind}: {err}");
+        }
+    }
+}
+
+/// A pattern naming only `modulepath:` does not admit the importing file.
+#[test]
+fn modulepath_only_policy_refuses_the_file_root() {
+    let (_temp, dir) = modulepath_project("pklr_modules_mp_root", MODULEPATH_ROOTS[0].1);
+    let err = eval_mp(&dir, &["^modulepath:"]).unwrap_err();
+    assert!(
+        err.contains("Refusing to load module `file://") && err.contains("root.pkl"),
+        "{err}"
+    );
+}

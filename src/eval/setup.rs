@@ -100,6 +100,7 @@ impl Evaluator {
                 .collect(),
             allowed_modules: None,
             package_bases: HashMap::default(),
+            module_path_uris: HashMap::default(),
             environment: None,
             external_properties: BTreeMap::default(),
             module_scopes: HashMap::default(),
