@@ -149,6 +149,13 @@ impl Evaluator {
             }
             let result = body(self);
             self.max_depth = saved;
+            if large {
+                // These hold the parsed trees, which free recursively; do it
+                // here rather than on the caller's small stack.
+                self.parse_cache.clear();
+                self.plan_cache.clear();
+                self.body_roots_cache.clear();
+            }
             result
         })
     }

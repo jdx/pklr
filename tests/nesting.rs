@@ -99,3 +99,44 @@ fn direct_parse_keeps_the_conservative_cap() {
         .unwrap();
     assert!(err.contains("nested more than 128 levels"), "{err}");
 }
+
+#[test]
+fn dropping_an_evaluator_after_a_deep_module_does_not_overflow() {
+    let depth = std::env::var("PKLR_TEST_DEPTH")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(3_000);
+    let dir = std::env::temp_dir().join(format!("pklr-nesting-drop-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("deep.pkl");
+    std::fs::write(&path, nested_lets(depth)).unwrap();
+    let mut evaluator = Evaluator::new();
+    let result = evaluator.eval_file(&path);
+    // The parsed tree is freed here, on the test's small stack.
+    drop(evaluator);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn a_long_amends_chain_is_an_error_or_a_result_not_a_crash() {
+    let n: usize = std::env::var("PKLR_TEST_CHAIN")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(300);
+    let dir = std::env::temp_dir().join(format!("pklr-nesting-chain-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for i in 0..n {
+        let body = if i + 1 == n {
+            "x = 1\n".to_string()
+        } else {
+            format!("amends \"m{}.pkl\"\n", i + 1)
+        };
+        std::fs::write(dir.join(format!("m{i}.pkl")), body).unwrap();
+    }
+    let result = pklr::eval_to_json(&dir.join("m0.pkl"));
+    let _ = std::fs::remove_dir_all(&dir);
+    if let Ok(json) = result {
+        assert_eq!(json["x"], 1);
+    }
+}

@@ -108,7 +108,7 @@ impl Evaluator {
         type_names: &mut HashSet<Name>,
     ) -> Result<HashSet<Name>> {
         let mut refs = HashSet::default();
-        if depth > self.max_depth {
+        if depth > self.max_depth || crate::stack::exhausted() {
             crate::stack::limit_hit();
             return Ok(refs);
         }
