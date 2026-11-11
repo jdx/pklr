@@ -16,7 +16,7 @@ use super::{
 use crate::error::{Error, Result};
 use crate::lexer;
 use crate::parser::{self, Entry, Expr, Modifier, Module, Property, TypeExpr};
-use crate::value::{ObjectMap, ObjectSource, Value};
+use crate::value::{ListKind, ListValue, ObjectMap, ObjectSource, Value};
 
 /// The `pkl:base` classes pklr provides, as Pkl source. Their methods
 /// (`renderDocument`, `renderValue`) are implemented natively.
@@ -137,6 +137,16 @@ class Parser {
 }
 "#;
 
+/// `pkl:yaml`, as Pkl source.
+const YAML_MODULE: &str = r#"
+class Parser {
+  mode: "compat" | "1.1" | "1.2" = "compat"
+  useMapping: Boolean = false
+  converters = new Mapping {}
+  maxCollectionAliases: Int32 = 50
+}
+"#;
+
 /// `pkl:xml`, as Pkl source.
 const XML_MODULE: &str = r#"
 class Renderer {
@@ -207,6 +217,7 @@ impl Evaluator {
             "json" => ("pkl:json", JSON_MODULE),
             "jsonnet" => ("pkl:jsonnet", JSONNET_MODULE),
             "xml" => ("pkl:xml", XML_MODULE),
+            "yaml" => ("pkl:yaml", YAML_MODULE),
             _ => return Ok(super::stdlib_module(name)),
         };
         if let Some(module) = self.builtin_classes.get(key) {
@@ -273,6 +284,13 @@ impl Evaluator {
         if method == "parse" && render::typed_class_is(renderer, "pkl:json", "Parser") {
             return self.eval_json_parse(renderer, args, depth).map(Some);
         }
+        if matches!(method, "parse" | "parseAll")
+            && render::typed_class_is(renderer, "pkl:yaml", "Parser")
+        {
+            return self
+                .eval_yaml_parse(renderer, method == "parseAll", args, depth)
+                .map(Some);
+        }
         let document = match method {
             "renderDocument" => true,
             "renderValue" => false,
@@ -292,28 +310,65 @@ impl Evaluator {
         Ok(Some(Value::String(text.into())))
     }
 
+    /// The text of a parser's `source` argument: a string or a resource.
+    fn parser_source(args: &[Value]) -> Result<Arc<str>> {
+        match args {
+            [Value::String(text)] => Ok(text.clone()),
+            [Value::Object(resource, _)] => match resource.get("text") {
+                Some(Value::String(text)) => Ok(text.clone()),
+                _ => Err(Error::Eval(
+                    "Expected a `String` or `Resource` to parse.".into(),
+                )),
+            },
+            _ => Err(Error::Eval(format!(
+                "parse() expects 1 argument of type `String` or `Resource`, got {}",
+                args.len()
+            ))),
+        }
+    }
+
+    /// `yaml.Parser.parse(source)` or `parseAll(source)`.
+    fn eval_yaml_parse(
+        &mut self,
+        parser: &Value,
+        all: bool,
+        args: &[Value],
+        depth: usize,
+    ) -> Result<Value> {
+        let Value::Object(settings, _) = parser else {
+            return Err(Error::Eval("expected a yaml.Parser".into()));
+        };
+        let text = Self::parser_source(args)?;
+        let mode = match settings.get("mode") {
+            Some(Value::String(mode)) => super::yaml_parser::Mode::parse(mode),
+            _ => Some(super::yaml_parser::Mode::Compat),
+        }
+        .ok_or_else(|| Error::Eval("Invalid YAML parser mode.".into()))?;
+        let use_mapping = matches!(settings.get("useMapping"), Some(Value::Bool(true)));
+        let converters = Converters::from_mapping(settings.get("converters"))?;
+        let mut docs = super::yaml_parser::parse_yaml(
+            &text,
+            mode,
+            use_mapping,
+            &converters,
+            &mut Invoker(self, depth),
+        )?;
+        if all {
+            return Ok(Value::List(ListValue::new(ListKind::Listing, docs)));
+        }
+        match docs.len() {
+            0 => Ok(Value::Null),
+            1 => Ok(docs.remove(0)),
+            _ => Err(Error::Eval("Error parsing YAML document.".into())),
+        }
+    }
+
     /// `json.Parser.parse(source)`, where `source` is a string or a resource.
     fn eval_json_parse(&mut self, parser: &Value, args: &[Value], depth: usize) -> Result<Value> {
         let Value::Object(settings, _) = parser else {
             return Err(Error::Eval("expected a json.Parser".into()));
         };
-        let text = match args {
-            [Value::String(text)] => text.clone(),
-            [Value::Object(resource, _)] => match resource.get("text") {
-                Some(Value::String(text)) => text.clone(),
-                _ => {
-                    return Err(Error::Eval(
-                        "Expected a `String` or `Resource` to parse.".into(),
-                    ));
-                }
-            },
-            _ => {
-                return Err(Error::Eval(format!(
-                    "parse() expects 1 argument of type `String` or `Resource`, got {}",
-                    args.len()
-                )));
-            }
-        };
+        let text = Self::parser_source(args)?;
         let use_mapping = matches!(settings.get("useMapping"), Some(Value::Bool(true)));
         let converters = Converters::from_mapping(settings.get("converters"))?;
         super::parsers::parse_json(&text, use_mapping, &converters, &mut Invoker(self, depth))
