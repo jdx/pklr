@@ -28,8 +28,14 @@ const RESERVE: usize = 32 << 20;
 /// move.
 const CALLER_BUDGET: usize = if cfg!(test) { usize::MAX } else { 512 << 10 };
 
-/// Nesting limit of the parser on the large stack.
-pub(crate) const PARSER_DEPTH: usize = 50_000;
+/// Nesting limit of the parser on the large stack. Debug builds use bigger
+/// frames, and the tree walks after parsing have no stack-byte guard of their
+/// own, so the limit is lower there.
+pub(crate) const PARSER_DEPTH: usize = if cfg!(debug_assertions) {
+    20_000
+} else {
+    50_000
+};
 
 /// Nesting limit of the parser and lexer on a stack of unknown size, such as
 /// a direct call to `parser::parse`.
@@ -39,7 +45,11 @@ pub(crate) const SMALL_STACK_PARSER_DEPTH: usize = 128;
 pub(crate) const SMALL_STACK_EVAL_DEPTH: usize = 32;
 
 /// Default evaluator recursion limit on the large stack.
-pub(crate) const EVAL_DEPTH: usize = 50_000;
+pub(crate) const EVAL_DEPTH: usize = if cfg!(debug_assertions) {
+    20_000
+} else {
+    50_000
+};
 
 thread_local! {
     /// Lowest stack address that recursion may reach under [`run`]; zero

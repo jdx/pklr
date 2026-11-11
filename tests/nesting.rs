@@ -140,3 +140,22 @@ fn a_long_amends_chain_is_an_error_or_a_result_not_a_crash() {
         assert_eq!(json["x"], 1);
     }
 }
+
+#[test]
+fn a_long_left_associated_chain_is_a_result_or_an_error_not_a_crash() {
+    let n: usize = std::env::var("PKLR_TEST_CHAIN_OPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30_000);
+    let src = format!("x = 1{}\n", " + 1".repeat(n));
+    match eval_source(&src) {
+        Ok(v) => assert_eq!(v["x"], n + 1),
+        Err(e) => {
+            let e = e.to_string();
+            assert!(
+                e.contains("recursion depth") || e.contains("nested more than"),
+                "{e}"
+            );
+        }
+    }
+}
