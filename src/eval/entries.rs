@@ -206,7 +206,10 @@ impl Evaluator {
                 // A nested listing whose innermost class the declaring scope
                 // could not see (a class naming itself) has no class bound
                 // there: the amending scope may know it.
-                let bound_is_complete = bound.as_deref().is_none_or(has_leaf_class);
+                let bound_is_complete = bound.as_deref().is_none_or(has_leaf_class)
+                    || scope
+                        .get(&listing_leaf_unresolved_binding(&prop.name))
+                        .is_none();
                 let elem_class = bound
                     .clone()
                     .filter(|_| bound_is_complete)
