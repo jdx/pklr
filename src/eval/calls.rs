@@ -508,7 +508,9 @@ impl Evaluator {
                     return Ok(Some(value.clone()));
                 }
                 let mut scope = Scope::for_call(&Arc::new(source.scope().clone()));
-                scope.set("super", obj.clone());
+                // A body default `default { key -> ... }` amends the default it
+                // replaces through `super.default`; none is left to amend here.
+                scope.set("super", Value::Object(Arc::default(), None));
                 // The default may read the mapping's own locals.
                 for entry in source.entries.iter() {
                     if let Entry::Property(prop) = entry
@@ -823,10 +825,9 @@ fn without_class_members(map: &Arc<ObjectMap>, source: Option<&ObjectSource>) ->
     )
 }
 
-/// Whether `expr` reads a `default`: the bare name, or `super.default`.
+/// Whether `expr` is `super.default`.
 fn is_default_member_ref(expr: &Expr) -> bool {
     match expr {
-        Expr::Ident(name) => name == "default",
         Expr::Field(base, name) => {
             name == "default" && matches!(base.as_ref(), Expr::Ident(base) if base == "super")
         }

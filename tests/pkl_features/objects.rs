@@ -7653,19 +7653,6 @@ n = (m) { ["a"] = 42; ["b"] = "x" }
 }
 
 #[test]
-fn mapping_function_default_applies_to_wrapped_untyped_new() {
-    let json = eval(
-        r#"
-m = new Mapping<String, Listing<String>> {
-  default = (key) -> new Listing { "seed" }
-  ["a"] = if (true) new { "tail" } else new {}
-}
-"#,
-    );
-    assert_eq!(json["m"]["a"], serde_json::json!(["seed", "tail"]));
-}
-
-#[test]
 fn mapping_function_default_is_not_called_for_computed_replacements() {
     let json = eval(
         r#"
@@ -7759,21 +7746,6 @@ r = f.apply(new Adder {})
 }
 
 #[test]
-fn mapping_function_default_is_tolerated_behind_let_and_unselected_branch() {
-    let json = eval(
-        r#"
-m = new Mapping {
-  default = (key) -> throw("unused")
-  ["a"] = let (flag = true) if (flag) 42 else new {}
-  ["b"] = if (true) 1 else new {}
-}
-"#,
-    );
-    assert_eq!(json["m"]["a"], 42);
-    assert_eq!(json["m"]["b"], 1);
-}
-
-#[test]
 fn amended_function_default_can_apply_an_element_only_default() {
     let json = eval(
         r#"
@@ -7785,4 +7757,33 @@ n = (m) { default = (k) -> (super.default.apply(k)) { 3 } }
 "#,
     );
     assert_eq!(json["n"]["a"], serde_json::json!([1, 3, 2]));
+}
+
+#[test]
+fn a_parameter_named_default_is_not_treated_as_a_mapping_default() {
+    let (_, err) = (
+        0,
+        eval_fails(
+            r#"
+f = (default) -> default.apply(1)
+r = f.apply(new Dynamic { x = 1 })
+"#,
+        ),
+    );
+    assert!(err.contains("apply"), "{err}");
+}
+
+#[test]
+fn mapping_get_or_default_body_default_reads_mapping_locals() {
+    let json = eval(
+        r#"
+m = new Mapping {
+  local base = 10
+  default { key -> n = base }
+  ["a"] {}
+}
+miss = m.getOrDefault("zed")
+"#,
+    );
+    assert_eq!(json["miss"]["n"], 10);
 }
