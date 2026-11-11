@@ -932,3 +932,28 @@ fn quoted_bases_keep_their_defaults_and_unions_when_amended() {
     );
     assert!(error.contains("undefined"), "{error}");
 }
+
+#[test]
+fn an_imported_class_is_a_type_whatever_value_shadows_the_import() {
+    let temp = TestTempDir::new("pklr_test_is_shadowed_import_class");
+    std::fs::write(temp.path().join("m.pkl"), "class C {}\ntypealias A = Int\n").unwrap();
+    let path = temp.path().join("main.pkl");
+    std::fs::write(
+        &path,
+        r#"import "m.pkl"
+local inst = new m.C {}
+a = let (m = 0) (inst is m.C)
+b = let (m = 0) (1 is m.C)
+c = let (m = 0) (inst as m.C)
+function f(m) = inst is m.C
+d = f(0)
+e = new Listing { for (m in List(0)) { inst is m.C } }
+g = let (m = 0) (1 is m.A)
+"#,
+    )
+    .unwrap();
+    assert_eq!(
+        pklr::eval_to_json(&path).unwrap(),
+        serde_json::json!({"a": true, "b": false, "c": {}, "d": true, "e": [true], "g": true})
+    );
+}

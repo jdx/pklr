@@ -1906,6 +1906,9 @@ pub(super) fn unresolved_type_error(
 pub(super) enum AliasLookup<'a> {
     /// The alias `name` of the imported module with this identity.
     Imported { identity: &'a str, name: &'a str },
+    /// The class `name` of the imported module with this identity. The
+    /// lookup answers with the module's scope when it declares the class.
+    ImportedClass { identity: &'a str, name: &'a str },
     /// The alias `name` of the module `scope` walks, when that module inherits
     /// it from the module that declares it.
     Inherited { scope: &'a Scope, name: &'a str },
@@ -1987,13 +1990,24 @@ impl TypeResolver<'_> {
         // `module`, `this` and `outer` stand for the enclosing scopes, whose
         // members must still name a class or alias.
         let enclosing = matches!(first, "module" | "this" | "outer") && !module.contains('.');
-        if !enclosing && resolve_dotted(scope, module).is_none() {
+        // A type resolves through the import, whatever value shadows its name.
+        if !enclosing
+            && resolve_dotted(scope, module).is_none()
+            && scope.module_identity(module).is_none()
+        {
             return Some(format!("Cannot find module import `{first}`."));
         }
         let names_class = matches!(
             resolve_dotted(scope, name),
             Some(Value::Object(_, Some(source))) if source.kind == ObjectKind::Class
-        );
+        ) || (!enclosing
+            && scope.module_identity(module).is_some_and(|identity| {
+                (self.module_alias)(AliasLookup::ImportedClass {
+                    identity,
+                    name: member,
+                })
+                .is_some()
+            }));
         if names_class {
             return None;
         }

@@ -372,6 +372,9 @@ impl Evaluator {
     ) -> Option<String> {
         unresolved_type_error(ty, scope, &mut |lookup| match lookup {
             AliasLookup::Imported { identity, name } => self.module_alias(identity, name),
+            AliasLookup::ImportedClass { identity, name } => self
+                .module_class_scope(identity, name)
+                .map(|scope| (TypeExpr::Named(name.to_string()), scope)),
             AliasLookup::Inherited { scope, name } => self.inherited_alias(scope, name),
         })
     }
@@ -387,6 +390,19 @@ impl Evaluator {
     ) -> Option<(crate::parser::TypeExpr, Scope)> {
         let key = self.module_scope_key(identity)?;
         self.alias_in_module(&key, name)
+    }
+
+    /// The scope of the imported module with the given identity, when it
+    /// declares the class `name`.
+    fn module_class_scope(&mut self, identity: &str, name: &str) -> Option<Scope> {
+        let key = self.module_scope_key(identity)?;
+        let mut module_scope = Scope::default();
+        self.layer_evaluated_module_scope(&key, &mut module_scope);
+        matches!(
+            module_scope.get(name),
+            Some(Value::Object(_, Some(source))) if source.kind == ObjectKind::Class
+        )
+        .then_some(module_scope)
     }
 
     /// The type alias `name` of the module with the scope key `module`, with
@@ -630,6 +646,16 @@ impl Evaluator {
                 }
                 if let Some(matches) = value_is_class_type(val, name, scope) {
                     return Ok(matches);
+                }
+                // A class an import declares, when a value shadows the import's
+                // name: the type resolves through the import.
+                if let Some((module, member)) = name.rsplit_once('.')
+                    && !module.contains('.')
+                    && resolve_dotted(scope, name).is_none()
+                    && let Some(identity) = scope.module_identity(module).cloned()
+                    && let Some(module_scope) = self.module_class_scope(&identity, member)
+                {
+                    return Ok(value_is_class_type(val, member, &module_scope).unwrap_or(false));
                 }
                 // An alias of an imported module is no member of its value.
                 if name.contains('.')
