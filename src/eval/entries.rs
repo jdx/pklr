@@ -1742,6 +1742,8 @@ fn bind_outer(
     // nested objects from holding a reference to the parent's property map,
     // which would otherwise force a full copy on every parent insert.
     outer_map.shift_remove("this");
+    // The saved import identities of a function are no member of `outer`.
+    outer_map.shift_remove(CAPTURED_IDENTITIES);
     for name in unused_this_aliases {
         outer_map.shift_remove(&**name);
     }

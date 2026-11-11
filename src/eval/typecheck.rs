@@ -234,8 +234,21 @@ impl Evaluator {
             TypeExpr::Nullable(_) => return true,
             TypeExpr::Named(name) => name.trim_start_matches('*'),
             TypeExpr::Constrained(base, _, form) => {
-                if let Some(quoted) = quoted_base_type(base, *form) {
-                    return self.selected_type_nullable(&quoted, scope, seen);
+                // A quoted name is exact: a `?` at its end is part of the name,
+                // so only an alias it names can make it nullable.
+                match form {
+                    BaseForm::NullableQuoted => return true,
+                    BaseForm::Quoted => {
+                        let name = base.trim_start_matches('*');
+                        return match self.resolve_unvisited_alias(name, scope, seen) {
+                            Some((alias, alias_scope)) => {
+                                let alias_scope = alias_scope.as_ref().unwrap_or(scope);
+                                self.selected_type_nullable(&alias, alias_scope, seen)
+                            }
+                            None => false,
+                        };
+                    }
+                    BaseForm::Text => {}
                 }
                 let (name, nullable) = constrained_name(base, *form);
                 if nullable {
@@ -736,12 +749,7 @@ impl Evaluator {
                 }
                 // A type of a standard library module (`base.Int`) is the
                 // type without its qualifier.
-                if let Some((module, member)) = name.rsplit_once('.')
-                    && !module.contains('.')
-                    && scope.get(module).is_some()
-                    && scope.module_identity(module).map(String::as_str) == Some("pkl:base")
-                    && STDLIB_TYPE_NAMES.contains(&member)
-                {
+                if let Some(member) = stdlib_qualified_member(scope, name) {
                     return Ok(value_is_type(
                         val,
                         &crate::parser::TypeExpr::Named(member.to_string()),
@@ -766,6 +774,18 @@ impl Evaluator {
                         .next()
                         .unwrap_or(base)
                 });
+                // `base.Int(c)`: a type of `pkl:base` is the type without its
+                // qualifier.
+                if *form == BaseForm::Text
+                    && let Some(member) = stdlib_qualified_member(scope, class_name)
+                {
+                    let unqualified = TypeExpr::Constrained(
+                        base.replacen(class_name, member, 1),
+                        constraint.clone(),
+                        *form,
+                    );
+                    return self.eval_type_check_in(val, &unqualified, scope, depth, resolving);
+                }
                 let base_matches = if nullable && is_null_value(val) {
                     true
                 } else if let Some((resolved, module_scope)) =
@@ -858,6 +878,10 @@ impl Evaluator {
             TypeExpr::Generic(name, args) => {
                 // A `*` marks a union's default alternative.
                 let name = name.trim_start_matches('*');
+                if let Some(member) = stdlib_qualified_member(scope, name) {
+                    let unqualified = TypeExpr::Generic(member.to_string(), args.clone());
+                    return self.eval_type_check_in(val, &unqualified, scope, depth, resolving);
+                }
                 if let Some((resolved, module_scope)) = self.inherited_alias(scope, name) {
                     return self.eval_alias_check(
                         val,
@@ -1310,4 +1334,16 @@ pub(super) enum UnionAmendState {
     /// A nullable union with no `*` alternative: the property is null. Holds
     /// the union as written, for the error message.
     NullDefault(String),
+}
+
+/// The type `Int` when `name` is `base.Int` and `base` is the import of
+/// `pkl:base`: a type of the standard library is the type without its
+/// qualifier.
+fn stdlib_qualified_member<'a>(scope: &Scope, name: &'a str) -> Option<&'a str> {
+    let (module, member) = name.rsplit_once('.')?;
+    (!module.contains('.')
+        && scope.get(module).is_some()
+        && scope.module_identity(module).map(String::as_str) == Some("pkl:base")
+        && STDLIB_TYPE_NAMES.contains(&member))
+    .then_some(member)
 }

@@ -1017,3 +1017,47 @@ fn a_reused_evaluator_forgets_the_base_a_module_used_to_extend() {
     let error = evaluator.eval_file(&main).unwrap_err().to_string();
     assert!(error.contains("Cannot find type `C`"), "{error}");
 }
+
+#[test]
+fn a_function_does_not_leak_its_saved_import_identities_into_outer() {
+    let json = eval(
+        r#"
+import "pkl:base" as base
+function f(x) = new Dynamic { a = outer.toMap().keys.toList() }.a
+r = f(1)
+"#,
+    );
+    let keys = json["r"].as_array().unwrap();
+    assert!(
+        keys.iter().all(|key| !key.as_str().unwrap().contains('\0')),
+        "{keys:?}"
+    );
+}
+
+#[test]
+fn a_pkl_base_qualified_type_works_with_a_constraint_nullable_and_generics() {
+    // Results are pkl 0.32.2's.
+    let json = eval(
+        r#"
+import "pkl:base" as base
+r1 = 1 is base.Int(true)
+r2 = 1 is base.Int?
+r3 = List(1) is base.List<Int>
+r4 = new Listing { 1 } is base.Listing<Int>(true)
+r5 = null is base.Int?(true)
+r6 = "a" is base.Int(true)
+"#,
+    );
+    assert_eq!(
+        json,
+        serde_json::json!({"r1": true, "r2": true, "r3": true, "r4": true, "r5": true, "r6": false})
+    );
+}
+
+#[test]
+fn a_default_marked_quoted_constrained_base_is_the_class_it_names() {
+    let json = eval(
+        "class `C?` { y = 2 }\nclass K { p: *`C?`(true)|String }\nr = new K { p { y = 5 } }.p\ns = new K {}.p",
+    );
+    assert_eq!(json, serde_json::json!({"r": {"y": 5}, "s": {"y": 2}}));
+}

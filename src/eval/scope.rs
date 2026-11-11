@@ -30,7 +30,7 @@ pub(super) fn object_type_metadata(source: &ObjectSource) -> Option<ObjectTypeMe
 }
 
 /// The binding that records which module each import a function captured is.
-const CAPTURED_IDENTITIES: &str = "\0pklr:identities";
+pub(super) const CAPTURED_IDENTITIES: &str = "\0pklr:identities";
 
 #[derive(Debug, Clone)]
 pub(super) struct Scope {

@@ -1238,7 +1238,7 @@ impl Value {
                     // Tag it, as a `Regex` is, instead of dropping its elements.
                     Some(source) if self.has_elements_and_members() => json!({
                         "_type": "dynamic",
-                        "elements": source.elements.iter().map(|v| v.to_json()).collect::<Vec<_>>(),
+                        "elements": source.elements.iter().map(|v| v.json_with(keep_classes)).collect::<Vec<_>>(),
                         "members": obj,
                     }),
                     _ => serde_json::Value::Object(obj),
