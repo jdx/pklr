@@ -260,7 +260,12 @@ impl Evaluator {
                         .iter()
                         .filter_map(|name| {
                             let name = mapping_value_type_base(name);
-                            resolve_dotted(&inherited_scope, name)
+                            // The classes of the declared value types are the
+                            // ones where the type was declared.
+                            declaring
+                                .as_ref()
+                                .and_then(|declaring| resolve_dotted(declaring, name))
+                                .or_else(|| resolve_dotted(&inherited_scope, name))
                                 .map(|value| (name.to_string(), value))
                         })
                         .collect::<Vec<_>>();
