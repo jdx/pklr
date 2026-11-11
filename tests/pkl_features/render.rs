@@ -1360,3 +1360,14 @@ localName = let (A = Person) A.simpleName
     assert_eq!(json["count"], 2);
     assert_eq!(json["localName"], "Person");
 }
+
+#[test]
+fn type_alias_text_hides_its_identity() {
+    let json = eval(
+        r#"
+typealias Email = String
+text = Email.toString()
+"#,
+    );
+    assert_eq!(json["text"], "Email");
+}

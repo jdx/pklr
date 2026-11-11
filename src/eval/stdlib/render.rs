@@ -319,6 +319,20 @@ fn render(value: &Value, explicit: bool, out: &mut String) {
         Value::Object(_, Some(source)) if source.kind == ObjectKind::Class => {
             out.push_str(&class_display_name(source));
         }
+        Value::Object(map, Some(source))
+            if source.type_identity.as_deref() == Some("pkl:base#TypeAlias") =>
+        {
+            // The alias's identity is an internal member, not public text.
+            let name = match map.get(super::TYPE_ALIAS_IDENTITY_KEY) {
+                Some(Value::String(identity)) => identity
+                    .rsplit(['.', '#'])
+                    .next()
+                    .unwrap_or(identity)
+                    .to_string(),
+                _ => "TypeAlias".to_string(),
+            };
+            out.push_str(&name);
+        }
         Value::Object(map, source) => {
             if explicit {
                 out.push_str("new ");
