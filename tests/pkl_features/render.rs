@@ -1340,8 +1340,10 @@ local parser = new yaml.Parser {
 explicit = parser.parse("? a\n: 2")
 implicit = parser.parse("a: 2")
 handle = new yaml.Parser {}.parse("%TAG !e! tag:yaml.org,2002:\n--- !e!str 123")
+primary = new yaml.Parser {}.parse("%TAG ! tag:yaml.org,2002:\n--- !str 123")
 "##,
     );
     assert_eq!(json["explicit"], json["implicit"]);
     assert_eq!(json["handle"], "123");
+    assert_eq!(json["primary"], "123");
 }

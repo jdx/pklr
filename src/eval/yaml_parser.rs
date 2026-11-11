@@ -403,7 +403,13 @@ impl Yaml<'_> {
                 None if handle == "!!" => Ok(format!("!!{suffix}")),
                 None => fail(),
             },
-            None => Ok(format!("!{name}")),
+            // `!suffix` expands through a declared primary handle.
+            None => match self.tag_handles.get("!") {
+                Some(prefix) if !name.is_empty() => {
+                    Ok(Self::normalize_tag(format!("{prefix}{name}")))
+                }
+                _ => Ok(format!("!{name}")),
+            },
         }
     }
 
