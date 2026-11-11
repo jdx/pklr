@@ -493,6 +493,21 @@ impl Evaluator {
             mapping_entries,
             entry_owners,
             own_body,
+            stale_members: inherited_source.map_or_else(Vec::new, |source| {
+                if pending_members.is_empty() {
+                    return Vec::new();
+                }
+                source
+                    .entries
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        Entry::Property(prop) if pending_members.contains(&prop.name) => {
+                            Some(prop.name.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            }),
             pending_members,
             deferred_lambdas: Vec::new(),
             default_template: None,
@@ -1030,6 +1045,23 @@ impl Evaluator {
                             return Err(Error::Eval(message));
                         }
                         drop(active_scope);
+                        check_spread_duplicates(cx, entry_index, &m)?;
+                        // An instance of a closed class has no members its class
+                        // does not declare, which a spread cannot add either.
+                        if let Some(inherited) = cx.inherited_source
+                            && !inherited.is_open
+                            && matches!(inherited.kind, ObjectKind::Object | ObjectKind::Class)
+                            && let Some(class) = &inherited.type_name
+                            && let Some(key) = m.keys().find(|key| {
+                                !inherited.entries.iter().any(|entry| {
+                                    matches!(entry, Entry::Property(p) if *p.name == ***key)
+                                })
+                            })
+                        {
+                            return Err(Error::Eval(format!(
+                                "Cannot find property `{key}` in object of type `{class}`."
+                            )));
+                        }
                         cx.entry_owners.release_this(&st.this_aliases);
                         props_extend_mapping(
                             &mut st.child_scope,
@@ -1240,9 +1272,23 @@ impl Evaluator {
         {
             active_scope.set(&prop.name, existing.clone());
         }
+        // A member declared later in this body shadows an enclosing or
+        // inherited binding of the name, so a read of it waits for the member
+        // rather than seeing the stale value.
+        // A lambda or method only captures its scope, and a poisoned binding
+        // would be captured with it.
+        if !cx.stale_members.is_empty() {
+            poison_stale_members(cx, st, prop, &mut active_scope);
+        }
         let value = match self.eval_property(prop, &active_scope, cx.depth) {
             Ok(value) => value,
-            Err(Error::Eval(message)) if prop.value.is_some() && !st.failed_locals.is_empty() => {
+            Err(Error::Eval(message))
+                if prop.value.is_some()
+                    && (!st.failed_locals.is_empty()
+                        || cx.pending_members.iter().any(|name| {
+                            *name != prop.name && !st.bound_members.contains(name)
+                        })) =>
+            {
                 // This body declaration shadows an enclosing or
                 // inherited property even while its local
                 // dependency is unresolved. Keep later members
@@ -1636,6 +1682,9 @@ struct BodyContext<'a, 'r> {
     /// The body's own members, which shadow an enclosing binding even before
     /// they are evaluated.
     pending_members: HashSet<Name>,
+    /// The own members that the amended object already holds. A read of such
+    /// a member must wait for the member rather than take the inherited value.
+    stale_members: Vec<Name>,
     deferred_lambdas: Vec<DeferredLambda<'a>>,
     default_template: Option<Value>,
     /// Whether member names must be tracked for duplicates. A single direct
@@ -1948,4 +1997,75 @@ fn shadowed(mut scope: Scope, shadow: &Option<Arc<FxIndexMap<Name, String>>>) ->
         scope.poisoned = Arc::clone(poisoned);
     }
     scope
+}
+
+/// A body may define each member once, so a spread cannot copy a member the
+/// same body declares, before or after the spread. Only the body's own
+/// declarations count, not those it inherits.
+fn check_spread_duplicates(
+    cx: &BodyContext,
+    spread_index: usize,
+    spread: &ObjectMap,
+) -> Result<()> {
+    let layer = entry_layer(cx.entry_scopes, spread_index);
+    for (index, entry) in cx.entries.iter().enumerate() {
+        if entry_layer(cx.entry_scopes, index) != layer {
+            continue;
+        }
+        let (key, shown, what) = match entry {
+            Entry::Property(prop)
+                if !has_modifier(&prop.modifiers, Modifier::Local)
+                    && (prop.value.is_some() || prop.body.is_some()) =>
+            {
+                (&*prop.name, prop.name.to_string(), "property")
+            }
+            Entry::DynProperty(Expr::String(key), _) => (&**key, format!("{key:?}"), "entry key"),
+            _ => continue,
+        };
+        if !spread.contains_key(key) {
+            continue;
+        }
+        return Err(Error::Eval(if index < spread_index {
+            format!(
+                "Cannot spread object because the enclosing object already has a declaration of {what} `{shown}`."
+            )
+        } else {
+            format!("Duplicate definition of member `{shown}`.")
+        }));
+    }
+    Ok(())
+}
+
+/// Poison the members the amended object already holds that `prop` reads, so
+/// the read waits for the member instead of taking the inherited value. A
+/// lambda or method only captures its scope, and a poisoned binding would be
+/// captured with it.
+#[inline(never)]
+fn poison_stale_members(
+    cx: &BodyContext,
+    st: &BodyState,
+    prop: &Property,
+    active_scope: &mut Scope,
+) {
+    let Some(value) = &prop.value else { return };
+    if matches!(
+        value,
+        Expr::Lambda(..)
+            | Expr::Null
+            | Expr::Bool(_)
+            | Expr::Int(_)
+            | Expr::Float(_)
+            | Expr::String(_)
+    ) {
+        return;
+    }
+    // One scan rules out the common property that names none of them.
+    if !expr_mentions(value, &NeedleSet::new(&cx.stale_members)) {
+        return;
+    }
+    for name in &cx.stale_members {
+        if *name != prop.name && !st.bound_members.contains(name) && expr_mentions(value, name) {
+            active_scope.poison(name.clone(), format!("undefined variable: {name}"));
+        }
+    }
 }

@@ -2859,14 +2859,56 @@ fn mark_type_use(names: &mut HashSet<Name>) {
     insert_name!(names, NAMES_A_TYPE);
 }
 
+/// A name, or a set of names, that a mention scan looks for.
+pub(super) trait Needle {
+    fn is(&self, ident: &str) -> bool;
+}
+
+impl Needle for str {
+    fn is(&self, ident: &str) -> bool {
+        self == ident
+    }
+}
+
+impl Needle for Name {
+    fn is(&self, ident: &str) -> bool {
+        **self == *ident
+    }
+}
+
+/// A set of names, with a bitmask of their lengths and first bytes that
+/// turns away most identifiers without comparing them to each name.
+pub(super) struct NeedleSet<'a> {
+    names: &'a [Name],
+    mask: u64,
+}
+
+impl<'a> NeedleSet<'a> {
+    pub(super) fn new(names: &'a [Name]) -> Self {
+        let mask = names.iter().fold(0, |mask, name| mask | Self::bit(name));
+        Self { names, mask }
+    }
+
+    fn bit(ident: &str) -> u64 {
+        let first = ident.as_bytes().first().copied().unwrap_or(0);
+        1 << ((ident.len() + usize::from(first)) % 64)
+    }
+}
+
+impl Needle for NeedleSet<'_> {
+    fn is(&self, ident: &str) -> bool {
+        self.mask & Self::bit(ident) != 0 && self.names.iter().any(|name| **name == *ident)
+    }
+}
+
 /// Whether `name` appears as an identifier anywhere in `entries`, including
 /// nested bodies, lambdas and type constraints, ignoring shadowing. Cheaper
 /// than collecting every name when only one matters.
-pub(super) fn entries_mention(entries: &[Entry], name: &str) -> bool {
+pub(super) fn entries_mention<N: Needle + ?Sized>(entries: &[Entry], name: &N) -> bool {
     entries.iter().any(|entry| entry_mentions(entry, name))
 }
 
-fn property_mentions(prop: &Property, name: &str) -> bool {
+fn property_mentions<N: Needle + ?Sized>(prop: &Property, name: &N) -> bool {
     prop.type_ann
         .as_ref()
         .is_some_and(|ty| type_mentions(ty, name))
@@ -2880,7 +2922,7 @@ fn property_mentions(prop: &Property, name: &str) -> bool {
             .is_some_and(|body| entries_mention(body, name))
 }
 
-fn entry_mentions(entry: &Entry, name: &str) -> bool {
+fn entry_mentions<N: Needle + ?Sized>(entry: &Entry, name: &N) -> bool {
     match entry {
         Entry::Property(prop) => property_mentions(prop, name),
         Entry::DynProperty(key, value) | Entry::Predicate(key, value) => {
@@ -2911,15 +2953,15 @@ fn entry_mentions(entry: &Entry, name: &str) -> bool {
 /// Whether a type name as written (`outer.Step`, `*Foo<Bar>?`, a quoted name)
 /// contains `name` as an identifier, so a type resolved through that binding
 /// counts as a mention.
-fn type_name_mentions(type_name: &str, name: &str) -> bool {
+fn type_name_mentions<N: Needle + ?Sized>(type_name: &str, name: &N) -> bool {
     type_name
         .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$'))
-        .any(|token| token == name)
+        .any(|token| name.is(token))
 }
 
-fn expr_mentions(expr: &Expr, name: &str) -> bool {
+pub(super) fn expr_mentions<N: Needle + ?Sized>(expr: &Expr, name: &N) -> bool {
     match expr {
-        Expr::Ident(ident) => ident == name,
+        Expr::Ident(ident) => name.is(ident),
         Expr::New(type_name, entries, generic_params) => {
             type_name
                 .iter()
@@ -3152,7 +3194,7 @@ impl InstanceReads {
     }
 }
 
-pub(super) fn type_mentions(ty: &crate::parser::TypeExpr, name: &str) -> bool {
+pub(super) fn type_mentions<N: Needle + ?Sized>(ty: &crate::parser::TypeExpr, name: &N) -> bool {
     match ty {
         crate::parser::TypeExpr::Constrained(base, constraint, _) => {
             type_name_mentions(base, name) || expr_mentions(constraint, name)

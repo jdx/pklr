@@ -7524,3 +7524,45 @@ fn a_callers_alias_of_the_same_name_does_not_retype_an_imported_mapping() {
     let json = eval_union_files("caller_alias", &[("lib.pkl", lib), ("main.pkl", main)]);
     assert_eq!(json.unwrap()["v"], serde_json::json!(["E", "E"]));
 }
+
+#[test]
+fn property_reads_a_sibling_declared_later_in_its_body() {
+    let v = eval("foo {\n  x = y\n  y = 3\n}");
+    assert_eq!(v["foo"]["x"], 3);
+}
+
+#[test]
+fn forward_sibling_read_sees_the_amended_value_not_the_inherited_one() {
+    let v = eval("f {\n  x = y\n  y = 3\n}\ng = (f) {\n  y = 4\n}\nh = (f) {\n  y = 5\n  z = 1\n}");
+    assert_eq!(v["f"]["x"], 3);
+    assert_eq!(v["g"]["x"], 4);
+    assert_eq!(v["h"]["x"], 5);
+}
+
+#[test]
+fn local_property_with_a_body_is_a_dynamic_object() {
+    let v = eval("local o {\n  foo = 1\n}\nr = o.foo\ns = (o) { bar = 2 }");
+    assert_eq!(v["r"], 1);
+    assert_eq!(v["s"]["bar"], 2);
+    assert_eq!(v["s"]["foo"], 1);
+}
+
+#[test]
+fn spread_cannot_duplicate_a_member_the_body_declares() {
+    for src in [
+        "local s { foo = 1 }\nres { ...s\n foo = 2 }",
+        "local s { foo = 1 }\nres { foo = 2\n ...s }",
+        "local s { [\"foo\"] = 1 }\nres: Mapping = new { [\"foo\"] = 2\n ...s }",
+        "local s { [\"foo\"] = 1 }\nres: Mapping = new { ...s\n [\"foo\"] = 2 }",
+    ] {
+        eval_fails(src);
+    }
+}
+
+#[test]
+fn spread_cannot_add_a_member_to_a_closed_class_instance() {
+    let msg = eval_fails(
+        "class P { name: String }\nlocal d { name = \"a\"\n age = 3 }\nres: P = new { ...d }",
+    );
+    assert!(msg.contains("age"), "{msg}");
+}
