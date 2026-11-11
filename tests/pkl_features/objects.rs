@@ -7621,3 +7621,33 @@ miss = res2.getOrDefault("missing")
     assert_eq!(json["miss"]["name"], "x");
     assert_eq!(json["miss"]["age"], 45);
 }
+
+#[test]
+fn mapping_replacement_entry_keeps_function_default() {
+    let json = eval(
+        r#"
+m = new Mapping {
+  default = (key) -> new Dynamic { name = key; age = 1 }
+  ["a"] {}
+}
+n = (m) { ["a"] = new { age = 2 } }
+"#,
+    );
+    assert_eq!(json["n"]["a"]["name"], "a");
+    assert_eq!(json["n"]["a"]["age"], 2);
+}
+
+#[test]
+fn mapping_amended_plain_function_default_is_recorded() {
+    let json = eval(
+        r#"
+m = new Mapping {
+  default { name = "old" }
+  ["a"] {}
+}
+n = (m) { default = (key) -> new Dynamic { name = key } }
+miss = n.getOrDefault("zed")
+"#,
+    );
+    assert_eq!(json["miss"]["name"], "zed");
+}

@@ -1350,9 +1350,27 @@ impl Evaluator {
             .flatten();
         let same =
             declared.is_some_and(|declared| declared.identity_json() == recorded.identity_json());
-        // A function default reads the default it amends through `super`,
-        // which the saved source cannot rebind, so it is not recorded.
-        if !same || matches!(assigned_default.value, Some(Expr::Lambda(..))) {
+        // A function default that amends the default it replaces
+        // (`default { key -> ... }`) reads it through `super`, which the saved
+        // source cannot rebind, so it is not recorded.
+        let amends_super_default = matches!(
+            &assigned_default.value,
+            Some(Expr::Lambda(_, body))
+                if matches!(
+                    body.as_ref(),
+                    Expr::Binop(BinOp::Add, call, _)
+                        if matches!(
+                            call.as_ref(),
+                            Expr::Call(callee, _)
+                                if matches!(
+                                    callee.as_ref(),
+                                    Expr::Field(recv, name)
+                                        if name == "apply" && super::calls::is_default_member_ref(recv)
+                                )
+                        )
+                )
+        );
+        if !same || amends_super_default {
             return Ok(None);
         }
         // The recorded default is the inherited body followed by the new one.

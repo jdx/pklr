@@ -804,7 +804,7 @@ fn without_class_members(map: &Arc<ObjectMap>, source: Option<&ObjectSource>) ->
 }
 
 /// Whether `expr` reads a `default`: the bare name, or `super.default`.
-fn is_default_member_ref(expr: &Expr) -> bool {
+pub(super) fn is_default_member_ref(expr: &Expr) -> bool {
     match expr {
         Expr::Ident(name) => name == "default",
         Expr::Field(base, name) => {
