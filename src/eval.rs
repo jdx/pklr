@@ -136,6 +136,8 @@ pub struct Evaluator {
     resource_cache: HashMap<String, Value>,
     /// URI prefixes resources may be read from. Empty denies all resources.
     allowed_resources: Vec<String>,
+    /// Directories searched, in order, for `modulepath:` module URIs.
+    module_path: Vec<PathBuf>,
     /// Patterns module URIs must match to load; `None` allows every module.
     /// A pattern that fails to compile is kept as its error message, which
     /// every module load then reports.
