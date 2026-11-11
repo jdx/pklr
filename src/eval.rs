@@ -139,6 +139,13 @@ pub struct Evaluator {
     external_properties: BTreeMap<String, String>,
     /// Final scopes for modules evaluated in this run, used to preserve inherited locals.
     module_scopes: HashMap<PathBuf, ModuleScopeSnapshot>,
+    /// The key of the saved scope of the module each module amends or extends,
+    /// whether that module is a local file, a remote one or a package's.
+    inherited_bases: HashMap<PathBuf, PathBuf>,
+    /// The saved-scope key of each import identity looked up in this run.
+    scope_keys: HashMap<String, PathBuf>,
+    /// The scope each module's saved bindings make, built once per run.
+    layered_scopes: HashMap<PathBuf, Scope>,
     /// Whether a module evaluated in this run has a failed property that
     /// rendering it would output (see `PoisonedMember::rendered`), so the
     /// output must be checked for one.
@@ -212,6 +219,11 @@ struct ModuleScopeSnapshot {
     values: Arc<ScopeMap>,
     type_aliases: Arc<TypeAliasMap>,
     module_identities: IndexMap<String, String>,
+    /// The module that declares each inherited type alias, when it is not
+    /// the module itself. Its imports resolve the names in the alias.
+    alias_definers: HashMap<Arc<str>, PathBuf>,
+    /// The classes and type aliases an importer can name as `m.Name`.
+    exported_types: HashSet<Arc<str>>,
     late_properties: Vec<Arc<Property>>,
 }
 

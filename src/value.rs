@@ -351,9 +351,11 @@ pub struct ObjectSource {
     /// from a Pkl body. Such objects retain their evaluated members when
     /// amended, but still render as Dynamics.
     pub(crate) is_parsed_json: bool,
-    /// Whether this object is a module, whose declared classes are members
-    /// rather than entries. A `Dynamic` or `Mapping` entry that holds a class
-    /// is data even when its key matches the class's name.
+    /// Whether this object is a module (one that carries a source only for
+    /// its deprecated or failed members), which is a `Typed` object and not
+    /// a `Dynamic`. A module's declared classes are members rather than
+    /// entries; a `Dynamic` or `Mapping` entry that holds a class is data even
+    /// when its key matches the class's name.
     pub(crate) is_module: bool,
     /// For an instance of a class, the class's default object. An untyped
     /// `new { ... }` assigned to one of the instance's properties amends the
@@ -1185,7 +1187,9 @@ impl Value {
     }
 
     /// Convert to JSON. Values JSON cannot represent become a tagged object
-    /// (a `Regex` is `{"_type": "regex", "pattern": ...}`); see
+    /// (a `Regex` is `{"_type": "regex", "pattern": ...}`, a `Dynamic` with
+    /// both elements and members is
+    /// `{"_type": "dynamic", "elements": [...], "members": {...}}`); see
     /// [`Value::try_to_json`] to reject them as `pkl eval -f json` does.
     pub fn to_json(&self) -> serde_json::Value {
         self.json_with(false)
@@ -1229,7 +1233,16 @@ impl Value {
                         v.json_with(keep_classes),
                     );
                 }
-                serde_json::Value::Object(obj)
+                match source {
+                    // A `Dynamic` with elements and members has no JSON form.
+                    // Tag it, as a `Regex` is, instead of dropping its elements.
+                    Some(source) if self.has_elements_and_members() => json!({
+                        "_type": "dynamic",
+                        "elements": source.elements.iter().map(|v| v.json_with(keep_classes)).collect::<Vec<_>>(),
+                        "members": obj,
+                    }),
+                    _ => serde_json::Value::Object(obj),
+                }
             }
             Value::List(items) => {
                 serde_json::Value::Array(items.iter().map(|v| v.json_with(keep_classes)).collect())

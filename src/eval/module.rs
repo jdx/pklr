@@ -35,6 +35,86 @@ impl Evaluator {
         self.eval_module_with_scope(module, path, depth, None, None)
     }
 
+    /// The key of the saved scope of the local module `module` amends or
+    /// extends.
+    fn parent_module_key(&mut self, module: &Module, path: &Path) -> Option<PathBuf> {
+        let uri = module.amends.as_ref().or(module.extends.as_ref())?;
+        // The base the module loaded, however it was found. A module that
+        // no longer amends or extends anything has none, whatever an earlier
+        // load of it recorded.
+        if let Some(base) = self.inherited_bases.get(path) {
+            return Some(base.clone());
+        }
+        if uri.contains("://") && !uri.starts_with("file://") {
+            return None;
+        }
+        self.local_file_path(path, uri).ok()
+    }
+
+    /// The names of the classes and type aliases an importer can use as
+    /// `m.Name`: the module's own that are not `local`, and those it inherits.
+    fn exported_types(&mut self, module: &Module, path: &Path) -> HashSet<Arc<str>> {
+        let mut exported: HashSet<Arc<str>> = self
+            .parent_module_key(module, path)
+            .and_then(|parent| self.module_scopes.get(&parent))
+            .map(|base| base.exported_types.clone())
+            .unwrap_or_default();
+        for entry in module.body.iter() {
+            match entry {
+                Entry::ClassDef(name, modifiers, ..) if !modifiers.contains(&Modifier::Local) => {
+                    exported.insert(name.as_str().into());
+                }
+                Entry::TypeAlias(name, _) if !module.local_type_aliases.contains(name) => {
+                    exported.insert(name.as_str().into());
+                }
+                _ => {}
+            }
+        }
+        exported
+    }
+
+    /// For each type alias `path` inherits from the module it amends or
+    /// extends, the module that declares it. Aliases the module declares
+    /// itself, and those of a base that is not a local file, are left out.
+    fn inherited_alias_definers(
+        &mut self,
+        module: &Module,
+        path: &Path,
+        type_aliases: &crate::value::TypeAliasMap,
+    ) -> HashMap<Arc<str>, PathBuf> {
+        let mut definers = HashMap::default();
+        let Some(parent) = self.parent_module_key(module, path) else {
+            return definers;
+        };
+        let Some(base) = self.module_scopes.get(&parent) else {
+            return definers;
+        };
+        for name in type_aliases.keys() {
+            let own = module
+                .body
+                .iter()
+                .any(|entry| matches!(entry, Entry::TypeAlias(own, _) if own == &**name));
+            if own || !base.type_aliases.contains_key(name) {
+                continue;
+            }
+            let definer = base
+                .alias_definers
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| parent.clone());
+            definers.insert(name.clone(), definer);
+        }
+        definers
+    }
+
+    /// Layer the scope of the base `base` that `child` amends or extends into
+    /// `scope`, and remember it as the child's base.
+    fn layer_inherited_scope(&mut self, child: &Path, base: &Path, scope: &mut Scope) {
+        self.inherited_bases
+            .insert(child.to_path_buf(), base.to_path_buf());
+        self.layer_evaluated_module_scope(base, scope);
+    }
+
     pub(super) fn layer_evaluated_module_scope(&self, path: &Path, scope: &mut Scope) {
         let Some(inherited) = self.module_scopes.get(path) else {
             return;
@@ -46,6 +126,12 @@ impl Evaluator {
         }
         for (name, ty) in inherited.type_aliases.iter() {
             scope.set_type_alias(name.clone(), ty.clone());
+        }
+        // The imports the inherited aliases name keep their modules.
+        for (name, identity) in &inherited.module_identities {
+            if scope.vars.contains_key(&**name) {
+                scope.set_module_identity(name.clone(), identity.clone());
+            }
         }
     }
 
@@ -711,11 +797,17 @@ impl Evaluator {
             };
             effective_late_properties.insert(prop.name.clone(), prop);
         }
+        let type_aliases = scope.flatten_type_aliases();
+        let alias_definers = self.inherited_alias_definers(module, path, &type_aliases);
+        let exported_types = self.exported_types(module, path);
+        self.layered_scopes.remove(path);
         self.module_scopes.insert(
             path.to_path_buf(),
             ModuleScopeSnapshot {
                 values: Arc::new(scope.flatten()),
-                type_aliases: Arc::new(scope.flatten_type_aliases()),
+                type_aliases: Arc::new(type_aliases),
+                alias_definers,
+                exported_types,
                 module_identities: scope.flatten_module_identities(),
                 late_properties: effective_late_properties.into_values().collect(),
             },
@@ -1381,7 +1473,7 @@ impl Evaluator {
                     Some(scope.clone()),
                     None,
                 )?;
-                self.layer_evaluated_module_scope(Path::new(uri), scope);
+                self.layer_inherited_scope(path, Path::new(uri), scope);
                 late_inherited_properties.extend(self.inherited_late_properties(Path::new(uri)));
                 if let Value::Object(m, _) = base_val {
                     *base_obj = (*m).clone();
@@ -1406,7 +1498,7 @@ impl Evaluator {
                             Some(scope.clone()),
                             None,
                         )?;
-                        self.layer_evaluated_module_scope(&local_path, scope);
+                        self.layer_inherited_scope(path, &local_path, scope);
                         late_inherited_properties
                             .extend(self.inherited_late_properties(&local_path));
                         if let Value::Object(m, _) = base_val {
@@ -1434,7 +1526,7 @@ impl Evaluator {
                         Some(scope.clone()),
                         None,
                     )?;
-                    self.layer_evaluated_module_scope(Path::new(url.as_str()), scope);
+                    self.layer_inherited_scope(path, Path::new(url.as_str()), scope);
                     late_inherited_properties
                         .extend(self.inherited_late_properties(Path::new(url.as_str())));
                     if let Value::Object(m, _) = base_val {
@@ -1453,7 +1545,7 @@ impl Evaluator {
                     self.check_not_self(module, path, &amends_path, "amend")?;
                     let base_val =
                         self.eval_file_with_scope(&amends_path, depth + 1, Some(scope.clone()))?;
-                    self.layer_evaluated_module_scope(&amends_path, scope);
+                    self.layer_inherited_scope(path, &amends_path, scope);
                     late_inherited_properties.extend(self.inherited_late_properties(&amends_path));
                     if let Value::Object(m, _) = &base_val {
                         self.bind_deferred_inherited_imports(
@@ -1585,7 +1677,7 @@ impl Evaluator {
                     }
                     let ext_val =
                         self.eval_file_with_scope(&extends_path, depth + 1, Some(scope.clone()))?;
-                    self.layer_evaluated_module_scope(&extends_path, scope);
+                    self.layer_inherited_scope(path, &extends_path, scope);
                     late_inherited_properties.extend(self.inherited_late_properties(&extends_path));
                     let name = extends_path.display().to_string();
                     let source = self.read_to_string_io(&extends_path)?;
@@ -1691,7 +1783,7 @@ impl Evaluator {
                     Some(scope.clone()),
                     None,
                 )?;
-                self.layer_evaluated_module_scope(Path::new(uri), scope);
+                self.layer_inherited_scope(path, Path::new(uri), scope);
                 late_inherited_properties.extend(self.inherited_late_properties(Path::new(uri)));
                 if let Value::Object(m, _) = ext_val {
                     *base_obj = (*m).clone();
@@ -1909,7 +2001,11 @@ impl Evaluator {
                 if !referenced_imports.contains(alias.as_str()) {
                     continue;
                 }
-                scope.declare(alias, stdlib_val);
+                scope.declare(alias.clone(), stdlib_val);
+                // The binding records which standard library module it is, so
+                // a type qualified through it (`base.Regex`) can be told from a
+                // member of another value.
+                scope.set_module_identity(alias, format!("pkl:{module_name}"));
                 continue;
             }
 

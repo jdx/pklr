@@ -25,7 +25,8 @@ impl Evaluator {
         // A parent class that failed to evaluate fails its subclasses too,
         // rather than leaving them without the inherited members.
         if parent_val.is_none()
-            && let Some(message) = parent_name.and_then(|name| poisoned_member(scope, name))
+            && let Some(message) =
+                parent_name.and_then(|name| poisoned_member(scope, name.trim_end_matches('?')))
         {
             return Err(Error::Eval(message));
         }
@@ -266,7 +267,7 @@ impl Evaluator {
                     scope.declare(name, val);
                 }
             }
-            crate::parser::TypeExpr::Constrained(base, _) => {
+            crate::parser::TypeExpr::Constrained(base, _, _) => {
                 self.bind_type_alias_value(name, base, scope);
             }
             // Union types, generics, etc. -- no runtime representation needed
@@ -321,7 +322,7 @@ impl Evaluator {
                         out.push((key.clone(), value.clone()));
                     }
                 }
-                TypeExpr::Constrained(base, _) => {
+                TypeExpr::Constrained(base, _, _) => {
                     if let Ok(base) = parser::parse_type_name(base) {
                         mapping_type_pairs(&base, scope, aliases, out);
                     }

@@ -29,6 +29,9 @@ pub(super) fn object_type_metadata(source: &ObjectSource) -> Option<ObjectTypeMe
     })
 }
 
+/// The binding that records which module each import a function captured is.
+pub(super) const CAPTURED_IDENTITIES: &str = "\0pklr:identities";
+
 #[derive(Debug, Clone)]
 pub(super) struct Scope {
     // The maps are shared copy-on-write so cloning a scope, which `child`
@@ -53,6 +56,10 @@ pub(super) struct Scope {
     /// body never names it can leave it out of what it captures.
     pub(super) this_aliases: Arc<FxHashSet<Name>>,
     pub(super) type_namespace: Option<String>,
+    /// The module whose type aliases this scope holds, when it was built to
+    /// walk one (see `alias_in_module`). An alias that module inherits is
+    /// walked in the module that declares it.
+    pub(super) alias_module: Option<Arc<PathBuf>>,
     pub(super) receiver_entries: Option<Arc<Vec<Entry>>>,
     pub(super) receiver_list_base: Option<usize>,
     pub(super) parent: Option<Arc<Scope>>,
@@ -114,6 +121,7 @@ impl Default for Scope {
             declared: Arc::clone(&empty.declared),
             this_aliases: Arc::clone(&empty.this_aliases),
             type_namespace: None,
+            alias_module: None,
             receiver_entries: None,
             receiver_list_base: None,
             parent: None,
@@ -126,16 +134,51 @@ impl Scope {
     /// than copied, under a child layer for the call's own bindings
     /// (parameters, and anything the caller layers over the capture).
     pub(super) fn for_call(captured: &Arc<ScopeMap>) -> Self {
-        Scope {
+        let mut scope = Scope {
             vars: Arc::clone(captured),
             ..Scope::default()
+        };
+        // The modules the captured imports are (see `capture_identities`).
+        if let Some(Value::Object(identities, _)) = captured.get(CAPTURED_IDENTITIES) {
+            for (name, identity) in identities.iter() {
+                if let Value::String(identity) = identity {
+                    scope.set_module_identity(name.clone(), identity.to_string());
+                }
+            }
         }
-        .child()
+        scope.child()
+    }
+
+    /// Record in `captured`, the bindings a function captures from this scope,
+    /// which module each captured import is, so a type check in the function
+    /// body (`x is base.Int`) resolves the import as it does outside.
+    pub(super) fn capture_identities(&self, captured: &mut ScopeMap) {
+        let mut identities = ObjectMap::default();
+        let mut level = Some(self);
+        while let Some(scope) = level {
+            for (name, identity) in scope.module_identities.iter() {
+                // The innermost level that records a name wins.
+                if captured.contains_key(&**name) && !identities.contains_key(&**name) {
+                    identities.insert(
+                        name.as_ref().into(),
+                        Value::String(identity.as_str().into()),
+                    );
+                }
+            }
+            level = scope.parent.as_deref();
+        }
+        if !identities.is_empty() {
+            captured.insert(
+                CAPTURED_IDENTITIES.into(),
+                Value::Object(Arc::new(identities), None),
+            );
+        }
     }
 
     pub(super) fn child(&self) -> Self {
         Self {
             type_namespace: self.type_namespace.clone(),
+            alias_module: self.alias_module.clone(),
             receiver_entries: self.receiver_entries.clone(),
             receiver_list_base: self.receiver_list_base,
             parent: Some(Arc::new(self.clone())),
@@ -272,11 +315,11 @@ impl Scope {
     }
 
     fn module_identity_walk(&self, name: &str) -> Option<&String> {
-        if self.vars.contains_key(name) {
-            self.module_identities.get(name)
-        } else {
-            self.parent.as_ref()?.module_identity_walk(name)
-        }
+        // A type name resolves to the import, whatever value (a parameter, a
+        // `let`, a `for` variable) shadows the import's name as a value.
+        self.module_identities
+            .get(name)
+            .or_else(|| self.parent.as_ref()?.module_identity_walk(name))
     }
 
     pub(super) fn flatten_module_identities(&self) -> IndexMap<String, String> {
@@ -355,6 +398,22 @@ impl Scope {
                 .parent
                 .as_ref()
                 .is_some_and(|parent| parent.has_type_aliases())
+    }
+
+    /// Whether the nearest declaration of the alias `name` is in the
+    /// outermost scope, where a module's own and inherited aliases are held,
+    /// and not in a nested scope that declares an alias of the same name.
+    pub(super) fn alias_declared_at_root(&self, name: &str) -> bool {
+        let mut level = self;
+        loop {
+            if level.type_aliases.contains_key(name) {
+                return level.parent.is_none();
+            }
+            match level.parent.as_deref() {
+                Some(parent) => level = parent,
+                None => return false,
+            }
+        }
     }
 
     pub(super) fn get_type_alias(&self, name: &str) -> Option<&crate::parser::TypeExpr> {
@@ -655,7 +714,7 @@ pub(super) fn missing_member_error(
 /// (`dep.C` where `dep`'s class `C` could not be built). `None` when the name
 /// resolves or is simply absent.
 pub(super) fn poisoned_member(scope: &Scope, name: &str) -> Option<String> {
-    let mut parts = name.trim_end_matches('?').split('.');
+    let mut parts = name.split('.');
     let root = parts.next()?;
     let Some(mut value) = scope.get(root) else {
         return scope.poison_of(root).cloned();

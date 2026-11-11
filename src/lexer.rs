@@ -850,6 +850,16 @@ enum Escaped {
     Continuation,
 }
 
+/// Whether `name` is an identifier, or identifiers joined by dots, that needs
+/// no backticks.
+pub(crate) fn is_plain_qualified_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.split('.').all(|segment| {
+            let mut chars = segment.chars();
+            chars.next().is_some_and(is_identifier_start) && chars.all(is_identifier_part)
+        })
+}
+
 fn is_identifier_start(c: char) -> bool {
     c == '_' || c == '$' || c.is_alphabetic()
 }

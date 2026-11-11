@@ -11,6 +11,7 @@ mod objects;
 mod types;
 mod validate;
 
+pub use ast::BaseForm;
 pub use ast::{
     Annotation, BinOp, Body, Entry, Expr, ForGenerator, Import, LocalBindings, Modifier, Module,
     Property, StringInterpPart, TraceSite, TypeExpr, UnOp, WhenGenerator,

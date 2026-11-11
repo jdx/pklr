@@ -47,6 +47,8 @@ impl<'a> Parser<'a> {
     }
 
     pub(super) fn parse_type_atom(&mut self) -> Result<TypeExpr> {
+        // Whether the type is one name written in backticks.
+        let mut quoted_name = false;
         let ty = match self.peek().clone() {
             TokenKind::KwModule => {
                 self.advance();
@@ -130,6 +132,7 @@ impl<'a> Parser<'a> {
                 TypeExpr::Named(name)
             }
             TokenKind::Ident(_) => {
+                quoted_name = self.is_quoted(self.peek_tok());
                 let name = self.parse_qualified_ident()?;
                 match &self.in_alias_definition {
                     Some(alias) => {
@@ -168,11 +171,12 @@ impl<'a> Parser<'a> {
                 );
             }
         };
-        self.parse_type_end(ty)
+        self.parse_type_end_of(ty, quoted_name)
     }
 
-    /// Parse `?` and `(constraints)` suffixes of a type.
-    pub(super) fn parse_type_end(&mut self, mut ty: TypeExpr) -> Result<TypeExpr> {
+    /// Parse `?` and `(constraints)` suffixes of a type, which is
+    /// `quoted_name` when it is one name in backticks.
+    fn parse_type_end_of(&mut self, mut ty: TypeExpr, quoted_name: bool) -> Result<TypeExpr> {
         loop {
             if matches!(self.peek(), TokenKind::QuestionMark) {
                 self.advance();
@@ -199,6 +203,11 @@ impl<'a> Parser<'a> {
                 ty = TypeExpr::Constrained(
                     type_expr_runtime_name(&ty),
                     Box::new(constraint.expect("at least one constraint")),
+                    if quoted_name && matches!(ty, TypeExpr::Named(_)) {
+                        BaseForm::Quoted
+                    } else {
+                        BaseForm::Text
+                    },
                 );
             } else {
                 return Ok(ty);
@@ -211,8 +220,8 @@ impl<'a> Parser<'a> {
 /// its predicate: the marker goes on the base name, as for a plain name.
 pub(super) fn mark_default_type(ty: TypeExpr) -> TypeExpr {
     match ty {
-        TypeExpr::Constrained(base, constraint) => {
-            TypeExpr::Constrained(format!("*{base}"), constraint)
+        TypeExpr::Constrained(base, constraint, quoted) => {
+            TypeExpr::Constrained(format!("*{base}"), constraint, quoted)
         }
         TypeExpr::Nullable(inner)
             if matches!(*inner, TypeExpr::Constrained(..) | TypeExpr::Nullable(_)) =>

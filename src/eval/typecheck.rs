@@ -1,7 +1,7 @@
 //! Checking values against declared types and their constraints.
 
 use super::*;
-use crate::parser::TypeExpr;
+use crate::parser::{BaseForm, TypeExpr};
 
 impl Evaluator {
     /// The scope a loaded module's own names resolve in (its type aliases,
@@ -137,11 +137,9 @@ impl Evaluator {
         };
         match ty {
             TypeExpr::Named(name) => named(self, name, seen),
-            TypeExpr::Constrained(base, _) => named(
-                self,
-                base.trim_start_matches('*').trim_end_matches('?'),
-                seen,
-            ),
+            TypeExpr::Constrained(base, _, form) => {
+                named(self, constrained_name(base, *form).0, seen)
+            }
             TypeExpr::Nullable(inner) => self.type_takes_dynamic(inner, scope, seen),
             TypeExpr::Union(variants) => variants
                 .iter()
@@ -163,7 +161,7 @@ impl Evaluator {
     ) -> bool {
         let name = match ty {
             TypeExpr::Named(name) => name.trim_start_matches('*'),
-            TypeExpr::Constrained(base, _) => base.trim_start_matches('*').trim_end_matches('?'),
+            TypeExpr::Constrained(base, _, form) => constrained_name(base, *form).0,
             TypeExpr::Generic(name, _) => name.as_str(),
             // An alias to a union supplies the default of the alternative it
             // marks with `*`, and none when it marks nothing. A nullable one
@@ -235,7 +233,29 @@ impl Evaluator {
         let name = match ty {
             TypeExpr::Nullable(_) => return true,
             TypeExpr::Named(name) => name.trim_start_matches('*'),
-            TypeExpr::Constrained(base, _) => base.trim_start_matches('*'),
+            TypeExpr::Constrained(base, _, form) => {
+                // A quoted name is exact: a `?` at its end is part of the name,
+                // so only an alias it names can make it nullable.
+                match form {
+                    BaseForm::NullableQuoted => return true,
+                    BaseForm::Quoted => {
+                        let name = base.trim_start_matches('*');
+                        return match self.resolve_unvisited_alias(name, scope, seen) {
+                            Some((alias, alias_scope)) => {
+                                let alias_scope = alias_scope.as_ref().unwrap_or(scope);
+                                self.selected_type_nullable(&alias, alias_scope, seen)
+                            }
+                            None => false,
+                        };
+                    }
+                    BaseForm::Text => {}
+                }
+                let (name, nullable) = constrained_name(base, *form);
+                if nullable {
+                    return true;
+                }
+                name
+            }
             _ => return false,
         };
         if name.ends_with('?') {
@@ -312,11 +332,14 @@ impl Evaluator {
             }
             // A constraint is checked on the value afterwards and gives it no
             // default: follow its base, which names an alias or spells a union.
-            TypeExpr::Constrained(base, _) => {
-                let nullable = nullable || base.ends_with('?');
-                match crate::parser::parse_type_name(
-                    base.trim_start_matches('*').trim_end_matches('?'),
-                ) {
+            TypeExpr::Constrained(base, _, form) => {
+                // A quoted name is one name, not a type to parse.
+                if let Some(quoted) = quoted_base_type(base, *form) {
+                    return self.union_amend_state_in(&quoted, scope, nullable, seen);
+                }
+                let (name, base_nullable) = constrained_name(base, *form);
+                let nullable = nullable || base_nullable;
+                match crate::parser::parse_type_name(name) {
                     Ok(base) => self.union_amend_state_in(&base, scope, nullable, seen),
                     Err(_) => UnionAmendState::NotUnion,
                 }
@@ -354,6 +377,188 @@ impl Evaluator {
         )))
     }
 
+    /// The error for the first name in `ty` that `is` and `as` cannot resolve.
+    pub(super) fn unresolved_type(
+        &mut self,
+        ty: &crate::parser::TypeExpr,
+        scope: &Scope,
+    ) -> Option<String> {
+        unresolved_type_error(ty, scope, &mut |lookup| match lookup {
+            AliasLookup::Imported { identity, name } => self.module_alias(identity, name),
+            AliasLookup::ImportedPrivate { identity, name } => {
+                let key = self.module_scope_key(identity)?;
+                (self.module_scopes.contains_key(&key) && !self.module_exports(&key, name))
+                    .then(|| (TypeExpr::Named(name.to_string()), Scope::default()))
+            }
+            AliasLookup::ImportedClass { identity, name } => self
+                .module_class_scope(identity, name)
+                .map(|scope| (TypeExpr::Named(name.to_string()), scope)),
+            AliasLookup::Inherited { scope, name } => self.inherited_alias(scope, name),
+        })
+    }
+
+    /// The type alias `name` that the module with the given identity (the
+    /// canonical path or URL an import records) declares, with the scope its
+    /// definition resolves in. A module's aliases are no members of its value,
+    /// so they are found in its final scope.
+    fn module_alias(
+        &mut self,
+        identity: &str,
+        name: &str,
+    ) -> Option<(crate::parser::TypeExpr, Scope)> {
+        let key = self.module_scope_key(identity)?;
+        self.module_exports(&key, name).then_some(())?;
+        self.alias_in_module(&key, name)
+    }
+
+    /// Whether the module with the scope key `key` exports the class or type
+    /// alias `name`: a `local` one is no member an importer can name.
+    fn module_exports(&self, key: &Path, name: &str) -> bool {
+        self.module_scopes
+            .get(key)
+            .is_some_and(|snapshot| snapshot.exported_types.contains(name))
+    }
+
+    /// Check `val` against `m.Name` when a value shadows the import `m`: a type
+    /// resolves through the import, never through a value of that name.
+    /// `None` when `m` is the import itself or `Name` is not an exported
+    /// class or alias of it.
+    fn shadowed_import_check(
+        &mut self,
+        val: &Value,
+        name: &str,
+        scope: &Scope,
+        depth: usize,
+        resolving: &mut Vec<String>,
+    ) -> Result<Option<bool>> {
+        let Some((module, member)) = name.rsplit_once('.') else {
+            return Ok(None);
+        };
+        if module.contains('.') {
+            return Ok(None);
+        }
+        let Some(identity) = scope.module_identity(module).cloned() else {
+            return Ok(None);
+        };
+        if identity.starts_with("pkl:") {
+            return Ok(None);
+        }
+        if let Some((alias, module_scope)) = self.module_alias(&identity, member) {
+            return self
+                .eval_alias_check(val, name, &alias, &module_scope, depth, resolving)
+                .map(Some);
+        }
+        Ok(self
+            .module_class_scope(&identity, member)
+            .map(|module_scope| value_is_class_type(val, member, &module_scope).unwrap_or(false)))
+    }
+
+    /// The scope of the imported module with the given identity, when it
+    /// declares the class `name`.
+    fn module_class_scope(&mut self, identity: &str, name: &str) -> Option<Scope> {
+        let key = self.module_scope_key(identity)?;
+        self.module_exports(&key, name).then_some(())?;
+        let module_scope = self.layered_module_scope(&key);
+        matches!(
+            module_scope.get(name),
+            Some(Value::Object(_, Some(source))) if source.kind == ObjectKind::Class
+        )
+        .then_some(module_scope)
+    }
+
+    /// The scope the saved bindings of the module with the key `key` make,
+    /// kept for the evaluation: building it copies every binding.
+    fn layered_module_scope(&mut self, key: &Path) -> Scope {
+        if let Some(scope) = self.layered_scopes.get(key) {
+            return scope.clone();
+        }
+        let mut scope = Scope::default();
+        self.layer_evaluated_module_scope(key, &mut scope);
+        self.layered_scopes.insert(key.to_path_buf(), scope.clone());
+        scope
+    }
+
+    /// The type alias `name` of the module with the scope key `module`, with
+    /// the scope its definition resolves in. Every path that expands an
+    /// alias (the name check, value matching, a nested alias) goes through
+    /// here, so an alias the module inherits is always expanded in the module
+    /// that declares it, whose imports its names refer to.
+    fn alias_in_module(
+        &mut self,
+        module: &Path,
+        name: &str,
+    ) -> Option<(crate::parser::TypeExpr, Scope)> {
+        let definer = self
+            .module_scopes
+            .get(module)
+            .and_then(|snapshot| snapshot.alias_definers.get(name))
+            .map_or_else(|| module.to_path_buf(), Clone::clone);
+        let mut module_scope = self.layered_module_scope(&definer);
+        module_scope.alias_module = Some(Arc::new(definer));
+        let alias = module_scope.get_type_alias(name)?.clone();
+        Some((alias, module_scope))
+    }
+
+    /// The alias `name` in the declaring module's scope, when `scope` walks a
+    /// module that inherits `name` from another module. `None` means the
+    /// alias is `scope`'s own.
+    fn inherited_alias(
+        &mut self,
+        scope: &Scope,
+        name: &str,
+    ) -> Option<(crate::parser::TypeExpr, Scope)> {
+        let module = scope.alias_module.as_ref()?;
+        // The nearest declaration wins over an inherited one.
+        if !scope.alias_declared_at_root(name) {
+            return None;
+        }
+        self.module_scopes
+            .get(&**module)?
+            .alias_definers
+            .contains_key(name)
+            .then(|| self.alias_in_module(module, name))
+            .flatten()
+    }
+
+    /// The key of the final scope of the module with the given identity.
+    fn module_scope_key(&mut self, identity: &str) -> Option<PathBuf> {
+        if let Some(key) = self.scope_keys.get(identity)
+            && self.module_scopes.contains_key(key)
+        {
+            return Some(key.clone());
+        }
+        let keys: Vec<PathBuf> = self.module_scopes.keys().cloned().collect();
+        let found = keys.into_iter().find(|key| {
+            let key_identity = if key.to_string_lossy().contains("://") {
+                key.display().to_string()
+            } else {
+                self.canonicalize_io(key)
+                    .unwrap_or_else(|_| key.clone())
+                    .display()
+                    .to_string()
+            };
+            key_identity == identity
+        });
+        if let Some(key) = &found {
+            self.scope_keys.insert(identity.to_string(), key.clone());
+        }
+        found
+    }
+
+    /// The type alias `module.member` of an imported module, with the scope
+    /// that its definition resolves in.
+    fn imported_alias(
+        &mut self,
+        scope: &Scope,
+        name: &str,
+    ) -> Option<(crate::parser::TypeExpr, Scope)> {
+        let (module, member) = name.rsplit_once('.')?;
+        if module.contains('.') || scope.get(module).is_none() {
+            return None;
+        }
+        self.module_alias(scope.module_identity(module)?, member)
+    }
+
     /// Check if a value matches a type expression, including constraint evaluation.
     pub(super) fn eval_type_check(
         &mut self,
@@ -377,27 +582,41 @@ impl Evaluator {
         depth: usize,
         resolving: &mut Vec<String>,
     ) -> Result<bool> {
-        if resolving.iter().any(|seen| seen == name) {
+        // An alias is told apart from one of the same name in another module.
+        let key = alias_key(scope, name);
+        if resolving.contains(&key) {
             return Err(Error::Eval(format!("type alias '{name}' refers to itself")));
         }
-        resolving.push(name.to_string());
+        let open = resolving.len();
+        resolving.push(key);
         // Long chains (`A0 = A1`, …) are valid Pkl and must not consume the
         // Rust call stack once per alias.  Flatten the simple-name part here;
         // compound targets still go through the regular checker below.
         let mut target = resolved.clone();
+        let mut redirected: Option<Scope> = None;
         while let crate::parser::TypeExpr::Named(next) = &target {
-            let Some(next_target) = scope.get_type_alias(next) else {
-                break;
+            let current = redirected.as_ref().unwrap_or(scope);
+            let (next_target, next_scope) = match self.inherited_alias(current, next) {
+                Some((alias, module_scope)) => (alias, Some(module_scope)),
+                None => match current.get_type_alias(next) {
+                    Some(alias) => (alias.clone(), None),
+                    None => break,
+                },
             };
-            if resolving.iter().any(|seen| seen == next) {
-                while resolving.pop().as_deref() != Some(name) {}
+            let next_key = alias_key(next_scope.as_ref().unwrap_or(current), next);
+            if resolving.contains(&next_key) {
+                resolving.truncate(open);
                 return Err(Error::Eval(format!("type alias '{next}' refers to itself")));
             }
-            resolving.push(next.clone());
-            target = next_target.clone();
+            resolving.push(next_key);
+            target = next_target;
+            if next_scope.is_some() {
+                redirected = next_scope;
+            }
         }
+        let scope = redirected.as_ref().unwrap_or(scope);
         let result = self.eval_type_check_in(val, &target, scope, depth + 1, resolving);
-        while resolving.pop().as_deref() != Some(name) {}
+        resolving.truncate(open);
         result
     }
 
@@ -481,6 +700,16 @@ impl Evaluator {
                 // A `*` marks a union's default alternative and is not part of
                 // the type.
                 let name = name.trim_start_matches('*');
+                if let Some((resolved, module_scope)) = self.inherited_alias(scope, name) {
+                    return self.eval_alias_check(
+                        val,
+                        name,
+                        &resolved,
+                        &module_scope,
+                        depth,
+                        resolving,
+                    );
+                }
                 if let Some(accepted) =
                     self.check_imported_alias(val, name, scope, depth, resolving)?
                 {
@@ -496,27 +725,95 @@ impl Evaluator {
                 if scalar_is_builtin_type(val, name) && scope.get(name).is_none() {
                     return Ok(true);
                 }
+                if let Some(accepted) =
+                    self.shadowed_import_check(val, name, scope, depth, resolving)?
+                {
+                    return Ok(accepted);
+                }
                 if let Some(matches) = value_is_class_type(val, name, scope) {
                     return Ok(matches);
+                }
+                // An alias of an imported module is no member of its value.
+                if name.contains('.')
+                    && resolve_dotted(scope, name).is_none()
+                    && let Some((resolved, module_scope)) = self.imported_alias(scope, name)
+                {
+                    return self.eval_alias_check(
+                        val,
+                        name,
+                        &resolved,
+                        &module_scope,
+                        depth,
+                        resolving,
+                    );
+                }
+                // A type of a standard library module (`base.Int`) is the
+                // type without its qualifier.
+                if let Some(member) = stdlib_qualified_member(scope, name) {
+                    return Ok(value_is_type(
+                        val,
+                        &crate::parser::TypeExpr::Named(member.to_string()),
+                    ));
                 }
                 // Otherwise, plain type check
                 Ok(value_is_type(val, ty))
             }
-            TypeExpr::Constrained(base, constraint) => {
+            TypeExpr::Constrained(base, constraint, form) => {
+                // A name written in backticks (`C?`) is that one name, and
+                // the same text without them is the nullable `C`.
+                let (quoted_name, nullable) = match form {
+                    BaseForm::Text => (None, base.ends_with('?')),
+                    BaseForm::Quoted => (Some(base.trim_start_matches('*')), false),
+                    BaseForm::NullableQuoted => (Some(base.trim_start_matches('*')), true),
+                };
                 // First check the base type
-                let class_name = base
-                    .trim_start_matches('*')
-                    .trim_end_matches('?')
-                    .split('<')
-                    .next()
-                    .unwrap_or(base);
-                let base_matches = if base.ends_with('?') && is_null_value(val) {
+                let class_name = quoted_name.unwrap_or_else(|| {
+                    base.trim_start_matches('*')
+                        .trim_end_matches('?')
+                        .split('<')
+                        .next()
+                        .unwrap_or(base)
+                });
+                // `base.Int(c)`: the outer type is the one `pkl:base` declares, not
+                // whatever the caller's scope calls `Int`; the type arguments
+                // and the constraint are the caller's.
+                let stdlib_member = (*form == BaseForm::Text)
+                    .then(|| stdlib_qualified_member(scope, class_name))
+                    .flatten();
+                let base_matches = if nullable && is_null_value(val) {
                     true
+                } else if let Some(member) = stdlib_member {
+                    let unqualified = base.replacen(class_name, member, 1);
+                    match crate::parser::parse_type_name(unqualified.trim_end_matches('?')) {
+                        Ok(TypeExpr::Generic(name, args)) => {
+                            value_is_type(val, &TypeExpr::Generic(name.clone(), args.clone()))
+                                && self.check_type_arguments(
+                                    val, &name, &args, scope, depth, resolving,
+                                )?
+                        }
+                        _ => value_is_type(val, &TypeExpr::Named(member.to_string())),
+                    }
+                } else if let Some((resolved, module_scope)) =
+                    self.inherited_alias(scope, class_name)
+                {
+                    self.eval_alias_check(
+                        val,
+                        class_name,
+                        &resolved,
+                        &module_scope,
+                        depth,
+                        resolving,
+                    )?
                 } else if let Some(accepted) =
                     self.check_imported_alias(val, class_name, scope, depth, resolving)?
                 {
                     accepted
-                } else if base.contains('<')
+                } else if let Some(accepted) =
+                    self.shadowed_import_check(val, class_name, scope, depth, resolving)?
+                {
+                    accepted
+                } else if *form == BaseForm::Text
+                    && base.contains('<')
                     && let Ok(generic) = crate::parser::parse_type_name(base)
                 {
                     // `Listing<Int>(length == 2)`: the base keeps its type
@@ -586,6 +883,25 @@ impl Evaluator {
             TypeExpr::Generic(name, args) => {
                 // A `*` marks a union's default alternative.
                 let name = name.trim_start_matches('*');
+                if let Some(member) = stdlib_qualified_member(scope, name) {
+                    // The outer type is `pkl:base`'s; its arguments are the caller's.
+                    let unqualified = TypeExpr::Generic(member.to_string(), args.clone());
+                    return if value_is_type(val, &unqualified) {
+                        self.check_type_arguments(val, member, args, scope, depth, resolving)
+                    } else {
+                        Ok(false)
+                    };
+                }
+                if let Some((resolved, module_scope)) = self.inherited_alias(scope, name) {
+                    return self.eval_alias_check(
+                        val,
+                        name,
+                        &resolved,
+                        &module_scope,
+                        depth,
+                        resolving,
+                    );
+                }
                 if let Some(accepted) =
                     self.check_imported_alias(val, name, scope, depth, resolving)?
                 {
@@ -922,7 +1238,7 @@ pub(super) fn type_constraint_has_explicit_throw(
         use crate::parser::TypeExpr;
 
         match ty {
-            TypeExpr::Constrained(_, constraint) => {
+            TypeExpr::Constrained(_, constraint, _) => {
                 expr_has_throw(constraint, scope, None, &mut HashSet::default())
             }
             TypeExpr::Named(name) | TypeExpr::Generic(name, _) => {
@@ -993,7 +1309,7 @@ fn type_names_user_class(ty: &crate::parser::TypeExpr, scope: &Scope, depth: usi
     };
     match ty {
         TypeExpr::Named(name) | TypeExpr::Generic(name, _) => class_name(name),
-        TypeExpr::Constrained(base, _) => class_name(base.split('<').next().unwrap_or(base)),
+        TypeExpr::Constrained(base, _, _) => class_name(base.split('<').next().unwrap_or(base)),
         TypeExpr::Nullable(inner) => type_names_user_class(inner, scope, depth + 1),
         TypeExpr::Union(variants) => variants
             .iter()
@@ -1028,4 +1344,16 @@ pub(super) enum UnionAmendState {
     /// A nullable union with no `*` alternative: the property is null. Holds
     /// the union as written, for the error message.
     NullDefault(String),
+}
+
+/// The type `Int` when `name` is `base.Int` and `base` is the import of
+/// `pkl:base`: a type of the standard library is the type without its
+/// qualifier.
+fn stdlib_qualified_member<'a>(scope: &Scope, name: &'a str) -> Option<&'a str> {
+    let (module, member) = name.rsplit_once('.')?;
+    (!module.contains('.')
+        && scope.get(module).is_some()
+        && scope.module_identity(module).map(String::as_str) == Some("pkl:base")
+        && STDLIB_TYPE_NAMES.contains(&member))
+    .then_some(member)
 }

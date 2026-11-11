@@ -121,6 +121,10 @@ impl Evaluator {
                             ),
                     )
                 };
+                let mut captured = captured;
+                if names.contains(NAMES_A_TYPE) {
+                    scope.capture_identities(&mut captured);
+                }
                 let captured = Arc::new(captured);
                 self.register_lambda_guard(&captured);
                 Ok(Value::Lambda(Arc::clone(params), captured_body, captured))
@@ -329,7 +333,7 @@ impl Evaluator {
                         if base.is_none()
                             && let Some(message) = type_name
                                 .as_deref()
-                                .and_then(|name| poisoned_member(scope, name))
+                                .and_then(|name| poisoned_member(scope, name.trim_end_matches('?')))
                         {
                             return Err(Error::Eval(message));
                         }
@@ -712,11 +716,17 @@ impl Evaluator {
                 }
             }
             Expr::Is(expr, ty) => {
+                if let Some(message) = self.unresolved_type(ty, scope) {
+                    return Err(Error::Eval(message));
+                }
                 let val = self.eval_expr(expr, scope, depth + 1)?;
                 let matches = self.eval_type_check(&val, ty, scope, depth)?;
                 Ok(Value::Bool(matches))
             }
             Expr::As(expr, ty) => {
+                if let Some(message) = self.unresolved_type(ty, scope) {
+                    return Err(Error::Eval(message));
+                }
                 let val = self.eval_expr(expr, scope, depth + 1)?;
                 let matches = self.eval_type_check(&val, ty, scope, depth)?;
                 if matches {

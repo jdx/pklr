@@ -114,7 +114,21 @@ pub enum TypeExpr {
     Generic(String, Vec<TypeExpr>),
     /// Constrained type: `Type(predicate)` e.g. `Int(this >= 0)`.
     /// Multiple source constraints are represented by a conjunctive expression.
-    Constrained(String, Box<Expr>),
+    /// The third field says how to read the text of the type before the
+    /// constraint (see [`BaseForm`]).
+    Constrained(String, Box<Expr>, BaseForm),
+}
+
+/// How the text of the base of a constrained type is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BaseForm {
+    /// The text of a type, such as `List<Int>` or `C?` (the nullable `C`).
+    Text,
+    /// One name written in backticks, such as `C?`, whatever it holds.
+    Quoted,
+    /// The same quoted name, and null matches it too (the use `L?(c)` of an
+    /// alias whose target is a quoted name).
+    NullableQuoted,
 }
 
 impl TypeExpr {
@@ -125,7 +139,7 @@ impl TypeExpr {
             TypeExpr::Generic(name, _) => name == "Listing",
             // A constrained listing, `Listing<T>(length > 0)`, stores its
             // base type as a name.
-            TypeExpr::Constrained(base, _) => {
+            TypeExpr::Constrained(base, _, _) => {
                 let base = base.trim_start_matches('*').trim_end_matches('?');
                 base == "Listing" || base.starts_with("Listing<")
             }
@@ -147,7 +161,7 @@ pub(super) fn type_expr_runtime_name(ty: &TypeExpr) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        TypeExpr::Constrained(name, _) => name.clone(),
+        TypeExpr::Constrained(name, _, _) => name.clone(),
     }
 }
 
@@ -158,7 +172,7 @@ pub(super) fn infers_new(ty: &TypeExpr) -> bool {
     match ty {
         TypeExpr::Generic(name, _) => matches!(name.as_str(), "Mapping" | "Listing"),
         TypeExpr::Nullable(inner) => infers_new(inner),
-        TypeExpr::Constrained(base, _) => {
+        TypeExpr::Constrained(base, _, _) => {
             let base = base.trim_end_matches('?');
             matches!(base.split('<').next(), Some("Mapping" | "Listing"))
         }
@@ -445,8 +459,8 @@ pub(crate) fn erase_type_parameters(ty: TypeExpr, parameters: &[String]) -> Type
                 .map(|arg| erase_type_parameters(arg, parameters))
                 .collect(),
         ),
-        TypeExpr::Constrained(base, constraint) => {
-            TypeExpr::Constrained(erase_word(&base, parameters), constraint)
+        TypeExpr::Constrained(base, constraint, quoted) => {
+            TypeExpr::Constrained(erase_word(&base, parameters), constraint, quoted)
         }
     }
 }
