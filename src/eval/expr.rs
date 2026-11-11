@@ -128,6 +128,10 @@ impl Evaluator {
                 // A type alias named as a value is a `TypeAlias`, which the
                 // lambda needs bound to reach it.
                 for name in &refs {
+                    // A local that reuses the alias's name stays what it is.
+                    if scope.get(name).is_some() && !scope.bound_by_alias(name) {
+                        continue;
+                    }
                     if let Some(value) = type_alias_value(name, scope) {
                         captured.insert(nm(format!("{TYPE_ALIAS_VALUE_PREFIX}{name}")), value);
                     }

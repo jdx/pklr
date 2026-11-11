@@ -1617,3 +1617,14 @@ quoted = test.catch(() -> r.renderValue(`contact.email`))
     assert!(quoted.contains("`TypeAlias`"), "{quoted}");
     assert!(quoted.ends_with("#`contact.email`"), "{quoted}");
 }
+
+#[test]
+fn captured_locals_named_like_an_alias_keep_their_value() {
+    let json = eval(
+        r#"
+typealias A = String
+res = let (A = 42) (() -> A + 1).apply()
+"#,
+    );
+    assert_eq!(json["res"], 43);
+}
