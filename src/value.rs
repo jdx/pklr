@@ -1189,9 +1189,16 @@ impl Value {
                 }
             ));
         }
+        let type_name = match self {
+            Value::Object(_, Some(source)) => match source.type_identity.as_deref() {
+                Some("pkl:base#Pair") => "Pair",
+                Some("pkl:base#TypeAlias") => "TypeAlias",
+                _ => self.type_name(),
+            },
+            _ => self.type_name(),
+        };
         crate::Error::Eval(format!(
-            "Cannot render value of type `{}` as JSON.\nValue: {}",
-            self.type_name(),
+            "Cannot render value of type `{type_name}` as JSON.\nValue: {}",
             crate::eval::stdlib::render_value(self)
         ))
     }

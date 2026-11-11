@@ -1149,9 +1149,13 @@ pub(crate) fn validate_xml_characters(
 fn map_key_display(key: &Arc<str>, depth: usize, max: usize) -> String {
     if let Some(class) = key
         .strip_prefix(crate::value::MAPPING_KEY_PREFIX)
-        .filter(|rest| rest.starts_with("object:") && rest.contains("class:"))
+        .filter(|rest| rest.starts_with("object:object:class:"))
     {
-        return class.rsplit(['#', ':']).next().unwrap_or(class).to_string();
+        // A class key ends with `::` and the class's own name.
+        return class
+            .rsplit_once("::")
+            .map_or(class, |(_, name)| name)
+            .to_string();
     }
     match class_key_name(key) {
         Some(name) => name.rsplit(['#', ':']).next().unwrap_or(name).to_string(),

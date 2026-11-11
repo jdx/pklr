@@ -1646,3 +1646,28 @@ msg = test.catch(() -> new PcfRenderer {}.renderDocument(Map(String, 1)))
         json["msg"]
     );
 }
+
+#[test]
+fn object_keys_that_mention_class_are_not_class_keys() {
+    let json = eval(
+        r#"
+import "pkl:test"
+msg = test.catch(() -> new PcfRenderer {}.renderDocument(Map(new Dynamic { x = "class:" }, 1)))
+"#,
+    );
+    let msg = json["msg"].as_str().unwrap();
+    assert!(!msg.contains("Map(Dynamic,"), "{msg}");
+    assert!(msg.contains("class:"), "{msg}");
+}
+
+#[test]
+fn json_render_errors_name_pair_and_type_alias() {
+    let json = eval(
+        r#"
+import "pkl:test"
+pairMsg = test.catch(() -> new JsonRenderer {}.renderDocument(Pair(1, 2)))
+"#,
+    );
+    let msg = json["pairMsg"].as_str().unwrap();
+    assert!(!msg.contains("`Dynamic`"), "{msg}");
+}
