@@ -2560,9 +2560,14 @@ mod late_binding_pass_tests {
     fn chain_of_elements(reads: usize) -> String {
         let mut template = String::from("base = 1\n");
         for n in 0..reads {
-            template.push_str(&format!("x{n} = new Dynamic {{ w = 0; ...x{} }}\n", n + 1));
+            template.push_str(&format!(
+                "x{n} = new Dynamic {{ w{n} = 0; ...x{} }}\n",
+                n + 1
+            ));
         }
-        template.push_str(&format!("x{reads} = new Dynamic {{ w = 0; base }}\n"));
+        template.push_str(&format!(
+            "x{reads} = new Dynamic {{ w{reads} = 0; base }}\n"
+        ));
         template
     }
 
