@@ -7290,3 +7290,28 @@ fn nested_listings_of_a_class_naming_itself_build_their_innermost_elements() {
     .unwrap();
     assert_eq!(json["v"], serde_json::json!(["d", "d"]));
 }
+
+#[test]
+fn nested_listing_fallback_only_completes_unresolved_class_names() {
+    // Verified against pkl 0.32.2: a built-in element type of the declaring
+    // module stays what it is when the importing module declares an alias of
+    // the same name, and a constrained self-referential listing is completed.
+    let lib = "class H { xs: Listing<Listing<Dynamic>>?; ys: Listing<Listing<String>>?; ms: Listing<Listing<Mapping<String, Int>>>? }\n\
+         class Node { x: Int = 1; s: String = \"d\"; c1: Listing<Listing<Node>(true)>?; c2: Listing<Node>(!isEmpty)?; c3: Listing<Listing<Node>>(!isEmpty)? }\n\
+         class N2 { s: String = \"d\"; kids: Listing<Node2(true)>? }\n\
+         class Node2 { s: String = \"d\"; back: Listing<Listing<N2>(true)>? }\n";
+    let main = "import \"lib.pkl\" as L\n\
+         class T { x: Int = 1 }\n\
+         typealias Dynamic = T\n\
+         h = new L.H { xs { new { new {} } }; ys { new { \"a\" } }; ms { new { new { [\"k\"] = 1 } } } }\n\
+         r = new L.Node { c1 { new { new { x = 3 } } }; c2 { new { x = 4 } }; c3 { new { new { x = 5 } } } }\n\
+         a = new L.N2 { kids { new { back { new { new { s = \"z\" } } } } } }\n\
+         v = List(h.xs[0][0] is T, h.ys[0][0] is T, h.ms[0][0] is Mapping,\n\
+                  r.c1[0][0].s, r.c2[0].s, r.c3[0][0].s, a.kids[0].s, a.kids[0].back[0][0].s)\n";
+    let json =
+        eval_union_files("nested_fallback", &[("lib.pkl", lib), ("main.pkl", main)]).unwrap();
+    assert_eq!(
+        json["v"],
+        serde_json::json!([false, false, true, "d", "d", "d", "d", "z"])
+    );
+}

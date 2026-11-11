@@ -190,6 +190,16 @@ impl Evaluator {
                         .values
                         .insert(listing_elem_class_binding(&prop.name).into(), class);
                 }
+                // A nested listing whose innermost class the declaring scope
+                // could not resolve (a class naming itself) is completed by the
+                // amending scope; one that resolves to a built-in type there is
+                // left as it is.
+                if class_unresolved(ty, &declaring) {
+                    amendment_scope.values.insert(
+                        listing_leaf_unresolved_binding(&prop.name).into(),
+                        Value::Bool(true),
+                    );
+                }
                 // The marker records which amending body owns the bindings, so
                 // a same-named property of a body nested inside it does not
                 // reuse them.
@@ -1676,4 +1686,17 @@ pub(super) fn declared_listing_binding(name: &str) -> String {
 /// amendment amends as the `null` it is.
 fn is_null_default(prop: &Property) -> bool {
     matches!(prop.value, Some(Expr::Null))
+}
+
+/// The binding that marks the saved element class of the listing property
+/// `name` as lacking its innermost class because that class name did not
+/// resolve where the type was declared.
+pub(super) fn listing_leaf_unresolved_binding(name: &str) -> String {
+    format!("\0listing_leaf_unresolved_of:{name}")
+}
+
+/// Whether a nested listing type ends in a class name that does not resolve in
+/// `declaring`.
+fn class_unresolved(ty: &crate::parser::TypeExpr, declaring: &Scope) -> bool {
+    listing_leaf_name(ty, declaring).is_some_and(|leaf| resolve_dotted(declaring, &leaf).is_none())
 }

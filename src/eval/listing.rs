@@ -646,13 +646,17 @@ pub(super) fn has_leaf_class(value: &Value) -> bool {
 
 /// The name a nested `Listing<...<Name>>` type ends in, through aliases and
 /// nullability, when it is not a built-in type.
-fn listing_leaf_name(ty: &crate::parser::TypeExpr, scope: &Scope) -> Option<String> {
+pub(super) fn listing_leaf_name(ty: &crate::parser::TypeExpr, scope: &Scope) -> Option<String> {
     use crate::parser::TypeExpr;
     let mut ty = ty.clone();
     for _ in 0..64 {
         ty = match resolve_alias_chain(&ty, scope, &mut HashSet::default())? {
             TypeExpr::Generic(name, args) if name == "Listing" && args.len() == 1 => {
                 args[0].clone()
+            }
+            // `Listing<Node>(!isEmpty)`: the type it constrains.
+            TypeExpr::Constrained(base, ..) => {
+                crate::parser::parse_type_name(base.trim_start_matches('*')).ok()?
             }
             TypeExpr::Named(name) => {
                 let name = name
