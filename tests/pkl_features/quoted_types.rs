@@ -2635,3 +2635,358 @@ fn a_type_resolves_through_its_import_whatever_shadows_the_value() {
         failures.join("\n")
     );
 }
+
+/// (declarations, type, operator, value, expected result or "ERR"): types written
+/// through the `pkl:base` import while the caller declares a class that shadows
+/// the built-in of the same name. Results are pkl's.
+const STDLIB_SHADOWED: &[(&str, &str, &str, &str, &str)] = &[
+    ("class Int {}", "base.Int", "is", "1", "true"),
+    ("class Int {}", "base.Int", "as", "1", "1"),
+    ("class Int {}", "base.Int", "is", "new Dynamic {}", "false"),
+    ("class Int {}", "base.Int", "as", "new Dynamic {}", "ERR"),
+    ("class Int {}", "base.Int", "is", "List(1)", "false"),
+    ("class Int {}", "base.Int", "as", "List(1)", "ERR"),
+    ("class Int {}", "base.Int", "is", "null", "false"),
+    ("class Int {}", "base.Int", "as", "null", "ERR"),
+    ("class Int {}", "base.Int(true)", "is", "1", "true"),
+    ("class Int {}", "base.Int(true)", "as", "1", "1"),
+    (
+        "class Int {}",
+        "base.Int(true)",
+        "is",
+        "new Dynamic {}",
+        "false",
+    ),
+    (
+        "class Int {}",
+        "base.Int(true)",
+        "as",
+        "new Dynamic {}",
+        "ERR",
+    ),
+    ("class Int {}", "base.Int(true)", "is", "List(1)", "false"),
+    ("class Int {}", "base.Int(true)", "as", "List(1)", "ERR"),
+    ("class Int {}", "base.Int(true)", "is", "null", "false"),
+    ("class Int {}", "base.Int(true)", "as", "null", "ERR"),
+    ("class Int {}", "base.Int?", "is", "1", "true"),
+    ("class Int {}", "base.Int?", "as", "1", "1"),
+    ("class Int {}", "base.Int?", "is", "new Dynamic {}", "false"),
+    ("class Int {}", "base.Int?", "as", "new Dynamic {}", "ERR"),
+    ("class Int {}", "base.Int?", "is", "List(1)", "false"),
+    ("class Int {}", "base.Int?", "as", "List(1)", "ERR"),
+    ("class Int {}", "base.Int?", "is", "null", "true"),
+    ("class Int {}", "base.Int?", "as", "null", "null"),
+    ("class Int {}", "base.List<Int>", "is", "1", "false"),
+    ("class Int {}", "base.List<Int>", "as", "1", "ERR"),
+    (
+        "class Int {}",
+        "base.List<Int>",
+        "is",
+        "new Dynamic {}",
+        "false",
+    ),
+    (
+        "class Int {}",
+        "base.List<Int>",
+        "as",
+        "new Dynamic {}",
+        "ERR",
+    ),
+    ("class Int {}", "base.List<Int>", "is", "List(1)", "false"),
+    ("class Int {}", "base.List<Int>", "as", "List(1)", "ERR"),
+    ("class Int {}", "base.List<Int>", "is", "null", "false"),
+    ("class Int {}", "base.List<Int>", "as", "null", "ERR"),
+    (
+        "class Int {}",
+        "base.Listing<Int>(true)",
+        "is",
+        "1",
+        "false",
+    ),
+    ("class Int {}", "base.Listing<Int>(true)", "as", "1", "ERR"),
+    (
+        "class Int {}",
+        "base.Listing<Int>(true)",
+        "is",
+        "new Dynamic {}",
+        "false",
+    ),
+    (
+        "class Int {}",
+        "base.Listing<Int>(true)",
+        "as",
+        "new Dynamic {}",
+        "ERR",
+    ),
+    (
+        "class Int {}",
+        "base.Listing<Int>(true)",
+        "is",
+        "List(1)",
+        "false",
+    ),
+    (
+        "class Int {}",
+        "base.Listing<Int>(true)",
+        "as",
+        "List(1)",
+        "ERR",
+    ),
+    (
+        "class Int {}",
+        "base.Listing<Int>(true)",
+        "is",
+        "null",
+        "false",
+    ),
+    (
+        "class Int {}",
+        "base.Listing<Int>(true)",
+        "as",
+        "null",
+        "ERR",
+    ),
+    (
+        "class Int {}",
+        "base.List<Int>(isEmpty)",
+        "is",
+        "1",
+        "false",
+    ),
+    ("class Int {}", "base.List<Int>(isEmpty)", "as", "1", "ERR"),
+    (
+        "class Int {}",
+        "base.List<Int>(isEmpty)",
+        "is",
+        "new Dynamic {}",
+        "false",
+    ),
+    (
+        "class Int {}",
+        "base.List<Int>(isEmpty)",
+        "as",
+        "new Dynamic {}",
+        "ERR",
+    ),
+    (
+        "class Int {}",
+        "base.List<Int>(isEmpty)",
+        "is",
+        "List(1)",
+        "false",
+    ),
+    (
+        "class Int {}",
+        "base.List<Int>(isEmpty)",
+        "as",
+        "List(1)",
+        "ERR",
+    ),
+    (
+        "class Int {}",
+        "base.List<Int>(isEmpty)",
+        "is",
+        "null",
+        "false",
+    ),
+    (
+        "class Int {}",
+        "base.List<Int>(isEmpty)",
+        "as",
+        "null",
+        "ERR",
+    ),
+    ("class List {}", "base.Int", "is", "1", "true"),
+    ("class List {}", "base.Int", "as", "1", "1"),
+    ("class List {}", "base.Int", "is", "new Dynamic {}", "false"),
+    ("class List {}", "base.Int", "as", "new Dynamic {}", "ERR"),
+    ("class List {}", "base.Int", "is", "List(1)", "false"),
+    ("class List {}", "base.Int", "as", "List(1)", "ERR"),
+    ("class List {}", "base.Int", "is", "null", "false"),
+    ("class List {}", "base.Int", "as", "null", "ERR"),
+    ("class List {}", "base.Int(true)", "is", "1", "true"),
+    ("class List {}", "base.Int(true)", "as", "1", "1"),
+    (
+        "class List {}",
+        "base.Int(true)",
+        "is",
+        "new Dynamic {}",
+        "false",
+    ),
+    (
+        "class List {}",
+        "base.Int(true)",
+        "as",
+        "new Dynamic {}",
+        "ERR",
+    ),
+    ("class List {}", "base.Int(true)", "is", "List(1)", "false"),
+    ("class List {}", "base.Int(true)", "as", "List(1)", "ERR"),
+    ("class List {}", "base.Int(true)", "is", "null", "false"),
+    ("class List {}", "base.Int(true)", "as", "null", "ERR"),
+    ("class List {}", "base.Int?", "is", "1", "true"),
+    ("class List {}", "base.Int?", "as", "1", "1"),
+    (
+        "class List {}",
+        "base.Int?",
+        "is",
+        "new Dynamic {}",
+        "false",
+    ),
+    ("class List {}", "base.Int?", "as", "new Dynamic {}", "ERR"),
+    ("class List {}", "base.Int?", "is", "List(1)", "false"),
+    ("class List {}", "base.Int?", "as", "List(1)", "ERR"),
+    ("class List {}", "base.Int?", "is", "null", "true"),
+    ("class List {}", "base.Int?", "as", "null", "null"),
+    ("class List {}", "base.List<Int>", "is", "1", "false"),
+    ("class List {}", "base.List<Int>", "as", "1", "ERR"),
+    (
+        "class List {}",
+        "base.List<Int>",
+        "is",
+        "new Dynamic {}",
+        "false",
+    ),
+    (
+        "class List {}",
+        "base.List<Int>",
+        "as",
+        "new Dynamic {}",
+        "ERR",
+    ),
+    ("class List {}", "base.List<Int>", "is", "List(1)", "true"),
+    ("class List {}", "base.List<Int>", "as", "List(1)", "[1]"),
+    ("class List {}", "base.List<Int>", "is", "null", "false"),
+    ("class List {}", "base.List<Int>", "as", "null", "ERR"),
+    (
+        "class List {}",
+        "base.Listing<Int>(true)",
+        "is",
+        "1",
+        "false",
+    ),
+    ("class List {}", "base.Listing<Int>(true)", "as", "1", "ERR"),
+    (
+        "class List {}",
+        "base.Listing<Int>(true)",
+        "is",
+        "new Dynamic {}",
+        "false",
+    ),
+    (
+        "class List {}",
+        "base.Listing<Int>(true)",
+        "as",
+        "new Dynamic {}",
+        "ERR",
+    ),
+    (
+        "class List {}",
+        "base.Listing<Int>(true)",
+        "is",
+        "List(1)",
+        "false",
+    ),
+    (
+        "class List {}",
+        "base.Listing<Int>(true)",
+        "as",
+        "List(1)",
+        "ERR",
+    ),
+    (
+        "class List {}",
+        "base.Listing<Int>(true)",
+        "is",
+        "null",
+        "false",
+    ),
+    (
+        "class List {}",
+        "base.Listing<Int>(true)",
+        "as",
+        "null",
+        "ERR",
+    ),
+    (
+        "class List {}",
+        "base.List<Int>(isEmpty)",
+        "is",
+        "1",
+        "false",
+    ),
+    ("class List {}", "base.List<Int>(isEmpty)", "as", "1", "ERR"),
+    (
+        "class List {}",
+        "base.List<Int>(isEmpty)",
+        "is",
+        "new Dynamic {}",
+        "false",
+    ),
+    (
+        "class List {}",
+        "base.List<Int>(isEmpty)",
+        "as",
+        "new Dynamic {}",
+        "ERR",
+    ),
+    (
+        "class List {}",
+        "base.List<Int>(isEmpty)",
+        "is",
+        "List(1)",
+        "false",
+    ),
+    (
+        "class List {}",
+        "base.List<Int>(isEmpty)",
+        "as",
+        "List(1)",
+        "ERR",
+    ),
+    (
+        "class List {}",
+        "base.List<Int>(isEmpty)",
+        "is",
+        "null",
+        "false",
+    ),
+    (
+        "class List {}",
+        "base.List<Int>(isEmpty)",
+        "as",
+        "null",
+        "ERR",
+    ),
+];
+
+#[test]
+fn a_pkl_base_qualified_type_is_not_the_callers_class_of_that_name() {
+    let mut failures = Vec::new();
+    for (declarations, ty, op, value, expected) in STDLIB_SHADOWED {
+        let src = format!("import \"pkl:base\" as base\n{declarations}\nr = {value} {op} {ty}\n");
+        let mut evaluator = pklr::eval::Evaluator::new();
+        let got = match evaluator.eval_source(&src, std::path::Path::new("test.pkl")) {
+            Ok(value) => value.to_json()["r"].to_string(),
+            Err(_) => "ERR".to_string(),
+        };
+        let want = if *expected == "ERR" {
+            "ERR".to_string()
+        } else {
+            serde_json::from_str::<serde_json::Value>(expected)
+                .unwrap()
+                .to_string()
+        };
+        if got != want {
+            failures.push(format!(
+                "{declarations} / {value} {op} {ty}: pkl {want}, pklr {got}"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} cells differ:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}

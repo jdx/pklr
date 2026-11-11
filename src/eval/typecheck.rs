@@ -774,20 +774,25 @@ impl Evaluator {
                         .next()
                         .unwrap_or(base)
                 });
-                // `base.Int(c)`: a type of `pkl:base` is the type without its
-                // qualifier.
-                if *form == BaseForm::Text
-                    && let Some(member) = stdlib_qualified_member(scope, class_name)
-                {
-                    let unqualified = TypeExpr::Constrained(
-                        base.replacen(class_name, member, 1),
-                        constraint.clone(),
-                        *form,
-                    );
-                    return self.eval_type_check_in(val, &unqualified, scope, depth, resolving);
-                }
+                // `base.Int(c)`: the outer type is the one `pkl:base` declares, not
+                // whatever the caller's scope calls `Int`; the type arguments
+                // and the constraint are the caller's.
+                let stdlib_member = (*form == BaseForm::Text)
+                    .then(|| stdlib_qualified_member(scope, class_name))
+                    .flatten();
                 let base_matches = if nullable && is_null_value(val) {
                     true
+                } else if let Some(member) = stdlib_member {
+                    let unqualified = base.replacen(class_name, member, 1);
+                    match crate::parser::parse_type_name(unqualified.trim_end_matches('?')) {
+                        Ok(TypeExpr::Generic(name, args)) => {
+                            value_is_type(val, &TypeExpr::Generic(name.clone(), args.clone()))
+                                && self.check_type_arguments(
+                                    val, &name, &args, scope, depth, resolving,
+                                )?
+                        }
+                        _ => value_is_type(val, &TypeExpr::Named(member.to_string())),
+                    }
                 } else if let Some((resolved, module_scope)) =
                     self.inherited_alias(scope, class_name)
                 {
@@ -879,8 +884,13 @@ impl Evaluator {
                 // A `*` marks a union's default alternative.
                 let name = name.trim_start_matches('*');
                 if let Some(member) = stdlib_qualified_member(scope, name) {
+                    // The outer type is `pkl:base`'s; its arguments are the caller's.
                     let unqualified = TypeExpr::Generic(member.to_string(), args.clone());
-                    return self.eval_type_check_in(val, &unqualified, scope, depth, resolving);
+                    return if value_is_type(val, &unqualified) {
+                        self.check_type_arguments(val, member, args, scope, depth, resolving)
+                    } else {
+                        Ok(false)
+                    };
                 }
                 if let Some((resolved, module_scope)) = self.inherited_alias(scope, name) {
                     return self.eval_alias_check(
