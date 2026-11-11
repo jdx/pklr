@@ -1117,6 +1117,16 @@ impl Value {
                 serde_json::Value::Null
             }
             Value::Object(map, source) => {
+                // A built-in `Pair` or `TypeAlias` has no JSON form.
+                if source.as_deref().is_some_and(|source| {
+                    matches!(
+                        source.type_identity.as_deref(),
+                        Some("pkl:base#Pair" | "pkl:base#TypeAlias")
+                    )
+                }) {
+                    unrenderable.get_or_insert(self);
+                    return serde_json::Value::Null;
+                }
                 // A `Dynamic` with elements and members has no JSON form.
                 if self.has_elements_and_members() {
                     unrenderable.get_or_insert(self);
@@ -1179,9 +1189,18 @@ impl Value {
                 }
             ));
         }
+        let type_name = match self {
+            Value::Object(_, Some(source)) if source.kind != ObjectKind::Class => {
+                match source.type_identity.as_deref() {
+                    Some("pkl:base#Pair") => "Pair",
+                    Some("pkl:base#TypeAlias") => "TypeAlias",
+                    _ => self.type_name(),
+                }
+            }
+            _ => self.type_name(),
+        };
         crate::Error::Eval(format!(
-            "Cannot render value of type `{}` as JSON.\nValue: {}",
-            self.type_name(),
+            "Cannot render value of type `{type_name}` as JSON.\nValue: {}",
             crate::eval::stdlib::render_value(self)
         ))
     }

@@ -1377,3 +1377,297 @@ aliased = new yaml.Parser {}.parse("&x a: 1\nb: *x")
     assert_eq!(json["explicit"], serde_json::json!({"a": 1, "c": 3}));
     assert_eq!(json["aliased"], serde_json::json!({"a": 1, "b": "a"}));
 }
+
+// ============================================================
+// Values a renderer cannot render: errors match `pkl eval` 0.32.2
+// ============================================================
+
+#[test]
+fn renderers_reject_pair_class_type_alias_and_int_seq() {
+    for (class, name) in [
+        ("JsonRenderer", "JSON"),
+        ("YamlRenderer", "YAML"),
+        ("PListRenderer", "XML property list"),
+    ] {
+        let json = eval(&format!(
+            r#"
+import "pkl:test"
+class Person {{ name: String }}
+typealias Email = String
+local r = new {class} {{}}
+pair = test.catch(() -> r.renderValue(Pair(1, 2)))
+cls = test.catch(() -> r.renderValue(Person))
+alias = test.catch(() -> r.renderValue(Email))
+seq = test.catch(() -> r.renderValue(IntSeq(1, 4)))
+"#
+        ));
+        let msg = |ty: &str, value: &str| {
+            format!("Cannot render value of type `{ty}` as {name}. Value: {value}")
+        };
+        assert_eq!(json["pair"], msg("Pair", "Pair(1, 2)"), "{class}");
+        assert!(
+            json["cls"].as_str().unwrap().starts_with(&msg("Class", "")),
+            "{class}"
+        );
+        assert!(
+            json["cls"].as_str().unwrap().ends_with("#Person"),
+            "{class}"
+        );
+        assert!(
+            json["alias"]
+                .as_str()
+                .unwrap()
+                .starts_with(&msg("TypeAlias", "")),
+            "{class}"
+        );
+        assert!(
+            json["alias"].as_str().unwrap().ends_with("#Email"),
+            "{class}"
+        );
+        assert_eq!(json["seq"], msg("IntSeq", "IntSeq(1, 4)"), "{class}");
+    }
+}
+
+#[test]
+fn pair_is_a_value_with_first_and_second() {
+    let json = eval(
+        r#"
+p = Pair(1, "x")
+first = p.first
+second = p.second
+"#,
+    );
+    assert_eq!(json["first"], 1);
+    assert_eq!(json["second"], "x");
+}
+
+#[test]
+fn renderer_document_errors_name_the_value_class() {
+    let json = eval(
+        r#"
+import "pkl:test"
+list = test.catch(() -> new PcfRenderer {}.renderDocument(List("a", "b")))
+set = test.catch(() -> new PropertiesRenderer {}.renderDocument(Set("a")))
+map = test.catch(() -> new PcfRenderer {}.renderDocument(Map("a", 1)))
+mixed = test.catch(() -> new YamlRenderer {}.renderDocument(new Dynamic { foo = "foo"; 5 }))
+"#,
+    );
+    assert_eq!(
+        json["list"],
+        "The top-level value of a Pcf document must have type `Typed` or `Dynamic`, but got type `List`. Value: List(\"a\", \"b\")"
+    );
+    assert_eq!(
+        json["set"],
+        "The top-level value of a Java properties file must have type `Typed`, `Dynamic`, `Mapping`, or `Map`, but got type `Set`. Value: Set(\"a\")"
+    );
+    assert_eq!(
+        json["map"],
+        "The top-level value of a Pcf document must have type `Typed` or `Dynamic`, but got type `Map`. Value: Map(\"a\", 1)"
+    );
+    assert_eq!(
+        json["mixed"],
+        "Cannot render object with both elements and properties/entries as YAML. Object: new Dynamic { foo = \"foo\"; 5 }"
+    );
+}
+
+#[test]
+fn user_classes_named_pair_or_type_alias_are_ordinary_objects() {
+    let json = eval(
+        r#"
+class Pair { first = 1; second = 2 }
+class TypeAlias { name = "x" }
+pairOut = new JsonRenderer {}.renderValue(new Pair {})
+aliasOut = new JsonRenderer {}.renderValue(new TypeAlias {})
+"#,
+    );
+    assert!(json["pairOut"].as_str().unwrap().contains("\"first\": 1"));
+    assert!(
+        json["aliasOut"]
+            .as_str()
+            .unwrap()
+            .contains("\"name\": \"x\"")
+    );
+}
+
+#[test]
+fn thrown_text_with_value_lines_is_not_rewritten_by_catch() {
+    let json = eval(
+        r#"
+import "pkl:test"
+msg = test.catch(() -> throw("bad\nValue: x"))
+"#,
+    );
+    assert_eq!(json["msg"], "bad\nValue: x");
+}
+
+#[test]
+fn renderer_errors_show_stdlib_classes_and_empty_maps() {
+    let json = eval(
+        r#"
+import "pkl:test"
+cls = test.catch(() -> new JsonRenderer {}.renderValue(Int))
+map = test.catch(() -> new PcfRenderer {}.renderDocument(Map()))
+mapping = test.catch(() -> new PcfRenderer {}.renderDocument(new Mapping {}))
+"#,
+    );
+    assert_eq!(
+        json["cls"],
+        "Cannot render value of type `Class` as JSON. Value: Int"
+    );
+    assert!(json["map"].as_str().unwrap().ends_with("Value: Map()"));
+    assert!(
+        json["mapping"]
+            .as_str()
+            .unwrap()
+            .ends_with("Value: new Mapping {}")
+    );
+}
+
+#[test]
+fn type_aliases_stay_distinct_and_local_class_bindings_win() {
+    let json = eval(
+        r#"
+typealias A = String
+typealias B = Int
+class Person {}
+same = A == B
+count = Set(A, B).length
+localName = let (A = Person) A.simpleName
+"#,
+    );
+    assert_eq!(json["same"], false);
+    assert_eq!(json["count"], 2);
+    assert_eq!(json["localName"], "Person");
+}
+
+#[test]
+fn type_alias_text_hides_its_identity() {
+    let json = eval(
+        r#"
+typealias Email = String
+text = Email.toString()
+"#,
+    );
+    assert_eq!(json["text"], "Email");
+}
+
+#[test]
+fn type_alias_text_keeps_quoted_names_and_property_equals() {
+    let json = eval(
+        r#"
+typealias `contact.email` = String
+typealias Email = String
+quoted = `contact.email`.toString()
+obj = (new Dynamic { alias = Email }).toString()
+"#,
+    );
+    assert_eq!(json["quoted"], "contact.email");
+    assert_eq!(json["obj"], "new Dynamic { alias = Email }");
+}
+
+#[test]
+fn renderer_errors_do_not_expand_shared_values_exponentially() {
+    let json = eval(
+        r#"
+import "pkl:test"
+local w0 = List(1)
+local w1 = List(w0, w0)
+local w2 = List(w1, w1)
+local w3 = List(w2, w2)
+local w4 = List(w3, w3)
+local w5 = List(w4, w4)
+local w6 = List(w5, w5)
+local w7 = List(w6, w6)
+local w8 = List(w7, w7)
+local w9 = List(w8, w8)
+local w10 = List(w9, w9)
+msg = test.catch(() -> new PcfRenderer {}.renderDocument(w10))
+"#,
+    );
+    assert!(json["msg"].as_str().unwrap().len() < 10_000);
+}
+
+#[test]
+fn type_alias_values_survive_builtin_bindings_and_lambdas() {
+    let json = eval(
+        r#"
+import "pkl:test"
+typealias Email = String
+typealias `contact.email` = String
+typealias Dyn = Dynamic
+local r = new JsonRenderer {}
+dyn = test.catch(() -> r.renderValue(Dyn))
+"#,
+    );
+    let dyn_ = json["dyn"].as_str().unwrap();
+    assert!(dyn_.contains("`TypeAlias`"), "{dyn_}");
+}
+
+#[test]
+fn quoted_type_alias_names_show_in_backticks() {
+    let json = eval(
+        r#"
+import "pkl:test"
+typealias `contact.email` = String
+local r = new JsonRenderer {}
+quoted = test.catch(() -> r.renderValue(`contact.email`))
+"#,
+    );
+    let quoted = json["quoted"].as_str().unwrap();
+    assert!(quoted.contains("`TypeAlias`"), "{quoted}");
+    assert!(quoted.ends_with("#`contact.email`"), "{quoted}");
+}
+
+#[test]
+fn captured_locals_named_like_an_alias_keep_their_value() {
+    let json = eval(
+        r#"
+typealias A = String
+res = let (A = 42) (() -> A + 1).apply()
+"#,
+    );
+    assert_eq!(json["res"], 43);
+}
+
+#[test]
+fn maps_with_class_keys_display_as_maps() {
+    let json = eval(
+        r#"
+import "pkl:test"
+msg = test.catch(() -> new PcfRenderer {}.renderDocument(Map(String, 1)))
+"#,
+    );
+    assert!(
+        json["msg"]
+            .as_str()
+            .unwrap()
+            .ends_with("Value: Map(String, 1)"),
+        "{}",
+        json["msg"]
+    );
+}
+
+#[test]
+fn object_keys_that_mention_class_are_not_class_keys() {
+    let json = eval(
+        r#"
+import "pkl:test"
+msg = test.catch(() -> new PcfRenderer {}.renderDocument(Map(new Dynamic { x = "class:" }, 1)))
+"#,
+    );
+    let msg = json["msg"].as_str().unwrap();
+    assert!(!msg.contains("Map(Dynamic,"), "{msg}");
+    assert!(msg.contains("class:"), "{msg}");
+}
+
+#[test]
+fn json_render_errors_name_pair_and_type_alias() {
+    let json = eval(
+        r#"
+import "pkl:test"
+pairMsg = test.catch(() -> new JsonRenderer {}.renderDocument(Pair(1, 2)))
+"#,
+    );
+    let msg = json["pairMsg"].as_str().unwrap();
+    assert!(!msg.contains("`Dynamic`"), "{msg}");
+}

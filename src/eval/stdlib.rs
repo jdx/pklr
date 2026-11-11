@@ -50,7 +50,8 @@ pub(super) fn typed_object(type_name: &str, members: ObjectMap) -> Value {
         is_open: false,
         is_abstract: false,
         type_name: Some(type_name.to_string()),
-        type_identity: (type_name == "RegexMatch").then(|| "pkl:base#RegexMatch".to_string()),
+        type_identity: matches!(type_name, "RegexMatch" | "Pair")
+            .then(|| format!("pkl:base#{type_name}")),
         parent_type_names: Vec::new(),
         parent_type_identities: Vec::new(),
         entry_scopes: Vec::new(),
@@ -160,6 +161,33 @@ pub(super) fn class_value(type_name: &str, type_identity: String) -> Value {
     source.type_identity = Some(type_identity);
     source.kind = ObjectKind::Class;
     Value::Object(Arc::default(), Some(Arc::new(source)))
+}
+
+/// A `TypeAlias` value with the given identity.
+/// The member of a `TypeAlias` value that holds the alias's identity.
+pub(crate) const TYPE_ALIAS_IDENTITY_KEY: &str = "\0alias";
+
+/// The member of a `TypeAlias` value that holds the name it was declared with.
+pub(crate) const TYPE_ALIAS_NAME_KEY: &str = "\0name";
+
+pub(super) fn type_alias_value(identity: String, name: &str) -> Value {
+    let Value::Object(_, Some(source)) = typed_object("TypeAlias", ObjectMap::default()) else {
+        unreachable!("typed_object builds an object with a source")
+    };
+    let mut source = Arc::unwrap_or_clone(source);
+    source.type_name = Some("TypeAlias".into());
+    // The built-in class's identity tells this value from an instance of a
+    // user class named `TypeAlias`, and `getClass()` is shared.
+    source.type_identity = Some("pkl:base#TypeAlias".into());
+    // The alias's own identity is a member, so it survives being stored in a
+    // `Map` and tells one alias from another when values are compared.
+    let mut members = ObjectMap::default();
+    members.insert(
+        TYPE_ALIAS_IDENTITY_KEY.into(),
+        Value::String(identity.into()),
+    );
+    members.insert(TYPE_ALIAS_NAME_KEY.into(), Value::String(name.into()));
+    Value::Object(Arc::new(members), Some(Arc::new(source)))
 }
 
 /// The `Class` value a standard library class name stands for, when it is not

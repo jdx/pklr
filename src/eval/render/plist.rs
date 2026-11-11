@@ -30,7 +30,9 @@ impl<'a> PList<'a> {
         let converted = self.convert_top_level(value)?;
         if document {
             let kind = self.walk.top_kind.unwrap_or_else(|| kind_of(&converted));
-            if !(kind.is_object() || matches!(kind, Kind::Listing | Kind::RenderDirective)) {
+            if !(kind.is_object()
+                || matches!(kind, Kind::Listing | Kind::RenderDirective | Kind::Function))
+            {
                 return Err(Error::Eval(format!(
                     "The top-level value of an XML property list must have type `Typed`, `Dynamic`, `Listing`, `Mapping`, `List`, `Set`, or `Map`, but got type `{}`.\nValue: {}",
                     kind.pkl_class(&converted),

@@ -242,6 +242,14 @@ pub(crate) enum Kind {
     Regex,
     Function,
     RenderDirective,
+    /// An `IntSeq`.
+    IntSeq,
+    /// A `Pair`.
+    Pair,
+    /// A `Class`.
+    Class,
+    /// A `TypeAlias`.
+    TypeAlias,
     /// A `Listing` or `List`; pklr does not tell them apart.
     Listing,
     /// An object whose members are all entries: a `Mapping` or `Map`.
@@ -269,11 +277,23 @@ impl Kind {
                 _ => "Function".into(),
             },
             Kind::RenderDirective => "RenderDirective".into(),
+            Kind::IntSeq => "IntSeq".into(),
+            Kind::Pair => "Pair".into(),
+            Kind::Class => "Class".into(),
+            Kind::TypeAlias => "TypeAlias".into(),
             Kind::Listing => match value {
-                Value::List(items) if items.kind() == ListKind::Dynamic => "Dynamic".into(),
+                Value::List(items) => match items.kind() {
+                    ListKind::Dynamic => "Dynamic".into(),
+                    ListKind::List => "List".into(),
+                    ListKind::Set => "Set".into(),
+                    ListKind::Listing => "Listing".into(),
+                },
                 _ => "Listing".into(),
             },
-            Kind::Mapping => "Mapping".into(),
+            Kind::Mapping => match value {
+                Value::Object(_, None) => "Map".into(),
+                _ => "Mapping".into(),
+            },
             Kind::Dynamic => "Dynamic".into(),
             Kind::Typed => match value {
                 Value::Object(_, Some(source)) => {
@@ -301,6 +321,7 @@ pub(crate) fn kind_of(value: &Value) -> Kind {
         Value::DataSize(_) => Kind::DataSize,
         Value::Regex(_) => Kind::Regex,
         Value::Lambda(..) => Kind::Function,
+        Value::List(items) if items.kind() == ListKind::List && items.is_int_seq() => Kind::IntSeq,
         Value::List(_) => Kind::Listing,
         Value::Object(map, None) => {
             if let Some(kind) = builtin_object_kind(map) {
@@ -309,8 +330,17 @@ pub(crate) fn kind_of(value: &Value) -> Kind {
                 Kind::Mapping
             }
         }
+        Value::Object(_, Some(source))
+            if source.kind == ObjectKind::Class && source.declared_as.is_none() =>
+        {
+            Kind::Class
+        }
         Value::Object(_, Some(source)) => match source.type_name.as_deref() {
             Some("RenderDirective") => Kind::RenderDirective,
+            Some("Pair") if source.type_identity.as_deref() == Some("pkl:base#Pair") => Kind::Pair,
+            Some("TypeAlias") if source.type_identity.as_deref() == Some("pkl:base#TypeAlias") => {
+                Kind::TypeAlias
+            }
             Some("Dynamic") => Kind::Dynamic,
             Some("Mapping" | "Map") => Kind::Mapping,
             Some(_) => Kind::Typed,
@@ -634,6 +664,10 @@ impl Converters {
             },
             Kind::Mapping => self.class("Mapping").or_else(|| self.class("Map")),
             Kind::Dynamic => self.class("Dynamic"),
+            Kind::IntSeq => self.class("IntSeq"),
+            Kind::Pair => self.class("Pair"),
+            Kind::Class => self.class("Class"),
+            Kind::TypeAlias => self.class("TypeAlias"),
             Kind::Typed | Kind::RenderDirective => {
                 // Class converters are covariant: the nearest class with a
                 // converter wins.
@@ -825,7 +859,14 @@ impl<'a> Walk<'a> {
 
     /// The kind of `value`, honoring the top-level override once.
     fn kind(&mut self, value: &Value) -> Kind {
-        self.top_kind.take().unwrap_or_else(|| kind_of(value))
+        let kind = self.top_kind.take().unwrap_or_else(|| kind_of(value));
+        // Only a class given to the renderer itself is an error. A nested one
+        // is, as before, rendered as the typed object it holds: pklr cannot
+        // always tell a class a member names from one the module declares.
+        if kind == Kind::Class && self.path.len() > 1 {
+            return Kind::Typed;
+        }
+        kind
     }
 
     /// Apply the converter for `value` at the current path, if any.
@@ -972,8 +1013,23 @@ pub(crate) trait StringRenderer<'a> {
         };
         if !elements.is_empty() && !ordered.is_empty() && !self.supports_mixed_objects() {
             self.walk().enclosing = previous;
+            let shown = ordered
+                .iter()
+                .map(|(member, key, value)| match member {
+                    MemberKind::Property => format!("{key} = {}", display_value(value)),
+                    MemberKind::Entry => {
+                        format!(
+                            "[{}] = {}",
+                            display_value(&key_value(key)),
+                            display_value(value)
+                        )
+                    }
+                })
+                .chain(elements.iter().map(display_value))
+                .collect::<Vec<_>>()
+                .join("; ");
             return Err(Error::Eval(format!(
-                "Cannot render object with both elements and properties/entries as {}.",
+                "Cannot render object with both elements and properties/entries as {}.\nObject: new Dynamic {{ {shown} }}",
                 self.name()
             )));
         }
@@ -1089,7 +1145,52 @@ pub(crate) fn validate_xml_characters(
 }
 
 /// A short Pkl rendering of `value` for error messages.
+/// A `Map` or `Mapping` key as it reads in an error: a class key by its name.
+fn map_key_display(key: &Arc<str>, depth: usize, max: usize) -> String {
+    if let Some(class) = key
+        .strip_prefix(crate::value::MAPPING_KEY_PREFIX)
+        .filter(|rest| rest.starts_with("object:object:class:"))
+    {
+        // A class key ends with `::` and the class's own name.
+        return class
+            .rsplit_once("::")
+            .map_or(class, |(_, name)| name)
+            .to_string();
+    }
+    match class_key_name(key) {
+        Some(name) => name.rsplit(['#', ':']).next().unwrap_or(name).to_string(),
+        None => display_value_at(&key_value(key), depth + 1, max),
+    }
+}
+
+/// The module and declared name of an alias identity. The name may hold dots
+/// (a quoted name), so it is taken from the value and not by splitting.
+fn alias_split<'a>(identity: &'a str, members: &ObjectMap) -> Option<(&'a str, &'a str)> {
+    let Some(Value::String(name)) = members.get(crate::eval::stdlib::TYPE_ALIAS_NAME_KEY) else {
+        return None;
+    };
+    let module = identity.strip_suffix(&**name)?.strip_suffix('.')?;
+    Some((module, &identity[module.len() + 1..]))
+}
+
+/// The deepest nesting `display_value` expands: shared contents can make an
+/// expanded value exponentially larger than the value itself.
+const DISPLAY_DEPTH: usize = 6;
+
 pub(crate) fn display_value(value: &Value) -> String {
+    display_value_at(value, 0, DISPLAY_DEPTH)
+}
+
+/// `display_value` without the depth cap, for text that is part of rendered
+/// output, where cutting a value short could make distinct values alike.
+pub(crate) fn display_value_full(value: &Value) -> String {
+    display_value_at(value, 0, usize::MAX)
+}
+
+fn display_value_at(value: &Value, depth: usize, max: usize) -> String {
+    if depth > max && matches!(value, Value::List(_) | Value::Object(..)) {
+        return "...".into();
+    }
     match (kind_of(value), value) {
         (Kind::Null, _) => "null".into(),
         (_, Value::Bool(b)) => b.to_string(),
@@ -1110,6 +1211,94 @@ pub(crate) fn display_value(value: &Value) -> String {
         }
         (Kind::Regex, Value::Regex(regex)) => format!("Regex({:?})", regex.pattern()),
         (kind @ Kind::Function, _) => format!("new {} {{}}", kind.pkl_class(value)),
+        (Kind::IntSeq, Value::List(items)) => {
+            let int = |item: Option<&Value>| match item {
+                Some(Value::Int(n)) => Some(*n),
+                _ => None,
+            };
+            match (int(items.first()), int(items.last())) {
+                (Some(start), Some(end)) if items.len() > 1 => {
+                    let step = int(items.get(1)).map_or(1, |second| second.wrapping_sub(start));
+                    if step == 1 {
+                        format!("IntSeq({start}, {end})")
+                    } else {
+                        format!("IntSeq({start}, {end}).step({step})")
+                    }
+                }
+                (Some(start), _) => format!("IntSeq({start}, {start})"),
+                _ => "IntSeq(1, 0)".into(),
+            }
+        }
+        (Kind::Pair, Value::Object(map, _)) => format!(
+            "Pair({}, {})",
+            map.get("first")
+                .map(|item| display_value_at(item, depth + 1, max))
+                .unwrap_or_default(),
+            map.get("second")
+                .map(|item| display_value_at(item, depth + 1, max))
+                .unwrap_or_default()
+        ),
+        (Kind::Class | Kind::TypeAlias, Value::Object(members, Some(source))) => {
+            (if kind_of(value) == Kind::TypeAlias {
+                match members.get(crate::eval::stdlib::TYPE_ALIAS_IDENTITY_KEY) {
+                    Some(Value::String(identity)) => Some(&**identity),
+                    _ => None,
+                }
+            } else {
+                source.type_identity.as_deref()
+            })
+            .map(|identity| {
+                match alias_split(identity, members).or_else(|| identity.rsplit_once('.')) {
+                    _ if identity.starts_with("pkl:") => identity
+                        .rsplit_once('#')
+                        .map_or(identity, |(_, name)| name)
+                        .to_string(),
+                    Some((module, name)) => {
+                        let module = module.rsplit(['/', '\\']).next().unwrap_or(module);
+                        let module = module.strip_suffix(".pkl").unwrap_or(module);
+                        if crate::eval::stdlib::render::is_regular_identifier(name) {
+                            format!("{module}#{name}")
+                        } else {
+                            format!("{module}#`{name}`")
+                        }
+                    }
+                    None => identity.to_string(),
+                }
+            })
+            .or_else(|| source.type_name.clone())
+            .unwrap_or_default()
+        }
+        (Kind::Mapping, Value::Object(map, source)) if !map.is_empty() => {
+            if source.is_none() {
+                // A `Map`, which keeps its entries in view.
+                let shown = map
+                    .iter()
+                    .map(|(key, value)| {
+                        format!(
+                            "{}, {}",
+                            map_key_display(key, depth, max),
+                            display_value_at(value, depth + 1, max)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("Map({shown})")
+            } else {
+                let shown = map
+                    .keys()
+                    .map(|key| format!("[{}] = ?", map_key_display(key, depth, max)))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                format!("new Mapping {{ {shown} }}")
+            }
+        }
+        (Kind::Mapping, Value::Object(map, source)) if map.is_empty() => {
+            if source.is_none() {
+                "Map()".into()
+            } else {
+                "new Mapping {}".into()
+            }
+        }
         (_, Value::Object(map, _)) => match map.keys().next() {
             Some(key) => match class_key_name(key) {
                 Some(name) => name.to_string(),
@@ -1117,7 +1306,31 @@ pub(crate) fn display_value(value: &Value) -> String {
             },
             None => "new Dynamic {}".into(),
         },
-        (_, Value::List(_)) => "new Listing { ... }".into(),
+        (_, Value::List(items)) => {
+            let shown = |items: &ListValue| {
+                items
+                    .iter()
+                    .map(|item| display_value_at(item, depth + 1, max))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            match items.kind() {
+                ListKind::List => format!("List({})", shown(items)),
+                ListKind::Set => format!("Set({})", shown(items)),
+                ListKind::Listing | ListKind::Dynamic => {
+                    let name = if items.kind() == ListKind::Listing {
+                        "Listing"
+                    } else {
+                        "Dynamic"
+                    };
+                    if items.is_empty() {
+                        format!("new {name} {{}}")
+                    } else {
+                        format!("new {name} {{ {} }}", vec!["?"; items.len()].join("; "))
+                    }
+                }
+            }
+        }
         _ => String::new(),
     }
 }
@@ -1421,7 +1634,11 @@ impl JsonValue<'_> {
     /// Render a member of an already converted value.
     #[cfg(feature = "native-io")]
     fn member(&mut self, value: &Value) -> Result<(serde_json::Value, Kind)> {
-        let kind = kind_of(value);
+        let kind = match kind_of(value) {
+            // As in `Walk::kind`, a nested class renders as a typed object.
+            Kind::Class => Kind::Typed,
+            kind => kind,
+        };
         Ok((self.value(value, kind)?, kind))
     }
 

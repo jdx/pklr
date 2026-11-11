@@ -50,7 +50,9 @@ impl Evaluator {
             Expr::Ident(name) => scope
                 .get(name)
                 .map(|value| {
-                    stdlib::builtin_marker_class(name, value).unwrap_or_else(|| value.clone())
+                    stdlib::builtin_marker_class(name, value)
+                        .or_else(|| alias_over_class(name, value, scope))
+                        .unwrap_or_else(|| value.clone())
                 })
                 .or_else(|| {
                     scope
@@ -58,6 +60,7 @@ impl Evaluator {
                         .is_none()
                         .then(|| stdlib::stdlib_class(name))?
                 })
+                .or_else(|| type_alias_value(name, scope))
                 .ok_or_else(|| {
                     Error::Eval(
                         scope
@@ -122,6 +125,17 @@ impl Evaluator {
                     )
                 };
                 let mut captured = captured;
+                // A type alias named as a value is a `TypeAlias`, which the
+                // lambda needs bound to reach it.
+                for name in &refs {
+                    // A local that reuses the alias's name stays what it is.
+                    if scope.get(name).is_some() && !scope.bound_by_alias(name) {
+                        continue;
+                    }
+                    if let Some(value) = type_alias_value(name, scope) {
+                        captured.insert(nm(format!("{TYPE_ALIAS_VALUE_PREFIX}{name}")), value);
+                    }
+                }
                 if names.contains(NAMES_A_TYPE) {
                     scope.capture_identities(&mut captured);
                 }
@@ -915,13 +929,18 @@ pub(super) fn eval_simple_expr(
         Expr::String(s) => Ok(Value::String(Arc::clone(s))),
         Expr::Ident(name) => scope
             .get(name)
-            .map(|value| stdlib::builtin_marker_class(name, value).unwrap_or_else(|| value.clone()))
+            .map(|value| {
+                stdlib::builtin_marker_class(name, value)
+                    .or_else(|| alias_over_class(name, value, scope))
+                    .unwrap_or_else(|| value.clone())
+            })
             .or_else(|| {
                 scope
                     .poison_of(name)
                     .is_none()
                     .then(|| stdlib::stdlib_class(name))?
             })
+            .or_else(|| type_alias_value(name, scope))
             .ok_or_else(|| {
                 Error::Eval(
                     scope
@@ -1189,4 +1208,46 @@ fn tag_dynamic(object: Value) -> Value {
         }
         other => other,
     }
+}
+
+/// Prefix of the hidden binding that carries a `TypeAlias` value into a lambda.
+pub(super) const TYPE_ALIAS_VALUE_PREFIX: &str = "\0alias:";
+
+/// The `TypeAlias` value for `name`, when it names a type alias in scope.
+fn type_alias_value(name: &str, scope: &Scope) -> Option<Value> {
+    if scope.poison_of(name).is_some() {
+        return None;
+    }
+    if scope.get_type_alias(name).is_none() {
+        // A lambda captured the alias under a hidden name, so naming a type in
+        // its body does not shadow the alias.
+        return scope
+            .get(&format!("{TYPE_ALIAS_VALUE_PREFIX}{name}"))
+            .cloned();
+    }
+    Some(stdlib::type_alias_value(
+        scope.runtime_type_identity(name),
+        name,
+    ))
+}
+
+/// Whether `Pair` in `scope` is still the built-in marker rather than a user
+/// binding of that name.
+pub(super) fn pair_is_builtin(scope: &Scope) -> bool {
+    matches!(
+        (scope.get("Pair"), stdlib::builtin_marker("Pair")),
+        (Some(Value::String(got)), Value::String(marker)) if Arc::ptr_eq(got, &marker)
+    )
+}
+
+/// The `TypeAlias` for `name` when `value` is the class the alias names, which
+/// `eval_type_alias` binds under the alias's name so `new Alias {}` works.
+fn alias_over_class(name: &str, value: &Value, scope: &Scope) -> Option<Value> {
+    // A class, a built-in's marker or any other value the alias declaration
+    // bound under the alias's name.
+    let _ = value;
+    scope
+        .bound_by_alias(name)
+        .then(|| type_alias_value(name, scope))
+        .flatten()
 }
