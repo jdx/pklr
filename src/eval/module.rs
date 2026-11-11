@@ -276,6 +276,7 @@ impl Evaluator {
         requested_fields: Option<HashSet<Name>>,
     ) -> Result<Value> {
         if depth > self.max_depth {
+            crate::stack::limit_hit();
             return Err(Error::Eval(format!(
                 "max import depth {} exceeded",
                 self.max_depth

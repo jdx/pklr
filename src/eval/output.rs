@@ -541,6 +541,7 @@ impl Evaluator {
         let mut from = path.to_path_buf();
         while let Some(uri) = parent {
             if levels.len() > self.max_depth {
+                crate::stack::limit_hit();
                 break;
             }
             let resolved = resolve_remote_relative(&from, &uri);
@@ -722,8 +723,10 @@ impl Evaluator {
     /// omitted unless the renderer sets `omitNullProperties = false`.
     #[cfg(feature = "native-io")]
     pub(crate) fn eval_file_json_blocking(&mut self, path: &Path) -> Result<serde_json::Value> {
-        let module = self.eval_file(path)?;
-        self.module_json(module)
+        self.on_grown_stack(|this| {
+            let module = this.eval_file(path)?;
+            this.module_json(module)
+        })
     }
 
     #[cfg(feature = "native-io")]
@@ -748,6 +751,11 @@ impl Evaluator {
     /// prints it.
     #[cfg(feature = "native-io")]
     pub(crate) fn eval_file_text_blocking(&mut self, path: &Path) -> Result<String> {
+        self.on_grown_stack(|this| this.eval_file_text_on_stack(path))
+    }
+
+    #[cfg(feature = "native-io")]
+    fn eval_file_text_on_stack(&mut self, path: &Path) -> Result<String> {
         self.output_format = RendererKind::Pcf;
         let module = self.eval_file(path);
         self.output_format = RendererKind::Json;

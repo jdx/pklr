@@ -73,7 +73,8 @@ impl Evaluator {
     pub fn with_capabilities(capabilities: impl EvalCapabilities + 'static) -> Self {
         Self {
             base_path: PathBuf::from("."),
-            max_depth: 32,
+            max_depth: crate::stack::SMALL_STACK_EVAL_DEPTH,
+            max_depth_set: false,
             http_cache: HashMap::default(),
             import_cache: HashMap::default(),
             imports_in_flight: HashSet::default(),
@@ -125,6 +126,31 @@ impl Evaluator {
             mapping_key_values: HashMap::default(),
             module_names: HashMap::default(),
         }
+    }
+
+    /// Limit how deeply evaluation may recurse before it fails with an error.
+    /// The default suits the large stack that evaluation runs on.
+    pub fn set_max_depth(&mut self, depth: usize) {
+        self.max_depth = depth;
+        self.max_depth_set = true;
+    }
+
+    /// Run `body`, which starts an evaluation, on the caller's stack and, if
+    /// that reaches the nesting limit, again on a large one with a higher
+    /// default limit.
+    pub(super) fn on_grown_stack<R: Send>(
+        &mut self,
+        mut body: impl FnMut(&mut Self) -> R + Send,
+    ) -> R {
+        crate::stack::run(|large| {
+            let saved = self.max_depth;
+            if large && !self.max_depth_set {
+                self.max_depth = crate::stack::EVAL_DEPTH;
+            }
+            let result = body(self);
+            self.max_depth = saved;
+            result
+        })
     }
 
     pub fn set_base_path(&mut self, path: &Path) {

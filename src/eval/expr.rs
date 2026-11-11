@@ -21,7 +21,8 @@ impl Evaluator {
         scope: &Scope,
         depth: usize,
     ) -> Result<Value> {
-        if depth > self.max_depth {
+        if depth > self.max_depth || crate::stack::exhausted() {
+            crate::stack::limit_hit();
             return Err(Error::Eval("maximum recursion depth exceeded".into()));
         }
         self.check_cancelled()?;

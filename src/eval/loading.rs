@@ -109,6 +109,7 @@ impl Evaluator {
     ) -> Result<HashSet<Name>> {
         let mut refs = HashSet::default();
         if depth > self.max_depth {
+            crate::stack::limit_hit();
             return Ok(refs);
         }
         for uri in [module.amends.as_deref(), module.extends.as_deref()]
@@ -215,8 +216,10 @@ impl Evaluator {
 
     /// Evaluate `source` as the module at `path`.
     pub fn eval_source(&mut self, source: &str, path: &Path) -> Result<Value> {
-        self.begin_evaluation();
-        self.eval_source_inner(source, path)
+        self.on_grown_stack(|this| {
+            this.begin_evaluation();
+            this.eval_source_inner(source, path)
+        })
     }
 
     pub(super) fn eval_source_inner(&mut self, source: &str, path: &Path) -> Result<Value> {
@@ -249,9 +252,11 @@ impl Evaluator {
 
     /// Evaluate a local pkl file by path.
     pub fn eval_file(&mut self, path: &Path) -> Result<Value> {
-        self.begin_evaluation();
-        let source = self.read_to_string_io(path)?;
-        self.eval_source_inner(&source, path)
+        self.on_grown_stack(|this| {
+            this.begin_evaluation();
+            let source = this.read_to_string_io(path)?;
+            this.eval_source_inner(&source, path)
+        })
     }
 
     /// Read, lex, parse, and evaluate a local file (with caching).
