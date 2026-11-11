@@ -53,10 +53,24 @@ impl Evaluator {
             // than the one the amended class recorded its listing bindings for.
             let declared_body = body;
             let body = inferred.as_ref().unwrap_or(body);
+            // The scope that declared the property's type, when an amendment of
+            // an inherited property carries it.
+            let declaring = match (
+                scope.get(&declared_type_scope_binding(&prop.name)),
+                scope.get(&declared_type_owner_binding(&prop.name)),
+            ) {
+                (Some(Value::Object(_, Some(source))), Some(Value::Int(owner)))
+                    if *owner == body_identity(declared_body) =>
+                {
+                    Some(restore_scope(&capture_object_source_scope(source)))
+                }
+                _ => None,
+            };
+            let type_scope = declaring.as_ref().unwrap_or(scope);
             let mut nullable_default = prop
                 .type_ann
                 .as_ref()
-                .and_then(|ty| nullable_inner_default(ty, scope));
+                .and_then(|ty| nullable_inner_default(ty, type_scope));
             // An amendment of an inherited `Listing` property records its
             // element class where the class declared the type. The type name
             // may mean something else here (an alias the amending module
@@ -69,7 +83,7 @@ impl Evaluator {
                 nullable_default = None;
             }
             if let Some(default) = &mut nullable_default {
-                apply_mapping_type_annotation(default, prop.type_ann.as_ref(), scope);
+                apply_mapping_type_annotation(default, prop.type_ann.as_ref(), type_scope);
             }
             // A body amendment amends a member the receiver itself holds. A
             // same-named property of an enclosing object, declared or

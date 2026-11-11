@@ -166,6 +166,30 @@ impl Evaluator {
         let inferred_overlay =
             self.infer_declared_members(base_source, overlay_entries, &mut listing_bound);
         let overlay_entries = inferred_overlay.as_deref().unwrap_or(overlay_entries);
+        // The declaring scope travels with the amended property: the amending
+        // scope reads a `Mapping` default from it.
+        for (name, declaring) in &listing_bound {
+            let Some(body) = overlay_entries.iter().find_map(|entry| match entry {
+                Entry::Property(prop) if prop.name == *name => prop.body.as_ref(),
+                _ => None,
+            }) else {
+                continue;
+            };
+            let mut source = mapping_source();
+            source.captured = SourceScope::lazy(
+                declaring,
+                vec![name_of("outer"), name_of("this")],
+                vec!["outer", "this"],
+            );
+            amendment_scope.values.insert(
+                declared_type_scope_binding(name).as_str().into(),
+                Value::Object(Arc::default(), Some(Arc::new(source))),
+            );
+            amendment_scope.values.insert(
+                declared_type_owner_binding(name).as_str().into(),
+                Value::Int(body_identity(body)),
+            );
+        }
         for entry in overlay_entries {
             let Entry::Property(prop) = entry else {
                 continue;
@@ -1714,12 +1738,14 @@ impl Evaluator {
                     .entries
                     .iter()
                     .enumerate()
-                    .rev()
                     .find_map(|(index, base)| match base {
                         Entry::Property(inherited)
                             if inherited.name == prop.name
                                 && !has_modifier(&inherited.modifiers, Modifier::Local) =>
                         {
+                            // The first entry with a type is the declaration;
+                            // a later one is an amendment that copied the
+                            // annotation, with the scope of whoever amended it.
                             inherited.type_ann.as_ref().map(|ty| (index, ty))
                         }
                         _ => None,
@@ -1747,13 +1773,18 @@ impl Evaluator {
             if !mapping_top && is_listing_chain(ty, &declaring) {
                 continue;
             }
-            let Some(inferred) = infer_declared_members(ty, body, &declaring) else {
-                continue;
-            };
-            let mut prop = (**prop).clone();
-            prop.body = Some(inferred);
-            rewritten.get_or_insert_with(|| overlay_entries.to_vec())[position] =
-                Entry::Property(Arc::new(prop));
+            match infer_declared_members(ty, body, &declaring) {
+                Some(inferred) => {
+                    let mut prop = (**prop).clone();
+                    prop.body = Some(inferred);
+                    rewritten.get_or_insert_with(|| overlay_entries.to_vec())[position] =
+                        Entry::Property(Arc::new(prop));
+                }
+                // A `Mapping` with no members to infer still reads its type
+                // (its alias, its nullable default) where it was declared.
+                None if mapping_top => {}
+                None => continue,
+            }
             declaring_scopes.push((prop_name(entry), declaring));
         }
         rewritten
@@ -1778,4 +1809,15 @@ fn never_collection_by_text(ty: &crate::parser::TypeExpr) -> bool {
         TypeExpr::Generic(name, _) => !matches!(name.as_str(), "Listing" | "Mapping"),
         _ => false,
     }
+}
+
+/// The binding under which an amendment scope carries the scope that declared
+/// the type of the property `name` (as the captured scope of an empty object).
+pub(super) fn declared_type_scope_binding(name: &str) -> String {
+    format!("\0declared_type_scope_of:{name}")
+}
+
+/// The binding that records which amending body owns [`declared_type_scope_binding`].
+pub(super) fn declared_type_owner_binding(name: &str) -> String {
+    format!("\0declared_type_owner_of:{name}")
 }
