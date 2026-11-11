@@ -144,6 +144,7 @@ impl Evaluator {
             return Ok(Some((source, uri.to_string())));
         }
         if uri.starts_with("package://") {
+            self.check_module_allowed(uri)?;
             let pkg = self.resolve_package(uri)?;
             match &pkg {
                 PackageSource::Direct { url, root } => {
@@ -177,6 +178,56 @@ impl Evaluator {
         }
         let source = self.read_to_string_io(&import_path)?;
         Ok(Some((source, import_path.display().to_string())))
+    }
+
+    /// Fail unless the module policy allows loading the module `uri`.
+    pub(super) fn check_module_allowed(&self, uri: &str) -> Result<()> {
+        let Some(policy) = &self.allowed_modules else {
+            return Ok(());
+        };
+        let patterns = policy.as_ref().map_err(|e| Error::Eval(e.clone()))?;
+        // The standard library is always loadable.
+        if uri.starts_with("pkl:") {
+            return Ok(());
+        }
+        if patterns
+            .iter()
+            .any(|pattern| pattern.is_match(uri).unwrap_or(false))
+        {
+            return Ok(());
+        }
+        Err(Error::Eval(format!(
+            "Refusing to load module `{uri}` because it does not match any entry in the module allowlist."
+        )))
+    }
+
+    /// [`Self::check_module_allowed`] for the module at `path`, which is a URL
+    /// for a remote module and a file otherwise. A file inside an extracted
+    /// package is covered by the check on its `package:` URI.
+    pub(super) fn check_module_path_allowed(&mut self, path: &Path) -> Result<()> {
+        if self.allowed_modules.is_none() {
+            return Ok(());
+        }
+        let name = path.to_string_lossy();
+        if name.contains("://") {
+            if self
+                .package_http_roots
+                .iter()
+                .any(|root| name.starts_with(root.as_str()))
+            {
+                return Ok(());
+            }
+            return self.check_module_allowed(&name);
+        }
+        let absolute = absolute_clean(&self.host_absolute_path(path.to_path_buf()));
+        if self
+            .package_dirs
+            .values()
+            .any(|dir| absolute.starts_with(dir))
+        {
+            return Ok(());
+        }
+        self.check_module_allowed(&file_uri(&absolute))
     }
 
     /// Load and parse the module `uri` names, sharing the parse cache with
@@ -457,6 +508,17 @@ impl Evaluator {
         // Match `expand_glob`, which walks `.` for a bare entry path, so the
         // matched paths share this prefix and the keys come out relative.
         let base_dir = module_dir(path.parent().unwrap_or(Path::new(".")));
+        if self.allowed_modules.is_some() {
+            // Pkl checks the directory the pattern searches before any match.
+            let fixed = uri.find(['*', '?', '[', '{']).map_or(uri, |i| &uri[..i]);
+            let dir = fixed.rfind('/').map_or("", |i| &fixed[..=i]);
+            let dir_path = self.local_file_path(path, dir)?;
+            let dir_uri = format!(
+                "{}/",
+                file_uri(&absolute_clean(&self.host_absolute_path(dir_path))).trim_end_matches('/')
+            );
+            self.check_module_allowed(&dir_uri)?;
+        }
         let matched = self.glob_io(base_dir, uri)?;
         let matched = matched
             .into_iter()
