@@ -739,27 +739,6 @@ impl Evaluator {
         )
     }
 
-    /// Whether an entry value is built from the mapping's `default`: an object
-    /// body or an untyped `new { ... }`, also as the selected result of `if`,
-    /// `let` or `trace`. Other values, such as literals, expressions and
-    /// `new T { ... }`, never read it.
-    fn reads_mapping_default(&mut self, expr: &Expr, scope: &Scope, depth: usize) -> Result<bool> {
-        Ok(match expr {
-            Expr::ObjectBody(_) | Expr::New(None, _, _) | Expr::InferredNew(..) => true,
-            Expr::If(condition, then, otherwise) => {
-                let branch = match self.eval_expr(condition, scope, depth + 1)? {
-                    Value::Bool(true) => then,
-                    _ => otherwise,
-                };
-                self.reads_mapping_default(branch, scope, depth)?
-            }
-            Expr::Let(_, _, body) | Expr::Trace(body, _) | Expr::TemplateLocals(_, body) => {
-                self.reads_mapping_default(body, scope, depth)?
-            }
-            _ => false,
-        })
-    }
-
     /// Evaluate the entries of one mapping body into `map`. `defined_keys`
     /// holds the keys the body has defined so far, including those its
     /// generators produced: a body may amend its parent's entries, but may
@@ -878,15 +857,21 @@ impl Evaluator {
                     // body that amends an existing entry amends itself instead.
                     let explicit_default = if let Some(function @ Value::Lambda(..)) =
                         &explicit_default
-                        && self.reads_mapping_default(val_expr, entry_scope, depth)?
+                        && let Some(wrapped) = reads_mapping_default(val_expr)
                         && !(map.contains_key(&storage_key)
                             && matches!(val_expr, Expr::ObjectBody(_)))
                     {
                         let arg = key
                             .clone()
                             .unwrap_or_else(|| Value::String(key_str.clone()));
-                        applied_default =
-                            Some(self.apply_function(function, &[arg], entry_scope, depth)?);
+                        // Behind `if`, `let` or `trace` the entry may not build an
+                        // object, so a failing default is not an error there.
+                        let applied = self.apply_function(function, &[arg], entry_scope, depth);
+                        applied_default = if wrapped {
+                            applied.ok()
+                        } else {
+                            Some(applied?)
+                        };
                         &applied_default
                     } else {
                         &explicit_default
@@ -1372,5 +1357,24 @@ mod mapping_key_tests {
         evaluator.begin_evaluation();
 
         assert!(evaluator.mapping_key_values.is_empty());
+    }
+}
+
+/// Whether an entry value is built from the mapping's `default`: `Some(false)`
+/// for an object body or an untyped `new { ... }`, `Some(true)` when it sits
+/// behind `if`, `let` or `trace` and may not be selected, `None` for values
+/// that never read it, such as literals, expressions and `new T { ... }`.
+fn reads_mapping_default(expr: &Expr) -> Option<bool> {
+    match expr {
+        Expr::ObjectBody(_) | Expr::New(None, _, _) | Expr::InferredNew(..) => Some(false),
+        Expr::If(_, then, otherwise) => {
+            reads_mapping_default(then).or_else(|| reads_mapping_default(otherwise))?;
+            Some(true)
+        }
+        Expr::Let(_, _, body) | Expr::Trace(body, _) | Expr::TemplateLocals(_, body) => {
+            reads_mapping_default(body)?;
+            Some(true)
+        }
+        _ => None,
     }
 }

@@ -53,6 +53,15 @@ impl Evaluator {
                     _ => {}
                 }
             }
+            // The same for an element-only `default`, which is a list and has no
+            // `apply` of its own.
+            if method == "apply"
+                && evaled_args.len() == 1
+                && matches!(obj, Value::List(_))
+                && is_default_member_ref(obj_expr)
+            {
+                return Ok(obj);
+            }
             if let Some(result) = self.eval_method_call(&obj, method, &evaled_args, depth)? {
                 return Ok(result);
             }
