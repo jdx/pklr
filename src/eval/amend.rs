@@ -1230,7 +1230,7 @@ impl Evaluator {
         let assigned_default = overlay_entries.iter().find_map(|entry| match entry {
             Entry::Property(prop)
                 if &*prop.name == "default"
-                    && prop.value.is_some()
+                    && (prop.value.is_some() || prop.body.is_some())
                     && !has_modifier(&prop.modifiers, Modifier::Local) =>
             {
                 Some(prop.clone())
@@ -1244,6 +1244,8 @@ impl Evaluator {
                 &*prop.name == "default" && !has_modifier(&prop.modifiers, Modifier::Local)
             }
             Entry::DynProperty(key, _) => matches!(key, Expr::String(_)),
+            // The entries a generator makes keep the value they had.
+            Entry::WhenGenerator(_) | Entry::ForGenerator(_) => true,
             _ => false,
         });
         let Some(assigned_default) = assigned_default else {
@@ -1256,7 +1258,23 @@ impl Evaluator {
         else {
             return Ok(None);
         };
+        // A body default amends the inherited one instead of replacing it.
+        let body_only = assigned_default.value.is_none();
+        let fresh_entries = match (
+            find_default_body_entries(&base_src.entries),
+            &assigned_default.body,
+        ) {
+            (Some(old), Some(new)) if body_only => Some(
+                old.iter()
+                    .chain(new.iter())
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .into(),
+            ),
+            _ => None,
+        };
         let recorded = default.clone();
+        let recorded_entries = fresh_entries.clone();
         // Entries the amendment replaces outright are never built from the base.
         let replaced: HashSet<&str> = overlay_entries
             .iter()
@@ -1294,7 +1312,7 @@ impl Evaluator {
                 &base_src.mapping_value_types,
                 MappingInheritedDefault {
                     value: Some(default),
-                    entries: None,
+                    entries: fresh_entries.clone(),
                 },
             )?;
             // An entry an earlier amendment changed is no longer what the base
@@ -1332,7 +1350,23 @@ impl Evaluator {
             .flatten();
         let same =
             declared.is_some_and(|declared| declared.identity_json() == recorded.identity_json());
-        Ok(same.then_some(assigned_default))
+        // A function default may read the default it amends through `super`
+        // or close over names that only exist where the amendment is written;
+        // the saved source can rebind neither, and every function compares
+        // equal above, so a function default is not recorded.
+        if !same || matches!(assigned_default.value, Some(Expr::Lambda(..))) {
+            return Ok(None);
+        }
+        // The recorded default is the inherited body followed by the new one.
+        Ok(match (body_only, recorded_entries) {
+            (false, _) => Some(assigned_default),
+            (true, Some(entries)) => {
+                let mut merged = (*assigned_default).clone();
+                merged.body = Some(entries);
+                Some(Arc::new(merged))
+            }
+            (true, None) => None,
+        })
     }
 }
 

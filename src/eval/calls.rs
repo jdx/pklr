@@ -53,6 +53,15 @@ impl Evaluator {
                     _ => {}
                 }
             }
+            // The same for an element-only `default`, which is a list and has no
+            // `apply` of its own.
+            if method == "apply"
+                && evaled_args.len() == 1
+                && matches!(obj, Value::List(_))
+                && is_default_member_ref(obj_expr)
+            {
+                return Ok(obj);
+            }
             if let Some(result) = self.eval_method_call(&obj, method, &evaled_args, depth)? {
                 return Ok(result);
             }
@@ -64,6 +73,16 @@ impl Evaluator {
             }
             if let Some(result) = self.eval_object_field_call(&obj, method, &evaled_args)? {
                 return Ok(result);
+            }
+            // A `default` that is an object stands for the function that
+            // returns it for every key or index, unless the object has its own
+            // `apply`.
+            if method == "apply"
+                && evaled_args.len() == 1
+                && matches!(obj, Value::Object(..) | Value::List(_))
+                && is_default_member_ref(obj_expr)
+            {
+                return Ok(obj);
             }
             if method == "getClass" && evaled_args.is_empty() {
                 if matches!(obj_expr.as_ref(), Expr::Ident(name) if name == "module") {
@@ -488,6 +507,41 @@ impl Evaluator {
             }
 
             // Object/Mapping methods
+            (Value::Object(map, Some(source)), "getOrDefault")
+                if source.kind == ObjectKind::Mapping && args.len() == 1 =>
+            {
+                let key = value_to_key(&args[0])?;
+                if let Some(stored) = equivalent_mapping_key(map, &key)
+                    && let Some(value) = map.get(&stored)
+                {
+                    return Ok(Some(value.clone()));
+                }
+                let mut scope = Scope::for_call(&Arc::new(source.scope().clone()));
+                // A body default `default { key -> ... }` amends the default it
+                // replaces through `super.default`; none is left to amend here.
+                scope.set("super", Value::Object(Arc::default(), None));
+                // The default may read the mapping's own locals.
+                for entry in source.entries.iter() {
+                    if let Entry::Property(prop) = entry
+                        && has_modifier(&prop.modifiers, Modifier::Local)
+                        && let Some(expr) = &prop.value
+                    {
+                        let value = self.eval_expr(expr, &scope, depth + 1)?;
+                        scope.declare(&prop.name, value);
+                    }
+                }
+                let Some(default) = self.find_default_template(&source.entries, &scope, depth)?
+                else {
+                    return Err(Error::Eval(format!(
+                        "Tried to read missing entry with key `{}` of `Mapping`, which has no default.",
+                        value_to_display(&args[0])
+                    )));
+                };
+                if let Value::Lambda(..) = default {
+                    return Ok(Some(self.apply_function(&default, args, &scope, depth)?));
+                }
+                Ok(Some(default))
+            }
             (Value::Object(map, _), "containsKey") => {
                 let key = args.first().and_then(|v| v.as_str()).unwrap_or("");
                 Ok(Some(Value::Bool(map.contains_key(key))))
@@ -792,4 +846,14 @@ fn without_class_members(map: &Arc<ObjectMap>, source: Option<&ObjectSource>) ->
             .map(|(key, value)| (key.clone(), value.clone().into_entry_value()))
             .collect(),
     )
+}
+
+/// Whether `expr` is `super.default`.
+fn is_default_member_ref(expr: &Expr) -> bool {
+    match expr {
+        Expr::Field(base, name) => {
+            name == "default" && matches!(base.as_ref(), Expr::Ident(base) if base == "super")
+        }
+        _ => false,
+    }
 }

@@ -849,6 +849,27 @@ impl Evaluator {
                     if let Some(key) = key.as_ref() {
                         self.remember_mapping_key(storage_key.clone(), key);
                     }
+                    // A function `default` builds each entry's template from the
+                    // entry's key.
+                    let applied_default;
+                    // Only an object body or an untyped `new { ... }` (possibly
+                    // behind `if`, `let` or `trace`) reads the `default`. An entry
+                    // body that amends an existing entry amends itself instead.
+                    let explicit_default = if let Some(function @ Value::Lambda(..)) =
+                        &explicit_default
+                        && reads_mapping_default(val_expr)
+                        && !(map.contains_key(&storage_key)
+                            && matches!(val_expr, Expr::ObjectBody(_)))
+                    {
+                        let arg = key
+                            .clone()
+                            .unwrap_or_else(|| Value::String(key_str.clone()));
+                        applied_default =
+                            Some(self.apply_function(function, &[arg], entry_scope, depth)?);
+                        &applied_default
+                    } else {
+                        &explicit_default
+                    };
                     if !insert_mapping_key(defined_keys, &key_str) {
                         let key = match key.as_ref() {
                             None => key_str.to_string(),
@@ -1331,4 +1352,14 @@ mod mapping_key_tests {
 
         assert!(evaluator.mapping_key_values.is_empty());
     }
+}
+
+/// Whether an entry value is built from the mapping's `default`: an object
+/// body or an untyped `new { ... }`. Other values, such as literals,
+/// expressions, `new T { ... }` and `if`/`let` results, never get it.
+fn reads_mapping_default(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::ObjectBody(_) | Expr::New(None, _, _) | Expr::InferredNew(..)
+    )
 }

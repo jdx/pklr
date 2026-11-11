@@ -7525,6 +7525,149 @@ fn a_callers_alias_of_the_same_name_does_not_retype_an_imported_mapping() {
     assert_eq!(json.unwrap()["v"], serde_json::json!(["E", "E"]));
 }
 
+// ============================================================
+// Mapping `default`
+// ============================================================
+
+#[test]
+fn mapping_function_default_builds_entries_from_keys() {
+    let json = eval(
+        r#"
+m = new Mapping {
+  default { key -> name = key }
+  ["a"] { age = 1 }
+  ["b"] { name = super.name + "!" }
+}
+"#,
+    );
+    assert_eq!(json["m"]["a"]["name"], "a");
+    assert_eq!(json["m"]["a"]["age"], 1);
+    assert_eq!(json["m"]["b"]["name"], "b!");
+}
+
+#[test]
+fn mapping_amended_default_rebuilds_entries() {
+    let json = eval(
+        r#"
+res1 = new Mapping {
+  default { age = 42 }
+  ["pigeon"] { name = "Pigeon" }
+  ["parrot"] { name = "Parrot"; age = 50 }
+}
+res2 = (res1) { default { age = 45 } }
+"#,
+    );
+    assert_eq!(json["res2"]["pigeon"]["age"], 45);
+    assert_eq!(json["res2"]["parrot"]["age"], 50);
+}
+
+#[test]
+fn mapping_get_or_default_reads_missing_entry_from_default() {
+    let json = eval(
+        r#"
+m = new Mapping {
+  default { key -> name = key }
+  ["a"] { age = 1 }
+}
+hit = m.getOrDefault("a")
+miss = (m.getOrDefault("zed")) { age = 99 }
+"#,
+    );
+    assert_eq!(json["hit"]["age"], 1);
+    assert_eq!(json["miss"]["name"], "zed");
+    assert_eq!(json["miss"]["age"], 99);
+}
+
+#[test]
+fn mapping_get_or_default_sees_locals_and_equivalent_keys() {
+    let json = eval(
+        r#"
+m = new Mapping { local n = 42; default { value = n }; [1.s] = 7 }
+missing = m.getOrDefault("missing")
+hit = m.getOrDefault(1000.ms)
+"#,
+    );
+    assert_eq!(json["missing"]["value"], 42);
+    assert_eq!(json["hit"], 7);
+}
+
+#[test]
+fn mapping_function_default_is_not_called_for_typed_new_entries() {
+    let json = eval(
+        r#"
+u = new Mapping {
+  default = (key) -> throw("unused")
+  ["a"] = new Dynamic { x = 1 }
+}
+"#,
+    );
+    assert_eq!(json["u"]["a"]["x"], 1);
+}
+
+#[test]
+fn mapping_amended_body_default_keeps_inherited_default_members() {
+    let json = eval(
+        r#"
+res1 = new Mapping {
+  default { name = "x"; age = 42 }
+  ["pigeon"] { }
+}
+res2 = (res1) { default { age = 45 } }
+miss = res2.getOrDefault("missing")
+"#,
+    );
+    assert_eq!(json["res2"]["pigeon"]["name"], "x");
+    assert_eq!(json["res2"]["pigeon"]["age"], 45);
+    assert_eq!(json["miss"]["name"], "x");
+    assert_eq!(json["miss"]["age"], 45);
+}
+
+#[test]
+fn mapping_replacement_entry_keeps_function_default() {
+    let json = eval(
+        r#"
+m = new Mapping {
+  default = (key) -> new Dynamic { name = key; age = 1 }
+  ["a"] {}
+}
+n = (m) { ["a"] = new { age = 2 } }
+"#,
+    );
+    assert_eq!(json["n"]["a"]["name"], "a");
+    assert_eq!(json["n"]["a"]["age"], 2);
+}
+
+#[test]
+fn mapping_function_default_is_not_called_for_plain_replacements() {
+    let json = eval(
+        r#"
+m = new Mapping {
+  default = (key) -> throw("unused")
+  ["a"] = 1
+}
+n = (m) { ["a"] = 42; ["b"] = "x" }
+"#,
+    );
+    assert_eq!(json["n"]["a"], 42);
+    assert_eq!(json["n"]["b"], "x");
+}
+
+#[test]
+fn mapping_function_default_is_not_called_for_computed_replacements() {
+    let json = eval(
+        r#"
+x = 3
+m = new Mapping {
+  default = (key) -> throw("unused")
+  ["a"] = 1
+}
+n = (m) { ["a"] = x + 1; ["b"] = -x; ["c"] = 2.s }
+"#,
+    );
+    assert_eq!(json["n"]["a"], 4);
+    assert_eq!(json["n"]["b"], -3);
+}
+
 #[test]
 fn property_reads_a_sibling_declared_later_in_its_body() {
     let v = eval("foo {\n  x = y\n  y = 3\n}");
@@ -7573,4 +7716,74 @@ fn spread_cannot_add_a_local_or_method_name_to_a_closed_class_instance() {
         "class P { name: String\n local secret = 1 }\nlocal d { secret = 2 }\nres: P = new { name = \"a\"; ...d }",
     );
     assert!(msg.contains("Cannot find property `secret`"), "{msg}");
+}
+
+#[test]
+fn mapping_function_default_is_not_called_for_unselected_branch() {
+    let json = eval(
+        r#"
+m = new Mapping {
+  default = (key) -> throw("unused")
+  ["a"] = if (true) 42 else new {}
+}
+"#,
+    );
+    assert_eq!(json["m"]["a"], 42);
+}
+
+#[test]
+fn default_named_value_keeps_its_own_apply_method() {
+    let json = eval(
+        r#"
+class Adder {
+  function apply(x) = x + 1
+}
+local f = (default) -> default.apply(1)
+r = f.apply(new Adder {})
+"#,
+    );
+    assert_eq!(json["r"], 2);
+}
+
+#[test]
+fn amended_function_default_can_apply_an_element_only_default() {
+    let json = eval(
+        r#"
+m = new Mapping {
+  default { 1 }
+  ["a"] { 2 }
+}
+n = (m) { default = (k) -> (super.default.apply(k)) { 3 } }
+"#,
+    );
+    assert_eq!(json["n"]["a"], serde_json::json!([1, 3, 2]));
+}
+
+#[test]
+fn a_parameter_named_default_is_not_treated_as_a_mapping_default() {
+    let (_, err) = (
+        0,
+        eval_fails(
+            r#"
+f = (default) -> default.apply(1)
+r = f.apply(new Dynamic { x = 1 })
+"#,
+        ),
+    );
+    assert!(err.contains("apply"), "{err}");
+}
+
+#[test]
+fn mapping_get_or_default_body_default_reads_mapping_locals() {
+    let json = eval(
+        r#"
+m = new Mapping {
+  local base = 10
+  default { key -> n = base }
+  ["a"] {}
+}
+miss = m.getOrDefault("zed")
+"#,
+    );
+    assert_eq!(json["miss"]["n"], 10);
 }
