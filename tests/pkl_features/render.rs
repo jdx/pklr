@@ -1320,3 +1320,26 @@ msg = test.catch(() -> throw("bad\nValue: x"))
     );
     assert_eq!(json["msg"], "bad\nValue: x");
 }
+
+#[test]
+fn renderer_errors_show_stdlib_classes_and_empty_maps() {
+    let json = eval(
+        r#"
+import "pkl:test"
+cls = test.catch(() -> new JsonRenderer {}.renderValue(Int))
+map = test.catch(() -> new PcfRenderer {}.renderDocument(Map()))
+mapping = test.catch(() -> new PcfRenderer {}.renderDocument(new Mapping {}))
+"#,
+    );
+    assert_eq!(
+        json["cls"],
+        "Cannot render value of type `Class` as JSON. Value: Int"
+    );
+    assert!(json["map"].as_str().unwrap().ends_with("Value: Map()"));
+    assert!(
+        json["mapping"]
+            .as_str()
+            .unwrap()
+            .ends_with("Value: new Mapping {}")
+    );
+}

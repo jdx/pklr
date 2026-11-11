@@ -1196,6 +1196,10 @@ pub(crate) fn display_value(value: &Value) -> String {
                 source.type_identity.as_deref()
             })
             .map(|identity| match identity.rsplit_once('.') {
+                _ if identity.starts_with("pkl:") => identity
+                    .rsplit_once('#')
+                    .map_or(identity, |(_, name)| name)
+                    .to_string(),
                 Some((module, name)) => {
                     let module = module.rsplit(['/', '\\']).next().unwrap_or(module);
                     let module = module.strip_suffix(".pkl").unwrap_or(module);
@@ -1230,6 +1234,13 @@ pub(crate) fn display_value(value: &Value) -> String {
                     .collect::<Vec<_>>()
                     .join("; ");
                 format!("new Mapping {{ {shown} }}")
+            }
+        }
+        (Kind::Mapping, Value::Object(map, source)) if map.is_empty() => {
+            if source.is_none() {
+                "Map()".into()
+            } else {
+                "new Mapping {}".into()
             }
         }
         (_, Value::Object(map, _)) => match map.keys().next() {
