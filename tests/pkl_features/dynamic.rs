@@ -697,3 +697,340 @@ r = new PcfRenderer {}.renderValue(Map(List(1), "v").toDynamic())
     assert!(!rendered.contains("pklr:"), "{rendered}");
     assert!(rendered.starts_with("{\n  ["), "{rendered}");
 }
+
+// A body that amends nothing and has elements as well as members is a
+// `Dynamic` with both. Each expectation was compared with `pkl eval` 0.32.2.
+#[test]
+fn an_untyped_body_with_elements_and_members_keeps_both() {
+    let json = eval(
+        r#"
+local d = new Dynamic { y { 5; z = 1 } }
+a1 = d.y.z
+a2 = d.y.toList()
+a3 = d.y.toMap()
+local e = new Dynamic { y { z = 1; 5 } }
+b1 = e.y.z
+b2 = e.y.toList()
+local n = new Dynamic { a { b { 5; z = 1 } } }
+c1 = n.a.b.z
+c2 = n.a.b.toList()
+local g = new Dynamic { y { 1; 2; z = 1; 3 } }
+d1 = g.y.toList()
+d2 = g.y.z
+"#,
+    );
+    assert_eq!(json["a1"], 1);
+    assert_eq!(json["a2"], serde_json::json!([5]));
+    assert_eq!(json["a3"], serde_json::json!({"z": 1}));
+    assert_eq!(json["b1"], 1);
+    assert_eq!(json["b2"], serde_json::json!([5]));
+    assert_eq!(json["c1"], 1);
+    assert_eq!(json["c2"], serde_json::json!([5]));
+    assert_eq!(json["d1"], serde_json::json!([1, 2, 3]));
+    assert_eq!(json["d2"], 1);
+}
+
+#[test]
+fn a_generator_body_with_elements_and_members_keeps_both() {
+    let json = eval(
+        r#"
+local d = new Dynamic { y { for (i in List(1, 2)) { i }; when (true) { z = 1 } } }
+a1 = d.y.z
+a2 = d.y.toList()
+local f = new Dynamic { y { for (k in List("a")) { ["k\(k)"] = 1 }; 7 } }
+b1 = f.y.toMap()
+b2 = f.y.toList()
+"#,
+    );
+    assert_eq!(json["a1"], 1);
+    assert_eq!(json["a2"], serde_json::json!([1, 2]));
+    assert_eq!(json["b1"], serde_json::json!({"ka": 1}));
+    assert_eq!(json["b2"], serde_json::json!([7]));
+}
+
+#[test]
+fn an_untyped_body_with_elements_and_members_in_a_listing_or_typed_dynamic() {
+    let json = eval(
+        r#"
+local l = new Listing { new { 5; z = 1 } }
+a1 = l[0].z
+a2 = l[0].toList()
+class D { x: Dynamic? }
+local d = new D { x { 5; z = 1 } }
+b1 = d.x.z
+b2 = d.x.toList()
+local m = new Dynamic { y { z = 1 } }
+c = m.y.z
+"#,
+    );
+    assert_eq!(json["a1"], 1);
+    assert_eq!(json["a2"], serde_json::json!([5]));
+    assert_eq!(json["b1"], 1);
+    assert_eq!(json["b2"], serde_json::json!([5]));
+    assert_eq!(json["c"], 1);
+}
+
+#[test]
+fn amending_a_mixed_body_adds_to_both() {
+    let json = eval(
+        r#"
+local d = new Dynamic { y { 5; z = 1 } }
+local d2 = (d) { y { 6; w = 2 } }
+a1 = d2.y.toList()
+a2 = d2.y.z
+a3 = d2.y.w
+"#,
+    );
+    assert_eq!(json["a1"], serde_json::json!([5, 6]));
+    assert_eq!(json["a2"], 1);
+    assert_eq!(json["a3"], 2);
+}
+
+#[test]
+fn a_listing_typed_body_with_only_elements_stays_a_listing() {
+    let json = eval(
+        r#"
+class C { l: Listing<Int> }
+local c = new C { l { 1; 2 } }
+a = c.l is Listing
+b = c.l
+"#,
+    );
+    assert_eq!(json["a"], true);
+    assert_eq!(json["b"], serde_json::json!([1, 2]));
+}
+
+// An element, spread or generator may read a member declared after it, and
+// keeps its place among the elements. Compared with `pkl eval` 0.32.2.
+#[test]
+fn an_element_may_read_a_member_declared_later() {
+    let json = eval(
+        r#"
+local d = new Dynamic { y { z; z = 1 } }
+a1 = d.y.toList()
+a2 = d.y.z
+local t = new Dynamic { z; z = 1 }
+b = t.toList()
+local o = new Dynamic { z; 5; z = 1 }
+c1 = o.toList()
+local e = new Dynamic { 5; z; k = 2; w; w = 3; z = 1 }
+c2 = e.toList()
+"#,
+    );
+    assert_eq!(json["a1"], serde_json::json!([1]));
+    assert_eq!(json["a2"], 1);
+    assert_eq!(json["b"], serde_json::json!([1]));
+    assert_eq!(json["c1"], serde_json::json!([1, 5]));
+    assert_eq!(json["c2"], serde_json::json!([5, 1, 3]));
+}
+
+#[test]
+fn a_generator_may_read_a_member_declared_later() {
+    let json = eval(
+        r#"
+local d = new Dynamic { y { when (true) { z }; z = 1 } }
+a = d.y.toList()
+local e = new Dynamic { y { for (i in List(1)) { z + i }; z = 1 } }
+b = e.y.toList()
+local f = new Dynamic { y { 7; for (i in List(1, 2)) { z + i }; z = 10 } }
+c = f.y.toList()
+"#,
+    );
+    assert_eq!(json["a"], serde_json::json!([1]));
+    assert_eq!(json["b"], serde_json::json!([2]));
+    assert_eq!(json["c"], serde_json::json!([7, 11, 12]));
+}
+
+#[test]
+fn a_member_may_read_an_earlier_member_of_a_mixed_body() {
+    let json = eval(
+        r#"
+local d = new Dynamic { y { 5; k = 2; z = k } }
+a = d.y.z
+"#,
+    );
+    assert_eq!(json["a"], 2);
+}
+
+#[test]
+fn many_spreads_before_a_member_keep_every_element() {
+    let spreads = "...a; ".repeat(200);
+    let json = eval(&format!(
+        "local a = List(1, 2, 3)\nlocal d = new Dynamic {{ {spreads}z = 1 }}\nr = d.toList().length\nr2 = d.z\n"
+    ));
+    assert_eq!(json["r"], 600);
+    assert_eq!(json["r2"], 1);
+}
+
+#[test]
+fn a_partly_evaluated_generator_before_a_member_still_reads_it() {
+    let json = eval(
+        r#"
+local d = new Dynamic { y { when (true) { 1; z }; z = 2 } }
+r = d.y.toList()
+"#,
+    );
+    assert_eq!(json["r"], serde_json::json!([1, 2]));
+}
+
+#[test]
+fn a_body_whose_only_elements_come_from_generators_reads_a_later_member() {
+    let json = eval(
+        r#"
+local d = new Dynamic { when (true) { z }; z = 1 }
+a = d.toList()
+local e = new Dynamic { for (i in List(1, 2)) { z + i }; z = 10 }
+b = e.toList()
+"#,
+    );
+    assert_eq!(json["a"], serde_json::json!([1]));
+    assert_eq!(json["b"], serde_json::json!([11, 12]));
+}
+
+#[test]
+fn a_for_that_fails_after_emitting_resumes_once_the_member_is_bound() {
+    let json = eval(
+        r#"
+local d = new Dynamic { y { 0; for (i in List(1, 2)) { if (i == 1) 1 else z }; z = 2 } }
+a = d.y.toList()
+local e = new Dynamic { 0; for (i in List(1, 2, 3)) { if (i < 3) i else z }; 9; z = 2 }
+b = e.toList()
+"#,
+    );
+    assert_eq!(json["a"], serde_json::json!([0, 1, 2]));
+    assert_eq!(json["b"], serde_json::json!([0, 1, 2, 2, 9]));
+}
+
+#[test]
+fn a_member_of_the_body_shadows_an_enclosing_binding_of_the_same_name() {
+    let json = eval(
+        r#"
+z = 5
+local a = new Dynamic { z; z = 1 }
+r1 = a.toList()
+function f(z) = new Dynamic { z; z = 1 }
+r2 = f(7).toList()
+local q = 9
+local b = new Dynamic { y { q; q = 2 } }
+r3 = b.y.toList()
+local c = new Dynamic { for (i in List(1)) { q + i }; q = 10 }
+r4 = c.toList()
+"#,
+    );
+    assert_eq!(json["r1"], serde_json::json!([1]));
+    assert_eq!(json["r2"], serde_json::json!([1]));
+    assert_eq!(json["r3"], serde_json::json!([2]));
+    assert_eq!(json["r4"], serde_json::json!([11]));
+}
+
+#[test]
+fn an_enclosing_binding_is_read_when_the_body_has_no_such_member() {
+    let json = eval(
+        r#"
+function f(z) = new Dynamic { z; w = 1 }
+r1 = f(5).toList()
+local z = 9
+r2 = new Dynamic { when (true) { z }; w = 1 }.toList()
+"#,
+    );
+    assert_eq!(json["r1"], serde_json::json!([5]));
+    assert_eq!(json["r2"], serde_json::json!([9]));
+}
+
+#[test]
+fn a_failure_that_is_not_a_later_member_still_surfaces() {
+    let message =
+        eval_fails("local d = new Dynamic { y { 5; throw(\"boom\") }; q = 1 }\nr = d.y.toList()\n");
+    assert!(message.contains("boom"), "{message}");
+    let message = eval_fails(
+        "local d = new Dynamic { for (i in List(1, 2)) { if (i == 2) throw(\"boom\") else i }; z = 1 }\nr = d.toList()\n",
+    );
+    assert!(message.contains("boom"), "{message}");
+    let message = eval_fails("local d = new Dynamic { z; z = throw(\"inner\") }\nr = d.toList()\n");
+    assert!(message.contains("inner"), "{message}");
+    let message = eval_fails("local d = new Dynamic { nope; z = 1 }\nr = d.toList()\n");
+    assert!(message.contains("nope"), "{message}");
+}
+
+#[test]
+fn a_body_with_a_member_produced_by_a_generator_keeps_its_elements() {
+    let json = eval(
+        r#"
+local d = new Dynamic { y { 5; when (true) { q = 2 }; 6 } }
+a = d.y.toList()
+a2 = d.y.q
+"#,
+    );
+    assert_eq!(json["a"], serde_json::json!([5, 6]));
+    assert_eq!(json["a2"], 2);
+}
+
+// Each expectation below was compared with `pkl eval` 0.32.2.
+#[test]
+fn two_failing_fors_each_resume_at_their_own_iteration() {
+    let json = eval(
+        r#"
+local d = new Dynamic { for (i in List(1, 2)) { if (i == 1) i else z }; for (i in List(5, 6)) { if (i == 5) i else z }; z = 9 }
+a = d.toList()
+local e = new Dynamic { for (i in List(1, 2)) { z + i }; for (i in List(3)) { z + i }; z = 10 }
+b = e.toList()
+local f = new Dynamic { when (true) { for (i in List(1, 2)) { if (i == 1) i else z } }; z = 7 }
+c = f.toList()
+"#,
+    );
+    assert_eq!(json["a"], serde_json::json!([1, 9, 5, 9]));
+    assert_eq!(json["b"], serde_json::json!([11, 12, 13]));
+    assert_eq!(json["c"], serde_json::json!([1, 7]));
+}
+
+#[test]
+fn a_computed_member_is_a_later_member_too() {
+    let json = eval(
+        r#"
+local a = new Dynamic { this["k"]; ["k"] = 1 }
+r1 = a.toList()
+local b = new Dynamic { this["k"]; ["k"] = 1; z = 2 }
+r2 = b.toList()
+local c = new Dynamic { z; ["k"] = 1; z = 2 }
+r3 = c.toList()
+local d = new Dynamic { for (i in List(1, 2)) { i }; this["k"]; ["k"] = 1 }
+r4 = d.toList()
+"#,
+    );
+    assert_eq!(json["r1"], serde_json::json!([1]));
+    assert_eq!(json["r2"], serde_json::json!([1]));
+    assert_eq!(json["r3"], serde_json::json!([2]));
+    assert_eq!(json["r4"], serde_json::json!([1, 2, 1]));
+}
+
+#[test]
+fn the_head_of_a_generator_and_a_spread_do_not_see_the_members_of_the_body() {
+    // pkl evaluates them outside the body, so a later member is not found.
+    for src in [
+        "local d = new Dynamic { for (i in List(1, 2)) { i }; for (i in List(z)) { i }; z = 3 }\nr = d.toList()\n",
+        "local d = new Dynamic { ...List(z); z = 1 }\nr = d.toList()\n",
+        "local d = new Dynamic { when (z == 1) { 5 }; z = 1 }\nr = d.toList()\n",
+        "local d = new Dynamic { for (i in List(1, 2)) { i }; for (i in nope) { i }; z = 1 }\nr = d.toList()\n",
+    ] {
+        let message = eval_fails(src);
+        assert!(
+            message.contains("`z`") || message.contains(" z") || message.contains("nope"),
+            "{src}: {message}"
+        );
+    }
+    // An enclosing binding of that name is what they read.
+    let json = eval(
+        r#"
+local z = 5
+local a = new Dynamic { for (i in List(z)) { i }; z = 1 }
+r1 = a.toList()
+local b = new Dynamic { when (z == 5) { 7 }; z = 1 }
+r2 = b.toList()
+local c = new Dynamic { ...List(z); z = 1 }
+r3 = c.toList()
+"#,
+    );
+    assert_eq!(json["r1"], serde_json::json!([5]));
+    assert_eq!(json["r2"], serde_json::json!([7]));
+    assert_eq!(json["r3"], serde_json::json!([5]));
+}
