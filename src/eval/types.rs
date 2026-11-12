@@ -1304,7 +1304,16 @@ pub(super) fn error_type_expr(ty: &crate::parser::TypeExpr) -> String {
             let args: Vec<_> = args.iter().map(error_type_expr).collect();
             format!("{}<{}>", name.trim_start_matches('*'), args.join(", "))
         }
-        TypeExpr::Constrained(base, _, _) => base.trim_start_matches('*').to_string(),
+        // pkl names the class of a constrained generic, without its arguments.
+        TypeExpr::Constrained(base, _, _) => {
+            let base = base.trim_start_matches('*');
+            match base.split_once('<') {
+                Some((class, _)) => {
+                    format!("{class}{}", if base.ends_with('?') { "?" } else { "" })
+                }
+                None => base.to_string(),
+            }
+        }
     }
 }
 

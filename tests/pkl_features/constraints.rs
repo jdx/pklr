@@ -126,3 +126,35 @@ fn a_predicate_reading_a_missing_property_of_an_untyped_object_fails() {
     let error = eval_fails("x = new { a = 1 } is Dynamic((v) -> v.required)\n");
     assert!(error.contains("required"), "{error}");
 }
+
+// Expectations compared with `pkl eval` 0.32.2.
+#[test]
+fn constrained_generic_still_checks_its_element_constraints() {
+    let json = eval(
+        r#"
+import "pkl:test"
+class Y {
+  function l(l): List<String(!isEmpty)>(!isEmpty) = l
+  function map(map): Map<String(!isEmpty), Int(isPositive)>(!isEmpty) = map
+}
+local y = new Y {}
+r1 = test.catch(() -> y.l(List("1", "")))
+r2 = test.catch(() -> y.map(Map("1", 1, "2", -2)))
+r3 = y.l(List("1"))
+"#,
+    );
+    assert_eq!(
+        json["r1"],
+        "Type constraint `!isEmpty` violated. Value: \"\""
+    );
+    assert_eq!(
+        json["r2"],
+        "Type constraint `isPositive` violated. Value: -2"
+    );
+    assert_eq!(json["r3"], serde_json::json!(["1"]));
+    let error = eval_fails("a: List<String(!isEmpty)>(!isEmpty) = 5\n");
+    assert!(
+        error.contains("Expected value of type `List`, but got type `Int`."),
+        "{error}"
+    );
+}
