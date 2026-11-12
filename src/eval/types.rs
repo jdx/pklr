@@ -1517,6 +1517,7 @@ pub(super) fn type_is_runtime_checkable(ty: &crate::parser::TypeExpr, scope: &Sc
                         | "Duration"
                         | "DataSize"
                         | "Any"
+                        | "nothing"
                 )
                 || alias_of(scope, runtime_name).is_some()
                 || resolve_dotted(scope, runtime_name).is_some()

@@ -3033,3 +3033,34 @@ fn member_predicates_are_reported_as_unsupported() {
         assert!(err.contains("member predicates"), "{src}: {err}");
     }
 }
+
+#[test]
+fn small_error_cases_match_pkl() {
+    // Each is rejected by `pkl eval` with the message checked here.
+    for (src, expected) in [
+        ("value: nothing = \"foo\"\n", "nothing"),
+        ("prop = 42\ncall = prop()\n", "Cannot find method `prop`."),
+        (
+            "local lambda = (_, x: Int) -> `_` + x\nres = lambda.apply(1, 1)\n",
+            "_",
+        ),
+    ] {
+        let err = eval_fails(src);
+        assert!(err.contains(expected), "{src}: {err}");
+    }
+    // `_` still ignores an argument.
+    assert_eq!(
+        eval("local f = (_, x) -> x\nres = f.apply(1, 2)\n")["res"],
+        2
+    );
+}
+
+#[test]
+fn amended_function_bodies_may_ignore_parameters() {
+    // `pkl eval` gives {"a": {"x": 2}}.
+    let v = eval(
+        "local f = (a, b) -> new Dynamic { x = b }\n\
+         a = (f) { _, y -> x = y }.apply(1, 2)\n",
+    );
+    assert_eq!(v["a"]["x"], 2);
+}

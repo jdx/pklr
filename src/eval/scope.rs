@@ -250,6 +250,10 @@ impl Scope {
 
     /// Bind a name declared in the body that owns this scope.
     pub(super) fn declare(&mut self, name: impl AsRef<str>, val: Value) {
+        // `_` as a parameter ignores its argument; it names nothing.
+        if name.as_ref() == "_" {
+            return;
+        }
         self.declare_name(name_of(name.as_ref()), val);
     }
 
