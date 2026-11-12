@@ -807,6 +807,7 @@ impl Evaluator {
                 self.trace(site, &v);
                 Ok(v)
             }
+            Expr::Constraint(inner, _) => self.eval_expr(inner, scope, depth + 1),
             Expr::Read(uri_expr, module_path) => {
                 let uri = self.eval_expr(uri_expr, scope, depth + 1)?;
                 self.eval_read(&value_to_display(&uri), Path::new(module_path), false)

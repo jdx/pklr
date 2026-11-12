@@ -138,7 +138,7 @@ impl Evaluator {
         };
         match ty {
             TypeExpr::Named(name) => named(self, name, seen),
-            TypeExpr::Constrained(base, _, form, _) => {
+            TypeExpr::Constrained(base, _, form) => {
                 named(self, constrained_name(base, *form).0, seen)
             }
             TypeExpr::Nullable(inner) => self.type_takes_dynamic(inner, scope, seen),
@@ -162,7 +162,7 @@ impl Evaluator {
     ) -> bool {
         let name = match ty {
             TypeExpr::Named(name) => name.trim_start_matches('*'),
-            TypeExpr::Constrained(base, _, form, _) => constrained_name(base, *form).0,
+            TypeExpr::Constrained(base, _, form) => constrained_name(base, *form).0,
             TypeExpr::Generic(name, _) => name.as_str(),
             // An alias to a union supplies the default of the alternative it
             // marks with `*`, and none when it marks nothing. A nullable one
@@ -234,7 +234,7 @@ impl Evaluator {
         let name = match ty {
             TypeExpr::Nullable(_) => return true,
             TypeExpr::Named(name) => name.trim_start_matches('*'),
-            TypeExpr::Constrained(base, _, form, _) => {
+            TypeExpr::Constrained(base, _, form) => {
                 // A quoted name is exact: a `?` at its end is part of the name,
                 // so only an alias it names can make it nullable.
                 match form {
@@ -333,7 +333,7 @@ impl Evaluator {
             }
             // A constraint is checked on the value afterwards and gives it no
             // default: follow its base, which names an alias or spells a union.
-            TypeExpr::Constrained(base, _, form, _) => {
+            TypeExpr::Constrained(base, _, form) => {
                 // A quoted name is one name, not a type to parse.
                 if let Some(quoted) = quoted_base_type(base, *form) {
                     return self.union_amend_state_in(&quoted, scope, nullable, seen);
@@ -786,7 +786,7 @@ impl Evaluator {
                 // Otherwise, plain type check
                 Ok(value_is_type(val, ty))
             }
-            TypeExpr::Constrained(base, constraint, form, texts) => {
+            TypeExpr::Constrained(base, constraint, form) => {
                 // A name written in backticks (`C?`) is that one name, and
                 // the same text without them is the nullable `C`.
                 let (quoted_name, nullable) = match form {
@@ -880,10 +880,7 @@ impl Evaluator {
                 }
                 // Each constraint is checked on its own, so that the error
                 // names the one that is violated.
-                for (index, constraint) in split_constraints(constraint, texts.len())
-                    .into_iter()
-                    .enumerate()
-                {
+                for (constraint, text) in split_constraints(constraint) {
                     let receiver_constraint =
                         with_constraint_receiver(constraint, &constraint_scope);
                     let constraint = receiver_constraint.as_ref().unwrap_or(constraint);
@@ -917,8 +914,7 @@ impl Evaluator {
                         )));
                     }
                     if !is_truthy(&result) {
-                        self.type_violation =
-                            texts.get(index).map(|text| (text.clone(), val.clone()));
+                        self.type_violation = text.map(|text| (text.to_string(), val.clone()));
                         return Ok(false);
                     }
                 }
@@ -1268,6 +1264,7 @@ pub(super) fn type_constraint_has_explicit_throw(
             }
             Expr::Unop(_, value)
             | Expr::Trace(value, _)
+            | Expr::Constraint(value, _)
             | Expr::Read(value, _)
             | Expr::ReadOrNull(value, _)
             | Expr::ReadGlob(value, _) => expr_has_throw(value, scope, captured, seen),
@@ -1314,7 +1311,7 @@ pub(super) fn type_constraint_has_explicit_throw(
         use crate::parser::TypeExpr;
 
         match ty {
-            TypeExpr::Constrained(_, constraint, _, _) => {
+            TypeExpr::Constrained(_, constraint, _) => {
                 expr_has_throw(constraint, scope, None, &mut HashSet::default())
             }
             TypeExpr::Named(name) | TypeExpr::Generic(name, _) => {
@@ -1385,7 +1382,7 @@ fn type_names_user_class(ty: &crate::parser::TypeExpr, scope: &Scope, depth: usi
     };
     match ty {
         TypeExpr::Named(name) | TypeExpr::Generic(name, _) => class_name(name),
-        TypeExpr::Constrained(base, _, _, _) => class_name(base.split('<').next().unwrap_or(base)),
+        TypeExpr::Constrained(base, _, _) => class_name(base.split('<').next().unwrap_or(base)),
         TypeExpr::Nullable(inner) => type_names_user_class(inner, scope, depth + 1),
         TypeExpr::Union(variants) => variants
             .iter()
@@ -1434,23 +1431,28 @@ fn stdlib_qualified_member<'a>(scope: &Scope, name: &'a str) -> Option<&'a str> 
     .then_some(member)
 }
 
-/// The `count` constraints a constrained type's predicate joins with `&&`, in
-/// source order. A `&&` inside one constraint stays inside it.
-fn split_constraints(expr: &Expr, count: usize) -> Vec<&Expr> {
+/// The constraints a constrained type's predicate joins, in source order, each
+/// with its source text when the parser recorded it. A `&&` inside one
+/// constraint stays inside it.
+fn split_constraints(expr: &Expr) -> Vec<(&Expr, Option<&str>)> {
     let mut parts = Vec::new();
     let mut rest = expr;
-    while parts.len() + 1 < count {
-        match rest {
-            Expr::Binop(BinOp::And, left, right) => {
-                parts.push(&**right);
-                rest = left;
-            }
-            _ => break,
+    while let Expr::Binop(BinOp::And, left, right) = rest {
+        if !matches!(**right, Expr::Constraint(..)) {
+            break;
         }
+        parts.push(&**right);
+        rest = left;
     }
     parts.push(rest);
     parts.reverse();
     parts
+        .into_iter()
+        .map(|part| match part {
+            Expr::Constraint(inner, text) => (&**inner, Some(text.as_str())),
+            other => (other, None),
+        })
+        .collect()
 }
 
 /// How an error shows the value that violated the constraint `text`. pkl

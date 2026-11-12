@@ -1947,6 +1947,7 @@ pub(super) fn this_member_reads_non_const(
         | Expr::Throw(value)
         | Expr::TemplateLocals(_, value)
         | Expr::Trace(value, _)
+        | Expr::Constraint(value, _)
         | Expr::Read(value, _)
         | Expr::ReadOrNull(value, _)
         | Expr::ReadGlob(value, _) => this_member_reads_non_const(value, non_const_members),

@@ -300,7 +300,7 @@ impl<'a> Parser<'a> {
             Some(match self.parse_type()? {
                 TypeExpr::Named(name)
                 | TypeExpr::Generic(name, _)
-                | TypeExpr::Constrained(name, _, _, _) => name,
+                | TypeExpr::Constrained(name, _, _) => name,
                 other => type_expr_runtime_name(&other),
             })
         } else {

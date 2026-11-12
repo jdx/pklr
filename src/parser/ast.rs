@@ -117,7 +117,7 @@ pub enum TypeExpr {
     /// The third field says how to read the text of the type before the
     /// constraint (see [`BaseForm`]). The last field holds the source text of
     /// each constraint, in order, for the error of one that is violated.
-    Constrained(String, Box<Expr>, BaseForm, Vec<String>),
+    Constrained(String, Box<Expr>, BaseForm),
 }
 
 /// How the text of the base of a constrained type is read.
@@ -140,7 +140,7 @@ impl TypeExpr {
             TypeExpr::Generic(name, _) => name == "Listing",
             // A constrained listing, `Listing<T>(length > 0)`, stores its
             // base type as a name.
-            TypeExpr::Constrained(base, _, _, _) => {
+            TypeExpr::Constrained(base, _, _) => {
                 let base = base.trim_start_matches('*').trim_end_matches('?');
                 base == "Listing" || base.starts_with("Listing<")
             }
@@ -162,7 +162,7 @@ pub(super) fn type_expr_runtime_name(ty: &TypeExpr) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        TypeExpr::Constrained(name, _, _, _) => name.clone(),
+        TypeExpr::Constrained(name, _, _) => name.clone(),
     }
 }
 
@@ -173,7 +173,7 @@ pub(super) fn infers_new(ty: &TypeExpr) -> bool {
     match ty {
         TypeExpr::Generic(name, _) => matches!(name.as_str(), "Mapping" | "Listing"),
         TypeExpr::Nullable(inner) => infers_new(inner),
-        TypeExpr::Constrained(base, _, _, _) => {
+        TypeExpr::Constrained(base, _, _) => {
             let base = base.trim_end_matches('?');
             matches!(base.split('<').next(), Some("Mapping" | "Listing"))
         }
@@ -230,9 +230,10 @@ pub(crate) fn has_untyped_result_new(expr: &Expr) -> bool {
         Expr::If(_, then_expr, else_expr) => {
             has_untyped_result_new(then_expr) || has_untyped_result_new(else_expr)
         }
-        Expr::Let(_, _, body) | Expr::Trace(body, _) | Expr::TemplateLocals(_, body) => {
-            has_untyped_result_new(body)
-        }
+        Expr::Let(_, _, body)
+        | Expr::Trace(body, _)
+        | Expr::Constraint(body, _)
+        | Expr::TemplateLocals(_, body) => has_untyped_result_new(body),
         _ => false,
     }
 }
@@ -253,9 +254,10 @@ pub(crate) fn rewrite_untyped_result_new(expr: &mut Expr, rewrite: &mut impl FnM
             rewrite_untyped_result_new(then_expr, rewrite);
             rewrite_untyped_result_new(else_expr, rewrite);
         }
-        Expr::Let(_, _, body) | Expr::Trace(body, _) | Expr::TemplateLocals(_, body) => {
-            rewrite_untyped_result_new(body, rewrite)
-        }
+        Expr::Let(_, _, body)
+        | Expr::Trace(body, _)
+        | Expr::Constraint(body, _)
+        | Expr::TemplateLocals(_, body) => rewrite_untyped_result_new(body, rewrite),
         _ => {}
     }
 }
@@ -309,6 +311,9 @@ pub enum Expr {
     Throw(Box<Expr>),
     /// `trace(expr)`, with where it appears for the trace message.
     Trace(Box<Expr>, std::sync::Arc<TraceSite>),
+    /// A type constraint with its source text, for error messages. Evaluates as
+    /// the inner expression.
+    Constraint(Box<Expr>, String),
     /// `read("uri")`. Fields: the URI, and the path of the module the
     /// expression was written in, which relative URIs resolve against.
     Read(Box<Expr>, String),
@@ -460,8 +465,8 @@ pub(crate) fn erase_type_parameters(ty: TypeExpr, parameters: &[String]) -> Type
                 .map(|arg| erase_type_parameters(arg, parameters))
                 .collect(),
         ),
-        TypeExpr::Constrained(base, constraint, quoted, texts) => {
-            TypeExpr::Constrained(erase_word(&base, parameters), constraint, quoted, texts)
+        TypeExpr::Constrained(base, constraint, quoted) => {
+            TypeExpr::Constrained(erase_word(&base, parameters), constraint, quoted)
         }
     }
 }

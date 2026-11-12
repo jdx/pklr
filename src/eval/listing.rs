@@ -335,7 +335,7 @@ fn resolves_to_listing_in(
 ) -> bool {
     use crate::parser::TypeExpr;
     match resolve_alias_chain(ty, scope, seen) {
-        Some(TypeExpr::Constrained(base, _, _, _)) => {
+        Some(TypeExpr::Constrained(base, _, _)) => {
             nesting < MAX_LISTING_NESTING
                 && crate::parser::parse_type_name(base.trim_start_matches('*'))
                     .is_ok_and(|base| resolves_to_listing_in(&base, scope, seen, nesting + 1))
@@ -441,7 +441,7 @@ fn type_elem_class_in(
         )))),
         TypeExpr::Named(name) => listing_elem_class(std::slice::from_ref(name), scope),
         // `T(x > 0)`: the element is a `T`, whatever the predicate says.
-        TypeExpr::Constrained(base, _, _, _) => {
+        TypeExpr::Constrained(base, _, _) => {
             if nesting >= MAX_LISTING_NESTING {
                 return None;
             }

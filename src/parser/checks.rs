@@ -274,6 +274,7 @@ impl<'a> Parser<'a> {
             | Expr::Throw(value)
             | Expr::TemplateLocals(_, value)
             | Expr::Trace(value, _)
+            | Expr::Constraint(value, _)
             | Expr::Read(value, _)
             | Expr::ReadOrNull(value, _)
             | Expr::ReadGlob(value, _) => self.check_expr_duplicates(value)?,
@@ -446,7 +447,7 @@ pub(super) fn generic_param_names(ty: &TypeExpr, out: &mut Vec<String>) {
             // merely permitted alternative.
             out.push(name.clone());
         }
-        TypeExpr::Constrained(name, _, _, _) => {
+        TypeExpr::Constrained(name, _, _) => {
             out.push(name.trim_end_matches('?').to_string());
         }
         TypeExpr::Nullable(inner) => generic_param_names(inner, out),
@@ -460,7 +461,7 @@ pub(super) fn generic_param_names(ty: &TypeExpr, out: &mut Vec<String>) {
 
 pub(super) fn collect_type_names(ty: &TypeExpr, out: &mut Vec<String>) {
     match ty {
-        TypeExpr::Named(name) | TypeExpr::Constrained(name, _, _, _) => {
+        TypeExpr::Named(name) | TypeExpr::Constrained(name, _, _) => {
             out.push(name.trim_start_matches('*').to_string())
         }
         TypeExpr::Nullable(inner) => collect_type_names(inner, out),
@@ -529,6 +530,7 @@ pub(super) fn expr_defines_type(expr: &Expr, name: &str) -> bool {
         | Expr::Throw(value)
         | Expr::TemplateLocals(_, value)
         | Expr::Trace(value, _)
+        | Expr::Constraint(value, _)
         | Expr::Read(value, _)
         | Expr::ReadOrNull(value, _)
         | Expr::ReadGlob(value, _)

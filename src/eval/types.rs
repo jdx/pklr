@@ -54,7 +54,9 @@ pub(super) fn needs_method_result_types(expr: &Expr) -> bool {
         Expr::If(_, then_expr, else_expr) => {
             needs_method_result_types(then_expr) || needs_method_result_types(else_expr)
         }
-        Expr::Let(_, _, body) | Expr::Trace(body, _) => needs_method_result_types(body),
+        Expr::Let(_, _, body) | Expr::Trace(body, _) | Expr::Constraint(body, _) => {
+            needs_method_result_types(body)
+        }
         _ => false,
     }
 }
@@ -71,7 +73,9 @@ pub(super) fn capture_method_result_types(expr: &mut Expr, scope: &Scope) {
             capture_method_result_types(then_expr, scope);
             capture_method_result_types(else_expr, scope);
         }
-        Expr::Let(_, _, body) | Expr::Trace(body, _) => capture_method_result_types(body, scope),
+        Expr::Let(_, _, body) | Expr::Trace(body, _) | Expr::Constraint(body, _) => {
+            capture_method_result_types(body, scope)
+        }
         _ => {}
     }
 }
@@ -115,6 +119,7 @@ impl AliasResolver<'_> {
             | Expr::Throw(value)
             | Expr::TemplateLocals(_, value)
             | Expr::Trace(value, _)
+            | Expr::Constraint(value, _)
             | Expr::Read(value, _)
             | Expr::ReadOrNull(value, _)
             | Expr::ReadGlob(value, _) => self.expr(value, shadowed),
@@ -266,7 +271,7 @@ impl AliasResolver<'_> {
                     self.ty(ty, shadowed);
                 }
             }
-            TypeExpr::Constrained(base, constraint, form, _) => {
+            TypeExpr::Constrained(base, constraint, form) => {
                 self.expr(constraint, shadowed);
                 // A quoted base is one name: a trailing `?` belongs to it.
                 let (nullable, unsuffixed) = match form {
@@ -303,14 +308,14 @@ impl AliasResolver<'_> {
                     TypeExpr::Named(name) if !crate::lexer::is_plain_qualified_name(name) => {
                         BaseForm::Quoted
                     }
-                    TypeExpr::Constrained(_, _, form, _) => *form,
+                    TypeExpr::Constrained(_, _, form) => *form,
                     _ => BaseForm::Text,
                 };
                 let (target, constraint_expr) = match resolved {
                     // `A(c)` with `A = B(c2)` checks `B`, then `c2`, then `c`,
                     // all against the same value. A nullable `A?` lets null
                     // skip `c2`, which a single conjunction cannot express.
-                    TypeExpr::Constrained(target, inner, inner_form, _)
+                    TypeExpr::Constrained(target, inner, inner_form)
                         if !nullable
                             || inner_form == BaseForm::NullableQuoted
                             || (inner_form == BaseForm::Text && target.ends_with('?')) =>
@@ -407,7 +412,7 @@ pub(super) fn qualify_alias_body(
         // A constraint is an expression of the declaring module, which names
         // its functions and constants. It cannot be evaluated here, so only
         // the type it constrains is kept.
-        TypeExpr::Constrained(base, _, _, _) => {
+        TypeExpr::Constrained(base, _, _) => {
             let plain = base.strip_suffix('?').unwrap_or(base);
             match crate::parser::parse_type_name(plain) {
                 // A generic base without a `*` marker is the generic type itself.
@@ -513,7 +518,7 @@ pub(super) fn inferred_new_type(
                 .ok_or_else(|| Error::Eval("Cannot tell which parent to amend".into()))?;
             inferred_new_type(selected, scope, depth + 1)
         }
-        TypeExpr::Constrained(name, _, _, _) => {
+        TypeExpr::Constrained(name, _, _) => {
             // Constraints store the underlying type as a runtime name. Parse
             // that name back into a type to retain any generic arguments.
             let ty = crate::parser::parse_type_name(name.trim_start_matches('*'))?;
@@ -546,16 +551,14 @@ fn type_default_value_seen(
 ) -> Option<Value> {
     use crate::parser::TypeExpr;
     match ty {
-        TypeExpr::Constrained(_, _, BaseForm::NullableQuoted, _) => Some(Value::Null),
+        TypeExpr::Constrained(_, _, BaseForm::NullableQuoted) => Some(Value::Null),
         // A quoted name is one name, looked up as it is written.
-        TypeExpr::Constrained(base, _, BaseForm::Quoted, _) => {
+        TypeExpr::Constrained(base, _, BaseForm::Quoted) => {
             quoted_default(base.trim_start_matches('*'), scope, seen)
         }
-        TypeExpr::Constrained(base, _, BaseForm::Text, _) if base.ends_with('?') => {
-            Some(Value::Null)
-        }
+        TypeExpr::Constrained(base, _, BaseForm::Text) if base.ends_with('?') => Some(Value::Null),
         // A constraint supplies no default: the type it constrains does.
-        TypeExpr::Constrained(base, _, _, _) => {
+        TypeExpr::Constrained(base, _, _) => {
             type_default_value_seen(&TypeExpr::Named(base.clone()), scope, seen)
         }
         TypeExpr::Nullable(_) => Some(Value::Null),
@@ -624,7 +627,7 @@ fn type_default_value_seen(
                 }
                 // pkl gives `*Map<K, V>(c)` its empty map, but `*IntSeq(c)` has
                 // no default, as bare `IntSeq` has none.
-                TypeExpr::Constrained(name, _, _, _) => {
+                TypeExpr::Constrained(name, _, _) => {
                     !(name.trim_start_matches('*') == "IntSeq" && !names_user_class(name, scope))
                 }
                 _ => true,
@@ -685,8 +688,8 @@ fn is_nullable_default_seen(
     match ty {
         TypeExpr::Nullable(_) => true,
         // A bare `*Item?` keeps its `?` on the name.
-        TypeExpr::Constrained(_, _, BaseForm::NullableQuoted, _) => true,
-        TypeExpr::Constrained(name, _, BaseForm::Text, _) if name.ends_with('?') => true,
+        TypeExpr::Constrained(_, _, BaseForm::NullableQuoted) => true,
+        TypeExpr::Constrained(name, _, BaseForm::Text) if name.ends_with('?') => true,
         TypeExpr::Named(name) if name.ends_with('?') => true,
         TypeExpr::Named(name) => {
             let mark = seen.len();
@@ -763,7 +766,7 @@ pub(super) fn type_default_error(ty: &crate::parser::TypeExpr, scope: &Scope) ->
         use crate::parser::TypeExpr;
 
         match ty {
-            TypeExpr::Constrained(base, _, form, _)
+            TypeExpr::Constrained(base, _, form)
                 if *form == BaseForm::Quoted
                     || (*form == BaseForm::Text && !base.ends_with('?')) =>
             {
@@ -874,7 +877,7 @@ fn nullable_inner_default_seen(
             .or_else(|| type_default_value(inner, scope)),
         // A quoted name is one name, looked up as it is written; only a
         // nullable one amends from what it wraps.
-        TypeExpr::Constrained(base, _, form, _) if *form != BaseForm::Text => {
+        TypeExpr::Constrained(base, _, form) if *form != BaseForm::Text => {
             let name = base.trim_start_matches('*');
             let nullable = *form == BaseForm::NullableQuoted;
             match alias(name, seen) {
@@ -886,7 +889,7 @@ fn nullable_inner_default_seen(
                 None => nullable.then(|| exact_default(name, scope)).flatten(),
             }
         }
-        TypeExpr::Constrained(name, _, form, _) => {
+        TypeExpr::Constrained(name, _, form) => {
             let (name, nullable) = constrained_name(name, *form);
             match alias(name, seen) {
                 // Only a nullable type amends from what it wraps.
@@ -928,7 +931,7 @@ pub(super) fn type_is_listing(ty: &crate::parser::TypeExpr) -> bool {
         TypeExpr::Named(name) | TypeExpr::Generic(name, _) => name == "Listing",
         TypeExpr::Nullable(inner) => type_is_listing(inner),
         // A default alternative keeps its `*` marker on the base name.
-        TypeExpr::Constrained(name, _, form, _) => {
+        TypeExpr::Constrained(name, _, form) => {
             let (name, _) = constrained_name(name, *form);
             name == "Listing" || (*form == BaseForm::Text && name.starts_with("Listing<"))
         }
@@ -1278,7 +1281,7 @@ pub(super) fn string_literal_type_value(name: &str) -> Option<&str> {
 pub(super) fn is_default_type(ty: &crate::parser::TypeExpr) -> bool {
     use crate::parser::TypeExpr;
     match ty {
-        TypeExpr::Named(name) | TypeExpr::Constrained(name, _, _, _) => name.starts_with('*'),
+        TypeExpr::Named(name) | TypeExpr::Constrained(name, _, _) => name.starts_with('*'),
         TypeExpr::Nullable(inner) => is_default_type(inner),
         _ => false,
     }
@@ -1301,7 +1304,7 @@ pub(super) fn error_type_expr(ty: &crate::parser::TypeExpr) -> String {
             let args: Vec<_> = args.iter().map(error_type_expr).collect();
             format!("{}<{}>", name.trim_start_matches('*'), args.join(", "))
         }
-        TypeExpr::Constrained(base, _, _, _) => base.trim_start_matches('*').to_string(),
+        TypeExpr::Constrained(base, _, _) => base.trim_start_matches('*').to_string(),
     }
 }
 
@@ -1319,7 +1322,7 @@ pub(super) fn display_type_expr(ty: &crate::parser::TypeExpr) -> String {
             let args_str: Vec<_> = args.iter().map(display_type_expr).collect();
             format!("{}<{}>", name, args_str.join(", "))
         }
-        TypeExpr::Constrained(base, _, _, _) => format!("{base}(... )"),
+        TypeExpr::Constrained(base, _, _) => format!("{base}(... )"),
     }
 }
 
@@ -1386,7 +1389,7 @@ pub(super) fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
                 _ => matches!(val, Value::Object(..)),
             }
         }
-        TypeExpr::Constrained(base, _, _, _) => {
+        TypeExpr::Constrained(base, _, _) => {
             // Just check the base type; constraint requires async eval
             value_is_named_type(val, base)
         }
@@ -1548,7 +1551,7 @@ pub(super) fn type_is_runtime_checkable(ty: &crate::parser::TypeExpr, scope: &Sc
             .iter()
             .all(|variant| type_is_runtime_checkable(variant, scope)),
         TypeExpr::Generic(_, _) => true,
-        TypeExpr::Constrained(base, _, _, _) => {
+        TypeExpr::Constrained(base, _, _) => {
             let runtime_name = base
                 .trim_start_matches('*')
                 .trim_end_matches('?')
@@ -2013,7 +2016,7 @@ impl TypeResolver<'_> {
             // the type it was made from (`List<Foo>`, `*Int?`), which does not
             // tell a quoted name (`Step?`) from the syntax around a name.
             // Where it cannot be read with certainty, accept it.
-            TypeExpr::Named(text) | TypeExpr::Constrained(text, _, _, _) => {
+            TypeExpr::Named(text) | TypeExpr::Constrained(text, _, _) => {
                 let whole = text.trim_start_matches('*');
                 if whole.is_empty() || string_literal_type_value(whole).is_some() {
                     return None;
@@ -2021,7 +2024,7 @@ impl TypeResolver<'_> {
                 // A name written in backticks is one name, whatever it holds.
                 if matches!(
                     ty,
-                    TypeExpr::Constrained(_, _, BaseForm::Quoted | BaseForm::NullableQuoted, _)
+                    TypeExpr::Constrained(_, _, BaseForm::Quoted | BaseForm::NullableQuoted)
                 ) {
                     return self.check_name(whole);
                 }
@@ -2256,7 +2259,7 @@ pub(super) fn resolve_collection_type(
             let alias = scope.get_type_alias(name.trim_start_matches('*'))?;
             resolve_collection_type(alias, scope, depth + 1)
         }
-        TypeExpr::Constrained(base, _, BaseForm::Text, _) if base.contains('<') => {
+        TypeExpr::Constrained(base, _, BaseForm::Text) if base.contains('<') => {
             let base = crate::parser::parse_type_name(base.trim_start_matches('*')).ok()?;
             resolve_collection_type(&base, scope, depth + 1)
         }
@@ -2620,7 +2623,7 @@ pub(super) fn type_lacks_default(ty: &crate::parser::TypeExpr, scope: &Scope) ->
     }
     match ty {
         TypeExpr::Named(name) => primitive(name, scope),
-        TypeExpr::Constrained(name, _, BaseForm::Text, _) => primitive(name, scope),
+        TypeExpr::Constrained(name, _, BaseForm::Text) => primitive(name, scope),
         TypeExpr::Union(variants) => variants.iter().all(|variant| match variant {
             TypeExpr::Named(name) => {
                 primitive(name, scope) || string_literal_type_value(name).is_some()
