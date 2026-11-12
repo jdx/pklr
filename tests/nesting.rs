@@ -159,3 +159,51 @@ fn a_long_left_associated_chain_is_a_result_or_an_error_not_a_crash() {
         }
     }
 }
+
+/// `x = List(List(... 1 ...))`, `n` calls deep.
+fn nested_lists(n: usize) -> String {
+    format!("x = {}1{}", "List(".repeat(n), ")".repeat(n))
+}
+
+/// Evaluate on a thread with a 2 MiB stack, the standard library's default for
+/// a spawned thread, and drop the result and the evaluator there. Returns
+/// whether it evaluated, and the depth of the result.
+fn eval_on_small_stack(src: String) -> Result<usize, String> {
+    std::thread::Builder::new()
+        .stack_size(2 << 20)
+        .spawn(move || {
+            let value = eval_source(&src).map_err(|err| err.to_string())?;
+            let mut depth = 0;
+            let mut cursor = &value["x"];
+            while let Some(inner) = cursor.as_array().and_then(|items| items.first()) {
+                depth += 1;
+                cursor = inner;
+            }
+            drop(value);
+            Ok(depth)
+        })
+        .unwrap()
+        .join()
+        .unwrap()
+}
+
+#[test]
+fn a_deep_result_is_freed_on_a_small_caller_stack() {
+    // Release frames are small enough to reach the large stack's limits; debug
+    // frames are not, so the depth that reaches it there is lower.
+    let depth = if cfg!(debug_assertions) {
+        3_000
+    } else {
+        19_000
+    };
+    assert_eq!(eval_on_small_stack(nested_lists(depth)), Ok(depth));
+}
+
+#[test]
+fn a_result_too_deep_to_free_on_a_small_stack_is_an_error() {
+    let err = eval_on_small_stack(nested_lists(25_000)).unwrap_err();
+    assert!(
+        err.contains("nested more than") || err.contains("maximum recursion depth"),
+        "{err}"
+    );
+}

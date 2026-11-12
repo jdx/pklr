@@ -742,7 +742,17 @@ impl Evaluator {
     pub(crate) fn eval_file_json_blocking(&mut self, path: &Path) -> Result<serde_json::Value> {
         self.on_grown_stack(|this| {
             let module = this.eval_file(path)?;
-            this.module_json(module)
+            let json = this.module_json(module)?;
+            // Only a run on the large stack can build a result too deep for
+            // the caller's stack to free; failing here frees it on this one.
+            if crate::stack::on_large_stack() && json_depth(&json) > crate::stack::MAX_RESULT_DEPTH
+            {
+                return Err(Error::Eval(format!(
+                    "the result is nested more than {} levels deep",
+                    crate::stack::MAX_RESULT_DEPTH
+                )));
+            }
+            Ok(json)
         })
     }
 
@@ -951,4 +961,24 @@ fn module_object(map: &Arc<ObjectMap>, path: &Path) -> Value {
         prototype: None,
     };
     Value::Object(Arc::clone(map), Some(Arc::new(source)))
+}
+
+/// How deeply `value` nests, counted without recursion.
+#[cfg(feature = "native-io")]
+fn json_depth(value: &serde_json::Value) -> usize {
+    let mut deepest = 0;
+    let mut pending = vec![(value, 1usize)];
+    while let Some((value, depth)) = pending.pop() {
+        deepest = deepest.max(depth);
+        match value {
+            serde_json::Value::Array(items) => {
+                pending.extend(items.iter().map(|item| (item, depth + 1)));
+            }
+            serde_json::Value::Object(map) => {
+                pending.extend(map.values().map(|item| (item, depth + 1)));
+            }
+            _ => {}
+        }
+    }
+    deepest
 }

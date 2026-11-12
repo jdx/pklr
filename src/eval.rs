@@ -223,6 +223,9 @@ pub struct Evaluator {
     /// Names declared by `module a.b.C` headers, by module identity (see
     /// `module_type_namespace`), for error messages.
     module_names: HashMap<String, String>,
+    /// Whether an evaluation moved to the large stack, so what the evaluator
+    /// holds may be nested too deeply to free on a small one.
+    grew: bool,
 }
 
 #[derive(Clone, Default)]

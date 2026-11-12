@@ -37,6 +37,11 @@ pub(crate) const PARSER_DEPTH: usize = if cfg!(debug_assertions) {
     50_000
 };
 
+/// Deepest JSON result an entry point returns after moving to the large stack.
+/// `serde_json::Value` frees recursively on the caller's stack, which may be
+/// 2 MiB; a result this deep takes about a megabyte of it in a release build.
+pub(crate) const MAX_RESULT_DEPTH: usize = 20_000;
+
 /// Nesting limit of the parser and lexer on a stack of unknown size, such as
 /// a direct call to `parser::parse`.
 pub(crate) const SMALL_STACK_PARSER_DEPTH: usize = 128;
@@ -152,5 +157,23 @@ pub(crate) fn run<R: Send>(mut f: impl FnMut(bool) -> R + Send) -> R {
         Ok(Ok(value)) => value,
         Ok(Err(panic)) => std::panic::resume_unwind(panic),
         Err(_) => first,
+    }
+}
+
+/// Drop `value` on a thread with a large stack, for a structure nested too
+/// deeply to free on a small one. If the thread cannot be created, it is
+/// dropped here.
+pub(crate) fn drop_on_large_stack<T: Send>(value: T) {
+    let slot = std::sync::Mutex::new(Some(value));
+    let spawned = std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn_scoped(scope, || {
+                drop(slot.lock().ok().and_then(|mut held| held.take()));
+            })
+            .map(|handle| handle.join())
+    });
+    if spawned.is_err() {
+        drop(slot.lock().ok().and_then(|mut held| held.take()));
     }
 }
