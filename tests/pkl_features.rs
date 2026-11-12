@@ -59,6 +59,8 @@ impl Drop for TestTempDir {
 
 #[path = "pkl_features/advanced.rs"]
 mod advanced;
+#[path = "pkl_features/constraints.rs"]
+mod constraints;
 #[path = "pkl_features/dynamic.rs"]
 mod dynamic;
 #[path = "pkl_features/get_class.rs"]

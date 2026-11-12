@@ -943,12 +943,9 @@ impl Evaluator {
                     let failure = if type_is_runtime_checkable(ty, scope) {
                         match self.eval_type_check(value, ty, scope, depth + 1) {
                             Ok(true) => None,
-                            Ok(false) => Some(format!(
-                                "property '{}' expected {}, got {}",
-                                prop.name,
-                                display_type_expr(ty),
-                                value_type_name(value)
-                            )),
+                            Ok(false) => {
+                                Some(self.type_mismatch_message(ty, value, Some(&prop.name)))
+                            }
                             // An explicit Pkl `throw` is observable after the
                             // member is materialized. Keep other evaluator
                             // limitations deferred, as before.

@@ -1408,7 +1408,10 @@ fn a_dynamic_is_not_accepted_for_a_listing_parameter() {
 #[test]
 fn a_wrong_element_is_named_in_the_error() {
     let error = eval_fails("a: Listing<Int> = new Listing { 1; \"x\" }\n");
-    assert!(error.contains("expected Listing<Int>"), "{error}");
+    assert!(
+        error.contains("Expected value of type `Listing<Int>`"),
+        "{error}"
+    );
     let error = eval_fails("function f(x: Int): Int = x\ny = f(\"x\")\n");
     assert!(
         error.contains("Expected value of type `Int`, but got type `String`"),
