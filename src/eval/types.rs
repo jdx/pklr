@@ -2126,6 +2126,13 @@ impl TypeResolver<'_> {
             {
                 return Some(format!("Expected `{module}` to be a type, but it is not."));
             }
+            // A property, class or local is no module import to qualify a type by.
+            if scope.module_identity(module).is_none()
+                && !module.contains('.')
+                && resolve_dotted(scope, module).is_some()
+            {
+                return Some(format!("Cannot find module import `{module}`."));
+            }
             return Some(format!("Cannot find type `{member}` in module `{module}`."));
         };
         // Walk the body in the scope of the module that declares it.

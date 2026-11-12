@@ -540,8 +540,10 @@ f = 1 is base.Int
         serde_json::json!({"a": true, "b": true, "c": false, "d": true, "e": false, "f": true})
     );
     // Only the `pkl:base` import qualifies the types of the standard library.
+    // A `local` is no import to qualify a type by either.
+    let error = eval_fails("local m = 1\nr = 1 is m.Int");
+    assert!(error.contains("module import `m`"), "{error}");
     for src in [
-        "local m = 1\nr = 1 is m.Int",
         "import \"pkl:math\" as math\nr = 1 is math.Int",
         "import \"pkl:math\" as math\nr = 1 as math.Int",
     ] {
