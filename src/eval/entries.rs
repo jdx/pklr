@@ -1307,7 +1307,7 @@ impl Evaluator {
         let value = match self.eval_property(prop, &active_scope, cx.depth) {
             Ok(value) => value,
             Err(Error::Eval(message))
-                if prop.value.is_some()
+                if (prop.value.is_some() || prop.body.is_some())
                     && (!st.failed_locals.is_empty()
                         || cx.pending_members.iter().any(|name| {
                             *name != prop.name && !st.bound_members.contains(name)
@@ -2071,7 +2071,18 @@ fn poison_stale_members(
     prop: &Property,
     active_scope: &mut Scope,
 ) {
-    let Some(value) = &prop.value else { return };
+    let Some(value) = &prop.value else {
+        // A nested body reads the members of its enclosing object too.
+        if prop.body.is_some() {
+            let reads = property_reference_names(prop);
+            for name in &cx.stale_members {
+                if *name != prop.name && !st.bound_members.contains(name) && reads.contains(name) {
+                    active_scope.poison(name.clone(), format!("undefined variable: {name}"));
+                }
+            }
+        }
+        return;
+    };
     if matches!(
         value,
         Expr::Lambda(..)

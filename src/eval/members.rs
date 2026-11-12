@@ -86,6 +86,31 @@ impl Evaluator {
                 if let Some(this) = scope.get("this") {
                     receiver.set("this", this.clone());
                 }
+                // The inherited member reads what the receiver defines, even
+                // a member it has not bound yet (late binding).
+                if let Some(entries) = &scope.receiver_entries {
+                    for name in property_reference_names(prop) {
+                        if receiver.get(&name).is_some() {
+                            continue;
+                        }
+                        let late = entries.iter().rev().find_map(|entry| match entry {
+                            Entry::Property(late)
+                                if late.name == name
+                                    && late.value.is_some()
+                                    && !has_modifier(&late.modifiers, Modifier::Local)
+                                    && !property_reference_names(late).contains("super") =>
+                            {
+                                Some(late)
+                            }
+                            _ => None,
+                        });
+                        if let Some(late) = late
+                            && let Ok(Some(value)) = self.eval_property(late, scope, depth + 1)
+                        {
+                            receiver.set(&name, value);
+                        }
+                    }
+                }
                 let mut active = scope_for_object_entry(
                     index,
                     &receiver,
