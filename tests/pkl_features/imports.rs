@@ -2354,7 +2354,7 @@ fn imported_class_retains_its_type_alias_constraint_bindings() {
             )
             .unwrap();
             let error = pklr::eval_to_json(&main).unwrap_err().to_string();
-            assert!(error.contains("expected Vendor"), "{error}");
+            assert!(error.contains("vendors.contains(this)"), "{error}");
         }
     }
 }
@@ -3843,7 +3843,7 @@ fn amended_listing_alias_keeps_its_constraints() {
     )
     .unwrap();
     let err = pklr::eval_to_json(&dir.join("bad.pkl")).unwrap_err();
-    assert!(err.to_string().contains("expected One"), "{err}");
+    assert!(err.to_string().contains("length == 1"), "{err}");
 
     // The amending module binds the alias's name to a class.
     std::fs::write(
@@ -3862,7 +3862,7 @@ fn amended_listing_alias_keeps_its_constraints() {
     )
     .unwrap();
     let err = pklr::eval_to_json(&dir.join("shadowed.pkl")).unwrap_err();
-    assert!(err.to_string().contains("expected One"), "{err}");
+    assert!(err.to_string().contains("length == 1"), "{err}");
 }
 
 // A cyclic type alias is rejected, a `local` one included, instead of

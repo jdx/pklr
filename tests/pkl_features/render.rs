@@ -1114,7 +1114,10 @@ fn nullable_indent_is_jsonnet_only() {
         "[1, 2]"
     );
     let err = eval_fails("res = new JsonRenderer { indent = null }.renderValue(List(1))");
-    assert!(err.contains("property 'indent' expected String"), "{err}");
+    assert!(
+        err.contains("property 'indent'") && err.contains("Expected value of type `String`"),
+        "{err}"
+    );
 }
 
 #[test]

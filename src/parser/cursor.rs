@@ -43,6 +43,16 @@ impl<'a> Parser<'a> {
         &self.tokens[self.pos]
     }
 
+    /// The source text from byte offset `start` to the end of the last
+    /// consumed token, or the empty string when no source is available.
+    pub(super) fn source_since(&self, start: usize) -> String {
+        let end = self
+            .pos
+            .checked_sub(1)
+            .map_or(start, |i| self.tokens[i].end);
+        self.source.get(start..end).unwrap_or("").trim().to_string()
+    }
+
     /// The kind of the `n`th token after the current one, skipping semicolons.
     pub(super) fn peek_nth(&self, n: usize) -> &TokenKind {
         let mut i = self.pos;

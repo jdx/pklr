@@ -218,6 +218,7 @@ pub(super) fn collect_expr_import_field_uses(
         | Expr::Throw(value)
         | Expr::TemplateLocals(_, value)
         | Expr::Trace(value, _)
+        | Expr::Constraint(value, _)
         | Expr::Read(value, _)
         | Expr::ReadOrNull(value, _)
         | Expr::ReadGlob(value, _) => collect_expr_import_field_uses(value, uses, shadows),
@@ -1116,6 +1117,7 @@ fn collect_sibling_field_refs_expr_in(
         | Expr::Throw(body)
         | Expr::TemplateLocals(_, body)
         | Expr::Trace(body, _)
+        | Expr::Constraint(body, _)
         | Expr::Read(body, _)
         | Expr::ReadOrNull(body, _)
         | Expr::ReadGlob(body, _) => {
@@ -1988,6 +1990,7 @@ fn collect_field_names_expr(expr: &Expr, out: &mut HashSet<Name>) {
         | Expr::Throw(value)
         | Expr::TemplateLocals(_, value)
         | Expr::Trace(value, _)
+        | Expr::Constraint(value, _)
         | Expr::Read(value, _)
         | Expr::ReadOrNull(value, _)
         | Expr::ReadGlob(value, _) => collect_field_names_expr(value, out),
@@ -2567,6 +2570,7 @@ fn collect_expr_refs_in(
         | Expr::Throw(value)
         | Expr::TemplateLocals(_, value)
         | Expr::Trace(value, _)
+        | Expr::Constraint(value, _)
         | Expr::Read(value, _)
         | Expr::ReadOrNull(value, _)
         | Expr::ReadGlob(value, _) => {
@@ -2764,6 +2768,7 @@ pub(super) fn collect_unshadowed_names(expr: &Expr, names: &mut HashSet<Name>) {
         | Expr::Throw(value)
         | Expr::TemplateLocals(_, value)
         | Expr::Trace(value, _)
+        | Expr::Constraint(value, _)
         | Expr::Read(value, _)
         | Expr::ReadOrNull(value, _)
         | Expr::ReadGlob(value, _) => collect_unshadowed_names(value, names),
@@ -2992,6 +2997,7 @@ pub(super) fn expr_mentions<N: Needle + ?Sized>(expr: &Expr, name: &N) -> bool {
         | Expr::Throw(value)
         | Expr::TemplateLocals(_, value)
         | Expr::Trace(value, _)
+        | Expr::Constraint(value, _)
         | Expr::Read(value, _)
         | Expr::ReadOrNull(value, _)
         | Expr::ReadGlob(value, _) => expr_mentions(value, name),
@@ -3044,6 +3050,7 @@ pub(super) fn mapping_entry_mentions_this(expr: &Expr) -> bool {
         | Expr::Throw(value)
         | Expr::TemplateLocals(_, value)
         | Expr::Trace(value, _)
+        | Expr::Constraint(value, _)
         | Expr::Read(value, _)
         | Expr::ReadOrNull(value, _)
         | Expr::ReadGlob(value, _) => mapping_entry_mentions_this(value),
@@ -3173,6 +3180,7 @@ impl InstanceReads {
             | Expr::Throw(value)
             | Expr::TemplateLocals(_, value)
             | Expr::Trace(value, _)
+            | Expr::Constraint(value, _)
             | Expr::Read(value, _)
             | Expr::ReadOrNull(value, _)
             | Expr::ReadGlob(value, _) => self.expr(value, depth),

@@ -185,7 +185,9 @@ impl<'a> Parser<'a> {
                 self.advance();
                 let mut constraint: Option<Expr> = None;
                 loop {
-                    let next = self.parse_expr()?;
+                    let start = self.peek_tok().offset;
+                    let next =
+                        Expr::Constraint(Box::new(self.parse_expr()?), self.source_since(start));
                     constraint = Some(match constraint {
                         Some(prev) => Expr::Binop(BinOp::And, Box::new(prev), Box::new(next)),
                         None => next,

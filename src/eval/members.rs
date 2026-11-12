@@ -395,6 +395,7 @@ pub(super) fn expr_reads_module_super(expr: &Expr) -> bool {
         | Expr::Throw(value)
         | Expr::TemplateLocals(_, value)
         | Expr::Trace(value, _)
+        | Expr::Constraint(value, _)
         | Expr::Read(value, _)
         | Expr::ReadOrNull(value, _)
         | Expr::ReadGlob(value, _) => expr_reads_module_super(value),

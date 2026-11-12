@@ -274,6 +274,7 @@ impl<'a> Parser<'a> {
             | Expr::Throw(value)
             | Expr::TemplateLocals(_, value)
             | Expr::Trace(value, _)
+            | Expr::Constraint(value, _)
             | Expr::Read(value, _)
             | Expr::ReadOrNull(value, _)
             | Expr::ReadGlob(value, _) => self.check_expr_duplicates(value)?,
@@ -529,6 +530,7 @@ pub(super) fn expr_defines_type(expr: &Expr, name: &str) -> bool {
         | Expr::Throw(value)
         | Expr::TemplateLocals(_, value)
         | Expr::Trace(value, _)
+        | Expr::Constraint(value, _)
         | Expr::Read(value, _)
         | Expr::ReadOrNull(value, _)
         | Expr::ReadGlob(value, _)

@@ -549,6 +549,34 @@ impl Evaluator {
                                 .collect::<Vec<_>>(),
                         )));
                     }
+                    // The `key` and `value` of a `Pair` are its `first` and `second`.
+                    (Value::Object(map, Some(source)), "key" | "value")
+                        if source.type_identity.as_deref() == Some("pkl:base#Pair") =>
+                    {
+                        let member = if field == "key" { "first" } else { "second" };
+                        if let Some(value) = map.get(member) {
+                            return Ok(value.clone());
+                        }
+                    }
+                    // `Map.entries`: a `Map` has no object source.
+                    (Value::Object(map, None), "entries") => {
+                        return Ok(Value::List(
+                            map.iter()
+                                .map(|(key, value)| {
+                                    let mut members = ObjectMap::default();
+                                    members.insert(
+                                        "first".into(),
+                                        self.mapping_key_values.get(key).cloned().unwrap_or_else(
+                                            || crate::value::mapping_storage_value(key),
+                                        ),
+                                    );
+                                    members.insert("second".into(), value.clone());
+                                    stdlib::typed_object("Pair", members)
+                                })
+                                .collect::<Vec<_>>()
+                                .into(),
+                        ));
+                    }
                     (Value::Object(map, _), "values") => {
                         return Ok(Value::List(
                             map.values().cloned().collect::<Vec<_>>().into(),
@@ -756,8 +784,18 @@ impl Evaluator {
             }
             Expr::Checked(expr, ty) => {
                 let val = self.eval_expr(expr, scope, depth + 1)?;
-                self.check_declared_value(&val, ty, scope, depth)?;
-                Ok(val)
+                self.type_violation = None;
+                if !type_is_runtime_checkable(ty, scope) {
+                    return match self.unresolved_type(ty, scope) {
+                        Some(message) => Err(Error::Eval(message)),
+                        None => Ok(val),
+                    };
+                }
+                if self.eval_argument_check(&val, ty, scope, depth, &mut Vec::new())? {
+                    Ok(val)
+                } else {
+                    Err(Error::Eval(self.type_mismatch_message(ty, &val, None)))
+                }
             }
             Expr::TemplateLocals(locals, inner) => {
                 let mut template_scope = scope.child();
@@ -775,6 +813,7 @@ impl Evaluator {
                 self.trace(site, &v);
                 Ok(v)
             }
+            Expr::Constraint(inner, _) => self.eval_expr(inner, scope, depth + 1),
             Expr::Read(uri_expr, module_path) => {
                 let uri = self.eval_expr(uri_expr, scope, depth + 1)?;
                 self.eval_read(&value_to_display(&uri), Path::new(module_path), false)
