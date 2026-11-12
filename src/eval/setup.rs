@@ -66,6 +66,10 @@ impl Evaluator {
         self.capabilities.resource_path_exists(path)
     }
 
+    pub(super) fn resource_is_file_io(&mut self, path: &Path) -> Result<bool> {
+        self.capabilities.resource_is_file(path)
+    }
+
     pub(super) fn resource_read_bytes_io(&mut self, path: &Path) -> Result<Vec<u8>> {
         self.capabilities.resource_read_bytes(path)
     }

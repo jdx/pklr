@@ -95,6 +95,12 @@ impl EvalCapabilities for Split {
         self.native.path_exists(path)
     }
 
+    fn resource_is_file(&mut self, path: &Path) -> pklr::Result<bool> {
+        self.log.lock().unwrap().push("resource_is_file");
+        self.refuse(Deny::Resources, "resource lookup")?;
+        self.native.is_file(path)
+    }
+
     fn resource_read_bytes(&mut self, path: &Path) -> pklr::Result<Vec<u8>> {
         self.log.lock().unwrap().push("resource_read_bytes");
         self.refuse(Deny::Resources, "resource read")?;
@@ -299,6 +305,6 @@ fn modulepath_resources_use_the_resource_hooks() {
     let value = evaluator.eval_file(&project.0.join("mpread.pkl")).unwrap();
     assert_eq!(value.to_json()["value"], "mp\n");
     let log = log.lock().unwrap();
-    assert!(log.contains(&"resource_path_exists"), "{log:?}");
+    assert!(log.contains(&"resource_is_file"), "{log:?}");
     assert!(!log.contains(&"path_exists"), "{log:?}");
 }

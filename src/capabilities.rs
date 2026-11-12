@@ -140,7 +140,7 @@ pub trait EvalCapabilities: Send + Sync {
     fn glob(&mut self, base: &Path, pattern: &str) -> Result<Vec<PathBuf>>;
 
     /// Whether the file resource at `path` exists, asked by `read`, `read?`
-    /// and `read*`, including triple-dot and `modulepath:` resource lookup.
+    /// and `read*`, including triple-dot resource lookup.
     ///
     /// Module, import and package loading keep using [`Self::path_exists`], so
     /// a host can allow imports while denying resource reads (or the reverse)
@@ -148,6 +148,16 @@ pub trait EvalCapabilities: Send + Sync {
     /// default delegates to [`Self::path_exists`].
     fn resource_path_exists(&mut self, path: &Path) -> Result<bool> {
         self.path_exists(path)
+    }
+
+    /// Whether the resource at `path` names a file rather than a directory,
+    /// asked while locating a `modulepath:` resource so that a directory
+    /// cannot hide a later file of the same name.
+    ///
+    /// Module loading keeps using [`Self::is_file`]. The default delegates to
+    /// [`Self::is_file`].
+    fn resource_is_file(&mut self, path: &Path) -> Result<bool> {
+        self.is_file(path)
     }
 
     /// Read the bytes of the file resource at `path`, asked by `read`, `read?`

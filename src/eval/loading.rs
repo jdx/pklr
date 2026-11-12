@@ -24,10 +24,9 @@ impl Evaluator {
         for dir in self.module_path.clone() {
             let mut candidate = dir;
             candidate.extend(&segments);
-            // A resource is located through the resource hooks, which have no
-            // file-versus-directory distinction.
+            // A resource is located through the resource hooks.
             let found = if resource {
-                self.resource_path_exists_io(&candidate)?
+                self.resource_is_file_io(&candidate)?
             } else {
                 self.is_file_io(&candidate)?
             };
