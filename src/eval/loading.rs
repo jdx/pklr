@@ -782,6 +782,8 @@ impl Evaluator {
         depth: usize,
         requested: Option<&HashSet<Name>>,
     ) -> Result<Value> {
+        // A malformed triple-dot URI is a syntax error, not a file pattern.
+        parse_triple_dot_path(uri)?;
         if uri.starts_with("modulepath:") {
             return Err(Error::Eval(format!(
                 "Cannot expand glob pattern `{uri}` because scheme `modulepath` is not globbable."
