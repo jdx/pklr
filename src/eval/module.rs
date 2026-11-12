@@ -2098,6 +2098,18 @@ impl Evaluator {
                 continue;
             }
 
+            // A `modulepath:` import that is used is checked by its URI before
+            // the module path is searched for it.
+            if uri.starts_with("modulepath:") {
+                let name = uri.rsplit('/').next().unwrap_or_default();
+                let alias = import
+                    .alias
+                    .as_deref()
+                    .unwrap_or_else(|| name.strip_suffix(".pkl").unwrap_or(name));
+                if referenced_imports.contains(alias) {
+                    self.check_module_path_uri(uri)?;
+                }
+            }
             let import_path = match self.local_file_path(path, uri) {
                 Ok(import_path) => import_path,
                 // A `modulepath:` URI naming nothing is an error only if the
@@ -2126,7 +2138,7 @@ impl Evaluator {
                 // reported only if the imported binding is actually referenced.
                 continue;
             }
-            self.check_module_path_allowed(&import_path)?;
+            self.check_import_allowed(uri, &import_path)?;
             if !self.path_exists_io(&import_path)? {
                 return Err(Error::ImportNotFound(import_path.display().to_string()));
             }

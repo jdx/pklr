@@ -101,6 +101,7 @@ impl Evaluator {
                 .collect(),
             allowed_modules: None,
             package_bases: HashMap::default(),
+            module_path_admitted: HashSet::default(),
             environment: None,
             external_properties: BTreeMap::default(),
             module_scopes: HashMap::default(),
@@ -288,6 +289,7 @@ impl Evaluator {
         self.active_typed_defaults.clear();
         self.mapping_key_values.clear();
         self.module_names.clear();
+        self.module_path_admitted.clear();
     }
 
     /// Add HTTP URL rewrite rules. Each rule is a `"source_prefix=target_prefix"` string

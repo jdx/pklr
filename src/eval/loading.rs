@@ -216,12 +216,13 @@ impl Evaluator {
         if uri.starts_with("pkl:") || (uri.contains("://") && !uri.starts_with("file://")) {
             return Ok(None);
         }
+        self.check_module_path_uri(uri)?;
         let import_path = match self.local_file_path(path, uri) {
             Ok(import_path) => import_path,
             Err(Error::ImportNotFound(_)) if uri.starts_with("modulepath:") => return Ok(None),
             Err(error) => return Err(error),
         };
-        self.check_module_path_allowed(&import_path)?;
+        self.check_import_allowed(uri, &import_path)?;
         if !self.path_exists_io(&import_path)? {
             return Ok(None);
         }
@@ -294,8 +295,57 @@ impl Evaluator {
         if self.allowed_modules.is_none() {
             return Ok(());
         }
+        if !self.module_path_admitted.is_empty() {
+            let absolute = absolute_clean(&self.host_absolute_path(path.to_path_buf()));
+            if self.module_path_admitted.contains(&absolute) {
+                return Ok(());
+            }
+        }
+        self.check_file_path_allowed(path)
+    }
+
+    /// Check the module at `path` by its `file:` (or remote) URI, even if the
+    /// file was admitted earlier through a `modulepath:` import.
+    fn check_file_path_allowed(&mut self, path: &Path) -> Result<()> {
+        if self.allowed_modules.is_none() {
+            return Ok(());
+        }
         let uri = self.module_policy_uri(path);
         self.check_module_allowed(&uri)
+    }
+
+    /// Check the import `uri` that resolved to the file `path`: a `modulepath:`
+    /// import by its URI, any other import by the file it names, so one
+    /// import's admission never covers another import of the same file.
+    pub(super) fn check_import_allowed(&mut self, uri: &str, path: &Path) -> Result<()> {
+        if uri.starts_with("modulepath:") {
+            self.admit_module_path(uri, path)
+        } else {
+            self.check_file_path_allowed(path)
+        }
+    }
+
+    /// Check the `modulepath:` URI `uri`, which Pkl matches against the
+    /// policy rather than the file it names, before looking for that file.
+    /// A no-op for any other URI.
+    pub(super) fn check_module_path_uri(&self, uri: &str) -> Result<()> {
+        if uri.starts_with("modulepath:") {
+            self.check_module_allowed(uri)?;
+        }
+        Ok(())
+    }
+
+    /// Record that the policy admitted the `modulepath:` URI `uri`, which was
+    /// resolved to the file `path`, so loading the file is not refused as a
+    /// `file:` URI. Call it only for a module that is actually loaded.
+    pub(super) fn admit_module_path(&mut self, uri: &str, path: &Path) -> Result<()> {
+        if self.allowed_modules.is_none() || !uri.starts_with("modulepath:") {
+            return Ok(());
+        }
+        self.check_module_allowed(uri)?;
+        let absolute = absolute_clean(&self.host_absolute_path(path.to_path_buf()));
+        self.module_path_admitted.insert(absolute);
+        Ok(())
     }
 
     /// Load and parse the module `uri` names, sharing the parse cache with
@@ -620,6 +670,9 @@ impl Evaluator {
             if self.same_local_path(&matched_path, path)? {
                 continue;
             }
+            // A match is checked by its own file URI, not by an earlier
+            // `modulepath:` admission of the same file.
+            self.check_file_path_allowed(&matched_path)?;
             let val = self.eval_file_with_requested_fields(&matched_path, depth + 1, None)?;
             mapping.insert(rel_key.into(), val);
         }
@@ -647,8 +700,9 @@ impl Evaluator {
         }
 
         if !uri.contains("://") || uri.starts_with("file://") {
+            self.check_module_path_uri(uri)?;
             let import_path = self.local_file_path(path, uri)?;
-            self.check_module_path_allowed(&import_path)?;
+            self.check_import_allowed(uri, &import_path)?;
             if !self.path_exists_io(&import_path)? {
                 return Err(Error::ImportNotFound(import_path.display().to_string()));
             }
