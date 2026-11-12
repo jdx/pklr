@@ -256,6 +256,15 @@ impl Evaluator {
             return regex_value(val);
         }
 
+        // A property holding a number, boolean or null is no function.
+        if let Expr::Ident(name) = func_expr
+            && matches!(
+                func_val,
+                Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Null
+            )
+        {
+            return Err(Error::Eval(format!("Cannot find method `{name}`.")));
+        }
         // Plain call with no args on an object — return the object
         if args.is_empty() {
             return Ok(func_val);
