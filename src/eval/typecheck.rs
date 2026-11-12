@@ -889,23 +889,25 @@ impl Evaluator {
                     // it to the value being checked.
                     let mut expected = "`Boolean` or `Function`";
                     if matches!(result, Value::Lambda(..)) {
-                        result =
-                            match self.invoke_lambda(&result, std::slice::from_ref(val), depth + 1)
+                        result = match self.invoke_lambda(
+                            &result,
+                            std::slice::from_ref(val),
+                            depth + 1,
+                        ) {
+                            Ok(result) => result,
+                            // A predicate reading a member that the value does
+                            // not have yet, because pklr has not filled in the
+                            // class defaults of the value's members, cannot
+                            // disprove the constraint.
+                            Err(Error::Eval(message))
+                                if message.starts_with("Cannot find property `")
+                                    && matches!(val, Value::Object(_, Some(source))
+                                            if source.kind == ObjectKind::Mapping || source.type_name.is_some()) =>
                             {
-                                Ok(result) => result,
-                                // A predicate reading a member that the value does
-                                // not have yet, because pklr has not filled in the
-                                // class defaults of the value's members, cannot
-                                // disprove the constraint.
-                                Err(Error::Eval(message))
-                                    if message.starts_with("Cannot find property `")
-                                        && matches!(val, Value::Object(_, Some(source))
-                                            if source.kind != ObjectKind::Dynamic) =>
-                                {
-                                    continue;
-                                }
-                                Err(error) => return Err(error),
-                            };
+                                continue;
+                            }
+                            Err(error) => return Err(error),
+                        };
                         expected = "`Boolean`";
                     }
                     if !matches!(result, Value::Bool(_)) {
@@ -1439,27 +1441,20 @@ fn stdlib_qualified_member<'a>(scope: &Scope, name: &'a str) -> Option<&'a str> 
 /// with its source text when the parser recorded it. A `&&` inside one
 /// constraint stays inside it.
 fn split_constraints(expr: &Expr) -> Vec<(&Expr, Option<&str>)> {
-    // A chain is what the parser and alias expansion build: constraints joined
-    // with `&&`, each wrapped in `Expr::Constraint`.
-    fn is_chain(expr: &Expr) -> bool {
-        match expr {
-            Expr::Constraint(..) => true,
-            Expr::Binop(BinOp::And, left, right) => is_chain(left) && is_chain(right),
-            _ => false,
-        }
-    }
-    fn collect<'a>(expr: &'a Expr, parts: &mut Vec<(&'a Expr, Option<&'a str>)>) {
-        match expr {
-            Expr::Constraint(inner, text) => parts.push((inner, Some(text.as_str()))),
-            Expr::Binop(BinOp::And, left, right) if is_chain(expr) => {
-                collect(left, parts);
-                collect(right, parts);
-            }
-            other => parts.push((other, None)),
-        }
-    }
+    // The parser and alias expansion build a chain: constraints joined with
+    // `&&`, each wrapped in `Expr::Constraint`. Anything else is one constraint.
     let mut parts = Vec::new();
-    collect(expr, &mut parts);
+    let mut pending = vec![expr];
+    while let Some(node) = pending.pop() {
+        match node {
+            Expr::Constraint(inner, text) => parts.push((&**inner, Some(text.as_str()))),
+            Expr::Binop(BinOp::And, left, right) => {
+                pending.push(right);
+                pending.push(left);
+            }
+            _ => return vec![(expr, None)],
+        }
+    }
     parts
 }
 

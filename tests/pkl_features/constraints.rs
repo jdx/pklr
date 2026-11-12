@@ -120,3 +120,9 @@ fn a_predicate_reading_a_missing_property_of_a_dynamic_fails() {
     let error = eval_fails("x = new Dynamic {} is Dynamic((v) -> v.required)\n");
     assert!(error.contains("required"), "{error}");
 }
+
+#[test]
+fn a_predicate_reading_a_missing_property_of_an_untyped_object_fails() {
+    let error = eval_fails("x = new { a = 1 } is Dynamic((v) -> v.required)\n");
+    assert!(error.contains("required"), "{error}");
+}
