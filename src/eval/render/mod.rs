@@ -1054,13 +1054,7 @@ pub(crate) trait StringRenderer<'a> {
                     self.walk().path.pop();
                 }
                 MemberKind::Entry => {
-                    if self.rejects_compound_keys()
-                        && key.starts_with(crate::value::MAPPING_KEY_PREFIX)
-                        && is_non_string_key(key)
-                        && matches!(key_value(key), Value::String(_))
-                    {
-                        return Err(cannot_render_non_string_key(&key_value(key), "JSON"));
-                    }
+                    let raw_key = key;
                     let key = self.walk().convert_key(&key_value(key))?;
                     self.walk().path.push(match &key {
                         Value::String(s) => PathPart::Entry(s.clone()),
@@ -1068,6 +1062,13 @@ pub(crate) trait StringRenderer<'a> {
                     });
                     let converted = self.walk().convert(value)?;
                     if !(self.walk().skip_null_entries && converted == Value::Null) {
+                        if self.rejects_compound_keys()
+                            && raw_key.starts_with(crate::value::MAPPING_KEY_PREFIX)
+                            && is_non_string_key(raw_key)
+                            && matches!(key_value(raw_key), Value::String(_))
+                        {
+                            return Err(cannot_render_non_string_key(&key_value(raw_key), "JSON"));
+                        }
                         let value_path = std::mem::take(&mut self.walk().path);
                         let result = self.visit_entry_key(&key, is_first);
                         self.walk().path = value_path;

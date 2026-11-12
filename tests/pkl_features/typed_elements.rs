@@ -1751,3 +1751,18 @@ fn json_renderer_rejects_object_and_list_mapping_keys() {
     let err = pklr::eval_to_json(&file).unwrap_err().to_string();
     assert!(err.contains("non-string key as JSON"), "{err}");
 }
+
+#[test]
+fn json_renderer_omits_null_entries_with_compound_keys() {
+    let temp = TestTempDir::new("pklr_json_renderer_null_compound_keys");
+    let file = temp.path().join("r.pkl");
+    std::fs::write(
+        &file,
+        "r = new JsonRenderer { omitNullProperties = true }.renderValue(new Mapping { [List(1)] = null })\n",
+    )
+    .unwrap();
+    assert_eq!(
+        pklr::eval_to_json(&file).unwrap(),
+        serde_json::json!({"r": "{}"})
+    );
+}
