@@ -101,3 +101,7 @@ required-features = ["reqwest"]
 
 [profile.dev]
 debug = 1
+
+[[test]]
+name = "shared_members"
+required-features = ["native-io"]

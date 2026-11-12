@@ -336,14 +336,36 @@ impl Evaluator {
 /// The error of the first failed member rendering `value` would output: a
 /// failed property of a module object it contains.
 pub(super) fn rendered_member_failure(value: &Value) -> Option<&str> {
+    rendered_member_failure_in(value, &mut HashSet::default())
+}
+
+/// A module's value can hold amended copies of itself (`(this) { ... }`), so
+/// its members share sub-objects and the same one is reachable many ways:
+/// each shared object is searched once, or the walk is exponential.
+fn rendered_member_failure_in<'a>(value: &'a Value, seen: &mut HashSet<usize>) -> Option<&'a str> {
     match value {
-        Value::Object(map, source) => source
-            .as_ref()
-            .and_then(|source| source.poisoned_members.as_ref())
-            .and_then(|members| members.values().find(|member| member.rendered))
-            .map(|member| member.message.as_str())
-            .or_else(|| map.values().find_map(rendered_member_failure)),
-        Value::List(items) => items.iter().find_map(rendered_member_failure),
+        Value::Object(map, source) => {
+            if !seen.insert(Arc::as_ptr(map) as *const () as usize) {
+                return None;
+            }
+            source
+                .as_ref()
+                .and_then(|source| source.poisoned_members.as_ref())
+                .and_then(|members| members.values().find(|member| member.rendered))
+                .map(|member| member.message.as_str())
+                .or_else(|| {
+                    map.values()
+                        .find_map(|member| rendered_member_failure_in(member, seen))
+                })
+        }
+        Value::List(items) => {
+            if !seen.insert(items.items_ptr() as *const () as usize) {
+                return None;
+            }
+            items
+                .iter()
+                .find_map(|item| rendered_member_failure_in(item, seen))
+        }
         _ => None,
     }
 }
