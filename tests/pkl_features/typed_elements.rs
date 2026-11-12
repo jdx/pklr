@@ -1738,3 +1738,16 @@ fn amending_a_checked_new_listing_still_checks_its_original_entries() {
     let err = pklr::eval_to_json(&child).unwrap_err().to_string();
     assert!(err.contains("!isEmpty"), "{err}");
 }
+
+#[test]
+fn json_renderer_rejects_object_and_list_mapping_keys() {
+    let temp = TestTempDir::new("pklr_json_renderer_compound_keys");
+    let file = temp.path().join("r.pkl");
+    std::fs::write(
+        &file,
+        "r = new JsonRenderer {}.renderValue(new Mapping { [List(1)] = 1 })\n",
+    )
+    .unwrap();
+    let err = pklr::eval_to_json(&file).unwrap_err().to_string();
+    assert!(err.contains("non-string key as JSON"), "{err}");
+}

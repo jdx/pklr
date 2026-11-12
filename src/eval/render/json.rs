@@ -152,6 +152,10 @@ impl<'a> StringRenderer<'a> for Json<'a> {
         self.visit(value)
     }
 
+    fn rejects_compound_keys(&self) -> bool {
+        true
+    }
+
     fn visit_entry_key(&mut self, key: &Value, is_first: bool) -> Result<()> {
         if !is_first {
             self.out.push(',');

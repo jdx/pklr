@@ -928,6 +928,10 @@ pub(crate) trait StringRenderer<'a> {
     fn end_listing(&mut self, is_empty: bool) -> Result<()>;
     fn visit_element(&mut self, index: usize, value: &Value, is_first: bool) -> Result<()>;
     fn visit_entry_key(&mut self, key: &Value, is_first: bool) -> Result<()>;
+    /// Whether an object or list mapping key is an error here, as in JSON.
+    fn rejects_compound_keys(&self) -> bool {
+        false
+    }
     fn visit_entry_value(&mut self, value: &Value) -> Result<()> {
         self.visit(value)
     }
@@ -1050,6 +1054,13 @@ pub(crate) trait StringRenderer<'a> {
                     self.walk().path.pop();
                 }
                 MemberKind::Entry => {
+                    if self.rejects_compound_keys()
+                        && key.starts_with(crate::value::MAPPING_KEY_PREFIX)
+                        && is_non_string_key(key)
+                        && matches!(key_value(key), Value::String(_))
+                    {
+                        return Err(cannot_render_non_string_key(&key_value(key), "JSON"));
+                    }
                     let key = self.walk().convert_key(&key_value(key))?;
                     self.walk().path.push(match &key {
                         Value::String(s) => PathPart::Entry(s.clone()),
