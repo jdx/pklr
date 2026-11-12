@@ -40,6 +40,7 @@ pub(crate) const PARSER_DEPTH: usize = if cfg!(debug_assertions) {
 /// Deepest JSON result an entry point returns after moving to the large stack.
 /// `serde_json::Value` frees recursively on the caller's stack, which may be
 /// 2 MiB; a result this deep takes about a megabyte of it in a release build.
+#[cfg(feature = "native-io")]
 pub(crate) const MAX_RESULT_DEPTH: usize = 20_000;
 
 /// Nesting limit of the parser and lexer on a stack of unknown size, such as
