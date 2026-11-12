@@ -132,6 +132,11 @@ impl Evaluator {
                 return Ok(result);
             }
             if method == "getClass" && evaled_args.is_empty() {
+                if let (Expr::Ident(name), Value::Object(props, None)) = (obj_expr.as_ref(), &obj)
+                    && name == "module"
+                {
+                    return stdlib::get_class(&self.module_with_class(props, scope));
+                }
                 return stdlib::get_class(&obj);
             }
             return Err(Error::Eval(format!(

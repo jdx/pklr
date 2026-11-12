@@ -367,3 +367,25 @@ fn amending_a_builtin_class_value_is_rejected() {
         );
     }
 }
+
+#[test]
+fn module_get_class_works_in_a_lambda_a_method_and_null_safe() {
+    // Real pkl: the module's class is the same wherever it is asked, and a
+    // file name may hold an `@`.
+    let result = eval(
+        r#"
+module Foo
+
+local f = () -> module.getClass().toString()
+function g() = module.getClass().toString()
+
+viaLambda = f()
+viaMethod = g()
+nullSafe = module?.getClass().toString()
+"#,
+    );
+    assert_eq!(
+        result,
+        serde_json::json!({"viaLambda": "Foo", "viaMethod": "Foo", "nullSafe": "Foo"})
+    );
+}

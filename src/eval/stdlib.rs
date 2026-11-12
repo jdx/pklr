@@ -249,15 +249,15 @@ pub(super) fn builtin_marker_class(name: &str, value: &Value) -> Option<Value> {
 /// `getClass()` hands back: the module's name, then where it lives, so two
 /// modules of the same name are different classes.
 pub(super) fn module_class_identity(name: &str, namespace: &str) -> String {
-    format!("{MODULE_IDENTITY_PREFIX}{name}@{namespace}")
+    format!("{MODULE_IDENTITY_PREFIX}{name}\0{namespace}")
 }
 
-const MODULE_IDENTITY_PREFIX: &str = "module:";
+const MODULE_IDENTITY_PREFIX: &str = "\0module:";
 
 /// The name a module class identity (see `module_class_identity`) carries.
 pub(crate) fn module_class_name(identity: &str) -> Option<&str> {
     let rest = identity.strip_prefix(MODULE_IDENTITY_PREFIX)?;
-    Some(rest.split_once('@').map_or(rest, |(name, _)| name))
+    Some(rest.split_once('\0').map_or(rest, |(name, _)| name))
 }
 
 /// The error for a `getClass()` pklr cannot answer faithfully.
