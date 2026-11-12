@@ -298,10 +298,6 @@ impl Evaluator {
         // name. When nothing in the overlay reads it, it has no effect at all.
         let overlay_reads: HashSet<Name> = overlay_entries
             .iter()
-            .filter(|entry| {
-                !matches!(entry, Entry::Property(prop)
-                if has_modifier(&prop.modifiers, Modifier::Local))
-            })
             .flat_map(|entry| referenced_roots(std::slice::from_ref(entry)))
             .collect();
         let overrides_nothing = |prop: &Property| {

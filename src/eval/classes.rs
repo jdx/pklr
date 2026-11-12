@@ -80,10 +80,17 @@ impl Evaluator {
         let body = typed_body.as_ref().unwrap_or(body);
         // A `local` member never overrides: the parent's member of that name
         // stays, and the parent's expressions keep reading it.
+        let body_reads: HashSet<Name> = body
+            .iter()
+            .flat_map(|entry| referenced_roots(std::slice::from_ref(entry)))
+            .collect();
         let without_local_overrides: Option<Body> = match &parent_val {
             Some(Value::Object(_, Some(parent))) => {
                 let overrides_nothing_local = |entry: &Entry| match entry {
-                    Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {
+                    Entry::Property(prop)
+                        if has_modifier(&prop.modifiers, Modifier::Local)
+                            && !body_reads.contains(&prop.name) =>
+                    {
                         parent.entries.iter().any(|inherited| {
                             matches!(inherited, Entry::Property(p)
                                 if p.name == prop.name

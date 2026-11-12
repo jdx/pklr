@@ -7996,3 +7996,21 @@ fn generated_members_are_readable_by_bare_name_from_later_siblings() {
     assert_eq!(v["a"]["u"], 5);
     assert!(v["a"].get("secret").is_none());
 }
+
+#[test]
+fn nested_generator_locals_are_readable_after_the_outer_generator() {
+    let v = eval(
+        "a {\n  when (true) {\n    when (true) { local secret = 5 }\n    inside = secret\n  }\n  outside = secret\n}\n",
+    );
+    assert_eq!(v["a"]["inside"], 5);
+    assert_eq!(v["a"]["outside"], 5);
+}
+
+#[test]
+fn a_local_read_by_its_own_body_is_still_bound() {
+    let v = eval(
+        "open class P { x = 1 }\nclass C extends P { local x = 2; y = x }\nc = new C {}\nbase = new Dynamic { x = 1 }\nr = (base) { local x = 2; local y = x; z = y }\n",
+    );
+    assert_eq!(v["c"]["y"], 2);
+    assert_eq!(v["r"]["z"], 2);
+}

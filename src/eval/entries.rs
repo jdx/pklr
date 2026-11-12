@@ -1569,12 +1569,11 @@ impl Evaluator {
                 st.child_scope.set(key, value.clone());
             }
             if let Some(source) = &source {
-                for entry in body.iter() {
-                    if let Entry::Property(prop) = entry
-                        && has_modifier(&prop.modifiers, Modifier::Local)
-                        && let Some(value) = source.scope().get(&prop.name)
-                    {
-                        st.child_scope.set(&prop.name, value.clone());
+                let mut locals = Vec::new();
+                collect_generated_locals(body, &mut locals);
+                for name in locals {
+                    if let Some(value) = source.scope().get(&name) {
+                        st.child_scope.set(&name, value.clone());
                     }
                 }
             }
@@ -2123,6 +2122,26 @@ fn poison_stale_members(
     for name in &cx.stale_members {
         if *name != prop.name && !st.bound_members.contains(name) && expr_mentions(value, name) {
             active_scope.poison(name.clone(), format!("undefined variable: {name}"));
+        }
+    }
+}
+
+/// The names of the `local` members a body declares, including those its
+/// nested generators declare, which stay readable after the generator.
+fn collect_generated_locals(body: &Body, out: &mut Vec<Name>) {
+    for entry in body.iter() {
+        match entry {
+            Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {
+                out.push(prop.name.clone());
+            }
+            Entry::WhenGenerator(generator) => {
+                collect_generated_locals(&generator.body, out);
+                if let Some(else_body) = &generator.else_body {
+                    collect_generated_locals(else_body, out);
+                }
+            }
+            Entry::ForGenerator(generator) => collect_generated_locals(&generator.body, out),
+            _ => {}
         }
     }
 }
