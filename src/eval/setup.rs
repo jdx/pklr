@@ -62,6 +62,18 @@ impl Evaluator {
         self.capabilities.temp_dir(prefix)
     }
 
+    pub(super) fn resource_path_exists_io(&mut self, path: &Path) -> Result<bool> {
+        self.capabilities.resource_path_exists(path)
+    }
+
+    pub(super) fn resource_read_bytes_io(&mut self, path: &Path) -> Result<Vec<u8>> {
+        self.capabilities.resource_read_bytes(path)
+    }
+
+    pub(super) fn resource_glob_io(&mut self, base: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
+        self.capabilities.resource_glob(base, pattern)
+    }
+
     pub(super) fn glob_io(&mut self, base: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
         self.capabilities.glob(base, pattern)
     }

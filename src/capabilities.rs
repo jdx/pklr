@@ -27,7 +27,9 @@ use crate::Result;
 /// Host-provided IO for evaluating Pkl modules.
 ///
 /// The required methods cover reading modules, environment variables, HTTP,
-/// temp directories and globs. The defaulted methods (`read_bytes`,
+/// temp directories and globs. Module IO and resource IO share them by
+/// default; the `resource_*` methods let a host treat resource reads
+/// (`read`, `read?`, `read*`) separately from imports. The defaulted methods (`read_bytes`,
 /// `create_dir_all`, `write_atomic`, `remove_file` and, with the
 /// `package-zip` feature, `extract_zip`) use the standard library; the
 /// evaluator uses them for general resource reads as well as `package://`
@@ -136,6 +138,34 @@ pub trait EvalCapabilities: Send + Sync {
     fn temp_dir(&mut self, prefix: &str) -> Result<PathBuf>;
 
     fn glob(&mut self, base: &Path, pattern: &str) -> Result<Vec<PathBuf>>;
+
+    /// Whether the file resource at `path` exists, asked by `read`, `read?`
+    /// and `read*` (including triple-dot resource lookup).
+    ///
+    /// Module, import and package loading keep using [`Self::path_exists`], so
+    /// a host can allow imports while denying resource reads (or the reverse)
+    /// by overriding only this method and the other `resource_*` ones. The
+    /// default delegates to [`Self::path_exists`].
+    fn resource_path_exists(&mut self, path: &Path) -> Result<bool> {
+        self.path_exists(path)
+    }
+
+    /// Read the bytes of the file resource at `path`, asked by `read`, `read?`
+    /// and `read*`, and for `package:` resources extracted to disk.
+    ///
+    /// Module loading keeps using [`Self::read_bytes`]. The default delegates
+    /// to [`Self::read_bytes`].
+    fn resource_read_bytes(&mut self, path: &Path) -> Result<Vec<u8>> {
+        self.read_bytes(path)
+    }
+
+    /// Expand the resource glob `pattern` below `base` for `read*`.
+    ///
+    /// `import*` globs keep using [`Self::glob`]. The default delegates to
+    /// [`Self::glob`].
+    fn resource_glob(&mut self, base: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
+        self.glob(base, pattern)
+    }
 }
 
 /// A byte budget shared by the requests of a batch fetch

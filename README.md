@@ -67,6 +67,12 @@ concurrently; the defaults fetch one URL after another. Both get a
 bytes to: start no request once it is spent, and drop a body that no longer
 fits.
 
+Module IO and resource IO share the same file hooks by default. To treat them
+separately, override `resource_path_exists`, `resource_read_bytes` and
+`resource_glob`: `read`, `read?` and `read*` call these, while imports, amends
+and packages keep calling `path_exists`, `read_bytes` and `glob`. Each defaults
+to its module-level counterpart, so existing implementations are unaffected.
+
 ### Reqwest and optional async support
 
 To use a configured reqwest client without linking ureq, select `reqwest`:
