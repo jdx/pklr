@@ -1674,3 +1674,101 @@ pairMsg = test.catch(() -> new JsonRenderer {}.renderDocument(Pair(1, 2)))
     let msg = json["pairMsg"].as_str().unwrap();
     assert!(!msg.contains("`Dynamic`"), "{msg}");
 }
+
+// Expected text is what `pkl eval` 0.32.2 renders.
+
+#[test]
+fn pcf_renders_collections_as_calls() {
+    assert_eq!(
+        render(r#"new PcfRenderer {}.renderValue(List(1, "a", new Dynamic { x = 1 }))"#),
+        "List(1, \"a\", new {\n  x = 1\n})"
+    );
+    assert_eq!(
+        render(r#"new PcfRenderer {}.renderValue(Map("k", Pair(1, "x"), 2, Set(3)))"#),
+        "Map(\"k\", Pair(1, \"x\"), 2, Set(3))"
+    );
+    assert_eq!(
+        render(
+            r#"new PcfRenderer {}.renderDocument(new Dynamic { l = List(1, 2); m = Map("a", 1); s = Set(1); p = Pair(1, 2); n = new Listing { 1 }; ["k"] = List(1); q = List(List(1), Map("a", Set(2))) })"#
+        ),
+        "l = List(1, 2)\nm = Map(\"a\", 1)\ns = Set(1)\np = Pair(1, 2)\nn {\n  1\n}\nq = List(List(1), Map(\"a\", Set(2)))\n[\"k\"] = List(1)\n"
+    );
+}
+
+#[test]
+fn pcf_renders_int_seq_with_its_bounds() {
+    assert_eq!(
+        render("new PcfRenderer {}.renderValue(IntSeq(1, 4))"),
+        "IntSeq(1, 4)"
+    );
+    assert_eq!(
+        render("new PcfRenderer {}.renderValue(IntSeq(1, 6).step(2))"),
+        "IntSeq(1, 6).step(2)"
+    );
+    assert_eq!(
+        render("new PcfRenderer {}.renderValue(IntSeq(1, 4).step(-2))"),
+        "IntSeq(1, 4).step(-2)"
+    );
+}
+
+#[test]
+fn pcf_renders_a_regex_and_a_dynamic_with_only_elements() {
+    assert_eq!(
+        render(r#"new PcfRenderer {}.renderValue(Regex("a.*b"))"#),
+        "Regex(\"a.*b\")"
+    );
+    assert_eq!(
+        render(r#"new PcfRenderer {}.renderDocument(new Dynamic { new { apple = "yes" } })"#),
+        "\nnew {\n  apple = \"yes\"\n}\n"
+    );
+}
+
+#[test]
+fn properties_renderer_names_unrenderable_values_as_pkl_does() {
+    let json = eval(
+        r#"
+import "pkl:test"
+res1 = test.catch(() -> new PropertiesRenderer {}.renderValue(List("a", "b")))
+res2 = test.catch(() -> new PropertiesRenderer {}.renderValue(Set(1)))
+res3 = test.catch(() -> new PropertiesRenderer {}.renderValue(new Dynamic { name = "pigeon"; age = 42 }))
+"#,
+    );
+    assert_eq!(
+        json["res1"],
+        "Cannot render value of type `List` as Properties. Value: List(\"a\", \"b\")"
+    );
+    assert_eq!(
+        json["res2"],
+        "Cannot render value of type `Set` as Properties. Value: Set(1)"
+    );
+    assert_eq!(
+        json["res3"],
+        "Cannot render value of type `Dynamic` as Properties. Value: new Dynamic { name = ?; age = ? }"
+    );
+}
+
+#[test]
+fn pcf_applies_converters_inside_collection_calls() {
+    assert_eq!(
+        render(
+            r#"new PcfRenderer { converters { [Int] = (i) -> i + 1 } }.renderValue(List(1, 2))"#
+        ),
+        "List(2, 3)"
+    );
+    assert_eq!(
+        render(
+            r#"new PcfRenderer { converters { [Int] = (i) -> i + 1 } }.renderValue(Map("a", 1))"#
+        ),
+        "Map(\"a\", 2)"
+    );
+}
+
+#[test]
+fn pcf_collection_members_keep_their_path_for_nested_converters() {
+    assert_eq!(
+        render(
+            r#"new PcfRenderer { converters { ["[*].a"] = (i) -> i + 10 } }.renderValue(List(new Dynamic { a = 1 }))"#
+        ),
+        "List(new {\n  a = 11\n})"
+    );
+}
