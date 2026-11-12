@@ -1444,8 +1444,20 @@ pub(super) fn value_is_named_type(val: &Value, name: &str) -> bool {
 pub(super) fn value_is_class_type(val: &Value, name: &str, scope: &Scope) -> Option<bool> {
     let expected_name = name.strip_prefix('*').unwrap_or(name);
     // `module` is the type of the enclosing module, never a `Dynamic`.
-    if expected_name == "module" && is_untyped_dynamic(val) {
-        return Some(false);
+    // pklr tracks no class for a module's value, so it is told from a class
+    // instance by having none.
+    if expected_name == "module" {
+        return Some(match val {
+            // A module's own value, as seen from inside it, has no source.
+            Value::Object(_, None) => true,
+            Value::Object(_, Some(source)) => {
+                source.is_module
+                    || (source.kind == ObjectKind::Object
+                        && source.type_name.is_none()
+                        && source.type_identity.is_none())
+            }
+            _ => false,
+        });
     }
     let Some(Value::Object(_, Some(expected_source))) = resolve_dotted(scope, expected_name) else {
         return None;

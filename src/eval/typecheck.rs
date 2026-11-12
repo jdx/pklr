@@ -743,6 +743,14 @@ impl Evaluator {
                 {
                     return Ok(accepted);
                 }
+                // The type of the enclosing module, unless an alias of that
+                // name shadows it.
+                if name == "module"
+                    && scope.get_type_alias(name).is_none()
+                    && let Some(matches) = value_is_class_type(val, name, scope)
+                {
+                    return Ok(matches);
+                }
                 if let Some(resolved) = scope.get_type_alias(name) {
                     let resolved = resolved.clone();
                     return self.eval_alias_check(val, name, &resolved, scope, depth, resolving);
