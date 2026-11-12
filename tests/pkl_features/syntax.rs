@@ -3064,3 +3064,10 @@ fn amended_function_bodies_may_ignore_parameters() {
     );
     assert_eq!(v["a"]["x"], 2);
 }
+
+#[test]
+fn quoted_underscore_local_is_still_bound() {
+    // `pkl eval` gives {"result": 1}.
+    let v = eval("local `_` = 1\nresult = `_`\n");
+    assert_eq!(v["result"], 1);
+}

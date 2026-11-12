@@ -182,7 +182,7 @@ impl Evaluator {
                                 let mut call_scope = Scope::for_call(captured);
                                 // Bind the object as the first parameter
                                 if let Some(param) = params.first() {
-                                    call_scope.declare(param, value.clone());
+                                    call_scope.declare_param(param, value.clone());
                                 }
                                 let result = self.eval_expr(body, &call_scope, 0)?;
                                 let mut blocked = blocked_root_converters;
