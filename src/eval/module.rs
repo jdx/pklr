@@ -938,10 +938,9 @@ impl Evaluator {
         if depth == 0 {
             self.eval_module_output(module, &module_map, &scope, path, depth)?;
             if self.rendered_member_failed
-                && !self.output_has_converters()
-                && let Some(message) = module_map.values().find_map(rendered_member_failure)
+                && let Some(message) = self.unconverted_module_failure(&module_map)
             {
-                return Err(Error::Eval(message.to_string()));
+                return Err(Error::Eval(message));
             }
         }
         Ok(Value::Object(module_map, source))

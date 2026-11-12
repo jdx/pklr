@@ -209,10 +209,19 @@ fn stdlib_alias_ignores_user_names() {
 }
 
 #[test]
-fn null_default_is_amended() {
-    let src = "class Foo { x: Int = 1; y: Int = 2 }\nclass Bar { foo: Foo? = Null(new Foo { x = 5 }) }\nb = new Bar { foo { y = 9 } }\n";
-    assert_eq!(
-        eval(src),
-        serde_json::json!({"b": {"foo": {"x": 5, "y": 9}}})
+fn null_default_accepts_a_dynamic_or_listing_reference() {
+    let json = eval(
+        "local d = new Dynamic { 1 }\nlocal l = new Listing { 1 }\na = Null(d)\nb = Null(l)\n",
     );
+    assert!(json["a"].is_null() && json["b"].is_null());
+    let err = eval_fails("a = Null(List(1))\n");
+    assert!(err.contains("Object | Function<Object>"), "{err}");
+}
+
+#[test]
+fn an_unrelated_converter_keeps_an_undefined_member_failing() {
+    let err = eval_fails(
+        "class P { age: Int }\nclass Q { x = 1 }\nres = new P {}\noutput { renderer = new JsonRenderer { converters { [Q] = (it) -> it } } }\n",
+    );
+    assert!(err.contains("`age`"), "{err}");
 }

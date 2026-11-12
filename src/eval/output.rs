@@ -684,12 +684,29 @@ impl Evaluator {
         (kind, renderer.clone())
     }
 
-    /// Whether the output renderer declares converters. A converter may
-    /// replace a value whose member failed, so the failure is then left to the
-    /// render.
-    pub(super) fn output_has_converters(&self) -> bool {
+    /// The first rendered failed member of the module's values that no output
+    /// converter replaces. A converter may replace a value whose member failed,
+    /// so only the failures it leaves are reported. A path converter cannot be
+    /// matched here and leaves the check to the render.
+    #[cfg(feature = "native-io")]
+    pub(super) fn unconverted_module_failure(&self, members: &ObjectMap) -> Option<String> {
         let (_, renderer) = self.output_renderer(RendererKind::Json);
-        renderer_converters(&renderer).is_ok_and(|converters| !converters.is_empty())
+        let converters = renderer_converters(&renderer).ok()?;
+        if converters.has_paths() {
+            return None;
+        }
+        members
+            .values()
+            .find_map(|value| unconverted_member_failure(value, None, &converters))
+            .map(str::to_string)
+    }
+
+    #[cfg(not(feature = "native-io"))]
+    pub(super) fn unconverted_module_failure(&self, members: &ObjectMap) -> Option<String> {
+        members
+            .values()
+            .find_map(super::members::rendered_member_failure)
+            .map(str::to_string)
     }
 
     /// Apply the module output renderer's converters to a value tree.
