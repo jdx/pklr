@@ -65,11 +65,11 @@ pub(crate) fn object_key(value: &Value) -> Arc<str> {
 
 /// Whether `key` stands for something other than a string.
 fn is_non_string_key(key: &str) -> bool {
-    if key.starts_with(crate::value::MAPPING_KEY_PREFIX) {
+    if let Some(stored) = key.strip_prefix(crate::value::MAPPING_KEY_PREFIX) {
         // Object and list keys are stored by an identity string, which
         // `mapping_storage_value` reads back as a string.
         return !matches!(crate::value::mapping_storage_value(key), Value::String(_))
-            || !key[crate::value::MAPPING_KEY_PREFIX.len()..].starts_with("string:");
+            || !stored.starts_with("string:");
     }
     key.starts_with('\0')
         && (key.starts_with(CLASS_KEY_PREFIX)
