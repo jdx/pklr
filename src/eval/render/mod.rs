@@ -299,9 +299,12 @@ impl Kind {
             },
             Kind::Dynamic => "Dynamic".into(),
             Kind::Typed => match value {
-                Value::Object(_, Some(source)) => {
-                    source.type_name.clone().unwrap_or_else(|| "Typed".into())
-                }
+                Value::Object(_, Some(source)) => match source.type_identity.as_deref() {
+                    Some(identity) if !identity.starts_with("pkl:") => {
+                        class_display_name(identity, source.type_name.as_deref())
+                    }
+                    _ => source.type_name.clone().unwrap_or_else(|| "Typed".into()),
+                },
                 _ => "Typed".into(),
             },
         }
@@ -918,6 +921,11 @@ pub(crate) trait StringRenderer<'a> {
     fn visit_other(&mut self, value: &Value, kind: Kind) -> Result<()> {
         Err(cannot_render_type(value, kind, self.name()))
     }
+    /// Render a `List`, `Set`, `Map`, `Pair` or `IntSeq` the format writes as a
+    /// call, returning whether it did.
+    fn visit_collection(&mut self, _value: &Value, _kind: Kind) -> Result<bool> {
+        Ok(false)
+    }
     /// Whether an object can have both elements and members in this format.
     fn supports_mixed_objects(&self) -> bool {
         false
@@ -964,6 +972,9 @@ pub(crate) trait StringRenderer<'a> {
             return Err(Error::Eval(
                 "XML comments must not contain `--` or end with `-`.".into(),
             ));
+        }
+        if self.visit_collection(value, kind)? {
+            return Ok(());
         }
         match (kind, value) {
             (Kind::Null, _) => self.visit_null(),
@@ -1111,8 +1122,46 @@ pub(crate) fn cannot_render_type(value: &Value, kind: Kind, name: &str) -> Error
     Error::Eval(format!(
         "Cannot render value of type `{}` as {name}.\nValue: {}\n\nConsider adding a converter to `output.converters`.",
         kind.pkl_class(value),
-        display_value(value),
+        unforced_object_display(value, kind).unwrap_or_else(|| display_value(value)),
     ))
+}
+
+/// A `Dynamic` or typed object as Pkl shows one whose members are not yet
+/// evaluated: `new Person { name = ?; age = ? }`.
+fn unforced_object_display(value: &Value, kind: Kind) -> Option<String> {
+    let Value::Object(map, source) = value else {
+        return None;
+    };
+    if !matches!(kind, Kind::Dynamic | Kind::Typed)
+        || map.is_empty()
+        || map.keys().any(|key| class_key_name(key).is_some())
+    {
+        return None;
+    }
+    let source = source.as_deref();
+    let members = Members::new(kind, source);
+    let mut shown: Vec<(MemberKind, String)> = map
+        .iter()
+        .filter(|(key, value)| !value.is_unrendered_member(key, source))
+        .map(|(key, _)| match members.kind_of(key) {
+            MemberKind::Property => (MemberKind::Property, format!("{key} = ?")),
+            MemberKind::Entry => (
+                MemberKind::Entry,
+                format!("[{}] = ?", map_key_display(key, 0, DISPLAY_DEPTH)),
+            ),
+        })
+        .collect();
+    shown.sort_by_key(|(member, _)| *member == MemberKind::Entry);
+    let shown = shown
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect::<Vec<_>>()
+        .join("; ");
+    let name = match source.and_then(|source| source.type_name.clone()) {
+        Some(name) if kind == Kind::Typed => name,
+        _ => kind.pkl_class(value),
+    };
+    Some(format!("new {name} {{ {shown} }}"))
 }
 
 /// `Cannot render object with non-string key as ...`.
@@ -1189,6 +1238,23 @@ fn alias_split<'a>(identity: &'a str, members: &ObjectMap) -> Option<(&'a str, &
     Some((module, &identity[module.len() + 1..]))
 }
 
+/// A class as Pkl names it in messages: `module#Name`.
+fn class_display_name(identity: &str, type_name: Option<&str>) -> String {
+    // A class name may itself contain dots, so peel the declared name off the
+    // end of the identity rather than splitting at the last dot.
+    let split = type_name
+        .and_then(|name| Some((identity.strip_suffix(name)?.strip_suffix('.')?, name)))
+        .or_else(|| identity.rsplit_once('.'));
+    match split {
+        Some((module, name)) => {
+            let module = module.rsplit(['/', '\\']).next().unwrap_or(module);
+            let module = module.strip_suffix(".pkl").unwrap_or(module);
+            format!("{module}#{name}")
+        }
+        None => identity.to_string(),
+    }
+}
+
 /// The deepest nesting `display_value` expands: shared contents can make an
 /// expanded value exponentially larger than the value itself.
 const DISPLAY_DEPTH: usize = 6;
@@ -1227,6 +1293,14 @@ fn display_value_at(value: &Value, depth: usize, max: usize) -> String {
         }
         (Kind::Regex, Value::Regex(regex)) => format!("Regex({:?})", regex.pattern()),
         (kind @ Kind::Function, _) => format!("new {} {{}}", kind.pkl_class(value)),
+        (Kind::IntSeq, Value::List(items)) if items.int_seq_bounds().is_some() => {
+            let (start, end, step) = items.int_seq_bounds().unwrap_or_default();
+            if step == 1 {
+                format!("IntSeq({start}, {end})")
+            } else {
+                format!("IntSeq({start}, {end}).step({step})")
+            }
+        }
         (Kind::IntSeq, Value::List(items)) => {
             let int = |item: Option<&Value>| match item {
                 Some(Value::Int(n)) => Some(*n),

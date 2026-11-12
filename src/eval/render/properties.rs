@@ -5,7 +5,7 @@ use super::{
     render_directive_text,
 };
 use crate::error::{Error, Result};
-use crate::value::Value;
+use crate::value::{ListKind, Value};
 
 pub(crate) struct Properties<'a> {
     walk: Walk<'a>,
@@ -181,6 +181,15 @@ impl<'a> StringRenderer<'a> for Properties<'a> {
 
     fn end_object(&mut self, _kind: Kind, _is_empty: bool) -> Result<()> {
         Ok(())
+    }
+
+    fn visit_collection(&mut self, value: &Value, kind: Kind) -> Result<bool> {
+        match (kind, value) {
+            (Kind::Listing, Value::List(items)) if items.kind() != ListKind::Dynamic => {
+                Err(cannot_render_type(value, kind, "Properties"))
+            }
+            _ => Ok(false),
+        }
     }
 
     fn start_listing(&mut self) -> Result<()> {
