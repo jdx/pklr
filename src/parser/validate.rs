@@ -611,10 +611,7 @@ impl<'m> Walker<'m> {
             bail!(self.type_expr(ty));
         }
         if let Some(value) = &prop.value {
-            match value {
-                Expr::New(None, body, _) => return self.new_object(None, body, prop, owner),
-                _ => bail!(self.expr(value)),
-            }
+            return self.result_value(value, prop, owner);
         }
         if let Some(body) = &prop.body {
             return self.object(
@@ -623,6 +620,24 @@ impl<'m> Walker<'m> {
             );
         }
         None
+    }
+
+    /// A member's value expression. An untyped `new` that is the value, or a
+    /// branch of an `if` that is, builds the member's declared type.
+    fn result_value(
+        &mut self,
+        value: &'m Expr,
+        prop: &'m Property,
+        owner: usize,
+    ) -> Option<ConstViolation> {
+        match value {
+            Expr::New(None, body, _) => self.new_object(None, body, prop, owner),
+            Expr::If(condition, then_expr, else_expr) => self
+                .expr(condition)
+                .or_else(|| self.result_value(then_expr, prop, owner))
+                .or_else(|| self.result_value(else_expr, prop, owner)),
+            _ => self.expr(value),
+        }
     }
 
     /// Whether an untyped object body assigned to `prop` builds a `Dynamic`:
