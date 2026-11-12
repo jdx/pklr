@@ -401,7 +401,12 @@ impl<'a> Parser<'a> {
         let checked = match &ty {
             TypeExpr::Generic(name, args)
                 if matches!(name.as_str(), "Listing" | "Mapping")
-                    && args.iter().any(is_plain_or_constrained) =>
+                    && args.iter().enumerate().any(|(i, arg)| {
+                        // A bare `String` key is not worth a walk over every
+                        // entry of a large Mapping.
+                        is_plain_or_constrained(arg)
+                            && !(name == "Mapping" && i == 0 && matches!(arg, TypeExpr::Named(_)))
+                    }) =>
             {
                 let args = args
                     .iter()
