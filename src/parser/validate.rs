@@ -118,6 +118,7 @@ const LISTING_MEMBERS: &[&str] = &[
     "hasProperty",
     "getProperty",
 ];
+const MAPPING_MEMBERS: &[&str] = &["getOrNull", "toMap", "toDynamic"];
 const OBJECT_MEMBERS: &[&str] = &["hasProperty", "getProperty", "toMap"];
 const UNIT_MEMBERS: &[&str] = &["unit", "value", "isBetween", "isPositive", "isNonZero"];
 const OTHER_MEMBERS: &[&str] = &[
@@ -658,7 +659,12 @@ impl<'m> Walker<'m> {
         }
         if matches!(name, "Listing" | "Mapping") && !self.classes.contains_key(name) {
             // The members of the collection a bare name may take.
-            for &member in COLLECTION_MEMBERS.iter().chain(LISTING_MEMBERS) {
+            let extra = if name == "Listing" {
+                LISTING_MEMBERS
+            } else {
+                MAPPING_MEMBERS
+            };
+            for &member in COLLECTION_MEMBERS.iter().chain(extra) {
                 own.props.entry(member).or_insert((true, false));
                 own.methods.entry(member).or_insert((true, false));
             }
@@ -959,6 +965,7 @@ fn inferred_class(ty: &TypeExpr) -> Option<&str> {
     match ty {
         TypeExpr::Named(name) => Some(name.trim_end_matches('?')),
         TypeExpr::Nullable(inner) => inferred_class(inner),
+        TypeExpr::Generic(name, _) if matches!(name.as_str(), "Listing" | "Mapping") => Some(name),
         _ => None,
     }
 }
