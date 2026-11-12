@@ -3253,6 +3253,8 @@ fn const_scopes_accept_unapplied_lambdas_and_quoted_receivers() {
     // names are ordinary bindings.
     let json = eval("x = 1\nobj { const local f = () -> x; result = 1 }\n");
     assert_eq!(json["obj"]["result"], 1);
+    let json = eval("x = 1\nobj { const local f = () -> x; result = ((ignored) -> 1).apply(f) }\n");
+    assert_eq!(json["obj"]["result"], 1);
     let json = eval("class C { v = let (`outer` = 1) `outer` }\nr = new C {}\n");
     assert_eq!(json["r"]["v"], 1);
 }

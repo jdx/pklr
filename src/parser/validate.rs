@@ -377,16 +377,14 @@ impl<'m> Walker<'m> {
         if pending.is_empty() {
             return None;
         }
-        let mut called: HashSet<(&str, bool)> = HashSet::new();
+        let mut called: HashSet<(&str, u8)> = HashSet::new();
         collect_calls_in_entries(body, &mut called);
         pending
             .into_iter()
             .find(|(name, kind, _)| match kind {
-                Pending::Method => called.contains(&(*name, true)),
-                Pending::Property => called.contains(&(*name, false)),
-                Pending::Lambda => {
-                    called.contains(&(*name, false)) && called.contains(&("apply", true))
-                }
+                Pending::Method => called.contains(&(*name, CALL)),
+                Pending::Property => called.contains(&(*name, READ)),
+                Pending::Lambda => called.contains(&(*name, APPLY)),
             })
             .map(|(_, _, violation)| violation)
     }
@@ -871,7 +869,10 @@ impl<'m> Walker<'m> {
                 }
                 Kind::Constraint => {
                     let base = constraints.next().copied().unwrap_or_default();
-                    if !method && !self.classes.contains_key(base) && value_member(base, name) {
+                    if !method
+                        && !self.classes.contains_key(user_class(base))
+                        && value_member(base, name)
+                    {
                         return None;
                     }
                 }
@@ -923,6 +924,13 @@ impl<'m> Walker<'m> {
     }
 }
 
+/// The class a constraint's base type names, without `?`, type arguments or a
+/// `module.` prefix.
+fn user_class(base: &str) -> &str {
+    let base = base.split('<').next().unwrap_or(base);
+    base.trim_end_matches('?').trim_start_matches("module.")
+}
+
 /// The in-module class an inferred `new` builds, if its type names one.
 fn inferred_class(ty: &TypeExpr) -> Option<&str> {
     match ty {
@@ -932,7 +940,13 @@ fn inferred_class(ty: &TypeExpr) -> Option<&str> {
     }
 }
 
-fn collect_calls_in_entries<'m>(entries: &'m [Entry], called: &mut HashSet<(&'m str, bool)>) {
+/// How a name is used: read as a property, called as a method, or applied as
+/// a lambda (`name.apply(...)`).
+const READ: u8 = 0;
+const CALL: u8 = 1;
+const APPLY: u8 = 2;
+
+fn collect_calls_in_entries<'m>(entries: &'m [Entry], called: &mut HashSet<(&'m str, u8)>) {
     for entry in entries {
         match entry {
             Entry::Property(prop) => {
@@ -971,7 +985,7 @@ fn collect_calls_in_entries<'m>(entries: &'m [Entry], called: &mut HashSet<(&'m 
     }
 }
 
-fn collect_calls_in_type<'m>(ty: &'m TypeExpr, called: &mut HashSet<(&'m str, bool)>) {
+fn collect_calls_in_type<'m>(ty: &'m TypeExpr, called: &mut HashSet<(&'m str, u8)>) {
     match ty {
         TypeExpr::Named(_) => {}
         TypeExpr::Nullable(inner) => collect_calls_in_type(inner, called),
@@ -986,7 +1000,7 @@ fn collect_calls_in_type<'m>(ty: &'m TypeExpr, called: &mut HashSet<(&'m str, bo
 }
 
 /// Collect the names an expression calls (`true`) or reads (`false`).
-fn collect_calls<'m>(expr: &'m Expr, called: &mut HashSet<(&'m str, bool)>) {
+fn collect_calls<'m>(expr: &'m Expr, called: &mut HashSet<(&'m str, u8)>) {
     if crate::stack::exhausted() {
         crate::stack::limit_hit();
         return;
@@ -995,10 +1009,13 @@ fn collect_calls<'m>(expr: &'m Expr, called: &mut HashSet<(&'m str, bool)>) {
         Expr::Call(callee, args) => {
             match callee.as_ref() {
                 Expr::Ident(name) => {
-                    called.insert((name, true));
+                    called.insert((name, CALL));
                 }
                 Expr::Field(base, name) | Expr::NullSafeField(base, name) => {
-                    called.insert((name, true));
+                    called.insert((name, CALL));
+                    if let (Expr::Ident(target), "apply") = (base.as_ref(), name.as_str()) {
+                        called.insert((target, APPLY));
+                    }
                     collect_calls(base, called);
                 }
                 other => collect_calls(other, called),
@@ -1006,7 +1023,7 @@ fn collect_calls<'m>(expr: &'m Expr, called: &mut HashSet<(&'m str, bool)>) {
             args.iter().for_each(|arg| collect_calls(arg, called));
         }
         Expr::Field(base, name) | Expr::NullSafeField(base, name) => {
-            called.insert((name, false));
+            called.insert((name, READ));
             collect_calls(base, called);
         }
         Expr::Index(left, right) | Expr::Binop(_, left, right) => {
@@ -1053,7 +1070,7 @@ fn collect_calls<'m>(expr: &'m Expr, called: &mut HashSet<(&'m str, bool)>) {
         | Expr::Import(_, _)
         | Expr::ImportGlob(_, _) => {}
         Expr::Ident(name) => {
-            called.insert((name, false));
+            called.insert((name, READ));
         }
     }
 }
