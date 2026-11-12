@@ -8085,3 +8085,13 @@ fn an_amended_mapping_replaces_numeric_entries_and_dynamic_entries_spread() {
     assert_eq!(v["n"], 3);
     assert_eq!(v["c"], false);
 }
+
+#[test]
+fn spreading_a_dynamic_with_generated_properties_into_a_mapping_fails() {
+    let err =
+        eval_fails("local d = new Dynamic { when (true) { a = 1 } }\nm = new Mapping { ...d }");
+    assert!(
+        err.contains("Cannot spread object containing properties"),
+        "{err}"
+    );
+}

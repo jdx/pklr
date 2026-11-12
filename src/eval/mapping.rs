@@ -1235,18 +1235,24 @@ impl Evaluator {
                     if let Value::Object(m, Some(source)) = &val
                         && source.kind != ObjectKind::Mapping
                         && !m.is_empty()
-                        // A `Dynamic` may hold only entries, which spread.
-                        && (source.kind != ObjectKind::Dynamic
-                            || source.entries.iter().any(|entry| {
-                                matches!(entry, Entry::Property(prop)
-                                    if !has_modifier(&prop.modifiers, Modifier::Local))
-                            }))
                     {
-                        return Err(Error::Eval(
-                            "Cannot spread object containing properties into object of type \
-                             `Mapping`."
-                                .into(),
-                        ));
+                        // A `Dynamic` may hold only entries, which spread.
+                        let has_properties = source.kind != ObjectKind::Dynamic
+                            || declares_property(&source.entries);
+                        if has_properties {
+                            return Err(Error::Eval(
+                                "Cannot spread object containing properties into object of type \
+                                 `Mapping`."
+                                    .into(),
+                            ));
+                        }
+                        if !source.elements.is_empty() {
+                            return Err(Error::Eval(
+                                "Cannot spread object containing elements into object of type \
+                                 `Mapping`."
+                                    .into(),
+                            ));
+                        }
                     }
                     if let Value::Object(m, _) = val {
                         for (key, value) in m.iter() {
@@ -1389,4 +1395,17 @@ fn reads_mapping_default(expr: &Expr) -> bool {
         expr,
         Expr::ObjectBody(_) | Expr::New(None, _, _) | Expr::InferredNew(..)
     )
+}
+
+/// Whether a body declares a non-local property, directly or in a `when` or
+/// `for` generator.
+fn declares_property(entries: &[Entry]) -> bool {
+    entries.iter().any(|entry| match entry {
+        Entry::Property(prop) => !has_modifier(&prop.modifiers, Modifier::Local),
+        Entry::WhenGenerator(w) => {
+            declares_property(&w.body) || w.else_body.as_ref().is_some_and(|b| declares_property(b))
+        }
+        Entry::ForGenerator(f) => declares_property(&f.body),
+        _ => false,
+    })
 }
