@@ -411,6 +411,14 @@ fn relative_project(name: &str, root: &str) -> (TestTempDir, std::path::PathBuf)
             "import* \"*.pkl\" as all\nr = all.keys.toList()\n",
         ),
         ("mp/outside.pkl", "v = 7\n"),
+        ("mp/x/outside.pkl", "v = 8\n"),
+        ("mp/secret.pkl", "v = 99\n"),
+        ("mp/x/bare.pkl", "open module bare\nv = 11\n"),
+        ("mp/x/sub/bare.pkl", "amends \"...\"\n"),
+        (
+            "mp/x/sub/up.pkl",
+            "import \".../../secret.pkl\"\nr = secret.v\n",
+        ),
         ("root.pkl", root),
     ];
     for (file, source) in files {
@@ -444,7 +452,7 @@ fn relative_imports_from_module_path_modules_are_matched_as_modulepath_uris() {
     let b = "^modulepath:/x/b\\.pkl$";
     let c = "^modulepath:/y/c\\.pkl$";
     type Expected<'a> = Result<(&'a str, serde_json::Value), &'a str>;
-    let cases: [(&str, &[&str], Expected); 14] = [
+    let cases: [(&str, &[&str], Expected); 17] = [
         ("x/a.pkl", &[a, b, c], Ok(("/r/r", 5.into()))),
         (
             "x/a.pkl",
@@ -489,6 +497,34 @@ fn relative_imports_from_module_path_modules_are_matched_as_modulepath_uris() {
             "x/trip.pkl",
             &["^modulepath:/x/trip\\.pkl$"],
             Err("modulepath:/outside.pkl"),
+        ),
+        // The search starts above the importer's directory, so `/x/outside.pkl`
+        // is not a candidate; a bare `...` searches for the importer's own name.
+        (
+            "x/trip.pkl",
+            &[
+                "^modulepath:/x/trip\\.pkl$",
+                "^modulepath:/x/outside\\.pkl$",
+            ],
+            Err("modulepath:/outside.pkl"),
+        ),
+        (
+            "x/sub/bare.pkl",
+            &[
+                "^modulepath:/x/sub/bare\\.pkl$",
+                "^modulepath:/x/bare\\.pkl$",
+            ],
+            Ok(("/r/v", 11.into())),
+        ),
+        // A triple-dot path cannot climb into a prefix the policy does not allow.
+        (
+            "x/sub/up.pkl",
+            &[
+                "^modulepath:/x/sub/up\\.pkl$",
+                "^modulepath:/x/",
+                "^modulepath:/secret\\.pkl$",
+            ],
+            Err("modulepath:/../../secret.pkl"),
         ),
         (
             "x/ext.pkl",

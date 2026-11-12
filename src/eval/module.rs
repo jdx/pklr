@@ -335,13 +335,21 @@ impl Evaluator {
         referenced_imports.extend(inherited_references);
         let import_field_uses = import_field_uses(&analysis_entries);
 
-        let inherited_local_paths: Vec<_> = module
-            .amends
-            .iter()
-            .chain(module.extends.iter())
-            .filter(|uri| local_module_path(path, uri).is_some())
-            .map(|uri| self.local_file_path(path, uri))
-            .collect::<Result<_>>()?;
+        let mut inherited_local_paths: Vec<PathBuf> = Vec::new();
+        for uri in module.amends.iter().chain(module.extends.iter()) {
+            // A relative reference from a module path module is a `modulepath:`
+            // URI, which names nothing when no module path directory has it.
+            let resolved = self.resolve_relative(path, uri);
+            if let Some(uri) = resolved.as_deref().filter(|u| u.starts_with("modulepath:")) {
+                match self.local_file_path(path, uri) {
+                    Ok(found) => inherited_local_paths.push(found),
+                    Err(Error::ImportNotFound(_)) => {}
+                    Err(error) => return Err(error),
+                }
+            } else if local_module_path(path, uri).is_some() {
+                inherited_local_paths.push(self.local_file_path(path, uri)?);
+            }
+        }
         let deferred_inherited_imports = self.bind_imports(
             module,
             path,

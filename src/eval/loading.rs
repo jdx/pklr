@@ -406,7 +406,11 @@ impl Evaluator {
         // The file's URI is what its relative imports resolve against.
         if let Some(normalized) = normalize_module_path_uri(split_query(uri).0)? {
             let absolute = absolute_clean(&self.host_absolute_path(path.to_path_buf()));
-            self.module_path_admitted.insert(absolute, normalized);
+            // The first URI that loads a file names it, so one file is not
+            // renamed by a later import of it through another URI.
+            self.module_path_admitted
+                .entry(absolute)
+                .or_insert(normalized);
         }
         Ok(())
     }
@@ -441,17 +445,33 @@ impl Evaluator {
             .split('/')
             .collect();
         dir.pop();
-        if let Some(rest) = rel_path.strip_prefix(".../") {
-            let candidate = |depth: usize| {
-                let mut parts = dir[..depth].to_vec();
-                parts.push(rest);
-                format!("modulepath:/{}", parts.join("/"))
+        // An invalid triple-dot URI falls through to be reported as such.
+        if let Ok(Some(triple_dot)) = parse_triple_dot_path(rel) {
+            // Pkl matches the unnormalized candidates and finds nothing for a
+            // `..` that climbs, so such a path is refused here as an escape
+            // rather than normalized into the module path.
+            if triple_dot.split('/').any(|part| part == "..") {
+                return format!("modulepath:/../{triple_dot}");
+            }
+            let module = Path::new("/").join(base.strip_prefix("modulepath:/").unwrap_or_default());
+            let found =
+                resolve_triple_dot(&module, triple_dot, Some(Path::new("/")), |candidate| {
+                    let uri = format!(
+                        "modulepath:{}",
+                        candidate.to_string_lossy().replace('\\', "/")
+                    );
+                    Ok(self.module_path_file(&uri, false).is_ok())
+                });
+            // Nothing found names the root, as Pkl reports it.
+            let name = match found {
+                Ok(Some(path)) => path.to_string_lossy().replace('\\', "/"),
+                _ => format!("/{triple_dot}"),
             };
-            let found = (0..=dir.len()).rev().find(|&depth| {
-                let uri = candidate(depth);
-                self.module_path_file(&uri, false).is_ok()
-            });
-            return format!("{}{suffix}", candidate(found.unwrap_or(0)));
+            let joined = format!("modulepath:{name}");
+            return normalize_module_path_uri(&joined)
+                .ok()
+                .flatten()
+                .unwrap_or(joined);
         }
         let mut stack: Vec<&str> = if rel_path.starts_with('/') {
             Vec::new()
