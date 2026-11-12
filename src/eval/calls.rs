@@ -892,13 +892,15 @@ impl Evaluator {
         }
         match self.eval_expr(arg, scope, depth + 1)? {
             // Dynamic and Listing objects are held as lists.
-            Value::Object(..) | Value::Lambda(..) => Ok(Value::Null),
+            // A class is not an `Object`.
+            value @ Value::Object(..) if !is_class_value(&value) => Ok(Value::Null),
+            Value::Lambda(..) => Ok(Value::Null),
             Value::List(items) if matches!(items.kind(), ListKind::Dynamic | ListKind::Listing) => {
                 Ok(Value::Null)
             }
             other => Err(Error::Eval(format!(
                 "Expected value of type `Object | Function<Object>`, but got type `{}`.\nValue: {}",
-                value_type_name(&other),
+                pkl_class_name(&other),
                 render::display_value(&other)
             ))),
         }

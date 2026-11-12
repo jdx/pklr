@@ -225,3 +225,11 @@ fn an_unrelated_converter_keeps_an_undefined_member_failing() {
     );
     assert!(err.contains("`age`"), "{err}");
 }
+
+#[test]
+fn null_rejects_a_class_and_names_an_int_seq() {
+    let err = eval_fails("a = Null(Int)\n");
+    assert!(err.contains("Object | Function<Object>"), "{err}");
+    let err = eval_fails("a = Null(IntSeq(1, 3))\n");
+    assert!(err.contains("got type `IntSeq`"), "{err}");
+}
