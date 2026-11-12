@@ -2016,10 +2016,21 @@ pub(super) fn shadow_local_reads(entry: &Entry, shadowed: &[(Name, Value)]) -> E
         prop.value = Some(match value {
             // A method stays a lambda, so it is still bound and rebound as
             // one; the saved locals wrap its body.
-            Expr::Lambda(params, body) => Expr::Lambda(
-                params,
-                Arc::new(Expr::TemplateLocals(bindings, Box::new((*body).clone()))),
-            ),
+            Expr::Lambda(params, body) => {
+                // A parameter hides a saved local of the same name.
+                let kept: Vec<(Name, Value)> = bindings
+                    .0
+                    .iter()
+                    .filter(|(name, _)| !params.iter().any(|param| **param == **name))
+                    .cloned()
+                    .collect();
+                let body = if kept.is_empty() {
+                    (*body).clone()
+                } else {
+                    Expr::TemplateLocals(LocalBindings(Arc::new(kept)), Box::new((*body).clone()))
+                };
+                Expr::Lambda(params, Arc::new(body))
+            }
             value => Expr::TemplateLocals(bindings, Box::new(value)),
         });
     } else if let Some(body) = prop.body.take() {

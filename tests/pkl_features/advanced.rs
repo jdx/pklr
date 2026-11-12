@@ -3808,3 +3808,14 @@ fn nested_locals_hide_shadowed_ones_and_constraint_failures_are_reported() {
     assert_eq!(value["child"]["k"]["value"], 3);
     assert_eq!(value["r"], "Type constraint `this > 0` violated. Value: -1");
 }
+
+#[test]
+fn a_method_parameter_hides_a_saved_local_of_the_same_name() {
+    // `pkl eval` 0.32.2: 8
+    let value = eval(
+        "open class A { local l = 1; function f(l) = l + this.l }\n\
+         class B extends A { l: Int = 3 }\n\
+         r = new B {}.f(5)\n",
+    );
+    assert_eq!(value["r"], 8);
+}
