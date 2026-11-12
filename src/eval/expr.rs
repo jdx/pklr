@@ -627,12 +627,7 @@ impl Evaluator {
                     _ if self.stdlib_property(&obj, field).is_some() => {
                         self.stdlib_property(&obj, field).unwrap()
                     }
-                    Value::List(items) if items.kind() == ListKind::Dynamic => Err(Error::Eval(
-                        format!("Cannot find property `{field}` in object of type `Dynamic`."),
-                    )),
-                    Value::List(items) if let Some(result) = list_property(&obj, items, field) => {
-                        result
-                    }
+                    Value::List(items) => null_safe_list_member(&obj, items, field),
                     Value::Object(map, source) => {
                         if let Some(message) = poisoned_member_error(source.as_deref(), field) {
                             return Err(Error::Eval(message));
@@ -1318,6 +1313,22 @@ fn alias_over_class(name: &str, value: &Value, scope: &Scope) -> Option<Value> {
         .bound_by_alias(name)
         .then(|| type_alias_value(name, scope))
         .flatten()
+}
+
+/// `list?.name` on a non-null list, set or listing.
+#[inline(never)]
+fn null_safe_list_member(list: &Value, items: &ListValue, name: &str) -> Result<Value> {
+    if items.kind() == ListKind::Dynamic {
+        return Err(Error::Eval(format!(
+            "Cannot find property `{name}` in object of type `Dynamic`."
+        )));
+    }
+    list_property(list, items, name).unwrap_or_else(|| {
+        Err(Error::Eval(format!(
+            "cannot access field '{name}' on {}",
+            value_type_name(list)
+        )))
+    })
 }
 
 /// A built-in property of a list, set or listing, or `None` when `name` is not
