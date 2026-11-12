@@ -3122,3 +3122,10 @@ fn quoted_underscore_parameter_is_bound() {
     let v = eval("local f = (`_`) -> `_` + 1\nr = f.apply(1)\n");
     assert_eq!(v["r"], 2);
 }
+
+#[test]
+fn dynamic_amendment_key_errors_are_reported_once() {
+    let err =
+        eval_fails("hidden base = new Dynamic { 1; 2 }\nres = (base) { [\"a\" as Int] = 9 }\n");
+    assert!(err.contains("Int"), "{err}");
+}

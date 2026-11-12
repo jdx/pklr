@@ -986,12 +986,25 @@ impl Evaluator {
             let mut rest = Vec::new();
             let mut replaced = false;
             for entry in overlay_entries.iter() {
-                if let Entry::DynProperty(key, value) = entry
+                let mut index = None;
+                if let Entry::DynProperty(key, _) = entry
                     && !matches!(key, Expr::String(_))
-                    // A key that reads a sibling property is not known yet: leave it
-                    // to the object path, which binds them.
-                    && let Ok(Value::Int(index)) = self.eval_expr(key, &amend_scope, depth + 1)
-                    && let Some(index) = usize::try_from(index).ok().filter(|i| *i < items.len())
+                {
+                    match self.eval_expr(key, &amend_scope, depth + 1) {
+                        Ok(Value::Int(i)) => {
+                            index = usize::try_from(i).ok().filter(|i| *i < items.len());
+                        }
+                        Ok(_) => {}
+                        // A key that reads a sibling property is not known yet:
+                        // leave it to the object path, which binds them. Any
+                        // other failure is final, so it does not run twice.
+                        Err(Error::Eval(message))
+                            if message.starts_with("Cannot find property") => {}
+                        Err(err) => return Err(err),
+                    }
+                }
+                if let Entry::DynProperty(_, value) = entry
+                    && let Some(index) = index
                 {
                     let current = elements[index].clone();
                     let updated = match value {
