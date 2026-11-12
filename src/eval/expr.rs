@@ -137,7 +137,7 @@ impl Evaluator {
                         captured.insert(nm(format!("{TYPE_ALIAS_VALUE_PREFIX}{name}")), value);
                     }
                 }
-                if names.contains(NAMES_A_TYPE) {
+                if names.contains(NAMES_A_TYPE) || names.contains("module") {
                     scope.capture_identities(&mut captured);
                 }
                 let captured = Arc::new(captured);

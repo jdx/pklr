@@ -1339,6 +1339,11 @@ fn display_value_at(value: &Value, depth: usize, max: usize) -> String {
             })
             .map(|identity| {
                 match alias_split(identity, members).or_else(|| identity.rsplit_once('.')) {
+                    _ if crate::eval::stdlib::module_class_name(identity).is_some() => {
+                        crate::eval::stdlib::module_class_name(identity)
+                            .unwrap_or_default()
+                            .to_string()
+                    }
                     _ if identity.starts_with("pkl:") => identity
                         .rsplit_once('#')
                         .map_or(identity, |(_, name)| name)

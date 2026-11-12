@@ -32,6 +32,10 @@ pub(super) fn object_type_metadata(source: &ObjectSource) -> Option<ObjectTypeMe
 /// The binding that records which module each import a function captured is.
 pub(super) const CAPTURED_IDENTITIES: &str = "\0pklr:identities";
 
+/// The key under `CAPTURED_IDENTITIES` that records the module a function was
+/// defined in, which names the class of its `module`.
+const CAPTURED_NAMESPACE: &str = "\0pklr:namespace";
+
 #[derive(Debug, Clone)]
 pub(super) struct Scope {
     // The maps are shared copy-on-write so cloning a scope, which `child`
@@ -142,7 +146,11 @@ impl Scope {
         if let Some(Value::Object(identities, _)) = captured.get(CAPTURED_IDENTITIES) {
             for (name, identity) in identities.iter() {
                 if let Value::String(identity) = identity {
-                    scope.set_module_identity(name.clone(), identity.to_string());
+                    if &**name == CAPTURED_NAMESPACE {
+                        scope.type_namespace = Some(identity.to_string());
+                    } else {
+                        scope.set_module_identity(name.clone(), identity.to_string());
+                    }
                 }
             }
         }
@@ -166,6 +174,12 @@ impl Scope {
                 }
             }
             level = scope.parent.as_deref();
+        }
+        if let Some(namespace) = &self.type_namespace {
+            identities.insert(
+                CAPTURED_NAMESPACE.into(),
+                Value::String(namespace.as_str().into()),
+            );
         }
         if !identities.is_empty() {
             captured.insert(
