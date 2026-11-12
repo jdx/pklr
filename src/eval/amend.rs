@@ -344,25 +344,6 @@ impl Evaluator {
                 .get(entry_index)
                 .cloned()
                 .unwrap_or(None);
-            // `x = Null(default)` of the builtin, which the default of an
-            // amendment is evaluated for where the property was declared.
-            let null_default = match entry {
-                Entry::Property(prop)
-                    if overlay_by_name.contains_key(prop.name.as_ref())
-                        && let Some(default) = null_default_value(prop) =>
-                {
-                    let declaring = match &inherited_entry_scope {
-                        Some(captured) => restore_scope(captured),
-                        None => restore_scope(&capture_object_source_scope(base_source)),
-                    };
-                    if declaring.get("Null").is_none() {
-                        Some(self.eval_expr(default, &declaring, depth + 1)?)
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            };
             // A `local` member of the base is not overridden: the base's own
             // expressions keep reading it.
             if let Entry::Property(prop) = entry
@@ -374,7 +355,6 @@ impl Evaluator {
                     && overlay_prop.value.is_none()
                     && (prop.value.is_some() || prop.body.is_some() || prop.type_ann.is_some())
                     && !is_null_default(prop)
-                    && null_default.is_none()
                 {
                     // Body amendment: keep base entry (for its value) AND overlay
                     // entry (for body amendment). eval_property will see the base
@@ -398,20 +378,11 @@ impl Evaluator {
                     // which makes a `Dynamic` (that a declared type then
                     // checks). Without the `= null`, the property has the
                     // default of its type, which the body amends instead.
-                    if (is_null_default(prop) || null_default.is_some())
+                    if is_null_default(prop)
                         && overlay_prop.value.is_none()
                         && let Some(body) = overlay_prop.body.take()
                     {
-                        overlay_prop.value = Some(if null_default.is_some() {
-                            // `Null(default)` is amended as its default.
-                            Expr::Binop(
-                                BinOp::Add,
-                                Box::new(Expr::Ident(NULL_DEFAULT.into())),
-                                Box::new(Expr::ObjectBody(body)),
-                            )
-                        } else {
-                            Expr::New(Some("Dynamic".into()), body, vec![])
-                        });
+                        overlay_prop.value = Some(Expr::New(Some("Dynamic".into()), body, vec![]));
                     }
                     // `hidden` is declared on the class property. An overlay
                     // that assigns it (`new Step { staged = true }` or
@@ -423,14 +394,7 @@ impl Evaluator {
                     }
                 }
                 merged.push(replacement);
-                merged_entry_scopes.push(match null_default {
-                    Some(default) => {
-                        let mut captured = (*amendment_captured).clone();
-                        captured.values.insert(NULL_DEFAULT.into(), default);
-                        Some(Arc::new(captured))
-                    }
-                    None => amendment_entry_scope.clone(),
-                });
+                merged_entry_scopes.push(amendment_entry_scope.clone());
                 used_overlay.insert(prop.name.as_ref());
                 continue;
             }
@@ -1991,23 +1955,6 @@ pub(super) fn declared_listing_binding(name: &str) -> String {
 /// amendment amends as the `null` it is.
 fn is_null_default(prop: &Property) -> bool {
     matches!(prop.value, Some(Expr::Null))
-}
-
-/// The hidden name an amendment binds the evaluated `Null(default)` to.
-const NULL_DEFAULT: &str = "\0null_default";
-
-/// The default of a property declared `= Null(default)`: null, which a body
-/// amends as that default.
-fn null_default_value(prop: &Property) -> Option<&Expr> {
-    match &prop.value {
-        Some(Expr::Call(callee, args)) if matches!(&**callee, Expr::Ident(name) if name == "Null") => {
-            match args.as_slice() {
-                [default] => Some(default),
-                _ => None,
-            }
-        }
-        _ => None,
-    }
 }
 
 impl Evaluator {
