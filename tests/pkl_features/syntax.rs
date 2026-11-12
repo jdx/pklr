@@ -3046,3 +3046,25 @@ fn member_predicates_are_reported_as_unsupported() {
         assert!(err.contains("member predicates"), "{src}: {err}");
     }
 }
+
+#[test]
+fn dynamic_element_amendment_by_computed_index_sees_locals_and_super() {
+    // `pkl eval` gives {"a": [1, 9], "b": [1, 9], "c": [1, 1]}.
+    let v = eval(
+        "hidden base = new Dynamic { 1; 2 }\n\
+         a = (base) { local r = 9; [1] = r }\n\
+         b = (base) { [1 + 0] = 9 }\n\
+         c = (base) { [1] = super[0] }\n",
+    );
+    assert_eq!(v["a"], serde_json::json!([1, 9]));
+    assert_eq!(v["b"], serde_json::json!([1, 9]));
+    assert_eq!(v["c"], serde_json::json!([1, 1]));
+}
+
+#[test]
+fn dynamic_out_of_range_index_amendment_terminates() {
+    // pkl adds an entry (and then cannot render the mixed object); the
+    // evaluator must not loop on the unmatched index.
+    let v = eval("hidden base = new Dynamic { 1; 2 }\nres = (base) { [2] = 9 }\n");
+    assert_eq!(v["res"]["members"]["2"], 9);
+}

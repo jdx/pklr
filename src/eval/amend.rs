@@ -1,5 +1,6 @@
 //! Amending objects and values: layering an amendment body over its parent.
 
+use super::listing::bind_listing_member;
 use super::*;
 
 impl Evaluator {
@@ -970,33 +971,49 @@ impl Evaluator {
             && items.kind() == ListKind::Dynamic
             && overlay_entries
                 .iter()
-                .any(|entry| matches!(entry, Entry::DynProperty(Expr::Int(_), _)))
+                .any(|entry| matches!(entry, Entry::DynProperty(key, _) if !matches!(key, Expr::String(_))))
         {
-            let mut elements = items.clone();
-            let mut rest = Vec::new();
+            // The amendment's `local`s and `super` are visible to its entries.
+            let mut amend_scope = scope.child();
+            amend_scope.set("super", base.clone());
             for entry in overlay_entries.iter() {
-                match entry {
-                    Entry::DynProperty(Expr::Int(index), value)
-                        if usize::try_from(*index).is_ok_and(|i| i < elements.len()) =>
-                    {
-                        let index = *index as usize;
-                        let current = elements[index].clone();
-                        let updated = match value {
-                            Expr::ObjectBody(body) => {
-                                self.eval_value_amendment(current, body, scope, depth + 1)?
-                            }
-                            _ => self.eval_expr(value, scope, depth + 1)?,
-                        };
-                        elements.make_mut()[index] = updated;
-                    }
-                    _ => rest.push(entry.clone()),
+                if let Entry::Property(prop) = entry
+                    && let Some(expr) = &prop.value
+                {
+                    let value = self.eval_expr(expr, &amend_scope, depth + 1)?;
+                    bind_listing_member(&mut amend_scope, prop, value);
                 }
             }
-            let base = Value::List(elements);
-            if rest.is_empty() {
-                return Ok(base);
+            let mut elements = items.clone();
+            let mut rest = Vec::new();
+            let mut replaced = false;
+            for entry in overlay_entries.iter() {
+                if let Entry::DynProperty(key, value) = entry
+                    && !matches!(key, Expr::String(_))
+                    && let Value::Int(index) = self.eval_expr(key, &amend_scope, depth + 1)?
+                    && let Some(index) = usize::try_from(index).ok().filter(|i| *i < items.len())
+                {
+                    let current = elements[index].clone();
+                    let updated = match value {
+                        Expr::ObjectBody(body) => {
+                            self.eval_value_amendment(current, body, &amend_scope, depth + 1)?
+                        }
+                        _ => self.eval_expr(value, &amend_scope, depth + 1)?,
+                    };
+                    elements.make_mut()[index] = updated;
+                    replaced = true;
+                } else {
+                    rest.push(entry.clone());
+                }
             }
-            return self.eval_value_amendment(base, &Arc::new(rest), scope, depth);
+            if replaced {
+                let base = Value::List(elements);
+                if rest.is_empty() {
+                    return Ok(base);
+                }
+                // What is left names no element, so it cannot come back here.
+                return self.eval_value_amendment(base, &Arc::new(rest), scope, depth);
+            }
         }
         // Amending an abstract module's object instantiates it.
         if let Value::Object(_, Some(source)) = &base
