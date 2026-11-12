@@ -216,6 +216,17 @@ impl ClassInfo<'_> {
     }
 }
 
+/// What has to use a deferred member for its violation to count.
+#[derive(Clone, Copy)]
+enum Pending {
+    /// A call of the method.
+    Method,
+    /// A read of the property.
+    Property,
+    /// A read of the const local lambda that is also applied.
+    Lambda,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
     /// The module, a class or an object body: `this` and `outer` count them.
@@ -301,7 +312,7 @@ struct Walker<'m> {
     classes: HashMap<&'m str, ClassDecl<'m>>,
     infos: HashMap<&'m str, Option<Rc<ClassInfo<'m>>>>,
     /// Violations in method bodies, which count only if the method is called.
-    pending: Vec<(&'m str, bool, ConstViolation)>,
+    pending: Vec<(&'m str, Pending, ConstViolation)>,
     /// The base types of the constraints being walked, innermost last.
     constraint_bases: Vec<&'m str>,
 }
@@ -370,7 +381,13 @@ impl<'m> Walker<'m> {
         collect_calls_in_entries(body, &mut called);
         pending
             .into_iter()
-            .find(|(name, method, _)| called.contains(&(*name, *method)))
+            .find(|(name, kind, _)| match kind {
+                Pending::Method => called.contains(&(*name, true)),
+                Pending::Property => called.contains(&(*name, false)),
+                Pending::Lambda => {
+                    called.contains(&(*name, false)) && called.contains(&("apply", true))
+                }
+            })
             .map(|(_, _, violation)| violation)
     }
 
@@ -385,6 +402,10 @@ impl<'m> Walker<'m> {
     fn class_info(&mut self, name: &'m str) -> Option<Rc<ClassInfo<'m>>> {
         if let Some(info) = self.infos.get(name) {
             return info.clone();
+        }
+        if crate::stack::exhausted() {
+            crate::stack::limit_hit();
+            return None;
         }
         // A class that extends itself, even through others, has no usable info.
         self.infos.insert(name, None);
@@ -544,13 +565,22 @@ impl<'m> Walker<'m> {
             let deferred =
                 prop.is_method || (is_const && owner != 0 && has(&prop.modifiers, Modifier::Local));
             if deferred {
-                // The evaluator guards a const local lambda when it is applied.
-                if !prop.is_method && matches!(prop.value, Some(Expr::Lambda(..))) {
-                    return None;
+                let kind = match (prop.is_method, &prop.value) {
+                    (true, _) => Pending::Method,
+                    (false, Some(Expr::Lambda(..))) => Pending::Lambda,
+                    _ => Pending::Property,
+                };
+                // The evaluator guards a const local lambda's reads of its own
+                // object when it is applied, so only reads of what lies
+                // outside that object are checked here.
+                let inner = self.boundary;
+                if matches!(kind, Pending::Lambda) {
+                    self.boundary = Some(owner - 1);
                 }
                 let found = self.member_value(prop, owner);
+                self.boundary = inner;
                 if let Some(found) = found {
-                    self.pending.push((&prop.name, prop.is_method, found));
+                    self.pending.push((&prop.name, kind, found));
                 }
                 return None;
             }
@@ -662,6 +692,10 @@ impl<'m> Walker<'m> {
     }
 
     fn expr(&mut self, expr: &'m Expr) -> Option<ConstViolation> {
+        if crate::stack::exhausted() {
+            crate::stack::limit_hit();
+            return None;
+        }
         match expr {
             Expr::Ident(name) => self.ident(name),
             Expr::Field(base, name) | Expr::NullSafeField(base, name) => {
@@ -780,6 +814,7 @@ impl<'m> Walker<'m> {
 
     fn ident(&mut self, name: &str) -> Option<ConstViolation> {
         match name {
+            "this" | "outer" if self.shadowed(name) => None,
             "this" => {
                 let (this, _) = self.receivers();
                 if this.is_some_and(|this| self.outside(this)) {
@@ -836,7 +871,7 @@ impl<'m> Walker<'m> {
                 }
                 Kind::Constraint => {
                     let base = constraints.next().copied().unwrap_or_default();
-                    if !method && value_member(base, name) {
+                    if !method && !self.classes.contains_key(base) && value_member(base, name) {
                         return None;
                     }
                 }
@@ -952,6 +987,10 @@ fn collect_calls_in_type<'m>(ty: &'m TypeExpr, called: &mut HashSet<(&'m str, bo
 
 /// Collect the names an expression calls (`true`) or reads (`false`).
 fn collect_calls<'m>(expr: &'m Expr, called: &mut HashSet<(&'m str, bool)>) {
+    if crate::stack::exhausted() {
+        crate::stack::limit_hit();
+        return;
+    }
     match expr {
         Expr::Call(callee, args) => {
             match callee.as_ref() {

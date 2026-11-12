@@ -3039,6 +3039,14 @@ fn const_scopes_reject_non_const_members() {
     // Every program here is rejected by `pkl eval` with the quoted message.
     for (src, message) in [
         (
+            "x = 1\nobj { const local f = () -> x; result = f.apply() }\n",
+            "Cannot reference property `x` from here because it is not `const`.",
+        ),
+        (
+            "class Int { length = 1 }\nlength = 99\ntypealias T = Int(length == 1)\nr = new Int {} is T\n",
+            "Cannot reference property `length` from here because it is not `const`.",
+        ),
+        (
             "x = 1\nclass C { a: Int(this == outer.x) = 1 }\nr = new C {}\n",
             "Cannot reference property `x` from here because it is not `const`.",
         ),
@@ -3237,4 +3245,14 @@ fn quoted_underscore_parameter_is_bound() {
     // `pkl eval` gives {"r": 2}.
     let v = eval("local f = (`_`) -> `_` + 1\nr = f.apply(1)\n");
     assert_eq!(v["r"], 2);
+}
+
+#[test]
+fn const_scopes_accept_unapplied_lambdas_and_quoted_receivers() {
+    // `pkl eval` accepts both: the lambda is never applied, and the quoted
+    // names are ordinary bindings.
+    let json = eval("x = 1\nobj { const local f = () -> x; result = 1 }\n");
+    assert_eq!(json["obj"]["result"], 1);
+    let json = eval("class C { v = let (`outer` = 1) `outer` }\nr = new C {}\n");
+    assert_eq!(json["r"]["v"], 1);
 }
