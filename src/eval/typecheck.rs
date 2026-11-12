@@ -1095,6 +1095,7 @@ pub(super) fn with_constraint_receiver(constraint: &Expr, scope: &Scope) -> Opti
 
     fn unbound(name: &str, scope: &Scope, bound: &[String]) -> bool {
         !matches!(name, "this" | "module" | "outer" | "super")
+            && !STDLIB_TYPE_NAMES.contains(&name)
             && !bound.iter().any(|bound| bound == name)
             && scope.get(name).is_none()
             // Pkl resolves a type alias before an identically named member in

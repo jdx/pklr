@@ -615,6 +615,15 @@ impl Evaluator {
                                 members.set(name, value.clone());
                             }
                         }
+                        // A `local` member is read by the constraint too.
+                        for entry in source.entries.iter() {
+                            if let Entry::Property(local) = entry
+                                && has_modifier(&local.modifiers, Modifier::Local)
+                                && let Some(value) = object_scope.get(&*local.name)
+                            {
+                                members.set(&local.name, value.clone());
+                            }
+                        }
                     }
                     for (name, value) in map.iter() {
                         members.set_name(Arc::clone(name), value.clone());
