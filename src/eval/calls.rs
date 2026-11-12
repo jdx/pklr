@@ -85,8 +85,11 @@ impl Evaluator {
                 return Ok(obj);
             }
             if method == "getClass" && evaled_args.is_empty() {
-                if matches!(obj_expr.as_ref(), Expr::Ident(name) if name == "module") {
-                    return Err(stdlib::get_class_unsupported("a module"));
+                // The module's value names its class only here, where it is asked.
+                if let (Expr::Ident(name), Value::Object(props, None)) = (obj_expr.as_ref(), &obj)
+                    && name == "module"
+                {
+                    return stdlib::get_class(&self.module_with_class(props, scope));
                 }
                 return stdlib::get_class(&obj);
             }

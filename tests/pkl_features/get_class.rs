@@ -139,13 +139,40 @@ fn class_has_no_properties_but_simple_name() {
 }
 
 #[test]
-fn get_class_on_map_and_module_is_a_clear_error() {
-    // pklr cannot tell a `Map` or a computed `Dynamic` from each other, nor
-    // a module from a `Dynamic`; it refuses instead of answering wrongly.
-    for src in ["a = Map(1, 2).getClass()", "a = module.getClass()"] {
-        let error = eval_fails(src);
-        assert!(error.contains("getClass() is not supported on"), "{error}");
-    }
+fn get_class_on_a_map_is_a_clear_error() {
+    // pklr cannot tell a `Map` or a computed `Dynamic` from each other; it
+    // refuses instead of answering wrongly.
+    let error = eval_fails("a = Map(1, 2).getClass()");
+    assert!(error.contains("getClass() is not supported on"), "{error}");
+}
+
+#[test]
+fn get_class_on_a_module_is_its_module_class() {
+    // Pkl: every module class has the simple name `ModuleClass` and prints as
+    // the module's name.
+    let result = eval(
+        r#"
+module Foo
+
+class P {}
+
+simple = module.getClass().simpleName
+text = module.getClass().toString()
+interpolated = "\(module.getClass())"
+same = module.getClass() == module.getClass()
+isDynamic = module.getClass() == Dynamic
+isClass = module.getClass() is Class
+isUserClass = module.getClass() == new P {}.getClass()
+"#,
+    );
+    assert_eq!(
+        result,
+        serde_json::json!({
+            "simple": "ModuleClass", "text": "Foo", "interpolated": "Foo",
+            "same": true, "isDynamic": false,
+            "isClass": true, "isUserClass": false
+        })
+    );
 }
 
 #[test]

@@ -250,6 +250,14 @@ fn object_class_name(source: &Option<std::sync::Arc<ObjectSource>>) -> &str {
 /// `module#Class` otherwise, naming the module by its file. (pkl names a
 /// module with a `module` declaration by that name instead.)
 fn class_display_name(source: &ObjectSource) -> String {
+    // A module's class shows as the module's name.
+    if let Some(name) = source
+        .type_identity
+        .as_deref()
+        .and_then(super::module_class_name)
+    {
+        return name.to_string();
+    }
     let name = source.type_name().unwrap_or("Class");
     let namespace = source
         .type_identity
