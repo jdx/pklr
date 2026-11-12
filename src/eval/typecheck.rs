@@ -571,6 +571,35 @@ impl Evaluator {
         self.eval_type_check_in(val, ty, scope, depth, &mut Vec::new())
     }
 
+    /// The error for `val` failing `ty`. Like a declared property, a
+    /// `List<T>` or `Set<T>` argument is faulted on its first element that is
+    /// not a `T`, not on the collection.
+    pub(super) fn mismatch_naming_element(
+        &mut self,
+        ty: &crate::parser::TypeExpr,
+        val: &Value,
+        scope: &Scope,
+        depth: usize,
+    ) -> String {
+        if let (crate::parser::TypeExpr::Generic(name, args), Value::List(items)) = (ty, val)
+            && let [element] = args.as_slice()
+            && matches!(
+                (name.as_str(), items.kind()),
+                ("List", ListKind::List) | ("Set", ListKind::Set)
+            )
+        {
+            for item in items.iter() {
+                self.type_violation = None;
+                if let Ok(false) =
+                    self.eval_argument_check(item, element, scope, depth, &mut Vec::new())
+                {
+                    return self.mismatch_naming_element(element, item, scope, depth);
+                }
+            }
+        }
+        self.type_mismatch_message(ty, val, None)
+    }
+
     /// The error for `val` failing the check against `ty`: the constraint the
     /// check found violated, or else the type the value does not have.
     pub(super) fn type_mismatch_message(
