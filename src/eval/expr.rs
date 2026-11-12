@@ -794,7 +794,9 @@ impl Evaluator {
                 if self.eval_argument_check(&val, ty, scope, depth, &mut Vec::new())? {
                     Ok(val)
                 } else {
-                    Err(Error::Eval(self.type_mismatch_message(ty, &val, None)))
+                    Err(Error::Eval(
+                        self.mismatch_naming_element(ty, &val, scope, depth),
+                    ))
                 }
             }
             Expr::TemplateLocals(locals, inner) => {

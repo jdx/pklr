@@ -4854,7 +4854,7 @@ fn const_local_lambda_guard_is_not_exposed_through_outer() {
     let json = eval(
         r#"
 foo {
-  const local f = () -> new {
+  const local f = () -> new Dynamic {
     copied = outer
   }
   result = f.apply()
@@ -7944,4 +7944,45 @@ miss = m.getOrDefault("z")
 "#,
     );
     assert_eq!(json["miss"], 2);
+}
+
+#[test]
+fn local_member_does_not_override_a_non_local_inherited_member() {
+    let json = eval(
+        r#"
+open class Foo5 {
+  function f() = "original"
+  x = f()
+}
+class Foo6 extends Foo5 {
+  local function f() = "override"
+}
+res1 = new Foo6 {}.x
+foo5 { l = "original"; x = l }
+res2 = (foo5) { local l = "override" }.x
+"#,
+    );
+    assert_eq!(json["res1"], "original");
+    assert_eq!(json["res2"], "original");
+    assert_eq!(json["foo5"]["l"], "original");
+}
+
+#[test]
+fn function_argument_type_error_names_the_bad_list_element() {
+    let json = eval(
+        r#"
+import "pkl:test"
+local function f(x: List<String>): Int = x.length
+res = test.catch(() -> f(List("foo", 42)))
+"#,
+    );
+    assert_eq!(
+        json["res"],
+        "Expected value of type `String`, but got type `Int`. Value: 42"
+    );
+}
+
+#[test]
+fn function_literal_body_cannot_infer_an_untyped_new() {
+    assert!(eval_fails("foo = () -> new {}").contains("Cannot tell which parent to amend"));
 }
