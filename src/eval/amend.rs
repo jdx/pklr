@@ -623,12 +623,7 @@ impl Evaluator {
                 if type_is_runtime_checkable(type_ann, check_scope)
                     && !self.eval_type_check(value, type_ann, check_scope, depth + 1)?
                 {
-                    let message = format!(
-                        "property '{}' expected {}, got {}",
-                        prop.name,
-                        display_type_expr(type_ann),
-                        value_type_display(value)
-                    );
+                    let message = self.type_mismatch_message(type_ann, value, Some(&prop.name));
                     if overlay_assigned_properties.contains(prop.name.as_ref()) {
                         return Err(Error::Eval(message));
                     }

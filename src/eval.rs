@@ -102,6 +102,9 @@ pub struct Evaluator {
     max_depth_set: bool,
     /// Cache for fetched HTTP sources (URL → source text)
     http_cache: HashMap<String, String>,
+    /// The constraint (its source text) and the value that failed the last
+    /// type check, for the error that reports it.
+    type_violation: Option<(String, Value)>,
     /// Cache for evaluated local imports (canonical path → Value)
     import_cache: HashMap<PathBuf, Value>,
     /// Local imports whose `import_cache` entry is still the placeholder that

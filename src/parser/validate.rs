@@ -197,6 +197,7 @@ impl ConstChecker<'_> {
             | Expr::Throw(base)
             | Expr::TemplateLocals(_, base)
             | Expr::Trace(base, _)
+            | Expr::Constraint(base, _)
             | Expr::Read(base, _)
             | Expr::ReadOrNull(base, _)
             | Expr::ReadGlob(base, _) => self.nested_const_expr(base, shadow),
@@ -318,6 +319,7 @@ impl ConstChecker<'_> {
             | Expr::Throw(value)
             | Expr::TemplateLocals(_, value)
             | Expr::Trace(value, _)
+            | Expr::Constraint(value, _)
             | Expr::Read(value, _)
             | Expr::ReadOrNull(value, _)
             | Expr::ReadGlob(value, _) => self.expr(value, shadow),
