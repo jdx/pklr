@@ -1980,9 +1980,12 @@ pub(super) fn shadow_local_reads(entry: &Entry, shadowed: &[(Name, Value)]) -> E
             Box::new(value),
         ));
     } else if let Some(body) = prop.body.take() {
-        prop.value = Some(Expr::TemplateLocals(
-            LocalBindings(Arc::new(seen)),
-            Box::new(Expr::ObjectBody(body)),
+        // Keep the body a body, so it still amends the declared type's
+        // default and any inherited member; shadow the reads inside it.
+        prop.body = Some(Arc::new(
+            body.iter()
+                .map(|entry| shadow_local_reads(entry, &seen))
+                .collect(),
         ));
     }
     Entry::Property(Arc::new(prop))
