@@ -170,6 +170,24 @@ impl Evaluator {
                     members.insert("second".into(), self.eval_expr(second, scope, depth + 1)?);
                     return Ok(stdlib::typed_object("Pair", members));
                 }
+                // `Null(default)` is a null value that carries a default object or
+                // function for amending; pklr keeps only the null.
+                "Null" if args.len() == 1 => {
+                    // A `new` default is not built: it may name the class being
+                    // instantiated, whose property this is.
+                    if matches!(&args[0], Expr::New(..)) {
+                        return Ok(Value::Null);
+                    }
+                    let value = self.eval_expr(&args[0], scope, depth + 1)?;
+                    return match value {
+                        Value::Object(..) | Value::Lambda(..) => Ok(Value::Null),
+                        other => Err(Error::Eval(format!(
+                            "Expected value of type `Object | Function<Object>`, but got type `{}`.\nValue: {}",
+                            value_type_name(&other),
+                            render::display_value(&other)
+                        ))),
+                    };
+                }
                 "Regex" => {
                     if let Some(arg) = args.first() {
                         let val = self.eval_expr(arg, scope, depth + 1)?;
