@@ -192,3 +192,15 @@ fn the_reported_uri_reads_the_same_file() {
     assert_eq!(value["c"], "spaced\n");
     assert_eq!(value["d"], "percent\n");
 }
+
+#[test]
+fn a_query_or_fragment_is_not_part_of_the_file_name() {
+    let temp = project(
+        "mp_res_query",
+        "a = read(\"modulepath:/sub/a.txt#sec\")\nb = read(\"modulepath:/sub/a.txt?q=1\").uri\n",
+    );
+    let value = eval(&temp, true, None).unwrap();
+    assert_eq!(value["a"]["uri"], "modulepath:/sub/a.txt#sec");
+    assert_eq!(value["a"]["text"], "hi\n");
+    assert_eq!(value["b"], "modulepath:/sub/a.txt?q=1");
+}

@@ -38,7 +38,8 @@ impl Evaluator {
         let Some(normalized) = normalize_module_path_uri(uri)? else {
             return Ok(None);
         };
-        match self.module_path_file(uri) {
+        // The file is named by the path alone, not a query or fragment.
+        match self.module_path_file(split_query(uri).0) {
             Ok(path) => Ok(Some((path, normalized))),
             Err(Error::ImportNotFound(_)) => Ok(None),
             Err(error) => Err(error),
@@ -47,11 +48,12 @@ impl Evaluator {
 }
 
 /// The `modulepath:` URI `uri` with dot segments and empty segments removed
-/// and the path percent-encoded, which is the spelling Pkl matches against the
+/// and the path percent-encoded, and any query or fragment kept as written, which is the spelling Pkl matches against the
 /// allowlist and reports as a resource's `uri`. `None` when the path climbs out
 /// of the module path or names nothing.
 pub(super) fn normalize_module_path_uri(uri: &str) -> Result<Option<String>> {
-    let segments = match module_path_segments(uri) {
+    let (path, query) = split_query(uri);
+    let segments = match module_path_segments(path) {
         Ok(segments) => segments,
         Err(Error::ImportNotFound(_)) => return Ok(None),
         Err(error) => return Err(error),
@@ -67,7 +69,13 @@ pub(super) fn normalize_module_path_uri(uri: &str) -> Result<Option<String>> {
             }
         }
     }
+    out.push_str(query);
     Ok(Some(out))
+}
+
+/// Split a URI into its path and its `?query`/`#fragment` suffix.
+fn split_query(uri: &str) -> (&str, &str) {
+    uri.split_at(uri.find(['?', '#']).unwrap_or(uri.len()))
 }
 
 /// The normalized path segments of a `modulepath:/path` URI.
