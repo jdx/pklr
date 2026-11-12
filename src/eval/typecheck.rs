@@ -898,7 +898,9 @@ impl Evaluator {
                                 // class defaults of the value's members, cannot
                                 // disprove the constraint.
                                 Err(Error::Eval(message))
-                                    if message.starts_with("Cannot find property `") =>
+                                    if message.starts_with("Cannot find property `")
+                                        && matches!(val, Value::Object(_, Some(source))
+                                            if source.kind != ObjectKind::Dynamic) =>
                                 {
                                     continue;
                                 }
@@ -935,6 +937,8 @@ impl Evaluator {
                     if !type_is_runtime_checkable(v, scope) {
                         has_uncheckable_variant = true;
                     } else if self.eval_type_check_in(val, v, scope, depth, resolving)? {
+                        // A branch that failed before this one is not the reason.
+                        self.type_violation = None;
                         return Ok(true);
                     }
                 }
@@ -1435,24 +1439,28 @@ fn stdlib_qualified_member<'a>(scope: &Scope, name: &'a str) -> Option<&'a str> 
 /// with its source text when the parser recorded it. A `&&` inside one
 /// constraint stays inside it.
 fn split_constraints(expr: &Expr) -> Vec<(&Expr, Option<&str>)> {
-    let mut parts = Vec::new();
-    let mut rest = expr;
-    while let Expr::Binop(BinOp::And, left, right) = rest {
-        if !matches!(**right, Expr::Constraint(..)) {
-            break;
+    // A chain is what the parser and alias expansion build: constraints joined
+    // with `&&`, each wrapped in `Expr::Constraint`.
+    fn is_chain(expr: &Expr) -> bool {
+        match expr {
+            Expr::Constraint(..) => true,
+            Expr::Binop(BinOp::And, left, right) => is_chain(left) && is_chain(right),
+            _ => false,
         }
-        parts.push(&**right);
-        rest = left;
     }
-    parts.push(rest);
-    parts.reverse();
+    fn collect<'a>(expr: &'a Expr, parts: &mut Vec<(&'a Expr, Option<&'a str>)>) {
+        match expr {
+            Expr::Constraint(inner, text) => parts.push((inner, Some(text.as_str()))),
+            Expr::Binop(BinOp::And, left, right) if is_chain(expr) => {
+                collect(left, parts);
+                collect(right, parts);
+            }
+            other => parts.push((other, None)),
+        }
+    }
+    let mut parts = Vec::new();
+    collect(expr, &mut parts);
     parts
-        .into_iter()
-        .map(|part| match part {
-            Expr::Constraint(inner, text) => (&**inner, Some(text.as_str())),
-            other => (other, None),
-        })
-        .collect()
 }
 
 /// How an error shows the value that violated the constraint `text`. pkl

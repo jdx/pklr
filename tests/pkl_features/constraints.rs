@@ -77,3 +77,46 @@ fn map_entries_are_pairs_with_key_and_value() {
     let json = eval(r#"m = Map("a", 1, "b", 2).entries.map((p) -> p.key + p.value.toString())"#);
     assert_eq!(json["m"], serde_json::json!(["a1", "b2"]));
 }
+
+#[test]
+fn map_entries_keep_compound_keys() {
+    let json = eval(r#"k = Map(List(1, 2), "x").entries.first.key.length"#);
+    assert_eq!(json["k"], 2);
+}
+
+#[test]
+fn a_union_branch_that_passes_hides_an_earlier_violation() {
+    let json = eval(
+        r#"
+import "pkl:test"
+class X { xs: List<Int(this > 0)|Int> }
+a = test.catch(() -> new X { xs = List(-1, "x") }.xs)
+"#,
+    );
+    let message = json["a"].as_str().unwrap();
+    assert!(
+        !message.contains("this > 0` violated. Value: -1"),
+        "{message}"
+    );
+}
+
+#[test]
+fn every_constraint_of_an_alias_use_is_checked_on_its_own() {
+    let json = eval(
+        r#"
+import "pkl:test"
+typealias Positive = Int(this > 0)
+class X { n: Positive(this < 10, this != 5) }
+a = test.catch(() -> new X { n = 5 }.n)
+b = test.catch(() -> new X { n = -1 }.n)
+"#,
+    );
+    assert_eq!(json["a"], "Type constraint `this != 5` violated. Value: 5");
+    assert_eq!(json["b"], "Type constraint `this > 0` violated. Value: -1");
+}
+
+#[test]
+fn a_predicate_reading_a_missing_property_of_a_dynamic_fails() {
+    let error = eval_fails("x = new Dynamic {} is Dynamic((v) -> v.required)\n");
+    assert!(error.contains("required"), "{error}");
+}

@@ -566,7 +566,9 @@ impl Evaluator {
                                     let mut members = ObjectMap::default();
                                     members.insert(
                                         "first".into(),
-                                        crate::value::mapping_storage_value(key),
+                                        self.mapping_key_values.get(key).cloned().unwrap_or_else(
+                                            || crate::value::mapping_storage_value(key),
+                                        ),
                                     );
                                     members.insert("second".into(), value.clone());
                                     stdlib::typed_object("Pair", members)
