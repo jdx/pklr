@@ -327,15 +327,13 @@ impl Evaluator {
         // An entry `["key"] = value` of the overlay replaces the base's entry
         // of that key in place, as a property does, so that the base's other
         // entries read the new value (`this["key"]`).
-        let mut overlay_entry_values: FxIndexMap<&str, &Entry> = FxIndexMap::default();
+        let mut overlay_entry_values: FxIndexMap<String, &Entry> = FxIndexMap::default();
         for entry in overlay_entries {
-            if let Entry::DynProperty(Expr::String(key), value) = entry
-                && !matches!(value, Expr::ObjectBody(_))
-            {
+            if let Some(key) = literal_entry_key(entry) {
                 overlay_entry_values.insert(key, entry);
             }
         }
-        let mut replaced_entries: HashSet<&str> = HashSet::default();
+        let mut replaced_entries: HashSet<String> = HashSet::default();
         // The base's `local` members that an overlay member of the same name
         // must not capture.
         let shadowed: Vec<(Name, Value)> = base_entries
@@ -410,9 +408,8 @@ impl Evaluator {
                 used_overlay.insert(prop.name.as_ref());
                 continue;
             }
-            if let Entry::DynProperty(Expr::String(key), value) = entry
-                && !matches!(value, Expr::ObjectBody(_))
-                && let Some(replacement) = overlay_entry_values.get(&**key)
+            if let Some(key) = literal_entry_key(entry)
+                && let Some(replacement) = overlay_entry_values.get(&key)
                 && replaced_entries.insert(key)
             {
                 merged.push((*replacement).clone());
@@ -430,10 +427,10 @@ impl Evaluator {
             {
                 continue; // already placed in-order above
             }
-            if let Entry::DynProperty(Expr::String(key), _) = entry
-                && replaced_entries.contains(&**key)
+            if let Some(key) = literal_entry_key(entry)
+                && replaced_entries.contains(&key)
                 && overlay_entry_values
-                    .get(&**key)
+                    .get(&key)
                     .is_some_and(|value| std::ptr::eq(*value, entry))
             {
                 continue;
@@ -2225,4 +2222,21 @@ fn without_declared(shadowed: &[(Name, Value)], body: &[Entry]) -> Vec<(Name, Va
         })
         .cloned()
         .collect()
+}
+
+/// The identity of an entry `[key] = value` whose key is a string or integer
+/// literal and whose value is not a body amendment, for matching an overlay
+/// entry to the base entry it replaces.
+fn literal_entry_key(entry: &Entry) -> Option<String> {
+    let Entry::DynProperty(key, value) = entry else {
+        return None;
+    };
+    if matches!(value, Expr::ObjectBody(_)) {
+        return None;
+    }
+    match key {
+        Expr::String(s) => Some(format!("s:{s}")),
+        Expr::Int(n) => Some(format!("i:{n}")),
+        _ => None,
+    }
 }

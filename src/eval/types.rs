@@ -855,7 +855,11 @@ pub(super) fn empty_mapping_or_listing(class: &str) -> Option<Value> {
             Arc::default(),
             Some(Arc::new(mapping_source())),
         )),
-        "Dynamic" => Some(Value::Object(Arc::default(), None)),
+        "Dynamic" => {
+            let mut source = mapping_source();
+            source.kind = ObjectKind::Dynamic;
+            Some(Value::Object(Arc::default(), Some(Arc::new(source))))
+        }
         _ => None,
     }
 }

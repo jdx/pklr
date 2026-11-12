@@ -1235,6 +1235,12 @@ impl Evaluator {
                     if let Value::Object(m, Some(source)) = &val
                         && source.kind != ObjectKind::Mapping
                         && !m.is_empty()
+                        // A `Dynamic` may hold only entries, which spread.
+                        && (source.kind != ObjectKind::Dynamic
+                            || source.entries.iter().any(|entry| {
+                                matches!(entry, Entry::Property(prop)
+                                    if !has_modifier(&prop.modifiers, Modifier::Local))
+                            }))
                     {
                         return Err(Error::Eval(
                             "Cannot spread object containing properties into object of type \

@@ -8069,3 +8069,19 @@ fn a_generated_member_may_not_repeat_a_declared_property() {
     assert_eq!(val["x"], serde_json::json!({ "y": 1 }));
     assert_eq!(val["z"], serde_json::json!({ "y": 1 }));
 }
+
+#[test]
+fn an_amended_mapping_replaces_numeric_entries_and_dynamic_entries_spread() {
+    let v = eval(
+        "a = new Mapping { [1] = 1; [2] = this[1] + 1 }\n\
+         b = (a) { [1] = 10 }\n\
+         r = b[2]\n\
+         local d = new Dynamic { [\"a\"] = 1; [2] = 3 }\n\
+         m = new Mapping { ...d }\n\
+         n = m[2]\n\
+         c = ((Dynamic) { a = 1 }) is Mapping",
+    );
+    assert_eq!(v["r"], 11);
+    assert_eq!(v["n"], 3);
+    assert_eq!(v["c"], false);
+}
