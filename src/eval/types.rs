@@ -2107,7 +2107,12 @@ impl TypeResolver<'_> {
                     })
                     .is_some()
                 }));
-        if names_class {
+        // A class reached through a property is not named by an import.
+        let qualified_by_value = !enclosing
+            && scope.module_identity(module).is_none()
+            && !module.contains('.')
+            && resolve_dotted(scope, module).is_some();
+        if names_class && !qualified_by_value {
             return None;
         }
         if enclosing {
@@ -2137,6 +2142,13 @@ impl TypeResolver<'_> {
                 && matches!(resolve_dotted(scope, module), Some(Value::Object(_, None)))
             {
                 return Some(format!("Expected `{module}` to be a type, but it is not."));
+            }
+            // A property, class or local is no module import to qualify a type by.
+            if scope.module_identity(module).is_none()
+                && !module.contains('.')
+                && resolve_dotted(scope, module).is_some()
+            {
+                return Some(format!("Cannot find module import `{module}`."));
             }
             return Some(format!("Cannot find type `{member}` in module `{module}`."));
         };

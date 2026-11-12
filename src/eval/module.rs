@@ -713,7 +713,19 @@ impl Evaluator {
                 && !synthesized_inherited_types.contains(prop.name.as_ref())
                 && let Some(ty) = &prop.type_ann
                 && let Some(message) = self.unresolved_type(ty, &scope)
-                && message.ends_with("to be a type, but it is not.")
+                && (message.ends_with("to be a type, but it is not.")
+                    // Only a prefix that resolves to a value that is no module: an
+                    // import still being loaded (a cycle) is not bound yet.
+                    || message
+                        .strip_prefix("Cannot find module import `")
+                        .and_then(|rest| rest.strip_suffix("`."))
+                        .is_some_and(|prefix| {
+                            resolve_dotted(&scope, prefix).is_some()
+                                // A property declared without a value names no import.
+                                || body.iter().any(|e| {
+                                    matches!(e, Entry::Property(p) if !p.is_method && &*p.name == prefix)
+                                })
+                        }))
             {
                 return Err(Error::Eval(message));
             }

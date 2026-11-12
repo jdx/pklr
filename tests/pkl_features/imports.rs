@@ -4416,3 +4416,22 @@ fn inherited_annotation_is_not_checked_in_the_child_scope() {
     let v = pklr::eval_to_json(&temp.path().join("main.pkl")).unwrap();
     assert_eq!(v, serde_json::json!({}));
 }
+
+#[test]
+fn qualified_type_prefix_must_be_a_module_import() {
+    // `pkl eval` rejects each of these with ``Cannot find module import `x`.``
+    // (or, for a local, "Expected `x` to be a module import"), whether or not
+    // the property has a value.
+    for src in [
+        "foo = 1\nbar: foo.T\n",
+        "foo = new Dynamic {}\nbar: foo.T\n",
+        "local foo = 1\nbar: foo.T\n",
+        "class C {}\nbar: C.T\n",
+        "foo = 1\nbar: foo.T = 1\n",
+        "hidden foo: Int\nbar: foo.T?\n",
+        "class C {}\nhidden foo = new Dynamic { T = C }\nbar: foo.T?\n",
+    ] {
+        let err = eval_fails(src);
+        assert!(err.contains("module import"), "{src}: {err}");
+    }
+}
