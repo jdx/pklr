@@ -137,7 +137,7 @@ impl Evaluator {
                         captured.insert(nm(format!("{TYPE_ALIAS_VALUE_PREFIX}{name}")), value);
                     }
                 }
-                if names.contains(NAMES_A_TYPE) {
+                if names.contains(NAMES_A_TYPE) || names.contains("module") {
                     scope.capture_identities(&mut captured);
                 }
                 let captured = Arc::new(captured);
@@ -523,18 +523,11 @@ impl Evaluator {
                     }
                     (Value::List(items), "length") => return Ok(Value::Int(items.len() as i64)),
                     (Value::List(items), "isEmpty") => return Ok(Value::Bool(items.is_empty())),
-                    (Value::List(items), "first") => {
-                        return items
-                            .first()
-                            .cloned()
-                            .ok_or_else(|| Error::Eval("empty list".into()));
-                    }
-                    (Value::List(items), "last") => {
-                        return items
-                            .last()
-                            .cloned()
-                            .ok_or_else(|| Error::Eval("empty list".into()));
-                    }
+                    (
+                        Value::List(items),
+                        field_name @ ("first" | "last" | "single" | "rest" | "firstOrNull"
+                        | "lastOrNull" | "singleOrNull" | "restOrNull" | "lastIndex"),
+                    ) => return list_element_member(&obj, items, field_name),
                     (Value::String(s), "length") => {
                         return Ok(Value::Int(s.chars().count() as i64));
                     }
@@ -795,7 +788,7 @@ impl Evaluator {
                     Ok(val)
                 } else {
                     Err(Error::Eval(
-                        self.type_mismatch_message(ty, &val, None, scope),
+                        self.mismatch_naming_element(ty, &val, scope, depth),
                     ))
                 }
             }
@@ -1220,7 +1213,7 @@ pub(super) fn int_seq(start: i64, end: i64, step: i64) -> Result<Value> {
                 .map(|i| Value::Int((start_w + i * step_w) as i64))
                 .collect::<Vec<_>>(),
         )
-        .into_int_seq(),
+        .into_int_seq(start, end, step),
     ))
 }
 
@@ -1321,4 +1314,44 @@ fn alias_over_class(name: &str, value: &Value, scope: &Scope) -> Option<Value> {
         .bound_by_alias(name)
         .then(|| type_alias_value(name, scope))
         .flatten()
+}
+
+/// The member `name` of `list`, a list or set (`items` are its elements).
+#[inline(never)]
+fn list_element_member(list: &Value, items: &ListValue, name: &str) -> Result<Value> {
+    let rest = || Value::List(ListValue::new(items.kind(), items[1..].to_vec()));
+    let found = match name {
+        "first" => items.first().cloned(),
+        "last" => items.last().cloned(),
+        "single" => (items.len() == 1).then(|| items[0].clone()),
+        "rest" => (!items.is_empty()).then(rest),
+        "firstOrNull" => return Ok(items.first().cloned().unwrap_or(Value::Null)),
+        "lastOrNull" => return Ok(items.last().cloned().unwrap_or(Value::Null)),
+        "singleOrNull" => {
+            return Ok(if items.len() == 1 {
+                items[0].clone()
+            } else {
+                Value::Null
+            });
+        }
+        "restOrNull" => {
+            return Ok(if items.is_empty() {
+                Value::Null
+            } else {
+                rest()
+            });
+        }
+        _ => return Ok(Value::Int(items.len() as i64 - 1)),
+    };
+    found.ok_or_else(|| {
+        let expected = if name == "single" {
+            "a single-element"
+        } else {
+            "a non-empty"
+        };
+        Error::Eval(format!(
+            "Expected {expected} collection.\nCollection: {}",
+            crate::eval::render::display_value(list)
+        ))
+    })
 }

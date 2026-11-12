@@ -294,8 +294,26 @@ impl Evaluator {
         });
         let amendment_entry_scope = Some(Arc::clone(&amendment_captured));
         let mut overlay_by_name: FxIndexMap<&str, &Entry> = FxIndexMap::default();
+        // A `local` overlay member does not override the base's member of that
+        // name. When nothing in the overlay reads it, it has no effect at all.
+        let overlay_reads: HashSet<Name> = overlay_entries
+            .iter()
+            .flat_map(|entry| referenced_roots(std::slice::from_ref(entry)))
+            .collect();
+        let overrides_nothing = |prop: &Property| {
+            has_modifier(&prop.modifiers, Modifier::Local)
+                && !overlay_reads.contains(&prop.name)
+                && base_entries.iter().any(|base| {
+                    matches!(base, Entry::Property(inherited)
+                        if inherited.name == prop.name
+                            && !has_modifier(&inherited.modifiers, Modifier::Local))
+                })
+        };
         for entry in overlay_entries {
             if let Entry::Property(prop) = entry {
+                if overrides_nothing(prop) {
+                    continue;
+                }
                 if let Some(message) = base_entries
                     .iter()
                     .filter_map(|base| match base {
@@ -331,6 +349,13 @@ impl Evaluator {
             .filter_map(|entry| match entry {
                 Entry::Property(prop) => match overlay_by_name.get(prop.name.as_ref()) {
                     Some(Entry::Property(_)) if has_modifier(&prop.modifiers, Modifier::Local) => {
+                        Some((prop.name.clone(), base_scope.get(&prop.name)?.clone()))
+                    }
+                    // The base keeps reading its own member where a `local`
+                    // overlay member takes the name over.
+                    Some(Entry::Property(overlay_prop))
+                        if has_modifier(&overlay_prop.modifiers, Modifier::Local) =>
+                    {
                         Some((prop.name.clone(), base_scope.get(&prop.name)?.clone()))
                     }
                     _ => None,
@@ -405,9 +430,9 @@ impl Evaluator {
         // Append overlay entries that are genuinely new (not replacing a base entry)
         for entry in overlay_entries {
             if let Entry::Property(prop) = entry
-                && used_overlay.contains(prop.name.as_ref())
+                && (used_overlay.contains(prop.name.as_ref()) || overrides_nothing(prop))
             {
-                continue; // already placed in-order above
+                continue; // already placed in-order above, or overrides nothing
             }
             merged.push(entry.clone());
             merged_entry_scopes.push(amendment_entry_scope.clone());
@@ -613,6 +638,15 @@ impl Evaluator {
                         for name in &source.evaluated_properties {
                             if let Some(value) = object_scope.get(&**name) {
                                 members.set(name, value.clone());
+                            }
+                        }
+                        // A `local` member is read by the constraint too.
+                        for entry in source.entries.iter() {
+                            if let Entry::Property(local) = entry
+                                && has_modifier(&local.modifiers, Modifier::Local)
+                                && let Some(value) = object_scope.get(&*local.name)
+                            {
+                                members.set(&local.name, value.clone());
                             }
                         }
                     }

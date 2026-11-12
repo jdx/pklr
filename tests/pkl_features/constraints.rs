@@ -192,3 +192,43 @@ fn stdlib_alias_ignores_user_names() {
     let err = eval_fails("class Char {}\na: Char = 1\n");
     assert!(err.contains("type `Char`"), "{err}");
 }
+
+// Expectations compared with `pkl eval` 0.32.2.
+#[test]
+fn constraint_reads_local_member_of_inherited_class() {
+    let json = eval(
+        r#"
+import "pkl:test"
+open class Base {
+  x: Int = 1
+  yy: Int(isValid1) = 2
+  local isValid1 = (n) -> n > x
+}
+class D extends Base
+r = (new D {}) { yy = 3; x = 2 }
+r2 = test.catch(() -> (r) { yy = 0 }.yy)
+s: String(List(1).map((it) -> getClass()).single == String) = "abc"
+"#,
+    );
+    assert_eq!(json["r"]["yy"], 3);
+    assert_eq!(json["r2"], "Type constraint `isValid1` violated. Value: 0");
+    assert_eq!(json["s"], "abc");
+}
+
+#[test]
+fn list_single_rest_and_or_null_members() {
+    let json = eval(
+        "l = List(1, 2, 3)\na = l.firstOrNull\nb = l.lastOrNull\nc = l.rest\nd = l.singleOrNull\ne = List(5).single\nf = l.lastIndex\n",
+    );
+    assert_eq!(json["a"], 1);
+    assert_eq!(json["b"], 3);
+    assert_eq!(json["c"], serde_json::json!([2, 3]));
+    assert!(json["d"].is_null());
+    assert_eq!(json["e"], 5);
+    assert_eq!(json["f"], 2);
+    let error = eval_fails("a = List(1, 2).single\n");
+    assert!(
+        error.contains("Expected a single-element collection."),
+        "{error}"
+    );
+}

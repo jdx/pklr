@@ -461,7 +461,13 @@ impl<'a> Parser<'a> {
                 "Function literals can have at most five parameters.",
             ));
         }
+        let body_start = self.prev_end;
         let body = self.parse_expr()?;
+        // A function literal's body has no expected type to infer a parent
+        // from, and pkl rejects the module as soon as it loads, used or not.
+        if matches!(body, Expr::New(None, ..)) {
+            return Err(self.error_at(body_start, "Cannot tell which parent to amend."));
+        }
         let body = check_signature(&typed_params, None, body);
         Ok((
             Expr::Lambda(params.into(), std::sync::Arc::new(body)),
