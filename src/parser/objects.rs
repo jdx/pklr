@@ -313,20 +313,9 @@ pub(super) struct ObjectBody {
     pub(super) entries: Vec<Entry>,
 }
 
-/// Give each ignored `_` parameter a name of its own, so the call that forwards
-/// the arguments to the amended function can still read them.
-pub(super) fn name_ignored_params(params: &mut [String]) {
-    for (i, param) in params.iter_mut().enumerate() {
-        if param == "_" {
-            *param = format!("\0pklr:ignored{i}");
-        }
-    }
-}
-
 /// Amend `parent` with an object body. A body with parameters amends a
 /// function: `f { x -> ... }` is `(x) -> f.apply(x) { ... }`.
-pub(super) fn amend_expr(parent: Expr, mut body: ObjectBody) -> Expr {
-    name_ignored_params(&mut body.params);
+pub(super) fn amend_expr(parent: Expr, body: ObjectBody) -> Expr {
     let entries = Expr::ObjectBody(body.entries.into());
     if body.params.is_empty() {
         return Expr::Binop(BinOp::Add, Box::new(parent), Box::new(entries));

@@ -242,7 +242,7 @@ impl Evaluator {
                 return Err(Error::Eval(message.to_string()));
             }
             for (param, arg) in params.iter().zip(evaled_args) {
-                call_scope.declare_param(param, arg);
+                call_scope.declare(param, arg);
             }
             return self.eval_expr(&body, &call_scope, depth + 1);
         }
@@ -325,7 +325,7 @@ impl Evaluator {
             call_scope.set("this", obj.clone());
             for (i, param) in params.iter().enumerate() {
                 if let Some(arg) = evaled_args.get(i) {
-                    call_scope.declare_param(param, arg.clone());
+                    call_scope.declare(param, arg.clone());
                 }
             }
             return Ok(Some(self.eval_expr(body, &call_scope, depth + 1)?));
@@ -633,7 +633,7 @@ impl Evaluator {
                 }
                 let mut call_scope = Scope::for_call(captured);
                 for (param, arg) in params.iter().zip(args.iter()) {
-                    call_scope.declare_param(param, arg.clone());
+                    call_scope.declare(param, arg.clone());
                 }
                 Ok(Some(self.eval_expr(body, &call_scope, depth + 1)?))
             }
@@ -676,7 +676,7 @@ impl Evaluator {
             }
         }
         for (param, arg) in params.iter().zip(args) {
-            call_scope.declare_param(param, arg.clone());
+            call_scope.declare(param, arg.clone());
         }
         self.eval_expr(body, &call_scope, depth + 1)
     }
@@ -730,7 +730,7 @@ impl Evaluator {
             }
             let mut scope = Scope::for_call(captured);
             for (param, arg) in params.iter().zip(args.iter()) {
-                scope.declare_param(param, arg.clone());
+                scope.declare(param, arg.clone());
             }
             self.eval_expr(body, &scope, depth + 1)
         } else {

@@ -3071,3 +3071,10 @@ fn quoted_underscore_local_is_still_bound() {
     let v = eval("local `_` = 1\nresult = `_`\n");
     assert_eq!(v["result"], 1);
 }
+
+#[test]
+fn quoted_underscore_parameter_is_bound() {
+    // `pkl eval` gives {"r": 2}.
+    let v = eval("local f = (`_`) -> `_` + 1\nr = f.apply(1)\n");
+    assert_eq!(v["r"], 2);
+}

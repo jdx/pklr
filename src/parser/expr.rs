@@ -224,9 +224,8 @@ impl<'a> Parser<'a> {
             TokenKind::KwNew => {
                 self.advance();
                 let (type_name, generic_params) = self.parse_new_type()?;
-                let mut body = self.parse_object_body(false)?;
+                let body = self.parse_object_body(false)?;
                 if !body.params.is_empty() {
-                    super::objects::name_ignored_params(&mut body.params);
                     // `new Mixin { x -> ... }` is the function `(x) -> x { ... }`
                     let arg = Expr::Ident(body.params[0].clone());
                     let lambda_body = Expr::Binop(

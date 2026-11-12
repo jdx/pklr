@@ -253,14 +253,6 @@ impl Scope {
         self.declare_name(name_of(name.as_ref()), val);
     }
 
-    /// Bind a function or lambda parameter. `_` ignores its argument and
-    /// names nothing.
-    pub(super) fn declare_param(&mut self, name: impl AsRef<str>, val: Value) {
-        if name.as_ref() != "_" {
-            self.declare(name, val);
-        }
-    }
-
     pub(super) fn declare_name(&mut self, name: Name, val: Value) {
         if !self.declared.contains(&*name) {
             Arc::make_mut(&mut self.declared).insert(name.clone());
