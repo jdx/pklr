@@ -207,3 +207,31 @@ fn a_result_too_deep_to_free_on_a_small_stack_is_an_error() {
         "{err}"
     );
 }
+
+#[test]
+fn reusing_an_evaluator_after_a_deep_result_frees_it_on_a_large_stack() {
+    let depth = if cfg!(debug_assertions) {
+        3_000
+    } else {
+        19_000
+    };
+    let dir = std::env::temp_dir().join(format!("pklr-nesting-reuse-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let deep = dir.join("deep.pkl");
+    let small = dir.join("small.pkl");
+    std::fs::write(&deep, nested_lists(depth)).unwrap();
+    std::fs::write(&small, "x = 1").unwrap();
+    std::thread::Builder::new()
+        .stack_size(2 << 20)
+        .spawn(move || {
+            let mut evaluator = Evaluator::new();
+            drop(evaluator.eval_file(&deep));
+            // Starting the next evaluation clears what the first one held.
+            let value = evaluator.eval_file(&small);
+            assert!(value.is_ok());
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

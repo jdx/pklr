@@ -284,6 +284,7 @@ impl Evaluator {
         // capture map that is still reachable through one. Dead capture maps
         // are otherwise only held here weakly; drop their registry entries at
         // each evaluation boundary.
+        self.release_deep_state();
         self.prune_lambda_guards();
         self.env_reads.clear();
         self.import_cache.clear();
@@ -376,14 +377,15 @@ impl Evaluator {
     }
 }
 
-impl Drop for Evaluator {
-    /// Frees the values and trees of a deep module on a large stack. They
-    /// free recursively, and an evaluator is dropped on the caller's stack,
-    /// which may be small.
-    fn drop(&mut self) {
+impl Evaluator {
+    /// Frees the values and trees a deep module left behind on a large stack.
+    /// They free recursively, and this runs on the caller's stack, which may
+    /// be small.
+    fn release_deep_state(&mut self) {
         if !self.grew || crate::stack::on_large_stack() {
             return;
         }
+        self.grew = false;
         let held = (
             std::mem::take(&mut self.import_cache),
             std::mem::take(&mut self.narrowed_import_cache),
@@ -401,5 +403,11 @@ impl Drop for Evaluator {
             std::mem::take(&mut self.mapping_key_values),
         );
         crate::stack::drop_on_large_stack(held);
+    }
+}
+
+impl Drop for Evaluator {
+    fn drop(&mut self) {
+        self.release_deep_state();
     }
 }
