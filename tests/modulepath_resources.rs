@@ -204,3 +204,11 @@ fn a_query_or_fragment_is_not_part_of_the_file_name() {
     assert_eq!(value["a"]["text"], "hi\n");
     assert_eq!(value["b"], "modulepath:/sub/a.txt?q=1");
 }
+
+#[test]
+fn a_directory_does_not_hide_a_later_file() {
+    let temp = project("mp_res_dir", "a = read(\"modulepath:/sub.txt\").text\n");
+    // `mp1/sub.txt` is a directory; the file is in `mp2`.
+    std::fs::create_dir(temp.0.join("mp1/sub.txt")).unwrap();
+    assert_eq!(eval(&temp, true, None).unwrap(), json!({"a": "z\n"}));
+}
