@@ -523,9 +523,11 @@ impl Evaluator {
                     }
                     (Value::List(items), "length") => return Ok(Value::Int(items.len() as i64)),
                     (Value::List(items), "isEmpty") => return Ok(Value::Bool(items.is_empty())),
-                    (Value::List(items), field_name) if is_list_element_member(field_name) => {
-                        return list_element_member(&obj, items, field_name);
-                    }
+                    (
+                        Value::List(items),
+                        field_name @ ("first" | "last" | "single" | "rest" | "firstOrNull"
+                        | "lastOrNull" | "singleOrNull" | "restOrNull" | "lastIndex"),
+                    ) => return list_element_member(&obj, items, field_name),
                     (Value::String(s), "length") => {
                         return Ok(Value::Int(s.chars().count() as i64));
                     }
@@ -623,21 +625,6 @@ impl Evaluator {
                         if field == "simpleName" && class_simple_name(&obj).is_some() =>
                     {
                         Ok(class_simple_name(&obj).unwrap())
-                    }
-                    Value::List(items)
-                        if items.kind() != ListKind::Dynamic && field == "length" =>
-                    {
-                        Ok(Value::Int(items.len() as i64))
-                    }
-                    Value::List(items)
-                        if items.kind() != ListKind::Dynamic && field == "isEmpty" =>
-                    {
-                        Ok(Value::Bool(items.is_empty()))
-                    }
-                    Value::List(items)
-                        if items.kind() != ListKind::Dynamic && is_list_element_member(field) =>
-                    {
-                        list_element_member(&obj, items, field)
                     }
                     _ if self.stdlib_property(&obj, field).is_some() => {
                         self.stdlib_property(&obj, field).unwrap()
@@ -1325,23 +1312,6 @@ fn alias_over_class(name: &str, value: &Value, scope: &Scope) -> Option<Value> {
         .bound_by_alias(name)
         .then(|| type_alias_value(name, scope))
         .flatten()
-}
-
-/// Whether `name` is a member of a list that reads its first, last or only
-/// element, or the elements after the first.
-fn is_list_element_member(name: &str) -> bool {
-    matches!(
-        name,
-        "first"
-            | "last"
-            | "single"
-            | "rest"
-            | "firstOrNull"
-            | "lastOrNull"
-            | "singleOrNull"
-            | "restOrNull"
-            | "lastIndex"
-    )
 }
 
 /// The member `name` of `list`, a list or set (`items` are its elements).

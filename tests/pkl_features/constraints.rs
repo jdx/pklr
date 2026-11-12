@@ -166,19 +166,3 @@ fn list_single_rest_and_or_null_members() {
         "{error}"
     );
 }
-
-#[test]
-fn null_safe_list_element_members() {
-    assert_eq!(
-        eval(
-            "a = List(5)?.single\nb = List(1, 2)?.firstOrNull\nc = List(1, 2)?.lastIndex\nd = List(1, 2)?.length\n"
-        ),
-        serde_json::json!({"a": 5, "b": 1, "c": 1, "d": 2})
-    );
-}
-
-#[test]
-fn null_safe_members_stay_off_element_only_dynamic() {
-    let err = eval_fails("a = new Dynamic { 1; 2 }?.length\n");
-    assert!(err.contains("length"), "{err}");
-}
