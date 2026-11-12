@@ -719,7 +719,13 @@ impl Evaluator {
                     || message
                         .strip_prefix("Cannot find module import `")
                         .and_then(|rest| rest.strip_suffix("`."))
-                        .is_some_and(|prefix| resolve_dotted(&scope, prefix).is_some()))
+                        .is_some_and(|prefix| {
+                            resolve_dotted(&scope, prefix).is_some()
+                                // A property declared without a value names no import.
+                                || body.iter().any(|e| {
+                                    matches!(e, Entry::Property(p) if !p.is_method && &*p.name == prefix)
+                                })
+                        }))
             {
                 return Err(Error::Eval(message));
             }
