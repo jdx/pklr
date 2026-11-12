@@ -2223,7 +2223,8 @@ fn amending_module_inherited_mapping_preserves_compound_keys_and_union_selection
     let compound = temp.path().join("Compound.pkl");
     std::fs::write(
         &compound,
-        "amends \"CompoundBase.pkl\"\ntyped { [List(1)] = 1 }\n",
+        // The output is replaced: pkl cannot render a List key as JSON.
+        "amends \"CompoundBase.pkl\"\ntyped { [List(1)] = 1 }\noutput { value = 1 }\n",
     )
     .unwrap();
     assert!(

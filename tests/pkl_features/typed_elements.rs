@@ -1642,3 +1642,48 @@ fn selected_untyped_new_mapping_values_amend_the_default() {
         serde_json::json!({"k": [[9], [1]], "j": [[9], [2]], "m": [[9], [3]]})
     );
 }
+
+// Expectations below were compared with `pkl eval` 0.32.2.
+
+#[test]
+fn new_listing_checks_elements_against_its_type_argument() {
+    eval_fails("res = new Listing<String> { 1 }");
+    eval_fails("one = 1\nres = new Listing<String> { one }");
+    eval_fails(
+        "res: Listing<String(!isEmpty)> = new Listing<String(endsWith(\"ga\"))> { \"hola\" }",
+    );
+    assert_eq!(
+        eval("res = new Listing<String(endsWith(\"a\"))> { \"hola\" }")["res"],
+        serde_json::json!(["hola"])
+    );
+}
+
+#[test]
+fn new_mapping_checks_keys_and_values_against_its_type_arguments() {
+    eval_fails("res = new Mapping<String, String> { [\"foo\"] = 1 }");
+    eval_fails(
+        "res = new Mapping<Listing<String(length == 5)>, String> { [new Listing { \"hi\" }] = \"hi\" }",
+    );
+    assert_eq!(
+        eval("res = new Mapping<String, Int> { [\"foo\"] = 1 }")["res"],
+        serde_json::json!({"foo": 1})
+    );
+}
+
+#[test]
+fn object_and_list_mapping_keys_do_not_render_as_json_strings() {
+    let temp = TestTempDir::new("pklr_object_mapping_keys_render");
+    for (name, src) in [
+        (
+            "person.pkl",
+            "class Person { name: String = \"\" }\nres { [new Person {}] = 1 }\n",
+        ),
+        ("dynamic.pkl", "res { [new Dynamic { a = 1 }] = 1 }\n"),
+        ("list.pkl", "res { [List(1)] = 1 }\n"),
+    ] {
+        let path = temp.path().join(name);
+        std::fs::write(&path, src).unwrap();
+        let error = pklr::eval_to_json(&path).unwrap_err().to_string();
+        assert!(error.contains("non-string key"), "{name}: {error}");
+    }
+}
