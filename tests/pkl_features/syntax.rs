@@ -3068,3 +3068,12 @@ fn dynamic_out_of_range_index_amendment_terminates() {
     let v = eval("hidden base = new Dynamic { 1; 2 }\nres = (base) { [2] = 9 }\n");
     assert_eq!(v["res"]["members"]["2"], 9);
 }
+
+#[test]
+fn dynamic_amendment_properties_read_the_amended_object() {
+    let v = eval(
+        "hidden base = new Dynamic { 1; 2 }\n\
+         res = (base) { name = \"inner\"; copy = this.name; [\"key\" + \"\"] = 9 }\n",
+    );
+    assert_eq!(v["res"]["members"]["copy"], "inner");
+}

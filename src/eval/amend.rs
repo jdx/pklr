@@ -977,7 +977,10 @@ impl Evaluator {
             let mut amend_scope = scope.child();
             amend_scope.set("super", base.clone());
             for entry in overlay_entries.iter() {
+                // Only `local`s: other properties are evaluated with the
+                // amended object as `this` further on.
                 if let Entry::Property(prop) = entry
+                    && has_modifier(&prop.modifiers, Modifier::Local)
                     && let Some(expr) = &prop.value
                 {
                     let value = self.eval_expr(expr, &amend_scope, depth + 1)?;
