@@ -993,7 +993,9 @@ impl Evaluator {
             for entry in overlay_entries.iter() {
                 if let Entry::DynProperty(key, value) = entry
                     && !matches!(key, Expr::String(_))
-                    && let Value::Int(index) = self.eval_expr(key, &amend_scope, depth + 1)?
+                    // A key that reads a sibling property is not known yet: leave it
+                    // to the object path, which binds them.
+                    && let Ok(Value::Int(index)) = self.eval_expr(key, &amend_scope, depth + 1)
                     && let Some(index) = usize::try_from(index).ok().filter(|i| *i < items.len())
                 {
                     let current = elements[index].clone();
