@@ -770,7 +770,24 @@ impl Evaluator {
                     } else {
                         match const_message {
                             Some(message) => Err(Error::Eval(message)),
-                            None => self.eval_expr(expr, &active_scope, cx.depth),
+                            None => {
+                                self.eval_expr(expr, &active_scope, cx.depth)
+                                    .and_then(|value| {
+                                        // A declared type is checked when the local
+                                        // is read, so a mismatch poisons it.
+                                        if let Some(ty) = &prop.type_ann
+                                            && !is_lambda
+                                        {
+                                            self.check_local_value(
+                                                &value,
+                                                ty,
+                                                &active_scope,
+                                                cx.depth,
+                                            )?;
+                                        }
+                                        Ok(value)
+                                    })
+                            }
                         }
                     };
                     // Release the entry scope before binding, as for properties.

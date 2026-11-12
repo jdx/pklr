@@ -756,17 +756,8 @@ impl Evaluator {
             }
             Expr::Checked(expr, ty) => {
                 let val = self.eval_expr(expr, scope, depth + 1)?;
-                if !type_is_runtime_checkable(ty, scope)
-                    || self.eval_argument_check(&val, ty, scope, depth, &mut Vec::new())?
-                {
-                    Ok(val)
-                } else {
-                    Err(Error::Eval(format!(
-                        "Expected value of type `{}`, but got type `{}`.",
-                        display_type_expr(ty),
-                        pkl_class_name(&val)
-                    )))
-                }
+                self.check_declared_value(&val, ty, scope, depth)?;
+                Ok(val)
             }
             Expr::TemplateLocals(locals, inner) => {
                 let mut template_scope = scope.child();
