@@ -793,7 +793,7 @@ impl Evaluator {
             }
             Expr::ImportGlob(pattern, module_path) => {
                 let module_path = Path::new(module_path);
-                let resolved = resolve_remote_relative(module_path, pattern);
+                let resolved = self.resolve_relative(module_path, pattern);
                 let pattern: &str = resolved.as_deref().unwrap_or(pattern);
                 self.eval_glob_import(pattern, module_path, depth, None)
             }

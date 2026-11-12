@@ -379,3 +379,169 @@ fn modulepath_only_policy_refuses_the_file_root() {
         "{err}"
     );
 }
+
+/// A module path whose modules import each other by relative path.
+fn relative_project(name: &str, root: &str) -> (TestTempDir, std::path::PathBuf) {
+    let temp = TestTempDir::new(name);
+    let dir = std::fs::canonicalize(temp.path()).unwrap();
+    let files = [
+        (
+            "mp/x/a.pkl",
+            "import \"b.pkl\"\nimport \"../y/c.pkl\"\nimport \"/y/c.pkl\" as abs\nr = b.v + c.v + abs.v\n",
+        ),
+        ("mp/x/b.pkl", "open module b\nv = 1\n"),
+        ("mp/y/c.pkl", "v = 2\n"),
+        (
+            "mp/x/sub/d.pkl",
+            "import \"../b.pkl\"\nimport \"../../y/c.pkl\"\nr = b.v + c.v\n",
+        ),
+        (
+            "mp/x/esc.pkl",
+            "import \"../../../outside.pkl\"\nr = outside.v\n",
+        ),
+        (
+            "mp/x/trip.pkl",
+            "import \".../outside.pkl\"\nr = outside.v\n",
+        ),
+        ("mp/x/ext.pkl", "extends \"b.pkl\"\nw = 5\n"),
+        ("mp/x/amd.pkl", "amends \"b.pkl\"\n"),
+        ("mp/x/expr.pkl", "r = import(\"b.pkl\").v\n"),
+        (
+            "mp/x/glob.pkl",
+            "import* \"*.pkl\" as all\nr = all.keys.toList()\n",
+        ),
+        ("mp/outside.pkl", "v = 7\n"),
+        ("root.pkl", root),
+    ];
+    for (file, source) in files {
+        let path = dir.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, source).unwrap();
+    }
+    (temp, dir)
+}
+
+/// Evaluate a root that imports `modulepath:/<module>`, allowing the root file
+/// and the given patterns.
+fn eval_relative(name: &str, module: &str, patterns: &[&str]) -> Result<serde_json::Value, String> {
+    let root = format!("import \"modulepath:/{module}\" as m\nr = m\n");
+    let (_temp, dir) = relative_project(name, &root);
+    let mut allowed = vec![pat(&dir.join("root.pkl"))];
+    allowed.extend(patterns.iter().map(|p| p.to_string()));
+    EvaluatorBuilder::new()
+        .module_path([dir.join("mp")])
+        .allowed_modules(allowed)
+        .eval_to_json(&dir.join("root.pkl"))
+        .map_err(|e| e.to_string())
+}
+
+/// Pkl keeps a relative import made from a module path module a `modulepath:`
+/// URI, so the allowlist matches that URI and never a `file:` one.
+#[test]
+fn relative_imports_from_module_path_modules_are_matched_as_modulepath_uris() {
+    let refused = |uri: &str| format!("Refusing to load module `{uri}` because it does not match");
+    let a = "^modulepath:/x/a\\.pkl$";
+    let b = "^modulepath:/x/b\\.pkl$";
+    let c = "^modulepath:/y/c\\.pkl$";
+    type Expected<'a> = Result<(&'a str, serde_json::Value), &'a str>;
+    let cases: [(&str, &[&str], Expected); 14] = [
+        ("x/a.pkl", &[a, b, c], Ok(("/r/r", 5.into()))),
+        (
+            "x/a.pkl",
+            &["^modulepath:/x/", "^modulepath:/y/"],
+            Ok(("/r/r", 5.into())),
+        ),
+        ("x/a.pkl", &[a, c], Err("modulepath:/x/b.pkl")),
+        ("x/a.pkl", &[a, b], Err("modulepath:/y/c.pkl")),
+        // `..` and a leading `/` are matched in their normalized spelling.
+        (
+            "x/sub/d.pkl",
+            &["^modulepath:/x/sub/d\\.pkl$", b, c],
+            Ok(("/r/r", 3.into())),
+        ),
+        (
+            "x/sub/d.pkl",
+            &[
+                "^modulepath:/x/sub/d\\.pkl$",
+                "^modulepath:/x/sub/\\.\\./b\\.pkl$",
+                c,
+            ],
+            Err("modulepath:/x/b.pkl"),
+        ),
+        // A `..` out of the module path root is matched as written and names nothing.
+        (
+            "x/esc.pkl",
+            &["^modulepath:/x/esc\\.pkl$", "^modulepath:/outside\\.pkl$"],
+            Err("modulepath:/../../outside.pkl"),
+        ),
+        (
+            "x/esc.pkl",
+            &["^modulepath:/x/esc\\.pkl$", "^modulepath:"],
+            Err("Import not found: modulepath:/../../outside.pkl"),
+        ),
+        // A triple-dot import names the ancestor directory that holds the file.
+        (
+            "x/trip.pkl",
+            &["^modulepath:/x/trip\\.pkl$", "^modulepath:/outside\\.pkl$"],
+            Ok(("/r/r", 7.into())),
+        ),
+        (
+            "x/trip.pkl",
+            &["^modulepath:/x/trip\\.pkl$"],
+            Err("modulepath:/outside.pkl"),
+        ),
+        (
+            "x/ext.pkl",
+            &["^modulepath:/x/ext\\.pkl$", b],
+            Ok(("/r/w", 5.into())),
+        ),
+        (
+            "x/ext.pkl",
+            &["^modulepath:/x/ext\\.pkl$"],
+            Err("modulepath:/x/b.pkl"),
+        ),
+        (
+            "x/amd.pkl",
+            &["^modulepath:/x/amd\\.pkl$", b],
+            Ok(("/r/v", 1.into())),
+        ),
+        (
+            "x/expr.pkl",
+            &["^modulepath:/x/expr\\.pkl$"],
+            Err("modulepath:/x/b.pkl"),
+        ),
+    ];
+    for (n, (module, patterns, expected)) in cases.into_iter().enumerate() {
+        let result = eval_relative(&format!("pklr_modules_rel_{n}"), module, patterns);
+        match expected {
+            Ok((pointer, value)) => {
+                let json = result.unwrap_or_else(|e| panic!("{module} {patterns:?}: {e}"));
+                assert_eq!(
+                    json.pointer(pointer),
+                    Some(&value),
+                    "{module} {patterns:?}: {json}"
+                );
+            }
+            Err(message) => {
+                let err = result.unwrap_err();
+                let wanted = if message.starts_with("Import") {
+                    message.to_string()
+                } else {
+                    refused(message)
+                };
+                assert!(err.contains(&wanted), "{module} {patterns:?}: {err}");
+            }
+        }
+    }
+}
+
+/// A glob import cannot expand a `modulepath:` URI, which Pkl refuses even
+/// when the allowlist admits it.
+#[test]
+fn glob_imports_from_module_path_modules_are_not_globbable() {
+    let err = eval_relative("pklr_modules_rel_glob", "x/glob.pkl", &["^modulepath:"]).unwrap_err();
+    assert!(
+        err.contains("Cannot expand glob pattern `modulepath:/x/*.pkl` because scheme `modulepath` is not globbable"),
+        "{err}"
+    );
+}

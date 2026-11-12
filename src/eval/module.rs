@@ -1538,7 +1538,7 @@ impl Evaluator {
         } = base;
         if let Some(amends_uri) = &module.amends {
             // A relative amends inside a remote module resolves against that URL.
-            let resolved_amends = resolve_remote_relative(path, amends_uri);
+            let resolved_amends = self.resolve_relative(path, amends_uri);
             let uri: &str = resolved_amends.as_deref().unwrap_or(amends_uri);
             if uri.starts_with("https://") || uri.starts_with("http://") {
                 // HTTP amends
@@ -1668,7 +1668,7 @@ impl Evaluator {
         // Also remove inherited class definitions from base_obj so they don't
         // appear in the amending module's data output.
         if let Some(amends_uri) = &module.amends {
-            let resolved_amends = resolve_remote_relative(path, amends_uri);
+            let resolved_amends = self.resolve_relative(path, amends_uri);
             let uri: &str = resolved_amends.as_deref().unwrap_or(amends_uri);
             if let Some((base_module, source_path)) = self.load_parsed_module(uri, path)? {
                 let mut base_scope = scope.clone();
@@ -1740,7 +1740,7 @@ impl Evaluator {
         // Process extends: load base module, inherit all members and scope
         if let Some(extends_uri) = &module.extends {
             // A relative extends inside a remote module resolves against that URL.
-            let resolved_extends = resolve_remote_relative(path, extends_uri);
+            let resolved_extends = self.resolve_relative(path, extends_uri);
             let uri: &str = resolved_extends.as_deref().unwrap_or(extends_uri);
             if uri == "pkl:test" {
                 inherit_stdlib_module("test", base_obj, scope);
@@ -1929,7 +1929,7 @@ impl Evaluator {
         // Process imports
         for import in &module.imports {
             // A relative import inside a remote module resolves against that URL.
-            let resolved_uri = resolve_remote_relative(path, &import.uri);
+            let resolved_uri = self.resolve_relative(path, &import.uri);
             let uri: &str = resolved_uri.as_deref().unwrap_or(&import.uri);
 
             // Handle glob imports: import* "dir/*.pkl" as Alias
