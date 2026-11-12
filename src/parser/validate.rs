@@ -167,7 +167,7 @@ impl ConstChecker<'_> {
                 .iter()
                 .find_map(|variant| self.type_expr(variant, shadow)),
             TypeExpr::Generic(_, args) => args.iter().find_map(|arg| self.type_expr(arg, shadow)),
-            TypeExpr::Constrained(_, constraint, _) => self.expr(constraint, shadow),
+            TypeExpr::Constrained(_, constraint, _, _) => self.expr(constraint, shadow),
         }
     }
 

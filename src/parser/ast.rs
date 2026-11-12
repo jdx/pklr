@@ -115,8 +115,9 @@ pub enum TypeExpr {
     /// Constrained type: `Type(predicate)` e.g. `Int(this >= 0)`.
     /// Multiple source constraints are represented by a conjunctive expression.
     /// The third field says how to read the text of the type before the
-    /// constraint (see [`BaseForm`]).
-    Constrained(String, Box<Expr>, BaseForm),
+    /// constraint (see [`BaseForm`]). The last field holds the source text of
+    /// each constraint, in order, for the error of one that is violated.
+    Constrained(String, Box<Expr>, BaseForm, Vec<String>),
 }
 
 /// How the text of the base of a constrained type is read.
@@ -139,7 +140,7 @@ impl TypeExpr {
             TypeExpr::Generic(name, _) => name == "Listing",
             // A constrained listing, `Listing<T>(length > 0)`, stores its
             // base type as a name.
-            TypeExpr::Constrained(base, _, _) => {
+            TypeExpr::Constrained(base, _, _, _) => {
                 let base = base.trim_start_matches('*').trim_end_matches('?');
                 base == "Listing" || base.starts_with("Listing<")
             }
@@ -161,7 +162,7 @@ pub(super) fn type_expr_runtime_name(ty: &TypeExpr) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        TypeExpr::Constrained(name, _, _) => name.clone(),
+        TypeExpr::Constrained(name, _, _, _) => name.clone(),
     }
 }
 
@@ -172,7 +173,7 @@ pub(super) fn infers_new(ty: &TypeExpr) -> bool {
     match ty {
         TypeExpr::Generic(name, _) => matches!(name.as_str(), "Mapping" | "Listing"),
         TypeExpr::Nullable(inner) => infers_new(inner),
-        TypeExpr::Constrained(base, _, _) => {
+        TypeExpr::Constrained(base, _, _, _) => {
             let base = base.trim_end_matches('?');
             matches!(base.split('<').next(), Some("Mapping" | "Listing"))
         }
@@ -459,8 +460,8 @@ pub(crate) fn erase_type_parameters(ty: TypeExpr, parameters: &[String]) -> Type
                 .map(|arg| erase_type_parameters(arg, parameters))
                 .collect(),
         ),
-        TypeExpr::Constrained(base, constraint, quoted) => {
-            TypeExpr::Constrained(erase_word(&base, parameters), constraint, quoted)
+        TypeExpr::Constrained(base, constraint, quoted, texts) => {
+            TypeExpr::Constrained(erase_word(&base, parameters), constraint, quoted, texts)
         }
     }
 }

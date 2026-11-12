@@ -184,8 +184,11 @@ impl<'a> Parser<'a> {
             } else if matches!(self.peek(), TokenKind::LParen) && self.on_same_line() {
                 self.advance();
                 let mut constraint: Option<Expr> = None;
+                let mut texts = Vec::new();
                 loop {
+                    let start = self.peek_tok().offset;
                     let next = self.parse_expr()?;
+                    texts.push(self.source_since(start));
                     constraint = Some(match constraint {
                         Some(prev) => Expr::Binop(BinOp::And, Box::new(prev), Box::new(next)),
                         None => next,
@@ -208,6 +211,7 @@ impl<'a> Parser<'a> {
                     } else {
                         BaseForm::Text
                     },
+                    texts,
                 );
             } else {
                 return Ok(ty);
@@ -220,8 +224,8 @@ impl<'a> Parser<'a> {
 /// its predicate: the marker goes on the base name, as for a plain name.
 pub(super) fn mark_default_type(ty: TypeExpr) -> TypeExpr {
     match ty {
-        TypeExpr::Constrained(base, constraint, quoted) => {
-            TypeExpr::Constrained(format!("*{base}"), constraint, quoted)
+        TypeExpr::Constrained(base, constraint, quoted, texts) => {
+            TypeExpr::Constrained(format!("*{base}"), constraint, quoted, texts)
         }
         TypeExpr::Nullable(inner)
             if matches!(*inner, TypeExpr::Constrained(..) | TypeExpr::Nullable(_)) =>

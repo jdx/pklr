@@ -549,6 +549,32 @@ impl Evaluator {
                                 .collect::<Vec<_>>(),
                         )));
                     }
+                    // The `key` and `value` of a `Pair` are its `first` and `second`.
+                    (Value::Object(map, Some(source)), "key" | "value")
+                        if source.type_identity.as_deref() == Some("pkl:base#Pair") =>
+                    {
+                        let member = if field == "key" { "first" } else { "second" };
+                        if let Some(value) = map.get(member) {
+                            return Ok(value.clone());
+                        }
+                    }
+                    // `Map.entries`: a `Map` has no object source.
+                    (Value::Object(map, None), "entries") => {
+                        return Ok(Value::List(
+                            map.iter()
+                                .map(|(key, value)| {
+                                    let mut members = ObjectMap::default();
+                                    members.insert(
+                                        "first".into(),
+                                        crate::value::mapping_storage_value(key),
+                                    );
+                                    members.insert("second".into(), value.clone());
+                                    stdlib::typed_object("Pair", members)
+                                })
+                                .collect::<Vec<_>>()
+                                .into(),
+                        ));
+                    }
                     (Value::Object(map, _), "values") => {
                         return Ok(Value::List(
                             map.values().cloned().collect::<Vec<_>>().into(),
@@ -756,16 +782,13 @@ impl Evaluator {
             }
             Expr::Checked(expr, ty) => {
                 let val = self.eval_expr(expr, scope, depth + 1)?;
+                self.type_violation = None;
                 if !type_is_runtime_checkable(ty, scope)
                     || self.eval_argument_check(&val, ty, scope, depth, &mut Vec::new())?
                 {
                     Ok(val)
                 } else {
-                    Err(Error::Eval(format!(
-                        "Expected value of type `{}`, but got type `{}`.",
-                        display_type_expr(ty),
-                        pkl_class_name(&val)
-                    )))
+                    Err(Error::Eval(self.type_mismatch_message(ty, &val, None)))
                 }
             }
             Expr::TemplateLocals(locals, inner) => {

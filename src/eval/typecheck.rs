@@ -1,5 +1,6 @@
 //! Checking values against declared types and their constraints.
 
+use super::render::display_value;
 use super::*;
 use crate::parser::{BaseForm, TypeExpr};
 
@@ -137,7 +138,7 @@ impl Evaluator {
         };
         match ty {
             TypeExpr::Named(name) => named(self, name, seen),
-            TypeExpr::Constrained(base, _, form) => {
+            TypeExpr::Constrained(base, _, form, _) => {
                 named(self, constrained_name(base, *form).0, seen)
             }
             TypeExpr::Nullable(inner) => self.type_takes_dynamic(inner, scope, seen),
@@ -161,7 +162,7 @@ impl Evaluator {
     ) -> bool {
         let name = match ty {
             TypeExpr::Named(name) => name.trim_start_matches('*'),
-            TypeExpr::Constrained(base, _, form) => constrained_name(base, *form).0,
+            TypeExpr::Constrained(base, _, form, _) => constrained_name(base, *form).0,
             TypeExpr::Generic(name, _) => name.as_str(),
             // An alias to a union supplies the default of the alternative it
             // marks with `*`, and none when it marks nothing. A nullable one
@@ -233,7 +234,7 @@ impl Evaluator {
         let name = match ty {
             TypeExpr::Nullable(_) => return true,
             TypeExpr::Named(name) => name.trim_start_matches('*'),
-            TypeExpr::Constrained(base, _, form) => {
+            TypeExpr::Constrained(base, _, form, _) => {
                 // A quoted name is exact: a `?` at its end is part of the name,
                 // so only an alias it names can make it nullable.
                 match form {
@@ -332,7 +333,7 @@ impl Evaluator {
             }
             // A constraint is checked on the value afterwards and gives it no
             // default: follow its base, which names an alias or spells a union.
-            TypeExpr::Constrained(base, _, form) => {
+            TypeExpr::Constrained(base, _, form, _) => {
                 // A quoted name is one name, not a type to parse.
                 if let Some(quoted) = quoted_base_type(base, *form) {
                     return self.union_amend_state_in(&quoted, scope, nullable, seen);
@@ -369,11 +370,10 @@ impl Evaluator {
         {
             return Ok(());
         }
-        Err(Error::Eval(format!(
-            "property '{}' expected {}, got {}",
-            prop.name,
-            display_type_expr(ty),
-            value_type_display(value)
+        Err(Error::Eval(self.type_mismatch_message(
+            ty,
+            value,
+            Some(&prop.name),
         )))
     }
 
@@ -567,7 +567,35 @@ impl Evaluator {
         scope: &Scope,
         depth: usize,
     ) -> Result<bool> {
+        self.type_violation = None;
         self.eval_type_check_in(val, ty, scope, depth, &mut Vec::new())
+    }
+
+    /// The error for `val` failing the check against `ty`: the constraint the
+    /// check found violated, or else the type the value does not have.
+    pub(super) fn type_mismatch_message(
+        &mut self,
+        ty: &crate::parser::TypeExpr,
+        val: &Value,
+        property: Option<&str>,
+    ) -> String {
+        // pkl shows the source line of the property after the message, which
+        // `catch` does not report.
+        let location = property
+            .map(|name| format!("{PROPERTY_CONTEXT}{name}'"))
+            .unwrap_or_default();
+        if let Some((text, violating)) = self.type_violation.take() {
+            return format!(
+                "Type constraint `{text}` violated.\nValue: {}{location}",
+                violating_value_display(&violating, &text)
+            );
+        }
+        format!(
+            "Expected value of type `{}`, but got type `{}`.\nValue: {}{location}",
+            error_type_expr(ty),
+            pkl_class_name(val),
+            display_value(val)
+        )
     }
 
     /// Resolve aliases with a guard: malformed or recursively-expanded
@@ -758,7 +786,7 @@ impl Evaluator {
                 // Otherwise, plain type check
                 Ok(value_is_type(val, ty))
             }
-            TypeExpr::Constrained(base, constraint, form) => {
+            TypeExpr::Constrained(base, constraint, form, texts) => {
                 // A name written in backticks (`C?`) is that one name, and
                 // the same text without them is the nullable `C`.
                 let (quoted_name, nullable) = match form {
@@ -850,15 +878,51 @@ impl Evaluator {
                     }
                     _ => {}
                 }
-                let receiver_constraint = with_constraint_receiver(constraint, &constraint_scope);
-                let constraint = receiver_constraint.as_ref().unwrap_or(constraint);
-                let mut result = self.eval_expr(constraint, &constraint_scope, depth + 1)?;
-                // `Listing(isSorted)` names a predicate function and applies
-                // it to the value being checked.
-                if matches!(result, Value::Lambda(..)) {
-                    result = self.invoke_lambda(&result, std::slice::from_ref(val), depth + 1)?;
+                // Each constraint is checked on its own, so that the error
+                // names the one that is violated.
+                for (index, constraint) in split_constraints(constraint, texts.len())
+                    .into_iter()
+                    .enumerate()
+                {
+                    let receiver_constraint =
+                        with_constraint_receiver(constraint, &constraint_scope);
+                    let constraint = receiver_constraint.as_ref().unwrap_or(constraint);
+                    let mut result = self.eval_expr(constraint, &constraint_scope, depth + 1)?;
+                    // `Listing(isSorted)` names a predicate function and applies
+                    // it to the value being checked.
+                    let mut expected = "`Boolean` or `Function`";
+                    if matches!(result, Value::Lambda(..)) {
+                        result =
+                            match self.invoke_lambda(&result, std::slice::from_ref(val), depth + 1)
+                            {
+                                Ok(result) => result,
+                                // A predicate reading a member that the value does
+                                // not have yet, because pklr has not filled in the
+                                // class defaults of the value's members, cannot
+                                // disprove the constraint.
+                                Err(Error::Eval(message))
+                                    if message.starts_with("Cannot find property `") =>
+                                {
+                                    continue;
+                                }
+                                Err(error) => return Err(error),
+                            };
+                        expected = "`Boolean`";
+                    }
+                    if !matches!(result, Value::Bool(_)) {
+                        return Err(Error::Eval(format!(
+                            "Expected value of type {expected}, but got type `{}`. Value: {}",
+                            pkl_class_name(&result),
+                            display_value(&result)
+                        )));
+                    }
+                    if !is_truthy(&result) {
+                        self.type_violation =
+                            texts.get(index).map(|text| (text.clone(), val.clone()));
+                        return Ok(false);
+                    }
                 }
-                Ok(is_truthy(&result))
+                Ok(true)
             }
             TypeExpr::Nullable(inner) => {
                 if is_null_value(val) {
@@ -1250,7 +1314,7 @@ pub(super) fn type_constraint_has_explicit_throw(
         use crate::parser::TypeExpr;
 
         match ty {
-            TypeExpr::Constrained(_, constraint, _) => {
+            TypeExpr::Constrained(_, constraint, _, _) => {
                 expr_has_throw(constraint, scope, None, &mut HashSet::default())
             }
             TypeExpr::Named(name) | TypeExpr::Generic(name, _) => {
@@ -1321,7 +1385,7 @@ fn type_names_user_class(ty: &crate::parser::TypeExpr, scope: &Scope, depth: usi
     };
     match ty {
         TypeExpr::Named(name) | TypeExpr::Generic(name, _) => class_name(name),
-        TypeExpr::Constrained(base, _, _) => class_name(base.split('<').next().unwrap_or(base)),
+        TypeExpr::Constrained(base, _, _, _) => class_name(base.split('<').next().unwrap_or(base)),
         TypeExpr::Nullable(inner) => type_names_user_class(inner, scope, depth + 1),
         TypeExpr::Union(variants) => variants
             .iter()
@@ -1369,3 +1433,66 @@ fn stdlib_qualified_member<'a>(scope: &Scope, name: &'a str) -> Option<&'a str> 
         && STDLIB_TYPE_NAMES.contains(&member))
     .then_some(member)
 }
+
+/// The `count` constraints a constrained type's predicate joins with `&&`, in
+/// source order. A `&&` inside one constraint stays inside it.
+fn split_constraints(expr: &Expr, count: usize) -> Vec<&Expr> {
+    let mut parts = Vec::new();
+    let mut rest = expr;
+    while parts.len() + 1 < count {
+        match rest {
+            Expr::Binop(BinOp::And, left, right) => {
+                parts.push(&**right);
+                rest = left;
+            }
+            _ => break,
+        }
+    }
+    parts.push(rest);
+    parts.reverse();
+    parts
+}
+
+/// How an error shows the value that violated the constraint `text`. pkl
+/// shows the members of an object the constraint has read and `?` for the
+/// others, which it has not evaluated.
+fn violating_value_display(value: &Value, text: &str) -> String {
+    let shown = display_value(value);
+    let Value::Object(map, source) = value else {
+        return shown;
+    };
+    if !shown.starts_with("new Dynamic {") {
+        return shown;
+    }
+    let name = source
+        .as_ref()
+        .and_then(|source| source.type_name.as_deref())
+        .unwrap_or("Dynamic");
+    let mut members = Vec::new();
+    for (key, member) in map.iter() {
+        if key.starts_with('\0') {
+            return shown;
+        }
+        if matches!(member, Value::Lambda(..)) {
+            continue;
+        }
+        let read = text
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .any(|word| word == &**key);
+        let rendered = if read {
+            display_value(member)
+        } else {
+            "?".into()
+        };
+        members.push(format!("{key} = {rendered}"));
+    }
+    if members.is_empty() {
+        format!("new {name} {{}}")
+    } else {
+        format!("new {name} {{ {} }}", members.join("; "))
+    }
+}
+
+/// The start of the line after a type error that names the property whose
+/// value failed the check.
+pub(super) const PROPERTY_CONTEXT: &str = "\n\nin property '";
