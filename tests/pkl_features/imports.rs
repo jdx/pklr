@@ -4402,3 +4402,21 @@ fn inherited_declaration_naming_a_non_type_is_rejected() {
         "{err}"
     );
 }
+
+#[test]
+fn inherited_declaration_resolves_types_in_its_own_module() {
+    // A child's `local C = 1` does not change what the base's `C` names.
+    let temp = TestTempDir::new("pklr_test_inherited_type_scope");
+    std::fs::write(
+        temp.path().join("p.pkl"),
+        "local class C {}\nhidden item: C?\n",
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("main.pkl"),
+        "amends \"p.pkl\"\nlocal C = 1\n",
+    )
+    .unwrap();
+    let v = pklr::eval_to_json(&temp.path().join("main.pkl")).unwrap();
+    assert_eq!(v, serde_json::json!({}));
+}
