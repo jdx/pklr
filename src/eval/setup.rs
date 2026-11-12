@@ -149,6 +149,7 @@ impl Evaluator {
             active_typed_defaults: HashSet::default(),
             mapping_key_values: HashMap::default(),
             module_names: HashMap::default(),
+            grew: false,
         }
     }
 
@@ -178,6 +179,9 @@ impl Evaluator {
         crate::stack::run(|large| {
             let saved = self.max_depth;
             let guard = Restore(&mut *self, saved);
+            if large {
+                guard.0.grew = true;
+            }
             if large && !guard.0.max_depth_set {
                 guard.0.max_depth = crate::stack::EVAL_DEPTH;
             }
@@ -280,6 +284,7 @@ impl Evaluator {
         // capture map that is still reachable through one. Dead capture maps
         // are otherwise only held here weakly; drop their registry entries at
         // each evaluation boundary.
+        self.release_deep_state();
         self.prune_lambda_guards();
         self.env_reads.clear();
         self.import_cache.clear();
@@ -369,5 +374,39 @@ impl Evaluator {
             Some((src, tgt)) => std::borrow::Cow::Owned(format!("{}{}", tgt, &url[src.len()..])),
             None => std::borrow::Cow::Borrowed(url),
         }
+    }
+}
+
+impl Evaluator {
+    /// Frees the values and trees a deep module left behind on a large stack.
+    /// They free recursively, and this runs on the caller's stack, which may
+    /// be small.
+    fn release_deep_state(&mut self) {
+        if !self.grew || crate::stack::on_large_stack() {
+            return;
+        }
+        self.grew = false;
+        let held = (
+            std::mem::take(&mut self.import_cache),
+            std::mem::take(&mut self.narrowed_import_cache),
+            std::mem::take(&mut self.parse_cache),
+            std::mem::take(&mut self.body_roots_cache),
+            std::mem::take(&mut self.plan_cache),
+            std::mem::take(&mut self.resource_cache),
+            std::mem::take(&mut self.module_scopes),
+            std::mem::take(&mut self.layered_scopes),
+            std::mem::take(&mut self.converters),
+            std::mem::take(&mut self.builtin_classes),
+            std::mem::take(&mut self.output_props),
+            self.module_output.take(),
+            std::mem::take(&mut self.mapping_key_values),
+        );
+        crate::stack::drop_on_large_stack(held);
+    }
+}
+
+impl Drop for Evaluator {
+    fn drop(&mut self) {
+        self.release_deep_state();
     }
 }
