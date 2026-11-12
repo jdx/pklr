@@ -1687,3 +1687,26 @@ fn object_and_list_mapping_keys_do_not_render_as_json_strings() {
         assert!(error.contains("non-string key"), "{name}: {error}");
     }
 }
+
+#[test]
+fn amending_a_checked_new_listing_keeps_late_binding_and_drops_its_type_argument() {
+    let temp = TestTempDir::new("pklr_checked_new_listing_amend");
+    std::fs::write(
+        temp.path().join("Base.pkl"),
+        "base = 1\nitems = new Listing<Int> { base }\n",
+    )
+    .unwrap();
+    let child = temp.path().join("Child.pkl");
+    std::fs::write(&child, "amends \"Base.pkl\"\nbase = 2\nitems { 3 }\n").unwrap();
+    assert_eq!(
+        pklr::eval_to_json(&child).unwrap(),
+        serde_json::json!({"base": 2, "items": [2, 3]})
+    );
+    // pkl does not carry `new Listing<Int>`'s type argument to an amendment.
+    let loose = temp.path().join("Loose.pkl");
+    std::fs::write(&loose, "amends \"Base.pkl\"\nitems { \"x\" }\n").unwrap();
+    assert_eq!(
+        pklr::eval_to_json(&loose).unwrap(),
+        serde_json::json!({"base": 1, "items": [1, "x"]})
+    );
+}
