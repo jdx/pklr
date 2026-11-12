@@ -584,8 +584,11 @@ impl<'a> Parser<'a> {
         if matches!(self.peek(), TokenKind::Ident(name) if name == "_")
             && !self.is_quoted(self.peek_tok())
         {
+            // An ignored parameter names nothing: give it a name no
+            // expression can read, so a backticked `_` still binds.
+            let name = format!("\0pklr:ignored{}", self.peek_tok().offset);
             self.advance();
-            return Ok(("_".to_string(), None));
+            return Ok((name, None));
         }
         let name = self.expect_ident()?;
         let ty = if matches!(self.peek(), TokenKind::Colon) {
