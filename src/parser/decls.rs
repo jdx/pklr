@@ -482,11 +482,11 @@ impl<'a> Parser<'a> {
         }
         let plain = bodies.iter().all(|body| body.params.is_empty());
         if redefines && plain {
-            // The first body builds the member and each later one amends it.
-            let mut bodies = bodies.into_iter();
-            let first = bodies.next().map(|body| body.entries).unwrap_or_default();
-            return Ok(BodyList::Amended(Box::new(move |_| {
-                bodies.fold(Expr::New(None, first.into(), Vec::new()), amend_expr)
+            // Each body amends the inherited member in turn. Evaluating the
+            // inherited value falls back to an empty object when nothing is
+            // inherited.
+            return Ok(BodyList::Amended(Box::new(move |parent| {
+                bodies.into_iter().fold(parent, amend_expr)
             })));
         }
         if !redefines && plain {

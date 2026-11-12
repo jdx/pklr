@@ -1427,13 +1427,22 @@ impl Evaluator {
         depth: usize,
     ) -> Result<()> {
         use crate::parser::TypeExpr;
-        let mut inner = ty;
-        while let TypeExpr::Nullable(next) = inner {
-            inner = next;
+        // Elements of a listing or mapping are checked as they are read, so
+        // only the collection itself is checked here.
+        fn shallow(ty: &TypeExpr) -> Option<TypeExpr> {
+            match ty {
+                TypeExpr::Generic(name, _) if matches!(name.as_str(), "Listing" | "Mapping") => {
+                    Some(TypeExpr::Named(name.clone()))
+                }
+                TypeExpr::Nullable(inner) => {
+                    shallow(inner).map(|ty| TypeExpr::Nullable(Box::new(ty)))
+                }
+                _ => None,
+            }
         }
-        match inner {
-            TypeExpr::Generic(name, _) if matches!(name.as_str(), "Listing" | "Mapping") => Ok(()),
-            _ => self.check_declared_value(val, ty, scope, depth),
+        match shallow(ty) {
+            Some(ty) => self.check_declared_value(val, &ty, scope, depth),
+            None => self.check_declared_value(val, ty, scope, depth),
         }
     }
 }

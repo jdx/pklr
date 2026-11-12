@@ -3705,3 +3705,39 @@ fn keyword_after_a_dot_is_rejected() {
         "{error}"
     );
 }
+
+#[test]
+fn consecutive_bodies_amend_the_inherited_member_and_declared_locals_are_checked() {
+    // Expected values come from `pkl eval` 0.32.2.
+    let value = eval(
+        "base { foo { keep = 1; bar { \"base\" } } }\n\
+         child = (base) { foo { bar { \"a\" } } { bar { \"b\" } } }\n\
+         fresh { keep = 1; bar { \"x\" } } { bar { \"y\" } }\n",
+    );
+    assert_eq!(
+        value["child"]["foo"],
+        serde_json::json!({"keep": 1, "bar": ["base", "a", "b"]})
+    );
+    assert_eq!(
+        value["fresh"],
+        serde_json::json!({"keep": 1, "bar": ["x", "y"]})
+    );
+
+    let error = eval_fails("local p: Listing<Int> = 1\nresult = p\n");
+    assert!(
+        error.contains("Expected value of type `Listing`, but got type `Int`."),
+        "{error}"
+    );
+    let error = eval_fails("local f: Int = () -> 1\nresult = f\n");
+    assert!(
+        error.contains("Expected value of type `Int`, but got type `Function0`."),
+        "{error}"
+    );
+    let value = eval(
+        "local p: Listing<Int> = new Listing { 1 }\n\
+         local f: (Int) -> Int = (x) -> x + 1\n\
+         local function k(x: Int): Int = x\n\
+         r = List(p.length, f.apply(1), k(3))\n",
+    );
+    assert_eq!(value["r"], serde_json::json!([1, 2, 3]));
+}

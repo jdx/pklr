@@ -839,7 +839,21 @@ impl Evaluator {
         if let BinOp::Add = op
             && let Some((overlay_entries, locals)) = overlay_body(right)
         {
-            let base = self.eval_expr(left, scope, depth + 1)?;
+            let base = match self.eval_expr(left, scope, depth + 1) {
+                // A member amended by several bodies that nothing defines
+                // starts from an empty object.
+                Err(Error::Eval(message))
+                    if matches!(left, Expr::Field(target, _) if matches!(target.as_ref(), Expr::Ident(name) if name == "super"))
+                        && message.starts_with("undefined variable: super") =>
+                {
+                    self.eval_expr(
+                        &Expr::New(None, Vec::new().into(), Vec::new()),
+                        scope,
+                        depth + 1,
+                    )?
+                }
+                other => other?,
+            };
             let overlay_scope = locals.map(|locals| {
                 let mut overlay_scope = scope.child();
                 for (name, value) in locals.0.iter() {

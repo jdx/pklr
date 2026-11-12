@@ -775,9 +775,7 @@ impl Evaluator {
                                     .and_then(|value| {
                                         // A declared type is checked when the local
                                         // is read, so a mismatch poisons it.
-                                        if let Some(ty) = &prop.type_ann
-                                            && !is_lambda
-                                        {
+                                        if let Some(ty) = &prop.type_ann {
                                             self.check_local_value(
                                                 &value,
                                                 ty,
