@@ -1762,3 +1762,13 @@ fn pcf_applies_converters_inside_collection_calls() {
         "Map(\"a\", 2)"
     );
 }
+
+#[test]
+fn pcf_collection_members_keep_their_path_for_nested_converters() {
+    assert_eq!(
+        render(
+            r#"new PcfRenderer { converters { ["[*].a"] = (i) -> i + 10 } }.renderValue(List(new Dynamic { a = 1 }))"#
+        ),
+        "List(new {\n  a = 11\n})"
+    );
+}

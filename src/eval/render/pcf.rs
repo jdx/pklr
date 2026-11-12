@@ -481,10 +481,16 @@ impl<'a> StringRenderer<'a> for Pcf<'a> {
                     (Some(other), true) => PathPart::Key(other.clone()),
                     _ => PathPart::Element(index),
                 };
+                // The path stays pushed while the member is rendered, so path
+                // converters reach inside it.
                 self.walk.path.push(part);
-                let converted = self.walk.convert(item);
+                let result = self
+                    .walk
+                    .convert(item)
+                    .and_then(|converted| self.visit_standalone(&converted));
                 self.walk.path.pop();
-                converted?
+                result?;
+                continue;
             };
             self.visit_standalone(&converted)?;
         }
