@@ -1218,7 +1218,7 @@ pub(super) fn int_seq(start: i64, end: i64, step: i64) -> Result<Value> {
                 .map(|i| Value::Int((start_w + i * step_w) as i64))
                 .collect::<Vec<_>>(),
         )
-        .into_int_seq(),
+        .into_int_seq(start, end, step),
     ))
 }
 
