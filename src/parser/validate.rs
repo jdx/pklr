@@ -105,6 +105,19 @@ const COLLECTION_MEMBERS: &[&str] = &[
     "map",
     "filter",
 ];
+const LISTING_MEMBERS: &[&str] = &[
+    "isDistinct",
+    "distinctBy",
+    "firstOrNull",
+    "lastOrNull",
+    "single",
+    "getOrNull",
+    "join",
+    "toListing",
+    "toMapping",
+    "hasProperty",
+    "getProperty",
+];
 const OBJECT_MEMBERS: &[&str] = &["hasProperty", "getProperty", "toMap"];
 const UNIT_MEMBERS: &[&str] = &["unit", "value", "isBetween", "isPositive", "isNonZero"];
 const OTHER_MEMBERS: &[&str] = &[
@@ -370,7 +383,7 @@ impl<'m> Walker<'m> {
                     self.members.pop();
                     bail!(found);
                 }
-                _ => {}
+                other => bail!(self.entry(other, 0)),
             }
         }
         let pending = std::mem::take(&mut self.pending);
@@ -398,6 +411,7 @@ impl<'m> Walker<'m> {
     }
 
     fn class_info(&mut self, name: &'m str) -> Option<Rc<ClassInfo<'m>>> {
+        let name = user_class(name);
         if let Some(info) = self.infos.get(name) {
             return info.clone();
         }
@@ -637,8 +651,17 @@ impl<'m> Walker<'m> {
     }
 
     fn typed_frame(&mut self, name: &str, body: &'m [Entry]) -> Frame<'m> {
-        let own = members_of(body);
+        let mut own = members_of(body);
+        let name = user_class(name);
         if name == "Dynamic" {
+            return Frame::object(own, false);
+        }
+        if matches!(name, "Listing" | "Mapping") && !self.classes.contains_key(name) {
+            // The members of the collection a bare name may take.
+            for &member in COLLECTION_MEMBERS.iter().chain(LISTING_MEMBERS) {
+                own.props.entry(member).or_insert((true, false));
+                own.methods.entry(member).or_insert((true, false));
+            }
             return Frame::object(own, false);
         }
         let class = self

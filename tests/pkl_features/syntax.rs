@@ -3053,6 +3053,10 @@ fn const_scopes_reject_non_const_members() {
     // Every program here is rejected by `pkl eval` with the quoted message.
     for (src, message) in [
         (
+            "x = 1\nclass C { v = new Listing { x } }\nr = new C {}\n",
+            "Cannot reference property `x` from here because it is not `const`.",
+        ),
+        (
             "x = 1\nobj { const local f = () -> x; result = f.apply() }\n",
             "Cannot reference property `x` from here because it is not `const`.",
         ),
