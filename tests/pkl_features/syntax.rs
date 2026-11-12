@@ -3000,7 +3000,7 @@ fn const_members_only_read_const_members() {
     assert!(err.contains("Cannot reference property `x`"), "{err}");
     let err = eval_fails("x = 1\nconst y = 1 is Int(this == x)\n");
     assert!(err.contains("Cannot reference property `x`"), "{err}");
-    let err = eval_fails("x = 1\ncontainer { local const y = x }\n");
+    let err = eval_fails("x = 1\ncontainer { local const y = x\nres = y }\n");
     assert!(err.contains("Cannot reference property `x`"), "{err}");
     let err = eval_fails("x = 1\nclass Child extends Missing { const y = module.x }\n");
     assert!(err.contains("Cannot reference property `x`"), "{err}");
@@ -3032,4 +3032,130 @@ fn member_predicates_are_reported_as_unsupported() {
         let err = eval_fails(src);
         assert!(err.contains("member predicates"), "{src}: {err}");
     }
+}
+
+#[test]
+fn const_scopes_reject_non_const_members() {
+    // Every program here is rejected by `pkl eval` with the quoted message.
+    for (src, message) in [
+        (
+            "x = 1\nclass C { v = x }\nr = new C {}\n",
+            "Cannot reference property `x` from here because it is not `const`.",
+        ),
+        (
+            "function f() = 1\nclass C { v = f() }\nr = new C {}\n",
+            "Cannot call method `f` from here because it is not `const`.",
+        ),
+        (
+            "local x = 1\nclass C { v = x }\nr = new C {}\n",
+            "Cannot reference property `x` from here because it is not `const`.",
+        ),
+        (
+            "x = 1\nclass C { v = module.x }\nr = new C {}\n",
+            "Cannot reference property `x` from here because it is not `const`.",
+        ),
+        (
+            "function g() = 1\nconst function f() = (s) -> s + g()\nr = f().apply(1)\n",
+            "Cannot call method `g` from here because it is not `const`.",
+        ),
+        (
+            "x = 1\nclass C { v = outer.x }\nr = new C {}\n",
+            "Cannot reference property `x` from here because it is not `const`.",
+        ),
+        (
+            "class C { v = module }\nr = new C {}\n",
+            "Cannot reference `module` within a class body.",
+        ),
+        (
+            "const c = new { x = module }\n",
+            "Cannot reference `module` from const property `x`.",
+        ),
+        (
+            "class C { const p = new { v = outer } }\nr = new C {}\n",
+            "Cannot reference `outer` from here because it's not `const`.",
+        ),
+        (
+            "x = 1\ntypealias T = Int(this == x)\nr = 1 is T\n",
+            "Cannot reference property `x` from here because it is not `const`.",
+        ),
+        (
+            "x = 1\ntypealias T = Int(let (m = module) m.x == 1)\nr = 1 is T\n",
+            "Cannot reference `module` from const property `T`.",
+        ),
+        (
+            "x = 1\nclass C {\n  const function f() = x\n  v = f()\n}\nr = new C {}\n",
+            "Cannot reference property `x` from here because it is not `const`.",
+        ),
+    ] {
+        let err = eval_fails(src);
+        assert!(err.contains(message), "{src}: {err}");
+    }
+}
+
+#[test]
+fn const_scopes_accept_const_and_local_names() {
+    // Every program here evaluates under `pkl eval`.
+    let json = eval("const x = 1\nclass C { v = x }\nr = new C {}\n");
+    assert_eq!(json["r"]["v"], 1);
+    let json = eval("const function f() = 2\nclass C { v = f() }\nr = new C {}\n");
+    assert_eq!(json["r"]["v"], 2);
+    let json = eval("const x = 1\nclass C { v = module.x }\nr = new C {}\n");
+    assert_eq!(json["r"]["v"], 1);
+    // Members of the class and its parameters are not module members.
+    let json = eval(
+        "class C {\n  a = 1\n  b = a + 1\n  function g(p) = p + a\n  c = g(3)\n}\nr = new C {}\n",
+    );
+    assert_eq!(json["r"], serde_json::json!({"a": 1, "b": 2, "c": 4}));
+    // `let`, `for` and lambda variables are free, and so are members of an
+    // object built inside the const scope.
+    let json = eval(
+        "const k = 3\nconst y = let (z = 2) z + k\nconst w = new Listing { for (i in List(1, 2)) { i + k } }\nconst l = ((p) -> p + k).apply(1)\n",
+    );
+    assert_eq!(json["y"], 5);
+    assert_eq!(json["w"], serde_json::json!([4, 5]));
+    assert_eq!(json["l"], 4);
+    let json = eval(
+        "class A { n = 1 }\nclass C {\n  a: A = new { n = 2 }\n  b = new A { n = 3 }\n  d = new Dynamic { q = 1; z = q }\n}\nr = new C {}\n",
+    );
+    assert_eq!(json["r"]["a"]["n"], 2);
+    assert_eq!(json["r"]["d"]["z"], 1);
+    let json = eval("const lim = 5\ntypealias Small = Int(this < lim)\nr = 3 is Small\n");
+    assert_eq!(json["r"], true);
+    // A method that reads a non-const member is fine until something calls it.
+    let json = eval("class C { function f() = module.g() }\nfunction g() = 1\nr = 1\n");
+    assert_eq!(json["r"], 1);
+    // pkl does not check the body of a module-level const method.
+    let json = eval("x = 1\nconst function f() = x\nr = f()\n");
+    assert_eq!(json["r"], 1);
+    // A property that is not const may read what it likes.
+    let json = eval("x = 1\nclass C { v = 2 }\nconst k = new Listing { 1; 2 }\nr = x\n");
+    assert_eq!(json["r"], 1);
+}
+
+#[test]
+fn subclass_properties_keep_the_const_and_fixed_modifiers() {
+    for (src, message) in [
+        (
+            "open class A { const x: Int }\nclass B extends A { x = 2 }\nr = new B {}\n",
+            "Missing modifier `const`.",
+        ),
+        (
+            "open class A { x: Int }\nclass B extends A { const x = 2 }\nr = new B {}\n",
+            "Modifier `const` cannot be applied to property `x`.",
+        ),
+        (
+            "abstract class A { fixed name: String }\nclass B extends A { name = \"a\" }\n",
+            "Missing modifier `fixed`.",
+        ),
+        (
+            "abstract class A { name: String }\nclass B extends A { fixed name = \"a\" }\n",
+            "Modifier `fixed` cannot be applied to property `name`.",
+        ),
+    ] {
+        let err = eval_fails(src);
+        assert!(err.contains(message), "{src}: {err}");
+    }
+    let json =
+        eval("open class A { const n = 1 }\nclass B extends A { const n = 2 }\nr = new B {}\n");
+    assert_eq!(json["r"]["n"], 2);
 }

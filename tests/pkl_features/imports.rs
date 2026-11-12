@@ -778,7 +778,7 @@ fn amended_object_uses_amendment_site_scope_for_overlay_entries() {
     std::fs::write(
         dir.join("Lib.pkl"),
         r#"
-local collision = "definition"
+const local collision = "definition"
 open class Item {
     inherited = collision
 }
@@ -1046,7 +1046,7 @@ fn repeated_amendment_keeps_each_entries_lexical_scope() {
     std::fs::write(
         dir.join("Lib.pkl"),
         r#"
-local collision = "definition"
+const local collision = "definition"
 open class Item {
     inherited = collision
 }
@@ -1087,7 +1087,7 @@ fn derived_class_amendment_keeps_parent_and_child_lexical_scopes() {
     std::fs::write(
         dir.join("Base.pkl"),
         r#"
-local collision = "parent"
+const local collision = "parent"
 open class Parent {
     fromParent = collision
 }
@@ -1179,7 +1179,7 @@ fn nested_class_inheritance_keeps_each_definition_scope() {
     std::fs::write(
         dir.join("Base.pkl"),
         r#"
-local collision = "parent"
+const local collision = "parent"
 open class Parent {
     fromParent = collision
 }
@@ -2090,7 +2090,7 @@ fn indexed_ordinary_import_is_evaluated_whole() {
     let dir = temp.path();
     std::fs::write(
         dir.join("dep.pkl"),
-        "expected = \"b\"\ntypealias IsB = String(this == expected)\nresult = \"b\" is IsB\n",
+        "const expected = \"b\"\ntypealias IsB = String(this == expected)\nresult = \"b\" is IsB\n",
     )
     .unwrap();
     std::fs::write(
@@ -2139,7 +2139,7 @@ fn narrowed_import_follows_type_alias_constraints() {
     let dir = temp.path();
     std::fs::write(
         dir.join("dep.pkl"),
-        "expected = \"b\"\ntypealias IsB = String(this == expected)\nresult = \"b\" is IsB\n",
+        "const expected = \"b\"\ntypealias IsB = String(this == expected)\nresult = \"b\" is IsB\n",
     )
     .unwrap();
     std::fs::write(
@@ -2161,7 +2161,7 @@ fn narrowed_import_follows_module_reads_in_class_defaults() {
     // building `Bar` from a requested property still needs `min`.
     std::fs::write(
         dir.join("dep.pkl"),
-        "min = 1\nclass Bar {\n  a: Int = min\n}\nresult {\n  bar = new Bar {}\n}\n",
+        "const min = 1\nclass Bar {\n  a: Int = min\n}\nresult {\n  bar = new Bar {}\n}\n",
     )
     .unwrap();
     std::fs::write(
@@ -2235,29 +2235,6 @@ fn narrowed_import_ignores_shadowed_module_in_constraints() {
         )
         .unwrap();
         assert!(pklr::eval_to_json(&main).is_err(), "{constraint}");
-    }
-
-    // An alias of the module keeps the module member it reads, including one
-    // rebound after an outer shadow.
-    for constraint in [
-        "let (`module` = module) `module`.bad",
-        "let (real = module) let (`module` = new Dynamic { bad = false }) let (`module` = real) `module`.bad",
-        "let (real = module) let (`module` = new Dynamic { bad = false }) ((`module`) -> new Listing { for (`module` in new Listing { `module` }) { `module`.bad } }.length == 1).apply(real)",
-    ] {
-        std::fs::write(
-            dir.join("types.pkl"),
-            format!(
-                "bad = true\ntypealias Check = Boolean({constraint})\nclass C {{ ok: Check = true }}\n"
-            ),
-        )
-        .unwrap();
-        let value =
-            pklr::eval_to_json(&main).unwrap_or_else(|error| panic!("{constraint}: {error}"));
-        assert_eq!(
-            value,
-            serde_json::json!({"result": {"ok": true}}),
-            "{constraint}"
-        );
     }
 }
 
@@ -2504,7 +2481,7 @@ fn narrowed_import_follows_module_reads_but_not_checked_value_members() {
     .unwrap();
     std::fs::write(
         dir.join("module_read.pkl"),
-        "expected = \"b\"\ntypealias IsB = String(this == module.expected)\nresult = \"b\" is IsB\n",
+        "const expected = \"b\"\ntypealias IsB = String(this == module.expected)\nresult = \"b\" is IsB\n",
     )
     .unwrap();
     // A number's check binds no `length`, so here it is the module property.
@@ -2728,7 +2705,7 @@ fn module_in_imported_class_body_means_the_class_module() {
     let dir = temp.path();
     std::fs::write(
         dir.join("dep2.pkl"),
-        "expected = \"b\"\nclass C { v = module.expected }\nresult = new C {}\n",
+        "const expected = \"b\"\nclass C { v = module.expected }\nresult = new C {}\n",
     )
     .unwrap();
     std::fs::write(
