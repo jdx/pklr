@@ -1390,6 +1390,14 @@ impl Evaluator {
         if self.eval_argument_check(val, ty, scope, depth, &mut Vec::new())? {
             return Ok(());
         }
+        // A value of the wrong base type is reported against the base, not
+        // against the constraint it never reached.
+        if let crate::parser::TypeExpr::Constrained(base, ..) = ty
+            && let Ok(base) = crate::parser::parse_type_name(base)
+            && !matches!(base, crate::parser::TypeExpr::Constrained(..))
+        {
+            self.check_declared_value(val, &base, scope, depth)?;
+        }
         if let (crate::parser::TypeExpr::Generic(name, args), Value::List(items)) = (ty, val)
             && matches!(name.as_str(), "List" | "Set")
             && let [element] = args.as_slice()

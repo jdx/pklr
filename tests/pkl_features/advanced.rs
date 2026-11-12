@@ -3573,3 +3573,135 @@ fn typealias_replacing_inherited_property_is_rejected_through_amends_and_imports
         );
     }
 }
+
+// Expected values are those of  0.32.2.
+#[test]
+fn local_members_late_binding_and_typed_locals_match_pkl() {
+    let json = eval(
+        r####"import "pkl:test"
+
+local bad: Int = "foo"
+badRead = test.catch(() -> bad)
+okRead = 1
+obj {
+  local p: List<String> = List("a", 1)
+  caught = test.catch(() -> p)
+  local function f(x: Int): String = x
+  callCaught = test.catch(() -> f(1))
+}
+missing {
+  local function g(): NoSuchType = 1
+  caught = test.catch(() -> g())
+}
+
+parent {
+  x = 1 + y
+  y = 2
+}
+child = (parent) {
+  x = super.x + 100
+  y = 3
+}
+grandChild = (child) {
+  y = 4
+}
+
+nestedLate {
+  foo {
+    x = y
+  }
+  y = 3
+}
+nestedLateAmended = (nestedLate) {
+  y = 4
+}
+
+chain {
+  bar { "Hello" }
+} {
+  bar { "World" }
+}
+
+amendedLocal {
+  local l = "original"
+  x = l
+}
+amendedLocalOverride = (amendedLocal) {
+  l = "override"
+}
+
+open class Foo1 {
+  local function f() = "original"
+  x = f()
+}
+class Foo2 extends Foo1 {
+  function f() = "override"
+}
+subclass = new Foo2 {}.x
+"####,
+    );
+    let expected: serde_json::Value = serde_json::from_str(
+        r####"{
+  "badRead": "Expected value of type `Int`, but got type `String`. Value: \"foo\"",
+  "okRead": 1,
+  "obj": {
+    "caught": "Expected value of type `String`, but got type `Int`. Value: 1",
+    "callCaught": "Expected value of type `String`, but got type `Int`. Value: 1"
+  },
+  "missing": {
+    "caught": "Cannot find type `NoSuchType`."
+  },
+  "parent": {
+    "x": 3,
+    "y": 2
+  },
+  "child": {
+    "x": 104,
+    "y": 3
+  },
+  "grandChild": {
+    "x": 105,
+    "y": 4
+  },
+  "nestedLate": {
+    "foo": {
+      "x": 3
+    },
+    "y": 3
+  },
+  "nestedLateAmended": {
+    "foo": {
+      "x": 4
+    },
+    "y": 4
+  },
+  "chain": {
+    "bar": [
+      "Hello",
+      "World"
+    ]
+  },
+  "amendedLocal": {
+    "x": "original"
+  },
+  "amendedLocalOverride": {
+    "x": "original",
+    "l": "override"
+  },
+  "subclass": "original"
+}
+"####,
+    )
+    .unwrap();
+    assert_eq!(json, expected);
+}
+
+#[test]
+fn keyword_after_a_dot_is_rejected() {
+    // `pkl eval` 0.32.2: "Keyword `outer` is not allowed here."
+    let error = eval_fails("a { b { x = outer.outer } }\n");
+    assert!(
+        error.contains("Keyword `outer` is not allowed here."),
+        "{error}"
+    );
+}

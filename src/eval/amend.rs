@@ -323,14 +323,31 @@ impl Evaluator {
         // If the overlay has a body amendment (no `=`), keep the base entry first
         // so its value is in scope, then add the overlay body entry after.
         let mut used_overlay: HashSet<&str> = HashSet::default();
+        // The base's `local` members that an overlay member of the same name
+        // must not capture.
+        let shadowed: Vec<(Name, Value)> = base_entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Property(prop) => match overlay_by_name.get(prop.name.as_ref()) {
+                    Some(Entry::Property(_)) if has_modifier(&prop.modifiers, Modifier::Local) => {
+                        Some((prop.name.clone(), base_scope.get(&prop.name)?.clone()))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
         for (entry_index, entry) in base_entries.iter().enumerate() {
             let inherited_entry_scope = base_source
                 .entry_scopes
                 .get(entry_index)
                 .cloned()
                 .unwrap_or(None);
+            // A `local` member of the base is not overridden: the base's own
+            // expressions keep reading it.
             if let Entry::Property(prop) = entry
                 && let Some(replacement) = overlay_by_name.get(prop.name.as_ref())
+                && !has_modifier(&prop.modifiers, Modifier::Local)
             {
                 if let Entry::Property(overlay_prop) = replacement
                     && overlay_prop.body.is_some()
@@ -380,7 +397,7 @@ impl Evaluator {
                 used_overlay.insert(prop.name.as_ref());
                 continue;
             }
-            merged.push(entry.clone());
+            merged.push(shadow_local_reads(entry, &shadowed));
             merged_entry_scopes.push(inherited_entry_scope);
         }
 
@@ -1936,4 +1953,37 @@ pub(super) fn listing_leaf_unresolved_binding(name: &str) -> String {
 /// `declaring`.
 fn class_unresolved(ty: &crate::parser::TypeExpr, declaring: &Scope) -> bool {
     listing_leaf_name(ty, declaring).is_some_and(|leaf| resolve_dotted(declaring, &leaf).is_none())
+}
+
+/// `entry` as the base wrote it, reading `shadowed` members as the base held
+/// them even where an amendment declares a `local` of the same name.
+pub(super) fn shadow_local_reads(entry: &Entry, shadowed: &[(Name, Value)]) -> Entry {
+    let Entry::Property(prop) = entry else {
+        return entry.clone();
+    };
+    if shadowed.is_empty() {
+        return entry.clone();
+    }
+    let reads = property_reference_names(prop);
+    let seen: Vec<(Name, Value)> = shadowed
+        .iter()
+        .filter(|(name, _)| reads.contains(name) && *name != prop.name)
+        .cloned()
+        .collect();
+    if seen.is_empty() {
+        return entry.clone();
+    }
+    let mut prop = (**prop).clone();
+    if let Some(value) = prop.value.take() {
+        prop.value = Some(Expr::TemplateLocals(
+            LocalBindings(Arc::new(seen)),
+            Box::new(value),
+        ));
+    } else if let Some(body) = prop.body.take() {
+        prop.value = Some(Expr::TemplateLocals(
+            LocalBindings(Arc::new(seen)),
+            Box::new(Expr::ObjectBody(body)),
+        ));
+    }
+    Entry::Property(Arc::new(prop))
 }
