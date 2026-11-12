@@ -15,7 +15,7 @@ pub use capabilities::NativeCapabilities;
 pub use capabilities::{EvalCapabilities, FetchBudget};
 pub use error::{Error, Result};
 #[cfg(feature = "eval-core")]
-pub use eval::Evaluator;
+pub use eval::{Evaluator, GlobAccess, NativeGlobAccess, expand_glob, expand_glob_with};
 #[cfg(feature = "eval-core")]
 pub use value::Value;
 
