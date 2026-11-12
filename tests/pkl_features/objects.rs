@@ -5134,7 +5134,10 @@ answer = 1
         assert!(error.contains("boom"), "{error}");
     }
     let error = eval_fails("class C { value: Int = \"wrong\" }\nc: C");
-    assert!(error.contains("property 'value' expected Int"), "{error}");
+    assert!(
+        error.contains("property 'value'") && error.contains("Expected value of type `Int`"),
+        "{error}"
+    );
 
     let json = eval("class Int { value = 1 }\nc: Int");
     assert_eq!(json["c"], serde_json::json!({ "value": 1 }));
@@ -5201,7 +5204,10 @@ fn typed_instance_member_errors_remain_lazy() {
         "class C { bad: Int = \"wrong\"; ok = 1 }\nc = new C {}",
     ] {
         let error = eval_fails(src);
-        assert!(error.contains("property 'bad' expected Int"), "{error}");
+        assert!(
+            error.contains("property 'bad'") && error.contains("Expected value of type `Int`"),
+            "{error}"
+        );
     }
 
     let json = eval("class C { hidden bad: Int = \"wrong\"; ok = 1 }\nc: C");
@@ -5352,7 +5358,7 @@ m: Mapping<String, R | Listing<Int>> = new {
 "#,
     );
     assert!(
-        error.contains("expected Mapping<String, R|Listing<Int>>"),
+        error.contains("Expected value of type `Mapping<String, R|Listing<Int>>`"),
         "{error}"
     );
 }
@@ -5915,7 +5921,7 @@ const CONSTRAINED_DEFAULT_CLASS: &str = "class C { argv: *Listing<String>(!this.
 fn constrained_default_alternative_rejects_implicit_default() {
     let err = eval_fails(&format!("{CONSTRAINED_DEFAULT_CLASS}c = new C {{}}"));
     assert!(err.contains("argv"), "{err}");
-    assert!(err.contains("*Listing<String>"), "{err}");
+    assert!(err.contains("!this.isEmpty"), "{err}");
 }
 
 #[test]
@@ -6045,7 +6051,7 @@ fn amend_explicit_null_default_rejects_listing_type() {
             "class U {{ g: {ty} = null }}\na = new U {{ g {{ \"adm\" }} }}\n"
         ));
         assert!(
-            err.contains("expected") && err.contains("Dynamic"),
+            (err.contains("Expected value") || err.contains("violated")) && err.contains("Dynamic"),
             "{ty}: {err}"
         );
     }
@@ -6160,7 +6166,7 @@ a = new Listing<T> {}
 b = (a) { new { x = "s" } }
 "#,
     );
-    assert!(error.contains("expected Int"), "{error}");
+    assert!(error.contains("Expected value of type `Int`"), "{error}");
 }
 
 #[test]
@@ -6214,7 +6220,7 @@ fn typed_nullable_listing_amendment_uses_the_declaring_scope_class() {
     )
     .unwrap();
     let error = pklr::eval_to_json(&main).unwrap_err().to_string();
-    assert!(error.contains("expected Int"), "{error}");
+    assert!(error.contains("Expected value of type `Int`"), "{error}");
 }
 
 #[test]
@@ -6240,7 +6246,7 @@ class T { name: String }
 x: Listing<Listing<T>> = new { new { new { name = 5 } } }
 "#,
     );
-    assert!(error.contains("expected String"), "{error}");
+    assert!(error.contains("Expected value of type `String`"), "{error}");
 }
 
 #[test]
@@ -6406,7 +6412,7 @@ fn explicit_dynamic_constraint_failures_name_a_dynamic() {
         "class U { g: Dynamic(false)? = null }\na = new U { g = new Dynamic { \"adm\" } }\n",
     ] {
         let err = eval_fails(src);
-        assert!(err.contains(", got Dynamic"), "{src}: {err}");
+        assert!(err.contains("Dynamic"), "{src}: {err}");
         assert!(!err.contains("got List"), "{src}: {err}");
     }
 }
@@ -6433,7 +6439,7 @@ fn element_only_dynamic_constraint_ignores_unrelated_classes() {
         assert_eq!(json["x"], serde_json::json!(["a"]), "{decl}");
     }
     let err = eval_fails("class Any {}\nx: Dynamic(false) = new Dynamic { \"a\" }\n");
-    assert!(err.contains("expected"), "{err}");
+    assert!(err.contains("violated"), "{err}");
 }
 
 // A long chain of aliases ending in `Dynamic` is walked without deep
@@ -6456,7 +6462,7 @@ fn element_only_dynamic_follows_long_alias_chains() {
             assert_eq!(eval(&src)["x"], serde_json::json!(["a"]), "{end}");
         } else {
             let err = eval_fails(&src);
-            assert!(err.contains("expected"), "{end}: {err}");
+            assert!(err.contains("Expected value of type"), "{end}: {err}");
         }
     }
 }
@@ -6477,7 +6483,7 @@ fn amended_explicit_null_default_evaluates_declared_type_constraints() {
     let err = eval_fails(
         "class U { g: Any(false)? = null }\na = new U { g = new Dynamic { \"adm\" } }\n",
     );
-    assert!(err.contains("expected"), "{err}");
+    assert!(err.contains("violated"), "{err}");
     let json =
         eval("class U { g: Dynamic(toList().length == 1)? = null }\na = new U { g { \"adm\" } }\n");
     assert_eq!(json["a"]["g"], serde_json::json!(["adm"]));

@@ -54,7 +54,9 @@ pub(super) fn needs_method_result_types(expr: &Expr) -> bool {
         Expr::If(_, then_expr, else_expr) => {
             needs_method_result_types(then_expr) || needs_method_result_types(else_expr)
         }
-        Expr::Let(_, _, body) | Expr::Trace(body, _) => needs_method_result_types(body),
+        Expr::Let(_, _, body) | Expr::Trace(body, _) | Expr::Constraint(body, _) => {
+            needs_method_result_types(body)
+        }
         _ => false,
     }
 }
@@ -71,7 +73,9 @@ pub(super) fn capture_method_result_types(expr: &mut Expr, scope: &Scope) {
             capture_method_result_types(then_expr, scope);
             capture_method_result_types(else_expr, scope);
         }
-        Expr::Let(_, _, body) | Expr::Trace(body, _) => capture_method_result_types(body, scope),
+        Expr::Let(_, _, body) | Expr::Trace(body, _) | Expr::Constraint(body, _) => {
+            capture_method_result_types(body, scope)
+        }
         _ => {}
     }
 }
@@ -115,6 +119,7 @@ impl AliasResolver<'_> {
             | Expr::Throw(value)
             | Expr::TemplateLocals(_, value)
             | Expr::Trace(value, _)
+            | Expr::Constraint(value, _)
             | Expr::Read(value, _)
             | Expr::ReadOrNull(value, _)
             | Expr::ReadGlob(value, _) => self.expr(value, shadowed),
@@ -1283,6 +1288,26 @@ pub(super) fn is_default_type(ty: &crate::parser::TypeExpr) -> bool {
 }
 
 /// Format a TypeExpr for user-facing error messages.
+/// The type as an error names it: without the constraints of a constrained
+/// type, which are reported on their own when one is violated.
+pub(super) fn error_type_expr(ty: &crate::parser::TypeExpr) -> String {
+    use crate::parser::TypeExpr;
+    match ty {
+        TypeExpr::Named(name) => name.trim_start_matches('*').to_string(),
+        TypeExpr::Nullable(inner) => format!("{}?", error_type_expr(inner)),
+        TypeExpr::Union(variants) => variants
+            .iter()
+            .map(error_type_expr)
+            .collect::<Vec<_>>()
+            .join("|"),
+        TypeExpr::Generic(name, args) => {
+            let args: Vec<_> = args.iter().map(error_type_expr).collect();
+            format!("{}<{}>", name.trim_start_matches('*'), args.join(", "))
+        }
+        TypeExpr::Constrained(base, _, _) => base.trim_start_matches('*').to_string(),
+    }
+}
+
 pub(super) fn display_type_expr(ty: &crate::parser::TypeExpr) -> String {
     use crate::parser::TypeExpr;
     match ty {
@@ -1517,6 +1542,7 @@ pub(super) fn type_is_runtime_checkable(ty: &crate::parser::TypeExpr, scope: &Sc
                         | "Duration"
                         | "DataSize"
                         | "Any"
+                        | "nothing"
                 )
                 || alias_of(scope, runtime_name).is_some()
                 || resolve_dotted(scope, runtime_name).is_some()
