@@ -1215,9 +1215,30 @@ impl Evaluator {
                 Entry::Spread(e) => {
                     let val = self.eval_expr(e, &entry_scope, depth + 1)?;
                     check_iterable(&val)?;
-                    if let Value::List(_) = val {
+                    if let Value::List(items) = &val {
+                        return Err(match items.kind() {
+                            ListKind::Listing | ListKind::Dynamic => Error::Eval(
+                                "Cannot spread object containing elements into object of type \
+                                 `Mapping`."
+                                    .into(),
+                            ),
+                            _ => stdlib::error_with_values(
+                                format!(
+                                    "Cannot spread value of type `{}` into object of type \
+                                     `Mapping`.",
+                                    pkl_class_name(&val)
+                                ),
+                                &[("Value", &val)],
+                            ),
+                        });
+                    }
+                    if let Value::Object(m, Some(source)) = &val
+                        && source.kind != ObjectKind::Mapping
+                        && !m.is_empty()
+                    {
                         return Err(Error::Eval(
-                            "Cannot spread value of type `List` into object of type `Mapping`."
+                            "Cannot spread object containing properties into object of type \
+                             `Mapping`."
                                 .into(),
                         ));
                     }

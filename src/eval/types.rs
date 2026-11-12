@@ -847,6 +847,19 @@ fn exact_default(base_name: &str, scope: &Scope) -> Option<Value> {
     }
 }
 
+/// An empty `Mapping`, `Listing` or `Dynamic`, for amending the class itself.
+pub(super) fn empty_mapping_or_listing(class: &str) -> Option<Value> {
+    match class {
+        "Listing" => Some(empty_collection("Listing")),
+        "Mapping" => Some(Value::Object(
+            Arc::default(),
+            Some(Arc::new(mapping_source())),
+        )),
+        "Dynamic" => Some(Value::Object(Arc::default(), None)),
+        _ => None,
+    }
+}
+
 /// An empty value of the collection type `name`.
 fn empty_collection(name: &str) -> Value {
     let kind = match name {

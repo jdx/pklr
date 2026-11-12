@@ -698,7 +698,12 @@ impl Evaluator {
                             .ok_or_else(|| {
                                 Error::Eval(
                                     missing_member_error(&source, obj_expr, &key_str, scope)
-                                        .unwrap_or_else(|| format!("key not found: {key_str}")),
+                                        .unwrap_or_else(|| {
+                                            format!(
+                                                "Cannot find key `{}`.",
+                                                stdlib::render_value(&key)
+                                            )
+                                        }),
                                 )
                             })
                     }
@@ -707,11 +712,27 @@ impl Evaluator {
                             .ok()
                             .and_then(|index| items.get(index))
                             .cloned()
-                            .ok_or_else(|| Error::Eval(format!("index out of bounds: {index}"))),
-                        _ => Err(Error::Eval("listing index must be an Int".into())),
+                            .ok_or_else(|| {
+                                let message = format!(
+                                    "Element index `{index}` is out of range `0`..`{}`.",
+                                    items.len() as i64 - 1
+                                );
+                                if items.kind() == ListKind::List {
+                                    stdlib::error_with_values(
+                                        message,
+                                        &[("Collection", &Value::List(items.clone()))],
+                                    )
+                                } else {
+                                    Error::Eval(message)
+                                }
+                            }),
+                        _ => Err(stdlib::operator_not_defined(
+                            "[]",
+                            &Value::List(items.clone()),
+                            &key,
+                        )),
                     },
-                    Value::List(_) => Err(Error::Eval("cannot index Set".into())),
-                    _ => Err(Error::Eval("cannot index non-object".into())),
+                    other => Err(stdlib::operator_not_defined("[]", &other, &key)),
                 }
             }
             Expr::Call(func_expr, args) => self.eval_call(func_expr, args, scope, depth),

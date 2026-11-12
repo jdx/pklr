@@ -324,6 +324,18 @@ impl Evaluator {
         // If the overlay has a body amendment (no `=`), keep the base entry first
         // so its value is in scope, then add the overlay body entry after.
         let mut used_overlay: HashSet<&str> = HashSet::default();
+        // An entry `["key"] = value` of the overlay replaces the base's entry
+        // of that key in place, as a property does, so that the base's other
+        // entries read the new value (`this["key"]`).
+        let mut overlay_entry_values: FxIndexMap<&str, &Entry> = FxIndexMap::default();
+        for entry in overlay_entries {
+            if let Entry::DynProperty(Expr::String(key), value) = entry
+                && !matches!(value, Expr::ObjectBody(_))
+            {
+                overlay_entry_values.insert(key, entry);
+            }
+        }
+        let mut replaced_entries: HashSet<&str> = HashSet::default();
         // The base's `local` members that an overlay member of the same name
         // must not capture.
         let shadowed: Vec<(Name, Value)> = base_entries
@@ -398,6 +410,15 @@ impl Evaluator {
                 used_overlay.insert(prop.name.as_ref());
                 continue;
             }
+            if let Entry::DynProperty(Expr::String(key), value) = entry
+                && !matches!(value, Expr::ObjectBody(_))
+                && let Some(replacement) = overlay_entry_values.get(&**key)
+                && replaced_entries.insert(key)
+            {
+                merged.push((*replacement).clone());
+                merged_entry_scopes.push(amendment_entry_scope.clone());
+                continue;
+            }
             merged.push(shadow_local_reads(entry, &shadowed));
             merged_entry_scopes.push(inherited_entry_scope);
         }
@@ -408,6 +429,14 @@ impl Evaluator {
                 && used_overlay.contains(prop.name.as_ref())
             {
                 continue; // already placed in-order above
+            }
+            if let Entry::DynProperty(Expr::String(key), _) = entry
+                && replaced_entries.contains(&**key)
+                && overlay_entry_values
+                    .get(&**key)
+                    .is_some_and(|value| std::ptr::eq(*value, entry))
+            {
+                continue;
             }
             merged.push(entry.clone());
             merged_entry_scopes.push(amendment_entry_scope.clone());
@@ -1054,6 +1083,17 @@ impl Evaluator {
                 "Cannot instantiate abstract class `{}`.",
                 source.type_identity.as_deref().unwrap_or_default()
             )));
+        }
+        // `(Mapping) { ... }`, `(Listing) { ... }` and `(Dynamic) { ... }` amend an empty one.
+        if let Value::Object(_, Some(source)) = &base
+            && source.kind == ObjectKind::Class
+            && let Some(class @ ("Mapping" | "Listing" | "Dynamic")) = source
+                .type_identity
+                .as_deref()
+                .and_then(|identity| identity.strip_prefix("pkl:base#"))
+            && let Some(empty) = empty_mapping_or_listing(class)
+        {
+            return self.eval_value_amendment(empty, overlay_entries, scope, depth);
         }
         // A standard library class value (`Duration`, `1.getClass()`) is an
         // external class's value: it has no members to amend.

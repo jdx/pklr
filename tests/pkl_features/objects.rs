@@ -3165,7 +3165,10 @@ fn set_empty() {
 #[test]
 fn sets_cannot_be_indexed() {
     let error = eval_fails(r#"x = Set(1, 2)[0]"#);
-    assert!(error.contains("cannot index Set"), "{error}");
+    assert!(
+        error.contains("Operator `[]` is not defined for operand types `Set` and `Int`."),
+        "{error}"
+    );
 }
 
 // ============================================================
@@ -3981,7 +3984,7 @@ fn failed_module_local_is_not_a_member_of_module() {
     assert_eq!(val["self"], serde_json::Value::Null);
     for read in ["module[\"x\"]", "this[\"x\"]"] {
         let err = eval_fails(&format!("{src}result = {read}\n"));
-        assert!(err.contains("key not found: x"), "{read}: {err}");
+        assert!(err.contains("Cannot find key `\"x\"`"), "{read}: {err}");
     }
 }
 
@@ -7944,4 +7947,125 @@ miss = m.getOrDefault("z")
 "#,
     );
     assert_eq!(json["miss"], 2);
+}
+
+// ============================================================
+// Subscripts, class amendments and spreads of Listing and Mapping
+// ============================================================
+
+#[test]
+fn subscript_errors_name_the_key_or_index() {
+    let val = eval(
+        r#"
+import "pkl:test"
+local l = List(1, 2)
+local m = new Mapping { ["a"] = 1 }
+local li = new Listing { 1 }
+res1 = test.catch(() -> l[5])
+res2 = test.catch(() -> m["b"])
+res3 = test.catch(() -> m[3])
+res4 = test.catch(() -> li[-1])
+res5 = test.catch(() -> l["a"])
+res6 = test.catch(() -> m[1.5])
+"#,
+    );
+    assert_eq!(
+        val["res1"],
+        "Element index `5` is out of range `0`..`1`.\nCollection: List(1, 2)"
+    );
+    assert_eq!(val["res2"], "Cannot find key `\"b\"`.");
+    assert_eq!(val["res3"], "Cannot find key `3`.");
+    assert_eq!(val["res4"], "Element index `-1` is out of range `0`..`0`.");
+    assert_eq!(
+        val["res5"],
+        "Operator `[]` is not defined for operand types `List` and `String`.\nLeft operand : List(1, 2)\nRight operand: \"a\""
+    );
+    assert_eq!(val["res6"], "Cannot find key `1.5`.");
+}
+
+#[test]
+fn amending_the_mapping_and_listing_classes_amends_an_empty_one() {
+    let val = eval(
+        r#"
+a = (Mapping) { ["k"] = 1 }
+b = (Listing) { 1; 2 }
+c = (Mapping) { when (true) {} }
+d = (Listing) { when (true) {} }
+e = (Dynamic) { when (true) {} }
+"#,
+    );
+    assert_eq!(val["a"], serde_json::json!({ "k": 1 }));
+    assert_eq!(val["b"], serde_json::json!([1, 2]));
+    assert_eq!(val["c"], serde_json::json!({}));
+    assert_eq!(val["d"], serde_json::json!([]));
+    assert_eq!(val["e"], serde_json::json!({}));
+}
+
+#[test]
+fn spreading_the_wrong_value_into_a_mapping_says_what_it_held() {
+    let val = eval(
+        r#"
+import "pkl:test"
+local listing = new Listing { 1; 2 }
+local dynamic = new Dynamic { 1; foo = "foo" }
+res1 = test.catch(() -> new Mapping { ...listing })
+res2 = test.catch(() -> new Mapping { ...dynamic })
+res3 = test.catch(() -> new Mapping { ...List(1, 2, 3) })
+res4 = test.catch(() -> new Mapping { ...Set(10, 20) })
+"#,
+    );
+    assert_eq!(
+        val["res1"],
+        "Cannot spread object containing elements into object of type `Mapping`."
+    );
+    assert_eq!(
+        val["res2"],
+        "Cannot spread object containing properties into object of type `Mapping`."
+    );
+    assert_eq!(
+        val["res3"],
+        "Cannot spread value of type `List` into object of type `Mapping`.\nValue: List(1, 2, 3)"
+    );
+    assert_eq!(
+        val["res4"],
+        "Cannot spread value of type `Set` into object of type `Mapping`.\nValue: Set(10, 20)"
+    );
+}
+
+#[test]
+fn an_amended_mapping_entry_is_seen_by_the_entries_that_read_it() {
+    let val = eval(
+        r#"
+a = new Mapping { ["one"] = 1; ["two"] = this["one"] + 1; ["three"] = 3 }
+b = (a) { ["one"] = 2 }
+c = (a) { ["three"] = 4; ["one"] = 10 }
+"#,
+    );
+    assert_eq!(
+        val["b"],
+        serde_json::json!({ "one": 2, "two": 3, "three": 3 })
+    );
+    assert_eq!(
+        val["c"],
+        serde_json::json!({ "one": 10, "two": 11, "three": 4 })
+    );
+}
+
+#[test]
+fn a_generated_member_may_not_repeat_a_declared_property() {
+    for src in [
+        "x { y = 123; when (true) { y = 456 } }",
+        "x { when (true) { y = 456 }; y = 123 }",
+        "x { y { a = 1 }; when (true) { y = 2 } }",
+    ] {
+        let err = eval_fails(src);
+        assert!(
+            err.contains("Duplicate definition of member `y`."),
+            "{src}: {err}"
+        );
+    }
+    let val =
+        eval("x { y = 1; when (false) { y = 2 } }\nz { when (true) { y = 1 } else { y = 2 } }");
+    assert_eq!(val["x"], serde_json::json!({ "y": 1 }));
+    assert_eq!(val["z"], serde_json::json!({ "y": 1 }));
 }

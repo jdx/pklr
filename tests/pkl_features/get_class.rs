@@ -325,12 +325,17 @@ fn class_value_cast_to_dynamic_fails() {
 }
 
 #[test]
+fn amending_the_dynamic_class_makes_a_dynamic_object() {
+    let json = eval("x = (Dynamic) { a = 1 }");
+    assert_eq!(json["x"], serde_json::json!({ "a": 1 }));
+}
+
+#[test]
 fn amending_a_builtin_class_value_is_rejected() {
     for src in [
         "x = (Duration) { a = 1 }",
         "x = (DataSize) { a = 1 }",
         "x = (Regex) { a = 1 }",
-        "x = (Dynamic) { a = 1 }",
         "x = (1.getClass()) { a = 1 }",
     ] {
         let err = eval_fails(src);
