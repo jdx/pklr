@@ -8014,3 +8014,10 @@ fn a_local_read_by_its_own_body_is_still_bound() {
     assert_eq!(v["c"]["y"], 2);
     assert_eq!(v["r"]["z"], 2);
 }
+
+#[test]
+fn function_argument_set_for_list_names_the_collection() {
+    let e = eval_fails("function f(x: List<Int>) = x\nr = f(Set(\"a\"))\n");
+    assert!(e.contains("Set"), "{e}");
+    assert!(!e.contains("got type String"), "{e}");
+}

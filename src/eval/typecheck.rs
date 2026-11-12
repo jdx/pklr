@@ -582,8 +582,11 @@ impl Evaluator {
         depth: usize,
     ) -> String {
         if let (crate::parser::TypeExpr::Generic(name, args), Value::List(items)) = (ty, val)
-            && matches!(name.as_str(), "List" | "Set")
             && let [element] = args.as_slice()
+            && matches!(
+                (name.as_str(), items.kind()),
+                ("List", ListKind::List) | ("Set", ListKind::Set)
+            )
         {
             for item in items.iter() {
                 self.type_violation = None;
