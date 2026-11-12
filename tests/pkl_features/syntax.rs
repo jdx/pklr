@@ -3051,6 +3051,14 @@ fn glob_imports_and_type_names_are_validated() {
             "foo = 1\nres: foo\n",
             "Expected `foo` to be a type, but it is not.",
         ),
+        (
+            "import* \"missing-dir/*.pkl\" as g\nres: g\n",
+            "Expected `g` to be a type, but it is not.",
+        ),
+        (
+            "import* \"missing-dir/*.pkl\" as g\nres: g.T\n",
+            "Expected `g` to be a type, but it is not.",
+        ),
     ] {
         let err = eval_fails(src);
         assert!(err.contains(expected), "{src}: {err}");
