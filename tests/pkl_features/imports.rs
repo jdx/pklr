@@ -4388,3 +4388,54 @@ fn modulepath_unused_missing_import_is_lazy() {
     let err = eval_with_module_path(&main, &[temp.path()]).unwrap_err();
     assert!(err.contains("modulepath:/missing.pkl"), "{err}");
 }
+
+#[test]
+fn inherited_declaration_naming_a_non_type_is_rejected() {
+    // `pkl eval` rejects the amending module with this message too.
+    let temp = TestTempDir::new("pklr_test_inherited_non_type");
+    std::fs::write(temp.path().join("p.pkl"), "foo = 1\nres: foo\n").unwrap();
+    std::fs::write(temp.path().join("main.pkl"), "amends \"p.pkl\"\nx = 1\n").unwrap();
+    let err = pklr::eval_to_json(&temp.path().join("main.pkl")).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("Expected `foo` to be a type, but it is not."),
+        "{err}"
+    );
+}
+
+#[test]
+fn inherited_declaration_resolves_types_in_its_own_module() {
+    // A child's `local C = 1` does not change what the base's `C` names.
+    let temp = TestTempDir::new("pklr_test_inherited_type_scope");
+    std::fs::write(
+        temp.path().join("p.pkl"),
+        "local class C {}\nhidden item: C?\n",
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("main.pkl"),
+        "amends \"p.pkl\"\nlocal C = 1\n",
+    )
+    .unwrap();
+    let v = pklr::eval_to_json(&temp.path().join("main.pkl")).unwrap();
+    assert_eq!(v, serde_json::json!({}));
+}
+
+#[test]
+fn inherited_annotation_is_not_checked_in_the_child_scope() {
+    // The child redeclares `item` without a type, inheriting `C?`, while its
+    // own `local C` shadows the class. `pkl eval` accepts it.
+    let temp = TestTempDir::new("pklr_test_inherited_annotation_scope");
+    std::fs::write(
+        temp.path().join("p.pkl"),
+        "local class C {}\nitem: C? = null\n",
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("main.pkl"),
+        "amends \"p.pkl\"\nlocal C = 1\nitem = if (false) new {} else null\n",
+    )
+    .unwrap();
+    let v = pklr::eval_to_json(&temp.path().join("main.pkl")).unwrap();
+    assert_eq!(v, serde_json::json!({}));
+}

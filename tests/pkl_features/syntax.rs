@@ -3049,6 +3049,37 @@ fn member_predicates_are_reported_as_unsupported() {
 }
 
 #[test]
+fn glob_imports_and_type_names_are_validated() {
+    // Each is rejected by `pkl eval` too.
+    for (src, expected) in [
+        (
+            "res = import*(\"https://www.apple.com/**.pkl\")\n",
+            "not globbable",
+        ),
+        (
+            "res = import*(\"file:path/to/foo.pkl\")\n",
+            "has invalid syntax",
+        ),
+        ("import* \".../x/**.pkl\" as g\nres = g\n", "triple-dot"),
+        (
+            "foo = 1\nres: foo\n",
+            "Expected `foo` to be a type, but it is not.",
+        ),
+        (
+            "import* \"missing-dir/*.pkl\" as g\nres: g\n",
+            "Expected `g` to be a type, but it is not.",
+        ),
+        (
+            "import* \"missing-dir/*.pkl\" as g\nres: g.T\n",
+            "Expected `g` to be a type, but it is not.",
+        ),
+    ] {
+        let err = eval_fails(src);
+        assert!(err.contains(expected), "{src}: {err}");
+    }
+}
+
+#[test]
 fn dynamic_element_amendment_by_computed_index_sees_locals_and_super() {
     // `pkl eval` gives {"a": [1, 9], "b": [1, 9], "c": [1, 1]}.
     let v = eval(
