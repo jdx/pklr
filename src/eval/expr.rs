@@ -523,17 +523,8 @@ impl Evaluator {
                     }
                     (Value::List(items), "length") => return Ok(Value::Int(items.len() as i64)),
                     (Value::List(items), "isEmpty") => return Ok(Value::Bool(items.is_empty())),
-                    (Value::List(items), "first") => {
-                        return items
-                            .first()
-                            .cloned()
-                            .ok_or_else(|| Error::Eval("empty list".into()));
-                    }
-                    (Value::List(items), "last") => {
-                        return items
-                            .last()
-                            .cloned()
-                            .ok_or_else(|| Error::Eval("empty list".into()));
+                    (Value::List(items), field_name) if is_list_element_member(field_name) => {
+                        return list_element_member(&obj, items, field_name);
                     }
                     (Value::String(s), "length") => {
                         return Ok(Value::Int(s.chars().count() as i64));
@@ -1319,4 +1310,61 @@ fn alias_over_class(name: &str, value: &Value, scope: &Scope) -> Option<Value> {
         .bound_by_alias(name)
         .then(|| type_alias_value(name, scope))
         .flatten()
+}
+
+/// Whether `name` is a member of a list that reads its first, last or only
+/// element, or the elements after the first.
+fn is_list_element_member(name: &str) -> bool {
+    matches!(
+        name,
+        "first"
+            | "last"
+            | "single"
+            | "rest"
+            | "firstOrNull"
+            | "lastOrNull"
+            | "singleOrNull"
+            | "restOrNull"
+            | "lastIndex"
+    )
+}
+
+/// The member `name` of `list`, a list or set (`items` are its elements).
+#[inline(never)]
+fn list_element_member(list: &Value, items: &ListValue, name: &str) -> Result<Value> {
+    let rest = || Value::List(ListValue::new(items.kind(), items[1..].to_vec()));
+    let found = match name {
+        "first" => items.first().cloned(),
+        "last" => items.last().cloned(),
+        "single" => (items.len() == 1).then(|| items[0].clone()),
+        "rest" => (!items.is_empty()).then(rest),
+        "firstOrNull" => return Ok(items.first().cloned().unwrap_or(Value::Null)),
+        "lastOrNull" => return Ok(items.last().cloned().unwrap_or(Value::Null)),
+        "singleOrNull" => {
+            return Ok(if items.len() == 1 {
+                items[0].clone()
+            } else {
+                Value::Null
+            });
+        }
+        "restOrNull" => {
+            return Ok(if items.is_empty() {
+                Value::Null
+            } else {
+                rest()
+            });
+        }
+        _ => return Ok(Value::Int(items.len() as i64 - 1)),
+    };
+    found.ok_or_else(|| {
+        let expected = if name == "single" {
+            "a single-element"
+        } else {
+            "a non-empty"
+        };
+        Error::Eval(format!(
+            "Expected {expected} collection.\nCollection: {}",
+            crate::eval::render::display_value(list)
+        ))
+    })
 }
