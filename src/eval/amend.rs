@@ -1958,12 +1958,23 @@ fn class_unresolved(ty: &crate::parser::TypeExpr, declaring: &Scope) -> bool {
 /// `entry` as the base wrote it, reading `shadowed` members as the base held
 /// them even where an amendment declares a `local` of the same name.
 pub(super) fn shadow_local_reads(entry: &Entry, shadowed: &[(Name, Value)]) -> Entry {
-    let Entry::Property(prop) = entry else {
-        return entry.clone();
-    };
     if shadowed.is_empty() {
         return entry.clone();
     }
+    let wrap = |expr: &Expr| {
+        Expr::TemplateLocals(
+            LocalBindings(Arc::new(shadowed.to_vec())),
+            Box::new(expr.clone()),
+        )
+    };
+    let prop = match entry {
+        Entry::Property(prop) => prop,
+        Entry::DynProperty(key, value) => return Entry::DynProperty(wrap(key), wrap(value)),
+        Entry::Elem(expr) => return Entry::Elem(wrap(expr)),
+        Entry::Spread(expr) => return Entry::Spread(wrap(expr)),
+        Entry::Predicate(test, value) => return Entry::Predicate(wrap(test), wrap(value)),
+        _ => return entry.clone(),
+    };
     let reads = property_reference_names(prop);
     let seen: Vec<(Name, Value)> = shadowed
         .iter()

@@ -3741,3 +3741,13 @@ fn consecutive_bodies_amend_the_inherited_member_and_declared_locals_are_checked
     );
     assert_eq!(value["r"], serde_json::json!([1, 2, 3]));
 }
+
+#[test]
+fn base_locals_stay_bound_in_nested_dynamic_entries() {
+    // `pkl eval` 0.32.2: the base's `l` is not replaced by the override.
+    let value = eval(
+        "base { local l = \"original\"; foo { [\"key\"] = l } }\n\
+         child = (base) { l = \"override\" }\n",
+    );
+    assert_eq!(value["child"]["foo"]["key"], "original");
+}
