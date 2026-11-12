@@ -140,7 +140,7 @@ pub trait EvalCapabilities: Send + Sync {
     fn glob(&mut self, base: &Path, pattern: &str) -> Result<Vec<PathBuf>>;
 
     /// Whether the file resource at `path` exists, asked by `read`, `read?`
-    /// and `read*` (including triple-dot resource lookup).
+    /// and `read*`, including triple-dot and `modulepath:` resource lookup.
     ///
     /// Module, import and package loading keep using [`Self::path_exists`], so
     /// a host can allow imports while denying resource reads (or the reverse)

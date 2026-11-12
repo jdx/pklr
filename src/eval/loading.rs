@@ -9,7 +9,7 @@ impl Evaluator {
         if uri.starts_with("file:") {
             file_uri_path(uri)
         } else if uri.starts_with("modulepath:") {
-            self.module_path_file(uri)
+            self.module_path_file(uri, false)
         } else {
             self.resolve_local_path(current_path, uri)
         }
@@ -19,12 +19,19 @@ impl Evaluator {
     /// directory holding a regular file at that path. A URI that names nothing
     /// is [`Error::ImportNotFound`]. This is the single place module path
     /// lookups happen.
-    fn module_path_file(&mut self, uri: &str) -> Result<PathBuf> {
+    fn module_path_file(&mut self, uri: &str, resource: bool) -> Result<PathBuf> {
         let segments = module_path_segments(uri)?;
         for dir in self.module_path.clone() {
             let mut candidate = dir;
             candidate.extend(&segments);
-            if self.is_file_io(&candidate)? {
+            // A resource is located through the resource hooks, which have no
+            // file-versus-directory distinction.
+            let found = if resource {
+                self.resource_path_exists_io(&candidate)?
+            } else {
+                self.is_file_io(&candidate)?
+            };
+            if found {
                 return Ok(candidate);
             }
         }
@@ -39,7 +46,7 @@ impl Evaluator {
             return Ok(None);
         };
         // The file is named by the path alone, not a query or fragment.
-        match self.module_path_file(split_query(uri).0) {
+        match self.module_path_file(split_query(uri).0, true) {
             Ok(path) => Ok(Some((path, normalized))),
             Err(Error::ImportNotFound(_)) => Ok(None),
             Err(error) => Err(error),
