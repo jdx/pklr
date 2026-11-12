@@ -256,6 +256,15 @@ impl Evaluator {
             return regex_value(val);
         }
 
+        // A property holding a number, boolean or null is no function.
+        if let Expr::Ident(name) = func_expr
+            && matches!(
+                func_val,
+                Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Null
+            )
+        {
+            return Err(Error::Eval(format!("Cannot find method `{name}`.")));
+        }
         // Plain call with no args on an object — return the object
         if args.is_empty() {
             return Ok(func_val);
@@ -780,6 +789,14 @@ pub(super) fn caught_error_message(error: Error) -> String {
     // pklr puts on its own line follows the message, and a renderer's hint to
     // add a converter is dropped. Only a renderer's own errors are rewritten:
     // text a program throws is returned as it is.
+    if message.starts_with("Type constraint `") || message.starts_with("Expected value of type `") {
+        // The context is a suffix naming one property.
+        let message = match message.rsplit_once(super::typecheck::PROPERTY_CONTEXT) {
+            Some((first, name)) if name.ends_with('\'') && !name.contains('\n') => first,
+            _ => message.as_str(),
+        };
+        return message.replacen("\nValue: ", " Value: ", 1);
+    }
     if !(message.starts_with("Cannot render ") || message.starts_with("The top-level value of ")) {
         return message;
     }
