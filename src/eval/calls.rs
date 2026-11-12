@@ -172,7 +172,7 @@ impl Evaluator {
                 }
                 // `Null(default)` is a null value that carries a default object or
                 // function for amending; pklr keeps only the null.
-                "Null" if args.len() == 1 => {
+                "Null" if args.len() == 1 && scope.get("Null").is_none() => {
                     // A `new` default is not built: it may name the class being
                     // instantiated, whose property this is.
                     if matches!(&args[0], Expr::New(..)) {
