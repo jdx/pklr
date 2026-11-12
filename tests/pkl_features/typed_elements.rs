@@ -1645,3 +1645,124 @@ fn selected_untyped_new_mapping_values_amend_the_default() {
         serde_json::json!({"k": [[9], [1]], "j": [[9], [2]], "m": [[9], [3]]})
     );
 }
+
+// Expectations below were compared with `pkl eval` 0.32.2.
+
+#[test]
+fn new_listing_checks_elements_against_its_type_argument() {
+    eval_fails("res = new Listing<String> { 1 }");
+    eval_fails("one = 1\nres = new Listing<String> { one }");
+    eval_fails(
+        "res: Listing<String(!isEmpty)> = new Listing<String(endsWith(\"ga\"))> { \"hola\" }",
+    );
+    assert_eq!(
+        eval("res = new Listing<String(endsWith(\"a\"))> { \"hola\" }")["res"],
+        serde_json::json!(["hola"])
+    );
+}
+
+#[test]
+fn new_collections_check_class_literal_and_bare_key_type_arguments() {
+    eval_fails("class C {}\na = new Listing<C> { 1 }");
+    eval_fails("a = new Listing<\"ok\"> { \"wrong\" }");
+    eval_fails("a = new Mapping<Int, Any> { [\"wrong\"] = 1 }");
+}
+
+#[test]
+fn new_mapping_checks_keys_and_values_against_its_type_arguments() {
+    eval_fails("res = new Mapping<String, String> { [\"foo\"] = 1 }");
+    eval_fails(
+        "res = new Mapping<Listing<String(length == 5)>, String> { [new Listing { \"hi\" }] = \"hi\" }",
+    );
+    assert_eq!(
+        eval("res = new Mapping<String, Int> { [\"foo\"] = 1 }")["res"],
+        serde_json::json!({"foo": 1})
+    );
+}
+
+#[test]
+fn object_and_list_mapping_keys_do_not_render_as_json_strings() {
+    let temp = TestTempDir::new("pklr_object_mapping_keys_render");
+    for (name, src) in [
+        (
+            "person.pkl",
+            "class Person { name: String = \"\" }\nres { [new Person {}] = 1 }\n",
+        ),
+        ("dynamic.pkl", "res { [new Dynamic { a = 1 }] = 1 }\n"),
+        ("list.pkl", "res { [List(1)] = 1 }\n"),
+    ] {
+        let path = temp.path().join(name);
+        std::fs::write(&path, src).unwrap();
+        let error = pklr::eval_to_json(&path).unwrap_err().to_string();
+        assert!(error.contains("non-string key"), "{name}: {error}");
+    }
+}
+
+#[test]
+fn amending_a_checked_new_listing_keeps_late_binding_and_drops_its_type_argument() {
+    let temp = TestTempDir::new("pklr_checked_new_listing_amend");
+    std::fs::write(
+        temp.path().join("Base.pkl"),
+        "base = 1\nitems = new Listing<Int> { base }\n",
+    )
+    .unwrap();
+    let child = temp.path().join("Child.pkl");
+    std::fs::write(&child, "amends \"Base.pkl\"\nbase = 2\nitems { 3 }\n").unwrap();
+    assert_eq!(
+        pklr::eval_to_json(&child).unwrap(),
+        serde_json::json!({"base": 2, "items": [2, 3]})
+    );
+    // pkl does not carry `new Listing<Int>`'s type argument to an amendment.
+    let loose = temp.path().join("Loose.pkl");
+    std::fs::write(&loose, "amends \"Base.pkl\"\nitems { \"x\" }\n").unwrap();
+    assert_eq!(
+        pklr::eval_to_json(&loose).unwrap(),
+        serde_json::json!({"base": 1, "items": [1, "x"]})
+    );
+}
+
+#[test]
+fn amending_a_checked_new_listing_still_checks_its_original_entries() {
+    let temp = TestTempDir::new("pklr_checked_new_listing_original");
+    std::fs::write(
+        temp.path().join("Base.pkl"),
+        "base = \"ok\"\nitems = new Listing<String(!isEmpty)> { base }\n",
+    )
+    .unwrap();
+    let child = temp.path().join("Child.pkl");
+    std::fs::write(
+        &child,
+        "amends \"Base.pkl\"\nbase = \"\"\nitems { \"extra\" }\n",
+    )
+    .unwrap();
+    let err = pklr::eval_to_json(&child).unwrap_err().to_string();
+    assert!(err.contains("!isEmpty"), "{err}");
+}
+
+#[test]
+fn json_renderer_rejects_object_and_list_mapping_keys() {
+    let temp = TestTempDir::new("pklr_json_renderer_compound_keys");
+    let file = temp.path().join("r.pkl");
+    std::fs::write(
+        &file,
+        "r = new JsonRenderer {}.renderValue(new Mapping { [List(1)] = 1 })\n",
+    )
+    .unwrap();
+    let err = pklr::eval_to_json(&file).unwrap_err().to_string();
+    assert!(err.contains("non-string key as JSON"), "{err}");
+}
+
+#[test]
+fn json_renderer_omits_null_entries_with_compound_keys() {
+    let temp = TestTempDir::new("pklr_json_renderer_null_compound_keys");
+    let file = temp.path().join("r.pkl");
+    std::fs::write(
+        &file,
+        "r = new JsonRenderer { omitNullProperties = true }.renderValue(new Mapping { [List(1)] = null })\n",
+    )
+    .unwrap();
+    assert_eq!(
+        pklr::eval_to_json(&file).unwrap(),
+        serde_json::json!({"r": "{}"})
+    );
+}

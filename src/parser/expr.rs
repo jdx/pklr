@@ -223,7 +223,7 @@ impl<'a> Parser<'a> {
             TokenKind::LParen => return self.parse_paren_or_lambda(),
             TokenKind::KwNew => {
                 self.advance();
-                let (type_name, generic_params) = self.parse_new_type()?;
+                let (type_name, generic_params, checked_type) = self.parse_new_type()?;
                 let body = self.parse_object_body(false)?;
                 if !body.params.is_empty() {
                     // `new Mixin { x -> ... }` is the function `(x) -> x { ... }`
@@ -238,8 +238,16 @@ impl<'a> Parser<'a> {
                         true,
                     ));
                 }
+                // An empty body holds nothing to check.
+                let checked_type = checked_type.filter(|_| !body.entries.is_empty());
+                let new = Expr::New(type_name, body.entries.into(), generic_params);
+                // `new Listing<String(isEmpty)> { ... }` checks what it holds
+                // against the type argument, which the names alone drop.
                 return Ok((
-                    Expr::New(type_name, body.entries.into(), generic_params),
+                    match checked_type {
+                        Some(ty) => Expr::Checked(Box::new(new), ty),
+                        None => new,
+                    },
                     true,
                 ));
             }
@@ -369,9 +377,11 @@ impl<'a> Parser<'a> {
 
     /// Parse the class of a `new` expression: its name and the simple names
     /// of its type arguments.
-    pub(super) fn parse_new_type(&mut self) -> Result<(Option<String>, Vec<String>)> {
+    pub(super) fn parse_new_type(
+        &mut self,
+    ) -> Result<(Option<String>, Vec<String>, Option<TypeExpr>)> {
         if matches!(self.peek(), TokenKind::LBrace) {
-            return Ok((None, Vec::new()));
+            return Ok((None, Vec::new(), None));
         }
         let offset = self.peek_tok().offset;
         let ty = self.parse_type()?;
@@ -385,6 +395,14 @@ impl<'a> Parser<'a> {
         {
             self.new_types.push((name.clone(), offset));
         }
+        let checked = match &ty {
+            TypeExpr::Generic(name, args)
+                if matches!(name.as_str(), "Listing" | "Mapping") && !args.is_empty() =>
+            {
+                Some(ty.clone())
+            }
+            _ => None,
+        };
         Ok(match ty {
             TypeExpr::Generic(name, args) => {
                 let mut params = Vec::new();
@@ -397,10 +415,10 @@ impl<'a> Parser<'a> {
                         generic_param_names(arg, &mut params);
                     }
                 }
-                (Some(name), params)
+                (Some(name), params, checked)
             }
-            TypeExpr::Named(name) => (Some(name), Vec::new()),
-            other => (Some(type_expr_runtime_name(&other)), Vec::new()),
+            TypeExpr::Named(name) => (Some(name), Vec::new(), None),
+            other => (Some(type_expr_runtime_name(&other)), Vec::new(), None),
         })
     }
 

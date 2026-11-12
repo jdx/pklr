@@ -1599,7 +1599,7 @@ pub(super) fn push_base_property(inherited: &mut Vec<Arc<Property>>, prop: &Arc<
 pub(super) fn builds_amendable_object(expr: &Expr) -> bool {
     match expr {
         Expr::New(..) | Expr::InferredNew(..) => true,
-        Expr::TemplateLocals(_, inner) => builds_amendable_object(inner),
+        Expr::TemplateLocals(_, inner) | Expr::Checked(inner, _) => builds_amendable_object(inner),
         Expr::Binop(BinOp::Add, left, right) => {
             overlay_body(right).is_some() && builds_amendable_object(left)
         }
@@ -1758,7 +1758,7 @@ pub(super) fn without_overridden_members(base: &Expr, body: &Body) -> Expr {
 pub(super) fn builds_mapping(expr: &Expr) -> bool {
     match expr {
         Expr::New(type_name, ..) => type_name.as_deref() == Some("Mapping"),
-        Expr::TemplateLocals(_, inner) => builds_mapping(inner),
+        Expr::TemplateLocals(_, inner) | Expr::Checked(inner, _) => builds_mapping(inner),
         Expr::Binop(BinOp::Add, left, _) => builds_mapping(left),
         _ => false,
     }
@@ -1846,9 +1846,12 @@ pub(super) fn compose_amended_object(
         base.clone()
     };
     let overlay = with_template_locals(locals, prop, Expr::ObjectBody(body.clone()));
+    // The type arguments of `new Listing<T> { ... }` keep checking the original
+    // entries, as pkl does; the overlay's own entries stay outside the check.
+    let value = Expr::Binop(BinOp::Add, Box::new(base), Box::new(overlay));
     Arc::new(Property {
         type_ann,
-        value: Some(Expr::Binop(BinOp::Add, Box::new(base), Box::new(overlay))),
+        value: Some(value),
         body: None,
         ..(**prop).clone()
     })
