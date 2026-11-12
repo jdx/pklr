@@ -3135,6 +3135,37 @@ fn const_scopes_reject_non_const_members() {
 }
 
 #[test]
+fn glob_imports_and_type_names_are_validated() {
+    // Each is rejected by `pkl eval` too.
+    for (src, expected) in [
+        (
+            "res = import*(\"https://www.apple.com/**.pkl\")\n",
+            "not globbable",
+        ),
+        (
+            "res = import*(\"file:path/to/foo.pkl\")\n",
+            "has invalid syntax",
+        ),
+        ("import* \".../x/**.pkl\" as g\nres = g\n", "triple-dot"),
+        (
+            "foo = 1\nres: foo\n",
+            "Expected `foo` to be a type, but it is not.",
+        ),
+        (
+            "import* \"missing-dir/*.pkl\" as g\nres: g\n",
+            "Expected `g` to be a type, but it is not.",
+        ),
+        (
+            "import* \"missing-dir/*.pkl\" as g\nres: g.T\n",
+            "Expected `g` to be a type, but it is not.",
+        ),
+    ] {
+        let err = eval_fails(src);
+        assert!(err.contains(expected), "{src}: {err}");
+    }
+}
+
+#[test]
 fn const_scopes_accept_const_and_local_names() {
     // Every program here evaluates under `pkl eval`.
     let json = eval("const x = 1\nclass C { v = x }\nr = new C {}\n");

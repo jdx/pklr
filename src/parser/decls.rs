@@ -479,7 +479,36 @@ impl<'a> Parser<'a> {
         while matches!(self.peek(), TokenKind::LBrace) {
             bodies.push(self.parse_object_body(false)?);
         }
-        if bodies.iter().all(|body| body.params.is_empty()) {
+        // Several plain bodies amend in turn. That is one body holding all
+        // their members, unless a later body redefines or selects what an
+        // earlier one defined, which amends that member instead.
+        let mut defined: Vec<&Entry> = Vec::new();
+        let mut redefines = false;
+        for body in &bodies {
+            for entry in &body.entries {
+                redefines |= match entry {
+                    Entry::Predicate(..) => !defined.is_empty(),
+                    Entry::Property(prop) => defined.iter().any(|earlier| {
+                        matches!(earlier, Entry::Property(other) if other.name == prop.name)
+                    }),
+                    Entry::DynProperty(key, _) => defined.iter().any(|earlier| {
+                        matches!(earlier, Entry::DynProperty(other, _) if other == key)
+                    }),
+                    _ => false,
+                };
+            }
+            defined.extend(body.entries.iter());
+        }
+        let plain = bodies.iter().all(|body| body.params.is_empty());
+        if redefines && plain {
+            // Each body amends the inherited member in turn. Evaluating the
+            // inherited value falls back to an empty object when nothing is
+            // inherited.
+            return Ok(BodyList::Amended(Box::new(move |parent| {
+                bodies.into_iter().fold(parent, amend_expr)
+            })));
+        }
+        if !redefines && plain {
             return Ok(BodyList::Plain(
                 bodies.into_iter().flat_map(|body| body.entries).collect(),
             ));

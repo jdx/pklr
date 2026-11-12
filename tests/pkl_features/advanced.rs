@@ -3573,3 +3573,249 @@ fn typealias_replacing_inherited_property_is_rejected_through_amends_and_imports
         );
     }
 }
+
+// Expected values are those of  0.32.2.
+#[test]
+fn local_members_late_binding_and_typed_locals_match_pkl() {
+    let json = eval(
+        r####"import "pkl:test"
+
+local bad: Int = "foo"
+badRead = test.catch(() -> bad)
+okRead = 1
+obj {
+  local p: List<String> = List("a", 1)
+  caught = test.catch(() -> p)
+  local function f(x: Int): String = x
+  callCaught = test.catch(() -> f(1))
+}
+missing {
+  local function g(): NoSuchType = 1
+  caught = test.catch(() -> g())
+}
+
+parent {
+  x = 1 + y
+  y = 2
+}
+child = (parent) {
+  x = super.x + 100
+  y = 3
+}
+grandChild = (child) {
+  y = 4
+}
+
+nestedLate {
+  foo {
+    x = y
+  }
+  y = 3
+}
+nestedLateAmended = (nestedLate) {
+  y = 4
+}
+
+chain {
+  bar { "Hello" }
+} {
+  bar { "World" }
+}
+
+amendedLocal {
+  local l = "original"
+  x = l
+}
+amendedLocalOverride = (amendedLocal) {
+  l = "override"
+}
+
+open class Foo1 {
+  local function f() = "original"
+  x = f()
+}
+class Foo2 extends Foo1 {
+  function f() = "override"
+}
+subclass = new Foo2 {}.x
+"####,
+    );
+    let expected: serde_json::Value = serde_json::from_str(
+        r####"{
+  "badRead": "Expected value of type `Int`, but got type `String`. Value: \"foo\"",
+  "okRead": 1,
+  "obj": {
+    "caught": "Expected value of type `String`, but got type `Int`. Value: 1",
+    "callCaught": "Expected value of type `String`, but got type `Int`. Value: 1"
+  },
+  "missing": {
+    "caught": "Cannot find type `NoSuchType`."
+  },
+  "parent": {
+    "x": 3,
+    "y": 2
+  },
+  "child": {
+    "x": 104,
+    "y": 3
+  },
+  "grandChild": {
+    "x": 105,
+    "y": 4
+  },
+  "nestedLate": {
+    "foo": {
+      "x": 3
+    },
+    "y": 3
+  },
+  "nestedLateAmended": {
+    "foo": {
+      "x": 4
+    },
+    "y": 4
+  },
+  "chain": {
+    "bar": [
+      "Hello",
+      "World"
+    ]
+  },
+  "amendedLocal": {
+    "x": "original"
+  },
+  "amendedLocalOverride": {
+    "x": "original",
+    "l": "override"
+  },
+  "subclass": "original"
+}
+"####,
+    )
+    .unwrap();
+    assert_eq!(json, expected);
+}
+
+#[test]
+fn keyword_after_a_dot_is_rejected() {
+    // `pkl eval` 0.32.2: "Keyword `outer` is not allowed here."
+    let error = eval_fails("a { b { x = outer.outer } }\n");
+    assert!(
+        error.contains("Keyword `outer` is not allowed here."),
+        "{error}"
+    );
+}
+
+#[test]
+fn consecutive_bodies_amend_the_inherited_member_and_declared_locals_are_checked() {
+    // Expected values come from `pkl eval` 0.32.2.
+    let value = eval(
+        "base { foo { keep = 1; bar { \"base\" } } }\n\
+         child = (base) { foo { bar { \"a\" } } { bar { \"b\" } } }\n\
+         fresh { keep = 1; bar { \"x\" } } { bar { \"y\" } }\n",
+    );
+    assert_eq!(
+        value["child"]["foo"],
+        serde_json::json!({"keep": 1, "bar": ["base", "a", "b"]})
+    );
+    assert_eq!(
+        value["fresh"],
+        serde_json::json!({"keep": 1, "bar": ["x", "y"]})
+    );
+
+    let error = eval_fails("local p: Listing<Int> = 1\nresult = p\n");
+    assert!(
+        error.contains("Expected value of type `Listing`, but got type `Int`."),
+        "{error}"
+    );
+    let error = eval_fails("local f: Int = () -> 1\nresult = f\n");
+    assert!(
+        error.contains("Expected value of type `Int`, but got type `Function0`."),
+        "{error}"
+    );
+    let value = eval(
+        "local p: Listing<Int> = new Listing { 1 }\n\
+         local f: (Int) -> Int = (x) -> x + 1\n\
+         local function k(x: Int): Int = x\n\
+         r = List(p.length, f.apply(1), k(3))\n",
+    );
+    assert_eq!(value["r"], serde_json::json!([1, 2, 3]));
+}
+
+#[test]
+fn base_locals_stay_bound_in_nested_dynamic_entries() {
+    // `pkl eval` 0.32.2: the base's `l` is not replaced by the override.
+    let value = eval(
+        "base { local l = \"original\"; foo { [\"key\"] = l } }\n\
+         child = (base) { l = \"override\" }\n",
+    );
+    assert_eq!(value["child"]["foo"]["key"], "original");
+}
+
+#[test]
+fn consecutive_bodies_on_a_computed_key_start_from_an_empty_object() {
+    // `pkl eval` 0.32.2: the later body amends the earlier one.
+    let value = eval("local k = \"a\"\nx { [k] { v = 1; w = 1 } { v = 2 } }\n");
+    assert_eq!(value["x"]["a"], serde_json::json!({"v": 2, "w": 1}));
+}
+
+#[test]
+fn shadowing_keeps_loop_variables_and_inherited_dynamic_entries() {
+    let value = eval(
+        "base { local l = \"original\"; for (l in List(\"loop\")) { [l] = l } }\n\
+         child = (base) { l = \"override\" }\n\
+         a { [\"k\"] { keep = 1 } }\n\
+         b = (a) { local l = \"original\"; [\"k\"] { v = l } }\n\
+         c = (b) { l = \"override\" }\n",
+    );
+    assert_eq!(value["child"]["loop"], "loop");
+    assert_eq!(
+        value["c"]["k"],
+        serde_json::json!({"keep": 1, "v": "original"})
+    );
+}
+
+#[test]
+fn inherited_methods_late_super_reads_and_typed_object_lambdas_match_pkl() {
+    // Expected values come from `pkl eval` 0.32.2.
+    let value = eval(
+        "import \"pkl:test\"\n\
+         base { local l = 1; local function f() = l + y; y = 2; x = f() }\n\
+         child = (base) { l = 3 }\n\
+         open class A { x = y + 1; y = 10 }\n\
+         class B extends A { x = super.x + 100; y = super.y + 1 }\n\
+         r = new B {}\n\
+         obj { local g: Int = () -> 1; caught = test.catch(() -> g) }\n",
+    );
+    assert_eq!(value["child"]["x"], 3);
+    assert_eq!(value["r"]["x"], 112);
+    assert_eq!(
+        value["obj"]["caught"],
+        "Expected value of type `Int`, but got type `Function0`. Value: new Function0 {}"
+    );
+}
+
+#[test]
+fn nested_locals_hide_shadowed_ones_and_constraint_failures_are_reported() {
+    // Expected values come from `pkl eval` 0.32.2.
+    let value = eval(
+        "import \"pkl:test\"\n\
+         base { local x = 1; [\"k\"] { local x = 3; value = x } }\n\
+         child = (base) { x = 5 }\n\
+         local n: Int(this > 0) = -1\n\
+         r = test.catch(() -> n)\n",
+    );
+    assert_eq!(value["child"]["k"]["value"], 3);
+    assert_eq!(value["r"], "Type constraint `this > 0` violated. Value: -1");
+}
+
+#[test]
+fn a_method_parameter_hides_a_saved_local_of_the_same_name() {
+    // `pkl eval` 0.32.2: 8
+    let value = eval(
+        "open class A { local l = 1; function f(l) = l + this.l }\n\
+         class B extends A { l: Int = 3 }\n\
+         r = new B {}.f(5)\n",
+    );
+    assert_eq!(value["r"], 8);
+}

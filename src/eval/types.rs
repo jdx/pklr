@@ -2119,6 +2119,13 @@ impl TypeResolver<'_> {
             {
                 return None;
             }
+            // A glob import's alias is a mapping of modules, not a module.
+            if scope.module_identity(module).is_none()
+                && !module.contains('.')
+                && matches!(resolve_dotted(scope, module), Some(Value::Object(_, None)))
+            {
+                return Some(format!("Expected `{module}` to be a type, but it is not."));
+            }
             return Some(format!("Cannot find type `{member}` in module `{module}`."));
         };
         // Walk the body in the scope of the module that declares it.

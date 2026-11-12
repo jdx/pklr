@@ -785,6 +785,23 @@ impl Evaluator {
     ) -> Result<Value> {
         // A malformed triple-dot URI is a syntax error, not a file pattern.
         parse_triple_dot_path(uri)?;
+        if uri.starts_with("...") {
+            return Err(Error::Eval(
+                "Cannot combine glob imports with triple-dot module URIs.".into(),
+            ));
+        }
+        if uri.starts_with("file:") && !uri.starts_with("file:/") {
+            return Err(Error::Eval(format!(
+                "Module URI `{uri}` has invalid syntax. File URIs must have a path that starts with `/` (e.g. file:/path/to/my_module.pkl)."
+            )));
+        }
+        for scheme in ["http", "https"] {
+            if uri.starts_with(&format!("{scheme}:")) {
+                return Err(Error::Eval(format!(
+                    "Cannot expand glob pattern `{uri}` because scheme `{scheme}` is not globbable."
+                )));
+            }
+        }
         if uri.starts_with("modulepath:") {
             return Err(Error::Eval(format!(
                 "Cannot expand glob pattern `{uri}` because scheme `modulepath` is not globbable."

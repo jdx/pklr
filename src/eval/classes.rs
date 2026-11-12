@@ -132,11 +132,27 @@ impl Evaluator {
                             );
                             captured
                         });
+                        // A parent's `local` member is not overridden: the
+                        // parent's own expressions keep reading it.
+                        let shadowed: Vec<(Name, Value)> = psrc
+                            .entries
+                            .iter()
+                            .filter_map(|entry| match entry {
+                                Entry::Property(p)
+                                    if has_modifier(&p.modifiers, Modifier::Local)
+                                        && child_names.contains(&p.name) =>
+                                {
+                                    Some((p.name.clone(), psrc.scope().get(&p.name)?.clone()))
+                                }
+                                _ => None,
+                            })
+                            .collect();
                         for (entry_index, pe) in psrc.entries.iter().enumerate() {
                             if let Entry::Property(p) = pe
-                                && !child_names.contains(&p.name)
+                                && (!child_names.contains(&p.name)
+                                    || has_modifier(&p.modifiers, Modifier::Local))
                             {
-                                combined_entries.push(pe.clone());
+                                combined_entries.push(shadow_local_reads(pe, &shadowed));
                                 combined_entry_scopes.push(
                                     psrc.entry_scopes
                                         .get(entry_index)

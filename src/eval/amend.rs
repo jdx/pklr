@@ -324,14 +324,31 @@ impl Evaluator {
         // If the overlay has a body amendment (no `=`), keep the base entry first
         // so its value is in scope, then add the overlay body entry after.
         let mut used_overlay: HashSet<&str> = HashSet::default();
+        // The base's `local` members that an overlay member of the same name
+        // must not capture.
+        let shadowed: Vec<(Name, Value)> = base_entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Property(prop) => match overlay_by_name.get(prop.name.as_ref()) {
+                    Some(Entry::Property(_)) if has_modifier(&prop.modifiers, Modifier::Local) => {
+                        Some((prop.name.clone(), base_scope.get(&prop.name)?.clone()))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
         for (entry_index, entry) in base_entries.iter().enumerate() {
             let inherited_entry_scope = base_source
                 .entry_scopes
                 .get(entry_index)
                 .cloned()
                 .unwrap_or(None);
+            // A `local` member of the base is not overridden: the base's own
+            // expressions keep reading it.
             if let Entry::Property(prop) = entry
                 && let Some(replacement) = overlay_by_name.get(prop.name.as_ref())
+                && !has_modifier(&prop.modifiers, Modifier::Local)
             {
                 if let Entry::Property(overlay_prop) = replacement
                     && overlay_prop.body.is_some()
@@ -381,7 +398,7 @@ impl Evaluator {
                 used_overlay.insert(prop.name.as_ref());
                 continue;
             }
-            merged.push(entry.clone());
+            merged.push(shadow_local_reads(entry, &shadowed));
             merged_entry_scopes.push(inherited_entry_scope);
         }
 
@@ -2049,4 +2066,123 @@ pub(super) fn listing_leaf_unresolved_binding(name: &str) -> String {
 /// `declaring`.
 fn class_unresolved(ty: &crate::parser::TypeExpr, declaring: &Scope) -> bool {
     listing_leaf_name(ty, declaring).is_some_and(|leaf| resolve_dotted(declaring, &leaf).is_none())
+}
+
+/// `entry` as the base wrote it, reading `shadowed` members as the base held
+/// them even where an amendment declares a `local` of the same name.
+pub(super) fn shadow_local_reads(entry: &Entry, shadowed: &[(Name, Value)]) -> Entry {
+    if shadowed.is_empty() {
+        return entry.clone();
+    }
+    let wrap = |expr: &Expr| {
+        Expr::TemplateLocals(
+            LocalBindings(Arc::new(shadowed.to_vec())),
+            Box::new(expr.clone()),
+        )
+    };
+    let prop = match entry {
+        Entry::Property(prop) => prop,
+        Entry::DynProperty(key, value) => {
+            // A body stays visible, so it still amends an inherited entry.
+            let value = match value {
+                Expr::ObjectBody(body) => Expr::ObjectBody(shadow_body(body, shadowed)),
+                value => wrap(value),
+            };
+            return Entry::DynProperty(wrap(key), value);
+        }
+        Entry::Elem(expr) => return Entry::Elem(wrap(expr)),
+        Entry::Spread(expr) => return Entry::Spread(wrap(expr)),
+        Entry::Predicate(test, value) => return Entry::Predicate(wrap(test), wrap(value)),
+        Entry::ForGenerator(generator) => {
+            let mut generator = generator.clone();
+            generator.collection = wrap(&generator.collection);
+            // The loop's own variables hide a saved local of the same name.
+            let inner: Vec<(Name, Value)> = shadowed
+                .iter()
+                .filter(|(name, _)| {
+                    **name != *generator.val_var && generator.key_var.as_deref() != Some(&**name)
+                })
+                .cloned()
+                .collect();
+            generator.body = shadow_body(&generator.body, &inner);
+            return Entry::ForGenerator(generator);
+        }
+        Entry::WhenGenerator(generator) => {
+            let mut generator = generator.clone();
+            generator.condition = wrap(&generator.condition);
+            generator.body = shadow_body(&generator.body, shadowed);
+            generator.else_body = generator
+                .else_body
+                .as_ref()
+                .map(|body| shadow_body(body, shadowed));
+            return Entry::WhenGenerator(generator);
+        }
+        _ => return entry.clone(),
+    };
+    let reads = property_reference_names(prop);
+    let seen: Vec<(Name, Value)> = shadowed
+        .iter()
+        .filter(|(name, _)| reads.contains(name) && *name != prop.name)
+        .cloned()
+        .collect();
+    if seen.is_empty() {
+        return entry.clone();
+    }
+    let mut prop = (**prop).clone();
+    if let Some(value) = prop.value.take() {
+        let bindings = LocalBindings(Arc::new(seen));
+        prop.value = Some(match value {
+            // A method stays a lambda, so it is still bound and rebound as
+            // one; the saved locals wrap its body.
+            Expr::Lambda(params, body) => {
+                // A parameter hides a saved local of the same name.
+                let kept: Vec<(Name, Value)> = bindings
+                    .0
+                    .iter()
+                    .filter(|(name, _)| !params.iter().any(|param| **param == **name))
+                    .cloned()
+                    .collect();
+                let body = if kept.is_empty() {
+                    (*body).clone()
+                } else {
+                    Expr::TemplateLocals(LocalBindings(Arc::new(kept)), Box::new((*body).clone()))
+                };
+                Expr::Lambda(params, Arc::new(body))
+            }
+            value => Expr::TemplateLocals(bindings, Box::new(value)),
+        });
+    } else if let Some(body) = prop.body.take() {
+        // Keep the body a body, so it still amends the declared type's
+        // default and any inherited member; shadow the reads inside it.
+        let inner = without_declared(&seen, &body);
+        prop.body = Some(Arc::new(
+            body.iter()
+                .map(|entry| shadow_local_reads(entry, &inner))
+                .collect(),
+        ));
+    }
+    Entry::Property(Arc::new(prop))
+}
+
+fn shadow_body(body: &Body, shadowed: &[(Name, Value)]) -> Body {
+    let inner = without_declared(shadowed, body);
+    body.iter()
+        .map(|entry| shadow_local_reads(entry, &inner))
+        .collect::<Vec<_>>()
+        .into()
+}
+
+/// The saved locals a body does not declare itself: a local the body declares
+/// hides a saved one of the same name for the body's own reads.
+fn without_declared(shadowed: &[(Name, Value)], body: &[Entry]) -> Vec<(Name, Value)> {
+    shadowed
+        .iter()
+        .filter(|(name, _)| {
+            !body.iter().any(|entry| {
+                matches!(entry, Entry::Property(prop)
+                    if prop.name == *name && has_modifier(&prop.modifiers, Modifier::Local))
+            })
+        })
+        .cloned()
+        .collect()
 }

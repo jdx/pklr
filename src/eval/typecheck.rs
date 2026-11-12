@@ -1437,6 +1437,85 @@ fn stdlib_qualified_member<'a>(scope: &Scope, name: &'a str) -> Option<&'a str> 
     .then_some(member)
 }
 
+impl Evaluator {
+    /// Check `val` against a declared type, with the error pkl reports: the
+    /// first element of a `List<T>` or `Set<T>` that is not a `T` is the one
+    /// named, and the rejected value follows on its own line.
+    pub(super) fn check_declared_value(
+        &mut self,
+        val: &Value,
+        ty: &crate::parser::TypeExpr,
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<()> {
+        if !type_is_runtime_checkable(ty, scope) {
+            return match self.unresolved_type(ty, scope) {
+                Some(message) => Err(Error::Eval(message)),
+                None => Ok(()),
+            };
+        }
+        if self.eval_argument_check(val, ty, scope, depth, &mut Vec::new())? {
+            return Ok(());
+        }
+        // A value of the wrong base type is reported against the base, not
+        // against the constraint it never reached.
+        if let crate::parser::TypeExpr::Constrained(base, ..) = ty
+            && let Ok(base) = crate::parser::parse_type_name(base)
+            && !matches!(base, crate::parser::TypeExpr::Constrained(..))
+        {
+            self.check_declared_value(val, &base, scope, depth)?;
+        }
+        if let (crate::parser::TypeExpr::Generic(name, args), Value::List(items)) = (ty, val)
+            && matches!(name.as_str(), "List" | "Set")
+            && let [element] = args.as_slice()
+        {
+            for item in items.iter() {
+                self.check_declared_value(item, element, scope, depth)?;
+            }
+        }
+        if matches!(ty, crate::parser::TypeExpr::Constrained(..)) && self.type_violation.is_some() {
+            return Err(Error::Eval(self.type_mismatch_message(ty, val, None)));
+        }
+        Err(Error::Eval(format!(
+            "Expected value of type `{}`, but got type `{}`.\nValue: {}",
+            display_type_expr(ty),
+            pkl_class_name(val),
+            super::stdlib::render_value(val)
+        )))
+    }
+}
+
+impl Evaluator {
+    /// The check a typed `local` gets when it is evaluated. Listing and
+    /// Mapping members are checked as they are read, so only the type of the
+    /// value itself is checked here.
+    pub(super) fn check_local_value(
+        &mut self,
+        val: &Value,
+        ty: &crate::parser::TypeExpr,
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<()> {
+        use crate::parser::TypeExpr;
+        // Elements of a listing or mapping are checked as they are read, so
+        // only the collection itself is checked here.
+        fn shallow(ty: &TypeExpr) -> Option<TypeExpr> {
+            match ty {
+                TypeExpr::Generic(name, _) if matches!(name.as_str(), "Listing" | "Mapping") => {
+                    Some(TypeExpr::Named(name.clone()))
+                }
+                TypeExpr::Nullable(inner) => {
+                    shallow(inner).map(|ty| TypeExpr::Nullable(Box::new(ty)))
+                }
+                _ => None,
+            }
+        }
+        match shallow(ty) {
+            Some(ty) => self.check_declared_value(val, &ty, scope, depth),
+            None => self.check_declared_value(val, ty, scope, depth),
+        }
+    }
+}
 /// The constraints a constrained type's predicate joins, in source order, each
 /// with its source text when the parser recorded it. A `&&` inside one
 /// constraint stays inside it.
