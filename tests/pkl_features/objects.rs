@@ -8095,3 +8095,11 @@ fn spreading_a_dynamic_with_generated_properties_into_a_mapping_fails() {
         "{err}"
     );
 }
+
+#[test]
+fn spreading_a_dynamic_whose_skipped_generator_holds_a_property_works() {
+    let v = eval(
+        "local d = new Dynamic { [\"k\"] = 1; when (false) { p = 2 } }\nm = new Mapping { ...d }\nr = m[\"k\"]",
+    );
+    assert_eq!(v["r"], 1);
+}

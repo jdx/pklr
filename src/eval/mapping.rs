@@ -1238,7 +1238,10 @@ impl Evaluator {
                     {
                         // A `Dynamic` may hold only entries, which spread.
                         let has_properties = source.kind != ObjectKind::Dynamic
-                            || declares_property(&source.entries);
+                            || source
+                                .evaluated_properties
+                                .iter()
+                                .any(|name| declares_property(&source.entries, name));
                         if has_properties {
                             return Err(Error::Eval(
                                 "Cannot spread object containing properties into object of type \
@@ -1397,15 +1400,20 @@ fn reads_mapping_default(expr: &Expr) -> bool {
     )
 }
 
-/// Whether a body declares a non-local property, directly or in a `when` or
-/// `for` generator.
-fn declares_property(entries: &[Entry]) -> bool {
+/// Whether a body declares a non-local property `name`, directly or in a
+/// `when` or `for` generator.
+fn declares_property(entries: &[Entry], name: &str) -> bool {
     entries.iter().any(|entry| match entry {
-        Entry::Property(prop) => !has_modifier(&prop.modifiers, Modifier::Local),
-        Entry::WhenGenerator(w) => {
-            declares_property(&w.body) || w.else_body.as_ref().is_some_and(|b| declares_property(b))
+        Entry::Property(prop) => {
+            prop.name.as_ref() == name && !has_modifier(&prop.modifiers, Modifier::Local)
         }
-        Entry::ForGenerator(f) => declares_property(&f.body),
+        Entry::WhenGenerator(w) => {
+            declares_property(&w.body, name)
+                || w.else_body
+                    .as_ref()
+                    .is_some_and(|b| declares_property(b, name))
+        }
+        Entry::ForGenerator(f) => declares_property(&f.body, name),
         _ => false,
     })
 }
