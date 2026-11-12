@@ -26,6 +26,26 @@ struct ModuleMembers<'b> {
 }
 
 impl Evaluator {
+    /// The `module` binding's value, which has no source of its own, carrying
+    /// the module's class so `module.getClass()` can name it. A scope that
+    /// does not know its module (a lambda body) keeps the plain value.
+    pub(super) fn module_with_class(&self, props: &Arc<ObjectMap>, scope: &Scope) -> Value {
+        let Some(namespace) = scope.type_namespace.as_deref() else {
+            return Value::Object(Arc::clone(props), None);
+        };
+        let name = self.module_names.get(namespace).map_or_else(
+            || {
+                let file = namespace.rsplit(['/', '\\']).next().unwrap_or(namespace);
+                file.strip_suffix(".pkl").unwrap_or(file)
+            },
+            String::as_str,
+        );
+        Value::Object(
+            Arc::clone(props),
+            Some(module_binding_source(name, namespace)),
+        )
+    }
+
     pub(super) fn eval_module(
         &mut self,
         module: &Module,
@@ -2445,6 +2465,33 @@ pub(super) fn settled_eq(old: Option<&Value>, new: Option<&Value>) -> bool {
         },
         _ => false,
     }
+}
+
+/// The source that names a module's class, so `module.getClass()` can tell
+/// which module the value is.
+fn module_binding_source(name: &str, namespace: &str) -> Arc<ObjectSource> {
+    Arc::new(ObjectSource {
+        entries: Vec::new().into(),
+        captured: SourceScope::default(),
+        body_members: HashSet::default(),
+        is_open: true,
+        is_abstract: false,
+        type_name: None,
+        type_identity: Some(stdlib::module_class_identity(name, namespace)),
+        parent_type_names: Vec::new(),
+        parent_type_identities: Vec::new(),
+        entry_scopes: Vec::new(),
+        evaluated_properties: Vec::new(),
+        elements: Vec::new(),
+        mapping_value_types: Vec::new(),
+        deprecated: IndexMap::new(),
+        declared_as: None,
+        poisoned_members: None,
+        kind: ObjectKind::Object,
+        is_parsed_json: false,
+        is_module: true,
+        prototype: None,
+    })
 }
 
 #[cfg(test)]

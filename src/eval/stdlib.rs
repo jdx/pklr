@@ -245,6 +245,21 @@ pub(super) fn builtin_marker_class(name: &str, value: &Value) -> Option<Value> {
     }
 }
 
+/// The identity of a module's class, which the `module` binding carries and
+/// `getClass()` hands back: the module's name, then where it lives, so two
+/// modules of the same name are different classes.
+pub(super) fn module_class_identity(name: &str, namespace: &str) -> String {
+    format!("{MODULE_IDENTITY_PREFIX}{name}\0{namespace}")
+}
+
+const MODULE_IDENTITY_PREFIX: &str = "\0module:";
+
+/// The name a module class identity (see `module_class_identity`) carries.
+pub(crate) fn module_class_name(identity: &str) -> Option<&str> {
+    let rest = identity.strip_prefix(MODULE_IDENTITY_PREFIX)?;
+    Some(rest.split_once('\0').map_or(rest, |(name, _)| name))
+}
+
 /// The error for a `getClass()` pklr cannot answer faithfully.
 pub(super) fn get_class_unsupported(what: &str) -> Error {
     Error::Eval(format!(
@@ -258,6 +273,17 @@ pub(super) fn get_class_unsupported(what: &str) -> Error {
 /// they are an error rather than a guess.
 pub(super) fn get_class(value: &Value) -> Result<Value> {
     let (name, identity) = match value {
+        // A module's class is a `ModuleClass`, which `toString()` shows by the
+        // module's name.
+        Value::Object(_, Some(source))
+            if source.is_module
+                && source
+                    .type_identity
+                    .as_deref()
+                    .is_some_and(|identity| module_class_name(identity).is_some()) =>
+        {
+            ("ModuleClass", source.type_identity.clone())
+        }
         Value::Object(_, Some(source)) if source.kind == ObjectKind::Class => ("Class", None),
         Value::Object(_, Some(source)) if source.kind == ObjectKind::Mapping => ("Mapping", None),
         Value::Object(_, Some(source)) => match source.type_name.as_deref() {
