@@ -708,6 +708,9 @@ impl Evaluator {
         for entry in body.iter() {
             if let Entry::Property(prop) = entry
                 && !prop.is_method
+                // An annotation copied from the parent names what the parent
+                // declared, not what this module's scope has under that name.
+                && !synthesized_inherited_types.contains(prop.name.as_ref())
                 && let Some(ty) = &prop.type_ann
                 && let Some(message) = self.unresolved_type(ty, &scope)
                 && message.ends_with("to be a type, but it is not.")
