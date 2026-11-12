@@ -3033,3 +3033,26 @@ fn member_predicates_are_reported_as_unsupported() {
         assert!(err.contains("member predicates"), "{src}: {err}");
     }
 }
+
+#[test]
+fn glob_imports_and_type_names_are_validated() {
+    // Each is rejected by `pkl eval` too.
+    for (src, expected) in [
+        (
+            "res = import*(\"https://www.apple.com/**.pkl\")\n",
+            "not globbable",
+        ),
+        (
+            "res = import*(\"file:path/to/foo.pkl\")\n",
+            "has invalid syntax",
+        ),
+        ("import* \".../x/**.pkl\" as g\nres = g\n", "triple-dot"),
+        (
+            "foo = 1\nres: foo\n",
+            "Expected `foo` to be a type, but it is not.",
+        ),
+    ] {
+        let err = eval_fails(src);
+        assert!(err.contains(expected), "{src}: {err}");
+    }
+}

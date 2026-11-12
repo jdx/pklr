@@ -717,6 +717,18 @@ impl Evaluator {
                     _ => None,
                 }))
                 .collect::<Vec<_>>();
+            // A declared type names a type, which a glob import's alias or a
+            // plain property is not, even when the property has no value.
+            for entry in body.iter() {
+                if let Entry::Property(prop) = entry
+                    && !prop.is_method
+                    && let Some(ty) = &prop.type_ann
+                    && let Some(message) = self.unresolved_type(ty, &scope)
+                    && message.ends_with("to be a type, but it is not.")
+                {
+                    return Err(Error::Eval(message));
+                }
+            }
             let mut inherited_type_failures =
                 self.inherited_type_failures(body, &scope, &synthesized_inherited_types, depth)?;
 
