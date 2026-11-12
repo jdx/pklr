@@ -3039,6 +3039,10 @@ fn const_scopes_reject_non_const_members() {
     // Every program here is rejected by `pkl eval` with the quoted message.
     for (src, message) in [
         (
+            "x = 1\nclass C { a: Int(this == outer.x) = 1 }\nr = new C {}\n",
+            "Cannot reference property `x` from here because it is not `const`.",
+        ),
+        (
             "x = 1\nr = \"\\(new Dynamic { const local y = x; z = y }.z)\"\n",
             "Cannot reference property `x` from here because it is not `const`.",
         ),
@@ -3178,4 +3182,14 @@ fn const_scopes_keep_methods_and_properties_apart() {
     // property `f` is not const-local.
     let json = eval("class C { function f() = module.g() }\nfunction g() = 1\nf = 2\nr = f\n");
     assert_eq!(json["r"], 2);
+}
+
+#[test]
+fn const_method_with_annotation_body_is_not_checked_for_bare_reads() {
+    // `pkl eval` accepts this: a module-level const method body is only checked
+    // inside lambdas and `module.name` reads.
+    let json = eval(
+        "x = 1\nclass Ann extends Annotation { v = 1 }\n@Ann { v = 2 }\nconst function f() = x\nr = 1\n",
+    );
+    assert_eq!(json["r"], 1);
 }

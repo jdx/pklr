@@ -525,7 +525,7 @@ impl<'m> Walker<'m> {
         // in `module.name` reads.
         let module_method = prop.is_method && owner == 0 && has(&prop.modifiers, Modifier::Const);
         let saved_method = std::mem::replace(&mut self.module_method, module_method);
-        self.method_lambda = module_method;
+        let saved_lambda = std::mem::replace(&mut self.method_lambda, module_method);
         let is_const = has(&prop.modifiers, Modifier::Const)
             && !matches!(self.frames[owner].kind, Kind::Vars | Kind::Constraint)
             && !module_method;
@@ -559,6 +559,7 @@ impl<'m> Walker<'m> {
         self.members.pop();
         self.boundary = saved;
         self.module_method = saved_method;
+        self.method_lambda = saved_lambda;
         result
     }
 
@@ -753,7 +754,11 @@ impl<'m> Walker<'m> {
             .filter(|(_, frame)| frame.kind != Kind::Vars);
         let this = found.next();
         if this.is_some_and(|(_, frame)| frame.kind == Kind::Constraint) {
-            return (None, None);
+            // `this` is the checked value, and `outer` is the object around the
+            // one the constraint is written in.
+            let mut lexical = found.filter(|(_, frame)| frame.kind != Kind::Constraint);
+            lexical.next();
+            return (None, lexical.next().map(|(index, _)| index));
         }
         (
             this.map(|(index, _)| index),
