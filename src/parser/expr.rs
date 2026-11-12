@@ -238,6 +238,8 @@ impl<'a> Parser<'a> {
                         true,
                     ));
                 }
+                // An empty body holds nothing to check.
+                let checked_type = checked_type.filter(|_| !body.entries.is_empty());
                 let new = Expr::New(type_name, body.entries.into(), generic_params);
                 // `new Listing<String(isEmpty)> { ... }` checks what it holds
                 // against the type argument, which the names alone drop.
