@@ -300,7 +300,9 @@ impl Kind {
             Kind::Dynamic => "Dynamic".into(),
             Kind::Typed => match value {
                 Value::Object(_, Some(source)) => match source.type_identity.as_deref() {
-                    Some(identity) if !identity.starts_with("pkl:") => class_display_name(identity),
+                    Some(identity) if !identity.starts_with("pkl:") => {
+                        class_display_name(identity, source.type_name.as_deref())
+                    }
                     _ => source.type_name.clone().unwrap_or_else(|| "Typed".into()),
                 },
                 _ => "Typed".into(),
@@ -1237,8 +1239,13 @@ fn alias_split<'a>(identity: &'a str, members: &ObjectMap) -> Option<(&'a str, &
 }
 
 /// A class as Pkl names it in messages: `module#Name`.
-fn class_display_name(identity: &str) -> String {
-    match identity.rsplit_once('.') {
+fn class_display_name(identity: &str, type_name: Option<&str>) -> String {
+    // A class name may itself contain dots, so peel the declared name off the
+    // end of the identity rather than splitting at the last dot.
+    let split = type_name
+        .and_then(|name| Some((identity.strip_suffix(name)?.strip_suffix('.')?, name)))
+        .or_else(|| identity.rsplit_once('.'));
+    match split {
         Some((module, name)) => {
             let module = module.rsplit(['/', '\\']).next().unwrap_or(module);
             let module = module.strip_suffix(".pkl").unwrap_or(module);

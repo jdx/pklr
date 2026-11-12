@@ -3,7 +3,9 @@
 //! `List`, `Set`, `Map`, `Pair` and `IntSeq` render as the calls that build
 //! them, such as `List(1, 2)`.
 
-use super::{Kind, StringRenderer, Walk, display_value, java_double_to_string, key_value, kind_of};
+use super::{
+    Kind, PathPart, StringRenderer, Walk, display_value, java_double_to_string, key_value, kind_of,
+};
 use crate::error::{Error, Result};
 use crate::value::{ListKind, Value};
 
@@ -461,11 +463,30 @@ impl<'a> StringRenderer<'a> for Pcf<'a> {
         };
         self.out.push_str(name);
         self.out.push('(');
+        // A `Map` call alternates keys and values: both are converted at the
+        // key's position.
+        let is_map = name == "Map";
+        let mut pending_key: Option<Value> = None;
         for (index, item) in items.iter().enumerate() {
             if index > 0 {
                 self.out.push_str(", ");
             }
-            self.visit_standalone(item)?;
+            let converted = if is_map && index % 2 == 0 {
+                let key = self.walk.convert_key(item)?;
+                pending_key = Some(key.clone());
+                key
+            } else {
+                let part = match (&pending_key, is_map) {
+                    (Some(Value::String(s)), true) => PathPart::Entry(s.clone()),
+                    (Some(other), true) => PathPart::Key(other.clone()),
+                    _ => PathPart::Element(index),
+                };
+                self.walk.path.push(part);
+                let converted = self.walk.convert(item);
+                self.walk.path.pop();
+                converted?
+            };
+            self.visit_standalone(&converted)?;
         }
         self.out.push(')');
         Ok(true)

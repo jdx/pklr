@@ -1746,3 +1746,19 @@ res3 = test.catch(() -> new PropertiesRenderer {}.renderValue(new Dynamic { name
         "Cannot render value of type `Dynamic` as Properties. Value: new Dynamic { name = ?; age = ? }"
     );
 }
+
+#[test]
+fn pcf_applies_converters_inside_collection_calls() {
+    assert_eq!(
+        render(
+            r#"new PcfRenderer { converters { [Int] = (i) -> i + 1 } }.renderValue(List(1, 2))"#
+        ),
+        "List(2, 3)"
+    );
+    assert_eq!(
+        render(
+            r#"new PcfRenderer { converters { [Int] = (i) -> i + 1 } }.renderValue(Map("a", 1))"#
+        ),
+        "Map(\"a\", 2)"
+    );
+}
