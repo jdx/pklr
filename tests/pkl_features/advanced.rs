@@ -3758,3 +3758,19 @@ fn consecutive_bodies_on_a_computed_key_start_from_an_empty_object() {
     let value = eval("local k = \"a\"\nx { [k] { v = 1; w = 1 } { v = 2 } }\n");
     assert_eq!(value["x"]["a"], serde_json::json!({"v": 2, "w": 1}));
 }
+
+#[test]
+fn shadowing_keeps_loop_variables_and_inherited_dynamic_entries() {
+    let value = eval(
+        "base { local l = \"original\"; for (l in List(\"loop\")) { [l] = l } }\n\
+         child = (base) { l = \"override\" }\n\
+         a { [\"k\"] { keep = 1 } }\n\
+         b = (a) { local l = \"original\"; [\"k\"] { v = l } }\n\
+         c = (b) { l = \"override\" }\n",
+    );
+    assert_eq!(value["child"]["loop"], "loop");
+    assert_eq!(
+        value["c"]["k"],
+        serde_json::json!({"keep": 1, "v": "original"})
+    );
+}

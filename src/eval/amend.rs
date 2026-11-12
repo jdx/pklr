@@ -1964,14 +1964,29 @@ pub(super) fn shadow_local_reads(entry: &Entry, shadowed: &[(Name, Value)]) -> E
     };
     let prop = match entry {
         Entry::Property(prop) => prop,
-        Entry::DynProperty(key, value) => return Entry::DynProperty(wrap(key), wrap(value)),
+        Entry::DynProperty(key, value) => {
+            // A body stays visible, so it still amends an inherited entry.
+            let value = match value {
+                Expr::ObjectBody(body) => Expr::ObjectBody(shadow_body(body, shadowed)),
+                value => wrap(value),
+            };
+            return Entry::DynProperty(wrap(key), value);
+        }
         Entry::Elem(expr) => return Entry::Elem(wrap(expr)),
         Entry::Spread(expr) => return Entry::Spread(wrap(expr)),
         Entry::Predicate(test, value) => return Entry::Predicate(wrap(test), wrap(value)),
         Entry::ForGenerator(generator) => {
             let mut generator = generator.clone();
             generator.collection = wrap(&generator.collection);
-            generator.body = shadow_body(&generator.body, shadowed);
+            // The loop's own variables hide a saved local of the same name.
+            let inner: Vec<(Name, Value)> = shadowed
+                .iter()
+                .filter(|(name, _)| {
+                    **name != *generator.val_var && generator.key_var.as_deref() != Some(&**name)
+                })
+                .cloned()
+                .collect();
+            generator.body = shadow_body(&generator.body, &inner);
             return Entry::ForGenerator(generator);
         }
         Entry::WhenGenerator(generator) => {
