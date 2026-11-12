@@ -1051,3 +1051,10 @@ fn module_type_accepts_the_module_and_its_amendments() {
     eval_fails("res: module = \"abc\"\n");
     eval_fails("class P {}\nres: module = new P {}\n");
 }
+
+#[test]
+fn quoted_module_type_alias_shadows_the_module_type() {
+    // `pkl eval` gives {"r": true}.
+    let v = eval("typealias `module` = Int\nr = 1 is `module`\n");
+    assert_eq!(v["r"], true);
+}
