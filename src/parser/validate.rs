@@ -12,7 +12,7 @@
 //! treats every read as executed, except in method bodies, which it reports
 //! only when the module calls a method of that name.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::rc::Rc;
 
 use super::ast::{Annotation, Entry, Expr, Modifier, Property, StringInterpPart, TypeExpr};
@@ -345,7 +345,7 @@ fn property_message(name: &str, method: bool) -> String {
 
 impl<'m> Walker<'m> {
     fn new(body: &'m [Entry]) -> Self {
-        let mut classes = HashMap::new();
+        let mut classes = HashMap::default();
         for entry in body {
             if let Entry::ClassDef(name, _, parent, class_body) = entry {
                 classes.insert(
@@ -365,7 +365,7 @@ impl<'m> Walker<'m> {
             module_method: false,
             method_lambda: false,
             classes,
-            infos: HashMap::new(),
+            infos: HashMap::default(),
             pending: Vec::new(),
             constraint_bases: Vec::new(),
         }
@@ -391,7 +391,7 @@ impl<'m> Walker<'m> {
         if pending.is_empty() {
             return None;
         }
-        let mut called: HashSet<(&str, u8)> = HashSet::new();
+        let mut called: HashSet<(&str, u8)> = HashSet::default();
         collect_calls_in_entries(body, &mut called);
         pending
             .into_iter()
