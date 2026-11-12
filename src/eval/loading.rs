@@ -428,7 +428,7 @@ impl Evaluator {
         }
         let absolute = absolute_clean(&self.host_absolute_path(current_path.to_path_buf()));
         let base = self.module_path_admitted.get(&absolute)?.clone();
-        Some(self.join_module_path_uri(&base, uri))
+        self.join_module_path_uri(&base, uri)
     }
 
     /// The `modulepath:` URI the relative reference `rel` names from the module
@@ -437,7 +437,7 @@ impl Evaluator {
     /// (`modulepath:/../x.pkl`) names nothing and is not mistaken for a file
     /// inside the root. A triple-dot reference names the nearest ancestor
     /// directory that holds the file, or the root when none does.
-    fn join_module_path_uri(&mut self, base: &str, rel: &str) -> String {
+    fn join_module_path_uri(&mut self, base: &str, rel: &str) -> Option<String> {
         let (rel_path, suffix) = split_query(rel);
         let mut dir: Vec<&str> = base
             .strip_prefix("modulepath:/")
@@ -445,13 +445,16 @@ impl Evaluator {
             .split('/')
             .collect();
         dir.pop();
-        // An invalid triple-dot URI falls through to be reported as such.
-        if let Ok(Some(triple_dot)) = parse_triple_dot_path(rel) {
+        // An invalid triple-dot URI stays as written, to be reported as such.
+        let Ok(triple_dot) = parse_triple_dot_path(rel_path) else {
+            return None;
+        };
+        if let Some(triple_dot) = triple_dot {
             // Pkl matches the unnormalized candidates and finds nothing for a
             // `..` that climbs, so such a path is refused here as an escape
             // rather than normalized into the module path.
             if triple_dot.split('/').any(|part| part == "..") {
-                return format!("modulepath:/../{triple_dot}");
+                return Some(format!("modulepath:/../{triple_dot}{suffix}"));
             }
             let module = Path::new("/").join(base.strip_prefix("modulepath:/").unwrap_or_default());
             let found =
@@ -467,11 +470,13 @@ impl Evaluator {
                 Ok(Some(path)) => path.to_string_lossy().replace('\\', "/"),
                 _ => format!("/{triple_dot}"),
             };
-            let joined = format!("modulepath:{name}");
-            return normalize_module_path_uri(&joined)
-                .ok()
-                .flatten()
-                .unwrap_or(joined);
+            let joined = format!("modulepath:{name}{suffix}");
+            return Some(
+                normalize_module_path_uri(&joined)
+                    .ok()
+                    .flatten()
+                    .unwrap_or(joined),
+            );
         }
         let mut stack: Vec<&str> = if rel_path.starts_with('/') {
             Vec::new()
@@ -488,10 +493,12 @@ impl Evaluator {
             }
         }
         let joined = format!("modulepath:/{}{suffix}", stack.join("/"));
-        normalize_module_path_uri(&joined)
-            .ok()
-            .flatten()
-            .unwrap_or(joined)
+        Some(
+            normalize_module_path_uri(&joined)
+                .ok()
+                .flatten()
+                .unwrap_or(joined),
+        )
     }
 
     /// Load and parse the module `uri` names, sharing the parse cache with
