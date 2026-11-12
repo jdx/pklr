@@ -7986,3 +7986,13 @@ res = test.catch(() -> f(List("foo", 42)))
 fn function_literal_body_cannot_infer_an_untyped_new() {
     assert!(eval_fails("foo = () -> new {}").contains("Cannot tell which parent to amend"));
 }
+
+#[test]
+fn generated_members_are_readable_by_bare_name_from_later_siblings() {
+    let v = eval(
+        "a {\n  when (true) {\n    q = 1\n    local secret = 5\n  }\n  t = q\n  u = secret\n}\n",
+    );
+    assert_eq!(v["a"]["t"], 1);
+    assert_eq!(v["a"]["u"], 5);
+    assert!(v["a"].get("secret").is_none());
+}

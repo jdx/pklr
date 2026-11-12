@@ -1562,6 +1562,23 @@ impl Evaluator {
             }
         }
         st.bound_members.extend(m.keys().cloned());
+        // A member a generator emitted is read by its bare name from the
+        // entries after it, as any other member of the body is.
+        if !cx.mapping_entries {
+            for (key, value) in m.iter() {
+                st.child_scope.set(key, value.clone());
+            }
+            if let Some(source) = &source {
+                for entry in body.iter() {
+                    if let Entry::Property(prop) = entry
+                        && has_modifier(&prop.modifiers, Modifier::Local)
+                        && let Some(value) = source.scope().get(&prop.name)
+                    {
+                        st.child_scope.set(&prop.name, value.clone());
+                    }
+                }
+            }
+        }
         self.guard_const_local_lambdas(
             &mut st.child_scope,
             &cx.deferred_lambdas,
