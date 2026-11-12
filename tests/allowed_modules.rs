@@ -410,6 +410,7 @@ fn relative_project(name: &str, root: &str) -> (TestTempDir, std::path::PathBuf)
             "mp/x/glob.pkl",
             "import* \"*.pkl\" as all\nr = all.keys.toList()\n",
         ),
+        ("mp/x/query.pkl", "import \"b.pkl?x=1\"\nr = b.v\n"),
         ("mp/outside.pkl", "v = 7\n"),
         ("mp/x/outside.pkl", "v = 8\n"),
         ("mp/secret.pkl", "v = 99\n"),
@@ -580,4 +581,18 @@ fn glob_imports_from_module_path_modules_are_not_globbable() {
         err.contains("Cannot expand glob pattern `modulepath:/x/*.pkl` because scheme `modulepath` is not globbable"),
         "{err}"
     );
+}
+
+/// A query on a relative import names the same file; the allowlist sees it.
+#[test]
+fn relative_import_with_a_query_finds_the_module_path_file() {
+    let query = "^modulepath:/x/query\\.pkl$";
+    let ok = eval_relative(
+        "rel-query",
+        "x/query.pkl",
+        &[query, "^modulepath:/x/b\\.pkl"],
+    );
+    assert_eq!(ok.unwrap()["r"]["r"], 1);
+    let err = eval_relative("rel-query-denied", "x/query.pkl", &[query]).unwrap_err();
+    assert!(err.contains("modulepath:/x/b.pkl?x=1"), "{err}");
 }

@@ -86,7 +86,8 @@ fn split_query(uri: &str) -> (&str, &str) {
 
 /// The normalized path segments of a `modulepath:/path` URI.
 fn module_path_segments(uri: &str) -> Result<Vec<String>> {
-    let Some(rest) = uri.strip_prefix("modulepath:/") else {
+    // The file is named by the path alone, not a query or fragment.
+    let Some(rest) = split_query(uri).0.strip_prefix("modulepath:/") else {
         return Err(Error::Eval(format!(
             "Module URI `{uri}` is missing a `/` after `modulepath:`."
         )));
