@@ -174,6 +174,11 @@ pub(super) fn type_expr_constrained_name(ty: &TypeExpr) -> String {
                 .join(", ")
         ),
         TypeExpr::Nullable(inner) => format!("{}?", type_expr_constrained_name(inner)),
+        TypeExpr::Union(variants) => variants
+            .iter()
+            .map(type_expr_constrained_name)
+            .collect::<Vec<_>>()
+            .join("|"),
         TypeExpr::Constrained(base, constraint, _) => {
             let mut texts = Vec::new();
             sources(constraint, &mut texts);

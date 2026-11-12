@@ -158,3 +158,17 @@ r3 = y.l(List("1"))
         "{error}"
     );
 }
+
+#[test]
+fn constrained_generic_keeps_element_constraints_in_unions_and_nullables() {
+    let err = eval_fails("a: List<String(!isEmpty)|Int>(!isEmpty) = List(\"\")\n");
+    assert!(err.contains("`!isEmpty`"), "{err}");
+    let err = eval_fails("a: List<String(!isEmpty)>?(true) = List(\"\")\n");
+    assert!(err.contains("`!isEmpty`"), "{err}");
+    assert_eq!(
+        eval(
+            "a: List<String(!isEmpty)|Int>(!isEmpty) = List(\"x\", 3)\nb: List<String(!isEmpty)>?(true) = null\n"
+        ),
+        serde_json::json!({"a": ["x", 3], "b": null})
+    );
+}

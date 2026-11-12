@@ -205,6 +205,9 @@ impl<'a> Parser<'a> {
                 ty = TypeExpr::Constrained(
                     match &ty {
                         TypeExpr::Generic(..) => type_expr_constrained_name(&ty),
+                        TypeExpr::Nullable(inner) if matches!(**inner, TypeExpr::Generic(..)) => {
+                            type_expr_constrained_name(&ty)
+                        }
                         _ => type_expr_runtime_name(&ty),
                     },
                     Box::new(constraint.expect("at least one constraint")),
