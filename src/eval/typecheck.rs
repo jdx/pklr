@@ -755,6 +755,13 @@ impl Evaluator {
                     let resolved = resolved.clone();
                     return self.eval_alias_check(val, name, &resolved, scope, depth, resolving);
                 }
+                // An alias of the standard library carries its constraints.
+                if let Some(source) = stdlib_alias_source(name)
+                    && scope.get(name).is_none()
+                    && let Ok(resolved) = crate::parser::parse_type_name(source)
+                {
+                    return self.eval_type_check_in(val, &resolved, scope, depth + 1, resolving);
+                }
                 // A scalar of the built-in type of that name matches without
                 // resolving the name as a class, which only a class instance
                 // could match, unless a user class of that name shadows it.
