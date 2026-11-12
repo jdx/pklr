@@ -780,6 +780,14 @@ pub(super) fn caught_error_message(error: Error) -> String {
     // pklr puts on its own line follows the message, and a renderer's hint to
     // add a converter is dropped. Only a renderer's own errors are rewritten:
     // text a program throws is returned as it is.
+    if message.starts_with("Type constraint `") || message.starts_with("Expected value of type `") {
+        // The context is a suffix naming one property.
+        let message = match message.rsplit_once(super::typecheck::PROPERTY_CONTEXT) {
+            Some((first, name)) if name.ends_with('\'') && !name.contains('\n') => first,
+            _ => message.as_str(),
+        };
+        return message.replacen("\nValue: ", " Value: ", 1);
+    }
     if !(message.starts_with("Cannot render ") || message.starts_with("The top-level value of ")) {
         return message;
     }

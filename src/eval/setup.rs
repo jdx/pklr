@@ -98,6 +98,7 @@ impl Evaluator {
             http_cache: HashMap::default(),
             import_cache: HashMap::default(),
             imports_in_flight: HashSet::default(),
+            type_violation: None,
             placeholder_reads: 0,
             narrowed_import_cache: HashMap::default(),
             parse_cache: HashMap::default(),

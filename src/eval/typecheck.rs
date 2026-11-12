@@ -1,5 +1,6 @@
 //! Checking values against declared types and their constraints.
 
+use super::render::display_value;
 use super::*;
 use crate::parser::{BaseForm, TypeExpr};
 
@@ -369,11 +370,10 @@ impl Evaluator {
         {
             return Ok(());
         }
-        Err(Error::Eval(format!(
-            "property '{}' expected {}, got {}",
-            prop.name,
-            display_type_expr(ty),
-            value_type_display(value)
+        Err(Error::Eval(self.type_mismatch_message(
+            ty,
+            value,
+            Some(&prop.name),
         )))
     }
 
@@ -567,7 +567,35 @@ impl Evaluator {
         scope: &Scope,
         depth: usize,
     ) -> Result<bool> {
+        self.type_violation = None;
         self.eval_type_check_in(val, ty, scope, depth, &mut Vec::new())
+    }
+
+    /// The error for `val` failing the check against `ty`: the constraint the
+    /// check found violated, or else the type the value does not have.
+    pub(super) fn type_mismatch_message(
+        &mut self,
+        ty: &crate::parser::TypeExpr,
+        val: &Value,
+        property: Option<&str>,
+    ) -> String {
+        // pkl shows the source line of the property after the message, which
+        // `catch` does not report.
+        let location = property
+            .map(|name| format!("{PROPERTY_CONTEXT}{name}'"))
+            .unwrap_or_default();
+        if let Some((text, violating)) = self.type_violation.take() {
+            return format!(
+                "Type constraint `{text}` violated.\nValue: {}{location}",
+                violating_value_display(&violating, &text)
+            );
+        }
+        format!(
+            "Expected value of type `{}`, but got type `{}`.\nValue: {}{location}",
+            error_type_expr(ty),
+            pkl_class_name(val),
+            display_value(val)
+        )
     }
 
     /// Resolve aliases with a guard: malformed or recursively-expanded
@@ -850,15 +878,51 @@ impl Evaluator {
                     }
                     _ => {}
                 }
-                let receiver_constraint = with_constraint_receiver(constraint, &constraint_scope);
-                let constraint = receiver_constraint.as_ref().unwrap_or(constraint);
-                let mut result = self.eval_expr(constraint, &constraint_scope, depth + 1)?;
-                // `Listing(isSorted)` names a predicate function and applies
-                // it to the value being checked.
-                if matches!(result, Value::Lambda(..)) {
-                    result = self.invoke_lambda(&result, std::slice::from_ref(val), depth + 1)?;
+                // Each constraint is checked on its own, so that the error
+                // names the one that is violated.
+                for (constraint, text) in split_constraints(constraint) {
+                    let receiver_constraint =
+                        with_constraint_receiver(constraint, &constraint_scope);
+                    let constraint = receiver_constraint.as_ref().unwrap_or(constraint);
+                    let mut result = self.eval_expr(constraint, &constraint_scope, depth + 1)?;
+                    // `Listing(isSorted)` names a predicate function and applies
+                    // it to the value being checked.
+                    let mut expected = "`Boolean` or `Function`";
+                    if matches!(result, Value::Lambda(..)) {
+                        result = match self.invoke_lambda(
+                            &result,
+                            std::slice::from_ref(val),
+                            depth + 1,
+                        ) {
+                            Ok(result) => result,
+                            // A predicate reading a member that the value does
+                            // not have yet, because pklr has not filled in the
+                            // class defaults of the value's members, cannot
+                            // disprove the constraint.
+                            Err(Error::Eval(message))
+                                if message.starts_with("Cannot find property `")
+                                    && matches!(val, Value::Object(_, Some(source))
+                                            if source.kind == ObjectKind::Mapping || source.type_name.is_some()) =>
+                            {
+                                continue;
+                            }
+                            Err(error) => return Err(error),
+                        };
+                        expected = "`Boolean`";
+                    }
+                    if !matches!(result, Value::Bool(_)) {
+                        return Err(Error::Eval(format!(
+                            "Expected value of type {expected}, but got type `{}`. Value: {}",
+                            pkl_class_name(&result),
+                            display_value(&result)
+                        )));
+                    }
+                    if !is_truthy(&result) {
+                        self.type_violation = text.map(|text| (text.to_string(), val.clone()));
+                        return Ok(false);
+                    }
                 }
-                Ok(is_truthy(&result))
+                Ok(true)
             }
             TypeExpr::Nullable(inner) => {
                 if is_null_value(val) {
@@ -875,6 +939,8 @@ impl Evaluator {
                     if !type_is_runtime_checkable(v, scope) {
                         has_uncheckable_variant = true;
                     } else if self.eval_type_check_in(val, v, scope, depth, resolving)? {
+                        // A branch that failed before this one is not the reason.
+                        self.type_violation = None;
                         return Ok(true);
                     }
                 }
@@ -1204,6 +1270,7 @@ pub(super) fn type_constraint_has_explicit_throw(
             }
             Expr::Unop(_, value)
             | Expr::Trace(value, _)
+            | Expr::Constraint(value, _)
             | Expr::Read(value, _)
             | Expr::ReadOrNull(value, _)
             | Expr::ReadGlob(value, _) => expr_has_throw(value, scope, captured, seen),
@@ -1369,3 +1436,68 @@ fn stdlib_qualified_member<'a>(scope: &Scope, name: &'a str) -> Option<&'a str> 
         && STDLIB_TYPE_NAMES.contains(&member))
     .then_some(member)
 }
+
+/// The constraints a constrained type's predicate joins, in source order, each
+/// with its source text when the parser recorded it. A `&&` inside one
+/// constraint stays inside it.
+fn split_constraints(expr: &Expr) -> Vec<(&Expr, Option<&str>)> {
+    // The parser and alias expansion build a chain: constraints joined with
+    // `&&`, each wrapped in `Expr::Constraint`. Anything else is one constraint.
+    let mut parts = Vec::new();
+    let mut pending = vec![expr];
+    while let Some(node) = pending.pop() {
+        match node {
+            Expr::Constraint(inner, text) => parts.push((&**inner, Some(text.as_str()))),
+            Expr::Binop(BinOp::And, left, right) => {
+                pending.push(right);
+                pending.push(left);
+            }
+            _ => return vec![(expr, None)],
+        }
+    }
+    parts
+}
+
+/// How an error shows the value that violated the constraint `text`. pkl
+/// shows the members of an object the constraint has read and `?` for the
+/// others, which it has not evaluated.
+fn violating_value_display(value: &Value, text: &str) -> String {
+    let shown = display_value(value);
+    let Value::Object(map, source) = value else {
+        return shown;
+    };
+    if !shown.starts_with("new Dynamic {") {
+        return shown;
+    }
+    let name = source
+        .as_ref()
+        .and_then(|source| source.type_name.as_deref())
+        .unwrap_or("Dynamic");
+    let mut members = Vec::new();
+    for (key, member) in map.iter() {
+        if key.starts_with('\0') {
+            return shown;
+        }
+        if matches!(member, Value::Lambda(..)) {
+            continue;
+        }
+        let read = text
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .any(|word| word == &**key);
+        let rendered = if read {
+            display_value(member)
+        } else {
+            "?".into()
+        };
+        members.push(format!("{key} = {rendered}"));
+    }
+    if members.is_empty() {
+        format!("new {name} {{}}")
+    } else {
+        format!("new {name} {{ {} }}", members.join("; "))
+    }
+}
+
+/// The start of the line after a type error that names the property whose
+/// value failed the check.
+pub(super) const PROPERTY_CONTEXT: &str = "\n\nin property '";

@@ -698,6 +698,7 @@ impl<'m> Walker<'m> {
             | Expr::Throw(value)
             | Expr::TemplateLocals(_, value)
             | Expr::Trace(value, _)
+            | Expr::Constraint(value, _)
             | Expr::Read(value, _)
             | Expr::ReadOrNull(value, _)
             | Expr::ReadGlob(value, _) => self.expr(value),
@@ -990,6 +991,7 @@ fn collect_calls<'m>(expr: &'m Expr, called: &mut HashSet<(&'m str, bool)>) {
         | Expr::Throw(value)
         | Expr::TemplateLocals(_, value)
         | Expr::Trace(value, _)
+        | Expr::Constraint(value, _)
         | Expr::Read(value, _)
         | Expr::ReadOrNull(value, _)
         | Expr::ReadGlob(value, _) => collect_calls(value, called),
