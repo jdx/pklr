@@ -22,6 +22,9 @@ impl Evaluator {
         if let Some(parent_name) = parent_name {
             check_supertype(scope, class_name, parent_name, parent_val.as_ref())?;
         }
+        if let Some(Value::Object(_, Some(parent))) = &parent_val {
+            check_override_modifiers(body, parent)?;
+        }
         // A parent class that failed to evaluate fails its subclasses too,
         // rather than leaving them without the inherited members.
         if parent_val.is_none()
@@ -670,6 +673,59 @@ pub(super) const ABSTRACT_STDLIB_CLASSES: &[&str] = &[
 
 /// Standard library classes that are neither `open` nor `abstract`.
 pub(super) const CLOSED_STDLIB_CLASSES: &[&str] = &["Dynamic", "Listing", "Mapping"];
+
+/// A property a subclass redeclares must keep its parent's `const` and `fixed`
+/// modifiers, and may not add them.
+fn check_override_modifiers(body: &[Entry], parent: &ObjectSource) -> Result<()> {
+    for entry in body {
+        let Entry::Property(prop) = entry else {
+            continue;
+        };
+        if prop.is_method || has_modifier(&prop.modifiers, Modifier::Local) {
+            continue;
+        }
+        let Some(inherited) = parent
+            .entries
+            .iter()
+            .rev()
+            .find_map(|inherited| match inherited {
+                Entry::Property(p)
+                    if p.name == prop.name
+                        && !p.is_method
+                        && !has_modifier(&p.modifiers, Modifier::Local) =>
+                {
+                    Some(p)
+                }
+                _ => None,
+            })
+        else {
+            continue;
+        };
+        let parent_class = parent
+            .type_name
+            .as_deref()
+            .map(|name| qualified_class_name(parent.type_identity.as_deref(), name))
+            .unwrap_or_default();
+        for (modifier, word) in [(Modifier::Const, "const"), (Modifier::Fixed, "fixed")] {
+            let child_has = has_modifier(&prop.modifiers, modifier.clone());
+            let parent_has = has_modifier(&inherited.modifiers, modifier);
+            if child_has == parent_has {
+                continue;
+            }
+            let name = &prop.name;
+            return Err(Error::Eval(if parent_has {
+                format!(
+                    "Missing modifier `{word}`.\n\nProperty `{name}` must be declared {word}, because it overrides a {word} property on parent class `{parent_class}`."
+                )
+            } else {
+                format!(
+                    "Modifier `{word}` cannot be applied to property `{name}`.\n\nProperty `{name}` cannot be declared {word}, because it overrides a non-{word} property on parent class `{parent_class}`."
+                )
+            }));
+        }
+    }
+    Ok(())
+}
 
 /// A class name as pkl reports it, `module#Class`, from the class's
 /// definition-site identity (`<module path>.<Class>`).

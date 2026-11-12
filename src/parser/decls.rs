@@ -139,7 +139,26 @@ impl<'a> Parser<'a> {
         self.check_new_types(&body, &imports)?;
         self.check_member_duplicates(&body, &imports)?;
         self.check_type_alias_cycles(&body)?;
-        if let Some(violation) = validate::find_const_violation(&body) {
+        let module_stem = std::path::Path::new(self.name)
+            .file_stem()
+            .map_or_else(String::new, |stem| stem.to_string_lossy().into_owned());
+        if let Some(violation) = validate::find_override_violation(&body, &module_stem) {
+            return Err(self.error_at(self.prev_end, violation.message()));
+        }
+        let has_const_scope = self.tokens.iter().any(|token| {
+            matches!(
+                token.kind,
+                TokenKind::KwConst
+                    | TokenKind::KwClass
+                    | TokenKind::KwTypeAlias
+                    | TokenKind::At
+                    | TokenKind::InterpolatedString(_)
+            )
+        });
+        if has_const_scope
+            && let Some(violation) =
+                validate::find_const_violation(&body, amends.is_some() || extends.is_some())
+        {
             return Err(self.error_at(self.prev_end, violation.message()));
         }
         Ok(Module {

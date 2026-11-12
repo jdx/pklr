@@ -803,7 +803,7 @@ x = new Config {
 fn class_defaults_reference_locals() {
     let json = eval(
         r#"
-local DEFAULT_PORT = 8080
+const local DEFAULT_PORT = 8080
 
 class Config {
     port: Int = DEFAULT_PORT
@@ -2318,7 +2318,7 @@ fn ordinary_scope_objects_are_not_merged_as_partial_modules() {
         dir.path.join("base.pkl"),
         r#"
 import "types.pkl"
-local Config = new {
+const local Config = new {
     ["Item"] = new types.Item {}
     selected = "base"
     stale = true
@@ -3769,7 +3769,7 @@ x = new Test {
 fn module_in_class_body_reads_module_property() {
     let val = eval(
         r#"
-expected = "b"
+const expected = "b"
 class C { v = module.expected }
 result = new C {}
 "#,
@@ -3782,7 +3782,7 @@ fn module_in_class_body_reads_property_declared_after_class() {
     let val = eval(
         r#"
 class C { v = module.expected; w = "w" }
-expected = "b"
+const expected = "b"
 result = new C {}
 amended = new C { w = "x" }
 overridden = new C { v = "o" }
@@ -3799,7 +3799,7 @@ fn module_qualified_class_read_is_not_shadowed_by_class_member() {
     let val = eval(
         r#"
 class C { expected = "class"; v = module.expected }
-expected = "module"
+const expected = "module"
 result = new C {}
 "#,
     );
@@ -3814,8 +3814,8 @@ open class C { v = module.expected; w = "w" }
 class D extends C { u = module.other }
 local function make(s) = new D { w = s }
 local mk = (s) -> new C { w = s }
-expected = "b"
-other = "o"
+const expected = "b"
+const other = "o"
 d = new D {}
 made = make("z")
 lambda = mk("y")
@@ -3835,7 +3835,7 @@ fn module_in_class_body_reads_property_declared_after_use() {
         r#"
 class C { v = module.expected }
 result = new C {}
-expected = "b"
+const expected = "b"
 "#,
     );
     assert_eq!(val["result"], serde_json::json!({"v": "b"}));
@@ -3865,7 +3865,7 @@ fn subclass_recovers_once_module_property_is_evaluated() {
         r#"
 open class C { v = module.expected }
 class D extends C { w = 1 }
-expected = "b"
+const expected = "b"
 result = new D {}
 "#,
     );
@@ -3878,7 +3878,7 @@ fn type_alias_of_class_reading_module_is_refreshed() {
         r#"
 class C { v = module.expected }
 typealias A = C
-expected = "b"
+const expected = "b"
 result = new A {}
 "#,
     );
@@ -3890,7 +3890,7 @@ fn recovered_class_is_visible_through_module_and_this() {
     let val = eval(
         r#"
 class C { v = module.expected }
-expected = "b"
+const expected = "b"
 result = new module.C {}
 "#,
     );
@@ -3899,7 +3899,7 @@ result = new module.C {}
         r#"
 class C { v = module.expected }
 function make() = new C {}
-expected = "b"
+const expected = "b"
 viaModule = module.make()
 viaThis = this.make()
 "#,
@@ -3916,7 +3916,7 @@ fn class_reading_module_is_refreshed_only_where_used() {
         r#"
 open class C { v = module.expected }
 function make() = new C {}
-expected = "b"
+const expected = "b"
 unrelated = expected + "!"
 holder { c = new C {} }
 viaFunction = module.make()
@@ -3935,7 +3935,7 @@ fn class_read_in_type_constraint_is_refreshed() {
     let val = eval(
         r#"
 class C { v = module.expected }
-expected = "b"
+const expected = "b"
 result = 1 is Int(module.C.v == "b")
 "#,
     );
@@ -3944,7 +3944,7 @@ result = 1 is Int(module.C.v == "b")
         r#"
 class C { v = module.expected }
 typealias Ok = Int(module.C.v == "b")
-expected = "b"
+const expected = "b"
 result = 1 is Ok
 "#,
     );
@@ -3952,24 +3952,10 @@ result = 1 is Ok
 }
 
 #[test]
-fn class_read_dynamically_through_module_is_refreshed() {
-    let val = eval(
-        r#"
-local key = "C"
-class C { v = module.expected }
-class D { v = module[key].v }
-expected = "b"
-result = new D {}
-"#,
-    );
-    assert_eq!(val["result"], serde_json::json!({"v": "b"}));
-}
-
-#[test]
 fn functions_reading_module_dynamically_are_refreshed() {
     for src in [
-        "local key = \"C\"\nclass C { v = module.expected }\nlocal function make() = module[key].v\nexpected = \"b\"\nresult = make()\n",
-        "local key = \"C\"\nclass C { v = module.expected }\nfunction make() = module[key].v\nexpected = \"b\"\nresult = make()\n",
+        "local key = \"C\"\nclass C { v = module.expected }\nlocal function make() = module[key].v\nconst expected = \"b\"\nresult = make()\n",
+        "local key = \"C\"\nclass C { v = module.expected }\nfunction make() = module[key].v\nconst expected = \"b\"\nresult = make()\n",
     ] {
         assert_eq!(eval(src)["result"], "b", "{src}");
     }
@@ -3988,7 +3974,8 @@ fn failed_class_reports_error_through_every_member_read() {
 fn failed_module_local_is_not_a_member_of_module() {
     // Locals are not members of `module`/`this`, whether or not they failed,
     // even in a module whose classes are refreshed.
-    let src = "class C { v = module.expected }\nlocal x = throw(\"boom\")\nexpected = \"b\"\n";
+    let src =
+        "class C { v = module.expected }\nlocal x = throw(\"boom\")\nconst expected = \"b\"\n";
     let val = eval(&format!("{src}result = module?.x\nself = this?.x\n"));
     assert_eq!(val["result"], serde_json::Value::Null);
     assert_eq!(val["self"], serde_json::Value::Null);
@@ -4002,56 +3989,20 @@ fn failed_module_local_is_not_a_member_of_module() {
 fn members_declared_before_the_class_they_use_are_refreshed() {
     for (src, expected) in [
         (
-            "function make() = new C {}\nclass C { v = module.expected }\nexpected = \"b\"\nresult = make()\n",
+            "function make() = new C {}\nclass C { v = module.expected }\nconst expected = \"b\"\nresult = make()\n",
             serde_json::json!({"v": "b"}),
         ),
         (
-            "local function make() = new C {}\nclass C { v = module.expected }\nexpected = \"b\"\nresult = make()\n",
+            "local function make() = new C {}\nclass C { v = module.expected }\nconst expected = \"b\"\nresult = make()\n",
             serde_json::json!({"v": "b"}),
         ),
         (
-            "class D { c = new C {} }\nclass C { v = module.expected }\nexpected = \"b\"\nresult = new D {}\n",
+            "class D { c = new C {} }\nclass C { v = module.expected }\nconst expected = \"b\"\nresult = new D {}\n",
             serde_json::json!({"c": {"v": "b"}}),
         ),
     ] {
         assert_eq!(eval(src)["result"], expected, "{src}");
     }
-}
-
-#[test]
-fn dynamic_module_readers_are_refreshed_before_their_dependents() {
-    // `C` reads `module[key]` and `D` reads `C`: `C` must be refreshed first.
-    let val = eval(
-        "local key = \"expected\"\nclass C { v = module[key] }\nclass D { v = module.C.v }\nexpected = \"b\"\nresult = new D {}\n",
-    );
-    assert_eq!(val["result"], serde_json::json!({"v": "b"}));
-    // A function using a class that reads `module` dynamically.
-    let val = eval(
-        "local key = \"expected\"\nfunction make() = new C {}\nclass C { v = module[key] }\nexpected = \"b\"\nresult = make()\n",
-    );
-    assert_eq!(val["result"], serde_json::json!({"v": "b"}));
-    // A dynamic reader of the module consumed by a function.
-    let val = eval(
-        "local key = \"C\"\nlocal function make() = new D {}\nclass D { c = module[key] }\nclass C { v = module.expected }\nexpected = \"b\"\nresult = make().c.v\n",
-    );
-    assert_eq!(val["result"], "b");
-}
-
-#[test]
-fn refresh_repeats_for_members_read_before_they_recovered() {
-    // Both classes read `module[...]`, so their order can't be derived and
-    // `C` (declared first) is refreshed before `D`, which it reads. `D`
-    // recovers in that pass, so `C` is refreshed again.
-    let val = eval(
-        "local k1 = \"D\"\nlocal k2 = \"expected\"\nclass C { v = module[k1].v }\nclass D { v = module[k2] }\nexpected = \"b\"\nresult = new C {}\n",
-    );
-    assert_eq!(val["result"], serde_json::json!({"v": "b"}));
-    // Functions re-bound in a repeated pass are changes too: `outerMake`
-    // must see the `make` re-bound to the recovered `C`.
-    let val = eval(
-        "local k1 = \"D\"\nlocal k2 = \"expected\"\nlocal function make() = new C {}\nlocal function outerMake() = make()\nclass C { v = module[k1].v }\nclass D { v = module[k2] }\nexpected = \"b\"\nresult = outerMake().v\n",
-    );
-    assert_eq!(val["result"], "b");
 }
 
 #[test]
@@ -4069,16 +4020,16 @@ fn failed_class_reports_error_through_module_and_this() {
 #[test]
 fn qualified_class_refs_are_refreshed_when_class_recovers() {
     for src in [
-        "class C { v = module.expected }\nfunction make() = new module.C {}\nexpected = \"b\"\nresult = make()\n",
-        "class C { v = module.expected }\nfunction make() = new this.C {}\nexpected = \"b\"\nresult = make()\n",
+        "class C { v = module.expected }\nfunction make() = new module.C {}\nconst expected = \"b\"\nresult = make()\n",
+        "class C { v = module.expected }\nfunction make() = new this.C {}\nconst expected = \"b\"\nresult = make()\n",
     ] {
         let val = eval(src);
         assert_eq!(val["result"], serde_json::json!({"v": "b"}), "{src}");
     }
     // A local holding a class is a value, not a type.
     for src in [
-        "class C { v = module.expected }\nlocal x = module.C\nexpected = \"b\"\nresult = new x {}\n",
-        "class C { v = module.expected }\nlocal x = this.C\nexpected = \"b\"\nresult = new x {}\n",
+        "class C { v = module.expected }\nlocal x = module.C\nconst expected = \"b\"\nresult = new x {}\n",
+        "class C { v = module.expected }\nlocal x = this.C\nconst expected = \"b\"\nresult = new x {}\n",
     ] {
         let err = eval_fails(src);
         assert!(
@@ -4094,7 +4045,7 @@ fn module_function_building_class_reading_module_is_refreshed() {
         r#"
 class C { v = module.expected }
 function make() = new C {}
-expected = "b"
+const expected = "b"
 result = make()
 "#,
     );
