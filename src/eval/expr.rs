@@ -843,8 +843,11 @@ impl Evaluator {
                 // A member amended by several bodies that nothing defines
                 // starts from an empty object.
                 Err(Error::Eval(message))
-                    if matches!(left, Expr::Field(target, _) if matches!(target.as_ref(), Expr::Ident(name) if name == "super"))
-                        && message.starts_with("undefined variable: super") =>
+                    if matches!(left, Expr::Field(target, _) | Expr::Index(target, _)
+                        if matches!(target.as_ref(), Expr::Ident(name) if name == "super"))
+                        && (message.starts_with("undefined variable: super")
+                            || matches!(left, Expr::Index(..))
+                                && message.starts_with("field not found")) =>
                 {
                     self.eval_expr(
                         &Expr::New(None, Vec::new().into(), Vec::new()),

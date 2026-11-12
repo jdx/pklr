@@ -3751,3 +3751,10 @@ fn base_locals_stay_bound_in_nested_dynamic_entries() {
     );
     assert_eq!(value["child"]["foo"]["key"], "original");
 }
+
+#[test]
+fn consecutive_bodies_on_a_computed_key_start_from_an_empty_object() {
+    // `pkl eval` 0.32.2: the later body amends the earlier one.
+    let value = eval("local k = \"a\"\nx { [k] { v = 1; w = 1 } { v = 2 } }\n");
+    assert_eq!(value["x"]["a"], serde_json::json!({"v": 2, "w": 1}));
+}

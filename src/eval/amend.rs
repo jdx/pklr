@@ -1973,6 +1973,22 @@ pub(super) fn shadow_local_reads(entry: &Entry, shadowed: &[(Name, Value)]) -> E
         Entry::Elem(expr) => return Entry::Elem(wrap(expr)),
         Entry::Spread(expr) => return Entry::Spread(wrap(expr)),
         Entry::Predicate(test, value) => return Entry::Predicate(wrap(test), wrap(value)),
+        Entry::ForGenerator(generator) => {
+            let mut generator = generator.clone();
+            generator.collection = wrap(&generator.collection);
+            generator.body = shadow_body(&generator.body, shadowed);
+            return Entry::ForGenerator(generator);
+        }
+        Entry::WhenGenerator(generator) => {
+            let mut generator = generator.clone();
+            generator.condition = wrap(&generator.condition);
+            generator.body = shadow_body(&generator.body, shadowed);
+            generator.else_body = generator
+                .else_body
+                .as_ref()
+                .map(|body| shadow_body(body, shadowed));
+            return Entry::WhenGenerator(generator);
+        }
         _ => return entry.clone(),
     };
     let reads = property_reference_names(prop);
@@ -2000,4 +2016,11 @@ pub(super) fn shadow_local_reads(entry: &Entry, shadowed: &[(Name, Value)]) -> E
         ));
     }
     Entry::Property(Arc::new(prop))
+}
+
+fn shadow_body(body: &Body, shadowed: &[(Name, Value)]) -> Body {
+    body.iter()
+        .map(|entry| shadow_local_reads(entry, shadowed))
+        .collect::<Vec<_>>()
+        .into()
 }
