@@ -20,30 +20,7 @@ impl Evaluator {
     /// is [`Error::ImportNotFound`]. This is the single place module path
     /// lookups happen.
     fn module_path_file(&mut self, uri: &str) -> Result<PathBuf> {
-        let Some(rest) = uri.strip_prefix("modulepath:/") else {
-            return Err(Error::Eval(format!(
-                "Module URI `{uri}` is missing a `/` after `modulepath:`."
-            )));
-        };
-        let not_found = || Error::ImportNotFound(uri.to_string());
-        // Decode the URI path and remove dot segments. A segment that could be
-        // a host path root, prefix or separator (`\`, `:`, NUL), or a `..` that
-        // climbs out of the module path directory, finds nothing.
-        let decoded = super::resource::percent_decode(rest);
-        let mut segments: Vec<&str> = Vec::new();
-        for part in decoded.split('/') {
-            match part {
-                "" | "." => {}
-                ".." => {
-                    segments.pop().ok_or_else(not_found)?;
-                }
-                _ if part.contains(['\\', ':', '\0']) => return Err(not_found()),
-                _ => segments.push(part),
-            }
-        }
-        if segments.is_empty() {
-            return Err(not_found());
-        }
+        let segments = module_path_segments(uri)?;
         for dir in self.module_path.clone() {
             let mut candidate = dir;
             candidate.extend(&segments);
@@ -51,9 +28,56 @@ impl Evaluator {
                 return Ok(candidate);
             }
         }
-        Err(not_found())
+        Err(Error::ImportNotFound(uri.to_string()))
     }
 
+    /// The module path file a `modulepath:` URI names, with the URI normalized
+    /// as Pkl reports it (`modulepath:/a//b/../c` is `modulepath:/a/c`).
+    /// `None` when no module path directory holds it.
+    pub(super) fn module_path_resource(&mut self, uri: &str) -> Result<Option<(PathBuf, String)>> {
+        let segments = match module_path_segments(uri) {
+            Ok(segments) => segments,
+            Err(Error::ImportNotFound(_)) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        match self.module_path_file(uri) {
+            Ok(path) => Ok(Some((path, format!("modulepath:/{}", segments.join("/"))))),
+            Err(Error::ImportNotFound(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+/// The normalized path segments of a `modulepath:/path` URI.
+fn module_path_segments(uri: &str) -> Result<Vec<String>> {
+    let Some(rest) = uri.strip_prefix("modulepath:/") else {
+        return Err(Error::Eval(format!(
+            "Module URI `{uri}` is missing a `/` after `modulepath:`."
+        )));
+    };
+    let not_found = || Error::ImportNotFound(uri.to_string());
+    // Decode the URI path and remove dot segments. A segment that could be
+    // a host path root, prefix or separator (`\`, `:`, NUL), or a `..` that
+    // climbs out of the module path directory, finds nothing.
+    let decoded = super::resource::percent_decode(rest);
+    let mut segments: Vec<&str> = Vec::new();
+    for part in decoded.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                segments.pop().ok_or_else(not_found)?;
+            }
+            _ if part.contains(['\\', ':', '\0']) => return Err(not_found()),
+            _ => segments.push(part),
+        }
+    }
+    if segments.is_empty() {
+        return Err(not_found());
+    }
+    Ok(segments.into_iter().map(String::from).collect())
+}
+
+impl Evaluator {
     /// Resolve a local module or resource URI against the module at
     /// `current_path`. A triple-dot URI is searched for upward from the
     /// module's directory (see [`Self::resolve_triple_dot`]); a path that

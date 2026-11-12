@@ -80,6 +80,10 @@ name = "allowed_modules"
 required-features = ["native-io"]
 
 [[test]]
+name = "modulepath_resources"
+required-features = ["native-io"]
+
+[[test]]
 name = "async"
 required-features = ["async", "package-zip"]
 

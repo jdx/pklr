@@ -141,6 +141,10 @@ impl Evaluator {
                 uri: absolute,
             },
             "http" | "https" | "package" => Target::Remote(absolute),
+            "modulepath" => match self.module_path_resource(&absolute)? {
+                Some((path, uri)) => Target::File { path, uri },
+                None => Target::Unreadable,
+            },
             _ => Target::Unreadable,
         })
     }
