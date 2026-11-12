@@ -7909,3 +7909,82 @@ fn dynamic_converter_does_not_replace_a_module_with_an_undefined_property() {
     );
     assert!(result.is_err(), "{result:?}");
 }
+
+#[test]
+fn mapping_get_or_default_amended_body_function_default() {
+    let json = eval(
+        r#"
+base = new Mapping {
+  default { key -> name = key; age = 42 }
+}
+m = (base) { default { key -> age = 45 } }
+miss = m.getOrDefault("zed")
+again = (m) { ["k"] { age = 5 } }
+miss2 = again.getOrDefault("zed")
+"#,
+    );
+    assert_eq!(json["miss"], serde_json::json!({"name": "zed", "age": 45}));
+    assert_eq!(json["miss2"], serde_json::json!({"name": "zed", "age": 45}));
+    assert_eq!(
+        json["again"]["k"],
+        serde_json::json!({"name": "k", "age": 5})
+    );
+}
+
+#[test]
+fn mapping_get_or_default_amended_assigned_function_default() {
+    let json = eval(
+        r#"
+local suffix = "!"
+base = new Mapping { default = (k) -> "v-\(k)" }
+m = (base) { default = (k) -> "w-\(k)\(suffix)" }
+miss = m.getOrDefault("z")
+kept = (base) { ["x"] = "y" }.getOrDefault("z")
+"#,
+    );
+    assert_eq!(json["miss"], "w-z!");
+    assert_eq!(json["kept"], "v-z");
+}
+
+#[test]
+fn mapping_get_or_default_amended_function_default_with_local_member() {
+    let json = eval(
+        r#"
+base = new Mapping { local n = 1; default = (k) -> "old\(n)" }
+m = (base) { default = (k) -> "new-\(k)" }
+miss = m.getOrDefault("z")
+"#,
+    );
+    assert_eq!(json["miss"], "new-z");
+}
+
+#[test]
+fn mapping_get_or_default_amended_function_default_reads_amendment_local() {
+    let json = eval(
+        r#"
+base = new Mapping { local unused = 0; default = (k) -> 1 }
+m = (base) { local r = 2; default = (k) -> r }
+miss = m.getOrDefault("z")
+"#,
+    );
+    assert_eq!(json["miss"], 2);
+}
+
+#[test]
+fn mapping_get_or_default_amended_function_default_with_unsaveable_replacement() {
+    let json = eval(
+        r#"
+base = new Mapping {
+  default = (k) -> 1
+  ["x"] = new Dynamic { a = 1 }
+  ["y"] = this["x"]
+}
+m = (base) {
+  default = (k) -> 2
+  ["x"] = new Dynamic { a = 2 }
+}
+miss = m.getOrDefault("z")
+"#,
+    );
+    assert_eq!(json["miss"], 2);
+}

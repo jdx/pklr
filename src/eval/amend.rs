@@ -1223,7 +1223,21 @@ impl Evaluator {
                             source.entries = entries.into();
                             Arc::new(source)
                         } else {
-                            Arc::clone(base_src)
+                            // The replaced entries cannot be saved, but the
+                            // default still is.
+                            let mut source = Arc::unwrap_or_clone(Arc::clone(base_src));
+                            source.entries = base_src
+                                .entries
+                                .iter()
+                                .map(|entry| match entry {
+                                    Entry::Property(prop) if &*prop.name == "default" => {
+                                        Entry::Property(default.clone())
+                                    }
+                                    entry => entry.clone(),
+                                })
+                                .collect::<Vec<_>>()
+                                .into();
+                            Arc::new(source)
                         }
                     }
                     None => Arc::clone(base_src),
@@ -1283,10 +1297,44 @@ impl Evaluator {
         let Some(assigned_default) = assigned_default else {
             return Ok(None);
         };
-        if !plain_base {
-            return Ok(None);
+        // The default may read the locals the amendment declares.
+        let mut default_scope = amendment_scope.clone();
+        // Whether `default_scope` holds everything the amendment declares: a
+        // function default recorded from a partial scope would mis-bind names.
+        let mut complete = true;
+        for entry in overlay_entries.iter() {
+            match entry {
+                Entry::Property(prop) if has_modifier(&prop.modifiers, Modifier::Local) => {
+                    let evaluated = match (&prop.value, &prop.body) {
+                        (Some(expr), _) => self.eval_expr(expr, &default_scope, depth + 1).ok(),
+                        (None, Some(body)) => {
+                            self.eval_entries(body, &default_scope, depth + 1).ok()
+                        }
+                        _ => None,
+                    };
+                    match evaluated {
+                        Some(value) => default_scope.declare(&prop.name, value),
+                        None => complete = false,
+                    }
+                }
+                Entry::ClassDef(name, mods, parent, body) => {
+                    match self.eval_class_def(
+                        name,
+                        mods,
+                        parent.as_deref(),
+                        body,
+                        &default_scope,
+                        depth + 1,
+                    ) {
+                        Ok(defaults) => default_scope.set(name, defaults),
+                        Err(_) => complete = false,
+                    }
+                }
+                Entry::TypeAlias(name, ty) => self.eval_type_alias(name, ty, &mut default_scope),
+                _ => {}
+            }
         }
-        let Some(default) = self.find_default_template(overlay_entries, amendment_scope, depth)?
+        let Some(default) = self.find_default_template(overlay_entries, &default_scope, depth)?
         else {
             return Ok(None);
         };
@@ -1323,11 +1371,12 @@ impl Evaluator {
             .entries
             .iter()
             .filter(|entry| {
-                matches!(
-                    entry,
-                    Entry::DynProperty(Expr::String(key), Expr::ObjectBody(_) | Expr::New(None, ..))
-                        if !replaced.contains(&**key)
-                )
+                plain_base
+                    && matches!(
+                        entry,
+                        Entry::DynProperty(Expr::String(key), Expr::ObjectBody(_) | Expr::New(None, ..))
+                            if !replaced.contains(&**key)
+                    )
             })
             .cloned()
             .collect();
@@ -1382,11 +1431,23 @@ impl Evaluator {
             .flatten();
         let same =
             declared.is_some_and(|declared| declared.identity_json() == recorded.identity_json());
-        // A function default may read the default it amends through `super`
-        // or close over names that only exist where the amendment is written;
-        // the saved source can rebind neither, and every function compares
-        // equal above, so a function default is not recorded.
-        if !same || matches!(assigned_default.value, Some(Expr::Lambda(..))) {
+        // A function default is recorded as the function itself: it already
+        // holds the bindings where the amendment is written, which the saved
+        // source cannot rebind, and it reads the default it amends through
+        // `super` as it did when it was made.
+        if let Value::Lambda(..) = recorded {
+            if !complete {
+                return Ok(None);
+            }
+            let mut saved = (*assigned_default).clone();
+            saved.value = Some(Expr::TemplateLocals(
+                LocalBindings(Arc::new(vec![(Arc::from(RECORDED_DEFAULT), recorded)])),
+                Box::new(Expr::Ident(RECORDED_DEFAULT.to_string())),
+            ));
+            saved.body = None;
+            return Ok(Some(Arc::new(saved)));
+        }
+        if !same || !plain_base {
             return Ok(None);
         }
         // The recorded default is the inherited body followed by the new one.
@@ -1401,6 +1462,9 @@ impl Evaluator {
         })
     }
 }
+
+/// The name a recorded function default is bound to in its saved source.
+const RECORDED_DEFAULT: &str = "#recorded-default";
 
 /// The function `(function) { body }` evaluates to: one that calls `function`
 /// with its `arity` arguments and amends the result with `body`, evaluated
