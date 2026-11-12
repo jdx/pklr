@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap as HashMap;
 
-use super::remote::resolve_remote_relative;
 use super::render::{self, Converters, Invoke, Kind, RendererKind, Settings};
 use super::types::resolve_dotted;
 use super::{
@@ -544,7 +543,7 @@ impl Evaluator {
                 crate::stack::limit_hit();
                 break;
             }
-            let resolved = resolve_remote_relative(&from, &uri);
+            let resolved = self.resolve_relative(&from, &uri);
             let uri = resolved.as_deref().unwrap_or(&uri);
             let Some((base, source_path)) = self.load_parsed_module(uri, &from)? else {
                 break;

@@ -86,7 +86,8 @@ fn split_query(uri: &str) -> (&str, &str) {
 
 /// The normalized path segments of a `modulepath:/path` URI.
 fn module_path_segments(uri: &str) -> Result<Vec<String>> {
-    let Some(rest) = uri.strip_prefix("modulepath:/") else {
+    // The file is named by the path alone, not a query or fragment.
+    let Some(rest) = split_query(uri).0.strip_prefix("modulepath:/") else {
         return Err(Error::Eval(format!(
             "Module URI `{uri}` is missing a `/` after `modulepath:`."
         )));
@@ -240,7 +241,7 @@ impl Evaluator {
         uri: &str,
         path: &Path,
     ) -> Result<Option<(String, String)>> {
-        let resolved = resolve_remote_relative(path, uri);
+        let resolved = self.resolve_relative(path, uri);
         let uri = resolved.as_deref().unwrap_or(uri);
         if uri.starts_with("https://") || uri.starts_with("http://") {
             let source = self.fetch_source(uri)?;
@@ -357,7 +358,7 @@ impl Evaluator {
         }
         if !self.module_path_admitted.is_empty() {
             let absolute = absolute_clean(&self.host_absolute_path(path.to_path_buf()));
-            if self.module_path_admitted.contains(&absolute) {
+            if self.module_path_admitted.contains_key(&absolute) {
                 return Ok(());
             }
         }
@@ -399,13 +400,106 @@ impl Evaluator {
     /// resolved to the file `path`, so loading the file is not refused as a
     /// `file:` URI. Call it only for a module that is actually loaded.
     pub(super) fn admit_module_path(&mut self, uri: &str, path: &Path) -> Result<()> {
-        if self.allowed_modules.is_none() || !uri.starts_with("modulepath:") {
+        if !uri.starts_with("modulepath:") {
             return Ok(());
         }
         self.check_module_allowed(uri)?;
-        let absolute = absolute_clean(&self.host_absolute_path(path.to_path_buf()));
-        self.module_path_admitted.insert(absolute);
+        // The file's URI is what its relative imports resolve against.
+        if let Some(normalized) = normalize_module_path_uri(split_query(uri).0)? {
+            let absolute = absolute_clean(&self.host_absolute_path(path.to_path_buf()));
+            // The first URI that loads a file names it, so one file is not
+            // renamed by a later import of it through another URI.
+            self.module_path_admitted
+                .entry(absolute)
+                .or_insert(normalized);
+        }
         Ok(())
+    }
+
+    /// Resolve the relative reference `uri` made from the module at
+    /// `current_path` to the absolute URI it names, when that is not a local
+    /// file: against a remote module's URL, or against a module path module's
+    /// `modulepath:` URI, as Pkl does. `None` when the import stays local.
+    pub(super) fn resolve_relative(&mut self, current_path: &Path, uri: &str) -> Option<String> {
+        if let Some(remote) = resolve_remote_relative(current_path, uri) {
+            return Some(remote);
+        }
+        if self.module_path_admitted.is_empty() || has_scheme(uri) {
+            return None;
+        }
+        let absolute = absolute_clean(&self.host_absolute_path(current_path.to_path_buf()));
+        let base = self.module_path_admitted.get(&absolute)?.clone();
+        self.join_module_path_uri(&base, uri)
+    }
+
+    /// The `modulepath:` URI the relative reference `rel` names from the module
+    /// `base`. Dot segments are removed, but ones that climb out of the module
+    /// path root are kept, so the URI Pkl matches against the allowlist
+    /// (`modulepath:/../x.pkl`) names nothing and is not mistaken for a file
+    /// inside the root. A triple-dot reference names the nearest ancestor
+    /// directory that holds the file, or the root when none does.
+    fn join_module_path_uri(&mut self, base: &str, rel: &str) -> Option<String> {
+        let (rel_path, suffix) = split_query(rel);
+        let mut dir: Vec<&str> = base
+            .strip_prefix("modulepath:/")
+            .unwrap_or_default()
+            .split('/')
+            .collect();
+        dir.pop();
+        // An invalid triple-dot URI stays as written, to be reported as such.
+        let Ok(triple_dot) = parse_triple_dot_path(rel_path) else {
+            return None;
+        };
+        if let Some(triple_dot) = triple_dot {
+            // Pkl matches the unnormalized candidates and finds nothing for a
+            // `..` that climbs, so such a path is refused here as an escape
+            // rather than normalized into the module path.
+            if triple_dot.split('/').any(|part| part == "..") {
+                return Some(format!("modulepath:/../{triple_dot}{suffix}"));
+            }
+            let module = Path::new("/").join(base.strip_prefix("modulepath:/").unwrap_or_default());
+            let found =
+                resolve_triple_dot(&module, triple_dot, Some(Path::new("/")), |candidate| {
+                    let uri = format!(
+                        "modulepath:{}",
+                        candidate.to_string_lossy().replace('\\', "/")
+                    );
+                    Ok(self.module_path_file(&uri, false).is_ok())
+                });
+            // Nothing found names the root, as Pkl reports it.
+            let name = match found {
+                Ok(Some(path)) => path.to_string_lossy().replace('\\', "/"),
+                _ => format!("/{triple_dot}"),
+            };
+            let joined = format!("modulepath:{name}{suffix}");
+            return Some(
+                normalize_module_path_uri(&joined)
+                    .ok()
+                    .flatten()
+                    .unwrap_or(joined),
+            );
+        }
+        let mut stack: Vec<&str> = if rel_path.starts_with('/') {
+            Vec::new()
+        } else {
+            dir
+        };
+        for part in rel_path.split('/') {
+            match part {
+                "" | "." => {}
+                ".." if stack.last().is_some_and(|last| *last != "..") => {
+                    stack.pop();
+                }
+                part => stack.push(part),
+            }
+        }
+        let joined = format!("modulepath:/{}{suffix}", stack.join("/"));
+        Some(
+            normalize_module_path_uri(&joined)
+                .ok()
+                .flatten()
+                .unwrap_or(joined),
+        )
     }
 
     /// Load and parse the module `uri` names, sharing the parse cache with
@@ -689,6 +783,13 @@ impl Evaluator {
         depth: usize,
         requested: Option<&HashSet<Name>>,
     ) -> Result<Value> {
+        // A malformed triple-dot URI is a syntax error, not a file pattern.
+        parse_triple_dot_path(uri)?;
+        if uri.starts_with("modulepath:") {
+            return Err(Error::Eval(format!(
+                "Cannot expand glob pattern `{uri}` because scheme `modulepath` is not globbable."
+            )));
+        }
         // Non-local glob imports resolve to an empty mapping.
         if uri.contains("://") {
             return Ok(Value::Object(Arc::default(), None));
@@ -752,7 +853,7 @@ impl Evaluator {
         depth: usize,
         requested: Option<HashSet<Name>>,
     ) -> Result<Value> {
-        let resolved = resolve_remote_relative(path, uri);
+        let resolved = self.resolve_relative(path, uri);
         let uri: &str = resolved.as_deref().unwrap_or(uri);
 
         if let Some(module_name) = uri.strip_prefix("pkl:") {
@@ -896,4 +997,12 @@ mod requested_field_tests {
 
         std::fs::remove_dir_all(test_dir).unwrap();
     }
+}
+
+/// Whether `uri` starts with a scheme (`file:`, `https://`), so is not a
+/// relative reference.
+fn has_scheme(uri: &str) -> bool {
+    uri.split('/')
+        .next()
+        .is_some_and(|first| first.contains(':'))
 }
