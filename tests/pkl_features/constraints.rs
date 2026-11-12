@@ -201,3 +201,17 @@ fn null_default_is_amended() {
         serde_json::json!({"b": {"foo": {"x": 5, "y": 9}}})
     );
 }
+
+#[test]
+fn null_default_reads_its_declaring_scope_and_user_null() {
+    let src = "const local k = 5\nclass Foo { x: Int = 1; y: Int = 2 }\nclass Bar { foo: Foo? = Null(new Foo { x = k }) }\nb = new Bar { foo { y = 9 } }\n";
+    assert_eq!(
+        eval(src),
+        serde_json::json!({"b": {"foo": {"x": 5, "y": 9}}})
+    );
+    let src = "const local function Null(v) = new Dynamic { kept = 1 }\nclass Bar { p = Null(new Dynamic {}) }\nb = new Bar { p { added = 2 } }\n";
+    assert_eq!(
+        eval(src),
+        serde_json::json!({"b": {"p": {"kept": 1, "added": 2}}})
+    );
+}
