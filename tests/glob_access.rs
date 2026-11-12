@@ -451,3 +451,61 @@ fn default_glob_without_access_fails_instead_of_touching_the_disk() {
         .unwrap_err();
     assert!(error.to_string().contains("no glob access"), "{error}");
 }
+
+/// Implements only `glob_access`, relying on the trait defaults for `glob`,
+/// `resource_glob_access` and `resource_glob`.
+struct OneHook {
+    native: NativeCapabilities,
+    view: Vfs,
+}
+
+impl EvalCapabilities for OneHook {
+    fn read_to_string(&mut self, path: &Path) -> pklr::Result<String> {
+        self.native.read_to_string(path)
+    }
+    fn path_exists(&mut self, path: &Path) -> pklr::Result<bool> {
+        self.native.path_exists(path)
+    }
+    fn canonicalize(&mut self, path: &Path) -> pklr::Result<PathBuf> {
+        self.native.canonicalize(path)
+    }
+    fn read_bytes(&mut self, path: &Path) -> pklr::Result<Vec<u8>> {
+        self.native.read_bytes(path)
+    }
+    fn read_env(&mut self, name: &str) -> pklr::Result<Option<String>> {
+        self.native.read_env(name)
+    }
+    fn fetch_text(&mut self, url: &str) -> pklr::Result<String> {
+        self.native.fetch_text(url)
+    }
+    fn fetch_bytes(&mut self, url: &str) -> pklr::Result<Vec<u8>> {
+        self.native.fetch_bytes(url)
+    }
+    fn temp_dir(&mut self, prefix: &str) -> pklr::Result<PathBuf> {
+        self.native.temp_dir(prefix)
+    }
+    fn glob_access(&mut self) -> Option<&mut dyn GlobAccess> {
+        Some(&mut self.view)
+    }
+}
+
+#[test]
+fn one_access_hook_serves_import_and_read_globs() {
+    let project = Project::new("globaccess_onehook");
+    let mut view = Vfs::mirror(&project.tree());
+    view.nodes.remove(&project.tree().join("sub/c.pkl"));
+    let asked = view.asked.clone();
+    let caps = OneHook {
+        native: NativeCapabilities::new(),
+        view,
+    };
+    let keys = project.keys("**.pkl", caps);
+    let expected = serde_json::json!([
+        "tree/.hidden.pkl",
+        "tree/a.pkl",
+        "tree/sub/deep/e.pkl",
+        "tree/z/f.pkl"
+    ]);
+    assert_eq!(keys, serde_json::json!({ "i": expected, "r": expected }));
+    assert!(!asked.lock().unwrap().is_empty());
+}
