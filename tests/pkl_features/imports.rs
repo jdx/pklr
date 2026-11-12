@@ -4452,6 +4452,7 @@ fn qualified_type_prefix_must_be_a_module_import() {
         "class C {}\nbar: C.T\n",
         "foo = 1\nbar: foo.T = 1\n",
         "hidden foo: Int\nbar: foo.T?\n",
+        "class C {}\nhidden foo = new Dynamic { T = C }\nbar: foo.T?\n",
     ] {
         let err = eval_fails(src);
         assert!(err.contains("module import"), "{src}: {err}");

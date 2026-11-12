@@ -2095,7 +2095,12 @@ impl TypeResolver<'_> {
                     })
                     .is_some()
                 }));
-        if names_class {
+        // A class reached through a property is not named by an import.
+        let qualified_by_value = !enclosing
+            && scope.module_identity(module).is_none()
+            && !module.contains('.')
+            && resolve_dotted(scope, module).is_some();
+        if names_class && !qualified_by_value {
             return None;
         }
         if enclosing {
