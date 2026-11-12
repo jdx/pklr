@@ -65,8 +65,11 @@ pub(crate) fn object_key(value: &Value) -> Arc<str> {
 
 /// Whether `key` stands for something other than a string.
 fn is_non_string_key(key: &str) -> bool {
-    if key.starts_with(crate::value::MAPPING_KEY_PREFIX) {
-        return !matches!(crate::value::mapping_storage_value(key), Value::String(_));
+    if let Some(stored) = key.strip_prefix(crate::value::MAPPING_KEY_PREFIX) {
+        // Object and list keys are stored by an identity string, which
+        // `mapping_storage_value` reads back as a string.
+        return !matches!(crate::value::mapping_storage_value(key), Value::String(_))
+            || !stored.starts_with("string:");
     }
     key.starts_with('\0')
         && (key.starts_with(CLASS_KEY_PREFIX)
@@ -925,6 +928,10 @@ pub(crate) trait StringRenderer<'a> {
     fn end_listing(&mut self, is_empty: bool) -> Result<()>;
     fn visit_element(&mut self, index: usize, value: &Value, is_first: bool) -> Result<()>;
     fn visit_entry_key(&mut self, key: &Value, is_first: bool) -> Result<()>;
+    /// Whether an object or list mapping key is an error here, as in JSON.
+    fn rejects_compound_keys(&self) -> bool {
+        false
+    }
     fn visit_entry_value(&mut self, value: &Value) -> Result<()> {
         self.visit(value)
     }
@@ -1047,6 +1054,7 @@ pub(crate) trait StringRenderer<'a> {
                     self.walk().path.pop();
                 }
                 MemberKind::Entry => {
+                    let raw_key = key;
                     let key = self.walk().convert_key(&key_value(key))?;
                     self.walk().path.push(match &key {
                         Value::String(s) => PathPart::Entry(s.clone()),
@@ -1054,6 +1062,13 @@ pub(crate) trait StringRenderer<'a> {
                     });
                     let converted = self.walk().convert(value)?;
                     if !(self.walk().skip_null_entries && converted == Value::Null) {
+                        if self.rejects_compound_keys()
+                            && raw_key.starts_with(crate::value::MAPPING_KEY_PREFIX)
+                            && is_non_string_key(raw_key)
+                            && matches!(key_value(raw_key), Value::String(_))
+                        {
+                            return Err(cannot_render_non_string_key(&key_value(raw_key), "JSON"));
+                        }
                         let value_path = std::mem::take(&mut self.walk().path);
                         let result = self.visit_entry_key(&key, is_first);
                         self.walk().path = value_path;

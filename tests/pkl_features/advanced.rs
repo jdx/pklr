@@ -1611,7 +1611,7 @@ values {
 }
 "#,
     );
-    assert!(msg.contains("undefined variable: h"), "{msg}");
+    assert!(msg.contains("Cannot find property `h`."), "{msg}");
 }
 
 #[test]
@@ -1626,7 +1626,7 @@ values = new Mapping {
 }
 "#,
     );
-    assert!(msg.contains("undefined variable: h"), "{msg}");
+    assert!(msg.contains("Cannot find property `h`."), "{msg}");
 }
 
 #[test]

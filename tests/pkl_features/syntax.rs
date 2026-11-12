@@ -2223,7 +2223,8 @@ fn amending_module_inherited_mapping_preserves_compound_keys_and_union_selection
     let compound = temp.path().join("Compound.pkl");
     std::fs::write(
         &compound,
-        "amends \"CompoundBase.pkl\"\ntyped { [List(1)] = 1 }\n",
+        // The output is replaced: pkl cannot render a List key as JSON.
+        "amends \"CompoundBase.pkl\"\ntyped { [List(1)] = 1 }\noutput { value = 1 }\n",
     )
     .unwrap();
     assert!(
@@ -3023,9 +3024,22 @@ fn lambda_calls_require_the_declared_arity() {
 }
 
 #[test]
+fn member_predicate_amends_matching_dynamic_elements() {
+    // Confirmed with `pkl eval`.
+    let v = eval(
+        "hidden base { 1 2 }\nres = (base) { [[this == 1]] = 3 }\n\
+         hidden people { new { name = \"a\" } new { name = \"b\" } }\n\
+         res2 = (people) { [[name == \"b\"]] { name = \"c\" } }\n\
+         res3 = (base) { [1] = 9 }\n",
+    );
+    assert_eq!(v["res"], serde_json::json!([3, 2]));
+    assert_eq!(v["res2"], serde_json::json!([{"name": "a"}, {"name": "c"}]));
+    assert_eq!(v["res3"], serde_json::json!([1, 9]));
+}
+
+#[test]
 fn member_predicates_are_reported_as_unsupported() {
     for src in [
-        "base { 1 2 }\nres = (base) { [[this == 1]] = 3 }\n",
         "base = new Listing { 1 2 }\nres = (base) { [[this == 1]] = 3 }\n",
         "base = new Mapping { [\"a\"] = 1 }\nres = (base) { [[this == 1]] = 3 }\n",
     ] {
@@ -3203,6 +3217,37 @@ fn const_method_with_annotation_body_is_not_checked_for_bare_reads() {
 }
 
 #[test]
+fn dynamic_element_amendment_by_computed_index_sees_locals_and_super() {
+    // `pkl eval` gives {"a": [1, 9], "b": [1, 9], "c": [1, 1]}.
+    let v = eval(
+        "hidden base = new Dynamic { 1; 2 }\n\
+         a = (base) { local r = 9; [1] = r }\n\
+         b = (base) { [1 + 0] = 9 }\n\
+         c = (base) { [1] = super[0] }\n",
+    );
+    assert_eq!(v["a"], serde_json::json!([1, 9]));
+    assert_eq!(v["b"], serde_json::json!([1, 9]));
+    assert_eq!(v["c"], serde_json::json!([1, 1]));
+}
+
+#[test]
+fn dynamic_out_of_range_index_amendment_terminates() {
+    // pkl adds an entry (and then cannot render the mixed object); the
+    // evaluator must not loop on the unmatched index.
+    let v = eval("hidden base = new Dynamic { 1; 2 }\nres = (base) { [2] = 9 }\n");
+    assert_eq!(v["res"]["members"]["2"], 9);
+}
+
+#[test]
+fn dynamic_amendment_properties_read_the_amended_object() {
+    let v = eval(
+        "hidden base = new Dynamic { 1; 2 }\n\
+         res = (base) { name = \"inner\"; copy = this.name; [\"key\" + \"\"] = 9 }\n",
+    );
+    assert_eq!(v["res"]["members"]["copy"], "inner");
+}
+
+#[test]
 fn small_error_cases_match_pkl() {
     // Each is rejected by `pkl eval` with the message checked here.
     for (src, expected) in [
@@ -3257,4 +3302,11 @@ fn const_scopes_accept_unapplied_lambdas_and_quoted_receivers() {
     assert_eq!(json["obj"]["result"], 1);
     let json = eval("class C { v = let (`outer` = 1) `outer` }\nr = new C {}\n");
     assert_eq!(json["r"]["v"], 1);
+}
+
+#[test]
+fn dynamic_amendment_key_errors_are_reported_once() {
+    let err =
+        eval_fails("hidden base = new Dynamic { 1; 2 }\nres = (base) { [\"a\" as Int] = 9 }\n");
+    assert!(err.contains("Int"), "{err}");
 }
