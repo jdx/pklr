@@ -374,6 +374,7 @@ impl Evaluator {
             ty,
             value,
             Some(&prop.name),
+            scope,
         )))
     }
 
@@ -578,6 +579,7 @@ impl Evaluator {
         ty: &crate::parser::TypeExpr,
         val: &Value,
         property: Option<&str>,
+        scope: &Scope,
     ) -> String {
         // pkl shows the source line of the property after the message, which
         // `catch` does not report.
@@ -592,7 +594,7 @@ impl Evaluator {
         }
         format!(
             "Expected value of type `{}`, but got type `{}`.\nValue: {}{location}",
-            error_type_expr(ty),
+            error_type_expr(ty, scope),
             pkl_class_name(val),
             display_value(val)
         )
@@ -760,7 +762,15 @@ impl Evaluator {
                     && scope.get(name).is_none()
                     && let Ok(resolved) = crate::parser::parse_type_name(source)
                 {
-                    return self.eval_type_check_in(val, &resolved, scope, depth + 1, resolving);
+                    // The alias is the standard library's: its base type and
+                    // predicates are not the caller's classes or functions.
+                    return self.eval_type_check_in(
+                        val,
+                        &resolved,
+                        &Scope::default(),
+                        depth + 1,
+                        resolving,
+                    );
                 }
                 // A scalar of the built-in type of that name matches without
                 // resolving the name as a class, which only a class instance
@@ -865,6 +875,18 @@ impl Evaluator {
                 } else if let Some(resolved) = scope.get_type_alias(class_name) {
                     let resolved = resolved.clone();
                     self.eval_alias_check(val, class_name, &resolved, scope, depth, resolving)?
+                } else if let Some(source) = stdlib_alias_source(class_name)
+                    && scope.get(class_name).is_none()
+                    && let Ok(resolved) = crate::parser::parse_type_name(source)
+                {
+                    // `UInt8(this != 1)`: the base is the standard library's alias.
+                    self.eval_type_check_in(
+                        val,
+                        &resolved,
+                        &Scope::default(),
+                        depth + 1,
+                        resolving,
+                    )?
                 } else {
                     value_is_class_type(val, class_name, scope)
                         .unwrap_or_else(|| value_is_named_type(val, base))
@@ -1488,8 +1510,10 @@ impl Evaluator {
                 self.check_declared_value(item, element, scope, depth)?;
             }
         }
-        if matches!(ty, crate::parser::TypeExpr::Constrained(..)) && self.type_violation.is_some() {
-            return Err(Error::Eval(self.type_mismatch_message(ty, val, None)));
+        if self.type_violation.is_some() {
+            return Err(Error::Eval(
+                self.type_mismatch_message(ty, val, None, scope),
+            ));
         }
         Err(Error::Eval(format!(
             "Expected value of type `{}`, but got type `{}`.\nValue: {}",

@@ -382,7 +382,15 @@ impl Evaluator {
                         && overlay_prop.value.is_none()
                         && let Some(body) = overlay_prop.body.take()
                     {
-                        overlay_prop.value = Some(Expr::New(Some("Dynamic".into()), body, vec![]));
+                        overlay_prop.value = Some(match null_default_value(prop) {
+                            // `Null(default)` is amended as its default.
+                            Some(default) => Expr::Binop(
+                                BinOp::Add,
+                                Box::new(default.clone()),
+                                Box::new(Expr::ObjectBody(body)),
+                            ),
+                            None => Expr::New(Some("Dynamic".into()), body, vec![]),
+                        });
                     }
                     // `hidden` is declared on the class property. An overlay
                     // that assigns it (`new Step { staged = true }` or
@@ -641,7 +649,8 @@ impl Evaluator {
                 if type_is_runtime_checkable(type_ann, check_scope)
                     && !self.eval_type_check(value, type_ann, check_scope, depth + 1)?
                 {
-                    let message = self.type_mismatch_message(type_ann, value, Some(&prop.name));
+                    let message =
+                        self.type_mismatch_message(type_ann, value, Some(&prop.name), check_scope);
                     if overlay_assigned_properties.contains(prop.name.as_ref()) {
                         return Err(Error::Eval(message));
                     }
@@ -1953,7 +1962,21 @@ pub(super) fn declared_listing_binding(name: &str) -> String {
 /// Whether `prop` is declared with an explicit `null` default, which a body
 /// amendment amends as the `null` it is.
 fn is_null_default(prop: &Property) -> bool {
-    matches!(prop.value, Some(Expr::Null))
+    matches!(prop.value, Some(Expr::Null)) || null_default_value(prop).is_some()
+}
+
+/// The default of a property declared `= Null(default)`: null, which a body
+/// amends as that default.
+fn null_default_value(prop: &Property) -> Option<&Expr> {
+    match &prop.value {
+        Some(Expr::Call(callee, args)) if matches!(&**callee, Expr::Ident(name) if name == "Null") => {
+            match args.as_slice() {
+                [default] => Some(default),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 impl Evaluator {

@@ -167,3 +167,37 @@ fn null_function_returns_null() {
     let json = eval("a = Null(new Dynamic {})\n");
     assert!(json["a"].is_null());
 }
+
+#[test]
+fn stdlib_alias_with_extra_constraint() {
+    assert_eq!(
+        eval("a: UInt8(this != 1) = 2\n"),
+        serde_json::json!({"a": 2})
+    );
+    let err = eval_fails("a: UInt8(this != 1) = 1\n");
+    assert!(err.contains("`this != 1`"), "{err}");
+    let err = eval_fails("local n: UInt8 = -5\na = n\n");
+    assert!(err.contains("isBetween(0, 255)"), "{err}");
+}
+
+#[test]
+fn stdlib_alias_ignores_user_names() {
+    // A user class or function of the same name is not the alias's.
+    assert_eq!(
+        eval("class Int {}\na: UInt8 = 2\n"),
+        serde_json::json!({"a": 2})
+    );
+    let err = eval_fails("local function isBetween(a, b) = true\na: UInt8 = 300\n");
+    assert!(err.contains("isBetween(0, 255)"), "{err}");
+    let err = eval_fails("class Char {}\na: Char = 1\n");
+    assert!(err.contains("type `Char`"), "{err}");
+}
+
+#[test]
+fn null_default_is_amended() {
+    let src = "class Foo { x: Int = 1; y: Int = 2 }\nclass Bar { foo: Foo? = Null(new Foo { x = 5 }) }\nb = new Bar { foo { y = 9 } }\n";
+    assert_eq!(
+        eval(src),
+        serde_json::json!({"b": {"foo": {"x": 5, "y": 9}}})
+    );
+}

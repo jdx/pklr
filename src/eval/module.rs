@@ -976,7 +976,7 @@ impl Evaluator {
                         match self.eval_type_check(value, ty, scope, depth + 1) {
                             Ok(true) => None,
                             Ok(false) => {
-                                Some(self.type_mismatch_message(ty, value, Some(&prop.name)))
+                                Some(self.type_mismatch_message(ty, value, Some(&prop.name), scope))
                             }
                             // An explicit Pkl `throw` is observable after the
                             // member is materialized. Keep other evaluator

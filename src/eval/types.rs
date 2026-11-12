@@ -1309,25 +1309,27 @@ pub(super) fn stdlib_alias_source(name: &str) -> Option<&'static str> {
 /// Format a TypeExpr for user-facing error messages.
 /// The type as an error names it: without the constraints of a constrained
 /// type, which are reported on their own when one is violated.
-pub(super) fn error_type_expr(ty: &crate::parser::TypeExpr) -> String {
+pub(super) fn error_type_expr(ty: &crate::parser::TypeExpr, scope: &Scope) -> String {
     use crate::parser::TypeExpr;
     match ty {
         TypeExpr::Named(name) => {
             let name = name.trim_start_matches('*');
             // The standard library's aliases are reported as what they alias.
             match stdlib_alias_source(name) {
-                Some(source) => source.split('(').next().unwrap_or(source).to_string(),
-                None => name.to_string(),
+                Some(source) if scope.get(name).is_none() => {
+                    source.split('(').next().unwrap_or(source).to_string()
+                }
+                _ => name.to_string(),
             }
         }
-        TypeExpr::Nullable(inner) => format!("{}?", error_type_expr(inner)),
+        TypeExpr::Nullable(inner) => format!("{}?", error_type_expr(inner, scope)),
         TypeExpr::Union(variants) => variants
             .iter()
-            .map(error_type_expr)
+            .map(|variant| error_type_expr(variant, scope))
             .collect::<Vec<_>>()
             .join("|"),
         TypeExpr::Generic(name, args) => {
-            let args: Vec<_> = args.iter().map(error_type_expr).collect();
+            let args: Vec<_> = args.iter().map(|arg| error_type_expr(arg, scope)).collect();
             format!("{}<{}>", name.trim_start_matches('*'), args.join(", "))
         }
         TypeExpr::Constrained(base, _, _) => base.trim_start_matches('*').to_string(),
