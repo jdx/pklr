@@ -1362,7 +1362,17 @@ impl Evaluator {
                         if has_modifier(&prop.modifiers, Modifier::Local)
                             && prop.value.is_some() =>
                     {
-                        match self.eval_expr(prop.value.as_ref().unwrap(), scope, depth) {
+                        let evaluated = self
+                            .eval_expr(prop.value.as_ref().unwrap(), scope, depth)
+                            .and_then(|value| {
+                                // A declared type is checked when the local is
+                                // read, so a mismatch poisons it.
+                                if let Some(ty) = &prop.type_ann {
+                                    self.check_local_value(&value, ty, scope, depth)?;
+                                }
+                                Ok(value)
+                            });
+                        match evaluated {
                             Ok(val) => scope.declare(&prop.name, val),
                             Err(Error::Eval(message)) => {
                                 scope.declare_poisoned(prop.name.clone(), message.clone());

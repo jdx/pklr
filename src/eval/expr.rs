@@ -785,9 +785,13 @@ impl Evaluator {
             Expr::Checked(expr, ty) => {
                 let val = self.eval_expr(expr, scope, depth + 1)?;
                 self.type_violation = None;
-                if !type_is_runtime_checkable(ty, scope)
-                    || self.eval_argument_check(&val, ty, scope, depth, &mut Vec::new())?
-                {
+                if !type_is_runtime_checkable(ty, scope) {
+                    return match self.unresolved_type(ty, scope) {
+                        Some(message) => Err(Error::Eval(message)),
+                        None => Ok(val),
+                    };
+                }
+                if self.eval_argument_check(&val, ty, scope, depth, &mut Vec::new())? {
                     Ok(val)
                 } else {
                     Err(Error::Eval(self.type_mismatch_message(ty, &val, None)))
@@ -862,6 +866,31 @@ impl Evaluator {
         Ok((bounds[0], bounds[1]))
     }
 
+    /// Whether `message` says that `left`, a read of `super` or of one of
+    /// its members, found no inherited value, rather than that an inherited
+    /// value failed.
+    fn is_missing_super_member(
+        &mut self,
+        left: &Expr,
+        message: &str,
+        scope: &Scope,
+        depth: usize,
+    ) -> bool {
+        match left {
+            Expr::Field(target, _) if matches!(target.as_ref(), Expr::Ident(name) if name == "super") => {
+                message.starts_with("undefined variable: super")
+            }
+            Expr::Index(target, key) if matches!(target.as_ref(), Expr::Ident(name) if name == "super") => {
+                message.starts_with("undefined variable: super")
+                    || self
+                        .eval_expr(key, scope, depth + 1)
+                        .and_then(|key| value_to_key(&key))
+                        .is_ok_and(|key| message == format!("field not found: {key}"))
+            }
+            _ => false,
+        }
+    }
+
     pub(super) fn eval_binop(
         &mut self,
         op: BinOp,
@@ -874,7 +903,20 @@ impl Evaluator {
         if let BinOp::Add = op
             && let Some((overlay_entries, locals)) = overlay_body(right)
         {
-            let base = self.eval_expr(left, scope, depth + 1)?;
+            let base = match self.eval_expr(left, scope, depth + 1) {
+                // A member amended by several bodies that nothing defines
+                // starts from an empty object.
+                Err(Error::Eval(message))
+                    if self.is_missing_super_member(left, &message, scope, depth) =>
+                {
+                    self.eval_expr(
+                        &Expr::New(None, Vec::new().into(), Vec::new()),
+                        scope,
+                        depth + 1,
+                    )?
+                }
+                other => other?,
+            };
             let overlay_scope = locals.map(|locals| {
                 let mut overlay_scope = scope.child();
                 for (name, value) in locals.0.iter() {

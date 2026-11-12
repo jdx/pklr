@@ -767,10 +767,31 @@ impl Evaluator {
                     let result = if is_lambda {
                         self.eval_expr(expr, &active_scope, cx.depth)
                             .map(|value| self.const_local_lambda_guard(value, const_message))
+                            .and_then(|value| {
+                                if let Some(ty) = &prop.type_ann {
+                                    self.check_local_value(&value, ty, &active_scope, cx.depth)?;
+                                }
+                                Ok(value)
+                            })
                     } else {
                         match const_message {
                             Some(message) => Err(Error::Eval(message)),
-                            None => self.eval_expr(expr, &active_scope, cx.depth),
+                            None => {
+                                self.eval_expr(expr, &active_scope, cx.depth)
+                                    .and_then(|value| {
+                                        // A declared type is checked when the local
+                                        // is read, so a mismatch poisons it.
+                                        if let Some(ty) = &prop.type_ann {
+                                            self.check_local_value(
+                                                &value,
+                                                ty,
+                                                &active_scope,
+                                                cx.depth,
+                                            )?;
+                                        }
+                                        Ok(value)
+                                    })
+                            }
                         }
                     };
                     // Release the entry scope before binding, as for properties.
@@ -1290,7 +1311,7 @@ impl Evaluator {
         let value = match self.eval_property(prop, &active_scope, cx.depth) {
             Ok(value) => value,
             Err(Error::Eval(message))
-                if prop.value.is_some()
+                if (prop.value.is_some() || prop.body.is_some())
                     && (!st.failed_locals.is_empty()
                         || cx.pending_members.iter().any(|name| {
                             *name != prop.name && !st.bound_members.contains(name)
@@ -2055,7 +2076,18 @@ fn poison_stale_members(
     prop: &Property,
     active_scope: &mut Scope,
 ) {
-    let Some(value) = &prop.value else { return };
+    let Some(value) = &prop.value else {
+        // A nested body reads the members of its enclosing object too.
+        if prop.body.is_some() {
+            let reads = property_reference_names(prop);
+            for name in &cx.stale_members {
+                if *name != prop.name && !st.bound_members.contains(name) && reads.contains(name) {
+                    active_scope.poison(name.clone(), format!("undefined variable: {name}"));
+                }
+            }
+        }
+        return;
+    };
     if matches!(
         value,
         Expr::Lambda(..)

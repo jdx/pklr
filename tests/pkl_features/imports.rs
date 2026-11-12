@@ -2439,10 +2439,10 @@ fn narrowed_import_follows_methods_called_by_class_defaults() {
     // `a` calls `getMin` while `Child`'s defaults are first evaluated, before
     // `Parent`'s `min` is merged in, so the class must still be refreshed,
     // also when the method is called through an alias of `this` or through
-    // a nested object's `outer` (or `outer.outer` from deeper down).
+    // a nested object's `outer` (also kept in a local from deeper down).
     std::fs::write(
         dir.join("dep.pkl"),
-        "min = 1\nopen class Parent { min = 2 }\nclass Child extends Parent {\n  function getMin() = min\n  a = getMin()\n}\nclass ThisChild extends Parent {\n  function getMin() = min\n  a = this.getMin()\n}\nclass AliasChild extends Parent {\n  function getMin() = min\n  a = let (self = this) self.getMin()\n}\nclass OuterChild extends Parent {\n  function getMin() = min\n  obj { a = outer.getMin() }\n  deep { inner { a = outer.outer.getMin() } }\n}\nchild = new Child {}\nthisChild = new ThisChild {}\naliasChild = new AliasChild {}\nouterChild = new OuterChild {}\n",
+        "min = 1\nopen class Parent { min = 2 }\nclass Child extends Parent {\n  function getMin() = min\n  a = getMin()\n}\nclass ThisChild extends Parent {\n  function getMin() = min\n  a = this.getMin()\n}\nclass AliasChild extends Parent {\n  function getMin() = min\n  a = let (self = this) self.getMin()\n}\nclass OuterChild extends Parent {\n  function getMin() = min\n  obj { a = outer.getMin() }\n  deep { local up = outer\n    inner { a = up.getMin() } }\n}\nchild = new Child {}\nthisChild = new ThisChild {}\naliasChild = new AliasChild {}\nouterChild = new OuterChild {}\n",
     )
     .unwrap();
     std::fs::write(
