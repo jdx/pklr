@@ -1731,12 +1731,8 @@ pub(super) fn compose_amended_object(
         base.clone()
     };
     let overlay = with_template_locals(locals, prop, Expr::ObjectBody(body.clone()));
-    // The type arguments of `new Listing<T> { ... }` check that object only;
-    // pkl does not carry them to an amendment.
-    let base = match base {
-        Expr::Checked(inner, _) => *inner,
-        base => base,
-    };
+    // The type arguments of `new Listing<T> { ... }` keep checking the original
+    // entries, as pkl does; the overlay's own entries stay outside the check.
     let value = Expr::Binop(BinOp::Add, Box::new(base), Box::new(overlay));
     Arc::new(Property {
         type_ann,

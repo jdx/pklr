@@ -1720,3 +1720,21 @@ fn amending_a_checked_new_listing_keeps_late_binding_and_drops_its_type_argument
         serde_json::json!({"base": 1, "items": [1, "x"]})
     );
 }
+
+#[test]
+fn amending_a_checked_new_listing_still_checks_its_original_entries() {
+    let temp = TestTempDir::new("pklr_checked_new_listing_original");
+    std::fs::write(
+        temp.path().join("Base.pkl"),
+        "base = \"ok\"\nitems = new Listing<String(!isEmpty)> { base }\n",
+    )
+    .unwrap();
+    let child = temp.path().join("Child.pkl");
+    std::fs::write(
+        &child,
+        "amends \"Base.pkl\"\nbase = \"\"\nitems { \"extra\" }\n",
+    )
+    .unwrap();
+    let err = pklr::eval_to_json(&child).unwrap_err().to_string();
+    assert!(err.contains("!isEmpty"), "{err}");
+}
