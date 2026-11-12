@@ -35,17 +35,39 @@ impl Evaluator {
     /// as Pkl reports it (`modulepath:/a//b/../c` is `modulepath:/a/c`).
     /// `None` when no module path directory holds it.
     pub(super) fn module_path_resource(&mut self, uri: &str) -> Result<Option<(PathBuf, String)>> {
-        let segments = match module_path_segments(uri) {
-            Ok(segments) => segments,
-            Err(Error::ImportNotFound(_)) => return Ok(None),
-            Err(error) => return Err(error),
+        let Some(normalized) = normalize_module_path_uri(uri)? else {
+            return Ok(None);
         };
         match self.module_path_file(uri) {
-            Ok(path) => Ok(Some((path, format!("modulepath:/{}", segments.join("/"))))),
+            Ok(path) => Ok(Some((path, normalized))),
             Err(Error::ImportNotFound(_)) => Ok(None),
             Err(error) => Err(error),
         }
     }
+}
+
+/// The `modulepath:` URI `uri` with dot segments and empty segments removed
+/// and the path percent-encoded, which is the spelling Pkl matches against the
+/// allowlist and reports as a resource's `uri`. `None` when the path climbs out
+/// of the module path or names nothing.
+pub(super) fn normalize_module_path_uri(uri: &str) -> Result<Option<String>> {
+    let segments = match module_path_segments(uri) {
+        Ok(segments) => segments,
+        Err(Error::ImportNotFound(_)) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut out = String::from("modulepath:");
+    for segment in segments {
+        out.push('/');
+        for byte in segment.bytes() {
+            if byte.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=@".contains(&byte) {
+                out.push(byte as char);
+            } else {
+                out.push_str(&format!("%{byte:02X}"));
+            }
+        }
+    }
+    Ok(Some(out))
 }
 
 /// The normalized path segments of a `modulepath:/path` URI.

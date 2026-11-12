@@ -162,3 +162,33 @@ fn the_allowlist_matches_the_modulepath_uri() {
         "{error}"
     );
 }
+
+#[test]
+fn the_allowlist_sees_dot_segments_removed() {
+    // pkl: `--allowed-resources modulepath:/sub/` refuses this read, reporting
+    // the normalized URI `modulepath:/Ruxel.pkl`.
+    let temp = project(
+        "mp_res_dots",
+        "a = read(\"modulepath:/sub/../Ruxel.pkl\")\n",
+    );
+    let error = eval(&temp, true, Some(&["modulepath:/sub/", "prop:"])).unwrap_err();
+    assert!(
+        error.contains("Refusing to read resource `modulepath:/Ruxel.pkl`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn the_reported_uri_reads_the_same_file() {
+    let temp = project(
+        "mp_res_encoding",
+        "a = read(\"modulepath:/a%20b.txt\")\nb = read(\"modulepath:/c%25d.txt\")\nc = read(a.uri).text\nd = read(b.uri).text\n",
+    );
+    std::fs::write(temp.0.join("mp1/a b.txt"), "spaced\n").unwrap();
+    std::fs::write(temp.0.join("mp1/c%d.txt"), "percent\n").unwrap();
+    let value = eval(&temp, true, None).unwrap();
+    assert_eq!(value["a"]["uri"], "modulepath:/a%20b.txt");
+    assert_eq!(value["b"]["uri"], "modulepath:/c%25d.txt");
+    assert_eq!(value["c"], "spaced\n");
+    assert_eq!(value["d"], "percent\n");
+}
