@@ -4388,3 +4388,17 @@ fn modulepath_unused_missing_import_is_lazy() {
     let err = eval_with_module_path(&main, &[temp.path()]).unwrap_err();
     assert!(err.contains("modulepath:/missing.pkl"), "{err}");
 }
+
+#[test]
+fn inherited_declaration_naming_a_non_type_is_rejected() {
+    // `pkl eval` rejects the amending module with this message too.
+    let temp = TestTempDir::new("pklr_test_inherited_non_type");
+    std::fs::write(temp.path().join("p.pkl"), "foo = 1\nres: foo\n").unwrap();
+    std::fs::write(temp.path().join("main.pkl"), "amends \"p.pkl\"\nx = 1\n").unwrap();
+    let err = pklr::eval_to_json(&temp.path().join("main.pkl")).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("Expected `foo` to be a type, but it is not."),
+        "{err}"
+    );
+}
