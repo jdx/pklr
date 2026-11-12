@@ -1,5 +1,6 @@
 //! Amending objects and values: layering an amendment body over its parent.
 
+use super::listing::bind_listing_member;
 use super::*;
 
 impl Evaluator {
@@ -906,6 +907,45 @@ impl Evaluator {
         self.eval_amended_object(template_map, &Arc::new(source), body, scope, depth)
     }
 
+    /// Replace each member predicate (`[[cond]] body`) of an amendment of a
+    /// `Dynamic` object's elements by an entry per element it matches.
+    /// The condition sees the element as `this`, and an object element's
+    /// members by name.
+    fn expand_member_predicates(
+        &mut self,
+        base: &Value,
+        entries: &Body,
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<Body> {
+        let Value::List(items) = base else {
+            return Err(member_predicates_unsupported());
+        };
+        if items.kind() != ListKind::Dynamic {
+            return Err(member_predicates_unsupported());
+        }
+        let mut expanded = Vec::with_capacity(entries.len());
+        for entry in entries.iter() {
+            let Entry::Predicate(cond, value) = entry else {
+                expanded.push(entry.clone());
+                continue;
+            };
+            for (index, item) in items.iter().enumerate() {
+                let mut cond_scope = scope.child();
+                if let Value::Object(map, _) = item {
+                    for (key, member) in map.iter() {
+                        cond_scope.set(key, member.clone());
+                    }
+                }
+                cond_scope.set("this", item.clone());
+                if is_truthy(&self.eval_expr(cond, &cond_scope, depth + 1)?) {
+                    expanded.push(Entry::DynProperty(Expr::Int(index as i64), value.clone()));
+                }
+            }
+        }
+        Ok(Arc::new(expanded))
+    }
+
     pub(super) fn eval_value_amendment(
         &mut self,
         base: Value,
@@ -913,6 +953,81 @@ impl Evaluator {
         scope: &Scope,
         depth: usize,
     ) -> Result<Value> {
+        if overlay_entries
+            .iter()
+            .any(|entry| matches!(entry, Entry::Predicate(..)))
+        {
+            let expanded = self.expand_member_predicates(&base, overlay_entries, scope, depth)?;
+            return self.eval_value_amendment(base, &expanded, scope, depth);
+        }
+        // Entries keyed by an index of an element-only `Dynamic` replace or
+        // amend that element.
+        if let Value::List(items) = &base
+            && items.kind() == ListKind::Dynamic
+            && overlay_entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::DynProperty(key, _) if !matches!(key, Expr::String(_))))
+        {
+            // The amendment's `local`s and `super` are visible to its entries.
+            let mut amend_scope = scope.child();
+            amend_scope.set("super", base.clone());
+            for entry in overlay_entries.iter() {
+                // Only `local`s: other properties are evaluated with the
+                // amended object as `this` further on.
+                if let Entry::Property(prop) = entry
+                    && has_modifier(&prop.modifiers, Modifier::Local)
+                    && let Some(expr) = &prop.value
+                {
+                    let value = self.eval_expr(expr, &amend_scope, depth + 1)?;
+                    bind_listing_member(&mut amend_scope, prop, value);
+                }
+            }
+            let mut elements = items.clone();
+            let mut rest = Vec::new();
+            let mut replaced = false;
+            for entry in overlay_entries.iter() {
+                let mut index = None;
+                if let Entry::DynProperty(key, _) = entry
+                    && !matches!(key, Expr::String(_))
+                {
+                    match self.eval_expr(key, &amend_scope, depth + 1) {
+                        Ok(Value::Int(i)) => {
+                            index = usize::try_from(i).ok().filter(|i| *i < items.len());
+                        }
+                        Ok(_) => {}
+                        // A key that reads a sibling property is not known yet:
+                        // leave it to the object path, which binds them. Any
+                        // other failure is final, so it does not run twice.
+                        Err(Error::Eval(message))
+                            if message.starts_with("Cannot find property") => {}
+                        Err(err) => return Err(err),
+                    }
+                }
+                if let Entry::DynProperty(_, value) = entry
+                    && let Some(index) = index
+                {
+                    let current = elements[index].clone();
+                    let updated = match value {
+                        Expr::ObjectBody(body) => {
+                            self.eval_value_amendment(current, body, &amend_scope, depth + 1)?
+                        }
+                        _ => self.eval_expr(value, &amend_scope, depth + 1)?,
+                    };
+                    elements.make_mut()[index] = updated;
+                    replaced = true;
+                } else {
+                    rest.push(entry.clone());
+                }
+            }
+            if replaced {
+                let base = Value::List(elements);
+                if rest.is_empty() {
+                    return Ok(base);
+                }
+                // What is left names no element, so it cannot come back here.
+                return self.eval_value_amendment(base, &Arc::new(rest), scope, depth);
+            }
+        }
         // Amending an abstract module's object instantiates it.
         if let Value::Object(_, Some(source)) = &base
             && source.is_abstract
@@ -1484,7 +1599,7 @@ pub(super) fn push_base_property(inherited: &mut Vec<Arc<Property>>, prop: &Arc<
 pub(super) fn builds_amendable_object(expr: &Expr) -> bool {
     match expr {
         Expr::New(..) | Expr::InferredNew(..) => true,
-        Expr::TemplateLocals(_, inner) => builds_amendable_object(inner),
+        Expr::TemplateLocals(_, inner) | Expr::Checked(inner, _) => builds_amendable_object(inner),
         Expr::Binop(BinOp::Add, left, right) => {
             overlay_body(right).is_some() && builds_amendable_object(left)
         }
@@ -1643,7 +1758,7 @@ pub(super) fn without_overridden_members(base: &Expr, body: &Body) -> Expr {
 pub(super) fn builds_mapping(expr: &Expr) -> bool {
     match expr {
         Expr::New(type_name, ..) => type_name.as_deref() == Some("Mapping"),
-        Expr::TemplateLocals(_, inner) => builds_mapping(inner),
+        Expr::TemplateLocals(_, inner) | Expr::Checked(inner, _) => builds_mapping(inner),
         Expr::Binop(BinOp::Add, left, _) => builds_mapping(left),
         _ => false,
     }
@@ -1731,9 +1846,12 @@ pub(super) fn compose_amended_object(
         base.clone()
     };
     let overlay = with_template_locals(locals, prop, Expr::ObjectBody(body.clone()));
+    // The type arguments of `new Listing<T> { ... }` keep checking the original
+    // entries, as pkl does; the overlay's own entries stay outside the check.
+    let value = Expr::Binop(BinOp::Add, Box::new(base), Box::new(overlay));
     Arc::new(Property {
         type_ann,
-        value: Some(Expr::Binop(BinOp::Add, Box::new(base), Box::new(overlay))),
+        value: Some(value),
         body: None,
         ..(**prop).clone()
     })

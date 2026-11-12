@@ -1342,7 +1342,7 @@ result = name
 
     let err = ev.eval_file(&dir.join("Base.pkl")).unwrap_err();
     assert!(
-        err.to_string().contains("undefined variable: meta"),
+        err.to_string().contains("Cannot find property `meta`."),
         "{err}"
     );
 }
