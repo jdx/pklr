@@ -3023,9 +3023,22 @@ fn lambda_calls_require_the_declared_arity() {
 }
 
 #[test]
+fn member_predicate_amends_matching_dynamic_elements() {
+    // Confirmed with `pkl eval`.
+    let v = eval(
+        "hidden base { 1 2 }\nres = (base) { [[this == 1]] = 3 }\n\
+         hidden people { new { name = \"a\" } new { name = \"b\" } }\n\
+         res2 = (people) { [[name == \"b\"]] { name = \"c\" } }\n\
+         res3 = (base) { [1] = 9 }\n",
+    );
+    assert_eq!(v["res"], serde_json::json!([3, 2]));
+    assert_eq!(v["res2"], serde_json::json!([{"name": "a"}, {"name": "c"}]));
+    assert_eq!(v["res3"], serde_json::json!([1, 9]));
+}
+
+#[test]
 fn member_predicates_are_reported_as_unsupported() {
     for src in [
-        "base { 1 2 }\nres = (base) { [[this == 1]] = 3 }\n",
         "base = new Listing { 1 2 }\nres = (base) { [[this == 1]] = 3 }\n",
         "base = new Mapping { [\"a\"] = 1 }\nres = (base) { [[this == 1]] = 3 }\n",
     ] {

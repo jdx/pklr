@@ -911,6 +911,45 @@ impl Evaluator {
         self.eval_amended_object(template_map, &Arc::new(source), body, scope, depth)
     }
 
+    /// Replace each member predicate (`[[cond]] body`) of an amendment of a
+    /// `Dynamic` object's elements by an entry per element it matches.
+    /// The condition sees the element as `this`, and an object element's
+    /// members by name.
+    fn expand_member_predicates(
+        &mut self,
+        base: &Value,
+        entries: &Body,
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<Body> {
+        let Value::List(items) = base else {
+            return Err(member_predicates_unsupported());
+        };
+        if items.kind() != ListKind::Dynamic {
+            return Err(member_predicates_unsupported());
+        }
+        let mut expanded = Vec::with_capacity(entries.len());
+        for entry in entries.iter() {
+            let Entry::Predicate(cond, value) = entry else {
+                expanded.push(entry.clone());
+                continue;
+            };
+            for (index, item) in items.iter().enumerate() {
+                let mut cond_scope = scope.child();
+                if let Value::Object(map, _) = item {
+                    for (key, member) in map.iter() {
+                        cond_scope.set(key, member.clone());
+                    }
+                }
+                cond_scope.set("this", item.clone());
+                if is_truthy(&self.eval_expr(cond, &cond_scope, depth + 1)?) {
+                    expanded.push(Entry::DynProperty(Expr::Int(index as i64), value.clone()));
+                }
+            }
+        }
+        Ok(Arc::new(expanded))
+    }
+
     pub(super) fn eval_value_amendment(
         &mut self,
         base: Value,
@@ -918,6 +957,47 @@ impl Evaluator {
         scope: &Scope,
         depth: usize,
     ) -> Result<Value> {
+        if overlay_entries
+            .iter()
+            .any(|entry| matches!(entry, Entry::Predicate(..)))
+        {
+            let expanded = self.expand_member_predicates(&base, overlay_entries, scope, depth)?;
+            return self.eval_value_amendment(base, &expanded, scope, depth);
+        }
+        // Entries keyed by an index of an element-only `Dynamic` replace or
+        // amend that element.
+        if let Value::List(items) = &base
+            && items.kind() == ListKind::Dynamic
+            && overlay_entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::DynProperty(Expr::Int(_), _)))
+        {
+            let mut elements = items.clone();
+            let mut rest = Vec::new();
+            for entry in overlay_entries.iter() {
+                match entry {
+                    Entry::DynProperty(Expr::Int(index), value)
+                        if usize::try_from(*index).is_ok_and(|i| i < elements.len()) =>
+                    {
+                        let index = *index as usize;
+                        let current = elements[index].clone();
+                        let updated = match value {
+                            Expr::ObjectBody(body) => {
+                                self.eval_value_amendment(current, body, scope, depth + 1)?
+                            }
+                            _ => self.eval_expr(value, scope, depth + 1)?,
+                        };
+                        elements.make_mut()[index] = updated;
+                    }
+                    _ => rest.push(entry.clone()),
+                }
+            }
+            let base = Value::List(elements);
+            if rest.is_empty() {
+                return Ok(base);
+            }
+            return self.eval_value_amendment(base, &Arc::new(rest), scope, depth);
+        }
         // Amending an abstract module's object instantiates it.
         if let Value::Object(_, Some(source)) = &base
             && source.is_abstract

@@ -67,7 +67,7 @@ impl Evaluator {
                         scope
                             .poison_of(name)
                             .cloned()
-                            .unwrap_or_else(|| format!("undefined variable: {name}")),
+                            .unwrap_or_else(|| format!("Cannot find property `{name}`.")),
                     )
                 }),
             Expr::Lambda(params, body) => {
@@ -947,7 +947,7 @@ pub(super) fn eval_simple_expr(
                     scope
                         .poison_of(name)
                         .cloned()
-                        .unwrap_or_else(|| format!("undefined variable: {name}")),
+                        .unwrap_or_else(|| format!("Cannot find property `{name}`.")),
                 )
             }),
         // An operator over simple operands, other than `|>` (a call) and an
