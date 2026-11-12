@@ -395,30 +395,11 @@ impl<'a> Parser<'a> {
         {
             self.new_types.push((name.clone(), offset));
         }
-        // Only arguments naming plain values or carrying a constraint are
-        // checked: a class-typed entry is already built as that class, and
-        // checking it again costs a walk over every entry.
         let checked = match &ty {
             TypeExpr::Generic(name, args)
-                if matches!(name.as_str(), "Listing" | "Mapping")
-                    && args.iter().enumerate().any(|(i, arg)| {
-                        // A bare `String` key is not worth a walk over every
-                        // entry of a large Mapping.
-                        is_plain_or_constrained(arg)
-                            && !(name == "Mapping" && i == 0 && matches!(arg, TypeExpr::Named(_)))
-                    }) =>
+                if matches!(name.as_str(), "Listing" | "Mapping") && !args.is_empty() =>
             {
-                let args = args
-                    .iter()
-                    .map(|arg| {
-                        if is_plain_or_constrained(arg) {
-                            arg.clone()
-                        } else {
-                            TypeExpr::Named("Any".to_string())
-                        }
-                    })
-                    .collect();
-                Some(TypeExpr::Generic(name.clone(), args))
+                Some(ty.clone())
             }
             _ => None,
         };
@@ -570,32 +551,4 @@ pub(super) fn strip_trace_grouping_tokens(
         end -= 1;
     }
     (start, end)
-}
-
-/// Whether a type argument names only basic values (`String`, `Int`, ...) or
-/// carries a constraint.
-fn is_plain_or_constrained(ty: &TypeExpr) -> bool {
-    match ty {
-        TypeExpr::Constrained(..) => true,
-        TypeExpr::Named(name) => matches!(
-            name.trim_start_matches('*').trim_end_matches('?'),
-            "String"
-                | "Int"
-                | "Float"
-                | "Number"
-                | "Boolean"
-                | "Duration"
-                | "DataSize"
-                | "Int8"
-                | "Int16"
-                | "Int32"
-                | "UInt"
-                | "UInt8"
-                | "UInt16"
-                | "UInt32"
-        ),
-        TypeExpr::Nullable(inner) => is_plain_or_constrained(inner),
-        TypeExpr::Union(variants) => variants.iter().all(is_plain_or_constrained),
-        TypeExpr::Generic(_, args) => args.iter().any(is_plain_or_constrained),
-    }
 }

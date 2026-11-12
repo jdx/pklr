@@ -1659,6 +1659,13 @@ fn new_listing_checks_elements_against_its_type_argument() {
 }
 
 #[test]
+fn new_collections_check_class_literal_and_bare_key_type_arguments() {
+    eval_fails("class C {}\na = new Listing<C> { 1 }");
+    eval_fails("a = new Listing<\"ok\"> { \"wrong\" }");
+    eval_fails("a = new Mapping<Int, Any> { [\"wrong\"] = 1 }");
+}
+
+#[test]
 fn new_mapping_checks_keys_and_values_against_its_type_arguments() {
     eval_fails("res = new Mapping<String, String> { [\"foo\"] = 1 }");
     eval_fails(
