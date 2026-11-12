@@ -195,15 +195,9 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// `outer` is reserved as a declaration name, but remains valid as a
-    /// member selected from an outer receiver (`outer.outer`).
+    /// A member name after `.` or `?.`: a keyword is not allowed there either
+    /// (`outer.outer` is an error).
     pub(super) fn expect_field_ident(&mut self) -> Result<String> {
-        if matches!(self.peek(), TokenKind::Ident(name) if name == "outer")
-            && !self.is_quoted(self.peek_tok())
-        {
-            self.advance();
-            return Ok("outer".to_string());
-        }
         self.expect_ident()
     }
 
