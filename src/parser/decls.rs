@@ -148,7 +148,11 @@ impl<'a> Parser<'a> {
         let has_const_scope = self.tokens.iter().any(|token| {
             matches!(
                 token.kind,
-                TokenKind::KwConst | TokenKind::KwClass | TokenKind::KwTypeAlias | TokenKind::At
+                TokenKind::KwConst
+                    | TokenKind::KwClass
+                    | TokenKind::KwTypeAlias
+                    | TokenKind::At
+                    | TokenKind::InterpolatedString(_)
             )
         });
         if has_const_scope

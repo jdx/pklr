@@ -2487,7 +2487,7 @@ fn narrowed_import_follows_module_reads_but_not_checked_value_members() {
     // A number's check binds no `length`, so here it is the module property.
     std::fs::write(
         dir.join("number.pkl"),
-        "length = 1\ntypealias IsOne = Int(this == length)\nresult = 1 is IsOne\n",
+        "const length = 1\ntypealias IsOne = Int(this == length)\nresult = 1 is IsOne\n",
     )
     .unwrap();
     std::fs::write(

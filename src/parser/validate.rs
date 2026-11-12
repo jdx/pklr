@@ -47,44 +47,52 @@ fn has(modifiers: &[Modifier], modifier: Modifier) -> bool {
     modifiers.contains(&modifier)
 }
 
-/// Names a bare identifier in a type constraint may take from the constrained
-/// value (`String(length > 3)`), so they are not reads of an outer member.
-const VALUE_MEMBERS: &[&str] = &[
+const STRING_MEMBERS: &[&str] = &[
     "length",
     "isEmpty",
     "isBlank",
+    "isRegex",
+    "startsWith",
+    "endsWith",
+    "contains",
+    "matches",
+    "trim",
+    "toInt",
+    "toFloat",
+    "toString",
+    "isLowerCase",
+    "isUpperCase",
+];
+const NUMBER_MEMBERS: &[&str] = &[
     "isNaN",
     "isFinite",
     "isInfinite",
     "isPositive",
     "isNonZero",
     "isBetween",
-    "isRegex",
-    "isUnique",
-    "isUniqueBy",
-    "startsWith",
-    "endsWith",
-    "contains",
-    "matches",
     "sign",
     "abs",
     "floor",
     "ceil",
     "round",
     "truncate",
-    "first",
-    "last",
-    "keys",
-    "values",
-    "size",
     "toInt",
     "toFloat",
     "toString",
-    "trim",
-    "isLowerCase",
-    "isUpperCase",
-    "hasProperty",
-    "getProperty",
+    "toDuration",
+    "toDataSize",
+];
+const COLLECTION_MEMBERS: &[&str] = &[
+    "length",
+    "isEmpty",
+    "isUnique",
+    "isUniqueBy",
+    "first",
+    "last",
+    "contains",
+    "keys",
+    "values",
+    "size",
     "containsKey",
     "containsValue",
     "any",
@@ -96,10 +104,10 @@ const VALUE_MEMBERS: &[&str] = &[
     "fold",
     "map",
     "filter",
-    "toDuration",
-    "toDataSize",
-    "unit",
-    "value",
+];
+const OBJECT_MEMBERS: &[&str] = &["hasProperty", "getProperty", "toMap"];
+const UNIT_MEMBERS: &[&str] = &["unit", "value", "isBetween", "isPositive", "isNonZero"];
+const OTHER_MEMBERS: &[&str] = &[
     "isLeapYear",
     "year",
     "month",
@@ -111,6 +119,29 @@ const VALUE_MEMBERS: &[&str] = &[
     "scheme",
     "host",
 ];
+
+/// Whether a bare identifier in a constraint on `base` may take `name` from the
+/// constrained value (`String(length > 3)`), so it is not a read of an outer
+/// member. A base that is not a standard library type may be an alias of any.
+fn value_member(base: &str, name: &str) -> bool {
+    let groups: &[&[&str]] = match base.trim_end_matches('?') {
+        "String" => &[STRING_MEMBERS],
+        "Int" | "Float" | "Number" | "UInt" | "Int8" | "Int16" | "Int32" | "UInt8" | "UInt16"
+        | "UInt32" => &[NUMBER_MEMBERS],
+        "List" | "Listing" | "Set" | "Map" | "Mapping" | "Collection" => &[COLLECTION_MEMBERS],
+        "Dynamic" | "Typed" | "Object" => &[OBJECT_MEMBERS],
+        "Duration" | "DataSize" => &[UNIT_MEMBERS],
+        _ => &[
+            STRING_MEMBERS,
+            NUMBER_MEMBERS,
+            COLLECTION_MEMBERS,
+            OBJECT_MEMBERS,
+            UNIT_MEMBERS,
+            OTHER_MEMBERS,
+        ],
+    };
+    groups.iter().any(|group| group.contains(&name))
+}
 
 /// Members by name: `(is_const, is_local)`.
 #[derive(Default)]
@@ -270,7 +301,9 @@ struct Walker<'m> {
     classes: HashMap<&'m str, ClassDecl<'m>>,
     infos: HashMap<&'m str, Option<Rc<ClassInfo<'m>>>>,
     /// Violations in method bodies, which count only if the method is called.
-    pending: Vec<(&'m str, ConstViolation)>,
+    pending: Vec<(&'m str, bool, ConstViolation)>,
+    /// The base types of the constraints being walked, innermost last.
+    constraint_bases: Vec<&'m str>,
 }
 
 fn violation(message: impl Into<String>) -> Option<ConstViolation> {
@@ -309,6 +342,7 @@ impl<'m> Walker<'m> {
             classes,
             infos: HashMap::new(),
             pending: Vec::new(),
+            constraint_bases: Vec::new(),
         }
     }
 
@@ -332,12 +366,12 @@ impl<'m> Walker<'m> {
         if pending.is_empty() {
             return None;
         }
-        let mut called = HashSet::new();
+        let mut called: HashSet<(&str, bool)> = HashSet::new();
         collect_calls_in_entries(body, &mut called);
         pending
             .into_iter()
-            .find(|(name, _)| called.contains(name))
-            .map(|(_, violation)| violation)
+            .find(|(name, method, _)| called.contains(&(*name, *method)))
+            .map(|(_, _, violation)| violation)
     }
 
     /// Run `f` inside a const scope whose outside is `frames[owner]` and below.
@@ -516,7 +550,7 @@ impl<'m> Walker<'m> {
                 }
                 let found = self.member_value(prop, owner);
                 if let Some(found) = found {
-                    self.pending.push((&prop.name, found));
+                    self.pending.push((&prop.name, prop.is_method, found));
                 }
                 return None;
             }
@@ -610,7 +644,8 @@ impl<'m> Walker<'m> {
                 variants.iter().find_map(|variant| self.type_expr(variant))
             }
             TypeExpr::Generic(_, args) => args.iter().find_map(|arg| self.type_expr(arg)),
-            TypeExpr::Constrained(_, constraint, _) => {
+            TypeExpr::Constrained(base, constraint, _) => {
+                self.constraint_bases.push(base);
                 self.frames.push(Frame {
                     kind: Kind::Constraint,
                     own: Rc::new(Members::default()),
@@ -619,6 +654,7 @@ impl<'m> Walker<'m> {
                 });
                 let result = self.expr(constraint);
                 self.frames.pop();
+                self.constraint_bases.pop();
                 result
             }
         }
@@ -656,8 +692,7 @@ impl<'m> Walker<'m> {
             Expr::Is(value, ty) | Expr::As(value, ty) => {
                 self.expr(value).or_else(|| self.type_expr(ty))
             }
-            // The declared type of a parameter or result is not a read.
-            Expr::Checked(value, _) => self.expr(value),
+            Expr::Checked(value, ty) => self.expr(value).or_else(|| self.type_expr(ty)),
             Expr::Unop(_, value)
             | Expr::Throw(value)
             | Expr::TemplateLocals(_, value)
@@ -785,6 +820,7 @@ impl<'m> Walker<'m> {
     /// Resolve a name the way the nearest enclosing scope does, and check a hit
     /// on a member outside the const scope.
     fn resolve(&self, name: &str, method: bool) -> Option<ConstViolation> {
+        let mut constraints = self.constraint_bases.iter().rev();
         for (index, frame) in self.frames.iter().enumerate().rev() {
             match frame.kind {
                 Kind::Vars => {
@@ -793,7 +829,8 @@ impl<'m> Walker<'m> {
                     }
                 }
                 Kind::Constraint => {
-                    if !method && VALUE_MEMBERS.contains(&name) {
+                    let base = constraints.next().copied().unwrap_or_default();
+                    if !method && value_member(base, name) {
                         return None;
                     }
                 }
@@ -854,7 +891,7 @@ fn inferred_class(ty: &TypeExpr) -> Option<&str> {
     }
 }
 
-fn collect_calls_in_entries<'m>(entries: &'m [Entry], called: &mut HashSet<&'m str>) {
+fn collect_calls_in_entries<'m>(entries: &'m [Entry], called: &mut HashSet<(&'m str, bool)>) {
     for entry in entries {
         match entry {
             Entry::Property(prop) => {
@@ -893,7 +930,7 @@ fn collect_calls_in_entries<'m>(entries: &'m [Entry], called: &mut HashSet<&'m s
     }
 }
 
-fn collect_calls_in_type<'m>(ty: &'m TypeExpr, called: &mut HashSet<&'m str>) {
+fn collect_calls_in_type<'m>(ty: &'m TypeExpr, called: &mut HashSet<(&'m str, bool)>) {
     match ty {
         TypeExpr::Named(_) => {}
         TypeExpr::Nullable(inner) => collect_calls_in_type(inner, called),
@@ -907,16 +944,16 @@ fn collect_calls_in_type<'m>(ty: &'m TypeExpr, called: &mut HashSet<&'m str>) {
     }
 }
 
-/// Collect the names an expression calls or reads.
-fn collect_calls<'m>(expr: &'m Expr, called: &mut HashSet<&'m str>) {
+/// Collect the names an expression calls (`true`) or reads (`false`).
+fn collect_calls<'m>(expr: &'m Expr, called: &mut HashSet<(&'m str, bool)>) {
     match expr {
         Expr::Call(callee, args) => {
             match callee.as_ref() {
                 Expr::Ident(name) => {
-                    called.insert(name);
+                    called.insert((name, true));
                 }
                 Expr::Field(base, name) | Expr::NullSafeField(base, name) => {
-                    called.insert(name);
+                    called.insert((name, true));
                     collect_calls(base, called);
                 }
                 other => collect_calls(other, called),
@@ -924,7 +961,7 @@ fn collect_calls<'m>(expr: &'m Expr, called: &mut HashSet<&'m str>) {
             args.iter().for_each(|arg| collect_calls(arg, called));
         }
         Expr::Field(base, name) | Expr::NullSafeField(base, name) => {
-            called.insert(name);
+            called.insert((name, false));
             collect_calls(base, called);
         }
         Expr::Index(left, right) | Expr::Binop(_, left, right) => {
@@ -970,7 +1007,7 @@ fn collect_calls<'m>(expr: &'m Expr, called: &mut HashSet<&'m str>) {
         | Expr::Import(_, _)
         | Expr::ImportGlob(_, _) => {}
         Expr::Ident(name) => {
-            called.insert(name);
+            called.insert((name, false));
         }
     }
 }

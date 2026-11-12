@@ -3039,6 +3039,18 @@ fn const_scopes_reject_non_const_members() {
     // Every program here is rejected by `pkl eval` with the quoted message.
     for (src, message) in [
         (
+            "x = 1\nr = \"\\(new Dynamic { const local y = x; z = y }.z)\"\n",
+            "Cannot reference property `x` from here because it is not `const`.",
+        ),
+        (
+            "length = 1\ntypealias IsOne = Int(this == length)\nresult = 1 is IsOne\n",
+            "Cannot reference property `length` from here because it is not `const`.",
+        ),
+        (
+            "x = 1\nclass C { function f(p: Int(this == x)) = p; v = f(1) }\nr = new C {}\n",
+            "Cannot reference property `x` from here because it is not `const`.",
+        ),
+        (
             "x = 1\nclass C { v = x }\nr = new C {}\n",
             "Cannot reference property `x` from here because it is not `const`.",
         ),
@@ -3158,4 +3170,12 @@ fn subclass_properties_keep_the_const_and_fixed_modifiers() {
     let json =
         eval("open class A { const n = 1 }\nclass B extends A { const n = 2 }\nr = new B {}\n");
     assert_eq!(json["r"]["n"], 2);
+}
+
+#[test]
+fn const_scopes_keep_methods_and_properties_apart() {
+    // `pkl eval` accepts this: the method `f` is never called, and the
+    // property `f` is not const-local.
+    let json = eval("class C { function f() = module.g() }\nfunction g() = 1\nf = 2\nr = f\n");
+    assert_eq!(json["r"], 2);
 }
