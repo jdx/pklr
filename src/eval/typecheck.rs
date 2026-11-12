@@ -700,6 +700,12 @@ impl Evaluator {
                 // A `*` marks a union's default alternative and is not part of
                 // the type.
                 let name = name.trim_start_matches('*');
+                // The type of the enclosing module needs no name resolution.
+                if name == "module"
+                    && let Some(matches) = value_is_class_type(val, name, scope)
+                {
+                    return Ok(matches);
+                }
                 if let Some((resolved, module_scope)) = self.inherited_alias(scope, name) {
                     return self.eval_alias_check(
                         val,

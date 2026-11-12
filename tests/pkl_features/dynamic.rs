@@ -1034,3 +1034,20 @@ r3 = c.toList()
     assert_eq!(json["r2"], serde_json::json!([7]));
     assert_eq!(json["r3"], serde_json::json!([5]));
 }
+
+#[test]
+fn module_type_accepts_the_module_and_its_amendments() {
+    // Confirmed with `pkl eval`.
+    let json = eval(
+        "x: Int = 1\n\
+         res1: module = module\n\
+         res2: module = (this) { x = 2 }\n\
+         res3: List<module> = List(module, (module) { x = 3 })\n\
+         res4: module? = null\n\
+         ok = res2.x == 2 && res3[1].x == 3\n",
+    );
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["res4"], serde_json::Value::Null);
+    eval_fails("res: module = \"abc\"\n");
+    eval_fails("class P {}\nres: module = new P {}\n");
+}
