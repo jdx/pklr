@@ -392,7 +392,6 @@ impl Evaluator {
             std::mem::take(&mut self.parse_cache),
             std::mem::take(&mut self.body_roots_cache),
             std::mem::take(&mut self.plan_cache),
-            std::mem::take(&mut self.lambda_guards),
             std::mem::take(&mut self.resource_cache),
             std::mem::take(&mut self.module_scopes),
             std::mem::take(&mut self.layered_scopes),
