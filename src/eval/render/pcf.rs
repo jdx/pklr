@@ -1,11 +1,13 @@
 //! `PcfRenderer`, after pkl-core's `PcfRenderer` and `ValueFormatter`.
 //!
-//! pklr does not tell `List` from `Listing` or `Map` from `Mapping`, so
-//! lists render as `Listing` bodies and maps as `Mapping` bodies.
+//! `List`, `Set`, `Map`, `Pair` and `IntSeq` render as the calls that build
+//! them, such as `List(1, 2)`.
 
-use super::{Kind, StringRenderer, Walk, display_value, java_double_to_string, kind_of};
+use super::{
+    Kind, PathPart, StringRenderer, Walk, display_value, java_double_to_string, key_value, kind_of,
+};
 use crate::error::{Error, Result};
-use crate::value::Value;
+use crate::value::{ListKind, Value};
 
 pub(crate) struct Pcf<'a> {
     walk: Walk<'a>,
@@ -36,7 +38,13 @@ impl<'a> Pcf<'a> {
         let converted = self.convert_top_level(value)?;
         if document {
             let kind = self.walk.top_kind.unwrap_or_else(|| kind_of(&converted));
-            if !matches!(kind, Kind::Typed | Kind::Dynamic | Kind::RenderDirective) {
+            let dynamic_elements = matches!(
+                &converted,
+                Value::List(items) if items.kind() == ListKind::Dynamic
+            );
+            if !dynamic_elements
+                && !matches!(kind, Kind::Typed | Kind::Dynamic | Kind::RenderDirective)
+            {
                 return Err(Error::Eval(format!(
                     "The top-level value of a Pcf document must have type `Typed` or `Dynamic`, but got type `{}`.\nValue: {}",
                     kind.pkl_class(&converted),
@@ -74,7 +82,11 @@ impl<'a> Pcf<'a> {
 
     /// A value outside an object body: objects get `new`.
     fn visit_standalone(&mut self, value: &Value) -> Result<()> {
-        if kind_of(value).is_object() || matches!(value, Value::List(_)) {
+        let body_list = matches!(
+            value,
+            Value::List(items) if !matches!(items.kind(), ListKind::List | ListKind::Set)
+        );
+        if kind_of(value).is_object() && !is_call(value) || body_list {
             self.out.push_str("new ");
         }
         self.visit(value)
@@ -102,9 +114,26 @@ impl<'a> Pcf<'a> {
     }
 }
 
+/// Whether `value` is a `List`, `Set` or `Map`, which render as calls.
+fn is_call(value: &Value) -> bool {
+    match value {
+        Value::List(items) => matches!(items.kind(), ListKind::List | ListKind::Set),
+        Value::Object(map, None) => {
+            kind_of(value) == Kind::Mapping
+                && map
+                    .iter()
+                    .all(|(key, value)| !value.is_unrendered_member(key, None))
+        }
+        _ => false,
+    }
+}
+
 /// Whether `value` is rendered as an object body, which a property or entry
 /// follows with a space rather than ` = `.
 fn is_object_like(value: &Value) -> bool {
+    if is_call(value) {
+        return false;
+    }
     let kind = kind_of(value);
     kind.is_object() || matches!(kind, Kind::Listing | Kind::RenderDirective)
 }
@@ -399,16 +428,91 @@ impl<'a> StringRenderer<'a> for Pcf<'a> {
         Ok(())
     }
 
+    fn visit_collection(&mut self, value: &Value, kind: Kind) -> Result<bool> {
+        let (name, items): (&str, Vec<Value>) = match (kind, value) {
+            (Kind::Listing, Value::List(items)) => match items.kind() {
+                ListKind::List => ("List", items.iter().cloned().collect()),
+                ListKind::Set => ("Set", items.iter().cloned().collect()),
+                _ => return Ok(false),
+            },
+            // A module without a source keeps its classes as members: not a `Map`.
+            (Kind::Mapping, Value::Object(map, None))
+                if map
+                    .iter()
+                    .all(|(key, value)| !value.is_unrendered_member(key, None)) =>
+            {
+                (
+                    "Map",
+                    map.iter()
+                        .flat_map(|(key, value)| [key_value(key), value.clone()])
+                        .collect(),
+                )
+            }
+            (Kind::Pair, Value::Object(map, _)) => (
+                "Pair",
+                ["first", "second"]
+                    .iter()
+                    .filter_map(|name| map.get(*name).cloned())
+                    .collect(),
+            ),
+            (Kind::IntSeq, _) => {
+                self.out.push_str(&display_value(value));
+                return Ok(true);
+            }
+            _ => return Ok(false),
+        };
+        self.out.push_str(name);
+        self.out.push('(');
+        // A `Map` call alternates keys and values: both are converted at the
+        // key's position.
+        let is_map = name == "Map";
+        let mut pending_key: Option<Value> = None;
+        for (index, item) in items.iter().enumerate() {
+            if index > 0 {
+                self.out.push_str(", ");
+            }
+            let converted = if is_map && index % 2 == 0 {
+                let key = self.walk.convert_key(item)?;
+                pending_key = Some(key.clone());
+                key
+            } else {
+                let part = match (&pending_key, is_map) {
+                    (Some(Value::String(s)), true) => PathPart::Entry(s.clone()),
+                    (Some(other), true) => PathPart::Key(other.clone()),
+                    _ => PathPart::Element(index),
+                };
+                // The path stays pushed while the member is rendered, so path
+                // converters reach inside it.
+                self.walk.path.push(part);
+                let result = self
+                    .walk
+                    .convert(item)
+                    .and_then(|converted| self.visit_standalone(&converted));
+                self.walk.path.pop();
+                result?;
+                continue;
+            };
+            self.visit_standalone(&converted)?;
+        }
+        self.out.push(')');
+        Ok(true)
+    }
+
     fn visit_other(&mut self, value: &Value, kind: Kind) -> Result<()> {
         match (kind, value) {
             (Kind::Duration | Kind::DataSize, _) => self.out.push_str(&display_value(value)),
-            (Kind::Regex, Value::Object(map, _)) => {
-                let pattern = map
-                    .get("pattern")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
+            (Kind::Regex, _) => {
+                let pattern = match value {
+                    Value::Regex(regex) => regex.pattern().to_string(),
+                    Value::Object(map, _) => map
+                        .get("pattern")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    _ => String::new(),
+                };
                 self.out.push_str("Regex(");
-                format_string(pattern, "", false, true, &mut self.out);
+                format_string(&pattern, "", false, true, &mut self.out);
                 self.out.push(')');
             }
             _ => return Err(super::cannot_render_type(value, kind, self.name())),

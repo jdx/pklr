@@ -504,7 +504,8 @@ impl ListValue {
 
     /// The class of a `Listing<T>`'s elements, if `T` is a class.
     pub(crate) fn elem_class(&self) -> Option<&Arc<Value>> {
-        self.elem_class.as_ref()
+        // An `IntSeq` keeps its bounds here instead (see `into_int_seq`).
+        self.elem_class.as_ref().filter(|_| !self.int_seq)
     }
 
     /// The same listing with the class its elements are declared to be.
@@ -514,9 +515,33 @@ impl ListValue {
     }
 
     /// The same list, marked as the result of `IntSeq(...)`.
-    pub(crate) fn into_int_seq(mut self) -> Self {
+    ///
+    /// The bounds are kept in `elem_class`, which an `IntSeq` does not use, so
+    /// the list stays no larger: a list of the start, end and step.
+    pub(crate) fn into_int_seq(mut self, start: i64, end: i64, step: i64) -> Self {
         self.int_seq = true;
+        self.elem_class = Some(Arc::new(Value::List(ListValue::from(vec![
+            Value::Int(start),
+            Value::Int(end),
+            Value::Int(step),
+        ]))));
         self
+    }
+
+    /// The start, end and step an `IntSeq` was made with.
+    pub(crate) fn int_seq_bounds(&self) -> Option<(i64, i64, i64)> {
+        if !self.int_seq {
+            return None;
+        }
+        match self.elem_class.as_deref() {
+            Some(Value::List(bounds)) => match bounds.as_slice() {
+                [Value::Int(start), Value::Int(end), Value::Int(step)] => {
+                    Some((*start, *end, *step))
+                }
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     pub(crate) fn is_int_seq(&self) -> bool {
@@ -527,10 +552,17 @@ impl ListValue {
         self.kind
     }
 
+    fn clear_int_seq(&mut self) {
+        if self.int_seq {
+            self.int_seq = false;
+            self.elem_class = None;
+        }
+    }
+
     /// The same items as a collection of another kind.
     pub fn with_kind(mut self, kind: ListKind) -> Self {
         self.kind = kind;
-        self.int_seq = false;
+        self.clear_int_seq();
         self
     }
 
@@ -542,7 +574,7 @@ impl ListValue {
 
     /// Mutable access to the items, copying them first if they are shared.
     pub fn make_mut(&mut self) -> &mut Vec<Value> {
-        self.int_seq = false;
+        self.clear_int_seq();
         Arc::make_mut(&mut self.items)
     }
 }

@@ -4854,7 +4854,7 @@ fn const_local_lambda_guard_is_not_exposed_through_outer() {
     let json = eval(
         r#"
 foo {
-  const local f = () -> new {
+  const local f = () -> new Dynamic {
     copied = outer
   }
   result = f.apply()
@@ -7944,4 +7944,80 @@ miss = m.getOrDefault("z")
 "#,
     );
     assert_eq!(json["miss"], 2);
+}
+
+#[test]
+fn local_member_does_not_override_a_non_local_inherited_member() {
+    let json = eval(
+        r#"
+open class Foo5 {
+  function f() = "original"
+  x = f()
+}
+class Foo6 extends Foo5 {
+  local function f() = "override"
+}
+res1 = new Foo6 {}.x
+foo5 { l = "original"; x = l }
+res2 = (foo5) { local l = "override" }.x
+"#,
+    );
+    assert_eq!(json["res1"], "original");
+    assert_eq!(json["res2"], "original");
+    assert_eq!(json["foo5"]["l"], "original");
+}
+
+#[test]
+fn function_argument_type_error_names_the_bad_list_element() {
+    let json = eval(
+        r#"
+import "pkl:test"
+local function f(x: List<String>): Int = x.length
+res = test.catch(() -> f(List("foo", 42)))
+"#,
+    );
+    assert_eq!(
+        json["res"],
+        "Expected value of type `String`, but got type `Int`. Value: 42"
+    );
+}
+
+#[test]
+fn function_literal_body_cannot_infer_an_untyped_new() {
+    assert!(eval_fails("foo = () -> new {}").contains("Cannot tell which parent to amend"));
+}
+
+#[test]
+fn generated_members_are_readable_by_bare_name_from_later_siblings() {
+    let v = eval(
+        "a {\n  when (true) {\n    q = 1\n    local secret = 5\n  }\n  t = q\n  u = secret\n}\n",
+    );
+    assert_eq!(v["a"]["t"], 1);
+    assert_eq!(v["a"]["u"], 5);
+    assert!(v["a"].get("secret").is_none());
+}
+
+#[test]
+fn nested_generator_locals_are_readable_after_the_outer_generator() {
+    let v = eval(
+        "a {\n  when (true) {\n    when (true) { local secret = 5 }\n    inside = secret\n  }\n  outside = secret\n}\n",
+    );
+    assert_eq!(v["a"]["inside"], 5);
+    assert_eq!(v["a"]["outside"], 5);
+}
+
+#[test]
+fn a_local_read_by_its_own_body_is_still_bound() {
+    let v = eval(
+        "open class P { x = 1 }\nclass C extends P { local x = 2; y = x }\nc = new C {}\nbase = new Dynamic { x = 1 }\nr = (base) { local x = 2; local y = x; z = y }\n",
+    );
+    assert_eq!(v["c"]["y"], 2);
+    assert_eq!(v["r"]["z"], 2);
+}
+
+#[test]
+fn function_argument_set_for_list_names_the_collection() {
+    let e = eval_fails("function f(x: List<Int>) = x\nr = f(Set(\"a\"))\n");
+    assert!(e.contains("Set"), "{e}");
+    assert!(!e.contains("got type String"), "{e}");
 }

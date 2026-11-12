@@ -866,12 +866,24 @@ fn check_failed_members(
 }
 
 /// The first failed member of `value`'s children (and of itself, when it has
-/// no converter), skipping every value a converter replaces.
+/// no converter), skipping every value a converter replaces. A module's value
+/// holds amended copies of itself, so its members share sub-objects: each
+/// shared object is searched once, or the walk is exponential.
 #[cfg(feature = "native-io")]
 fn unconverted_member_failure<'a>(
     value: &'a Value,
     kind: Option<Kind>,
     converters: &render::Converters,
+) -> Option<&'a str> {
+    unconverted_member_failure_in(value, kind, converters, &mut Default::default())
+}
+
+#[cfg(feature = "native-io")]
+fn unconverted_member_failure_in<'a>(
+    value: &'a Value,
+    kind: Option<Kind>,
+    converters: &render::Converters,
+    seen: &mut std::collections::HashSet<usize>,
 ) -> Option<&'a str> {
     let kind = kind.unwrap_or_else(|| render::kind_of(value));
     if converters.find(value, kind, &[]).is_some() {
@@ -879,6 +891,9 @@ fn unconverted_member_failure<'a>(
     }
     match value {
         Value::Object(map, source) => {
+            if !seen.insert(Arc::as_ptr(map) as *const () as usize) {
+                return None;
+            }
             if let Some(member) = source
                 .as_ref()
                 .and_then(|source| source.poisoned_members.as_ref())
@@ -887,11 +902,16 @@ fn unconverted_member_failure<'a>(
                 return Some(member.message.as_str());
             }
             map.values()
-                .find_map(|value| unconverted_member_failure(value, None, converters))
+                .find_map(|value| unconverted_member_failure_in(value, None, converters, seen))
         }
-        Value::List(items) => items
-            .iter()
-            .find_map(|value| unconverted_member_failure(value, None, converters)),
+        Value::List(items) => {
+            if !seen.insert(items.items_ptr() as *const () as usize) {
+                return None;
+            }
+            items
+                .iter()
+                .find_map(|value| unconverted_member_failure_in(value, None, converters, seen))
+        }
         _ => None,
     }
 }
