@@ -176,3 +176,9 @@ fn null_safe_list_element_members() {
         serde_json::json!({"a": 5, "b": 1, "c": 1, "d": 2})
     );
 }
+
+#[test]
+fn null_safe_members_stay_off_element_only_dynamic() {
+    let err = eval_fails("a = new Dynamic { 1; 2 }?.length\n");
+    assert!(err.contains("length"), "{err}");
+}

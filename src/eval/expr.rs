@@ -624,9 +624,19 @@ impl Evaluator {
                     {
                         Ok(class_simple_name(&obj).unwrap())
                     }
-                    Value::List(items) if field == "length" => Ok(Value::Int(items.len() as i64)),
-                    Value::List(items) if field == "isEmpty" => Ok(Value::Bool(items.is_empty())),
-                    Value::List(items) if is_list_element_member(field) => {
+                    Value::List(items)
+                        if items.kind() != ListKind::Dynamic && field == "length" =>
+                    {
+                        Ok(Value::Int(items.len() as i64))
+                    }
+                    Value::List(items)
+                        if items.kind() != ListKind::Dynamic && field == "isEmpty" =>
+                    {
+                        Ok(Value::Bool(items.is_empty()))
+                    }
+                    Value::List(items)
+                        if items.kind() != ListKind::Dynamic && is_list_element_member(field) =>
+                    {
                         list_element_member(&obj, items, field)
                     }
                     _ if self.stdlib_property(&obj, field).is_some() => {
