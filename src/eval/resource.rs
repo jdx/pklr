@@ -130,6 +130,12 @@ impl Evaluator {
                 }
             },
         };
+        // Pkl matches a `modulepath:` URI in its normalized spelling, so that
+        // `modulepath:/sub/../x` cannot escape an allowed `modulepath:/sub/`.
+        let absolute = match uri_scheme(&absolute) {
+            Some("modulepath") => normalize_module_path_uri(&absolute)?.unwrap_or(absolute),
+            _ => absolute,
+        };
         self.check_resource_allowed(&absolute)?;
         let scheme = uri_scheme(&absolute).unwrap_or_default();
         let value = &absolute[scheme.len() + 1..];
@@ -141,6 +147,10 @@ impl Evaluator {
                 uri: absolute,
             },
             "http" | "https" | "package" => Target::Remote(absolute),
+            "modulepath" => match self.module_path_resource(&absolute)? {
+                Some((path, uri)) => Target::File { path, uri },
+                None => Target::Unreadable,
+            },
             _ => Target::Unreadable,
         })
     }
