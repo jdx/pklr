@@ -3774,3 +3774,23 @@ fn shadowing_keeps_loop_variables_and_inherited_dynamic_entries() {
         serde_json::json!({"keep": 1, "v": "original"})
     );
 }
+
+#[test]
+fn inherited_methods_late_super_reads_and_typed_object_lambdas_match_pkl() {
+    // Expected values come from `pkl eval` 0.32.2.
+    let value = eval(
+        "import \"pkl:test\"\n\
+         base { local l = 1; local function f() = l + y; y = 2; x = f() }\n\
+         child = (base) { l = 3 }\n\
+         open class A { x = y + 1; y = 10 }\n\
+         class B extends A { x = super.x + 100; y = super.y + 1 }\n\
+         r = new B {}\n\
+         obj { local g: Int = () -> 1; caught = test.catch(() -> g) }\n",
+    );
+    assert_eq!(value["child"]["x"], 3);
+    assert_eq!(value["r"]["x"], 112);
+    assert_eq!(
+        value["obj"]["caught"],
+        "Expected value of type `Int`, but got type `Function0`. Value: new Function0 {}"
+    );
+}

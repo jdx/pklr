@@ -2012,10 +2012,16 @@ pub(super) fn shadow_local_reads(entry: &Entry, shadowed: &[(Name, Value)]) -> E
     }
     let mut prop = (**prop).clone();
     if let Some(value) = prop.value.take() {
-        prop.value = Some(Expr::TemplateLocals(
-            LocalBindings(Arc::new(seen)),
-            Box::new(value),
-        ));
+        let bindings = LocalBindings(Arc::new(seen));
+        prop.value = Some(match value {
+            // A method stays a lambda, so it is still bound and rebound as
+            // one; the saved locals wrap its body.
+            Expr::Lambda(params, body) => Expr::Lambda(
+                params,
+                Arc::new(Expr::TemplateLocals(bindings, Box::new((*body).clone()))),
+            ),
+            value => Expr::TemplateLocals(bindings, Box::new(value)),
+        });
     } else if let Some(body) = prop.body.take() {
         // Keep the body a body, so it still amends the declared type's
         // default and any inherited member; shadow the reads inside it.

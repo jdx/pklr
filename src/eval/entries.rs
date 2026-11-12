@@ -767,6 +767,12 @@ impl Evaluator {
                     let result = if is_lambda {
                         self.eval_expr(expr, &active_scope, cx.depth)
                             .map(|value| self.const_local_lambda_guard(value, const_message))
+                            .and_then(|value| {
+                                if let Some(ty) = &prop.type_ann {
+                                    self.check_local_value(&value, ty, &active_scope, cx.depth)?;
+                                }
+                                Ok(value)
+                            })
                     } else {
                         match const_message {
                             Some(message) => Err(Error::Eval(message)),

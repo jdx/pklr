@@ -98,7 +98,7 @@ impl Evaluator {
                                 if late.name == name
                                     && late.value.is_some()
                                     && !has_modifier(&late.modifiers, Modifier::Local)
-                                    && !property_reference_names(late).contains("super") =>
+                                    && &*late.name != field =>
                             {
                                 Some(late)
                             }
