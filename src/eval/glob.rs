@@ -15,14 +15,104 @@ use super::*;
 /// CVE-2010-2632).
 const MAX_LIST_ELEMENTS: usize = 16384;
 
-/// Expand a Pkl glob pattern relative to a base directory.
+/// A host-provided view of a file system for Pkl glob expansion.
+///
+/// [`expand_glob_with`] keeps all of Pkl's glob semantics (pattern matching,
+/// files before subdirectories, name sorting, `**` matching zero components,
+/// the listing limit) and asks the host only for these two primitives, so a
+/// virtual file system (in memory, an archive, a container image, a pinned
+/// directory) gets the same results as the native one without
+/// reimplementing them.
+///
+/// Paths are built by joining names onto the `base` given to
+/// [`expand_glob_with`], so the host sees exactly the paths it would see from
+/// the native walker, and returns them verbatim in the matches.
+///
+/// An `Err` aborts the expansion and is returned to the caller; it is for
+/// real failures (permission denied, I/O errors, a denied view), not for
+/// missing paths.
+pub trait GlobAccess {
+    /// Whether `path` names a file (not a directory). A nonexistent path, or
+    /// one whose parent is not a directory, is `Ok(false)`.
+    fn is_file(&mut self, path: &Path) -> Result<bool>;
+
+    /// The entries of the directory `path` as `(name, is_dir)`, where `name`
+    /// is the entry's file name alone. Symbolic links must be left out, as
+    /// Pkl skips them to avoid cyclic globs. A nonexistent directory, or a
+    /// path that is not a directory, has no entries (`Ok(vec![])`).
+    ///
+    /// Entries may come back in any order: the library sorts them into Pkl's
+    /// order (files before directories, each by name).
+    fn list_dir(&mut self, path: &Path) -> Result<Vec<(String, bool)>>;
+}
+
+/// A [`GlobAccess`] over the native file system (`std::fs`), as
+/// [`expand_glob`] uses. A host can delegate to it for the parts of its view
+/// that are real directories.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NativeGlobAccess;
+
+impl GlobAccess for NativeGlobAccess {
+    fn is_file(&mut self, path: &Path) -> Result<bool> {
+        Ok(path.is_file())
+    }
+
+    fn list_dir(&mut self, dir: &Path) -> Result<Vec<(String, bool)>> {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(Vec::new());
+            }
+            Err(error) => return Err(Error::Io(dir.to_path_buf(), error)),
+        };
+        let mut listed = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|error| Error::Io(dir.to_path_buf(), error))?;
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(Error::Io(entry.path(), error)),
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
+            listed.push((
+                entry.file_name().to_string_lossy().into_owned(),
+                file_type.is_dir(),
+            ));
+        }
+        Ok(listed)
+    }
+}
+
+/// Expand a Pkl glob pattern relative to a base directory over the native
+/// file system.
 ///
 /// An empty `base` (the parent of a bare relative path like `main.pkl`) means
 /// the current directory. Matches are files, in pkl's order: within a
 /// directory, files before subdirectories, each sorted by name. Symbolic links
-/// are skipped, as pkl does to avoid cyclic globs.
+/// are skipped, as pkl does to avoid cyclic globs. See [`expand_glob_with`]
+/// for a host-provided file system.
 pub fn expand_glob(base: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
-    Ok(resolve_file_glob(module_dir(base), pattern)?
+    expand_glob_with(base, pattern, &mut NativeGlobAccess)
+}
+
+/// Expand a Pkl glob pattern relative to a base directory over a
+/// host-provided file system.
+///
+/// Behaves exactly like [`expand_glob`], including the order of the matches,
+/// but lists directories and checks files through `access`.
+pub fn expand_glob_with(
+    base: &Path,
+    pattern: &str,
+    access: &mut dyn GlobAccess,
+) -> Result<Vec<PathBuf>> {
+    Ok(resolve_file_glob(module_dir(base), pattern, access)?
         .into_iter()
         .map(|(_, path)| path)
         .collect())
@@ -31,124 +121,109 @@ pub fn expand_glob(base: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
 /// Expand `pattern` against the directory `base`, returning each matched
 /// file with its key: the pattern's leading literal parts followed by the
 /// matched path under them, as pkl keys `import*` and `read*` results.
-pub(super) fn resolve_file_glob(base: &Path, pattern: &str) -> Result<Vec<(String, PathBuf)>> {
+pub(super) fn resolve_file_glob(
+    base: &Path,
+    pattern: &str,
+    access: &mut dyn GlobAccess,
+) -> Result<Vec<(String, PathBuf)>> {
     let (prefix, parts) = split_glob_pattern(pattern)?;
     let mut results = Vec::new();
     if parts.is_empty() {
         let path = base.join(pattern);
-        if path.is_file() {
+        if access.is_file(&path)? {
             results.push((pattern.to_string(), path));
         }
         return Ok(results);
     }
     let dir = base.join(&prefix);
-    let mut listed = 0;
-    resolve_glob_parts(&parts, &dir, &prefix, &mut listed, &mut results)?;
-    Ok(results)
+    let mut walk = Walk {
+        access,
+        listed: 0,
+        results,
+    };
+    walk.parts(&parts, &dir, &prefix)?;
+    Ok(walk.results)
 }
 
-fn resolve_glob_parts(
-    parts: &[(&str, Option<GlobPart>)],
-    dir: &Path,
-    key: &str,
-    listed: &mut usize,
-    results: &mut Vec<(String, PathBuf)>,
-) -> Result<()> {
-    let Some(((literal, part), rest)) = parts.split_first() else {
-        return Ok(());
-    };
-    // `**/` may consume no directory components, so try the remaining
-    // segments in the current directory before descending.
-    if part.as_ref().is_some_and(|part| part.globstar) {
-        resolve_glob_parts(rest, dir, key, listed, results)?;
-    }
-    let Some(part) = part else {
-        let path = dir.join(literal);
-        let key = join_glob_key(key, literal);
-        if rest.is_empty() {
-            if path.is_file() {
-                results.push((key, path));
-            }
+/// The state of one glob expansion.
+struct Walk<'a> {
+    access: &'a mut dyn GlobAccess,
+    /// Directories listed so far, against [`MAX_LIST_ELEMENTS`].
+    listed: usize,
+    results: Vec<(String, PathBuf)>,
+}
+
+impl Walk<'_> {
+    fn parts(&mut self, parts: &[(&str, Option<GlobPart>)], dir: &Path, key: &str) -> Result<()> {
+        let Some(((literal, part), rest)) = parts.split_first() else {
             return Ok(());
-        }
-        return resolve_glob_parts(rest, &path, &key, listed, results);
-    };
-    let mut matched = Vec::new();
-    expand_glob_part(part, dir, key, listed, &mut matched)?;
-    for (key, path, is_dir) in matched {
-        if rest.is_empty() {
-            if !is_dir {
-                results.push((key, path));
-            }
-        } else if is_dir {
-            resolve_glob_parts(rest, &path, &key, listed, results)?;
-        }
-    }
-    Ok(())
-}
-
-/// The entries of `dir` whose names match `part`, and with `**`, those of
-/// every subdirectory too.
-fn expand_glob_part(
-    part: &GlobPart,
-    dir: &Path,
-    key: &str,
-    listed: &mut usize,
-    matched: &mut Vec<(String, PathBuf, bool)>,
-) -> Result<()> {
-    *listed += 1;
-    if *listed > MAX_LIST_ELEMENTS {
-        return Err(invalid_glob(
-            &part.source,
-            "The glob pattern is too complex.",
-        ));
-    }
-    for (name, is_dir) in list_dir(dir)? {
-        let path = dir.join(&name);
-        let entry_key = join_glob_key(key, &name);
-        if part.matches(&name) {
-            matched.push((entry_key.clone(), path.clone(), is_dir));
-        }
-        if is_dir && part.globstar {
-            expand_glob_part(part, &path, &entry_key, listed, matched)?;
-        }
-    }
-    Ok(())
-}
-
-/// The entries of `dir` as `(name, is_dir)`, files first, each sorted by
-/// name, skipping symbolic links. A missing directory has no entries.
-fn list_dir(dir: &Path) -> Result<Vec<(String, bool)>> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-            ) =>
-        {
-            return Ok(Vec::new());
-        }
-        Err(error) => return Err(Error::Io(dir.to_path_buf(), error)),
-    };
-    let mut listed = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|error| Error::Io(dir.to_path_buf(), error))?;
-        let file_type = match entry.file_type() {
-            Ok(file_type) => file_type,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(Error::Io(entry.path(), error)),
         };
-        if file_type.is_symlink() {
-            continue;
+        // `**/` may consume no directory components, so try the remaining
+        // segments in the current directory before descending.
+        if part.as_ref().is_some_and(|part| part.globstar) {
+            self.parts(rest, dir, key)?;
         }
-        listed.push((
-            entry.file_name().to_string_lossy().into_owned(),
-            file_type.is_dir(),
-        ));
+        let Some(part) = part else {
+            let path = dir.join(literal);
+            let key = join_glob_key(key, literal);
+            if rest.is_empty() {
+                if self.access.is_file(&path)? {
+                    self.results.push((key, path));
+                }
+                return Ok(());
+            }
+            return self.parts(rest, &path, &key);
+        };
+        let mut matched = Vec::new();
+        self.part(part, dir, key, &mut matched)?;
+        for (key, path, is_dir) in matched {
+            if rest.is_empty() {
+                if !is_dir {
+                    self.results.push((key, path));
+                }
+            } else if is_dir {
+                self.parts(rest, &path, &key)?;
+            }
+        }
+        Ok(())
     }
-    listed.sort_by(|(a, a_dir), (b, b_dir)| a_dir.cmp(b_dir).then_with(|| a.cmp(b)));
-    Ok(listed)
+
+    /// The entries of `dir` whose names match `part`, and with `**`, those of
+    /// every subdirectory too.
+    fn part(
+        &mut self,
+        part: &GlobPart,
+        dir: &Path,
+        key: &str,
+        matched: &mut Vec<(String, PathBuf, bool)>,
+    ) -> Result<()> {
+        self.listed += 1;
+        if self.listed > MAX_LIST_ELEMENTS {
+            return Err(invalid_glob(
+                &part.source,
+                "The glob pattern is too complex.",
+            ));
+        }
+        for (name, is_dir) in self.list_sorted(dir)? {
+            let path = dir.join(&name);
+            let entry_key = join_glob_key(key, &name);
+            if part.matches(&name) {
+                matched.push((entry_key.clone(), path.clone(), is_dir));
+            }
+            if is_dir && part.globstar {
+                self.part(part, &path, &entry_key, matched)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The entries of `dir` as `(name, is_dir)`, files first, each sorted by
+    /// name.
+    fn list_sorted(&mut self, dir: &Path) -> Result<Vec<(String, bool)>> {
+        let mut listed = self.access.list_dir(dir)?;
+        listed.sort_by(|(a, a_dir), (b, b_dir)| a_dir.cmp(b_dir).then_with(|| a.cmp(b)));
+        Ok(listed)
+    }
 }
 
 fn join_glob_key(key: &str, name: &str) -> String {

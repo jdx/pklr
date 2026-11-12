@@ -23,6 +23,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use crate::Result;
+use crate::eval::{GlobAccess, expand_glob_with};
 
 /// Host-provided IO for evaluating Pkl modules.
 ///
@@ -137,7 +138,37 @@ pub trait EvalCapabilities: Send + Sync {
 
     fn temp_dir(&mut self, prefix: &str) -> Result<PathBuf>;
 
-    fn glob(&mut self, base: &Path, pattern: &str) -> Result<Vec<PathBuf>>;
+    /// The file system view that globs run over, for [`Self::glob`] (and,
+    /// unless [`Self::resource_glob_access`] says otherwise, `read*` globs).
+    ///
+    /// Return a [`GlobAccess`] to have the library expand globs over it with
+    /// Pkl's own matching, ordering and symlink rules; the default `None`
+    /// means the host expands globs itself by overriding [`Self::glob`].
+    fn glob_access(&mut self) -> Option<&mut dyn GlobAccess> {
+        None
+    }
+
+    /// Expand the module glob `pattern` below `base` for `import*`.
+    ///
+    /// The default expands it over [`Self::glob_access`] with
+    /// [`expand_glob_with`], and fails when there is none, so a host that
+    /// provides neither this method nor an access hook gets no globs rather
+    /// than the native file system.
+    fn glob(&mut self, base: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
+        match self.glob_access() {
+            Some(access) => expand_glob_with(base, pattern, access),
+            None => Err(crate::Error::Eval(format!(
+                "Cannot expand glob pattern `{pattern}` because these capabilities provide no glob access."
+            ))),
+        }
+    }
+
+    /// The file system view that `read*` globs run over, separately from the
+    /// `import*` one, as [`Self::resource_glob`] uses it. The default is
+    /// [`Self::glob_access`].
+    fn resource_glob_access(&mut self) -> Option<&mut dyn GlobAccess> {
+        self.glob_access()
+    }
 
     /// Whether the file resource at `path` exists, asked by `read`, `read?`
     /// and `read*`, including triple-dot resource lookup.
@@ -171,10 +202,15 @@ pub trait EvalCapabilities: Send + Sync {
 
     /// Expand the resource glob `pattern` below `base` for `read*`.
     ///
-    /// `import*` globs keep using [`Self::glob`]. The default delegates to
-    /// [`Self::glob`].
+    /// `import*` globs keep using [`Self::glob`]. The default expands the glob
+    /// over [`Self::resource_glob_access`] with [`expand_glob_with`] when
+    /// there is one, and otherwise delegates to [`Self::glob`] (so a host
+    /// that overrides only `glob` keeps working).
     fn resource_glob(&mut self, base: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
-        self.glob(base, pattern)
+        match self.resource_glob_access() {
+            Some(access) => expand_glob_with(base, pattern, access),
+            None => self.glob(base, pattern),
+        }
     }
 }
 
