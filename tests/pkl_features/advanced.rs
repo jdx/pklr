@@ -3794,3 +3794,17 @@ fn inherited_methods_late_super_reads_and_typed_object_lambdas_match_pkl() {
         "Expected value of type `Int`, but got type `Function0`. Value: new Function0 {}"
     );
 }
+
+#[test]
+fn nested_locals_hide_shadowed_ones_and_constraint_failures_are_reported() {
+    // Expected values come from `pkl eval` 0.32.2.
+    let value = eval(
+        "import \"pkl:test\"\n\
+         base { local x = 1; [\"k\"] { local x = 3; value = x } }\n\
+         child = (base) { x = 5 }\n\
+         local n: Int(this > 0) = -1\n\
+         r = test.catch(() -> n)\n",
+    );
+    assert_eq!(value["child"]["k"]["value"], 3);
+    assert_eq!(value["r"], "Type constraint `this > 0` violated. Value: -1");
+}

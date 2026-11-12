@@ -1473,6 +1473,9 @@ impl Evaluator {
                 self.check_declared_value(item, element, scope, depth)?;
             }
         }
+        if matches!(ty, crate::parser::TypeExpr::Constrained(..)) && self.type_violation.is_some() {
+            return Err(Error::Eval(self.type_mismatch_message(ty, val, None)));
+        }
         Err(Error::Eval(format!(
             "Expected value of type `{}`, but got type `{}`.\nValue: {}",
             display_type_expr(ty),

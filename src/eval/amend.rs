@@ -2025,9 +2025,10 @@ pub(super) fn shadow_local_reads(entry: &Entry, shadowed: &[(Name, Value)]) -> E
     } else if let Some(body) = prop.body.take() {
         // Keep the body a body, so it still amends the declared type's
         // default and any inherited member; shadow the reads inside it.
+        let inner = without_declared(&seen, &body);
         prop.body = Some(Arc::new(
             body.iter()
-                .map(|entry| shadow_local_reads(entry, &seen))
+                .map(|entry| shadow_local_reads(entry, &inner))
                 .collect(),
         ));
     }
@@ -2035,8 +2036,24 @@ pub(super) fn shadow_local_reads(entry: &Entry, shadowed: &[(Name, Value)]) -> E
 }
 
 fn shadow_body(body: &Body, shadowed: &[(Name, Value)]) -> Body {
+    let inner = without_declared(shadowed, body);
     body.iter()
-        .map(|entry| shadow_local_reads(entry, shadowed))
+        .map(|entry| shadow_local_reads(entry, &inner))
         .collect::<Vec<_>>()
         .into()
+}
+
+/// The saved locals a body does not declare itself: a local the body declares
+/// hides a saved one of the same name for the body's own reads.
+fn without_declared(shadowed: &[(Name, Value)], body: &[Entry]) -> Vec<(Name, Value)> {
+    shadowed
+        .iter()
+        .filter(|(name, _)| {
+            !body.iter().any(|entry| {
+                matches!(entry, Entry::Property(prop)
+                    if prop.name == *name && has_modifier(&prop.modifiers, Modifier::Local))
+            })
+        })
+        .cloned()
+        .collect()
 }
