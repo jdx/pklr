@@ -173,20 +173,7 @@ impl Evaluator {
                 // `Null(default)` is a null value that carries a default object or
                 // function for amending; pklr keeps only the null.
                 "Null" if args.len() == 1 && scope.get("Null").is_none() => {
-                    // A `new` default is not built: it may name the class being
-                    // instantiated, whose property this is.
-                    if matches!(&args[0], Expr::New(..)) {
-                        return Ok(Value::Null);
-                    }
-                    let value = self.eval_expr(&args[0], scope, depth + 1)?;
-                    return match value {
-                        Value::Object(..) | Value::Lambda(..) => Ok(Value::Null),
-                        other => Err(Error::Eval(format!(
-                            "Expected value of type `Object | Function<Object>`, but got type `{}`.\nValue: {}",
-                            value_type_name(&other),
-                            render::display_value(&other)
-                        ))),
-                    };
+                    return self.null_default(&args[0], scope, depth);
                 }
                 "Regex" => {
                     if let Some(arg) = args.first() {
@@ -890,5 +877,26 @@ fn is_default_member_ref(expr: &Expr) -> bool {
             name == "default" && matches!(base.as_ref(), Expr::Ident(base) if base == "super")
         }
         _ => false,
+    }
+}
+
+impl Evaluator {
+    /// `Null(default)`: the null a valid default stands for. Kept out of line
+    /// so it adds nothing to the evaluator's stack frame.
+    #[inline(never)]
+    fn null_default(&mut self, arg: &Expr, scope: &Scope, depth: usize) -> Result<Value> {
+        // A `new` default is not built: it may name the class being
+        // instantiated, whose property this is.
+        if matches!(arg, Expr::New(..)) {
+            return Ok(Value::Null);
+        }
+        match self.eval_expr(arg, scope, depth + 1)? {
+            Value::Object(..) | Value::Lambda(..) => Ok(Value::Null),
+            other => Err(Error::Eval(format!(
+                "Expected value of type `Object | Function<Object>`, but got type `{}`.\nValue: {}",
+                value_type_name(&other),
+                render::display_value(&other)
+            ))),
+        }
     }
 }

@@ -684,6 +684,14 @@ impl Evaluator {
         (kind, renderer.clone())
     }
 
+    /// Whether the output renderer declares converters. A converter may
+    /// replace a value whose member failed, so the failure is then left to the
+    /// render.
+    pub(super) fn output_has_converters(&self) -> bool {
+        let (_, renderer) = self.output_renderer(RendererKind::Json);
+        renderer_converters(&renderer).is_ok_and(|converters| !converters.is_empty())
+    }
+
     /// Apply the module output renderer's converters to a value tree.
     pub(super) fn apply_output_converters(&mut self, value: Value) -> Result<Value> {
         let (_, renderer) = self.output_renderer(RendererKind::Json);

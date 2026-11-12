@@ -167,3 +167,18 @@ fn null_function_returns_null() {
     let json = eval("a = Null(new Dynamic {})\n");
     assert!(json["a"].is_null());
 }
+
+#[test]
+fn a_marked_nested_union_defaults_to_its_inner_default() {
+    let json = eval("b: *(\"a\"|*\"b\")|\"c\"\nc: (\"a\"|*\"b\")|*\"c\"\n");
+    assert_eq!(json["b"], "b");
+    assert_eq!(json["c"], "c");
+}
+
+#[test]
+fn a_converter_fills_in_a_nested_undefined_property() {
+    let json = eval_with_converters(
+        "class Person { name: String; age: Int }\nres = new Person { name = \"pigeon\" }\noutput { renderer = new JsonRenderer { converters { [Person] = (it) -> (it) { age = 40 } } } }\n",
+    );
+    assert_eq!(json["res"]["age"], 40);
+}
