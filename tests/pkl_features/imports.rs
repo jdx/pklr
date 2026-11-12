@@ -4433,7 +4433,7 @@ fn inherited_annotation_is_not_checked_in_the_child_scope() {
     .unwrap();
     std::fs::write(
         temp.path().join("main.pkl"),
-        "amends \"p.pkl\"\nlocal C = 1\nitem = null\n",
+        "amends \"p.pkl\"\nlocal C = 1\nitem = if (false) new {} else null\n",
     )
     .unwrap();
     let v = pklr::eval_to_json(&temp.path().join("main.pkl")).unwrap();
