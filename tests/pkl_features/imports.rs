@@ -4560,3 +4560,15 @@ res = module.relativePathTo(root)
         "{err}"
     );
 }
+
+#[test]
+fn relative_path_to_requires_the_modules_to_exist() {
+    let temp = TestTempDir::new("pklr_test_relative_path_to_missing");
+    let root = temp.path().join("root.pkl");
+    std::fs::write(
+        &root,
+        "res = module.relativePathTo(import(\"missing.pkl\"))\n",
+    )
+    .unwrap();
+    assert!(pklr::eval_to_json(&root).is_err());
+}

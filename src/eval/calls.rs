@@ -89,6 +89,10 @@ impl Evaluator {
             && let [other] = args
             && let Some(result) = self.relative_path_to(obj_expr, other, scope)
         {
+            // Both sides are modules that must exist, which evaluating them
+            // checks.
+            self.eval_expr(obj_expr, scope, depth + 1)?;
+            self.eval_expr(other, scope, depth + 1)?;
             return result;
         }
         // Handle method calls: obj.method(args)

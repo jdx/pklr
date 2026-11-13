@@ -1173,15 +1173,21 @@ impl Evaluator {
             && base_src.kind == ObjectKind::Mapping
         {
             check_no_elements(base_src, overlay_entries)?;
-            let needs_mapping_evaluation = body_has(overlay_entries, &|entry| {
+            let defines_members = body_has(overlay_entries, &|entry| {
                 matches!(entry, Entry::Spread(_))
                     || matches!(entry, Entry::Property(prop) if &*prop.name == "default")
-                    // A body that amends an existing object entry amends it
-                    // member by member, which the general path (replacing
-                    // whatever the body redefines) does not.
-                    || matches!(entry, Entry::DynProperty(Expr::String(key), Expr::ObjectBody(_))
-                        if matches!(base_map.get(&**key), Some(Value::Object(_, Some(_)))))
             });
+            // A body that amends an existing object entry amends it member
+            // by member, which the general path (replacing whatever the body
+            // redefines) does not. A computed key may name such an entry.
+            let amends_entry = body_has(overlay_entries, &|entry| match entry {
+                Entry::DynProperty(Expr::String(key), Expr::ObjectBody(_)) => {
+                    matches!(base_map.get(&**key), Some(Value::Object(_, Some(_))))
+                }
+                Entry::DynProperty(_, Expr::ObjectBody(_)) => true,
+                _ => false,
+            });
+            let needs_mapping_evaluation = defines_members || amends_entry;
             if !base_src.is_metadata_only() || !needs_mapping_evaluation {
                 // Unannotated mapping entries with bodies still use the general
                 // amendment path, which preserves Listing-shaped entry bodies.
@@ -1237,6 +1243,12 @@ impl Evaluator {
                 // specialized first amendment must retain the overlay as its
                 // future source. Otherwise a later ordinary amendment loses
                 // an introduced `default` (and any captured bindings it uses).
+                // An amendment that only amends entries stays metadata-only:
+                // its values are all in the map, which rebuilding from the
+                // overlay would drop.
+                if !defines_members {
+                    return Ok(Value::Object(Arc::new(amended), Some(Arc::clone(base_src))));
+                }
                 let mut source = Arc::unwrap_or_clone(Arc::clone(base_src));
                 source.entries = base_src
                     .entries

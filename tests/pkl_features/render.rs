@@ -1827,3 +1827,24 @@ res = (foos) { ["bar"] { names { "new" } } }
         serde_json::json!(["orig", "new"])
     );
 }
+
+#[test]
+fn amending_a_to_mapping_entry_by_computed_key_and_again() {
+    let json = eval(
+        r#"
+class Foo { names: Listing<String> }
+local k = "bar"
+local foos = Map("bar", new Foo { names { "orig" } }, "baz", new Foo { names { "z" } }).toMapping()
+local once = (foos) { [k] { names { "new" } } }
+res = (once) { ["baz"] { names { "again" } } }
+"#,
+    );
+    assert_eq!(
+        json["res"]["bar"]["names"],
+        serde_json::json!(["orig", "new"])
+    );
+    assert_eq!(
+        json["res"]["baz"]["names"],
+        serde_json::json!(["z", "again"])
+    );
+}
