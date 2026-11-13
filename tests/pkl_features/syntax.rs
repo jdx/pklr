@@ -3534,3 +3534,16 @@ res = new App { m = 3 }
     assert_eq!(json["res"]["m"], 3);
     assert_eq!(json["res"]["x"], 4);
 }
+
+#[test]
+fn amended_function_body_reads_its_own_parameters_before_base_members() {
+    let json = eval(
+        r#"
+local h = () -> new Dynamic { name = "P" }
+local g = (name) -> (h) { x = name }
+r = g.apply("Q").apply()
+"#,
+    );
+    assert_eq!(json["r"]["name"], "P");
+    assert_eq!(json["r"]["x"], "Q");
+}
