@@ -2350,6 +2350,10 @@ fn check_stale_class_read(
     current_scope: &Scope,
 ) -> Result<()> {
     for (name, message) in current_scope.poisoned_bindings() {
+        // A nearer binding of the name hides the pending member.
+        if current_scope.get(name).is_some() {
+            continue;
+        }
         if (base_map.contains_key(&**name) || base_source.evaluated_properties.contains(name))
             && !overlay_entries
                 .iter()

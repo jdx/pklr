@@ -8326,3 +8326,18 @@ fn module_super_call_keeps_the_declaring_modules_locals() {
     let json = pklr::eval_to_json(&main).unwrap();
     assert_eq!(json["r"], "local");
 }
+
+#[test]
+fn new_class_body_inside_let_reads_the_let_binding() {
+    let json = eval(
+        r#"
+class Foo { x: Int }
+v {
+  foo = let (y = 2) new Foo { x = y }
+  y = foo.x
+}
+"#,
+    );
+    assert_eq!(json["v"]["foo"]["x"], 2);
+    assert_eq!(json["v"]["y"], 2);
+}

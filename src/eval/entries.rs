@@ -2208,15 +2208,16 @@ fn poison_pending_reads(
     active_scope: &mut Scope,
 ) {
     let mut bodies = Vec::new();
+    let mut bound = HashSet::default();
     if let Some(value) = &prop.value {
-        typed_new_bodies(value, &mut bodies);
+        typed_new_bodies(value, &mut bodies, &mut bound);
     }
     if bodies.is_empty() {
         return;
     }
     let mut refs = HashSet::default();
     for entries in bodies {
-        collect_entry_refs(entries, &mut refs, &HashSet::default());
+        collect_entry_refs(entries, &mut refs, &bound);
     }
     for name in &cx.pending_members {
         if *name != prop.name && !st.bound_members.contains(name) && refs.contains(name) {
@@ -2227,14 +2228,18 @@ fn poison_pending_reads(
 
 /// The bodies of the `new Class { .. }` expressions an expression can
 /// evaluate to.
-fn typed_new_bodies<'a>(expr: &'a Expr, bodies: &mut Vec<&'a [Entry]>) {
+/// `bound` collects the names `let`s bind around them.
+fn typed_new_bodies<'a>(expr: &'a Expr, bodies: &mut Vec<&'a [Entry]>, bound: &mut HashSet<Name>) {
     match expr {
         Expr::New(Some(_), entries, _) => bodies.push(entries),
         Expr::If(_, then, otherwise) => {
-            typed_new_bodies(then, bodies);
-            typed_new_bodies(otherwise, bodies);
+            typed_new_bodies(then, bodies, bound);
+            typed_new_bodies(otherwise, bodies, bound);
         }
-        Expr::Let(_, _, body) => typed_new_bodies(body, bodies),
+        Expr::Let(name, _, body) => {
+            bound.insert(nm(name));
+            typed_new_bodies(body, bodies, bound);
+        }
         _ => {}
     }
 }
