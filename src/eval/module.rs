@@ -2724,13 +2724,23 @@ mod late_binding_pass_tests {
     /// each captured scope holds on every pass.
     #[test]
     fn a_chain_no_quiet_pass_can_end_never_compares_by_data() {
-        let child = "amends \"Template.pkl\"\nbase = 10\n";
-        let (json, passes) = evaluate_amendment(&chain_of_lambdas_reading_the_module(30), child);
-        assert_eq!(json["res"], 2);
-        // The template's own pass and pass 0 of the amending module, then a pass for
-        // each of the inherited properties, and one more.
-        assert_eq!(passes, 2 + 31, "every pass runs");
-        assert_eq!(super::SAME_DATA_CHECKS.with(std::cell::Cell::get), 0);
+        // The chain is deep for a debug build's frames, so run it with room to
+        // spare on a thread of its own (the counter is thread-local too).
+        std::thread::Builder::new()
+            .stack_size(16 << 20)
+            .spawn(|| {
+                let child = "amends \"Template.pkl\"\nbase = 10\n";
+                let (json, passes) =
+                    evaluate_amendment(&chain_of_lambdas_reading_the_module(30), child);
+                assert_eq!(json["res"], 2);
+                // The template's own pass and pass 0 of the amending module, then a
+                // pass for each of the inherited properties, and one more.
+                assert_eq!(passes, 2 + 31, "every pass runs");
+                assert_eq!(super::SAME_DATA_CHECKS.with(std::cell::Cell::get), 0);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     /// The chain and the margin as long as the passes, to the pass: the last
