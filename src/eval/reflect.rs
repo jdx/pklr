@@ -962,7 +962,8 @@ impl Evaluator {
                 })
                 .cloned()
                 .collect();
-            annotated |= !prop.annotations.is_empty();
+            // Only an annotation that can convert replaces the prototype's.
+            annotated |= !own.is_empty();
             out.extend(self.eval_annotations(&own, scope, depth)?);
         }
         // An amendment (`new C { a = 1 }`) replaces the property without its
