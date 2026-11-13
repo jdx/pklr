@@ -36,6 +36,11 @@ pub(super) const CAPTURED_IDENTITIES: &str = "\0pklr:identities";
 /// defined in, which names the class of its `module`.
 const CAPTURED_NAMESPACE: &str = "\0pklr:namespace";
 
+/// The prefix of a key under `CAPTURED_IDENTITIES` that marks a captured name
+/// as declared by a body, so an amendment inside the function keeps it ahead
+/// of an inherited member of the same name.
+pub(super) const CAPTURED_DECLARED: &str = "\0pklr:declared:";
+
 #[derive(Debug, Clone)]
 pub(crate) struct Scope {
     // The maps are shared copy-on-write so cloning a scope, which `child`
@@ -145,7 +150,9 @@ impl Scope {
         // The modules the captured imports are (see `capture_identities`).
         if let Some(Value::Object(identities, _)) = captured.get(CAPTURED_IDENTITIES) {
             for (name, identity) in identities.iter() {
-                if let Value::String(identity) = identity {
+                if let Some(declared) = name.strip_prefix(CAPTURED_DECLARED) {
+                    Arc::make_mut(&mut scope.declared).insert(name_of(declared));
+                } else if let Value::String(identity) = identity {
                     if &**name == CAPTURED_NAMESPACE {
                         scope.type_namespace = Some(identity.to_string());
                     } else {

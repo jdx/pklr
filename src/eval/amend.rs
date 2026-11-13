@@ -1029,7 +1029,7 @@ impl Evaluator {
                 if matches!(item, Value::List(_)) {
                     bind_listing_receiver(&mut cond_scope, item);
                 }
-                if is_truthy(&self.eval_expr(cond, &cond_scope, depth + 1)?) {
+                if expect_bool(&self.eval_expr(cond, &cond_scope, depth + 1)?)? {
                     expanded.push(Entry::DynProperty(Expr::Int(index as i64), value.clone()));
                 }
             }
@@ -1992,6 +1992,23 @@ pub(super) fn amended_function(arity: usize, function: Value, body: &Body, scope
     );
     let mut captured = scope.flatten();
     captured.insert(FUNCTION.into(), function);
+    // The body is amended where the function was written, so the bindings
+    // that scope declared still win over the base's members.
+    let mut markers = match captured.get(CAPTURED_IDENTITIES) {
+        Some(Value::Object(identities, _)) => (**identities).clone(),
+        _ => ObjectMap::default(),
+    };
+    for name in scope.flatten_declared() {
+        if captured.contains_key(&*name) {
+            markers.insert(format!("{CAPTURED_DECLARED}{name}").into(), Value::Null);
+        }
+    }
+    if !markers.is_empty() {
+        captured.insert(
+            CAPTURED_IDENTITIES.into(),
+            Value::Object(Arc::new(markers), None),
+        );
+    }
     Value::Lambda(
         params.into(),
         Arc::new(Expr::Binop(

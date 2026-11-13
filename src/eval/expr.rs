@@ -763,7 +763,7 @@ impl Evaluator {
             }
             Expr::If(cond, then_expr, else_expr) => {
                 let c = self.eval_expr(cond, scope, depth + 1)?;
-                if is_truthy(&c) {
+                if expect_bool(&c)? {
                     self.eval_expr(then_expr, scope, depth + 1)
                 } else {
                     self.eval_expr(else_expr, scope, depth + 1)
@@ -796,7 +796,7 @@ impl Evaluator {
                     UnOp::NonNull => {
                         if is_null_value(&v) {
                             Err(Error::Eval(
-                                "non-null assertion failed: value is null".into(),
+                                "Expected a non-null value, but got `null`.".into(),
                             ))
                         } else {
                             Ok(v)

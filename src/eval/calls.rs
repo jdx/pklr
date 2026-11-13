@@ -431,6 +431,38 @@ impl Evaluator {
             }
             return Ok(Some(self.eval_expr(body, &call_scope, depth + 1)?));
         }
+        if let Value::Object(map, source) = obj
+            && let "hasProperty" | "getPropertyOrNull" | "getProperty" = method
+            && let [Value::String(name)] = evaled_args
+            && source
+                .as_ref()
+                .is_none_or(|s| s.kind != ObjectKind::Mapping)
+        {
+            // A hidden member is in the definition scope, not the member map.
+            let hidden = || {
+                let source = source.as_ref()?;
+                source
+                    .evaluated_properties
+                    .iter()
+                    .any(|property| **property == **name)
+                    .then(|| source.scope().get(&**name).cloned())?
+            };
+            let found = map.get(&**name).cloned().or_else(hidden);
+            return match (method, found) {
+                ("hasProperty", found) => Ok(Some(Value::Bool(found.is_some()))),
+                ("getPropertyOrNull", found) => Ok(Some(found.unwrap_or(Value::Null))),
+                (_, Some(value)) => Ok(Some(value)),
+                (_, None) => {
+                    let class = source
+                        .as_ref()
+                        .and_then(|s| s.type_name.as_deref())
+                        .unwrap_or("Dynamic");
+                    Err(Error::Eval(format!(
+                        "Cannot find property `{name}` in object of type `{class}`."
+                    )))
+                }
+            };
+        }
         Ok(None)
     }
 
@@ -1086,6 +1118,13 @@ pub(super) fn caught_error_message(error: Error) -> String {
         };
         return message.replacen("\nValue: ", " Value: ", 1);
     }
+    if message.starts_with("Operator `") {
+        return message
+            .replace("\nLeft operand : ", " Left operand : ")
+            .replace("\nRight operand: ", " Right operand: ")
+            .replace("\nLeft operand: ", " Left operand: ")
+            .replace("\nOperand: ", " Operand: ");
+    }
     if !(message.starts_with("Cannot render ")
         || message.starts_with("The top-level value of ")
         || message.starts_with("Cannot spread value of type `"))
@@ -1175,7 +1214,11 @@ impl Evaluator {
         // Only the selected branch counts.
         if let Expr::If(cond, then_expr, else_expr) = arg {
             let c = self.eval_expr(cond, scope, depth + 1)?;
-            let branch = if is_truthy(&c) { then_expr } else { else_expr };
+            let branch = if expect_bool(&c)? {
+                then_expr
+            } else {
+                else_expr
+            };
             return self.null_default(branch, scope, depth + 1);
         }
         // A `new` default is not built: it may name the class being

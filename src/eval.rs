@@ -265,6 +265,9 @@ pub struct Evaluator {
     /// The declarations of parsed modules, by the address of the module's
     /// body, which the weak reference confirms is still that module's.
     parsed_declarations: HashMap<usize, ParsedDeclarations>,
+    /// The classes `pkl:reflect` is mirroring, so a class that reaches itself
+    /// through a member's type is not mirrored again.
+    reflecting_classes: Vec<String>,
     /// Whether an evaluation moved to the large stack, so what the evaluator
     /// holds may be nested too deeply to free on a small one.
     grew: bool,

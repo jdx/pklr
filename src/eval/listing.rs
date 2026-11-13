@@ -118,7 +118,7 @@ impl Evaluator {
                 }
                 Entry::WhenGenerator(generator) => {
                     let condition = self.eval_expr(&generator.condition, &scope, depth + 1)?;
-                    let selected = if is_truthy(&condition) {
+                    let selected = if expect_bool(&condition)? {
                         Some(generator.body.as_slice())
                     } else {
                         generator.else_body.as_deref().map(Vec::as_slice)
@@ -285,7 +285,7 @@ impl Evaluator {
                 Entry::WhenGenerator(generator) => {
                     let condition =
                         self.eval_expr(&generator.condition, &listing_scope, depth + 1)?;
-                    let selected = if is_truthy(&condition) {
+                    let selected = if expect_bool(&condition)? {
                         Some(generator.body.as_slice())
                     } else {
                         generator.else_body.as_deref().map(Vec::as_slice)
