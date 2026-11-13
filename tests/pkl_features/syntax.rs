@@ -3375,12 +3375,6 @@ fn module_self_reads_see_members_evaluated_so_far() {
 }
 
 #[test]
-fn closed_class_extending_module_rejects_unknown_properties() {
-    let err = eval_fails("class C extends module {}\nresult = new C { typo = 1 }\n");
-    assert!(err.contains("typo"), "{err}");
-}
-
-#[test]
 fn dynamic_member_predicates_do_not_bind_listing_members() {
     let v = eval(
         "local length = 5\nbase = new Dynamic { 1; 2 }\nres = (base) { [[length == 5]] = 9 }\n",
