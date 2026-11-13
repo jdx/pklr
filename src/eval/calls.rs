@@ -565,11 +565,10 @@ impl Evaluator {
                 let mut result = Vec::new();
                 for item in items.iter() {
                     let val = self.invoke_lambda(lambda, std::slice::from_ref(item), depth)?;
-                    if let Value::List(inner) = val {
-                        result.extend(inner.iter().cloned());
-                    } else {
-                        result.push(val);
-                    }
+                    let Value::List(inner) = val else {
+                        return Err(stdlib::type_mismatch("Collection", &val));
+                    };
+                    result.extend(inner.iter().cloned());
                 }
                 Ok(Some(collection_result(items.kind(), result)))
             }
@@ -579,8 +578,7 @@ impl Evaluator {
                     .ok_or_else(|| Error::Eval("filter requires a function argument".into()))?;
                 let mut result = Vec::new();
                 for item in items.iter() {
-                    let cond = self.invoke_lambda(lambda, std::slice::from_ref(item), depth)?;
-                    if is_truthy(&cond) {
+                    if self.call_predicate(lambda, std::slice::from_ref(item), depth)? {
                         result.push(item.clone());
                     }
                 }
@@ -613,7 +611,7 @@ impl Evaluator {
                     .first()
                     .ok_or_else(|| Error::Eval("any requires a function argument".into()))?;
                 for item in items.iter() {
-                    if is_truthy(&self.invoke_lambda(lambda, std::slice::from_ref(item), depth)?) {
+                    if self.call_predicate(lambda, std::slice::from_ref(item), depth)? {
                         return Ok(Some(Value::Bool(true)));
                     }
                 }
@@ -624,7 +622,7 @@ impl Evaluator {
                     .first()
                     .ok_or_else(|| Error::Eval("every requires a function argument".into()))?;
                 for item in items.iter() {
-                    if !is_truthy(&self.invoke_lambda(lambda, std::slice::from_ref(item), depth)?) {
+                    if !self.call_predicate(lambda, std::slice::from_ref(item), depth)? {
                         return Ok(Some(Value::Bool(false)));
                     }
                 }
@@ -804,6 +802,15 @@ impl Evaluator {
             }
             (Value::Lambda(..), "toString") => Ok(Some(Value::String(pkl_value_text(obj).into()))),
 
+            (Value::List(items), _) => self
+                .collection_method(items, method, args, depth)
+                .transpose(),
+            // A module or object that defines a function of that name is not a `Map`.
+            (Value::Object(map, None), _)
+                if !matches!(map.get(method), Some(Value::Lambda(..))) =>
+            {
+                self.map_method(map, method, args, depth).transpose()
+            }
             _ => Ok(None), // not a known method
         }
     }
@@ -1059,7 +1066,18 @@ pub(super) fn is_evaluator_control_error(error: &Error) -> bool {
     )
 }
 
+/// The message `catch` returns for `error`. pkl puts the lines of a message
+/// on one line, each break becoming a space.
 pub(super) fn caught_error_message(error: Error) -> String {
+    let message = caught_error_text(error);
+    if message.contains('\n') {
+        message.replace('\n', " ")
+    } else {
+        message
+    }
+}
+
+fn caught_error_text(error: Error) -> String {
     let message = match error {
         // A parser's detail is the cause of the error, which `catch` does
         // not report: only the first paragraph is its message.

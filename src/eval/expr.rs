@@ -549,6 +549,9 @@ impl Evaluator {
                     (Value::String(s), "isEmpty") => return Ok(Value::Bool(s.is_empty())),
                     (Value::Object(map, _), "length") => return Ok(Value::Int(map.len() as i64)),
                     (Value::Object(map, _), "isEmpty") => return Ok(Value::Bool(map.is_empty())),
+                    (Value::Object(map, None), "isNotEmpty") => {
+                        return Ok(Value::Bool(!map.is_empty()));
+                    }
                     (Value::Object(map, _), "keys") => {
                         return Ok(Value::List(ListValue::new(
                             ListKind::Set,
@@ -1434,7 +1437,7 @@ fn list_property(list: &Value, items: &ListValue, name: &str) -> Option<Result<V
                 _ => step,
             }))
         }
-        _ => return None,
+        _ => return stdlib::collection_property(items, name),
     })
 }
 
@@ -1471,6 +1474,9 @@ fn list_element_member(list: &Value, items: &ListValue, name: &str) -> Result<Va
         } else {
             "a non-empty"
         };
+        if items.kind() == ListKind::Listing {
+            return Error::Eval(format!("Expected {expected} Listing."));
+        }
         Error::Eval(format!(
             "Expected {expected} collection.\nCollection: {}",
             crate::eval::render::display_value(list)

@@ -6,6 +6,7 @@
 
 use super::*;
 
+mod collections;
 #[allow(dead_code)] // Activated when the compatibility formatter is migrated.
 mod dragon;
 mod fdlibm;
@@ -16,6 +17,7 @@ pub(crate) mod render;
 pub(crate) mod string;
 mod units;
 
+pub(super) use collections::collection_property;
 pub(crate) use numbers::{
     binary_op, logical_left, logical_not, logical_right, negate, units_equal,
 };

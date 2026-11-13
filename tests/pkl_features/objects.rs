@@ -8065,14 +8065,14 @@ res6 = test.catch(() -> m[1.5])
     );
     assert_eq!(
         val["res1"],
-        "Element index `5` is out of range `0`..`1`.\nCollection: List(1, 2)"
+        "Element index `5` is out of range `0`..`1`. Collection: List(1, 2)"
     );
     assert_eq!(val["res2"], "Cannot find key `\"b\"`.");
     assert_eq!(val["res3"], "Cannot find key `3`.");
     assert_eq!(val["res4"], "Element index `-1` is out of range `0`..`0`.");
     assert_eq!(
         val["res5"],
-        "Operator `[]` is not defined for operand types `List` and `String`.\nLeft operand : List(1, 2)\nRight operand: \"a\""
+        "Operator `[]` is not defined for operand types `List` and `String`. Left operand : List(1, 2) Right operand: \"a\""
     );
     assert_eq!(val["res6"], "Cannot find key `1.5`.");
 }
