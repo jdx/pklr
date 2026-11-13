@@ -8341,3 +8341,17 @@ v {
     assert_eq!(json["v"]["foo"]["x"], 2);
     assert_eq!(json["v"]["y"], 2);
 }
+
+#[test]
+fn let_in_an_unused_branch_does_not_hide_reads_in_the_selected_one() {
+    let json = eval(
+        r#"
+class Foo { x: Int; y = 1 }
+v {
+  foo = if (false) let (y = 2) new Foo { x = y } else new Foo { x = y }
+  y = 3
+}
+"#,
+    );
+    assert_eq!(json["v"]["foo"]["x"], 3);
+}
