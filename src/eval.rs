@@ -70,6 +70,7 @@ use remote::*;
 pub(crate) use remote::{parse_triple_dot_path, resolve_triple_dot};
 pub(crate) use resource::file_uri_path;
 use resource::{DEFAULT_ALLOWED_RESOURCES, absolute_clean, file_uri};
+pub(crate) use scope::Scope as ListScope;
 pub(crate) use scope::SourceScope;
 use scope::*;
 use typecheck::*;

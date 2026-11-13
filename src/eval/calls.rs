@@ -630,6 +630,26 @@ impl Evaluator {
                 Ok(Some(Value::List(rev)))
             }
 
+            // `Listing.getOrDefault`: the element, or what `default` makes.
+            (Value::List(items), "getOrDefault")
+                if items.kind() == ListKind::Listing && args.len() == 1 =>
+            {
+                let Value::Int(index) = &args[0] else {
+                    return Err(Error::Eval(format!(
+                        "Expected value of type `Int`, but got type `{}`.",
+                        value_type_name(&args[0])
+                    )));
+                };
+                if let Some(item) = usize::try_from(*index).ok().and_then(|i| items.get(i)) {
+                    return Ok(Some(item.clone()));
+                }
+                let default = items
+                    .layers()
+                    .and_then(|layers| layers.default.clone())
+                    .unwrap_or_else(|| implicit_listing_default(items.elem_class()));
+                Ok(Some(self.invoke_lambda(&default, &args[..1], depth)?))
+            }
+
             // Object/Mapping methods
             (Value::Object(map, Some(source)), "getOrDefault")
                 if source.kind == ObjectKind::Mapping && args.len() == 1 =>

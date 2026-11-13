@@ -490,6 +490,33 @@ pub struct ListValue {
     /// Made by `Bytes(...)`: a `List` of ints in 0..=255 that is of type
     /// `Bytes`. Cleared like `int_seq`, and ignored by equality.
     bytes: bool,
+    /// The bodies that built a `Listing` whose elements are late bound: they
+    /// read `this`, or are `new { ... }` elements built from the listing's
+    /// `default`. Amending the listing replays them, so those elements see
+    /// the amendment. Any change of the items clears it, and equality ignores
+    /// it.
+    layers: Option<Arc<ListLayers>>,
+}
+
+/// One body that built a `Listing`, with the scope it was written in.
+#[derive(Debug, Clone)]
+pub(crate) struct ListLayer {
+    pub(crate) entries: crate::parser::Body,
+    pub(crate) scope: crate::eval::ListScope,
+    /// The `default` in force once this body ran, for `super.default`.
+    pub(crate) default: Option<Value>,
+}
+
+/// The bodies that built a `Listing`, oldest first (see [`ListValue`]).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ListLayers {
+    /// The items before the first body, which are not rebuilt.
+    pub(crate) init: Arc<Vec<Value>>,
+    pub(crate) layers: Vec<ListLayer>,
+    /// The `default` function after the last body: a `Lambda`.
+    pub(crate) default: Option<Value>,
+    /// Whether an element of some body reads `this`.
+    pub(crate) reads_this: bool,
 }
 
 impl PartialEq for ListValue {
@@ -506,7 +533,18 @@ impl ListValue {
             elem_class: None,
             int_seq: false,
             bytes: false,
+            layers: None,
         }
+    }
+
+    pub(crate) fn layers(&self) -> Option<&Arc<ListLayers>> {
+        self.layers.as_ref()
+    }
+
+    /// The same listing with the bodies that built it.
+    pub(crate) fn with_layers(mut self, layers: Option<Arc<ListLayers>>) -> Self {
+        self.layers = layers;
+        self
     }
 
     /// The same list, marked as the result of `Bytes(...)`.
@@ -584,6 +622,10 @@ impl ListValue {
         self
     }
 
+    pub(crate) fn items_arc(&self) -> &Arc<Vec<Value>> {
+        &self.items
+    }
+
     /// The address of the shared items, which identifies them while they are
     /// alive.
     pub(crate) fn items_ptr(&self) -> *const Vec<Value> {
@@ -593,6 +635,7 @@ impl ListValue {
     /// Mutable access to the items, copying them first if they are shared.
     pub fn make_mut(&mut self) -> &mut Vec<Value> {
         self.clear_int_seq();
+        self.layers = None;
         Arc::make_mut(&mut self.items)
     }
 }

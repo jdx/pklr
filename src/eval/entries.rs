@@ -200,7 +200,7 @@ impl Evaluator {
                         || prop.type_ann.as_ref().is_some_and(type_is_listing)
                         || entries_are_listing_amendment(body)))
             {
-                let mut items = match amendment_base {
+                let items = match amendment_base {
                     Some(Value::List(existing)) => existing.clone(),
                     // Amending nothing makes a `Dynamic`, unless the declared
                     // type is a `Listing` (or an alias or `*` union of one),
@@ -262,19 +262,13 @@ impl Evaluator {
                             .and_then(|ty| self.declared_elem_class(ty, scope))
                     })
                     .or(bound);
-                items = items.with_elem_class(elem_class.clone());
-                let mut amendment_scope = scope.child();
-                amendment_scope.set("super", Value::List(items.clone()));
-                amendment_scope.receiver_entries = Some(body.clone());
-                amendment_scope.receiver_list_base = Some(items.len());
-                self.eval_listing_entries(
+                return Ok(Some(Value::List(self.eval_listing_body(
+                    Some(items),
                     body,
-                    &amendment_scope,
+                    scope,
                     depth,
-                    items.make_mut(),
-                    elem_class.as_ref(),
-                )?;
-                return Ok(Some(Value::List(items.with_elem_class(elem_class))));
+                    elem_class,
+                )?)));
             }
             // `foo { ... }` — object body amendment.
             // If the property already has a value in scope (e.g., from a base class),

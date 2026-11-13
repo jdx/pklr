@@ -1314,20 +1314,14 @@ impl Evaluator {
                         .into(),
                 ));
             }
-            let mut amended = existing;
-            let elem_class = amended.elem_class().cloned();
-            let mut amendment_scope = scope.child();
-            amendment_scope.set("super", Value::List(amended.clone()));
-            amendment_scope.receiver_entries = Some(overlay_entries.clone());
-            amendment_scope.receiver_list_base = Some(amended.len());
-            self.eval_listing_entries(
+            let elem_class = existing.elem_class().cloned();
+            return Ok(Value::List(self.eval_listing_body(
+                Some(existing),
                 overlay_entries,
-                &amendment_scope,
-                depth + 1,
-                amended.make_mut(),
-                elem_class.as_ref(),
-            )?;
-            return Ok(Value::List(amended));
+                scope,
+                depth,
+                elem_class,
+            )?));
         }
         if let Value::Object(base_map, Some(base_src)) = &base
             && !base_src.is_metadata_only()
