@@ -1411,13 +1411,20 @@ fn display_value_at(value: &Value, depth: usize, max: usize) -> String {
                 "new Mapping {}".into()
             }
         }
-        (_, Value::Object(map, _)) => match map.keys().next() {
-            Some(key) => match class_key_name(key) {
-                Some(name) => name.to_string(),
-                None => "new Dynamic { ... }".into(),
-            },
-            None => "new Dynamic {}".into(),
-        },
+        (_, Value::Object(map, source)) => {
+            let class = source
+                .as_deref()
+                .and_then(crate::value::ObjectSource::type_name)
+                .unwrap_or("Dynamic");
+            match map.keys().next() {
+                Some(key) => match class_key_name(key) {
+                    Some(name) => name.to_string(),
+                    // `violating_value_display` expands this by its prefix.
+                    None => "new Dynamic { ... }".into(),
+                },
+                None => format!("new {class} {{}}"),
+            }
+        }
         (_, Value::List(items)) => {
             let shown = |items: &ListValue| {
                 items

@@ -3819,3 +3819,20 @@ fn a_method_parameter_hides_a_saved_local_of_the_same_name() {
     );
     assert_eq!(value["r"], 8);
 }
+
+#[test]
+fn type_mismatch_shows_an_empty_class_instance_by_its_class() {
+    // Expected values come from `pkl eval` 0.32.2.
+    let value = eval(
+        "import \"pkl:test\"\n\
+         class Foo\n\
+         class Baz\n\
+         a = test.catch(() -> ((x: Baz) -> x).apply(new Foo {}))\n\
+         local f = (x) -> new Dynamic {}\n\
+         b = test.catch(() -> (f) { y: Baz -> prop = y }.apply(new Foo {}))\n",
+    );
+    for key in ["a", "b"] {
+        let message = value[key].as_str().unwrap();
+        assert!(message.ends_with("Value: new Foo {}"), "{key}: {message}");
+    }
+}
