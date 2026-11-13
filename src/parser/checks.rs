@@ -197,7 +197,7 @@ impl<'a> Parser<'a> {
                     (!names.insert(property.name.to_string())).then(|| property.name.to_string())
                 }
                 Entry::ClassDef(name, ..) => (!members.insert(name.clone())).then(|| name.clone()),
-                Entry::TypeAlias(name, _) => {
+                Entry::TypeAlias(name, ..) => {
                     let names = if object_scope && self.local_type_aliases.contains(name) {
                         &mut local_members
                     } else {
@@ -258,7 +258,7 @@ impl<'a> Parser<'a> {
             Entry::ClassDef(_, _, _, body) => {
                 self.check_entry_duplicates(body, None, false, false)?
             }
-            Entry::TypeAlias(_, _) => {}
+            Entry::TypeAlias(..) => {}
         }
         Ok(())
     }
@@ -324,7 +324,7 @@ impl<'a> Parser<'a> {
         let aliases: Vec<(&str, &TypeExpr)> = entries
             .iter()
             .filter_map(|entry| match entry {
-                Entry::TypeAlias(name, ty) => Some((name.as_str(), ty)),
+                Entry::TypeAlias(name, ty, ..) => Some((name.as_str(), ty)),
                 _ => None,
             })
             .collect();
@@ -493,7 +493,7 @@ pub(super) fn entries_define_type(entries: &[Entry], name: &str) -> bool {
         Entry::ClassDef(entry_name, _, _, body) => {
             entry_name == name || entries_define_type(body, name)
         }
-        Entry::TypeAlias(entry_name, _) => entry_name == name,
+        Entry::TypeAlias(entry_name, ..) => entry_name == name,
         Entry::Property(property) => {
             property
                 .body

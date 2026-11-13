@@ -1008,7 +1008,7 @@ impl Evaluator {
         let Value::List(items) = base else {
             return Err(member_predicates_unsupported());
         };
-        if items.kind() != ListKind::Dynamic {
+        if !matches!(items.kind(), ListKind::Dynamic | ListKind::Listing) {
             return Err(member_predicates_unsupported());
         }
         let mut expanded = Vec::with_capacity(entries.len());
@@ -1025,6 +1025,9 @@ impl Evaluator {
                     }
                 }
                 cond_scope.set("this", item.clone());
+                if matches!(item, Value::List(_)) {
+                    bind_listing_receiver(&mut cond_scope, item);
+                }
                 if is_truthy(&self.eval_expr(cond, &cond_scope, depth + 1)?) {
                     expanded.push(Entry::DynProperty(Expr::Int(index as i64), value.clone()));
                 }
@@ -1281,7 +1284,8 @@ impl Evaluator {
                     if &*prop.name != "default" && !has_modifier(&prop.modifiers, Modifier::Local))
             }) {
                 return Err(Error::Eval(
-                    "Object of type `Listing` cannot have a property.".into(),
+                    "Object of type `Listing` cannot have a property (other than `default`)."
+                        .into(),
                 ));
             }
             let mut amended = existing;
@@ -1539,7 +1543,9 @@ impl Evaluator {
                         Err(_) => complete = false,
                     }
                 }
-                Entry::TypeAlias(name, ty) => self.eval_type_alias(name, ty, &mut default_scope),
+                Entry::TypeAlias(name, ty, generic) => {
+                    self.eval_type_alias(name, ty, generic.as_ref(), &mut default_scope)
+                }
                 _ => {}
             }
         }
@@ -2288,5 +2294,51 @@ fn literal_key(key: &Expr) -> Option<String> {
         Expr::String(s) => Some(format!("s:{s}")),
         Expr::Int(n) => Some(format!("i:{n}")),
         _ => None,
+    }
+}
+
+/// Let a member predicate's condition read the members of a `Listing` element
+/// by bare name, as it reads those of an object element: the properties by
+/// value, and the methods that take no arguments as functions.
+fn bind_listing_receiver(scope: &mut Scope, item: &Value) {
+    let Value::List(items) = item else {
+        return;
+    };
+    // A `Dynamic` has no `length` or other collection members.
+    if items.kind() != ListKind::Listing {
+        return;
+    }
+    let len = items.len();
+    scope.set("length", Value::Int(len as i64));
+    scope.set("isEmpty", Value::Bool(len == 0));
+    scope.set("isNotEmpty", Value::Bool(len != 0));
+    scope.set("lastIndex", Value::Int(len as i64 - 1));
+    if let (Some(first), Some(last)) = (items.iter().next(), items.iter().last()) {
+        scope.set("first", first.clone());
+        scope.set("last", last.clone());
+    }
+    let captured = Arc::new(scope.flatten());
+    for method in [
+        "toList",
+        "toSet",
+        "isDistinct",
+        "firstOrNull",
+        "lastOrNull",
+        "single",
+    ] {
+        scope.set(
+            method,
+            Value::Lambda(
+                Arc::new([]),
+                Arc::new(Expr::Call(
+                    Box::new(Expr::Field(
+                        Box::new(Expr::Ident("this".into())),
+                        method.to_string(),
+                    )),
+                    Vec::new(),
+                )),
+                Arc::clone(&captured),
+            ),
+        );
     }
 }

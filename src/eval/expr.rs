@@ -208,6 +208,16 @@ impl Evaluator {
                         })
                     }
                     Some("Listing") => {
+                        if entries.iter().any(|entry| {
+                            matches!(entry, Entry::Property(prop)
+                                if &*prop.name != "default"
+                                    && !has_modifier(&prop.modifiers, Modifier::Local))
+                        }) {
+                            return Err(Error::Eval(
+                                "Object of type `Listing` cannot have a property (other than `default`)."
+                                    .into(),
+                            ));
+                        }
                         let elem_class = listing_elem_class(generic_params, scope);
                         let mut listing_scope = scope.child();
                         listing_scope.set(
@@ -357,7 +367,12 @@ impl Evaluator {
                         if let Some(Value::Object(ref base_map, Some(ref base_src))) = base {
                             check_no_elements(base_src, entries)?;
                             // Enforce open modifier: non-open classes reject new properties
-                            if !base_src.is_open {
+                            // A class extending `module` inherits declarations this
+                            // scope's `module` snapshot may not carry yet, so its
+                            // closed check cannot be made here.
+                            if !base_src.is_open
+                                && !base_src.parent_type_names.iter().any(|n| n == "module")
+                            {
                                 // Collect all declared property names from the base class
                                 // (includes those with no default value)
                                 let base_names: std::collections::HashSet<Name> = base_src
@@ -658,13 +673,15 @@ impl Evaluator {
                     let key = self.eval_expr(key_expr, scope, depth + 1)?;
                     if let Some(Value::List(items)) = scope.get("super") {
                         return match key {
-                            Value::Int(index) => usize::try_from(index)
+                            // Past the parent's elements `super[i]` is an
+                            // empty Dynamic.
+                            Value::Int(index) => Ok(usize::try_from(index)
                                 .ok()
                                 .and_then(|index| items.get(index))
                                 .cloned()
-                                .ok_or_else(|| {
-                                    Error::Eval(format!("index out of bounds: {index}"))
-                                }),
+                                .unwrap_or_else(|| {
+                                    tag_dynamic(Value::Object(Arc::default(), None))
+                                })),
                             _ => Err(Error::Eval("listing index must be an Int".into())),
                         };
                     }
@@ -709,7 +726,8 @@ impl Evaluator {
                             .cloned()
                             .ok_or_else(|| {
                                 let message = format!(
-                                    "Element index `{index}` is out of range `0`..`{}`.",
+                                    "Element index `{}` is out of range `0`..`{}`.",
+                                    group_digits(index),
                                     items.len() as i64 - 1
                                 );
                                 if items.kind() == ListKind::List {
@@ -791,11 +809,9 @@ impl Evaluator {
                 if matches {
                     Ok(val)
                 } else {
-                    Err(Error::Eval(format!(
-                        "cannot cast {} to {}",
-                        value_type_name(&val),
-                        display_type_expr(ty)
-                    )))
+                    Err(Error::Eval(
+                        self.type_mismatch_message(ty, &val, None, scope),
+                    ))
                 }
             }
             Expr::Checked(expr, ty) => {
@@ -1362,6 +1378,13 @@ fn list_property(list: &Value, items: &ListValue, name: &str) -> Option<Result<V
     Some(match name {
         "length" => Ok(Value::Int(items.len() as i64)),
         "isEmpty" => Ok(Value::Bool(items.is_empty())),
+        "isDistinct" => Ok(Value::Bool(
+            items.kind() == ListKind::Set
+                || items
+                    .iter()
+                    .enumerate()
+                    .all(|(i, a)| items[..i].iter().all(|b| !values_eq(a, b))),
+        )),
         "first" | "last" | "single" | "rest" | "firstOrNull" | "lastOrNull" | "singleOrNull"
         | "restOrNull" | "lastIndex" => list_element_member(list, items, name),
         _ => return None,

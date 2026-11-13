@@ -13,8 +13,8 @@ mod validate;
 
 pub use ast::BaseForm;
 pub use ast::{
-    Annotation, BinOp, Body, Entry, Expr, ForGenerator, Import, LocalBindings, Modifier, Module,
-    Property, StringInterpPart, TraceSite, TypeExpr, UnOp, WhenGenerator,
+    Annotation, BinOp, Body, Entry, Expr, ForGenerator, GenericAlias, Import, LocalBindings,
+    Modifier, Module, Property, StringInterpPart, TraceSite, TypeExpr, UnOp, WhenGenerator,
 };
 use ast::{
     check_signature, erase_type_parameters, infers_new, type_expr_constrained_name,

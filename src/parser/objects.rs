@@ -7,7 +7,8 @@ impl<'a> Parser<'a> {
     /// for-generator, which cannot define properties or methods.
     pub(super) fn parse_object_body(&mut self, in_for: bool) -> Result<ObjectBody> {
         self.expect(&TokenKind::LBrace, "{")?;
-        let params = self.parse_body_params()?;
+        let typed_params = self.parse_body_params()?;
+        let params = typed_params.iter().map(|(name, _)| name.clone()).collect();
         let mut entries = Vec::new();
         let mut prev_end: Option<usize> = None;
         while !matches!(self.peek(), TokenKind::RBrace) {
@@ -26,19 +27,23 @@ impl<'a> Parser<'a> {
             prev_end = Some(self.prev_end);
         }
         self.advance(); // }
-        Ok(ObjectBody { params, entries })
+        Ok(ObjectBody {
+            params,
+            typed_params,
+            entries,
+        })
     }
 
     /// Parse the `a, b: Type ->` parameters at the start of an object body.
-    pub(super) fn parse_body_params(&mut self) -> Result<Vec<String>> {
+    pub(super) fn parse_body_params(&mut self) -> Result<TypedParams> {
         let is_param_start = |kind: &TokenKind| matches!(kind, TokenKind::Ident(_));
         if !is_param_start(self.peek()) {
             return Ok(Vec::new());
         }
         // Look ahead for `->` after a parameter list without consuming.
         let saved = (self.pos, self.prev_end, self.prev_line);
-        let parsed = (|| -> Result<Option<Vec<String>>> {
-            let params = self.parse_parameters(&TokenKind::Arrow)?;
+        let parsed = (|| -> Result<Option<TypedParams>> {
+            let params = self.parse_typed_parameters(&TokenKind::Arrow)?;
             if matches!(self.peek(), TokenKind::Arrow) {
                 self.advance();
                 Ok(Some(params))
@@ -308,9 +313,14 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// Parameter names with their declared types.
+pub(super) type TypedParams = Vec<(String, Option<TypeExpr>)>;
+
 /// A parsed object body: optional parameters (`{ a, b -> ... }`) and members.
 pub(super) struct ObjectBody {
     pub(super) params: Vec<String>,
+    /// The parameters with their declared types, which a call checks.
+    pub(super) typed_params: TypedParams,
     pub(super) entries: Vec<Entry>,
 }
 
@@ -326,8 +336,9 @@ pub(super) fn amend_expr(parent: Expr, body: ObjectBody) -> Expr {
         Box::new(Expr::Field(Box::new(parent), "apply".to_string())),
         args,
     );
+    let lambda_body = Expr::Binop(BinOp::Add, Box::new(call), Box::new(entries));
     Expr::Lambda(
         body.params.into(),
-        std::sync::Arc::new(Expr::Binop(BinOp::Add, Box::new(call), Box::new(entries))),
+        std::sync::Arc::new(check_signature(&body.typed_params, None, lambda_body)),
     )
 }
