@@ -657,7 +657,11 @@ impl Converters {
     pub(crate) fn class(&self, name: &str) -> Option<&Value> {
         self.by_class
             .iter()
-            .find(|(class, ..)| class == name)
+            // A builtin kind is named by a builtin class: a user class that
+            // shares the name (`[mod.Int]`) is a different class.
+            .find(|(class, declared, _)| {
+                class == name && declared.as_deref().is_none_or(|id| id.starts_with("pkl:"))
+            })
             .map(|(.., function)| function)
     }
 
