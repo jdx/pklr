@@ -267,7 +267,7 @@ pub(crate) enum Kind {
 
 impl Kind {
     /// The Pkl class name used in error messages.
-    fn pkl_class(self, value: &Value) -> String {
+    pub(super) fn pkl_class(self, value: &Value) -> String {
         match self {
             Kind::Null => "Null".into(),
             Kind::Boolean => "Boolean".into(),
@@ -303,6 +303,7 @@ impl Kind {
             Kind::Dynamic => "Dynamic".into(),
             Kind::Typed => match value {
                 Value::Object(_, Some(source)) => match source.type_identity.as_deref() {
+                    _ if source.kind == ObjectKind::Reference => "pkl.ref#Reference".into(),
                     Some(identity) if !identity.starts_with("pkl:") => {
                         class_display_name(identity, source.type_name.as_deref())
                     }
@@ -981,6 +982,12 @@ pub(crate) trait StringRenderer<'a> {
         if self.visit_collection(value, kind)? {
             return Ok(());
         }
+        // A reference holds internal members; it has no document form.
+        if kind == Kind::Typed
+            && matches!(value, Value::Object(_, Some(source)) if source.kind == ObjectKind::Reference)
+        {
+            return Err(cannot_render_type(value, kind, self.name()));
+        }
         match (kind, value) {
             (Kind::Null, _) => self.visit_null(),
             (Kind::Boolean, Value::Bool(b)) => self.visit_bool(*b),
@@ -1135,23 +1142,25 @@ pub(crate) fn cannot_render_type(value: &Value, kind: Kind, name: &str) -> Error
     Error::Eval(format!(
         "Cannot render value of type `{}` as {name}.\nValue: {}\n\nConsider adding a converter to `output.converters`.",
         kind.pkl_class(value),
-        unforced_object_display(value, kind).unwrap_or_else(|| match value {
-            // Here pkl shows a `Listing`'s elements, unlike the top-level
-            // type errors, which show `?` for each.
-            Value::List(items)
-                if kind == Kind::Listing
-                    && !items.is_empty()
-                    && matches!(items.kind(), ListKind::Listing) =>
-            {
-                let shown = items
-                    .iter()
-                    .map(|item| display_value_at(item, 1, DISPLAY_DEPTH))
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                format!("new Listing {{ {shown} }}")
-            }
-            _ => display_value(value),
-        }),
+        reference_display(value)
+            .or_else(|| unforced_object_display(value, kind))
+            .unwrap_or_else(|| match value {
+                // Here pkl shows a `Listing`'s elements, unlike the top-level
+                // type errors, which show `?` for each.
+                Value::List(items)
+                    if kind == Kind::Listing
+                        && !items.is_empty()
+                        && matches!(items.kind(), ListKind::Listing) =>
+                {
+                    let shown = items
+                        .iter()
+                        .map(|item| display_value_at(item, 1, DISPLAY_DEPTH))
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    format!("new Listing {{ {shown} }}")
+                }
+                _ => display_value(value),
+            }),
     ))
 }
 
@@ -1807,6 +1816,11 @@ impl JsonValue<'_> {
                 "XML comments must not contain `--` or end with `-`.".into(),
             ));
         }
+        if kind == Kind::Typed
+            && matches!(value, Value::Object(_, Some(source)) if source.kind == ObjectKind::Reference)
+        {
+            return Err(cannot_render_type(value, kind, "JSON"));
+        }
         Ok(match (kind, value) {
             (Kind::Null, _) => serde_json::Value::Null,
             (_, Value::Bool(b)) => serde_json::Value::Bool(*b),
@@ -1883,6 +1897,16 @@ impl JsonValue<'_> {
             }
             (kind, _) => return Err(cannot_render_type(value, kind, "JSON")),
         })
+    }
+}
+
+/// A reference as an error message shows it.
+fn reference_display(value: &Value) -> Option<String> {
+    match value {
+        Value::Object(_, Some(source)) if source.kind == ObjectKind::Reference => {
+            Some(crate::eval::stdlib::render_value(value))
+        }
+        _ => None,
     }
 }
 

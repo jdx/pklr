@@ -558,7 +558,24 @@ impl Evaluator {
             Arc::new(receiver)
         });
         let this_aliases = Vec::<Name>::new();
-        refresh_this_aliases(&mut child_scope, &this_aliases, &all_props);
+        // With `pkl:ref` in use, `this` of an instance body keeps the class it
+        // is an instance of, so a Reference to it is a Reference to that type.
+        let this_source = (self.refs.active
+            && inherited_source.is_some_and(|source| source.type_identity.is_some()))
+        .then(|| {
+            inherited_source.map(|source| {
+                let mut source = source.clone();
+                source.kind = ObjectKind::Object;
+                Arc::new(source)
+            })
+        })
+        .flatten();
+        refresh_this_aliases(
+            &mut child_scope,
+            &this_aliases,
+            &all_props,
+            this_source.as_ref(),
+        );
         // Locals run before properties, so an untyped local may initially be
         // unable to read a member of this body. Keep only those locals for a
         // later retry as members bind; typed locals retain their existing
@@ -624,6 +641,7 @@ impl Evaluator {
             child_scope,
             all_props,
             this_aliases,
+            this_source,
             failed_locals,
             failed_properties,
             non_const_members,
@@ -1142,7 +1160,12 @@ impl Evaluator {
             &cx.deferred_lambdas,
             &st.non_const_members,
         );
-        refresh_this_aliases(&mut st.child_scope, &st.this_aliases, &st.all_props);
+        refresh_this_aliases(
+            &mut st.child_scope,
+            &st.this_aliases,
+            &st.all_props,
+            st.this_source.as_ref(),
+        );
         self.retry_failed_locals(cx, st)?;
         Ok(())
     }
@@ -1216,7 +1239,12 @@ impl Evaluator {
                         if let Some(source) = source {
                             st.elements.extend(source.elements.iter().cloned());
                         }
-                        refresh_this_aliases(&mut st.child_scope, &st.this_aliases, &st.all_props);
+                        refresh_this_aliases(
+                            &mut st.child_scope,
+                            &st.this_aliases,
+                            &st.all_props,
+                            st.this_source.as_ref(),
+                        );
                     }
                     Value::List(items) => st.elements.extend(items.iter().cloned()),
                     _ => unreachable!("check_iterable accepted an unsupported value"),
@@ -1396,7 +1424,12 @@ impl Evaluator {
         {
             st.child_scope.set(&prop.name, Value::Null);
         }
-        refresh_this_aliases(&mut st.child_scope, &st.this_aliases, &st.all_props);
+        refresh_this_aliases(
+            &mut st.child_scope,
+            &st.this_aliases,
+            &st.all_props,
+            st.this_source.as_ref(),
+        );
         let mut active_scope = scope_for_object_entry(
             entry_index,
             &st.child_scope,
@@ -1586,7 +1619,12 @@ impl Evaluator {
             st.member_entry_indices
                 .insert(storage_key.clone(), entry_index);
             st.map.insert(storage_key, val);
-            refresh_this_aliases(&mut st.child_scope, &st.this_aliases, &st.all_props);
+            refresh_this_aliases(
+                &mut st.child_scope,
+                &st.this_aliases,
+                &st.all_props,
+                st.this_source.as_ref(),
+            );
             self.retry_failed_locals(cx, st)?;
             return Ok(());
         }
@@ -1653,7 +1691,12 @@ impl Evaluator {
         st.member_entry_indices
             .insert(storage_key.clone(), entry_index);
         st.map.insert(storage_key, val);
-        refresh_this_aliases(&mut st.child_scope, &st.this_aliases, &st.all_props);
+        refresh_this_aliases(
+            &mut st.child_scope,
+            &st.this_aliases,
+            &st.all_props,
+            st.this_source.as_ref(),
+        );
         self.retry_failed_locals(cx, st)?;
 
         Ok(())
@@ -1727,7 +1770,12 @@ impl Evaluator {
         if let Some(source) = source {
             st.elements.extend(source.elements.iter().cloned());
         }
-        refresh_this_aliases(&mut st.child_scope, &st.this_aliases, &st.all_props);
+        refresh_this_aliases(
+            &mut st.child_scope,
+            &st.this_aliases,
+            &st.all_props,
+            st.this_source.as_ref(),
+        );
         self.retry_failed_locals(cx, st)?;
 
         Ok(())
@@ -1844,7 +1892,12 @@ impl Evaluator {
     /// Bind the deferred local lambdas again, now that the properties are
     /// bound, so they capture overridden values (late binding).
     fn bind_deferred_lambdas(&mut self, cx: &BodyContext, st: &mut BodyState) -> Result<()> {
-        refresh_this_aliases(&mut st.child_scope, &st.this_aliases, &st.all_props);
+        refresh_this_aliases(
+            &mut st.child_scope,
+            &st.this_aliases,
+            &st.all_props,
+            st.this_source.as_ref(),
+        );
         for &(ref name, prop, expr, entry_index) in &cx.deferred_lambdas {
             let active_scope = scope_for_object_entry(
                 entry_index,
@@ -1926,6 +1979,8 @@ struct BodyState<'a> {
     child_scope: Scope,
     all_props: Arc<ObjectMap>,
     this_aliases: Vec<Name>,
+    /// The class `this` is an instance of, while a `pkl:ref` module is in use.
+    this_source: Option<Arc<ObjectSource>>,
     /// Untyped locals that failed, possibly because they read a member of
     /// this body not yet bound.
     failed_locals: Vec<usize>,

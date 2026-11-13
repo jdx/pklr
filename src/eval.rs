@@ -38,6 +38,7 @@ mod output;
 mod package;
 mod parsers;
 mod prefetch;
+mod reference;
 mod reflect;
 mod reflect_base;
 mod relative_path;
@@ -238,6 +239,8 @@ pub struct Evaluator {
     converters: Vec<(String, Value)>,
     /// Cached templates for the built-in classes used by module output.
     builtin_classes: HashMap<&'static str, Value>,
+    /// Referent types of `pkl:ref` references.
+    refs: reference::RefState,
     /// `output` declarations belonging to the module being evaluated.
     output_props: Vec<Arc<Property>>,
     /// Evaluated module output, when the module declares an `output` block.
@@ -267,6 +270,9 @@ pub struct Evaluator {
     /// The declarations of parsed modules, by the address of the module's
     /// body, which the weak reference confirms is still that module's.
     parsed_declarations: HashMap<usize, ParsedDeclarations>,
+    /// The classes `pkl:reflect` is mirroring, so a class that reaches itself
+    /// through a member's type is not mirrored again.
+    reflecting_classes: Vec<String>,
     /// Whether an evaluation moved to the large stack, so what the evaluator
     /// holds may be nested too deeply to free on a small one.
     grew: bool,

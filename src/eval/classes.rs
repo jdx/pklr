@@ -116,6 +116,59 @@ impl Evaluator {
             _ => None,
         };
         let body = without_local_overrides.as_ref().unwrap_or(body);
+        // A default that names its own class (`ref.Reference(d, A, this)` in
+        // `A`) reads it before the class is bound: it stands for the class by
+        // its identity, which is all its members of a type can ask of it.
+        if self.refs.active
+            && body_reads.contains(class_name)
+            && child_scope.get(class_name).is_none()
+        {
+            let mut placeholder =
+                stdlib::class_value(class_name, scope.runtime_type_identity(class_name));
+            // Its declarations (and its parent's) let a member of a type
+            // be looked up before the class is complete.
+            if let Value::Object(_, Some(source)) = &mut placeholder {
+                let (mut entries, mut scopes): (Vec<Entry>, Vec<_>) = match &parent_val {
+                    Some(Value::Object(_, Some(parent))) => (parent.entries.to_vec(), {
+                        // One snapshot for the entries without a scope,
+                        // as the completed class's merge captures.
+                        let mut captured = capture_object_source_scope(parent);
+                        captured.body_members.extend(
+                            parent
+                                .entries
+                                .iter()
+                                .enumerate()
+                                .filter(|(index, _)| {
+                                    parent.entry_scopes.get(*index).is_none_or(Option::is_none)
+                                })
+                                .filter_map(|(_, entry)| entry_member_name(entry)),
+                        );
+                        let parent_scope = Arc::new(captured);
+                        (0..parent.entries.len())
+                            .map(|i| {
+                                parent
+                                    .entry_scopes
+                                    .get(i)
+                                    .cloned()
+                                    .flatten()
+                                    .or_else(|| Some(Arc::clone(&parent_scope)))
+                            })
+                            .collect()
+                    }),
+                    _ => (Vec::new(), Vec::new()),
+                };
+                scopes.resize(entries.len() + body.len(), None);
+                entries.extend(body.iter().cloned());
+                let source = Arc::make_mut(source);
+                source.entries = entries.into();
+                source.entry_scopes = scopes;
+                // The completed class has these too; a reference to the
+                // class may register this placeholder first.
+                source.parent_type_names = parent_type_names.clone();
+                source.parent_type_identities = parent_type_identities.clone();
+            }
+            child_scope.set(class_name, placeholder);
+        }
 
         let mut child_receiver_scope = child_scope.clone();
         child_receiver_scope.receiver_entries = Some(body.clone());
