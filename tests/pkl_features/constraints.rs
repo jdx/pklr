@@ -383,3 +383,77 @@ h = new H { m { ["a"] {} } }
     );
     assert_eq!(json["h"]["m"]["a"]["x"], 1);
 }
+
+// A constraint shows without its outer parentheses, and a failing nested
+// constraint leaks `this` to the enclosing one, as `pkl eval` 0.32.2 does.
+#[test]
+fn constraint_text_drops_outer_parens_and_nested_this_leaks() {
+    let json = eval(
+        r#"
+import "pkl:test"
+typealias A<T> = List((this[0] is Any(this is T)))
+typealias C<T> = List((this.length > 5))
+typealias F<T> = List(!(this.isEmpty))
+local foo = List("uh oh")
+r1 = test.catch(() -> foo as A<Int>)
+r3 = test.catch(() -> foo as C<Int>)
+r6 = test.catch(() -> List() as F<Int>)
+"#,
+    );
+    assert_eq!(
+        json["r1"],
+        "Type constraint `this[0] is Any(this is T)` violated. Value: \"u\""
+    );
+    assert_eq!(
+        json["r3"],
+        "Type constraint `this.length > 5` violated. Value: List(\"uh oh\")"
+    );
+    assert_eq!(
+        json["r6"],
+        "Type constraint `!(this.isEmpty)` violated. Value: List()"
+    );
+}
+
+// A failed `local` stays poisoned when an object body captures its scope, so
+// reading it from a nested amend body fails when read, not at lookup.
+#[test]
+fn poisoned_local_read_from_nested_body_is_catchable() {
+    let json = eval(
+        r#"
+import "pkl:test"
+local y: Int = "wrong type"
+foo {
+  bar {
+    res = test.catch(() -> y)
+  }
+}
+"#,
+    );
+    assert!(
+        json["foo"]["bar"]["res"]
+            .as_str()
+            .unwrap()
+            .contains("Expected value of type `Int`"),
+        "{json}"
+    );
+}
+
+// A const-scope violation inside a `test.catch` lambda is raised when the
+// lambda runs, so the catch returns it, as `pkl eval` 0.32.2 does.
+#[test]
+fn const_violation_in_catch_lambda_is_deferred() {
+    let json = eval(
+        r#"
+import "pkl:test"
+y = 1
+class C {
+  r = test.catch(() -> y)
+}
+c = new C {}
+"#,
+    );
+    assert_eq!(
+        json["c"]["r"],
+        "Cannot reference property `y` from here because it is not `const`."
+    );
+}

@@ -1016,25 +1016,10 @@ impl Evaluator {
                     return Ok(false);
                 }
                 // Evaluate the constraint with `this` bound to the value
-                let mut constraint_scope = scope.child();
-                constraint_scope.set("this", val.clone());
-                // Also bind common properties directly so `length`, `isEmpty` etc. work
-                match val {
-                    Value::String(s) => {
-                        constraint_scope.set("length", Value::Int(s.chars().count() as i64));
-                        constraint_scope.set("isEmpty", Value::Bool(s.is_empty()));
-                    }
-                    Value::Int(_) | Value::Float(_) => {}
-                    // An element-only `Dynamic` has no `length`.
-                    Value::List(items) if items.kind() != ListKind::Dynamic => {
-                        constraint_scope.set("length", Value::Int(items.len() as i64));
-                        constraint_scope.set("isEmpty", Value::Bool(items.is_empty()));
-                    }
-                    Value::Object(items, _) => {
-                        constraint_scope.set("length", Value::Int(items.len() as i64));
-                        constraint_scope.set("isEmpty", Value::Bool(items.is_empty()));
-                    }
-                    _ => {}
+                let constraint_scope = constraint_scope_for(scope, val);
+                // A constraint nested in another one leaks its `this`.
+                if self.constraint_nesting > 0 {
+                    self.leaked_this = Some(val.clone());
                 }
                 // Each constraint is checked on its own, so that the error
                 // names the one that is violated.
@@ -1042,7 +1027,32 @@ impl Evaluator {
                     let receiver_constraint =
                         with_constraint_receiver(constraint, &constraint_scope);
                     let constraint = receiver_constraint.as_ref().unwrap_or(constraint);
-                    let mut result = self.eval_expr(constraint, &constraint_scope, depth + 1)?;
+                    self.constraint_nesting += 1;
+                    let outer_leak = self.leaked_this.take();
+                    let result = self.eval_expr(constraint, &constraint_scope, depth + 1);
+                    self.constraint_nesting -= 1;
+                    let mut result = result?;
+                    let mut leak = self.leaked_this.take();
+                    // A failing constraint that leaked is evaluated once more
+                    // with the leaked `this`, and the error shows that value.
+                    if matches!(result, Value::Bool(false))
+                        && let Some(leaked) = leak.take()
+                    {
+                        let retry_scope = constraint_scope_for(scope, &leaked);
+                        self.constraint_nesting += 1;
+                        let retry = self.eval_expr(constraint, &retry_scope, depth + 1);
+                        self.constraint_nesting -= 1;
+                        // A retry that errors (a lambda's nested constraint is
+                        // not a leak) leaves the ordinary failure.
+                        if matches!(retry, Ok(Value::Bool(false))) {
+                            let shown = self.leaked_this.take().unwrap_or(leaked.clone());
+                            self.type_violation = text.map(|text| (text.to_string(), shown));
+                            self.leaked_this = outer_leak;
+                            return Ok(false);
+                        }
+                        self.leaked_this = None;
+                    }
+                    self.leaked_this = leak.or(outer_leak);
                     // `Listing(isSorted)` names a predicate function and applies
                     // it to the value being checked.
                     let mut expected = "`Boolean` or `Function`";
@@ -1857,4 +1867,29 @@ fn top_level_error_type(ty: &crate::parser::TypeExpr, scope: &Scope) -> String {
 /// under, beside the alias itself.
 pub(super) fn generic_alias_key(name: &str) -> String {
     format!("\0generic:{name}")
+}
+
+/// The scope a constraint on `val` is evaluated in: `this` is the value, and
+/// its common properties are bound directly so `length`, `isEmpty` etc. work.
+fn constraint_scope_for(scope: &Scope, val: &Value) -> Scope {
+    let mut constraint_scope = scope.child();
+    constraint_scope.set("this", val.clone());
+    match val {
+        Value::String(s) => {
+            constraint_scope.set("length", Value::Int(s.chars().count() as i64));
+            constraint_scope.set("isEmpty", Value::Bool(s.is_empty()));
+        }
+        Value::Int(_) | Value::Float(_) => {}
+        // An element-only `Dynamic` has no `length`.
+        Value::List(items) if items.kind() != ListKind::Dynamic => {
+            constraint_scope.set("length", Value::Int(items.len() as i64));
+            constraint_scope.set("isEmpty", Value::Bool(items.is_empty()));
+        }
+        Value::Object(items, _) => {
+            constraint_scope.set("length", Value::Int(items.len() as i64));
+            constraint_scope.set("isEmpty", Value::Bool(items.is_empty()));
+        }
+        _ => {}
+    }
+    constraint_scope
 }

@@ -174,11 +174,14 @@ impl<'a> Parser<'a> {
                     | TokenKind::InterpolatedString(_)
             )
         });
-        if has_const_scope
-            && let Some(violation) =
-                validate::find_const_violation(&body, amends.is_some() || extends.is_some())
-        {
-            return Err(self.error_at(self.prev_end, violation.message()));
+        let mut deferred_const_violations = Vec::new();
+        if has_const_scope {
+            let (violation, deferred) =
+                validate::find_const_violation(&body, amends.is_some() || extends.is_some());
+            if let Some(violation) = violation {
+                return Err(self.error_at(self.prev_end, violation.message()));
+            }
+            deferred_const_violations = deferred;
         }
         Ok(Module {
             name,
@@ -189,6 +192,7 @@ impl<'a> Parser<'a> {
             annotations,
             body: body.into(),
             local_type_aliases: std::mem::take(&mut self.module_local_type_aliases),
+            deferred_const_violations,
         })
     }
 

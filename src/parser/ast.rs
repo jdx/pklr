@@ -31,6 +31,9 @@ pub struct Module {
     pub body: Body,
     /// Names of the module's `local` type aliases, which importers cannot see.
     pub local_type_aliases: std::collections::HashSet<String>,
+    /// Const-scope violations inside lambdas passed to `catch`, which only
+    /// fail when the lambda runs: the address of the lambda body and the message.
+    pub deferred_const_violations: Vec<(usize, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

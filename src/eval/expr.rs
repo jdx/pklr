@@ -74,6 +74,11 @@ impl Evaluator {
                 // The body is shared with the AST unless one of the rewrites
                 // below applies to it.
                 let mut body = Arc::clone(body);
+                if !self.deferred_const.is_empty()
+                    && let Some(message) = self.deferred_const.get(&(Arc::as_ptr(&body) as usize))
+                {
+                    body = Arc::new(Expr::Throw(Box::new(Expr::String(Arc::clone(message)))));
+                }
                 if needs_method_result_types(&body) {
                     capture_method_result_types(Arc::make_mut(&mut body), scope);
                 }

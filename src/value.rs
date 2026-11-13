@@ -287,6 +287,9 @@ pub(crate) struct CapturedScope {
     pub module_identities: IndexMap<String, String>,
     pub type_aliases: TypeAliasMap,
     pub type_namespace: Option<String>,
+    /// Bindings that failed to evaluate, with their errors: a read of one
+    /// reports its error instead of finding no such property.
+    pub poisoned: Vec<(Arc<str>, String)>,
 }
 
 /// Captures the original AST entries and scope for an object, enabling

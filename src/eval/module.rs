@@ -1615,6 +1615,10 @@ impl Evaluator {
         // order, so a member can read one declared after it. A member that
         // fails is poisoned rather than failing the module: as in Pkl, the
         // error surfaces only where the member is used (or rendered, below).
+        for (body, message) in &module.deferred_const_violations {
+            self.deferred_const
+                .insert(*body, Arc::from(message.as_str()));
+        }
         let mut class_names: std::collections::HashSet<Name> = std::collections::HashSet::default();
         let mut evaluated: HashMap<&str, Value> = HashMap::default();
         let mut failed: HashMap<&str, String> = HashMap::default();

@@ -193,8 +193,9 @@ impl<'a> Parser<'a> {
                 let mut constraint: Option<Expr> = None;
                 loop {
                     let start = self.peek_tok().offset;
-                    let next =
-                        Expr::Constraint(Box::new(self.parse_expr()?), self.source_since(start));
+                    let body = self.parse_expr()?;
+                    let text = self.source_since(start);
+                    let next = Expr::Constraint(Box::new(body), unparenthesized(&text));
                     constraint = Some(match constraint {
                         Some(prev) => Expr::Binop(BinOp::And, Box::new(prev), Box::new(next)),
                         None => next,
@@ -253,5 +254,41 @@ fn is_marked(ty: &TypeExpr) -> bool {
         TypeExpr::Named(name) | TypeExpr::Constrained(name, _, _) => name.starts_with('*'),
         TypeExpr::Nullable(inner) => is_marked(inner),
         _ => false,
+    }
+}
+
+/// The source of a constraint as pkl shows it in an error: without the
+/// parentheses that wrap all of it, as in `List((this[0] is Int))`.
+fn unparenthesized(text: &str) -> String {
+    let text = text.trim();
+    let Some(inner) = text.strip_prefix('(').and_then(|t| t.strip_suffix(')')) else {
+        return text.to_string();
+    };
+    // The first `(` must close at the very end, not earlier as in `(a) + (b)`.
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for c in inner.chars() {
+        if in_string {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '(' => depth += 1,
+            ')' if depth == 0 => return text.to_string(),
+            ')' => depth -= 1,
+            _ => {}
+        }
+    }
+    if depth == 0 {
+        inner.trim().to_string()
+    } else {
+        text.to_string()
     }
 }
