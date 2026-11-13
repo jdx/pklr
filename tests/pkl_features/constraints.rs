@@ -127,6 +127,72 @@ fn a_predicate_reading_a_missing_property_of_an_untyped_object_fails() {
     assert!(error.contains("required"), "{error}");
 }
 
+#[test]
+fn stdlib_aliases_carry_their_constraints() {
+    let err = eval_fails("foo: UInt8 = -5\n");
+    assert!(
+        err.contains("Type constraint `isBetween(0, 255)` violated."),
+        "{err}"
+    );
+    let err = eval_fails("foo: Int16 = 40000\n");
+    assert!(err.contains("isBetween(-32768, 32767)"), "{err}");
+    let err = eval_fails("foo: UInt = -1\n");
+    assert!(err.contains("`isPositive`"), "{err}");
+    let err = eval_fails("foo: NonNull = null\n");
+    assert!(
+        err.contains("Type constraint `!(this is Null)` violated."),
+        "{err}"
+    );
+    let err = eval_fails("foo: Char = \"ab\"\n");
+    assert!(err.contains("`length == 1`"), "{err}");
+    // A value of the wrong base type is reported as that type.
+    let err = eval_fails("foo: Int16 = \"abc\"\n");
+    assert!(
+        err.contains("Expected value of type `Int`, but got type `String`."),
+        "{err}"
+    );
+    let err = eval_fails("foo: Uri = 42\n");
+    assert!(
+        err.contains("Expected value of type `String`, but got type `Int`."),
+        "{err}"
+    );
+    let err = eval_fails("class A { x: UInt16 = 65536 }\na = new A {}.x\n");
+    assert!(err.contains("isBetween(0, 65535)"), "{err}");
+    let json = eval("a: UInt8 = 255\nb: Int8 = -128\nc: Uri = \"x\"\nd: NonNull = 1\n");
+    assert_eq!(json["a"], 255);
+}
+
+#[test]
+fn null_function_returns_null() {
+    let json = eval("a = Null(new Dynamic {})\n");
+    assert!(json["a"].is_null());
+}
+
+#[test]
+fn stdlib_alias_with_extra_constraint() {
+    assert_eq!(
+        eval("a: UInt8(this != 1) = 2\n"),
+        serde_json::json!({"a": 2})
+    );
+    let err = eval_fails("a: UInt8(this != 1) = 1\n");
+    assert!(err.contains("`this != 1`"), "{err}");
+    let err = eval_fails("local n: UInt8 = -5\na = n\n");
+    assert!(err.contains("isBetween(0, 255)"), "{err}");
+}
+
+#[test]
+fn stdlib_alias_ignores_user_names() {
+    // A user class or function of the same name is not the alias's.
+    assert_eq!(
+        eval("class Int {}\na: UInt8 = 2\n"),
+        serde_json::json!({"a": 2})
+    );
+    let err = eval_fails("local function isBetween(a, b) = true\na: UInt8 = 300\n");
+    assert!(err.contains("isBetween(0, 255)"), "{err}");
+    let err = eval_fails("class Char {}\na: Char = 1\n");
+    assert!(err.contains("type `Char`"), "{err}");
+}
+
 // Expectations compared with `pkl eval` 0.32.2.
 #[test]
 fn constraint_reads_local_member_of_inherited_class() {

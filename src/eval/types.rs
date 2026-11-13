@@ -1304,21 +1304,49 @@ pub(super) fn is_default_type(ty: &crate::parser::TypeExpr) -> bool {
     }
 }
 
+/// The definition of a type alias `pkl:base` declares, written as the type it
+/// aliases. Values of these are checked against the definition, which carries
+/// the constraints.
+pub(super) fn stdlib_alias_source(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "Int8" => "Int(isBetween(-128, 127))",
+        "Int16" => "Int(isBetween(-32768, 32767))",
+        "Int32" => "Int(isBetween(-2147483648, 2147483647))",
+        "UInt8" => "Int(isBetween(0, 255))",
+        "UInt16" => "Int(isBetween(0, 65535))",
+        "UInt32" => "Int(isBetween(0, 4294967295))",
+        "UInt" => "Int(isPositive)",
+        "NonNull" => "Any(!(this is Null))",
+        "Uri" => "String",
+        "Char" => "String(length == 1)",
+        _ => return None,
+    })
+}
+
 /// Format a TypeExpr for user-facing error messages.
 /// The type as an error names it: without the constraints of a constrained
 /// type, which are reported on their own when one is violated.
-pub(super) fn error_type_expr(ty: &crate::parser::TypeExpr) -> String {
+pub(super) fn error_type_expr(ty: &crate::parser::TypeExpr, scope: &Scope) -> String {
     use crate::parser::TypeExpr;
     match ty {
-        TypeExpr::Named(name) => name.trim_start_matches('*').to_string(),
-        TypeExpr::Nullable(inner) => format!("{}?", error_type_expr(inner)),
+        TypeExpr::Named(name) => {
+            let name = name.trim_start_matches('*');
+            // The standard library's aliases are reported as what they alias.
+            match stdlib_alias_source(name) {
+                Some(source) if scope.get(name).is_none() => {
+                    source.split('(').next().unwrap_or(source).to_string()
+                }
+                _ => name.to_string(),
+            }
+        }
+        TypeExpr::Nullable(inner) => format!("{}?", error_type_expr(inner, scope)),
         TypeExpr::Union(variants) => variants
             .iter()
-            .map(error_type_expr)
+            .map(|variant| error_type_expr(variant, scope))
             .collect::<Vec<_>>()
             .join("|"),
         TypeExpr::Generic(name, args) => {
-            let args: Vec<_> = args.iter().map(error_type_expr).collect();
+            let args: Vec<_> = args.iter().map(|arg| error_type_expr(arg, scope)).collect();
             format!("{}<{}>", name.trim_start_matches('*'), args.join(", "))
         }
         TypeExpr::Constrained(base, _, _) => base.trim_start_matches('*').to_string(),
@@ -1573,6 +1601,7 @@ pub(super) fn type_is_runtime_checkable(ty: &crate::parser::TypeExpr, scope: &Sc
                         | "Any"
                         | "nothing"
                 )
+                || stdlib_alias_source(runtime_name).is_some()
                 || alias_of(scope, runtime_name).is_some()
                 || resolve_dotted(scope, runtime_name).is_some()
         }

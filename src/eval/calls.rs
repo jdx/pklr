@@ -178,6 +178,11 @@ impl Evaluator {
                     members.insert("second".into(), self.eval_expr(second, scope, depth + 1)?);
                     return Ok(stdlib::typed_object("Pair", members));
                 }
+                // `Null(default)` is null. Its default, which pkl lets a body
+                // amend, is not modelled and not evaluated here.
+                "Null" if args.len() == 1 && scope.get("Null").is_none() => {
+                    return Ok(Value::Null);
+                }
                 "Regex" => {
                     if let Some(arg) = args.first() {
                         let val = self.eval_expr(arg, scope, depth + 1)?;
