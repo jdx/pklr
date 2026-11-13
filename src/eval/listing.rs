@@ -186,6 +186,12 @@ impl Evaluator {
             matches!(entry, Entry::Elem(expr) | Entry::DynProperty(_, expr)
                 if mapping_entry_mentions_this(expr))
         });
+        // `this` has the kind of the body being built (a Dynamic's `super`
+        // is a Dynamic list).
+        let this_kind = match scope.get("super") {
+            Some(Value::List(parent)) => parent.kind(),
+            _ => ListKind::Listing,
+        };
         let total_len = items.len()
             + entries
                 .iter()
@@ -196,10 +202,7 @@ impl Evaluator {
                 let mut snapshot = items.clone();
                 // Elements still to come, so `this` has about its final length.
                 snapshot.resize(total_len.max(items.len()), Value::Null);
-                listing_scope.set(
-                    "this",
-                    Value::List(ListValue::new(ListKind::Listing, snapshot)),
-                );
+                listing_scope.set("this", Value::List(ListValue::new(this_kind, snapshot)));
             }
             match entry {
                 Entry::Predicate(..) => return Err(member_predicates_unsupported()),

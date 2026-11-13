@@ -1872,3 +1872,9 @@ fn listing_is_distinct_uses_equality() {
     let v = eval("x = new Listing { 1; 1.0 }.isDistinct");
     assert_eq!(v["x"], false);
 }
+
+#[test]
+fn dynamic_element_this_is_dynamic() {
+    let v = eval("x = new Dynamic { 1; this is Dynamic }");
+    assert_eq!(v["x"][1], true);
+}
