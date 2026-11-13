@@ -13,7 +13,7 @@ pub type Body = std::sync::Arc<Vec<Entry>>;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Annotation {
     pub name: String,
-    pub body: Vec<Entry>,
+    pub body: std::sync::Arc<Vec<Entry>>,
 }
 
 /// A pkl module (top-level file).

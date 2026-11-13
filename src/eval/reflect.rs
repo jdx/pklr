@@ -988,7 +988,7 @@ impl Evaluator {
         for annotation in annotations {
             let expr = Expr::New(
                 Some(annotation.name.clone()),
-                Arc::new(annotation.body.clone()),
+                Arc::clone(&annotation.body),
                 Vec::new(),
             );
             let value = self.eval_expr(&expr, scope, depth + 1)?;

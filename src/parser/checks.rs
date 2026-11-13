@@ -121,7 +121,7 @@ impl<'a> Parser<'a> {
         let required = annotations
             .iter()
             .filter(|annotation| annotation.name == "ModuleInfo")
-            .flat_map(|annotation| &annotation.body)
+            .flat_map(|annotation| annotation.body.iter())
             .find_map(|entry| match entry {
                 Entry::Property(property) if &*property.name == "minPklVersion" => {
                     property.value.as_ref().and_then(constant_string)

@@ -1133,9 +1133,25 @@ impl Evaluator {
         let module_annotations = if annotated.is_empty() {
             inherited_annotations
         } else {
+            // The annotations read these names and nothing else of the
+            // module's scope.
+            let instances: Vec<Entry> = annotated
+                .iter()
+                .flat_map(|(_, list)| list)
+                .map(|annotation| Entry::Elem(annotation_instance(annotation)))
+                .collect();
+            let names = referenced_roots(&instances);
+            let captured = if names
+                .iter()
+                .any(|name| matches!(&**name, "this" | "module" | "super"))
+            {
+                super::scope::capture_scope(&scope)
+            } else {
+                super::scope::capture_scope_names(&scope, names.iter().map(|n| &**n))
+            };
             Some(Arc::new(crate::value::ModuleAnnotations {
                 properties: annotated,
-                scope: super::scope::capture_scope(&scope),
+                scope: captured,
                 parent: inherited_annotations,
             }))
         };

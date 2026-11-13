@@ -17,25 +17,45 @@ use crate::lexer;
 use crate::parser::{Entry, Expr, Modifier, Module, Property, TypeExpr};
 use crate::value::{ListKind, ListValue, ObjectMap, ObjectSource, Value};
 
-/// The `pkl:base` classes pklr provides, as Pkl source. Their methods
-/// (`renderDocument`, `renderValue`) are implemented natively.
-const BASE_CLASSES: &str = r#"
+/// The `pkl:base` classes pklr provides, as Pkl source, one entry per class
+/// so that evaluating one parses only it. Their methods (`renderDocument`,
+/// `renderValue`) are implemented natively.
+const BASE_CLASSES: &[(&str, &str)] = &[
+    (
+        "ModuleOutput",
+        r#"
 open class ModuleOutput {}
-
+"#,
+    ),
+    (
+        "RenderDirective",
+        r#"
 class RenderDirective {
   text: String
 }
-
+"#,
+    ),
+    (
+        "Resource",
+        r#"
 class Resource {
   uri: String
   text: String
   base64: String
 }
-
+"#,
+    ),
+    (
+        "ConvertProperty",
+        r#"
 // The `render` function is left undeclared: a subclass overriding an inherited
 // property does not yet see its own sibling members from the override.
 open class ConvertProperty {}
-
+"#,
+    ),
+    (
+        "PcfRenderer",
+        r#"
 class PcfRenderer {
   extension = "pcf"
   indent: String = "  "
@@ -44,7 +64,11 @@ class PcfRenderer {
   converters = new Mapping {}
   convertPropertyTransformers: Mapping<Class, Mixin<ConvertProperty>> = new Mapping {}
 }
-
+"#,
+    ),
+    (
+        "JsonRenderer",
+        r#"
 class JsonRenderer {
   extension = "json"
   indent: String = "  "
@@ -52,7 +76,11 @@ class JsonRenderer {
   converters = new Mapping {}
   convertPropertyTransformers: Mapping<Class, Mixin<ConvertProperty>> = new Mapping {}
 }
-
+"#,
+    ),
+    (
+        "YamlRenderer",
+        r#"
 class YamlRenderer {
   extension = "yaml"
   mode = "compat"
@@ -62,14 +90,22 @@ class YamlRenderer {
   converters = new Mapping {}
   convertPropertyTransformers: Mapping<Class, Mixin<ConvertProperty>> = new Mapping {}
 }
-
+"#,
+    ),
+    (
+        "PListRenderer",
+        r#"
 class PListRenderer {
   extension = "plist"
   indent: String = "  "
   converters = new Mapping {}
   convertPropertyTransformers: Mapping<Class, Mixin<ConvertProperty>> = new Mapping {}
 }
-
+"#,
+    ),
+    (
+        "PropertiesRenderer",
+        r#"
 class PropertiesRenderer {
   extension = "properties"
   omitNullProperties: Boolean = true
@@ -77,7 +113,9 @@ class PropertiesRenderer {
   converters = new Mapping {}
   convertPropertyTransformers: Mapping<Class, Mixin<ConvertProperty>> = new Mapping {}
 }
-"#;
+"#,
+    ),
+];
 
 /// Names of the classes defined by [`BASE_CLASSES`].
 pub(super) const BUILTIN_CLASS_NAMES: &[&str] = &[
@@ -249,8 +287,11 @@ impl Evaluator {
         if let Some(template) = self.builtin_classes.get(name) {
             return Ok(Some(template.clone()));
         }
-        let tokens = lexer::lex_named(BASE_CLASSES, "pkl:base")?;
-        let module = self.parse_registered(&tokens, BASE_CLASSES, "pkl:base")?;
+        let Some(&(_, source)) = BASE_CLASSES.iter().find(|(class, _)| *class == name) else {
+            return Ok(None);
+        };
+        let tokens = lexer::lex_named(source, "pkl:base")?;
+        let module = self.parse_registered(&tokens, source, "pkl:base")?;
         let Some((class_mods, body)) = module.body.iter().find_map(|entry| match entry {
             Entry::ClassDef(class_name, mods, _, body) if class_name == name => Some((mods, body)),
             _ => None,

@@ -14,7 +14,7 @@ pub(super) fn collect_deprecated(entries: &[Entry]) -> IndexMap<String, Option<S
                     continue;
                 }
                 let mut message = None;
-                for e in &ann.body {
+                for e in ann.body.iter() {
                     if let Entry::Property(p) = e
                         && &*p.name == "message"
                         && let Some(Expr::String(s)) = &p.value

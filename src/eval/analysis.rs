@@ -87,7 +87,7 @@ pub(super) fn annotation_instance(annotation: &crate::parser::Annotation) -> Exp
     let root = annotation.name.split('.').next().unwrap_or_default();
     Expr::New(
         Some(root.to_string()),
-        Arc::new(annotation.body.clone()),
+        Arc::clone(&annotation.body),
         Vec::new(),
     )
 }
