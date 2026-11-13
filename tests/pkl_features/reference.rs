@@ -379,3 +379,28 @@ n = p.v[0].n.getPath().length
 "#);
     assert_eq!(result["n"], 3);
 }
+
+#[test]
+fn reference_generic_alias_parameters_do_not_capture_names_in_other_aliases() {
+    let result = run(r#"
+class Item { n: Int }
+typealias T = Item
+typealias Scalar = T
+typealias Wrap<T> = Mapping<Scalar, T>
+class P { v: Wrap<String> }
+local p = ref.Reference(d, P, null)
+n = p.v[new Item { n = 1 }].getPath().length
+"#);
+    assert_eq!(result["n"], 2);
+    let err = fails(
+        r#"
+typealias T = Int
+typealias Scalar = T
+typealias Wrap<T> = Mapping<Scalar, T>
+class P { v: Wrap<String> }
+local p = ref.Reference(d, P, null)
+bad = p.v["k"]
+"#,
+    );
+    assert!(err.contains("Cannot subscript"), "{err}");
+}

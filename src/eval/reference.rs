@@ -394,6 +394,20 @@ impl Evaluator {
         }
     }
 
+    /// Normalizes the body of a type alias that is not the generic alias being
+    /// expanded: the parameters of that alias are not names in this body.
+    fn normalize_alias_body(
+        &mut self,
+        body: &TypeExpr,
+        scope: &Scope,
+        out: &mut Vec<RType>,
+        depth: usize,
+    ) {
+        let outer = std::mem::take(&mut self.refs.bindings);
+        self.normalize_into(body, scope, out, depth + 1);
+        self.refs.bindings = outer;
+    }
+
     fn normalize_named(&mut self, name: &str, scope: &Scope, out: &mut Vec<RType>, depth: usize) {
         if let Some(bound) = self.refs.bindings.get(name) {
             out.push(bound.clone());
@@ -412,14 +426,14 @@ impl Evaluator {
             _ => {}
         }
         if let Some((resolved, alias_scope)) = self.inherited_alias(scope, name) {
-            return self.normalize_into(&resolved, &alias_scope, out, depth + 1);
+            return self.normalize_alias_body(&resolved, &alias_scope, out, depth);
         }
         if let Some(resolved) = scope.get_type_alias(name) {
             let resolved = resolved.clone();
-            return self.normalize_into(&resolved, scope, out, depth + 1);
+            return self.normalize_alias_body(&resolved, scope, out, depth);
         }
         if let Some((resolved, alias_scope)) = self.imported_alias(scope, name) {
-            return self.normalize_into(&resolved, &alias_scope, out, depth + 1);
+            return self.normalize_alias_body(&resolved, &alias_scope, out, depth);
         }
         if let Some(class) = resolve_dotted(scope, name)
             && let Some(ty) = self.class_type(&class)
@@ -432,7 +446,7 @@ impl Evaluator {
         if let Some(source) = stdlib_alias_source(name)
             && let Ok(resolved) = crate::parser::parse_type_name(source)
         {
-            return self.normalize_into(&resolved, &Scope::default(), out, depth + 1);
+            return self.normalize_alias_body(&resolved, &Scope::default(), out, depth);
         }
         let member = name.rsplit_once('.').map_or(name, |(_, member)| member);
         if BASE_CLASSES.contains(&member) {
