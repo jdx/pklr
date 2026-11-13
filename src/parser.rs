@@ -166,6 +166,8 @@ struct Parser<'a> {
     /// Simple class names of `new` expressions and their offsets, checked
     /// against the module's declarations once it is parsed.
     new_types: Vec<(String, usize)>,
+    /// Qualifiers of `new q.Type` expressions and their offsets, which must be imports.
+    new_qualifiers: Vec<(String, usize)>,
     /// Type parameter names for aliases currently being parsed.
     type_alias_parameters: std::collections::HashMap<String, Vec<String>>,
     /// Local aliases are resolved only if a value requires them, so their

@@ -15,6 +15,55 @@ impl Evaluator {
         self.eval_property_with(prop, scope, depth, false)
     }
 
+    /// The error for a value of type `module` that names an imported module,
+    /// which is another module than the one declaring the property.
+    fn other_module_error(&self, import: &str, scope: &Scope) -> Option<String> {
+        let identity = scope.module_identity(import)?;
+        let namespace = scope.type_namespace.as_deref()?;
+        if identity == namespace {
+            return None;
+        }
+        let name_of = |namespace: &str| {
+            self.module_names
+                .get(namespace)
+                .cloned()
+                .unwrap_or_else(|| {
+                    let file = namespace.rsplit(['/', '\\']).next().unwrap_or(namespace);
+                    file.strip_suffix(".pkl").unwrap_or(file).to_string()
+                })
+        };
+        // A local path becomes a `file:` URI; a namespace with a scheme is one.
+        let as_uri = |namespace: &str| {
+            if namespace.contains("://")
+                || namespace.starts_with("modulepath:")
+                || namespace.starts_with("pkl:")
+            {
+                namespace.to_string()
+            } else {
+                match namespace.strip_prefix(r"\\?\UNC\") {
+                    // A verbatim UNC path names `file://server/share/...`.
+                    Some(unc) => format!(
+                        "file://{}",
+                        super::resource::percent_encode(&unc.replace('\\', "/"))
+                    ),
+                    None => super::resource::file_uri(std::path::Path::new(
+                        namespace.strip_prefix(r"\\?\").unwrap_or(namespace),
+                    )),
+                }
+            }
+        };
+        let (expected, actual) = (name_of(namespace), name_of(identity));
+        Some(if expected == actual {
+            format!(
+                "Module version conflict: Expected value of type `{expected}` defined by module `{}`, but got type `{actual}` defined by module `{}`.",
+                as_uri(namespace),
+                as_uri(identity)
+            )
+        } else {
+            format!("Expected value of type `module`, but got a value of type `{actual}`.")
+        })
+    }
+
     pub(super) fn eval_property_with(
         &mut self,
         prop: &Property,
@@ -33,6 +82,13 @@ impl Evaluator {
                 }
                 _ => self.eval_expr(expr, scope, depth)?,
             };
+            if let Some(crate::parser::TypeExpr::Named(ty)) = &prop.type_ann
+                && ty == "module"
+                && let Expr::Ident(name) = expr
+                && let Some(message) = self.other_module_error(name, scope)
+            {
+                return Err(Error::Eval(message));
+            }
             apply_mapping_type_annotation(&mut value, prop.type_ann.as_ref(), scope);
             return Ok(Some(value));
         }

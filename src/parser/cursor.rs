@@ -15,6 +15,7 @@ impl<'a> Parser<'a> {
             prev_line: first.map_or(1, |t| t.line),
             amending: false,
             new_types: Vec::new(),
+            new_qualifiers: Vec::new(),
             type_alias_parameters: std::collections::HashMap::new(),
             local_type_aliases: std::collections::HashSet::new(),
             module_local_type_aliases: std::collections::HashSet::new(),

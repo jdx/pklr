@@ -3370,8 +3370,8 @@ fn int_seq_errors() {
 fn int_seq_user_binding_shadows_builtin() {
     let json = eval(
         r#"
-x = ((IntSeq) -> IntSeq(1, 2))((a, b) -> a + b)
-local IntSeq = (a, b) -> a * b
+x = ((IntSeq) -> IntSeq.apply(1, 2)).apply((a, b) -> a + b)
+function IntSeq(a, b) = a * b
 y = IntSeq(3, 4)
 "#,
     );

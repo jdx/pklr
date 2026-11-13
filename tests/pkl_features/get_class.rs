@@ -384,7 +384,7 @@ module Foo
 local f = () -> module.getClass().toString()
 function g() = module.getClass().toString()
 
-viaLambda = f()
+viaLambda = f.apply()
 viaMethod = g()
 nullSafe = module?.getClass().toString()
 "#,

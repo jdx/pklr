@@ -64,6 +64,26 @@ impl<'a> Parser<'a> {
     /// Reject `new X {}` where `X` names a module property rather than a
     /// class or type alias: types and values live in separate namespaces.
     pub(super) fn check_new_types(&self, body: &[Entry], imports: &[Import]) -> Result<()> {
+        for (qualifier, offset) in &self.new_qualifiers {
+            let is_property = body
+                .iter()
+                .any(|entry| matches!(entry, Entry::Property(p) if *p.name == **qualifier));
+            let is_import = imports.iter().any(|import| {
+                let inferred = import
+                    .uri
+                    .rsplit(['/', ':'])
+                    .next()
+                    .unwrap_or(&import.uri)
+                    .trim_end_matches(".pkl");
+                import.alias.as_deref().unwrap_or(inferred) == qualifier
+            });
+            if is_property && !is_import {
+                return Err(self.error_at(
+                    *offset,
+                    format!("Expected `{qualifier}` to be a module import, but it is not."),
+                ));
+            }
+        }
         if self.new_types.is_empty() {
             return Ok(());
         }
@@ -591,4 +611,222 @@ pub(super) fn constant_string(expr: &Expr) -> Option<String> {
             .collect(),
         _ => None,
     }
+}
+
+/// Whether a type, with the aliases it names expanded, carries a constraint.
+fn type_has_constraint(
+    ty: &TypeExpr,
+    aliases: &std::collections::HashMap<&str, (&[String], &TypeExpr)>,
+    depth: usize,
+    budget: &std::cell::Cell<usize>,
+) -> bool {
+    // A shared work budget keeps repeated aliases from exploding.
+    if depth > 32 || budget.get() == 0 {
+        return false;
+    }
+    budget.set(budget.get() - 1);
+    match ty {
+        TypeExpr::Constrained(..) => true,
+        TypeExpr::Nullable(inner) => type_has_constraint(inner, aliases, depth + 1, budget),
+        TypeExpr::Union(variants) => variants
+            .iter()
+            .any(|variant| type_has_constraint(variant, aliases, depth + 1, budget)),
+        TypeExpr::Generic(name, args) => {
+            // An alias that expands is judged by its body, as Pkl does; unused
+            // arguments are not visited. Otherwise the arguments decide.
+            match expand_alias(name, args, aliases) {
+                Some(body) => type_has_constraint(&body, aliases, depth + 1, budget),
+                // Too large to expand: stay silent rather than reject a type
+                // whose arguments the alias may discard.
+                None if aliases.contains_key(name.as_str()) => false,
+                None => args
+                    .iter()
+                    .any(|arg| type_has_constraint(arg, aliases, depth + 1, budget)),
+            }
+        }
+        TypeExpr::Named(name) => aliases
+            .get(name.trim_start_matches('*'))
+            .is_some_and(|(_, body)| type_has_constraint(body, aliases, depth + 1, budget)),
+    }
+}
+
+const CONSTRAINT_WEIGHT: usize = 64;
+
+/// The number of nodes in a type, counted up to `limit`.
+fn type_size(ty: &TypeExpr, limit: usize) -> usize {
+    // A constraint carries its predicate, so a copy costs far more than a node.
+    let mut count = if matches!(ty, TypeExpr::Constrained(..)) {
+        CONSTRAINT_WEIGHT
+    } else {
+        1
+    };
+    let children: &[TypeExpr] = match ty {
+        TypeExpr::Nullable(inner) => std::slice::from_ref(inner),
+        TypeExpr::Union(items) | TypeExpr::Generic(_, items) => items,
+        _ => &[],
+    };
+    for child in children {
+        if count >= limit {
+            break;
+        }
+        count += type_size(child, limit - count);
+    }
+    count
+}
+
+/// The most nodes an expanded alias may have before the check gives up, which
+/// keeps repeated parameters from growing a type exponentially.
+const EXPANSION_LIMIT: usize = 4096;
+
+/// The body of a generic alias applied to `args`, unless it would be too large.
+/// The size is estimated first so no oversized tree is ever built.
+fn expand_alias(
+    name: &str,
+    args: &[TypeExpr],
+    aliases: &std::collections::HashMap<&str, (&[String], &TypeExpr)>,
+) -> Option<TypeExpr> {
+    let (params, body) = aliases.get(name)?;
+    let arg_sizes: Vec<usize> = args.iter().map(|a| type_size(a, EXPANSION_LIMIT)).collect();
+    let mut estimate = 0usize;
+    let mut stack = vec![*body];
+    while let Some(node) = stack.pop() {
+        match node {
+            TypeExpr::Named(n) => {
+                estimate = estimate.saturating_add(
+                    params
+                        .iter()
+                        .position(|p| p == n.trim_start_matches('*'))
+                        .and_then(|i| arg_sizes.get(i).copied())
+                        .unwrap_or(1),
+                );
+            }
+            TypeExpr::Nullable(inner) => {
+                estimate += 1;
+                stack.push(inner);
+            }
+            TypeExpr::Union(items) | TypeExpr::Generic(_, items) => {
+                estimate += 1;
+                stack.extend(items.iter());
+            }
+            TypeExpr::Constrained(..) => estimate += CONSTRAINT_WEIGHT,
+        }
+        if estimate >= EXPANSION_LIMIT {
+            return None;
+        }
+    }
+    Some(substitute_type(body, params, args))
+}
+
+/// Replace the parameters of a generic type alias by the arguments it is used with.
+fn substitute_type(ty: &TypeExpr, params: &[String], args: &[TypeExpr]) -> TypeExpr {
+    let go = |inner: &TypeExpr| substitute_type(inner, params, args);
+    match ty {
+        TypeExpr::Named(name) => {
+            // `*T` marks a union default; the argument keeps that marker.
+            let bare = name.trim_start_matches('*');
+            match params
+                .iter()
+                .position(|param| param == bare)
+                .and_then(|index| args.get(index))
+            {
+                Some(TypeExpr::Named(arg)) if bare.len() != name.len() => {
+                    TypeExpr::Named(format!("*{}", arg.trim_start_matches('*')))
+                }
+                Some(arg) => arg.clone(),
+                None => ty.clone(),
+            }
+        }
+        // A parameter used as the base of a constraint stays constrained.
+        TypeExpr::Constrained(..) => ty.clone(),
+        TypeExpr::Nullable(inner) => TypeExpr::Nullable(Box::new(go(inner))),
+        TypeExpr::Union(variants) => TypeExpr::Union(variants.iter().map(go).collect()),
+        TypeExpr::Generic(name, inner) => {
+            TypeExpr::Generic(name.clone(), inner.iter().map(go).collect())
+        }
+    }
+}
+
+/// Whether a type, with aliases expanded, is a `Reference` of `pkl:ref` whose
+/// referent type includes a constraint.
+fn reference_with_constraint(
+    ty: &TypeExpr,
+    reference: &[String],
+    aliases: &std::collections::HashMap<&str, (&[String], &TypeExpr)>,
+    depth: usize,
+    budget: &std::cell::Cell<usize>,
+) -> bool {
+    // A shared work budget keeps repeated aliases from exploding.
+    if depth > 32 || budget.get() == 0 {
+        return false;
+    }
+    budget.set(budget.get() - 1);
+    match ty {
+        TypeExpr::Nullable(inner) => {
+            reference_with_constraint(inner, reference, aliases, depth + 1, budget)
+        }
+        TypeExpr::Union(variants) => variants.iter().any(|variant| {
+            reference_with_constraint(variant, reference, aliases, depth + 1, budget)
+        }),
+        TypeExpr::Generic(name, args) => {
+            if reference.iter().any(|r| r == name) && args.len() == 2 {
+                return type_has_constraint(&args[1], aliases, depth + 1, budget);
+            }
+            if let Some(body) = expand_alias(name, args, aliases)
+                && reference_with_constraint(&body, reference, aliases, depth + 1, budget)
+            {
+                return true;
+            }
+            args.iter()
+                .any(|arg| reference_with_constraint(arg, reference, aliases, depth + 1, budget))
+        }
+        TypeExpr::Named(name) => {
+            aliases
+                .get(name.trim_start_matches('*'))
+                .is_some_and(|(_, body)| {
+                    reference_with_constraint(body, reference, aliases, depth + 1, budget)
+                })
+        }
+        TypeExpr::Constrained(..) => false,
+    }
+}
+
+/// Find a property annotation naming `pkl:ref`'s `Reference` with a referent
+/// type that includes a constraint, directly or through type aliases.
+pub(super) fn has_constrained_reference(body: &[Entry], imports: &[Import]) -> bool {
+    let reference: Vec<String> = imports
+        .iter()
+        .filter(|import| import.uri == "pkl:ref" && !import.is_glob)
+        .map(|import| format!("{}.Reference", import.alias.as_deref().unwrap_or("ref")))
+        .collect();
+    if reference.is_empty() {
+        return false;
+    }
+    let mut aliases = std::collections::HashMap::new();
+    for entry in body {
+        if let Entry::TypeAlias(name, ty, generic) = entry {
+            match generic {
+                Some(generic) => aliases.insert(name.as_str(), (generic.0.as_slice(), &generic.1)),
+                None => aliases.insert(name.as_str(), (&[][..], ty)),
+            };
+        }
+    }
+    let annotated = |entries: &[Entry]| {
+        entries.iter().any(|entry| match entry {
+            Entry::Property(prop) => prop.type_ann.as_ref().is_some_and(|ty| {
+                reference_with_constraint(
+                    ty,
+                    &reference,
+                    &aliases,
+                    0,
+                    &std::cell::Cell::new(20_000),
+                )
+            }),
+            _ => false,
+        })
+    };
+    annotated(body)
+        || body.iter().any(|entry| match entry {
+            Entry::ClassDef(_, _, _, class_body) => annotated(class_body),
+            _ => false,
+        })
 }

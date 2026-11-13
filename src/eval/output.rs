@@ -26,6 +26,12 @@ class RenderDirective {
   text: String
 }
 
+class Resource {
+  uri: String
+  text: String
+  base64: String
+}
+
 class PcfRenderer {
   extension = "pcf"
   indent: String = "  "
@@ -73,6 +79,7 @@ class PropertiesRenderer {
 pub(super) const BUILTIN_CLASS_NAMES: &[&str] = &[
     "ModuleOutput",
     "RenderDirective",
+    "Resource",
     "PcfRenderer",
     "JsonRenderer",
     "YamlRenderer",
