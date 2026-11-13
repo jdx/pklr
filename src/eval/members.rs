@@ -46,6 +46,10 @@ impl Evaluator {
                         Error::Eval(format!("listing index {target} is out of bounds"))
                     })
                 }
+                "default" if items.kind() == ListKind::Listing => Ok(items
+                    .layers()
+                    .and_then(|layers| layers.default.clone())
+                    .unwrap_or_else(|| implicit_listing_default(items.elem_class()))),
                 _ => Err(Error::Eval(format!("field not found: {field}"))),
             };
         }

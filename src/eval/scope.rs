@@ -37,7 +37,7 @@ pub(super) const CAPTURED_IDENTITIES: &str = "\0pklr:identities";
 const CAPTURED_NAMESPACE: &str = "\0pklr:namespace";
 
 #[derive(Debug, Clone)]
-pub(super) struct Scope {
+pub(crate) struct Scope {
     // The maps are shared copy-on-write so cloning a scope, which `child`
     // does for every nested body, does not copy its bindings.
     // They also use a fast non-cryptographic hasher: lookups and inserts on

@@ -1,6 +1,7 @@
 //! Evaluating the members and entries of a `Listing` body.
 
 use super::*;
+use crate::value::{ListLayer, ListLayers};
 
 impl Evaluator {
     /// Read one member of the amended receiver without forcing unrelated
@@ -151,6 +152,15 @@ impl Evaluator {
         elem_class: Option<&Arc<Value>>,
     ) -> Result<()> {
         let mut listing_scope = scope.child();
+        // The listing's `default`, which an untyped `new { ... }` element
+        // amends and the body may read.
+        let listing_default = match scope.get(LISTING_DEFAULT) {
+            Some(default @ Value::Lambda(..)) => Some(default.clone()),
+            _ => None,
+        };
+        if let Some(default) = &listing_default {
+            listing_scope.set("default", default.clone());
+        }
         // A body's locals and properties (`default`) are visible to all of
         // its entries, including ones written before them, and to each other
         // regardless of order. Bind each once the members of this body it
@@ -182,10 +192,15 @@ impl Evaluator {
             unbound.remove(&prop.name);
         }
         // `this` in an element reads the elements before it.
-        let reads_this = entries.iter().any(|entry| {
-            matches!(entry, Entry::Elem(expr) | Entry::DynProperty(_, expr)
-                if mapping_entry_mentions_this(expr))
-        });
+        let final_this = scope.get(LISTING_FINAL_THIS).cloned();
+        let reads_this = final_this.is_none()
+            && entries.iter().any(|entry| {
+                matches!(entry, Entry::Elem(expr) | Entry::DynProperty(_, expr)
+                    if mapping_entry_mentions_this(expr))
+            });
+        if let Some(this) = final_this {
+            listing_scope.set("this", this);
+        }
         // `this` has the kind of the body being built (a Dynamic's `super`
         // is a Dynamic list).
         let this_kind = match scope.get("super") {
@@ -207,6 +222,22 @@ impl Evaluator {
             match entry {
                 Entry::Predicate(..) => return Err(member_predicates_unsupported()),
                 Entry::Property(_) => {}
+                Entry::Elem(Expr::New(None, body, _)) if listing_default.is_some() => {
+                    // `new { ... }` amends what `default` makes for this index.
+                    let made = Expr::Call(
+                        Box::new(Expr::Field(
+                            Box::new(Expr::Ident("default".into())),
+                            "apply".into(),
+                        )),
+                        vec![Expr::Int(items.len() as i64)],
+                    );
+                    let element = Expr::Binop(
+                        BinOp::Add,
+                        Box::new(made),
+                        Box::new(Expr::ObjectBody(body.clone())),
+                    );
+                    items.push(self.eval_expr(&element, &listing_scope, depth + 1)?)
+                }
                 Entry::Elem(expr) => {
                     let (expr, elem_scope) = typed_listing_elem(expr, &listing_scope, elem_class);
                     items.push(self.eval_expr(&expr, &elem_scope, depth + 1)?)
@@ -295,6 +326,240 @@ impl Evaluator {
             }
         }
         Ok(())
+    }
+}
+
+/// The scope binding of a listing's `default`: a `Lambda`, or `Null`.
+pub(super) const LISTING_DEFAULT: &str = "\0listing_default";
+
+/// The scope binding of the final elements of a listing being rebuilt, which
+/// `this` reads in a replayed body.
+const LISTING_FINAL_THIS: &str = "\0listing_final_this";
+
+/// The parameter of a listing's `default` function.
+const DEFAULT_INDEX: &str = "\0listing_default_index";
+
+/// The `default` of a listing that declares none: it makes an instance of the
+/// element class, or a `Dynamic`.
+pub(super) fn implicit_listing_default(elem_class: Option<&Arc<Value>>) -> Value {
+    let (body, scope) = typed_listing_elem(
+        &Expr::New(None, Arc::default(), Vec::new()),
+        &Scope::default(),
+        elem_class,
+    );
+    Value::Lambda(
+        Arc::from(vec![DEFAULT_INDEX.to_string()]),
+        Arc::new(body),
+        Arc::new(scope.flatten()),
+    )
+}
+
+/// What a listing body makes late bound.
+struct ListingBodyFlags {
+    /// An element reads `this`.
+    reads_this: bool,
+    /// An untyped `new { ... }` element, which amends the `default`.
+    default_elements: bool,
+    defines_default: bool,
+}
+
+fn default_property(entries: &[Entry]) -> Option<&Arc<Property>> {
+    entries.iter().find_map(|entry| match entry {
+        Entry::Property(prop)
+            if &*prop.name == "default" && !has_modifier(&prop.modifiers, Modifier::Local) =>
+        {
+            Some(prop)
+        }
+        _ => None,
+    })
+}
+
+fn listing_body_flags(entries: &[Entry], flags: &mut ListingBodyFlags) {
+    for entry in entries {
+        match entry {
+            Entry::Property(prop)
+                if &*prop.name == "default" && !has_modifier(&prop.modifiers, Modifier::Local) =>
+            {
+                flags.defines_default = true;
+            }
+            Entry::Elem(expr) | Entry::DynProperty(_, expr) => {
+                flags.reads_this |= mapping_entry_mentions_this(expr);
+                flags.default_elements |= matches!(expr, Expr::New(None, ..));
+            }
+            Entry::ForGenerator(generator) => listing_body_flags(&generator.body, flags),
+            Entry::WhenGenerator(generator) => {
+                listing_body_flags(&generator.body, flags);
+                if let Some(body) = &generator.else_body {
+                    listing_body_flags(body, flags);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Evaluator {
+    /// The `default` function of the listing a body builds: the body's own, or
+    /// `None` when it has none. A `default { ... }` body amends what
+    /// `super.default` makes.
+    fn listing_default_of(
+        &mut self,
+        entries: &[Entry],
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<Option<Value>> {
+        let Some(prop) = default_property(entries) else {
+            return Ok(None);
+        };
+        let function = match (&prop.value, &prop.body) {
+            (Some(expr), _) => expr.clone(),
+            (None, Some(body)) => {
+                let parent = Expr::Call(
+                    Box::new(Expr::Field(
+                        Box::new(Expr::Field(
+                            Box::new(Expr::Ident("super".into())),
+                            "default".into(),
+                        )),
+                        "apply".into(),
+                    )),
+                    vec![Expr::Ident(DEFAULT_INDEX.into())],
+                );
+                Expr::Lambda(
+                    Arc::from(vec![DEFAULT_INDEX.to_string()]),
+                    Arc::new(Expr::Binop(
+                        BinOp::Add,
+                        Box::new(parent),
+                        Box::new(Expr::ObjectBody(body.clone())),
+                    )),
+                )
+            }
+            _ => return Ok(None),
+        };
+        self.eval_expr(&function, scope, depth + 1).map(Some)
+    }
+
+    /// Build the listing `entries` make over `base` (`None` for a new one).
+    /// A body with late-bound elements is kept, so an amendment replays it.
+    pub(super) fn eval_listing_body(
+        &mut self,
+        base: Option<ListValue>,
+        entries: &Body,
+        scope: &Scope,
+        depth: usize,
+        elem_class: Option<Arc<Value>>,
+    ) -> Result<ListValue> {
+        let mut flags = ListingBodyFlags {
+            reads_this: false,
+            default_elements: false,
+            defines_default: false,
+        };
+        listing_body_flags(entries, &mut flags);
+        let base_layers = base.as_ref().and_then(|base| base.layers().cloned());
+        let base = base.unwrap_or_else(|| ListValue::new(ListKind::Listing, Vec::new()));
+        let kind = base.kind();
+        let base = base.with_elem_class(elem_class.clone());
+        let layer = ListLayer {
+            entries: entries.clone(),
+            scope: scope.clone(),
+        };
+        let record = base_layers.is_some()
+            || flags.defines_default
+            || flags.reads_this
+            || flags.default_elements;
+        // The default so far, for `super.default` and for the new elements.
+        let inherited = base_layers
+            .as_ref()
+            .and_then(|layers| layers.default.clone());
+        let mut body_scope = scope.child();
+        let super_list = base.clone().with_layers(base_layers.clone());
+        body_scope.set("super", Value::List(super_list));
+        body_scope.receiver_entries = Some(entries.clone());
+        body_scope.receiver_list_base = Some(base.len());
+        body_scope.set(LISTING_DEFAULT, inherited.clone().unwrap_or(Value::Null));
+        let own_default = self.listing_default_of(entries, &body_scope, depth)?;
+        let default = own_default.or(inherited);
+        body_scope.set(LISTING_DEFAULT, default.clone().unwrap_or(Value::Null));
+        // An amendment that changes the default, or replaces an element a
+        // late-bound one reads, rebuilds what the earlier bodies made.
+        if let Some(base_layers) = base_layers
+            .as_ref()
+            .filter(|layers| flags.defines_default || layers.reads_this)
+        {
+            let mut layers = (**base_layers).clone();
+            layers.layers.push(layer);
+            layers.default = default;
+            layers.reads_this |= flags.reads_this;
+            let items = self.replay_listing(&layers, kind, elem_class.as_ref(), depth)?;
+            return Ok(ListValue::new(kind, items)
+                .with_elem_class(elem_class)
+                .with_layers(Some(Arc::new(layers))));
+        }
+        let mut list = base;
+        let init = Arc::clone(list.items_arc());
+        self.eval_listing_entries(
+            entries,
+            &body_scope,
+            depth + 1,
+            list.make_mut(),
+            elem_class.as_ref(),
+        )?;
+        let layers = record.then(|| {
+            let mut layers = base_layers.map_or_else(
+                || ListLayers {
+                    init,
+                    ..ListLayers::default()
+                },
+                |layers| (*layers).clone(),
+            );
+            layers.layers.push(layer);
+            layers.default = default;
+            layers.reads_this |= flags.reads_this;
+            Arc::new(layers)
+        });
+        Ok(list.with_elem_class(elem_class).with_layers(layers))
+    }
+
+    /// Evaluate every body of `layers` in order, with the final default and,
+    /// where a body reads `this`, the final elements.
+    fn replay_listing(
+        &mut self,
+        layers: &ListLayers,
+        kind: ListKind,
+        elem_class: Option<&Arc<Value>>,
+        depth: usize,
+    ) -> Result<Vec<Value>> {
+        let mut final_items: Option<Vec<Value>> = None;
+        let passes = if layers.reads_this { 2 } else { 1 };
+        for _ in 0..passes {
+            let mut items = layers.init.to_vec();
+            for layer in &layers.layers {
+                let mut scope = layer.scope.child();
+                let super_list =
+                    ListValue::new(kind, items.clone()).with_elem_class(elem_class.cloned());
+                scope.set("super", Value::List(super_list));
+                scope.receiver_entries = Some(layer.entries.clone());
+                scope.receiver_list_base = Some(items.len());
+                scope.set(
+                    LISTING_DEFAULT,
+                    layers.default.clone().unwrap_or(Value::Null),
+                );
+                if let Some(final_items) = &final_items {
+                    scope.set(
+                        LISTING_FINAL_THIS,
+                        Value::List(ListValue::new(kind, final_items.clone())),
+                    );
+                }
+                self.eval_listing_entries(
+                    &layer.entries,
+                    &scope,
+                    depth + 1,
+                    &mut items,
+                    elem_class,
+                )?;
+            }
+            final_items = Some(items);
+        }
+        Ok(final_items.unwrap_or_default())
     }
 }
 

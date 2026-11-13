@@ -225,26 +225,9 @@ impl Evaluator {
                             ));
                         }
                         let elem_class = listing_elem_class(generic_params, scope);
-                        let mut listing_scope = scope.child();
-                        listing_scope.set(
-                            "super",
-                            Value::List(
-                                ListValue::new(ListKind::Listing, Vec::new())
-                                    .with_elem_class(elem_class.clone()),
-                            ),
-                        );
-                        listing_scope.receiver_list_base = Some(0);
-                        let mut items = Vec::new();
-                        self.eval_listing_entries(
-                            entries,
-                            &listing_scope,
-                            depth + 1,
-                            &mut items,
-                            elem_class.as_ref(),
-                        )?;
-                        Ok(Value::List(
-                            ListValue::new(ListKind::Listing, items).with_elem_class(elem_class),
-                        ))
+                        Ok(Value::List(self.eval_listing_body(
+                            None, entries, scope, depth, elem_class,
+                        )?))
                     }
                     Some("Mapping") => {
                         check_member_kinds("Mapping", "Mapping", entries, false)?;
@@ -1391,6 +1374,10 @@ fn list_property(list: &Value, items: &ListValue, name: &str) -> Option<Result<V
     Some(match name {
         "length" => Ok(Value::Int(items.len() as i64)),
         "isEmpty" => Ok(Value::Bool(items.is_empty())),
+        "default" if items.kind() == ListKind::Listing => Ok(items
+            .layers()
+            .and_then(|layers| layers.default.clone())
+            .unwrap_or_else(|| implicit_listing_default(items.elem_class()))),
         "isDistinct" => Ok(Value::Bool(
             items.kind() == ListKind::Set
                 || items
