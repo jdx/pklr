@@ -337,7 +337,10 @@ impl Evaluator {
             // The default of a constrained `Dynamic` is checked against its
             // constraint like any other value. (Other defaults are template
             // values that a subclass or amendment may replace.)
-            if names_constrained_dynamic(ty, scope)
+            // Only a module's own property: a class member's default is a
+            // template that an instance replaces.
+            if require_union_default
+                && names_constrained_dynamic(ty, scope)
                 && let Some(default) = &default
             {
                 self.check_declared_value(default, ty, scope, depth)?;

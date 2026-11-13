@@ -1853,3 +1853,15 @@ fn element_mismatch_keeps_the_property_name() {
     let msg = eval_fails("xs: List<Int> = List(\"x\")");
     assert!(msg.contains("in property 'xs'"), "{msg}");
 }
+
+#[test]
+fn class_member_dynamic_default_is_not_checked_before_assignment() {
+    let json = eval(
+        r#"
+typealias D = Dynamic(this.toList().length > 0)
+class C { x: D }
+result = new C { x = new Dynamic { 1 } }
+"#,
+    );
+    assert_eq!(json["result"]["x"][0], 1);
+}
