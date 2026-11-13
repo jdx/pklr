@@ -833,6 +833,40 @@ pub(super) fn poisoned_member(scope: &Scope, name: &str) -> Option<String> {
     None
 }
 
+/// The scope as `capture_scope` sees it, limited to the bindings `names`
+/// read. A holder that evaluates only expressions naming `names` sees no
+/// difference, and the module's other bindings are not copied.
+pub(super) fn capture_scope_names<'a>(
+    scope: &Scope,
+    names: impl IntoIterator<Item = &'a str> + Clone,
+) -> CapturedScope {
+    let mut declared = NameSet::default();
+    for name in names.clone() {
+        let mut level = Some(scope);
+        while let Some(current) = level {
+            if let Some((key, _)) = current.vars.get_key_value(name) {
+                if current.declared.contains(name) {
+                    declared.insert(key.clone());
+                }
+                break;
+            }
+            if current.poisoned.contains_key(name) {
+                break;
+            }
+            level = current.parent.as_deref();
+        }
+    }
+    CapturedScope {
+        values: scope.flatten_names(names),
+        declared,
+        body_members: HashSet::default(),
+        module_identities: scope.flatten_module_identities(),
+        type_aliases: scope.flatten_type_aliases(),
+        type_namespace: scope.type_namespace.clone(),
+        poisoned: scope.flatten_poisoned(),
+    }
+}
+
 pub(super) fn capture_scope(scope: &Scope) -> CapturedScope {
     CapturedScope {
         values: scope.flatten(),

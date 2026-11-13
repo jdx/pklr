@@ -23,7 +23,38 @@ pub(crate) const MAPPING_KEY_PREFIX: &str = "\0pklr:mapping-key:";
 // This ID is internal-only: the stored key still renders from `display`.
 static NEXT_NAN_MAPPING_KEY: AtomicU64 = AtomicU64::new(0);
 
+thread_local! {
+    /// The values behind object, list and regex mapping keys, by storage key,
+    /// so a renderer can show a key as the value it stands for. Cleared when
+    /// an evaluation begins.
+    static COMPOUND_KEYS: std::cell::RefCell<rustc_hash::FxHashMap<Arc<str>, Value>> =
+        std::cell::RefCell::default();
+}
+
+/// Forgets the values remembered for compound mapping keys.
+pub(crate) fn clear_compound_keys() {
+    drop(take_compound_keys());
+}
+
+/// The values remembered for compound mapping keys, for the caller to free:
+/// a key can nest deeply, so freeing it may need a large stack.
+pub(crate) fn take_compound_keys() -> rustc_hash::FxHashMap<Arc<str>, Value> {
+    COMPOUND_KEYS.with(|keys| std::mem::take(&mut *keys.borrow_mut()))
+}
+
 pub(crate) fn mapping_storage_key(value: &Value) -> Option<Arc<str>> {
+    let key = mapping_storage_key_of(value)?;
+    if matches!(value, Value::Object(..) | Value::List(_) | Value::Regex(_)) {
+        COMPOUND_KEYS.with(|keys| {
+            keys.borrow_mut()
+                .entry(key.clone())
+                .or_insert_with(|| value.clone());
+        });
+    }
+    Some(key)
+}
+
+fn mapping_storage_key_of(value: &Value) -> Option<Arc<str>> {
     let (kind, identity, display) = match value {
         Value::String(_) => return None,
         Value::Null => ("null", "0000000000000000".to_string(), "null".to_string()),
@@ -113,6 +144,7 @@ pub(crate) fn mapping_storage_key(value: &Value) -> Option<Arc<str>> {
                 .to_json()
                 .to_string(),
         ),
+        Value::Regex(regex) => ("regex", regex.pattern().to_string(), format!("{value:?}")),
         other => (
             "display",
             "0000000000000000".to_string(),
@@ -215,6 +247,9 @@ pub(crate) fn display_storage_key(key: &str) -> &str {
 }
 
 pub(crate) fn mapping_storage_value(key: &str) -> Value {
+    if let Some(value) = COMPOUND_KEYS.with(|keys| keys.borrow().get(key).cloned()) {
+        return value;
+    }
     let Some(key) = key.strip_prefix(MAPPING_KEY_PREFIX) else {
         return Value::String(key.into());
     };
@@ -297,6 +332,15 @@ pub(crate) struct CapturedScope {
 /// with the overlay's entries and re-evaluated so that dependent
 /// properties pick up overridden values.
 #[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ModuleAnnotations {
+    pub properties: Vec<(Arc<str>, Vec<crate::parser::Annotation>)>,
+    pub scope: CapturedScope,
+    /// The annotations the module or class this one amends or extends
+    /// declares, evaluated in their own scope and applied first.
+    pub parent: Option<Arc<ModuleAnnotations>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct ObjectSource {
     pub(crate) entries: crate::parser::Body,
     /// The bindings visible where the object was defined (see
@@ -344,6 +388,10 @@ pub struct ObjectSource {
     /// instantiating such a member reports its error instead of treating it
     /// as absent, and rendering the module reports a failed output member.
     pub(crate) poisoned_members: Option<Arc<IndexMap<Arc<str>, PoisonedMember>>>,
+    /// The annotations on a module's own properties, with the module's scope,
+    /// so a renderer can apply `ConvertProperty` annotations. A module keeps
+    /// no entries; `None` unless some property carries such an annotation.
+    pub(crate) module_annotations: Option<Arc<ModuleAnnotations>>,
     /// For a class a module declares as a member, the name of that member (the
     /// class, or a type alias to it). A class held by another name, such as an
     /// ordinary property `c = lib.C`, is data and is not marked.
@@ -452,6 +500,8 @@ impl ObjectSource {
     pub(crate) fn is_metadata_only(&self) -> bool {
         (self.poisoned_members.is_some()
             || self.is_abstract
+            || self.module_annotations.is_some()
+            || !self.deprecated.is_empty()
             || (matches!(self.kind, ObjectKind::Mapping) && self.mapping_value_types.is_empty()))
             && self.entries.is_empty()
             && self.evaluated_properties.is_empty()
@@ -1523,6 +1573,20 @@ impl From<serde_json::Value> for Value {
 }
 
 #[cfg(test)]
+mod compound_key_tests {
+    use super::*;
+
+    #[test]
+    fn taking_the_compound_keys_empties_the_table() {
+        let key = Value::List(ListValue::new(ListKind::List, vec![Value::Int(1)]));
+        let storage = mapping_storage_key(&key).expect("a list is a compound key");
+        let taken = take_compound_keys();
+        assert!(taken.contains_key(&storage));
+        assert!(take_compound_keys().is_empty());
+    }
+}
+
+#[cfg(test)]
 mod same_data_tests {
     use super::*;
 
@@ -1736,6 +1800,7 @@ mod same_data_tests {
                         .collect(),
                 )
             }),
+            module_annotations: None,
             kind: ObjectKind::Object,
             is_parsed_json: false,
             is_module: false,

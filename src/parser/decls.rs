@@ -74,9 +74,9 @@ impl<'a> Parser<'a> {
             _ => return Err(self.error_at(offset, "Expected an annotation class.")),
         };
         let body = if matches!(self.peek(), TokenKind::LBrace) {
-            self.parse_object_body(false)?.entries
+            std::sync::Arc::new(self.parse_object_body(false)?.entries)
         } else {
-            Vec::new()
+            Default::default()
         };
         Ok(Annotation { name, body })
     }
@@ -119,7 +119,7 @@ impl<'a> Parser<'a> {
             for modifier in header.modifiers() {
                 annotations.push(Annotation {
                     name: format!("pklr:module:{modifier:?}"),
-                    body: Vec::new(),
+                    body: Default::default(),
                 });
             }
         }

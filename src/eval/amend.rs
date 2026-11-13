@@ -1990,6 +1990,22 @@ pub(super) fn compose_amended_object(
     prop: &Arc<Property>,
     locals: Option<&LocalBindings>,
 ) -> Arc<Property> {
+    if let (None, Some(earlier), Some(body), None) =
+        (&inherited.value, &inherited.body, &prop.body, &prop.value)
+        && (entries_are_listing_amendment(earlier) || entries_are_listing_amendment(body))
+    {
+        // Two bodies that add elements: the second adds to what the first
+        // made, so the member is rebuilt from both, in order. Each body stays
+        // a layer of its own, so the `local`s of one never replace the
+        // other's. (A body-only member has no type annotation to keep.)
+        let base = Expr::New(None, earlier.clone(), Vec::new());
+        let overlay = with_template_locals(locals, prop, Expr::ObjectBody(body.clone()));
+        return Arc::new(Property {
+            value: Some(Expr::Binop(BinOp::Add, Box::new(base), Box::new(overlay))),
+            body: None,
+            ..(**prop).clone()
+        });
+    }
     let (Some(base), Some(body), None) = (&inherited.value, &prop.body, &prop.value) else {
         return prop.clone();
     };

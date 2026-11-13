@@ -692,7 +692,11 @@ impl Evaluator {
             .unwrap_or_else(|| match render::class_key_name(stored_key) {
                 // `[String] = 1` keys by a class, which no evaluated key
                 // value was remembered for.
-                Some(class) => stdlib::class_value(class, format!("pkl:base#{class}")),
+                Some(class) => stdlib::class_value(
+                    class,
+                    render::class_key_identity(stored_key)
+                        .map_or_else(|| format!("pkl:base#{class}"), str::to_string),
+                ),
                 None => crate::value::mapping_storage_value(stored_key),
             })
     }

@@ -329,6 +329,7 @@ impl Evaluator {
         self.prefetch = prefetch::PrefetchState::new(self.cancel.clone());
         self.active_typed_defaults.clear();
         self.mapping_key_values.clear();
+        crate::value::clear_compound_keys();
         self.module_names.clear();
         if self.grew {
             // Alias targets can nest deeply, so free them on a large stack.
@@ -435,6 +436,7 @@ impl Evaluator {
             std::mem::take(&mut self.refs),
             std::mem::take(&mut self.module_declarations),
             std::mem::take(&mut self.parsed_declarations),
+            crate::value::take_compound_keys(),
         );
         crate::stack::drop_on_large_stack(held);
     }
@@ -443,5 +445,8 @@ impl Evaluator {
 impl Drop for Evaluator {
     fn drop(&mut self) {
         self.release_deep_state();
+        // Whatever the evaluation left that was not deep enough to need a
+        // large stack to free.
+        crate::value::clear_compound_keys();
     }
 }

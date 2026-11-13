@@ -104,7 +104,11 @@ impl Evaluator {
             let mut value = match &prop.type_ann {
                 Some(ty) if parser::has_untyped_result_new(expr) && !type_is_any(ty) => {
                     let mut inferred = expr.clone();
-                    parser::infer_method_return_new(&mut inferred, ty);
+                    if let Some(mixin) = parser::mixin_typed_new(expr, ty) {
+                        inferred = mixin;
+                    } else {
+                        parser::infer_method_return_new(&mut inferred, ty);
+                    }
                     self.eval_expr(&inferred, scope, depth)?
                 }
                 _ => self.eval_expr(expr, scope, depth)?,
@@ -803,6 +807,8 @@ impl Evaluator {
             deprecated: collect_deprecated(entries),
             poisoned_members: (!st.deferred_undefined.is_empty())
                 .then(|| Arc::new(std::mem::take(&mut st.deferred_undefined))),
+            module_annotations: inherited_source
+                .and_then(|source| source.module_annotations.clone()),
             declared_as: None,
             kind: ObjectKind::Object,
             is_parsed_json: false,
@@ -900,20 +906,28 @@ impl Evaluator {
                         match const_message {
                             Some(message) => Err(Error::Eval(message)),
                             None => {
-                                self.eval_expr(expr, &active_scope, cx.depth)
-                                    .and_then(|value| {
-                                        // A declared type is checked when the local
-                                        // is read, so a mismatch poisons it.
-                                        match &prop.type_ann {
-                                            Some(ty) => self.check_local_value(
-                                                value,
-                                                ty,
-                                                &active_scope,
-                                                cx.depth,
-                                            ),
-                                            None => Ok(value),
-                                        }
-                                    })
+                                let mixin = prop
+                                    .type_ann
+                                    .as_ref()
+                                    .and_then(|ty| parser::mixin_typed_new(expr, ty));
+                                self.eval_expr(
+                                    mixin.as_ref().unwrap_or(expr),
+                                    &active_scope,
+                                    cx.depth,
+                                )
+                                .and_then(|value| {
+                                    // A declared type is checked when the local
+                                    // is read, so a mismatch poisons it.
+                                    match &prop.type_ann {
+                                        Some(ty) => self.check_local_value(
+                                            value,
+                                            ty,
+                                            &active_scope,
+                                            cx.depth,
+                                        ),
+                                        None => Ok(value),
+                                    }
+                                })
                             }
                         }
                     };
@@ -1663,6 +1677,7 @@ impl Evaluator {
                         mapping_value_types: Vec::new(),
                         deprecated: merge_deprecated(&src.deprecated, body),
                         poisoned_members: None,
+                        module_annotations: src.module_annotations.clone(),
                         declared_as: None,
                         kind: ObjectKind::Object,
                         is_parsed_json: false,
@@ -2083,7 +2098,7 @@ fn tracks_dynamic_members(entries: &[Entry]) -> bool {
 /// Also insert Null for any nullable-no-default properties declared in these
 /// entries but absent from the parent scope, so that `outer.optionalProp`
 /// resolves to Null rather than failing with "field not found".
-fn bind_outer(
+pub(super) fn bind_outer(
     child_scope: &mut Scope,
     scope: &Scope,
     entries: &[Entry],

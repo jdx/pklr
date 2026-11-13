@@ -14,7 +14,7 @@ pub(super) fn collect_deprecated(entries: &[Entry]) -> IndexMap<String, Option<S
                     continue;
                 }
                 let mut message = None;
-                for e in &ann.body {
+                for e in ann.body.iter() {
                     if let Entry::Property(p) = e
                         && &*p.name == "message"
                         && let Some(Expr::String(s)) = &p.value
@@ -1543,6 +1543,15 @@ pub(super) fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
             "DataSize" => matches!(val, Value::DataSize(_)),
             "Any" | "unknown" => true,
             "nothing" => false,
+            // A renderer is an instance of its own class only.
+            name @ ("PcfRenderer" | "JsonRenderer" | "YamlRenderer" | "PListRenderer"
+            | "PropertiesRenderer")
+                if matches!(val, Value::Object(_, Some(source)) if source.type_name.is_some()) =>
+            {
+                matches!(val, Value::Object(_, Some(source))
+                    if source.type_name.as_deref() == Some(name)
+                        || source.parent_type_names.iter().any(|parent| parent == name))
+            }
             _ => {
                 // Unknown type name -- could be a class; treat objects as matching
                 matches!(val, Value::Object(..))
@@ -2078,7 +2087,8 @@ pub(super) fn merge_values(base: Value, overlay: Value) -> Value {
                             .cloned()
                     })
                     .unwrap_or_else(|| k.clone());
-                if let Some(existing) = b_map.shift_remove(&storage_key) {
+                // A member the overlay redefines keeps its place.
+                if let Some(existing) = b_map.get(&storage_key).cloned() {
                     b_map.insert(storage_key, merge_values(existing, v.clone()));
                 } else {
                     b_map.insert(storage_key, v.clone());

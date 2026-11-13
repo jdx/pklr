@@ -13,7 +13,7 @@ pub type Body = std::sync::Arc<Vec<Entry>>;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Annotation {
     pub name: String,
-    pub body: Vec<Entry>,
+    pub body: std::sync::Arc<Vec<Entry>>,
 }
 
 /// A pkl module (top-level file).
@@ -357,6 +357,21 @@ pub(crate) fn has_untyped_result_new(expr: &Expr) -> bool {
         | Expr::TemplateLocals(_, body) => has_untyped_result_new(body),
         _ => false,
     }
+}
+
+/// For a declared `Mixin` or `Mixin<T>` type, `expr` with each untyped
+/// `new { ... }` in a result position made a `new Mixin { ... }`.
+pub(crate) fn mixin_typed_new(expr: &Expr, ty: &TypeExpr) -> Option<Expr> {
+    if !matches!(ty, TypeExpr::Named(n) | TypeExpr::Generic(n, _) if n == "Mixin")
+        || !has_untyped_result_new(expr)
+    {
+        return None;
+    }
+    let mut rewritten = expr.clone();
+    rewrite_untyped_result_new(&mut rewritten, &mut |entries| {
+        Expr::New(Some("Mixin".to_string()), entries, Vec::new())
+    });
+    Some(rewritten)
 }
 
 /// Propagate the method's expected result type through result expressions only.

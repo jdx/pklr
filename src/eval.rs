@@ -300,6 +300,8 @@ struct ModuleScopeSnapshot {
     /// The classes and type aliases an importer can name as `m.Name`.
     exported_types: HashSet<Arc<str>>,
     late_properties: Vec<Arc<Property>>,
+    /// The property annotations the module declares or inherits.
+    annotations: Option<Arc<crate::value::ModuleAnnotations>>,
 }
 
 #[cfg(feature = "native-io")]

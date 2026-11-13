@@ -471,6 +471,11 @@ impl<'a> StringRenderer<'a> for Pcf<'a> {
             if index > 0 {
                 self.out.push_str(", ");
             }
+            // Pkl converts a pair as a whole and never its two members.
+            if name == "Pair" {
+                self.visit_standalone(item)?;
+                continue;
+            }
             let converted = if is_map && index % 2 == 0 {
                 let key = self.walk.convert_key(item)?;
                 pending_key = Some(key.clone());

@@ -272,6 +272,7 @@ mod tests {
                 mapping_value_types: Vec::new(),
                 deprecated: Default::default(),
                 poisoned_members: None,
+                module_annotations: None,
                 declared_as: None,
                 kind: crate::value::ObjectKind::Dynamic,
                 is_parsed_json: false,

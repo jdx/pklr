@@ -80,6 +80,18 @@ fn index_reads_key(alias: &str) -> String {
     format!("{alias}\0[]")
 }
 
+/// The instance an annotation writes, for what it names and reads. A dotted
+/// annotation class names only its root, so an import it comes from is read
+/// whole, as the module that declares the annotation is evaluated whole.
+pub(super) fn annotation_instance(annotation: &crate::parser::Annotation) -> Expr {
+    let root = annotation.name.split('.').next().unwrap_or_default();
+    Expr::New(
+        Some(root.to_string()),
+        Arc::clone(&annotation.body),
+        Vec::new(),
+    )
+}
+
 pub(super) fn import_field_uses(entries: &[Entry]) -> HashMap<String, ImportUse> {
     let mut uses = HashMap::default();
     let shadows = HashSet::default();
@@ -105,6 +117,13 @@ pub(super) fn collect_entry_import_field_uses(
                 }
                 if let Some(body) = &prop.body {
                     collect_entry_import_field_uses(body, uses, &entry_shadows);
+                }
+                for annotation in &prop.annotations {
+                    collect_expr_import_field_uses(
+                        &annotation_instance(annotation),
+                        uses,
+                        &entry_shadows,
+                    );
                 }
             }
             Entry::DynProperty(key, value) | Entry::Predicate(key, value) => {
@@ -2435,6 +2454,15 @@ fn collect_entry_refs_unnarrowed(
                 }
                 if let Some(body) = &prop.body {
                     collect_entry_refs_in(body, refs, &entry_shadows, aliases, definitions);
+                }
+                for annotation in &prop.annotations {
+                    collect_expr_refs_in(
+                        &annotation_instance(annotation),
+                        refs,
+                        &entry_shadows,
+                        aliases,
+                        definitions,
+                    );
                 }
             }
             Entry::DynProperty(key, value) | Entry::Predicate(key, value) => {

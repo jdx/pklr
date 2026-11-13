@@ -112,13 +112,7 @@ impl Evaluator {
                     .flat_map(|method| &method.annotations);
                 declaration.annotations.iter().chain(methods)
             })
-            .map(|annotation| {
-                Entry::Elem(Expr::New(
-                    Some(annotation.name.clone()),
-                    Arc::new(annotation.body.clone()),
-                    Vec::new(),
-                ))
-            })
+            .map(|annotation| Entry::Elem(annotation_instance(annotation)))
             .chain(declarations.iter().flat_map(|declaration| {
                 // A bodyless method's types name imports its entries do not;
                 // a type test walks them as any other type.
@@ -560,6 +554,16 @@ impl Evaluator {
             analysis_entries_for_requested_fields(&module.body, requested_output_fields.as_ref());
         // What the annotations of a class or type alias read counts as used.
         analysis_entries.extend(self.declaration_annotation_entries(module));
+        // A renderer applies the annotations of the module's own properties,
+        // whether or not the requested fields reach those properties, so
+        // what they name and read counts as used.
+        for entry in module.body.iter() {
+            if let Entry::Property(prop) = entry {
+                for annotation in &prop.annotations {
+                    analysis_entries.push(Entry::Elem(annotation_instance(annotation)));
+                }
+            }
+        }
         let mut referenced_imports = referenced_roots(&analysis_entries);
         referenced_imports.extend(inherited_references);
         let import_field_uses = import_field_uses(&analysis_entries);
@@ -1120,7 +1124,61 @@ impl Evaluator {
         // An abstract module also keeps a source, so `new` can reject it.
         let deprecated = collect_deprecated(body);
         let is_abstract = module_is_abstract(module);
-        let source = if deprecated.is_empty() && poisoned_members.is_empty() && !is_abstract {
+        // Properties annotated with a user annotation, which a renderer's
+        // `convertPropertyTransformers` may convert.
+        let annotated: Vec<(Arc<str>, Vec<crate::parser::Annotation>)> = body
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Property(prop) if !has_modifier(&prop.modifiers, Modifier::Local) => {
+                    let annotations: Vec<_> = prop
+                        .annotations
+                        .iter()
+                        .filter(|annotation| {
+                            !is_stdlib_annotation(&annotation.name, scope.get(&annotation.name))
+                        })
+                        .cloned()
+                        .collect();
+                    (!annotations.is_empty()).then(|| (prop.name.clone(), annotations))
+                }
+                _ => None,
+            })
+            .collect();
+        // The annotations of the module this one amends or extends apply
+        // first, evaluated in that module's own scope.
+        let inherited_annotations = self
+            .parent_module_key(module, path)
+            .and_then(|parent| self.module_scopes.get(&parent))
+            .and_then(|base| base.annotations.clone());
+        let module_annotations = if annotated.is_empty() {
+            inherited_annotations
+        } else {
+            // The annotations read these names and nothing else of the
+            // module's scope.
+            let instances: Vec<Entry> = annotated
+                .iter()
+                .flat_map(|(_, list)| list)
+                .map(|annotation| Entry::Elem(annotation_instance(annotation)))
+                .collect();
+            let names = referenced_roots(&instances);
+            let captured = if names
+                .iter()
+                .any(|name| matches!(&**name, "this" | "module" | "super" | "outer"))
+            {
+                super::scope::capture_scope(&scope)
+            } else {
+                super::scope::capture_scope_names(&scope, names.iter().map(|n| &**n))
+            };
+            Some(Arc::new(crate::value::ModuleAnnotations {
+                properties: annotated,
+                scope: captured,
+                parent: inherited_annotations,
+            }))
+        };
+        let source = if deprecated.is_empty()
+            && poisoned_members.is_empty()
+            && !is_abstract
+            && module_annotations.is_none()
+        {
             None
         } else {
             Some(Arc::new(ObjectSource {
@@ -1142,6 +1200,7 @@ impl Evaluator {
                 declared_as: None,
                 poisoned_members: (!poisoned_members.is_empty())
                     .then(|| Arc::new(poisoned_members)),
+                module_annotations: module_annotations.clone(),
                 kind: ObjectKind::Object,
                 is_parsed_json: false,
                 is_module: true,
@@ -1207,6 +1266,7 @@ impl Evaluator {
                 exported_types,
                 module_identities: scope.flatten_module_identities(),
                 late_properties: effective_late_properties.into_values().collect(),
+                annotations: module_annotations.clone(),
             },
         );
         // An imported module whose failed property this output renders fails
@@ -1565,6 +1625,35 @@ impl Evaluator {
         // `same_data` is not called, which matters for values that capture a
         // large scope.
         let can_stop = || settled_after() < late_passes;
+        // The names a changed member of this module reaches: its own members,
+        // and the inherited ones that read them, directly or through others.
+        // Worked out only when a listing amendment needs it.
+        let reaches_child_cell: std::cell::OnceCell<HashSet<Name>> = std::cell::OnceCell::new();
+        let reaches_child = || {
+            reaches_child_cell.get_or_init(|| {
+                let mut reaches: HashSet<Name> = child_property_names
+                    .iter()
+                    .map(|name| Name::from(&**name))
+                    .collect();
+                loop {
+                    let before = reaches.len();
+                    for prop in late_inherited_properties {
+                        if !reaches.contains(prop.name.as_ref())
+                            && property_reference_names(prop).iter().any(|name| {
+                                // A computed read, or an object handed to a
+                                // call, may reach any member of this module.
+                                &**name == DYNAMIC_SIBLING_REF || reaches.contains(name)
+                            })
+                        {
+                            reaches.insert(prop.name.clone());
+                        }
+                    }
+                    if reaches.len() == before {
+                        break reaches;
+                    }
+                }
+            })
+        };
         let mut pass = 0;
         let mut quiet_passes = 0;
         loop {
@@ -1578,7 +1667,42 @@ impl Evaluator {
                 if child_property_names.contains(prop.name.as_ref()) || reads_super(prop) {
                     continue;
                 }
-                match self.eval_property_with(prop, scope, depth, true) {
+                // An amendment's elements add to the member it amends, which
+                // already holds them: evaluating the body again would append
+                // them a second time. Only a read of a member this module
+                // defines, directly or through an inherited one, can change
+                // what the body makes.
+                let mut fresh_scope = None;
+                if prop.value.is_none()
+                    && let Some(body) = &prop.body
+                    && entries_are_listing_amendment(body)
+                    && scope.vars.contains_key(prop.name.as_ref())
+                {
+                    let reads = referenced_roots(body);
+                    if !reads.iter().any(|name| {
+                        reaches_child().contains(name)
+                            || matches!(name.as_ref(), "this" | "module" | "super" | "outer")
+                    }) {
+                        continue;
+                    }
+                    // The first declaration of the member makes it anew; the
+                    // value in scope is what it made before.
+                    let first = late_inherited_properties
+                        .iter()
+                        .find(|other| other.name == prop.name)
+                        .is_some_and(|other| std::ptr::eq(&**other, &**prop));
+                    if first {
+                        let mut fresh = scope.clone();
+                        Arc::make_mut(&mut fresh.vars).shift_remove(prop.name.as_ref());
+                        fresh_scope = Some(fresh);
+                    }
+                }
+                match self.eval_property_with(
+                    prop,
+                    fresh_scope.as_ref().unwrap_or(scope),
+                    depth,
+                    true,
+                ) {
                     Ok(Some(value)) => {
                         change = change.then(scope.get(&prop.name), &value, can_stop).then(
                             all_props.get(prop.name.as_ref()),
@@ -1775,8 +1899,13 @@ impl Evaluator {
                         if has_modifier(&prop.modifiers, Modifier::Local)
                             && prop.value.is_some() =>
                     {
+                        let value_expr = prop.value.as_ref().unwrap();
+                        let mixin = prop
+                            .type_ann
+                            .as_ref()
+                            .and_then(|ty| crate::parser::mixin_typed_new(value_expr, ty));
                         let evaluated = self
-                            .eval_expr(prop.value.as_ref().unwrap(), scope, depth)
+                            .eval_expr(mixin.as_ref().unwrap_or(value_expr), scope, depth)
                             .and_then(|value| {
                                 // A declared type is checked when the local is
                                 // read, so a mismatch poisons it.
@@ -2908,6 +3037,7 @@ fn module_source(type_identity: Option<String>) -> Arc<ObjectSource> {
         deprecated: IndexMap::new(),
         declared_as: None,
         poisoned_members: None,
+        module_annotations: None,
         kind: ObjectKind::Object,
         is_parsed_json: false,
         is_module: true,
@@ -3438,6 +3568,28 @@ fn binds_own_super(prop: &Property) -> bool {
 
 /// The scope binding that names the module `super` stands for.
 pub(super) const SUPER_MODULE_NAME: &str = "\0pklr:super-module";
+
+/// Annotations `pkl:base` declares, which never convert a property.
+pub(super) const STDLIB_ANNOTATIONS: &[&str] = &[
+    "Deprecated",
+    "Since",
+    "AlsoKnownAs",
+    "Unlisted",
+    "DocExample",
+    "SourceCode",
+    "ModuleInfo",
+];
+
+/// Whether the annotation `name` is one of `pkl:base`'s annotation classes,
+/// rather than a class the user declared under the same name. `bound` is what
+/// the declaring scope binds `name` to.
+pub(super) fn is_stdlib_annotation(name: &str, bound: Option<&Value>) -> bool {
+    STDLIB_ANNOTATIONS.contains(&name)
+        && !matches!(
+            bound,
+            Some(Value::Object(_, Some(source))) if source.kind == ObjectKind::Class
+        )
+}
 
 /// `ty` without the `*` that marks a union's default arm, which names no
 /// import of its own.

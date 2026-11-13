@@ -17,38 +17,70 @@ use crate::lexer;
 use crate::parser::{Entry, Expr, Modifier, Module, Property, TypeExpr};
 use crate::value::{ListKind, ListValue, ObjectMap, ObjectSource, Value};
 
-/// The `pkl:base` classes pklr provides, as Pkl source. Their methods
-/// (`renderDocument`, `renderValue`) are implemented natively.
-const BASE_CLASSES: &str = r#"
+/// The `pkl:base` classes pklr provides, as Pkl source, one entry per class
+/// so that evaluating one parses only it. Their methods (`renderDocument`,
+/// `renderValue`) are implemented natively.
+const BASE_CLASSES: &[(&str, &str)] = &[
+    (
+        "ModuleOutput",
+        r#"
 open class ModuleOutput {}
-
+"#,
+    ),
+    (
+        "RenderDirective",
+        r#"
 class RenderDirective {
   text: String
 }
-
+"#,
+    ),
+    (
+        "Resource",
+        r#"
 class Resource {
   uri: String
   text: String
   base64: String
 }
-
+"#,
+    ),
+    (
+        "ConvertProperty",
+        r#"
+// The `render` function is left undeclared: a subclass overriding an inherited
+// property does not yet see its own sibling members from the override.
+open class ConvertProperty {}
+"#,
+    ),
+    (
+        "PcfRenderer",
+        r#"
 class PcfRenderer {
   extension = "pcf"
   indent: String = "  "
   omitNullProperties: Boolean = false
   useCustomStringDelimiters: Boolean = false
   converters = new Mapping {}
-  convertPropertyTransformers = new Mapping {}
+  convertPropertyTransformers: Mapping<Class, Mixin<ConvertProperty>> = new Mapping {}
 }
-
+"#,
+    ),
+    (
+        "JsonRenderer",
+        r#"
 class JsonRenderer {
   extension = "json"
   indent: String = "  "
   omitNullProperties: Boolean = true
   converters = new Mapping {}
-  convertPropertyTransformers = new Mapping {}
+  convertPropertyTransformers: Mapping<Class, Mixin<ConvertProperty>> = new Mapping {}
 }
-
+"#,
+    ),
+    (
+        "YamlRenderer",
+        r#"
 class YamlRenderer {
   extension = "yaml"
   mode = "compat"
@@ -56,30 +88,41 @@ class YamlRenderer {
   omitNullProperties: Boolean = true
   isStream: Boolean = false
   converters = new Mapping {}
-  convertPropertyTransformers = new Mapping {}
+  convertPropertyTransformers: Mapping<Class, Mixin<ConvertProperty>> = new Mapping {}
 }
-
+"#,
+    ),
+    (
+        "PListRenderer",
+        r#"
 class PListRenderer {
   extension = "plist"
   indent: String = "  "
   converters = new Mapping {}
-  convertPropertyTransformers = new Mapping {}
+  convertPropertyTransformers: Mapping<Class, Mixin<ConvertProperty>> = new Mapping {}
 }
-
+"#,
+    ),
+    (
+        "PropertiesRenderer",
+        r#"
 class PropertiesRenderer {
   extension = "properties"
   omitNullProperties: Boolean = true
   restrictCharset: Boolean = false
   converters = new Mapping {}
-  convertPropertyTransformers = new Mapping {}
+  convertPropertyTransformers: Mapping<Class, Mixin<ConvertProperty>> = new Mapping {}
 }
-"#;
+"#,
+    ),
+];
 
 /// Names of the classes defined by [`BASE_CLASSES`].
 pub(super) const BUILTIN_CLASS_NAMES: &[&str] = &[
     "ModuleOutput",
     "RenderDirective",
     "Resource",
+    "ConvertProperty",
     "PcfRenderer",
     "JsonRenderer",
     "YamlRenderer",
@@ -119,6 +162,10 @@ fn lexical_names(module: &Module) -> Vec<String> {
 /// `pkl:jsonnet`, as Pkl source. pklr keeps functions and classes in one
 /// namespace, so the classes its functions build are named `...Class`.
 const JSONNET_MODULE: &str = r#"
+class Property extends ConvertProperty {
+  name: String
+  render = (prop, renderer) -> if (renderer is Renderer) Pair(name, prop.value) else prop
+}
 function ImportStr(_path: String) = new ImportStrClass { path = _path }
 
 function ExtVar(_name: String) = new ExtVarClass { name = _name }
@@ -128,7 +175,7 @@ class Renderer {
   indent: String? = "  "
   omitNullProperties: Boolean = true
   converters = new Mapping {}
-  convertPropertyTransformers = new Mapping {}
+  convertPropertyTransformers: Mapping<Class, Mixin<ConvertProperty>> = new Mapping {}
 }
 
 class ImportStrClass { path: String }
@@ -215,6 +262,10 @@ class Reference {}
 
 /// `pkl:json`, as Pkl source.
 const JSON_MODULE: &str = r#"
+class Property extends ConvertProperty {
+  name: String
+  render = (prop, renderer) -> if (renderer is JsonRenderer) Pair(name, prop.value) else prop
+}
 class Parser {
   useMapping: Boolean = false
   converters = new Mapping {}
@@ -223,6 +274,10 @@ class Parser {
 
 /// `pkl:yaml`, as Pkl source.
 const YAML_MODULE: &str = r#"
+class Property extends ConvertProperty {
+  name: String
+  render = (prop, renderer) -> if (renderer is YamlRenderer) Pair(name, prop.value) else prop
+}
 class Parser {
   mode: "compat" | "1.1" | "1.2" = "compat"
   useMapping: Boolean = false
@@ -233,6 +288,10 @@ class Parser {
 
 /// `pkl:xml`, as Pkl source.
 const XML_MODULE: &str = r#"
+class Property extends ConvertProperty {
+  name: String
+  render = (prop, renderer) -> if (renderer is Renderer) Pair(name, prop.value) else prop
+}
 class Renderer {
   extension = "xml"
   indent: String = "  "
@@ -240,7 +299,7 @@ class Renderer {
   rootElementName: String = "root"
   rootElementAttributes = new Mapping {}
   converters = new Mapping {}
-  convertPropertyTransformers = new Mapping {}
+  convertPropertyTransformers: Mapping<Class, Mixin<ConvertProperty>> = new Mapping {}
 }
 
 function Element(_name: String): Dynamic = new Dynamic {
@@ -265,6 +324,18 @@ impl Invoke for Invoker<'_> {
     fn invoke(&mut self, function: &Value, arg: Value) -> Result<Value> {
         self.0.invoke_lambda(function, &[arg], self.1)
     }
+
+    fn invoke_all(&mut self, function: &Value, args: &[Value]) -> Result<Value> {
+        self.0.invoke_lambda(function, args, self.1)
+    }
+
+    fn property_annotations(
+        &mut self,
+        source: &crate::value::ObjectSource,
+        name: &str,
+    ) -> Result<Vec<Value>> {
+        self.0.property_annotation_values(source, name, self.1)
+    }
 }
 
 impl Evaluator {
@@ -277,8 +348,11 @@ impl Evaluator {
         if let Some(template) = self.builtin_classes.get(name) {
             return Ok(Some(template.clone()));
         }
-        let tokens = lexer::lex_named(BASE_CLASSES, "pkl:base")?;
-        let module = self.parse_registered(&tokens, BASE_CLASSES, "pkl:base")?;
+        let Some(&(_, source)) = BASE_CLASSES.iter().find(|(class, _)| *class == name) else {
+            return Ok(None);
+        };
+        let tokens = lexer::lex_named(source, "pkl:base")?;
+        let module = self.parse_registered(&tokens, source, "pkl:base")?;
         let Some((class_mods, body)) = module.body.iter().find_map(|entry| match entry {
             Entry::ClassDef(class_name, mods, _, body) if class_name == name => Some((mods, body)),
             _ => None,
@@ -361,7 +435,9 @@ impl Evaluator {
                     .as_deref()
                     .is_some_and(|name| name.rsplit('.').next() == Some(last)) =>
             {
-                source.type_name.as_deref().map(render::class_key)
+                source.type_name.as_deref().map(|name| {
+                    render::class_key_with_identity(name, source.type_identity.as_deref())
+                })
             }
             _ => None,
         }
@@ -502,7 +578,13 @@ impl Evaluator {
         let renderer = self
             .builtin_class(self.output_format.class_name())?
             .unwrap_or_default();
-        let default_value = module_object(module_map, path);
+        // The module's own annotations convert the properties of the value
+        // `output.text` renders, as they do for the module itself.
+        let annotations = self
+            .module_scopes
+            .get(path)
+            .and_then(|snapshot| snapshot.annotations.clone());
+        let default_value = module_object(module_map, path, annotations);
         let default_renderer = renderer.clone();
         let mut output_value_is_explicit = false;
         if let Value::Object(map, _) = &mut output {
@@ -900,12 +982,13 @@ impl Evaluator {
         // As `pkl eval -f json`: null properties and mapping entries are
         // omitted unless the evaluated renderer sets `omitNullProperties`
         // to false.
-        let omit_nulls = render::Settings::read(kind, &renderer)?.omit_null_properties;
+        let settings = render::Settings::read(kind, &renderer)?;
         render::to_json(
             &value,
             top_kind,
             &converters,
-            omit_nulls,
+            settings.omit_null_properties,
+            Some((&settings.renderer, &settings.property_transformers)),
             &mut Invoker(self, 0),
         )
     }
@@ -1092,7 +1175,11 @@ fn dotted_name(expr: &Expr) -> Option<String> {
 
 /// The module itself as a value: typed, with the module's name as its class
 /// (as in Pkl), so renderers treat its members as properties.
-fn module_object(map: &Arc<ObjectMap>, path: &Path) -> Value {
+fn module_object(
+    map: &Arc<ObjectMap>,
+    path: &Path,
+    annotations: Option<Arc<crate::value::ModuleAnnotations>>,
+) -> Value {
     let name = path
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
@@ -1113,6 +1200,7 @@ fn module_object(map: &Arc<ObjectMap>, path: &Path) -> Value {
         mapping_value_types: Vec::new(),
         deprecated: Default::default(),
         poisoned_members: None,
+        module_annotations: annotations,
         declared_as: None,
         kind: crate::value::ObjectKind::Object,
         is_parsed_json: false,

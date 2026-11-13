@@ -151,6 +151,25 @@ impl Evaluator {
         items: &mut Vec<Value>,
         elem_class: Option<&Arc<Value>>,
     ) -> Result<()> {
+        // `outer` is the object the listing body sits in, bound once from the
+        // scope outside the body: the generators and locals within it do not
+        // shadow the enclosing members it reads.
+        if super::entries_mention(entries, "outer") {
+            let mut with_outer = scope.child();
+            super::entries::bind_outer(&mut with_outer, scope, entries, &[]);
+            return self.eval_listing_inner(entries, &with_outer, depth, items, elem_class);
+        }
+        self.eval_listing_inner(entries, scope, depth, items, elem_class)
+    }
+
+    fn eval_listing_inner(
+        &mut self,
+        entries: &[Entry],
+        scope: &Scope,
+        depth: usize,
+        items: &mut Vec<Value>,
+        elem_class: Option<&Arc<Value>>,
+    ) -> Result<()> {
         let mut listing_scope = scope.child();
         // The listing's `default`, which an untyped `new { ... }` element
         // amends and the body may read.
@@ -273,7 +292,7 @@ impl Evaluator {
                             iter_scope.set(key_var, key);
                         }
                         reject_generated_property(&listing_scope, &generator.body)?;
-                        self.eval_listing_entries(
+                        self.eval_listing_inner(
                             &generator.body,
                             &iter_scope,
                             depth + 1,
@@ -292,7 +311,7 @@ impl Evaluator {
                     };
                     if let Some(selected) = selected {
                         reject_generated_property(&listing_scope, selected)?;
-                        self.eval_listing_entries(
+                        self.eval_listing_inner(
                             selected,
                             &listing_scope,
                             depth + 1,

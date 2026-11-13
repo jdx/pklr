@@ -326,6 +326,7 @@ pub(super) fn parsed_object(map: ObjectMap, use_mapping: bool) -> Value {
         mapping_value_types: Vec::new(),
         deprecated: Default::default(),
         poisoned_members: None,
+        module_annotations: None,
         declared_as: None,
         kind: if use_mapping {
             ObjectKind::Mapping

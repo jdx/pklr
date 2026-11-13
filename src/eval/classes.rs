@@ -20,7 +20,17 @@ impl Evaluator {
     ) -> Result<Value> {
         let resolved = parent_name.map(|name| supertype_through_aliases(scope, name));
         let parent_name = resolved.map(|(name, _)| name);
-        let parent_val = resolved.and_then(|(name, from)| resolve_dotted(from, name));
+        let mut parent_val = resolved.and_then(|(name, from)| resolve_dotted(from, name));
+        // A builtin class with no binding in scope is the parent itself, so
+        // its name reaches the subclass's `parent_type_names` and a
+        // converter keyed on it matches the subclass.
+        if parent_val.is_none()
+            && let Some(name) = parent_name
+            && !name.contains('.')
+            && super::output::BUILTIN_CLASS_NAMES.contains(&name)
+        {
+            parent_val = self.builtin_class(name)?;
+        }
         if let Some(parent_name) = parent_name {
             check_supertype(scope, class_name, parent_name, parent_val.as_ref())?;
         }
@@ -257,7 +267,106 @@ impl Evaluator {
                                 _ => None,
                             })
                             .collect();
+                        let child_entries = std::mem::take(&mut src.entries);
+                        let child_entry_scopes = std::mem::take(&mut src.entry_scopes);
+                        // An annotation on a property the parent declares also
+                        // applies to the child's override, ahead of its own,
+                        // and is evaluated where the parent declared it.
+                        let mut inherited_annotations: Vec<(
+                            Name,
+                            Vec<crate::parser::Annotation>,
+                            Arc<CapturedScope>,
+                        )> = Vec::new();
+                        for (index, entry) in psrc.entries.iter().enumerate() {
+                            let Entry::Property(p) = entry else {
+                                continue;
+                            };
+                            if !child_names.contains(&p.name) {
+                                continue;
+                            }
+                            // An entry the parent copied from its own parent
+                            // keeps the scope that declared it, and the
+                            // annotation names resolve there.
+                            let scope = psrc
+                                .entry_scopes
+                                .get(index)
+                                .cloned()
+                                .flatten()
+                                .unwrap_or_else(|| Arc::clone(&parent_scope));
+                            let annotations: Vec<_> = p
+                                .annotations
+                                .iter()
+                                .filter(|annotation| {
+                                    let declared = super::module::STDLIB_ANNOTATIONS
+                                        .contains(&&*annotation.name)
+                                        .then(|| super::scope::restore_scope(&scope));
+                                    !super::module::is_stdlib_annotation(
+                                        &annotation.name,
+                                        declared
+                                            .as_ref()
+                                            .and_then(|scope| scope.get(&annotation.name)),
+                                    )
+                                })
+                                .cloned()
+                                .collect();
+                            if annotations.is_empty() {
+                                continue;
+                            }
+                            inherited_annotations.push((p.name.clone(), annotations, scope));
+                        }
+                        if !inherited_annotations.is_empty() || psrc.module_annotations.is_some() {
+                            // One level per declaring scope, so each
+                            // annotation resolves its names where it was written.
+                            let mut level = psrc.module_annotations.clone();
+                            let mut groups: Vec<(Arc<CapturedScope>, Vec<_>)> = Vec::new();
+                            for (name, annotations, scope) in inherited_annotations {
+                                match groups
+                                    .iter_mut()
+                                    .find(|(known, _)| Arc::ptr_eq(known, &scope))
+                                {
+                                    Some((_, properties)) => properties.push((name, annotations)),
+                                    None => groups.push((scope, vec![(name, annotations)])),
+                                }
+                            }
+                            if groups.is_empty() {
+                                groups.push((Arc::clone(&parent_scope), Vec::new()));
+                            }
+                            for (scope, properties) in groups {
+                                level = Some(Arc::new(crate::value::ModuleAnnotations {
+                                    properties,
+                                    scope: (*scope).clone(),
+                                    parent: level,
+                                }));
+                            }
+                            src.module_annotations = level;
+                        }
+                        let mut prepared_child: Vec<(Entry, Option<Arc<CapturedScope>>)> =
+                            Vec::new();
+                        for (entry_index, entry) in
+                            Arc::unwrap_or_clone(child_entries).into_iter().enumerate()
+                        {
+                            prepared_child.push((
+                                entry,
+                                child_entry_scopes.get(entry_index).cloned().unwrap_or(None),
+                            ));
+                        }
+                        let mut child_used = vec![false; prepared_child.len()];
                         for (entry_index, pe) in psrc.entries.iter().enumerate() {
+                            // A child's override keeps the parent member's place.
+                            if let Entry::Property(p) = pe
+                                && child_names.contains(&p.name)
+                                && !has_modifier(&p.modifiers, Modifier::Local)
+                                && let Some(ci) =
+                                    prepared_child.iter().enumerate().position(|(i, (e, _))| {
+                                        !child_used[i]
+                                            && matches!(e, Entry::Property(c) if c.name == p.name)
+                                    })
+                            {
+                                child_used[ci] = true;
+                                combined_entries.push(prepared_child[ci].0.clone());
+                                combined_entry_scopes.push(prepared_child[ci].1.clone());
+                                continue;
+                            }
                             if let Entry::Property(p) = pe
                                 && (!child_names.contains(&p.name)
                                     || has_modifier(&p.modifiers, Modifier::Local))
@@ -278,14 +387,11 @@ impl Evaluator {
                                 }
                             }
                         }
-                        let child_entries = std::mem::take(&mut src.entries);
-                        let child_entry_scopes = std::mem::take(&mut src.entry_scopes);
-                        for (entry_index, entry) in
-                            Arc::unwrap_or_clone(child_entries).into_iter().enumerate()
-                        {
-                            combined_entries.push(entry);
-                            combined_entry_scopes
-                                .push(child_entry_scopes.get(entry_index).cloned().unwrap_or(None));
+                        for (i, (entry, scope)) in prepared_child.into_iter().enumerate() {
+                            if !child_used[i] {
+                                combined_entries.push(entry);
+                                combined_entry_scopes.push(scope);
+                            }
                         }
                         combined_evaluated_properties.extend(src.evaluated_properties);
                         // Keep the ObjectSource invariant used by amendment
