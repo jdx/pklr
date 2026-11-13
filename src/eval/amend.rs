@@ -1283,7 +1283,8 @@ impl Evaluator {
                     if &*prop.name != "default" && !has_modifier(&prop.modifiers, Modifier::Local))
             }) {
                 return Err(Error::Eval(
-                    "Object of type `Listing` cannot have a property.".into(),
+                    "Object of type `Listing` cannot have a property (other than `default`)."
+                        .into(),
                 ));
             }
             let mut amended = existing;

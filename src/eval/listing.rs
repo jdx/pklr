@@ -181,7 +181,29 @@ impl Evaluator {
             bind_listing_member(&mut listing_scope, prop, value);
             unbound.remove(&prop.name);
         }
+        // `this` in an element reads the elements before it.
+        let reads_this = entries.iter().any(|entry| {
+            matches!(entry, Entry::Elem(expr) | Entry::DynProperty(_, expr)
+                if mapping_entry_mentions_this(expr))
+        });
+        // `this` has the kind of the body being built (a Dynamic's `super`
+        // is a Dynamic list).
+        let this_kind = match scope.get("super") {
+            Some(Value::List(parent)) => parent.kind(),
+            _ => ListKind::Listing,
+        };
+        let total_len = items.len()
+            + entries
+                .iter()
+                .filter(|entry| matches!(entry, Entry::Elem(_)))
+                .count();
         for entry in entries {
+            if reads_this && matches!(entry, Entry::Elem(_) | Entry::DynProperty(..)) {
+                let mut snapshot = items.clone();
+                // Elements still to come, so `this` has about its final length.
+                snapshot.resize(total_len.max(items.len()), Value::Null);
+                listing_scope.set("this", Value::List(ListValue::new(this_kind, snapshot)));
+            }
             match entry {
                 Entry::Predicate(..) => return Err(member_predicates_unsupported()),
                 Entry::Property(_) => {}
@@ -207,7 +229,8 @@ impl Evaluator {
                         .filter(|index| *index < parent_len)
                         .ok_or_else(|| {
                             Error::Eval(format!(
-                                "Element index `{index}` is out of range `0`..`{}`.",
+                                "Element index `{}` is out of range `0`..`{}`.",
+                                group_digits(index),
                                 parent_len as i64 - 1
                             ))
                         })?;
@@ -239,6 +262,7 @@ impl Evaluator {
                         if let Some(key_var) = &generator.key_var {
                             iter_scope.set(key_var, key);
                         }
+                        reject_generated_property(&listing_scope, &generator.body)?;
                         self.eval_listing_entries(
                             &generator.body,
                             &iter_scope,
@@ -257,6 +281,7 @@ impl Evaluator {
                         generator.else_body.as_deref().map(Vec::as_slice)
                     };
                     if let Some(selected) = selected {
+                        reject_generated_property(&listing_scope, selected)?;
                         self.eval_listing_entries(
                             selected,
                             &listing_scope,
@@ -271,6 +296,23 @@ impl Evaluator {
         }
         Ok(())
     }
+}
+
+/// A `for` or `when` body of a Listing that runs may not assign a property,
+/// which would otherwise be dropped silently.
+fn reject_generated_property(scope: &Scope, body: &[Entry]) -> Result<()> {
+    let is_listing = matches!(scope.get("super"),
+        Some(Value::List(parent)) if parent.kind() == ListKind::Listing);
+    let assigns = body.iter().any(|entry| {
+        matches!(entry, Entry::Property(prop)
+            if &*prop.name != "default" && !has_modifier(&prop.modifiers, Modifier::Local))
+    });
+    if is_listing && assigns {
+        return Err(Error::Eval(
+            "Object of type `Listing` cannot have a property (other than `default`).".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// The scope name an untyped `new { ... }` element of a `Listing<T>` is

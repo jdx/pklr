@@ -1508,7 +1508,13 @@ impl Evaluator {
                                 // A declared type is checked when the local is
                                 // read, so a mismatch poisons it.
                                 if let Some(ty) = &prop.type_ann {
-                                    self.check_local_value(&value, ty, scope, depth)?;
+                                    self.check_local_value(
+                                        &value,
+                                        ty,
+                                        prop.value.as_ref().unwrap(),
+                                        scope,
+                                        depth,
+                                    )?;
                                 }
                                 Ok(value)
                             });

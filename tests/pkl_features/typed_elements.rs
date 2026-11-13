@@ -1766,3 +1766,121 @@ fn json_renderer_omits_null_entries_with_compound_keys() {
         serde_json::json!({"r": "{}"})
     );
 }
+
+// Expected values below come from `pkl eval` 0.32.2.
+
+#[test]
+fn listing_this_reads_the_elements_before_it() {
+    let value = eval(
+        "res = new Listing { \"one\"; this[0]; \"two\"; this[2]; this[1] }\n\
+         amended = (res) { \"three\"; this[0]; this[5] }\n",
+    );
+    assert_eq!(
+        value["res"],
+        serde_json::json!(["one", "one", "two", "two", "one"])
+    );
+    assert_eq!(value["amended"][7], serde_json::json!("three"));
+}
+
+#[test]
+fn super_index_past_the_parent_is_an_empty_dynamic() {
+    let value = eval("res = new Listing { super[0] }\n");
+    assert_eq!(value["res"], serde_json::json!([{}]));
+}
+
+#[test]
+fn listing_is_distinct() {
+    let value = eval(
+        "a = new Listing { 1; 2 }.isDistinct\n\
+         b = new Listing { 1; 1 }.isDistinct\n",
+    );
+    assert_eq!(value["a"], serde_json::json!(true));
+    assert_eq!(value["b"], serde_json::json!(false));
+}
+
+#[test]
+fn listing_index_errors_group_digits() {
+    let value = eval(
+        "import \"pkl:test\"\n\
+         x = new Listing { 1 }\n\
+         res = test.catch(() -> x[9223372036854775807])\n",
+    );
+    assert_eq!(
+        value["res"],
+        serde_json::json!("Element index `9,223,372,036,854,775,807` is out of range `0`..`0`.")
+    );
+}
+
+#[test]
+fn listing_rejects_properties() {
+    let error = eval_fails("x = new Listing { foo = 1 }\n");
+    assert!(
+        error.contains("Object of type `Listing` cannot have a property (other than `default`)."),
+        "{error}"
+    );
+}
+
+#[test]
+fn mapping_elements_are_rejected_only_when_generated() {
+    let value = eval("x = new Mapping { when (false) { 0 }; [\"a\"] = 1 }\n");
+    assert_eq!(value["x"], serde_json::json!({"a": 1}));
+    let error = eval_fails("x = new Mapping { when (true) { 0 } }\n");
+    assert!(
+        error.contains("Object of type `Mapping` cannot have an element."),
+        "{error}"
+    );
+}
+
+#[test]
+fn typed_local_checks_the_elements_of_an_existing_listing() {
+    let error = eval_fails(
+        "local a = new Listing { 1 }\n\
+         local b: Listing<String> = a\n\
+         x = b[0]\n",
+    );
+    assert!(error.contains("Listing<String>"), "{error}");
+}
+
+#[test]
+fn amended_function_parameters_are_checked() {
+    let error = eval_fails(
+        "local f = (x) -> new Dynamic {}\n\
+         x = (f) { a: String -> prop = a }.apply(1)\n",
+    );
+    assert!(error.contains("Expected value of type `String`"), "{error}");
+    let value = eval(
+        "local f = (x) -> new Dynamic {}\n\
+         x = (f) { a: Int -> prop = a + 1 }.apply(1)\n",
+    );
+    assert_eq!(value["x"], serde_json::json!({"prop": 2}));
+}
+
+#[test]
+fn listing_rejects_generated_properties() {
+    let err = eval_fails("x = new Listing { when (true) { foo = 1 } }");
+    assert!(err.contains("cannot have a property"), "{err}");
+}
+
+#[test]
+fn mapping_amendment_rejects_generated_elements() {
+    let err = eval_fails("local m = new Mapping { [\"a\"] = 1 }\nx = (m) { when (true) { 2 } }");
+    assert!(err.contains("cannot have an element"), "{err}");
+}
+
+#[test]
+fn listing_is_distinct_uses_equality() {
+    let v = eval("x = new Listing { 1; 1.0 }.isDistinct");
+    assert_eq!(v["x"], false);
+}
+
+#[test]
+fn dynamic_element_this_is_dynamic() {
+    let v = eval("x = new Dynamic { 1; this is Dynamic }");
+    assert_eq!(v["x"][1], true);
+}
+
+#[test]
+fn listing_unused_branch_property_is_not_rejected() {
+    let v = eval("x = new Listing { when (false) { foo = 1 }; 2 }");
+    assert_eq!(v["x"], serde_json::json!([2]));
+}

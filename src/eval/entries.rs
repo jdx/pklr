@@ -769,7 +769,13 @@ impl Evaluator {
                             .map(|value| self.const_local_lambda_guard(value, const_message))
                             .and_then(|value| {
                                 if let Some(ty) = &prop.type_ann {
-                                    self.check_local_value(&value, ty, &active_scope, cx.depth)?;
+                                    self.check_local_value(
+                                        &value,
+                                        ty,
+                                        expr,
+                                        &active_scope,
+                                        cx.depth,
+                                    )?;
                                 }
                                 Ok(value)
                             })
@@ -785,6 +791,7 @@ impl Evaluator {
                                             self.check_local_value(
                                                 &value,
                                                 ty,
+                                                expr,
                                                 &active_scope,
                                                 cx.depth,
                                             )?;
@@ -1229,6 +1236,11 @@ impl Evaluator {
                         _ => {}
                     }
                 }
+            }
+            Entry::Elem(_) if cx.mapping_entries => {
+                return Err(Error::Eval(
+                    "Object of type `Mapping` cannot have an element.".into(),
+                ));
             }
             Entry::Elem(expr) => {
                 let active_scope = shadowed(
@@ -2001,7 +2013,14 @@ pub(super) fn this_member_reads_non_const(
 /// Reject elements in the body of an object of type `type_display`, and
 /// entries too when `typed` (a class instance has only properties).
 pub(super) fn check_member_kinds(type_display: &str, entries: &[Entry], typed: bool) -> Result<()> {
-    if body_has(entries, &|entry| matches!(entry, Entry::Elem(_))) {
+    // A Mapping body checks the elements its generators produce as it runs, so
+    // only a direct element counts here.
+    let is_elem = |entry: &Entry| matches!(entry, Entry::Elem(_));
+    if if typed {
+        body_has(entries, &is_elem)
+    } else {
+        entries.iter().any(is_elem)
+    } {
         return Err(Error::Eval(format!(
             "Object of type `{type_display}` cannot have an element."
         )));
