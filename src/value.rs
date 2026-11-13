@@ -503,6 +503,8 @@ pub struct ListValue {
 pub(crate) struct ListLayer {
     pub(crate) entries: crate::parser::Body,
     pub(crate) scope: crate::eval::ListScope,
+    /// The `default` in force once this body ran, for `super.default`.
+    pub(crate) default: Option<Value>,
 }
 
 /// The bodies that built a `Listing`, oldest first (see [`ListValue`]).

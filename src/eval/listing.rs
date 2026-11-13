@@ -161,36 +161,9 @@ impl Evaluator {
         if let Some(default) = &listing_default {
             listing_scope.set("default", default.clone());
         }
-        // A body's locals and properties (`default`) are visible to all of
-        // its entries, including ones written before them, and to each other
-        // regardless of order. Bind each once the members of this body it
-        // reads are bound, so a function captures them too.
-        let mut pending: Vec<_> = entries
-            .iter()
-            .filter_map(|entry| match entry {
-                Entry::Property(prop) => Some((prop, prop.value.as_ref()?)),
-                _ => None,
-            })
-            .collect();
-        let mut unbound: HashSet<Name> =
-            pending.iter().map(|(prop, _)| prop.name.clone()).collect();
-        while !pending.is_empty() {
-            let ready = pending
-                .iter()
-                .position(|(prop, expr)| {
-                    let mut refs = HashSet::default();
-                    collect_expr_refs(expr, &mut refs, &HashSet::default());
-                    !refs
-                        .iter()
-                        .any(|name| *name != prop.name && unbound.contains(name))
-                })
-                // A cycle: bind in declaration order.
-                .unwrap_or(0);
-            let (prop, expr) = pending.remove(ready);
-            let value = self.eval_expr(expr, &listing_scope, depth + 1)?;
-            bind_listing_member(&mut listing_scope, prop, value);
-            unbound.remove(&prop.name);
-        }
+        // A replay keeps the final `default` its caller bound.
+        let keep_default = scope.get(LISTING_REPLAY).is_some();
+        self.bind_listing_members(entries, &mut listing_scope, keep_default, depth)?;
         // `this` in an element reads the elements before it.
         let final_this = scope.get(LISTING_FINAL_THIS).cloned();
         let reads_this = final_this.is_none()
@@ -222,20 +195,23 @@ impl Evaluator {
             match entry {
                 Entry::Predicate(..) => return Err(member_predicates_unsupported()),
                 Entry::Property(_) => {}
-                Entry::Elem(Expr::New(None, body, _)) if listing_default.is_some() => {
-                    // `new { ... }` amends what `default` makes for this index.
-                    let made = Expr::Call(
-                        Box::new(Expr::Field(
-                            Box::new(Expr::Ident("default".into())),
-                            "apply".into(),
-                        )),
-                        vec![Expr::Int(items.len() as i64)],
-                    );
-                    let element = Expr::Binop(
-                        BinOp::Add,
-                        Box::new(made),
-                        Box::new(Expr::ObjectBody(body.clone())),
-                    );
+                Entry::Elem(expr)
+                    if listing_default.is_some() && parser::has_untyped_result_new(expr) =>
+                {
+                    // `new { ... }` amends what `default` makes for this
+                    // index, also as the result of an `if`, `let` or `trace`.
+                    let index = items.len() as i64;
+                    let mut element = expr.clone();
+                    parser::rewrite_untyped_result_new(&mut element, &mut |body| {
+                        let made = Expr::Call(
+                            Box::new(Expr::Field(
+                                Box::new(Expr::Ident("default".into())),
+                                "apply".into(),
+                            )),
+                            vec![Expr::Int(index)],
+                        );
+                        Expr::Binop(BinOp::Add, Box::new(made), Box::new(Expr::ObjectBody(body)))
+                    });
                     items.push(self.eval_expr(&element, &listing_scope, depth + 1)?)
                 }
                 Entry::Elem(expr) => {
@@ -336,6 +312,10 @@ pub(super) const LISTING_DEFAULT: &str = "\0listing_default";
 /// `this` reads in a replayed body.
 const LISTING_FINAL_THIS: &str = "\0listing_final_this";
 
+/// Set while a listing is replayed: the `default` in scope is the final one,
+/// which a body's own `default = ...` must not replace.
+const LISTING_REPLAY: &str = "\0listing_replay";
+
 /// The parameter of a listing's `default` function.
 const DEFAULT_INDEX: &str = "\0listing_default_index";
 
@@ -384,7 +364,7 @@ fn listing_body_flags(entries: &[Entry], flags: &mut ListingBodyFlags) {
             }
             Entry::Elem(expr) | Entry::DynProperty(_, expr) => {
                 flags.reads_this |= mapping_entry_mentions_this(expr);
-                flags.default_elements |= matches!(expr, Expr::New(None, ..));
+                flags.default_elements |= parser::has_untyped_result_new(expr);
             }
             Entry::ForGenerator(generator) => listing_body_flags(&generator.body, flags),
             Entry::WhenGenerator(generator) => {
@@ -435,7 +415,10 @@ impl Evaluator {
             }
             _ => return Ok(None),
         };
-        self.eval_expr(&function, scope, depth + 1).map(Some)
+        // The function sees the body's own locals.
+        let mut scope = scope.child();
+        self.bind_listing_members(entries, &mut scope, false, depth)?;
+        self.eval_expr(&function, &scope, depth + 1).map(Some)
     }
 
     /// Build the listing `entries` make over `base` (`None` for a new one).
@@ -461,6 +444,7 @@ impl Evaluator {
         let layer = ListLayer {
             entries: entries.clone(),
             scope: scope.clone(),
+            default: None,
         };
         let record = base_layers.is_some()
             || flags.defines_default
@@ -486,7 +470,10 @@ impl Evaluator {
             .filter(|layers| flags.defines_default || layers.reads_this)
         {
             let mut layers = (**base_layers).clone();
-            layers.layers.push(layer);
+            layers.layers.push(ListLayer {
+                default: default.clone(),
+                ..layer
+            });
             layers.default = default;
             layers.reads_this |= flags.reads_this;
             let items = self.replay_listing(&layers, kind, elem_class.as_ref(), depth)?;
@@ -511,7 +498,10 @@ impl Evaluator {
                 },
                 |layers| (*layers).clone(),
             );
-            layers.layers.push(layer);
+            layers.layers.push(ListLayer {
+                default: default.clone(),
+                ..layer
+            });
             layers.default = default;
             layers.reads_this |= flags.reads_this;
             Arc::new(layers)
@@ -529,14 +519,32 @@ impl Evaluator {
         depth: usize,
     ) -> Result<Vec<Value>> {
         let mut final_items: Option<Vec<Value>> = None;
-        let passes = if layers.reads_this { 2 } else { 1 };
+        // Elements that read `this` read the previous pass's result, so
+        // repeat until they settle (each pass fixes at least one more).
+        let passes = if layers.reads_this {
+            layers.init.len() + layers.layers.len() + 4
+        } else {
+            1
+        };
         for _ in 0..passes {
             let mut items = layers.init.to_vec();
+            let mut parent_default = None;
             for layer in &layers.layers {
                 let mut scope = layer.scope.child();
-                let super_list =
-                    ListValue::new(kind, items.clone()).with_elem_class(elem_class.cloned());
+                let parent_layers = parent_default.take().map(|default| {
+                    Arc::new(ListLayers {
+                        init: Arc::new(Vec::new()),
+                        layers: Vec::new(),
+                        default: Some(default),
+                        reads_this: false,
+                    })
+                });
+                parent_default = layer.default.clone();
+                let super_list = ListValue::new(kind, items.clone())
+                    .with_elem_class(elem_class.cloned())
+                    .with_layers(parent_layers);
                 scope.set("super", Value::List(super_list));
+                scope.set(LISTING_REPLAY, Value::Null);
                 scope.receiver_entries = Some(layer.entries.clone());
                 scope.receiver_list_base = Some(items.len());
                 scope.set(
@@ -557,7 +565,11 @@ impl Evaluator {
                     elem_class,
                 )?;
             }
+            let settled = final_items.as_ref() == Some(&items);
             final_items = Some(items);
+            if settled {
+                break;
+            }
         }
         Ok(final_items.unwrap_or_default())
     }
@@ -1006,4 +1018,53 @@ pub(super) fn listing_leaf_name(ty: &crate::parser::TypeExpr, scope: &Scope) -> 
         };
     }
     None
+}
+
+impl Evaluator {
+    /// A body's locals and properties (`default`) are visible to all of its
+    /// entries, including ones written before them, and to each other
+    /// regardless of order. Bind each once the members of this body it reads
+    /// are bound, so a function captures them too. `keep_default` leaves a
+    /// `default` already in `scope` alone.
+    fn bind_listing_members(
+        &mut self,
+        entries: &[Entry],
+        scope: &mut Scope,
+        keep_default: bool,
+        depth: usize,
+    ) -> Result<()> {
+        let mut pending: Vec<_> = entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Property(prop)
+                    if !(keep_default
+                        && &*prop.name == "default"
+                        && !has_modifier(&prop.modifiers, Modifier::Local)) =>
+                {
+                    Some((prop, prop.value.as_ref()?))
+                }
+                _ => None,
+            })
+            .collect();
+        let mut unbound: HashSet<Name> =
+            pending.iter().map(|(prop, _)| prop.name.clone()).collect();
+        while !pending.is_empty() {
+            let ready = pending
+                .iter()
+                .position(|(prop, expr)| {
+                    let mut refs = HashSet::default();
+                    collect_expr_refs(expr, &mut refs, &HashSet::default());
+                    !refs
+                        .iter()
+                        .any(|name| *name != prop.name && unbound.contains(name))
+                })
+                // A cycle: bind in declaration order.
+                .unwrap_or(0);
+            let (prop, expr) = pending.remove(ready);
+            let value = self.eval_expr(expr, scope, depth + 1)?;
+            bind_listing_member(scope, prop, value);
+            unbound.remove(&prop.name);
+        }
+        Ok(())
+    }
 }

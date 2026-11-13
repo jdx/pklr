@@ -33,3 +33,39 @@ fn listing_late_binds_this_when_amended() {
     assert_eq!(v["a"], serde_json::json!([1, 2]));
     assert_eq!(v["b"], serde_json::json!([1, 3, 5]));
 }
+
+#[test]
+fn listing_this_reads_settle_when_amended() {
+    let v = eval("a = new Listing { 1; this[0]; this[1]; this[2] }\nb = (a) { [0] = 9 }\n");
+    assert_eq!(v["b"], serde_json::json!([9, 9, 9, 9]));
+}
+
+#[test]
+fn listing_default_sees_body_locals() {
+    let v = eval(
+        "l = new Listing { local n = 1; default { x = n }; new {} }\nd = l.default.apply(0).x\n",
+    );
+    assert_eq!(v["d"], 1);
+}
+
+#[test]
+fn amended_listing_rebuilds_elements_with_the_final_default() {
+    let v = eval(
+        "a = new Listing { default = (i) -> new Dynamic { n = 1 }; new {} }\nb = (a) { default { n = 2 } }\n",
+    );
+    assert_eq!(v["b"], serde_json::json!([{"n": 2}]));
+}
+
+#[test]
+fn replay_keeps_the_parent_default_for_super() {
+    let v = eval(
+        "a = new Listing { default { n = 1 }; new {} }\nb = (a) { super.default.apply(0) }\nc = (b) { default { n = 2 } }\n",
+    );
+    assert_eq!(v["c"], serde_json::json!([{"n": 2}, {"n": 1}]));
+}
+
+#[test]
+fn conditional_element_gets_the_default() {
+    let v = eval("l = new Listing { default { n = 1 }; if (true) new { m = 2 } else new {} }\n");
+    assert_eq!(v["l"], serde_json::json!([{"n": 1, "m": 2}]));
+}
