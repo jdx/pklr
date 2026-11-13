@@ -528,23 +528,18 @@ pub(super) fn mapping_value_type_from_name(name: &str) -> Option<String> {
         .or_else(|| name.strip_prefix("Map<"))?
         .strip_suffix('>')?;
     let mut depth = 0usize;
-    // Brackets inside a string literal of a constraint do not nest.
-    let (mut in_string, mut escaped) = (false, false);
-    for (index, ch) in inner.char_indices() {
-        if in_string {
-            match ch {
-                _ if escaped => escaped = false,
-                '\\' => escaped = true,
-                '"' => in_string = false,
-                _ => {}
-            }
+    let bytes = inner.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        // Brackets inside a string literal of a constraint do not nest.
+        if let Some(end) = string_literal_end(inner, index) {
+            index = end;
             continue;
         }
-        match ch {
-            '"' => in_string = true,
-            '<' | '(' => depth += 1,
-            '>' | ')' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
+        match bytes[index] {
+            b'<' | b'(' => depth += 1,
+            b'>' | b')' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => {
                 let value_type = inner[index + 1..].trim();
                 return Some(
                     value_type
@@ -557,8 +552,42 @@ pub(super) fn mapping_value_type_from_name(name: &str) -> Option<String> {
             }
             _ => {}
         }
+        index += 1;
     }
     None
+}
+
+/// The index just past the string literal that starts at `start` in `text`,
+/// or `None` when no string literal starts there. Handles `#"..."#` raw
+/// strings and `"""` multiline strings.
+fn string_literal_end(text: &str, start: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let hashes = bytes[start..].iter().take_while(|&&b| b == b'#').count();
+    let quote = start + hashes;
+    if bytes.get(quote) != Some(&b'"') {
+        return None;
+    }
+    let quotes = if bytes[quote..].starts_with(b"\"\"\"") {
+        3
+    } else {
+        1
+    };
+    let closing = format!("{}{}", "\"".repeat(quotes), "#".repeat(hashes));
+    let escape = format!("\\{}", "#".repeat(hashes));
+    let mut index = quote + quotes;
+    while index < bytes.len() {
+        if text[index..].starts_with(&closing) {
+            return Some(index + closing.len());
+        }
+        if text[index..].starts_with(&escape) && index + escape.len() < bytes.len() {
+            // Skip the escaped character, which may be a quote.
+            let escaped = text[index + escape.len()..].chars().next()?;
+            index += escape.len() + escaped.len_utf8();
+        } else {
+            index += 1;
+        }
+    }
+    Some(bytes.len())
 }
 
 pub(super) fn collect_mapping_value_type_names(
