@@ -427,23 +427,13 @@ impl Evaluator {
                 }
                 // The amended module is a class: its properties are the only
                 // ones an amending module can assign.
-                if !prop.is_method
-                    && &*prop.name != "output"
-                    // An unresolved base also yields no members; only judge a
-                    // base that declared some.
-                    && (!late_inherited_properties.is_empty() || !base_obj.is_empty())
-                    && !base_obj.contains_key(prop.name.as_ref())
-                    && !late_inherited_properties
-                        .iter()
-                        .any(|inherited| inherited.name == prop.name)
-                    && !self.inherits_stdlib_module(module, path)
-                {
-                    let module_name = self.amended_module_name(module, path);
-                    return Err(Error::Eval(format!(
-                        "Cannot find property `{}` in module `{module_name}`.",
-                        prop.name
-                    )));
-                }
+                self.check_declared_in_base(
+                    module,
+                    path,
+                    prop,
+                    &late_inherited_properties,
+                    &base_obj,
+                )?;
                 if has_modifier(&prop.modifiers, Modifier::Fixed) {
                     return Err(Error::Eval(
                         "Modifier `fixed` is not applicable to object members.".into(),
@@ -1051,9 +1041,41 @@ impl Evaluator {
         Ok(inherited_type_failures)
     }
 
+    /// Reject a property an amending module assigns but its base never declared.
+    /// Kept out of line: the module evaluator is deeply recursive.
+    #[inline(never)]
+    fn check_declared_in_base(
+        &mut self,
+        module: &Module,
+        path: &Path,
+        prop: &Property,
+        late_inherited_properties: &[Arc<Property>],
+        base_obj: &ObjectMap,
+    ) -> Result<()> {
+        if !prop.is_method
+            && &*prop.name != "output"
+            // An unresolved base also yields no members; only judge a base
+            // that declared some.
+            && (!late_inherited_properties.is_empty() || !base_obj.is_empty())
+            && !base_obj.contains_key(prop.name.as_ref())
+            && !late_inherited_properties
+                .iter()
+                .any(|inherited| inherited.name == prop.name)
+            && !self.inherits_stdlib_module(module, path)
+        {
+            let module_name = self.amended_module_name(module, path);
+            return Err(Error::Eval(format!(
+                "Cannot find property `{}` in module `{module_name}`.",
+                prop.name
+            )));
+        }
+        Ok(())
+    }
+
     /// An amending or extending module assigns plain values to properties the
     /// base module declared with a type. Check each such value against the
     /// inherited type; the failure stays attached to the member.
+    #[inline(never)]
     fn plain_override_type_failures(
         &mut self,
         body: &Body,
@@ -2795,13 +2817,23 @@ mod late_binding_pass_tests {
     /// each captured scope holds on every pass.
     #[test]
     fn a_chain_no_quiet_pass_can_end_never_compares_by_data() {
-        let child = "amends \"Template.pkl\"\n";
-        let (json, passes) = evaluate_amendment(&chain_of_lambdas_reading_the_module(30), child);
-        assert_eq!(json["res"], 2);
-        // The template's own pass and pass 0 of the amending module, then a pass for
-        // each of the inherited properties, and one more.
-        assert_eq!(passes, 2 + 31, "every pass runs");
-        assert_eq!(super::SAME_DATA_CHECKS.with(std::cell::Cell::get), 0);
+        // The 30 nested lambda calls need more than a default test thread's
+        // stack in a debug build, so run on a roomier one.
+        std::thread::Builder::new()
+            .stack_size(16 << 20)
+            .spawn(|| {
+                let child = "amends \"Template.pkl\"\n";
+                let (json, passes) =
+                    evaluate_amendment(&chain_of_lambdas_reading_the_module(30), child);
+                assert_eq!(json["res"], 2);
+                // The template's own pass and pass 0 of the amending module, then
+                // a pass for each of the inherited properties, and one more.
+                assert_eq!(passes, 2 + 31, "every pass runs");
+                assert_eq!(super::SAME_DATA_CHECKS.with(std::cell::Cell::get), 0);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     /// The chain and the margin as long as the passes, to the pass: the last
