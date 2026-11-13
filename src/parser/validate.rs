@@ -1138,8 +1138,14 @@ pub(super) fn find_called_lambda(body: &[Entry], open: bool) -> Option<&str> {
     let lambdas: Vec<&str> = body
         .iter()
         .filter_map(|entry| match entry {
+            // A call to a stdlib function name falls through to `base`.
             Entry::Property(prop)
-                if !prop.is_method && matches!(prop.value, Some(Expr::Lambda(..))) =>
+                if !prop.is_method
+                    && matches!(prop.value, Some(Expr::Lambda(..)))
+                    && !matches!(
+                        &*prop.name,
+                        "List" | "Map" | "Set" | "Pair" | "IntSeq" | "Regex"
+                    ) =>
             {
                 Some(&*prop.name)
             }

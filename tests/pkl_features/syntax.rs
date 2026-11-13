@@ -3419,6 +3419,13 @@ fn a_property_holding_a_lambda_is_not_a_method() {
 }
 
 #[test]
+fn a_lambda_named_like_a_stdlib_function_still_calls_the_builtin() {
+    // `pkl eval`: method lookup skips the property and reaches `base`.
+    let json = eval("local List = (a) -> a\nx = List(1)");
+    assert_eq!(json["x"], serde_json::json!([1]));
+}
+
+#[test]
 fn resource_has_no_properties_beyond_its_own() {
     let err = eval_fails("resource = new Resource {\n  foo = \"bar\"\n}");
     assert!(err.contains("foo"), "{err}");
