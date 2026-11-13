@@ -47,9 +47,9 @@ impl Evaluator {
                 .map(Box::new);
         }
         if source.kind == ObjectKind::Reference
-            && let Some(result) = self.reference_method(obj, method)
+            && let Some(result) = self.reference_method(obj, method, args.len())
         {
-            return Some(Box::new(Ok(result)));
+            return Some(Box::new(result));
         }
         if is_class_method_miss(receiver, source, method) {
             return Some(Box::new(Err(class_method_error(method))));
@@ -394,11 +394,13 @@ impl Evaluator {
             {
                 return Ok(Some(regex_value(arg.clone())?));
             }
+            if matches!(func_val, Value::Object(..))
+                && let Some(result) = self.reference_construct(&func_val, evaled_args)
+            {
+                return result.map(Some);
+            }
             if evaled_args.is_empty() {
                 return Ok(Some(func_val));
-            }
-            if let Some(result) = self.reference_construct(&func_val, evaled_args) {
-                return result.map(Some);
             }
             return Err(Error::Eval("cannot call non-function".into()));
         }

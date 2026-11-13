@@ -1229,12 +1229,14 @@ impl Value {
                 serde_json::Value::Null
             }
             Value::Object(map, source) => {
-                // A built-in `Pair` or `TypeAlias` has no JSON form.
+                // A built-in `Pair` or `TypeAlias`, or a `Reference`, has no
+                // JSON form.
                 if source.as_deref().is_some_and(|source| {
-                    matches!(
-                        source.type_identity.as_deref(),
-                        Some("pkl:base#Pair" | "pkl:base#TypeAlias")
-                    )
+                    source.kind == ObjectKind::Reference
+                        || matches!(
+                            source.type_identity.as_deref(),
+                            Some("pkl:base#Pair" | "pkl:base#TypeAlias")
+                        )
                 }) {
                     unrenderable.get_or_insert(self);
                     return serde_json::Value::Null;
@@ -1308,6 +1310,7 @@ impl Value {
         let type_name = match self {
             Value::Object(_, Some(source)) if source.kind != ObjectKind::Class => {
                 match source.type_identity.as_deref() {
+                    _ if source.kind == ObjectKind::Reference => "pkl.ref#Reference",
                     Some("pkl:base#Pair") => "Pair",
                     Some("pkl:base#TypeAlias") => "TypeAlias",
                     _ => self.type_name(),
@@ -1344,6 +1347,10 @@ impl Value {
             Value::Int(n) => json!(n),
             Value::Float(f) => json!(f),
             Value::String(s) => serde_json::Value::String(s.to_string()),
+            // A reference's members are internal: show its text.
+            Value::Object(_, Some(source)) if source.kind == ObjectKind::Reference => {
+                json!(crate::eval::stdlib::render_value(self))
+            }
             Value::Object(map, source) => {
                 let mut obj = serde_json::Map::new();
                 // Methods are stored as function-valued members, but are not

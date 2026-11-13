@@ -121,10 +121,19 @@ impl Evaluator {
             && body_reads.contains(class_name)
             && child_scope.get(class_name).is_none()
         {
-            child_scope.set(
-                class_name,
-                stdlib::class_value(class_name, scope.runtime_type_identity(class_name)),
-            );
+            let mut placeholder =
+                stdlib::class_value(class_name, scope.runtime_type_identity(class_name));
+            // Its declarations (and its parent's) let a member of a type
+            // be looked up before the class is complete.
+            if let Value::Object(_, Some(source)) = &mut placeholder {
+                let mut entries: Vec<Entry> = match &parent_val {
+                    Some(Value::Object(_, Some(parent))) => parent.entries.to_vec(),
+                    _ => Vec::new(),
+                };
+                entries.extend(body.iter().cloned());
+                Arc::make_mut(source).entries = entries.into();
+            }
+            child_scope.set(class_name, placeholder);
         }
 
         let mut child_receiver_scope = child_scope.clone();

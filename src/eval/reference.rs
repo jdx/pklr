@@ -104,6 +104,13 @@ pub(super) struct RefState {
     saw_constraint: bool,
 }
 
+impl RefState {
+    /// Frees the classes, which hold value trees that free recursively.
+    pub(super) fn release(&mut self) {
+        self.classes.clear();
+    }
+}
+
 const BASE_CLASSES: &[&str] = &[
     "Any",
     "Null",
@@ -156,6 +163,9 @@ fn base_parent(name: &str) -> Option<&'static str> {
     Some(match name {
         "Any" => return None,
         "Int" | "Float" => "Number",
+        "Int8" | "Int16" | "Int32" | "UInt8" | "UInt16" | "UInt32" | "UInt" => "Int",
+        "Typed" => "Object",
+        "Module" => "Typed",
         "List" | "Set" => "Collection",
         "Listing" | "Mapping" | "Dynamic" => "Object",
         _ => "Any",
@@ -298,6 +308,20 @@ impl Evaluator {
         })
     }
 
+    /// The declaring scope and member name of the generic alias `m.Name`
+    /// that `scope` imports as `m`.
+    fn imported_generic_scope<'n>(
+        &mut self,
+        scope: &Scope,
+        name: &'n str,
+    ) -> Option<(Scope, &'n str)> {
+        let (root, member) = name.split_once('.')?;
+        scope.get_type_alias(&format!("{root}#{member}"))?;
+        let identity = scope.module_identity(root).cloned()?;
+        let declaring = self.module_type_scope(&identity)?;
+        Some((declaring, member))
+    }
+
     /// The normalized form of the type `ty` written in `scope`.
     pub(super) fn normalize_type(&mut self, ty: &TypeExpr, scope: &Scope) -> RType {
         let mut out = Vec::new();
@@ -331,12 +355,15 @@ impl Evaluator {
             }
             TypeExpr::Generic(name, args) => {
                 let name = name.trim_start_matches('*');
-                let declaring = match self.inherited_alias(scope, name) {
-                    Some((_, module_scope)) => module_scope,
-                    None => scope.clone(),
+                let (declaring, alias_name) = match self.inherited_alias(scope, name) {
+                    Some((_, module_scope)) => (module_scope, name),
+                    None => match self.imported_generic_scope(scope, name) {
+                        Some((module_scope, member)) => (module_scope, member),
+                        None => (scope.clone(), name),
+                    },
                 };
                 if let Some(TypeExpr::Generic(params, written)) =
-                    declaring.get_type_alias(&generic_alias_key(name))
+                    declaring.get_type_alias(&generic_alias_key(alias_name))
                     && let Some(body) = written.first()
                 {
                     let params: Vec<&str> = params.split(',').collect();
@@ -430,7 +457,30 @@ impl Evaluator {
             }
             return false;
         }
-        self.class_parents(sub).iter().any(|p| &**p == sup)
+        // A class a module declares is a `Typed` and an `Object`.
+        matches!(sup, "pkl:base#Typed" | "pkl:base#Object")
+            || self.class_parents(sub).iter().any(|p| &**p == sup)
+    }
+
+    /// The type arguments `sub` has as an instance of its ancestor `sup`:
+    /// a `List<E>` is a `Collection<E>`, and other ancestors have none.
+    /// The type arguments of `sub<args>` seen as its ancestor `sup`, or `None`
+    /// when an ancestor on the way takes none of them.
+    fn upcast_args(sub: &str, args: &[RType], sup: &str) -> Option<Vec<RType>> {
+        let Some(mut current) = sub.strip_prefix("pkl:base#") else {
+            return Some(Vec::new());
+        };
+        let args = args.to_vec();
+        while format!("pkl:base#{current}") != sup {
+            let Some(parent) = base_parent(current) else {
+                return Some(Vec::new());
+            };
+            if !matches!((current, parent), ("List" | "Set", "Collection")) && !args.is_empty() {
+                return None;
+            }
+            current = parent;
+        }
+        Some(args)
     }
 
     pub(super) fn is_subtype(&self, sub: &RType, sup: &RType) -> bool {
@@ -478,17 +528,12 @@ impl Evaluator {
                 if !self.is_subclass(a_id, b_id) {
                     return false;
                 }
-                if a_id == b_id && !a.is_empty() && !b.is_empty() {
-                    let invariant_key = b_id.as_ref() == "pkl:base#Mapping";
-                    return a.iter().zip(b).enumerate().all(|(i, (x, y))| {
-                        if invariant_key && i == 0 {
-                            x == y
-                        } else {
-                            self.is_subtype(x, y)
-                        }
-                    });
-                }
-                true
+                // As pkl, type arguments are covariant (keys included) and a
+                // raw class never relates to an applied one.
+                let Some(a) = Self::upcast_args(a_id, a, b_id) else {
+                    return false;
+                };
+                a.len() == b.len() && a.iter().zip(b).all(|(x, y)| self.is_subtype(x, y))
             }
             _ => false,
         }
@@ -651,15 +696,15 @@ impl Evaluator {
                         if source.type_identity.as_deref() == Some(&**id)
                             || source.parent_type_identities.iter().any(|p| p.as_str() == &**id));
                 };
-                match (name, key) {
-                    ("Any", _) => true,
-                    ("String", Value::String(_))
-                    | ("Int" | "Number", Value::Int(_))
-                    | ("Float" | "Number", Value::Float(_))
-                    | ("Boolean", Value::Bool(_)) => true,
-                    _ => int_alias_range(name).is_some_and(
-                        |(lo, hi)| matches!(key, Value::Int(n) if (lo..=hi).contains(&i128::from(*n))),
-                    ),
+                // As pkl, a key is of exactly the key type's class: `Any`,
+                // `Number` and `Collection` accept no `Int` or `List`.
+                match key {
+                    Value::Object(_, source) => source.as_ref().is_some_and(|source| {
+                        source.type_identity.as_deref() == Some(&**id)
+                            || (source.type_identity.is_none()
+                                && source.type_name.as_deref() == Some(name))
+                    }),
+                    _ => value_type_name(key) == name,
                 }
             }
             RType::Nothing => false,
@@ -743,7 +788,12 @@ impl Evaluator {
     }
 
     /// The methods of `Reference`: `getDomain()`, `getData()`, `getPath()`.
-    pub(super) fn reference_method(&self, obj: &Value, method: &str) -> Option<Value> {
+    pub(super) fn reference_method(
+        &self,
+        obj: &Value,
+        method: &str,
+        arg_count: usize,
+    ) -> Option<Result<Value>> {
         reference_source(obj)?;
         let Value::Object(members, _) = obj else {
             return None;
@@ -754,7 +804,12 @@ impl Evaluator {
             "getPath" => PATH_KEY,
             _ => return None,
         };
-        members.get(key).cloned()
+        if arg_count != 0 {
+            return Some(Err(error(format!(
+                "Expected 0 function arguments but got {arg_count}."
+            ))));
+        }
+        members.get(key).cloned().map(Ok)
     }
 
     /// `reference.toString()`: the domain renders the reference.

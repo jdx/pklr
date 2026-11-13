@@ -10,7 +10,7 @@ impl Evaluator {
     /// classes and imports), by its identity (canonical path or URL).
     /// Snapshots are keyed by the path the module was loaded with, which need
     /// not be canonical.
-    fn module_type_scope(&mut self, identity: &str) -> Option<Scope> {
+    pub(super) fn module_type_scope(&mut self, identity: &str) -> Option<Scope> {
         let key = if self.module_scopes.contains_key(Path::new(identity)) {
             PathBuf::from(identity)
         } else {

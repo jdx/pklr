@@ -204,6 +204,7 @@ impl Evaluator {
                 self.parse_cache.clear();
                 self.plan_cache.clear();
                 self.body_roots_cache.clear();
+                self.refs.release();
             }
             result
         })
@@ -296,6 +297,7 @@ impl Evaluator {
         // are otherwise only held here weakly; drop their registry entries at
         // each evaluation boundary.
         self.release_deep_state();
+        self.refs = reference::RefState::default();
         self.prune_lambda_guards();
         self.env_reads.clear();
         self.import_cache.clear();
@@ -415,6 +417,7 @@ impl Evaluator {
             std::mem::take(&mut self.mapping_key_values),
             std::mem::take(&mut self.deferred_const),
             self.last_coerced.take(),
+            std::mem::take(&mut self.refs),
         );
         crate::stack::drop_on_large_stack(held);
     }

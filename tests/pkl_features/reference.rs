@@ -168,3 +168,101 @@ joined = new Listing { r.title; r.inner.n }.toList().join(",")
 "#);
     assert_eq!(result["joined"], "$.title,$.inner.n");
 }
+
+#[test]
+fn reference_accessors_take_no_arguments() {
+    let err = fails("x = r.getDomain(1)");
+    assert!(
+        err.contains("Expected 0 function arguments but got 1."),
+        "{err}"
+    );
+    let err = eval_fails("import \"pkl:ref\"\nx = ref.Reference()");
+    assert!(
+        err.contains("Expected 3 function arguments but got 0."),
+        "{err}"
+    );
+}
+
+#[test]
+fn reference_type_arguments_follow_the_ancestor() {
+    let body = |src: &str, dst: &str| {
+        format!(
+            "class P {{ v: {src} }}\nlocal p = ref.Reference(d, P, null)\nlocal ok: ref.Reference<D, {dst}> = p.v\nres = ok.getPath().length"
+        )
+    };
+    for (src, dst) in [
+        ("List<String>", "Collection<String>"),
+        ("Mapping<String, Int>", "Mapping<Any, Int>"),
+        ("Map<Int8, Int>", "Map<Int, Int>"),
+    ] {
+        assert_eq!(run(&body(src, dst))["res"], 1, "{src} -> {dst}");
+    }
+    for (src, dst) in [
+        ("List<String>", "Collection<Int>"),
+        ("Listing<Int>", "Object"),
+        ("Mapping<Any, Int>", "Mapping<String, Int>"),
+        ("List", "List<Int>"),
+    ] {
+        let err = fails(&body(src, dst));
+        assert!(
+            err.contains("Expected value of type"),
+            "{src} -> {dst}: {err}"
+        );
+    }
+}
+
+#[test]
+fn reference_user_class_is_a_typed_and_object() {
+    let result = run(r#"
+class U {}
+class P { v: U }
+local p = ref.Reference(d, P, null)
+local a: ref.Reference<D, Typed> = p.v
+local b: ref.Reference<D, Object> = p.v
+ok = a.getPath().length + b.getPath().length
+"#);
+    assert_eq!(result["ok"], 2);
+}
+
+#[test]
+fn reference_subscript_key_is_of_the_key_class() {
+    let result = run(r#"
+class P { dur: Mapping<Duration, Int> = new {}; ds: Mapping<DataSize, Int> = new {} }
+local p = ref.Reference(d, P, null)
+a = p.dur[1.s].getPath().length
+b = p.ds[1.mb].getPath().length
+"#);
+    assert_eq!(result["a"], 2);
+    assert_eq!(result["b"], 2);
+    let err = fails(
+        r#"
+class P { m: Mapping<Number, Int> = new {} }
+local p = ref.Reference(d, P, null)
+x = p.m[1]
+"#,
+    );
+    assert!(err.contains("Cannot subscript"), "{err}");
+}
+
+#[test]
+fn reference_hidden_default_reads_members_of_its_own_class() {
+    let result = run(r#"
+class A {
+  n: Int = 1
+  hidden fixed `$` = ref.Reference(d, A, this).n
+}
+n = new A {}.n
+"#);
+    assert_eq!(result["n"], 1);
+}
+
+#[test]
+fn reference_has_no_document_form() {
+    let mut ev = Evaluator::new();
+    let src = format!("{PRELUDE}\nx = r");
+    let value = ev
+        .eval_source(&src, std::path::Path::new("test.pkl"))
+        .unwrap();
+    let json = value.to_json().to_string();
+    assert!(!json.contains("\\u0000"), "{json}");
+}
