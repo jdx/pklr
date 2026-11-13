@@ -1540,6 +1540,7 @@ impl Evaluator {
             return Err(Error::Eval(message));
         }
         if cx.track_dynamic_members {
+            check_generated_duplicates(cx, entry_index, m)?;
             record_generated_members(
                 st.defined_by_layer.get_or_insert_default(),
                 entry_layer(cx.entry_scopes, entry_index),
@@ -2077,6 +2078,33 @@ fn check_spread_duplicates(
         } else {
             format!("Duplicate definition of member `{shown}`.")
         }));
+    }
+    Ok(())
+}
+
+/// A member a generator produced is a second definition when the body it is
+/// in also declares it directly, before or after the generator.
+fn check_generated_duplicates(
+    cx: &BodyContext,
+    generator_index: usize,
+    generated: &ObjectMap,
+) -> Result<()> {
+    if generated.is_empty() {
+        return Ok(());
+    }
+    let layer = entry_layer(cx.entry_scopes, generator_index);
+    for (index, entry) in cx.entries.iter().enumerate() {
+        if let Entry::Property(prop) = entry
+            && !has_modifier(&prop.modifiers, Modifier::Local)
+            && (prop.value.is_some() || prop.body.is_some())
+            && generated.contains_key(&*prop.name)
+            && entry_layer(cx.entry_scopes, index) == layer
+        {
+            return Err(Error::Eval(format!(
+                "Duplicate definition of member `{}`.",
+                prop.name
+            )));
+        }
     }
     Ok(())
 }

@@ -342,6 +342,16 @@ impl Evaluator {
         // If the overlay has a body amendment (no `=`), keep the base entry first
         // so its value is in scope, then add the overlay body entry after.
         let mut used_overlay: HashSet<&str> = HashSet::default();
+        // An entry `["key"] = value` of the overlay replaces the base's entry
+        // of that key in place, as a property does, so that the base's other
+        // entries read the new value (`this["key"]`).
+        let mut overlay_entry_values: FxIndexMap<String, &Entry> = FxIndexMap::default();
+        for entry in overlay_entries {
+            if let Some(key) = literal_entry_key(entry) {
+                overlay_entry_values.insert(key, entry);
+            }
+        }
+        let mut replaced_entries: HashSet<String> = HashSet::default();
         // The base's `local` members that an overlay member of the same name
         // must not capture.
         let shadowed: Vec<(Name, Value)> = base_entries
@@ -423,6 +433,22 @@ impl Evaluator {
                 used_overlay.insert(prop.name.as_ref());
                 continue;
             }
+            if let Some(key) = literal_entry_key(entry)
+                && let Some(replacement) = overlay_entry_values.get(&key)
+                && replaced_entries.insert(key)
+            {
+                merged.push((*replacement).clone());
+                merged_entry_scopes.push(amendment_entry_scope.clone());
+                continue;
+            }
+            // A body amendment `["key"] { ... }` of an entry the overlay
+            // replaced would amend the replacement, so it is dropped.
+            if let Entry::DynProperty(key, Expr::ObjectBody(_)) = entry
+                && let Some(key) = literal_key(key)
+                && replaced_entries.contains(&key)
+            {
+                continue;
+            }
             merged.push(shadow_local_reads(entry, &shadowed));
             merged_entry_scopes.push(inherited_entry_scope);
         }
@@ -433,6 +459,14 @@ impl Evaluator {
                 && (used_overlay.contains(prop.name.as_ref()) || overrides_nothing(prop))
             {
                 continue; // already placed in-order above, or overrides nothing
+            }
+            if let Some(key) = literal_entry_key(entry)
+                && replaced_entries.contains(&key)
+                && overlay_entry_values
+                    .get(&key)
+                    .is_some_and(|value| std::ptr::eq(*value, entry))
+            {
+                continue;
             }
             merged.push(entry.clone());
             merged_entry_scopes.push(amendment_entry_scope.clone());
@@ -1088,6 +1122,17 @@ impl Evaluator {
                 "Cannot instantiate abstract class `{}`.",
                 source.type_identity.as_deref().unwrap_or_default()
             )));
+        }
+        // `(Mapping) { ... }`, `(Listing) { ... }` and `(Dynamic) { ... }` amend an empty one.
+        if let Value::Object(_, Some(source)) = &base
+            && source.kind == ObjectKind::Class
+            && let Some(class @ ("Mapping" | "Listing" | "Dynamic")) = source
+                .type_identity
+                .as_deref()
+                .and_then(|identity| identity.strip_prefix("pkl:base#"))
+            && let Some(empty) = empty_mapping_or_listing(class)
+        {
+            return self.eval_value_amendment(empty, overlay_entries, scope, depth);
         }
         // A standard library class value (`Duration`, `1.getClass()`) is an
         // external class's value: it has no members to amend.
@@ -2219,4 +2264,25 @@ fn without_declared(shadowed: &[(Name, Value)], body: &[Entry]) -> Vec<(Name, Va
         })
         .cloned()
         .collect()
+}
+
+/// The identity of an entry `[key] = value` whose key is a string or integer
+/// literal and whose value is not a body amendment, for matching an overlay
+/// entry to the base entry it replaces.
+fn literal_entry_key(entry: &Entry) -> Option<String> {
+    let Entry::DynProperty(key, value) = entry else {
+        return None;
+    };
+    if matches!(value, Expr::ObjectBody(_)) {
+        return None;
+    }
+    literal_key(key)
+}
+
+fn literal_key(key: &Expr) -> Option<String> {
+    match key {
+        Expr::String(s) => Some(format!("s:{s}")),
+        Expr::Int(n) => Some(format!("i:{n}")),
+        _ => None,
+    }
 }
