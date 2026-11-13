@@ -1133,7 +1133,9 @@ impl Evaluator {
                     let annotations: Vec<_> = prop
                         .annotations
                         .iter()
-                        .filter(|annotation| !STDLIB_ANNOTATIONS.contains(&&*annotation.name))
+                        .filter(|annotation| {
+                            !is_stdlib_annotation(&annotation.name, scope.get(&annotation.name))
+                        })
                         .cloned()
                         .collect();
                     (!annotations.is_empty()).then(|| (prop.name.clone(), annotations))
@@ -1637,9 +1639,11 @@ impl Evaluator {
                     let before = reaches.len();
                     for prop in late_inherited_properties {
                         if !reaches.contains(prop.name.as_ref())
-                            && property_reference_names(prop)
-                                .iter()
-                                .any(|name| reaches.contains(name))
+                            && property_reference_names(prop).iter().any(|name| {
+                                // A computed read, or an object handed to a
+                                // call, may reach any member of this module.
+                                &**name == DYNAMIC_SIBLING_REF || reaches.contains(name)
+                            })
                         {
                             reaches.insert(prop.name.clone());
                         }
@@ -3575,6 +3579,17 @@ pub(super) const STDLIB_ANNOTATIONS: &[&str] = &[
     "SourceCode",
     "ModuleInfo",
 ];
+
+/// Whether the annotation `name` is one of `pkl:base`'s annotation classes,
+/// rather than a class the user declared under the same name. `bound` is what
+/// the declaring scope binds `name` to.
+pub(super) fn is_stdlib_annotation(name: &str, bound: Option<&Value>) -> bool {
+    STDLIB_ANNOTATIONS.contains(&name)
+        && !matches!(
+            bound,
+            Some(Value::Object(_, Some(source))) if source.kind == ObjectKind::Class
+        )
+}
 
 /// `ty` without the `*` that marks a union's default arm, which names no
 /// import of its own.

@@ -2419,3 +2419,44 @@ fn annotation_reads_module_members_through_outer() {
         serde_json::json!({"label": "renamed", "renamed": 1, "b": 2})
     );
 }
+
+// A user class named like a `pkl:base` annotation (`Since`) still converts the
+// property it annotates, on a class, on a module and through an inherited class.
+#[test]
+fn user_annotation_named_like_a_stdlib_annotation_converts() {
+    let rename = "class Since extends ConvertProperty {\n  render = (prop, r) -> Pair(\"S_\" + prop.first, prop.second)\n}\n";
+    let json = eval(&format!(
+        "{rename}class C {{\n  @Since {{}}\n  a: Int = 1\n  b: Int = 2\n}}\nopen class P {{\n  @Since {{}}\n  a: Int = 1\n  b: Int = 2\n}}\nclass Q extends P {{ a = 5 }}\nres = new JsonRenderer {{}}.renderValue(new C {{}})\nres2 = new JsonRenderer {{}}.renderValue(new Q {{}})"
+    ));
+    assert_eq!(json["res"], "{\n  \"S_a\": 1,\n  \"b\": 2\n}");
+    assert_eq!(json["res2"], "{\n  \"S_a\": 5,\n  \"b\": 2\n}");
+    let (_dir, path) = module_file(
+        "pklr_user_since_module",
+        &format!(
+            "{rename}@Since {{}}\na = 1\nb = 2\noutput {{ renderer = new JsonRenderer {{}} }}\n"
+        ),
+    );
+    assert_eq!(
+        pklr::eval_to_text(&path).unwrap(),
+        "{\n  \"S_a\": 1,\n  \"b\": 2\n}\n"
+    );
+}
+
+// Same-named classes from different modules keep their own identity when a
+// mapping key is a class, so a type error names the module that declared it.
+#[cfg(feature = "native-io")]
+#[test]
+fn mapping_class_key_keeps_its_declaring_module() {
+    let dir = TestTempDir::new("pklr_class_key_identity");
+    std::fs::write(dir.path().join("ca.pkl"), "class P {}\n").unwrap();
+    std::fs::write(dir.path().join("cb.pkl"), "class P {}\n").unwrap();
+    std::fs::write(
+        dir.path().join("main.pkl"),
+        "import \"ca.pkl\"\nimport \"cb.pkl\"\nn: Mapping<ca.P, Int> = new { [cb.P] = 1 }\n",
+    )
+    .unwrap();
+    let err = pklr::eval_to_json(&dir.path().join("main.pkl"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("Value: cb#P"), "{err}");
+}

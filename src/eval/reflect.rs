@@ -958,7 +958,10 @@ impl Evaluator {
                 .annotations
                 .iter()
                 .filter(|annotation| {
-                    !super::module::STDLIB_ANNOTATIONS.contains(&&*annotation.name)
+                    !super::module::is_stdlib_annotation(
+                        &annotation.name,
+                        scope.get(&annotation.name),
+                    )
                 })
                 .cloned()
                 .collect();

@@ -58,7 +58,7 @@ pub(crate) fn class_key_name(key: &str) -> Option<&str> {
 }
 
 /// The definition-site identity of the class a key stands for, if it has one.
-fn class_key_identity(key: &str) -> Option<&str> {
+pub(crate) fn class_key_identity(key: &str) -> Option<&str> {
     key.strip_prefix(CLASS_KEY_PREFIX)?
         .split_once(CLASS_IDENTITY_SEP)
         .map(|(_, identity)| identity)
