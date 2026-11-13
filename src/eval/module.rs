@@ -2793,7 +2793,7 @@ mod late_binding_pass_tests {
     /// each captured scope holds on every pass.
     #[test]
     fn a_chain_no_quiet_pass_can_end_never_compares_by_data() {
-        let child = "amends \"Template.pkl\"\nf30 = (x) -> x + 1\n";
+        let child = "amends \"Template.pkl\"\n";
         let (json, passes) = evaluate_amendment(&chain_of_lambdas_reading_the_module(30), child);
         assert_eq!(json["res"], 2);
         // The template's own pass and pass 0 of the amending module, then a pass for

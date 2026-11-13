@@ -170,19 +170,7 @@ impl Evaluator {
                     return int_seq(start, end, 1);
                 }
                 "Bytes" if scope.get("Bytes").is_none() => {
-                    let mut bytes = Vec::with_capacity(args.len());
-                    for arg in args {
-                        match self.eval_expr(arg, scope, depth + 1)? {
-                            value @ Value::Int(0..=255) => bytes.push(value),
-                            Value::Int(n) => {
-                                return Err(Error::Eval(format!(
-                                    "Type constraint `isBetween(0, 255)` violated.\nValue: {n}"
-                                )));
-                            }
-                            other => return Err(stdlib::type_mismatch("UInt8", &other)),
-                        }
-                    }
-                    return Ok(Value::List(ListValue::from(bytes).into_bytes()));
+                    return self.eval_bytes_constructor(args, scope, depth);
                 }
                 "Pair" if pair_is_builtin(scope) => {
                     let [first, second] = args else {
@@ -453,17 +441,7 @@ impl Evaluator {
             (Value::List(items), "toMap")
                 if matches!(items.kind(), ListKind::List | ListKind::Set) && args.len() == 2 =>
             {
-                let mut map = ObjectMap::default();
-                for item in items.iter() {
-                    let key = self.invoke_lambda(&args[0], std::slice::from_ref(item), depth)?;
-                    let value = self.invoke_lambda(&args[1], std::slice::from_ref(item), depth)?;
-                    let storage_key = value_to_key(&key)?;
-                    let storage_key =
-                        equivalent_mapping_key(&map, &storage_key).unwrap_or(storage_key);
-                    self.remember_mapping_key(storage_key.clone(), &key);
-                    map.insert(storage_key, value.into_entry_value());
-                }
-                Ok(Some(Value::Object(Arc::new(map), None)))
+                self.list_to_map(items, args, depth).map(Some)
             }
             (Value::List(items), "map") => {
                 let lambda = args
@@ -951,5 +929,45 @@ impl Evaluator {
                 render::display_value(&other)
             ))),
         }
+    }
+}
+
+impl Evaluator {
+    /// `Bytes(...)`: every argument is an `Int` in `0..=255`.
+    #[inline(never)]
+    fn eval_bytes_constructor(
+        &mut self,
+        args: &[Expr],
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<Value> {
+        let mut bytes = Vec::with_capacity(args.len());
+        for arg in args {
+            match self.eval_expr(arg, scope, depth + 1)? {
+                value @ Value::Int(0..=255) => bytes.push(value),
+                Value::Int(n) => {
+                    return Err(Error::Eval(format!(
+                        "Type constraint `isBetween(0, 255)` violated.\nValue: {n}"
+                    )));
+                }
+                other => return Err(stdlib::type_mismatch("UInt8", &other)),
+            }
+        }
+        Ok(Value::List(ListValue::from(bytes).into_bytes()))
+    }
+
+    /// `List.toMap(keyFn, valueFn)` (also on `Set`).
+    #[inline(never)]
+    fn list_to_map(&mut self, items: &ListValue, args: &[Value], depth: usize) -> Result<Value> {
+        let mut map = ObjectMap::default();
+        for item in items.iter() {
+            let key = self.invoke_lambda(&args[0], std::slice::from_ref(item), depth)?;
+            let value = self.invoke_lambda(&args[1], std::slice::from_ref(item), depth)?;
+            let storage_key = value_to_key(&key)?;
+            let storage_key = equivalent_mapping_key(&map, &storage_key).unwrap_or(storage_key);
+            self.remember_mapping_key(storage_key.clone(), &key);
+            map.insert(storage_key, value.into_entry_value());
+        }
+        Ok(Value::Object(Arc::new(map), None))
     }
 }
