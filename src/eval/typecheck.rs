@@ -1,5 +1,6 @@
 //! Checking values against declared types and their constraints.
 
+use super::reference::names_reference_class;
 use super::render::display_value;
 use super::*;
 use crate::parser::{BaseForm, TypeExpr};
@@ -519,7 +520,7 @@ impl Evaluator {
     /// The alias `name` in the declaring module's scope, when `scope` walks a
     /// module that inherits `name` from another module. `None` means the
     /// alias is `scope`'s own.
-    fn inherited_alias(
+    pub(super) fn inherited_alias(
         &mut self,
         scope: &Scope,
         name: &str,
@@ -564,7 +565,7 @@ impl Evaluator {
 
     /// The type alias `module.member` of an imported module, with the scope
     /// that its definition resolves in.
-    fn imported_alias(
+    pub(super) fn imported_alias(
         &mut self,
         scope: &Scope,
         name: &str,
@@ -1351,6 +1352,11 @@ impl Evaluator {
                     }
                 }
                 Ok(true)
+            }
+            (n, Value::Object(..))
+                if n.ends_with("Reference") && names_reference_class(scope, n) =>
+            {
+                self.check_reference_args(val, args, scope, depth, resolving)
             }
             _ => Ok(true),
         }

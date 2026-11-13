@@ -4,8 +4,9 @@ pub(super) fn refresh_this_aliases(
     scope: &mut Scope,
     aliases: &[Name],
     properties: &Arc<ObjectMap>,
+    source: Option<&Arc<ObjectSource>>,
 ) {
-    let snapshot = Value::Object(Arc::clone(properties), None);
+    let snapshot = Value::Object(Arc::clone(properties), source.cloned());
     scope.set("this", snapshot.clone());
     for alias in aliases {
         scope.set(alias, snapshot.clone());
@@ -1355,7 +1356,7 @@ impl Evaluator {
                 Entry::WhenGenerator(generator) => {
                     let condition =
                         self.eval_expr(&generator.condition, &entry_scope, depth + 1)?;
-                    let selected = if is_truthy(&condition) {
+                    let selected = if expect_bool(&condition)? {
                         Some(generator.body.as_slice())
                     } else {
                         generator.else_body.as_deref().map(Vec::as_slice)

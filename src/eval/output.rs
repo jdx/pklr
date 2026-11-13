@@ -144,6 +144,23 @@ class ImportStrClass { path: String }
 class ExtVarClass { name: String }
 "#;
 
+/// `pkl:ref`, as Pkl source. Reference values are built and read natively
+/// (see `eval/reference.rs`); the class here names their type.
+const REF_MODULE: &str = r#"
+abstract class Domain {
+  abstract function renderReference(reference: Reference<Domain, Any>): String
+}
+
+class Access {
+  fixed isProperty: Boolean = property != null
+  fixed isSubscript: Boolean = property == null
+  property: String(key == null)?
+  key: Any
+}
+
+class Reference {}
+"#;
+
 /// `pkl:json`, as Pkl source.
 const JSON_MODULE: &str = r#"
 class Property extends ConvertProperty {
@@ -252,10 +269,12 @@ impl Evaluator {
 
     /// The value of the standard library module `pkl:name`.
     pub(super) fn stdlib_module(&mut self, name: &str, depth: usize) -> Result<Value> {
+        self.refs.active |= name == "ref";
         let (key, source) = match name {
             "json" => ("pkl:json", JSON_MODULE),
             "jsonnet" => ("pkl:jsonnet", JSONNET_MODULE),
             "xml" => ("pkl:xml", XML_MODULE),
+            "ref" => ("pkl:ref", REF_MODULE),
             "yaml" => ("pkl:yaml", YAML_MODULE),
             _ => return Ok(super::stdlib_module(name)),
         };
@@ -816,7 +835,11 @@ impl Evaluator {
     pub(crate) fn eval_file_json_blocking(&mut self, path: &Path) -> Result<serde_json::Value> {
         self.on_grown_stack(|this| {
             let module = this.eval_file(path)?;
-            let json = this.module_json(module)?;
+            let json = this.module_json(module);
+            // The converters have run; free the class declarations here, on
+            // the large stack.
+            this.refs.release();
+            let json = json?;
             // Only a run on the large stack can build a result too deep for
             // the caller's stack to free; failing here frees it on this one.
             if crate::stack::on_large_stack() && json_depth(&json) > crate::stack::MAX_RESULT_DEPTH
@@ -861,7 +884,11 @@ impl Evaluator {
     /// prints it.
     #[cfg(feature = "native-io")]
     pub(crate) fn eval_file_text_blocking(&mut self, path: &Path) -> Result<String> {
-        self.on_grown_stack(|this| this.eval_file_text_on_stack(path))
+        self.on_grown_stack(|this| {
+            let text = this.eval_file_text_on_stack(path);
+            this.refs.release();
+            text
+        })
     }
 
     #[cfg(feature = "native-io")]

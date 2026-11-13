@@ -27,6 +27,9 @@ struct ModuleMembers<'b> {
     failed: HashMap<&'b str, String>,
 }
 
+/// What a union property without a selected default fails with.
+const NO_SELECTED_DEFAULT: &str = "has no selected default";
+
 impl Evaluator {
     /// The `module` binding's value, which has no source of its own, carrying
     /// the module's class so `module.getClass()` can name it. A scope that
@@ -99,6 +102,20 @@ impl Evaluator {
                     Vec::new(),
                 ))
             })
+            .chain(declarations.iter().flat_map(|declaration| {
+                // A bodyless method's types name imports its entries do not;
+                // a type test walks them as any other type.
+                declaration.signatures.iter().flat_map(|signature| {
+                    signature
+                        .parameters
+                        .iter()
+                        .filter_map(|(_, ty)| ty.as_ref())
+                        .chain(signature.return_type.as_ref())
+                        .map(|ty| {
+                            Entry::Elem(Expr::Is(Box::new(Expr::Null), without_default_marks(ty)))
+                        })
+                })
+            }))
             .collect()
     }
 
@@ -902,7 +919,7 @@ impl Evaluator {
                 break;
             }
         }
-        self.run_late_binding_passes(
+        let deferred_failures = self.run_late_binding_passes(
             module,
             depth,
             &mut scope,
@@ -978,6 +995,9 @@ impl Evaluator {
             // plain property is not, even when the property has no value.
             let mut inherited_type_failures =
                 self.inherited_type_failures(body, &scope, &synthesized_inherited_types, depth)?;
+            for (name, message) in deferred_failures {
+                inherited_type_failures.entry(name).or_insert(message);
+            }
             if !late_inherited_properties.is_empty() {
                 self.plain_override_type_failures(
                     body,
@@ -1521,7 +1541,10 @@ impl Evaluator {
         requested_eval_fields: &Option<HashSet<Name>>,
         requested_output_fields: &Option<HashSet<Name>>,
         synthesized_inherited_types: &HashSet<&str>,
-    ) -> Result<()> {
+    ) -> Result<IndexMap<Name, String>> {
+        // A union property with no selected default fails only when read, so
+        // it is handed back to poison the member rather than fail the module.
+        let mut deferred = IndexMap::new();
         let late_passes = late_inherited_properties.len() + late_child_properties.len();
         // `super` in a base module's property is that module's own base, not
         // this module's: those keep the value the base computed.
@@ -1675,6 +1698,9 @@ impl Evaluator {
                     {
                         errored = true;
                     }
+                    Err(Error::Eval(message)) if message.ends_with(NO_SELECTED_DEFAULT) => {
+                        deferred.insert(prop.name.clone(), message);
+                    }
                     Err(error) => return Err(error),
                 }
             }
@@ -1745,6 +1771,9 @@ impl Evaluator {
                     {
                         errored = true;
                     }
+                    Err(Error::Eval(message)) if message.ends_with(NO_SELECTED_DEFAULT) => {
+                        deferred.insert(prop.name.clone(), message);
+                    }
                     Err(error) => return Err(error),
                 }
             }
@@ -1774,7 +1803,7 @@ impl Evaluator {
                 break;
             }
         }
-        Ok(())
+        Ok(deferred)
     }
 
     /// Evaluate locals, classes, type aliases and properties in dependency
@@ -1869,6 +1898,7 @@ impl Evaluator {
                         // evaluation errors can depend on members declared
                         // later in the module and remain retryable.
                         if let Some(parent_name) = parent.as_deref() {
+                            let parent_name = supertype_through_aliases(scope, parent_name);
                             let parent_val = resolve_dotted(scope, parent_name);
                             check_supertype(scope, name, parent_name, parent_val.as_ref())?;
                         }
@@ -1883,6 +1913,7 @@ impl Evaluator {
                             Ok(defaults) => {
                                 scope.set_member_poison(name, None);
                                 scope.declare(name, defaults.clone());
+                                self.register_reference_class(&defaults);
                                 // The live `this`/`module` hold the class as a
                                 // declared member too, so rendering them skips it.
                                 module_props_insert(
@@ -3511,3 +3542,24 @@ pub(super) const STDLIB_ANNOTATIONS: &[&str] = &[
     "SourceCode",
     "ModuleInfo",
 ];
+
+/// `ty` without the `*` that marks a union's default arm, which names no
+/// import of its own.
+fn without_default_marks(ty: &crate::parser::TypeExpr) -> crate::parser::TypeExpr {
+    use crate::parser::TypeExpr;
+    let bare = |name: &str| name.strip_prefix('*').unwrap_or(name).to_string();
+    match ty {
+        TypeExpr::Named(name) => TypeExpr::Named(bare(name)),
+        TypeExpr::Nullable(inner) => TypeExpr::Nullable(Box::new(without_default_marks(inner))),
+        TypeExpr::Union(items) => {
+            TypeExpr::Union(items.iter().map(without_default_marks).collect())
+        }
+        TypeExpr::Generic(name, arguments) => TypeExpr::Generic(
+            bare(name),
+            arguments.iter().map(without_default_marks).collect(),
+        ),
+        TypeExpr::Constrained(base, constraint, form) => {
+            TypeExpr::Constrained(bare(base), constraint.clone(), *form)
+        }
+    }
+}

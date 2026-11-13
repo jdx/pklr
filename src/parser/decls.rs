@@ -86,6 +86,7 @@ impl<'a> Parser<'a> {
         let mut amends = None;
         let mut extends = None;
         let mut header = Some(self.parse_member_header()?);
+        let mut module_header: Option<MemberHeader> = None;
 
         let mut name = None;
         let has_module_decl = matches!(self.peek(), TokenKind::KwModule);
@@ -114,6 +115,7 @@ impl<'a> Parser<'a> {
                 self.check_modifiers(&header, MemberKind::AmendingModule)?;
             }
             annotations = header.annotations.clone();
+            module_header = Some(header.clone());
             for modifier in header.modifiers() {
                 annotations.push(Annotation {
                     name: format!("pklr:module:{modifier:?}"),
@@ -149,6 +151,7 @@ impl<'a> Parser<'a> {
         }
 
         let mut body = Vec::new();
+        let mut module_members = Vec::new();
         let mut header = header.filter(|header| !header.is_empty());
         loop {
             let header = match header.take() {
@@ -158,7 +161,11 @@ impl<'a> Parser<'a> {
             if header.is_empty() && self.at_eof() {
                 break;
             }
+            let (member_at, before) = (header.at, body.len());
             self.parse_module_member(header, &mut body)?;
+            if let Some(Entry::Property(prop)) = body.get(before) {
+                module_members.push((prop.name.clone(), member_at));
+            }
         }
         self.check_new_types(&body, &imports)?;
         self.check_member_duplicates(&body, &imports)?;
@@ -202,6 +209,24 @@ impl<'a> Parser<'a> {
             }
             deferred_const_violations = deferred;
         }
+        // The module itself, as a class named `module` (a keyword, so no class
+        // is called that), for `pkl:reflect`.
+        let module_header = module_header.unwrap_or_default();
+        self.declarations.push(Declaration {
+            is_class: true,
+            modifiers: module_header.modifiers(),
+            target: None,
+            name: "module".into(),
+            at: module_header.at,
+            doc: module_header.doc.clone(),
+            annotations: module_header.annotations.clone(),
+            parent: extends.clone().or_else(|| amends.clone()),
+            members: module_members,
+            type_parameters: Vec::new(),
+            bodyless_methods: std::mem::take(&mut self.bodyless_methods),
+            signatures: std::mem::take(&mut self.method_signatures),
+            nested: false,
+        });
         Ok(Module {
             name,
             amends,
@@ -315,6 +340,7 @@ impl<'a> Parser<'a> {
             members: Vec::new(),
             type_parameters: parameters,
             bodyless_methods: Vec::new(),
+            signatures: Vec::new(),
             nested,
         });
         Ok(Entry::TypeAlias(name, ty, generic))
@@ -390,6 +416,7 @@ impl<'a> Parser<'a> {
         let mut body = Vec::new();
         let mut members = Vec::new();
         let outer_methods = std::mem::take(&mut self.bodyless_methods);
+        let outer_signatures = std::mem::take(&mut self.method_signatures);
         self.declaration_nesting += 1;
         if matches!(self.peek(), TokenKind::LBrace) {
             self.advance();
@@ -417,6 +444,7 @@ impl<'a> Parser<'a> {
         }
         self.declaration_nesting -= 1;
         let bodyless_methods = std::mem::replace(&mut self.bodyless_methods, outer_methods);
+        let signatures = std::mem::replace(&mut self.method_signatures, outer_signatures);
         self.declarations.push(Declaration {
             is_class: true,
             modifiers: header.modifiers(),
@@ -429,6 +457,7 @@ impl<'a> Parser<'a> {
             members,
             type_parameters: Vec::new(),
             bodyless_methods,
+            signatures,
             nested,
         });
         Ok(Entry::ClassDef(
@@ -626,6 +655,13 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+        if !matches!(kind, MemberKind::ObjectMember) {
+            self.method_signatures.push(MethodSignature {
+                name: name.as_str().into(),
+                parameters: params.clone(),
+                return_type: return_type.clone(),
+            });
+        }
         if !matches!(self.peek(), TokenKind::Equals) {
             if matches!(kind, MemberKind::ObjectMember) {
                 return Err(self.unexpected_token("="));

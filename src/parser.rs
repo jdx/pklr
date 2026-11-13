@@ -16,7 +16,7 @@ pub use ast::{
     Annotation, BinOp, Body, Entry, Expr, ForGenerator, GenericAlias, Import, LocalBindings,
     Modifier, Module, Property, StringInterpPart, TraceSite, TypeExpr, UnOp, WhenGenerator,
 };
-pub(crate) use ast::{BodylessMethod, Declaration, SourcePos};
+pub(crate) use ast::{BodylessMethod, Declaration, MethodSignature, SourcePos};
 use ast::{
     check_signature, erase_type_parameters, infers_new, type_expr_constrained_name,
     type_expr_runtime_name,
@@ -88,7 +88,7 @@ pub(crate) static BARE_GET_CLASS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// The doc comment, annotations and modifiers in front of a member.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct MemberHeader {
     /// Offset of the first doc comment line
     doc_comment: Option<usize>,
@@ -209,4 +209,6 @@ struct Parser<'a> {
     declaration_nesting: u32,
     /// The methods without a body in the class being parsed.
     bodyless_methods: Vec<BodylessMethod>,
+    /// The signatures of the methods in the class (or module) being parsed.
+    method_signatures: Vec<MethodSignature>,
 }

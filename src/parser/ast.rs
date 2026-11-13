@@ -57,9 +57,19 @@ pub(crate) struct Declaration {
     /// For a class, the methods of its body that have no body of their own
     /// (abstract or external), which the parsed entries leave out.
     pub(crate) bodyless_methods: Vec<BodylessMethod>,
+    /// The parameter and return types of the methods its body declares.
+    pub(crate) signatures: Vec<MethodSignature>,
     /// Whether it is declared inside a class or an object body rather than at
     /// the top level of its module.
     pub(crate) nested: bool,
+}
+
+/// The types a method declares, which its lambda does not keep.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MethodSignature {
+    pub(crate) name: std::sync::Arc<str>,
+    pub(crate) parameters: Vec<(String, Option<TypeExpr>)>,
+    pub(crate) return_type: Option<TypeExpr>,
 }
 
 /// A method declared without a body, such as `abstract function f(): Int`.

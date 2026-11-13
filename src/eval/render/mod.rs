@@ -267,7 +267,7 @@ pub(crate) enum Kind {
 
 impl Kind {
     /// The Pkl class name used in error messages.
-    fn pkl_class(self, value: &Value) -> String {
+    pub(super) fn pkl_class(self, value: &Value) -> String {
         match self {
             Kind::Null => "Null".into(),
             Kind::Boolean => "Boolean".into(),
@@ -303,6 +303,7 @@ impl Kind {
             Kind::Dynamic => "Dynamic".into(),
             Kind::Typed => match value {
                 Value::Object(_, Some(source)) => match source.type_identity.as_deref() {
+                    _ if source.kind == ObjectKind::Reference => "pkl.ref#Reference".into(),
                     Some(identity) if !identity.starts_with("pkl:") => {
                         class_display_name(identity, source.type_name.as_deref())
                     }
@@ -1020,6 +1021,12 @@ pub(crate) trait StringRenderer<'a> {
         if self.visit_collection(value, kind)? {
             return Ok(());
         }
+        // A reference holds internal members; it has no document form.
+        if kind == Kind::Typed
+            && matches!(value, Value::Object(_, Some(source)) if source.kind == ObjectKind::Reference)
+        {
+            return Err(cannot_render_type(value, kind, self.name()));
+        }
         match (kind, value) {
             (Kind::Null, _) => self.visit_null(),
             (Kind::Boolean, Value::Bool(b)) => self.visit_bool(*b),
@@ -1190,23 +1197,25 @@ pub(crate) fn cannot_render_type(value: &Value, kind: Kind, name: &str) -> Error
     Error::Eval(format!(
         "Cannot render value of type `{}` as {name}.\nValue: {}\n\nConsider adding a converter to `output.converters`.",
         kind.pkl_class(value),
-        unforced_object_display(value, kind).unwrap_or_else(|| match value {
-            // Here pkl shows a `Listing`'s elements, unlike the top-level
-            // type errors, which show `?` for each.
-            Value::List(items)
-                if kind == Kind::Listing
-                    && !items.is_empty()
-                    && matches!(items.kind(), ListKind::Listing) =>
-            {
-                let shown = items
-                    .iter()
-                    .map(|item| display_value_at(item, 1, DISPLAY_DEPTH))
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                format!("new Listing {{ {shown} }}")
-            }
-            _ => display_value(value),
-        }),
+        reference_display(value)
+            .or_else(|| unforced_object_display(value, kind))
+            .unwrap_or_else(|| match value {
+                // Here pkl shows a `Listing`'s elements, unlike the top-level
+                // type errors, which show `?` for each.
+                Value::List(items)
+                    if kind == Kind::Listing
+                        && !items.is_empty()
+                        && matches!(items.kind(), ListKind::Listing) =>
+                {
+                    let shown = items
+                        .iter()
+                        .map(|item| display_value_at(item, 1, DISPLAY_DEPTH))
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    format!("new Listing {{ {shown} }}")
+                }
+                _ => display_value(value),
+            }),
     ))
 }
 
@@ -1567,7 +1576,15 @@ pub(crate) fn java_double_to_string(value: f64) -> String {
         .into();
     }
     // Shortest round-tripping digits and the decimal exponent.
-    let scientific = format!("{:e}", value.abs());
+    let mut scientific = format!("{:e}", value.abs());
+    // Java writes at least two digits, the closest two-digit decimal that
+    // still reads back as the same double: `4.9E-324`, not `5.0E-324`.
+    if !scientific.contains('.') {
+        let two = format!("{:.1e}", value.abs());
+        if !two.contains(".0e") && two.parse::<f64>() == Ok(value.abs()) {
+            scientific = two;
+        }
+    }
     let (mantissa, exponent) = scientific.split_once('e').unwrap_or((&scientific, "0"));
     let exponent: i32 = exponent.parse().unwrap_or(0);
     let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
@@ -2008,6 +2025,11 @@ impl JsonValue<'_> {
                 "XML comments must not contain `--` or end with `-`.".into(),
             ));
         }
+        if kind == Kind::Typed
+            && matches!(value, Value::Object(_, Some(source)) if source.kind == ObjectKind::Reference)
+        {
+            return Err(cannot_render_type(value, kind, "JSON"));
+        }
         Ok(match (kind, value) {
             (Kind::Null, _) => serde_json::Value::Null,
             (_, Value::Bool(b)) => serde_json::Value::Bool(*b),
@@ -2087,6 +2109,16 @@ impl JsonValue<'_> {
     }
 }
 
+/// A reference as an error message shows it.
+fn reference_display(value: &Value) -> Option<String> {
+    match value {
+        Value::Object(_, Some(source)) if source.kind == ObjectKind::Reference => {
+            Some(crate::eval::stdlib::render_value(value))
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2105,6 +2137,9 @@ mod tests {
             (1e-5, "1.0E-5"),
             (123456789.123, "1.23456789123E8"),
             (0.1 + 0.2, "0.30000000000000004"),
+            (4.9e-324, "4.9E-324"),
+            (2e-323, "2.0E-323"),
+            (1e23, "1.0E23"),
             (100.0, "100.0"),
             (-0.0, "-0.0"),
             (f64::NAN, "NaN"),

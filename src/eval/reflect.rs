@@ -13,7 +13,7 @@ use super::stdlib::{
 };
 use super::types::resolve_dotted;
 use super::*;
-use crate::parser::{Annotation, BaseForm, Declaration, SourcePos, TypeExpr};
+use crate::parser::{Annotation, BaseForm, Declaration, MethodSignature, SourcePos, TypeExpr};
 
 /// The identity of the `pkl:reflect` module object.
 pub(super) const MODULE: &str = "pkl:reflect";
@@ -59,6 +59,10 @@ fn modifier_name(modifier: &Modifier) -> Option<&'static str> {
 
 fn modifier_names(modifiers: &[Modifier]) -> Vec<&'static str> {
     modifiers.iter().filter_map(modifier_name).collect()
+}
+
+fn unknown_type() -> Value {
+    mirror("UnknownType", ObjectMap::default())
 }
 
 fn list_of(kind: ListKind, items: Vec<Value>) -> Value {
@@ -146,6 +150,12 @@ struct MemberData {
     modifiers: Vec<&'static str>,
     type_parameters: Vec<TypeParameter>,
     parameters: Vec<String>,
+    /// A property's declared type, or a method's return type.
+    ty: Option<Value>,
+    /// The types of a method's parameters, by position.
+    parameter_types: Vec<Value>,
+    /// What a property is declared to be when nothing amends it.
+    default: Value,
 }
 
 /// A class as its declaration gives it, and its superclasses.
@@ -181,7 +191,7 @@ impl MemberData {
         members.insert("docComment".into(), string_or_null(self.doc.as_deref()));
         members.insert(
             "annotations".into(),
-            list_of(ListKind::Listing, self.annotations.clone()),
+            list_of(ListKind::List, self.annotations.clone()),
         );
         members.insert("modifiers".into(), strings(self.modifiers.iter().copied()));
         members.insert("name".into(), Value::String(self.name.as_str().into()));
@@ -202,40 +212,64 @@ impl MemberData {
                 .map(|name| {
                     let mut parameter = ObjectMap::default();
                     parameter.insert("name".into(), Value::String(name.as_str().into()));
-                    (name.as_str().into(), mirror("MethodParameter", parameter))
+                    let index = self.parameters.iter().position(|p| p == name).unwrap_or(0);
+                    let ty = self
+                        .parameter_types
+                        .get(index)
+                        .cloned()
+                        .unwrap_or_else(unknown_type);
+                    (
+                        name.as_str().into(),
+                        mirror_with_hidden("MethodParameter", parameter, vec![("type", ty)]),
+                    )
                 })
                 .collect();
             members.insert("parameters".into(), map_of(parameters));
-            return mirror("Method", members);
+            let return_type = self.ty.clone().unwrap_or_else(unknown_type);
+            return mirror_with_hidden("Method", members, vec![("returnType", return_type)]);
         }
         let inherited_members = match inherited {
             Some(Value::Object(members, _)) => Some(members),
             _ => None,
         };
-        let mut all_modifiers: Vec<Value> = self
-            .modifiers
-            .iter()
-            .map(|modifier| Value::String((*modifier).into()))
-            .collect();
+        let mut all_modifiers: Vec<Value> = Vec::new();
         let mut all_annotations = self.annotations.clone();
         if let Some(inherited) = inherited_members {
             if let Some(Value::List(list)) = inherited.get("allModifiers") {
-                for modifier in list.iter() {
-                    if !all_modifiers.contains(modifier) {
-                        all_modifiers.push(modifier.clone());
-                    }
-                }
+                all_modifiers.extend(list.iter().cloned());
             }
             if let Some(Value::List(list)) = inherited.get("allAnnotations") {
                 all_annotations.extend(list.iter().cloned());
             }
         }
+        for modifier in &self.modifiers {
+            let modifier = Value::String((*modifier).into());
+            if !all_modifiers.contains(&modifier) {
+                all_modifiers.push(modifier);
+            }
+        }
+        // The merged modifiers come in the declaration order of `Modifier`.
+        const ORDER: [&str; 7] = [
+            "external", "abstract", "open", "local", "hidden", "fixed", "const",
+        ];
+        all_modifiers.sort_by_key(|modifier| {
+            ORDER
+                .iter()
+                .position(|name| matches!(modifier, Value::String(s) if &**s == *name))
+        });
         members.insert("allModifiers".into(), list_of(ListKind::Set, all_modifiers));
         members.insert(
             "allAnnotations".into(),
-            list_of(ListKind::Listing, all_annotations),
+            list_of(ListKind::List, all_annotations),
         );
-        mirror("Property", members)
+        mirror_with_hidden(
+            "Property",
+            members,
+            vec![
+                ("type", self.ty.clone().unwrap_or_else(unknown_type)),
+                ("defaultValue", self.default.clone()),
+            ],
+        )
     }
 }
 
@@ -269,7 +303,7 @@ impl ClassData {
         members.insert("docComment".into(), string_or_null(self.doc.as_deref()));
         members.insert(
             "annotations".into(),
-            list_of(ListKind::Listing, self.annotations.clone()),
+            list_of(ListKind::List, self.annotations.clone()),
         );
         members.insert("modifiers".into(), strings(self.modifiers.iter().copied()));
         members.insert("name".into(), Value::String(self.name.as_str().into()));
@@ -426,6 +460,9 @@ fn base_class_data_of(class: BaseClass) -> ClassData {
             modifiers: member.modifiers.clone(),
             type_parameters: type_parameters(&member.type_params),
             parameters: member.params.iter().map(|p| p.to_string()).collect(),
+            ty: None,
+            parameter_types: Vec::new(),
+            default: Value::Null,
         })
         .collect();
     ClassData {
@@ -600,6 +637,27 @@ impl Evaluator {
         depth: usize,
     ) -> Result<ClassData> {
         let name = source.type_name().unwrap_or("Class");
+        let key = format!(
+            "{}#{name}",
+            object_source_type_namespace(source).unwrap_or_default()
+        );
+        // A class that reaches itself through a member's type is a stub there.
+        if self.reflecting_classes.contains(&key) {
+            return Ok(empty_class(name));
+        }
+        self.reflecting_classes.push(key);
+        let data = self.declared_class_data(source, scope, depth);
+        self.reflecting_classes.pop();
+        data
+    }
+
+    fn declared_class_data(
+        &mut self,
+        source: &ObjectSource,
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<ClassData> {
+        let name = source.type_name().unwrap_or("Class");
         if let Some(base) = source
             .type_identity
             .as_deref()
@@ -646,7 +704,13 @@ impl Evaluator {
             let location = at
                 .zip(namespace.as_deref())
                 .map(|(at, namespace)| Location::in_module(namespace, at));
-            members.push(self.member_data(prop, location, &class_scope, depth)?);
+            members.push(self.member_data(
+                prop,
+                location,
+                declaration.map_or(&[][..], |d| d.signatures.as_slice()),
+                &class_scope,
+                depth,
+            )?);
         }
         if let Some(declaration) = declaration
             && !declaration.bodyless_methods.is_empty()
@@ -655,6 +719,26 @@ impl Evaluator {
                 let location = namespace
                     .as_deref()
                     .map(|namespace| Location::in_module(namespace, method.at));
+                let signature = declaration
+                    .signatures
+                    .iter()
+                    .find(|signature| signature.name == method.name);
+                let mut parameter_types = Vec::new();
+                let mut return_type = unknown_type();
+                if let Some(signature) = signature {
+                    for (_, ty) in &signature.parameters {
+                        parameter_types.push(match ty {
+                            Some(ty) => {
+                                self.type_mirror(ty, &[], &class_scope, depth, &mut Vec::new())?
+                            }
+                            None => unknown_type(),
+                        });
+                    }
+                    if let Some(ty) = &signature.return_type {
+                        return_type =
+                            self.type_mirror(ty, &[], &class_scope, depth, &mut Vec::new())?;
+                    }
+                }
                 members.push(MemberData {
                     is_method: true,
                     name: method.name.to_string(),
@@ -664,6 +748,9 @@ impl Evaluator {
                     modifiers: modifier_names(&method.modifiers),
                     type_parameters: Vec::new(),
                     parameters: method.parameters.clone(),
+                    ty: Some(return_type),
+                    parameter_types,
+                    default: Value::Null,
                 });
             }
             // Members read in the order the class declares them.
@@ -795,7 +882,7 @@ impl Evaluator {
             if prop.modifiers.contains(&Modifier::Local) {
                 continue;
             }
-            members.push(self.member_data(prop, None, scope, depth)?);
+            members.push(self.member_data(prop, None, &[], scope, depth)?);
         }
         let data = ClassData {
             name,
@@ -904,7 +991,22 @@ impl Evaluator {
                 Arc::new(annotation.body.clone()),
                 Vec::new(),
             );
-            values.push(self.eval_expr(&expr, scope, depth + 1)?);
+            let value = self.eval_expr(&expr, scope, depth + 1)?;
+            // An instance of a standard-library annotation class carries no
+            // class of its own, so it names the annotation when printed.
+            values.push(match value {
+                Value::Object(map, None) => stdlib::typed_object(&annotation.name, (*map).clone()),
+                Value::Object(map, Some(source))
+                    if source.type_name.is_none()
+                        && source.kind == ObjectKind::Object
+                        && source.elements.is_empty() =>
+                {
+                    let mut source = Arc::unwrap_or_clone(source);
+                    source.type_name = Some(annotation.name.to_string());
+                    Value::Object(map, Some(Arc::new(source)))
+                }
+                other => other,
+            });
         }
         Ok(values)
     }
@@ -914,6 +1016,7 @@ impl Evaluator {
         &mut self,
         prop: &Property,
         location: Option<Location>,
+        signatures: &[MethodSignature],
         scope: &Scope,
         depth: usize,
     ) -> Result<MemberData> {
@@ -922,6 +1025,18 @@ impl Evaluator {
                 parameters.iter().map(|name| name.to_string()).collect()
             }
             _ => Vec::new(),
+        };
+        let signature = signatures
+            .iter()
+            .find(|signature| prop.is_method && signature.name == prop.name);
+        let (ty, parameter_types) = self.signature_types(prop, signature, scope, depth)?;
+        let default = match &prop.value {
+            Some(_) if !prop.is_method => self
+                .eval_property(prop, scope, depth + 1)
+                .ok()
+                .flatten()
+                .unwrap_or(Value::Null),
+            _ => Value::Null,
         };
         Ok(MemberData {
             is_method: prop.is_method,
@@ -932,7 +1047,36 @@ impl Evaluator {
             modifiers: modifier_names(&prop.modifiers),
             type_parameters: Vec::new(),
             parameters,
+            ty: Some(ty),
+            parameter_types,
+            default,
         })
+    }
+
+    /// The type of a property, or the return type and parameter types of a
+    /// method. What a declaration leaves out is `unknown`.
+    fn signature_types(
+        &mut self,
+        prop: &Property,
+        signature: Option<&MethodSignature>,
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<(Value, Vec<Value>)> {
+        let mirror_of = |this: &mut Self, ty: Option<&TypeExpr>| match ty {
+            Some(ty) => this.type_mirror(ty, &[], scope, depth, &mut Vec::new()),
+            None => Ok(unknown_type()),
+        };
+        if !prop.is_method {
+            return Ok((mirror_of(self, prop.type_ann.as_ref())?, Vec::new()));
+        }
+        let Some(signature) = signature else {
+            return Ok((unknown_type(), Vec::new()));
+        };
+        let mut parameters = Vec::new();
+        for (_, ty) in &signature.parameters {
+            parameters.push(mirror_of(self, ty.as_ref())?);
+        }
+        Ok((mirror_of(self, signature.return_type.as_ref())?, parameters))
     }
 
     fn reflect_type_alias(
@@ -1011,10 +1155,7 @@ impl Evaluator {
             Some(declaration) => self.eval_annotations(&declaration.annotations, scope, depth)?,
             None => Vec::new(),
         };
-        mirror_members.insert(
-            "annotations".into(),
-            list_of(ListKind::Listing, annotations),
-        );
+        mirror_members.insert("annotations".into(), list_of(ListKind::List, annotations));
         let modifiers = declaration
             .map(|declaration| modifier_names(&declaration.modifiers))
             .unwrap_or_default();
@@ -1202,6 +1343,27 @@ fn unsupported_module() -> Error {
 
 /// A `pkl:reflect` mirror of the given type, which names its own class rather
 /// than a `pkl:base` one.
+/// A mirror with hidden members: ones a read finds but rendering skips.
+fn mirror_with_hidden(
+    type_name: &str,
+    members: ObjectMap,
+    hidden: Vec<(&'static str, Value)>,
+) -> Value {
+    let Value::Object(members, Some(source)) = mirror(type_name, members) else {
+        unreachable!("mirror builds an object with a source")
+    };
+    let mut source = Arc::unwrap_or_clone(source);
+    for (name, value) in hidden {
+        source.evaluated_properties.push(name.into());
+        source
+            .captured
+            .parts_mut()
+            .values
+            .insert(name.into(), value);
+    }
+    Value::Object(members, Some(Arc::new(source)))
+}
+
 fn mirror(type_name: &str, members: ObjectMap) -> Value {
     let Value::Object(members, Some(source)) = typed_object(type_name, members) else {
         unreachable!("typed_object builds an object with a source")

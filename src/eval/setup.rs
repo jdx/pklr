@@ -151,6 +151,7 @@ impl Evaluator {
             http_rewrites: Vec::new(),
             converters: Vec::new(),
             builtin_classes: HashMap::default(),
+            refs: reference::RefState::default(),
             output_props: Vec::new(),
             module_output: None,
             output_sets_value: false,
@@ -161,6 +162,7 @@ impl Evaluator {
             module_names: HashMap::default(),
             module_declarations: HashMap::default(),
             parsed_declarations: HashMap::default(),
+            reflecting_classes: Vec::new(),
             grew: false,
         }
     }
@@ -299,6 +301,7 @@ impl Evaluator {
         // are otherwise only held here weakly; drop their registry entries at
         // each evaluation boundary.
         self.release_deep_state();
+        self.refs = reference::RefState::default();
         self.prune_lambda_guards();
         self.env_reads.clear();
         self.import_cache.clear();
@@ -429,6 +432,7 @@ impl Evaluator {
             std::mem::take(&mut self.mapping_key_values),
             std::mem::take(&mut self.deferred_const),
             self.last_coerced.take(),
+            std::mem::take(&mut self.refs),
             std::mem::take(&mut self.module_declarations),
             std::mem::take(&mut self.parsed_declarations),
         );

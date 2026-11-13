@@ -46,6 +46,11 @@ impl Evaluator {
                 .reflect_call(method, arg_exprs, args, scope, depth)
                 .map(Box::new);
         }
+        if source.kind == ObjectKind::Reference
+            && let Some(result) = self.reference_method(obj, method, args.len())
+        {
+            return Some(Box::new(result));
+        }
         if is_class_method_miss(receiver, source, method) {
             return Some(Box::new(Err(class_method_error(method))));
         }
@@ -389,6 +394,11 @@ impl Evaluator {
             {
                 return Ok(Some(regex_value(arg.clone())?));
             }
+            if matches!(func_val, Value::Object(..))
+                && let Some(result) = self.reference_construct(&func_val, evaled_args)
+            {
+                return result.map(Some);
+            }
             if evaled_args.is_empty() {
                 return Ok(Some(func_val));
             }
@@ -430,6 +440,38 @@ impl Evaluator {
                 }
             }
             return Ok(Some(self.eval_expr(body, &call_scope, depth + 1)?));
+        }
+        if let Value::Object(map, source) = obj
+            && let "hasProperty" | "getPropertyOrNull" | "getProperty" = method
+            && let [Value::String(name)] = evaled_args
+            && source
+                .as_ref()
+                .is_none_or(|s| s.kind != ObjectKind::Mapping)
+        {
+            // A hidden member is in the definition scope, not the member map.
+            let hidden = || {
+                let source = source.as_ref()?;
+                source
+                    .evaluated_properties
+                    .iter()
+                    .any(|property| **property == **name)
+                    .then(|| source.scope().get(&**name).cloned())?
+            };
+            let found = map.get(&**name).cloned().or_else(hidden);
+            return match (method, found) {
+                ("hasProperty", found) => Ok(Some(Value::Bool(found.is_some()))),
+                ("getPropertyOrNull", found) => Ok(Some(found.unwrap_or(Value::Null))),
+                (_, Some(value)) => Ok(Some(value)),
+                (_, None) => {
+                    let class = source
+                        .as_ref()
+                        .and_then(|s| s.type_name.as_deref())
+                        .unwrap_or("Dynamic");
+                    Err(Error::Eval(format!(
+                        "Cannot find property `{name}` in object of type `{class}`."
+                    )))
+                }
+            };
         }
         Ok(None)
     }
@@ -632,7 +674,14 @@ impl Evaluator {
             }
             (Value::List(items), "join") => {
                 let sep = args.first().and_then(|v| v.as_str()).unwrap_or(",");
-                let s: Vec<String> = items.iter().map(value_to_display).collect();
+                let mut s = Vec::with_capacity(items.len());
+                for item in items.iter() {
+                    s.push(if matches!(item, Value::Object(..)) {
+                        self.value_to_string(item, depth)?
+                    } else {
+                        value_to_display(item)
+                    });
+                }
                 Ok(Some(Value::String(s.join(sep).into())))
             }
             (Value::List(items), "reverse") => {
@@ -702,12 +751,12 @@ impl Evaluator {
                 Ok(Some(Value::Bool(map.contains_key(key))))
             }
             (Value::Object(map, source), "toMap") => Ok(Some(Value::Object(
-                without_class_members(map, source.as_deref()),
+                reference_safe_members(map, source.as_deref()),
                 None,
             ))),
             // `Map.toMapping()` is a `Mapping`, which can be amended.
             (Value::Object(map, source), "toMapping") => Ok(Some(Value::Object(
-                without_class_members(map, source.as_deref()),
+                reference_safe_members(map, source.as_deref()),
                 Some(Arc::new(super::mapping::mapping_source())),
             ))),
             (Value::Object(map, _), "mapValues") => {
@@ -1086,6 +1135,13 @@ pub(super) fn caught_error_message(error: Error) -> String {
         };
         return message.replacen("\nValue: ", " Value: ", 1);
     }
+    if message.starts_with("Operator `") {
+        return message
+            .replace("\nLeft operand : ", " Left operand : ")
+            .replace("\nRight operand: ", " Right operand: ")
+            .replace("\nLeft operand: ", " Left operand: ")
+            .replace("\nOperand: ", " Operand: ");
+    }
     if !(message.starts_with("Cannot render ")
         || message.starts_with("The top-level value of ")
         || message.starts_with("Cannot spread value of type `"))
@@ -1157,6 +1213,15 @@ fn without_class_members(map: &Arc<ObjectMap>, source: Option<&ObjectSource>) ->
     )
 }
 
+/// `without_class_members`, except that a `Reference` has no members to
+/// convert: its entries are internal.
+fn reference_safe_members(map: &Arc<ObjectMap>, source: Option<&ObjectSource>) -> Arc<ObjectMap> {
+    if source.is_some_and(|s| s.kind == ObjectKind::Reference) {
+        return Arc::default();
+    }
+    without_class_members(map, source)
+}
+
 /// Whether `expr` is `super.default`.
 fn is_default_member_ref(expr: &Expr) -> bool {
     match expr {
@@ -1175,7 +1240,11 @@ impl Evaluator {
         // Only the selected branch counts.
         if let Expr::If(cond, then_expr, else_expr) = arg {
             let c = self.eval_expr(cond, scope, depth + 1)?;
-            let branch = if is_truthy(&c) { then_expr } else { else_expr };
+            let branch = if expect_bool(&c)? {
+                then_expr
+            } else {
+                else_expr
+            };
             return self.null_default(branch, scope, depth + 1);
         }
         // A `new` default is not built: it may name the class being

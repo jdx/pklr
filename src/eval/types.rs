@@ -1187,6 +1187,11 @@ fn object_class_name(
 /// The name of `value`'s class as Pkl writes it in error messages.
 pub(super) fn pkl_class_name(value: &Value) -> String {
     match value {
+        // An object without a source is a `Map`.
+        Value::Object(_, None) => "Map".to_string(),
+        Value::Object(_, Some(source)) if source.kind == ObjectKind::Mapping => {
+            "Mapping".to_string()
+        }
         Value::Object(_, source) => object_class_name(source.as_deref(), None),
         Value::List(items) => match items.kind() {
             ListKind::List if items.is_int_seq() => "IntSeq".to_string(),
@@ -1506,16 +1511,31 @@ pub(super) fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
             "Regex" => matches!(val, Value::Regex(_)),
             "List" | "Listing" | "Set" => matches!(val, Value::List(_)),
             "Class" => is_class_value(val),
-            "Map" | "Mapping" => {
+            "Map" => {
                 matches!(val, Value::Object(..))
                     && !is_class_value(val)
                     && !is_untyped_dynamic_object(val)
             }
+            // An object without a source is a `Map`.
+            "Mapping" => {
+                matches!(val, Value::Object(_, Some(_)))
+                    && !is_class_value(val)
+                    && !is_untyped_dynamic_object(val)
+            }
             "Dynamic" => {
-                matches!(val, Value::Object(..)) && !is_class_value(val) && !is_mapping_object(val)
+                matches!(val, Value::Object(_, Some(_)))
+                    && !is_class_value(val)
+                    && !is_mapping_object(val)
             }
             "Object" => matches!(val, Value::Object(..)) && !is_class_value(val),
-            "Function" => matches!(val, Value::Lambda(..)),
+            // Only lists and sets are collections.
+            "Collection" => false,
+            "Typed" => is_typed_object(val),
+            "Function" | "Mixin" => matches!(val, Value::Lambda(..)),
+            name @ ("Function0" | "Function1" | "Function2" | "Function3" | "Function4"
+            | "Function5") => {
+                matches!(val, Value::Lambda(params, ..) if params.len() < 10 && name.as_bytes()[8] == b'0' + params.len() as u8)
+            }
             "Duration" => matches!(val, Value::Duration(_)),
             "DataSize" => matches!(val, Value::DataSize(_)),
             "Any" | "unknown" => true,
@@ -1546,6 +1566,7 @@ pub(super) fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
                         && !is_untyped_dynamic_object(val)
                 }
                 "Class" => is_class_value(val),
+                "Collection" => false,
                 "Regex" => matches!(val, Value::Regex(_)),
                 "Function" | "Mixin" => matches!(val, Value::Lambda(..)),
                 // A function type fixes the number of parameters.
@@ -1664,6 +1685,15 @@ fn is_untyped_dynamic_object(val: &Value) -> bool {
     matches!(val, Value::Object(_, Some(source)) if source.kind == ObjectKind::Dynamic)
 }
 
+/// Whether `val` is an instance of a class or a module, which is `Typed`:
+/// not a `Map`, `Dynamic`, `Mapping` or `Class`.
+fn is_typed_object(val: &Value) -> bool {
+    matches!(val, Value::Object(_, Some(source))
+        if source.is_module
+            || (source.kind == ObjectKind::Object
+                && (source.type_name.is_some() || source.type_identity.is_some())))
+}
+
 fn is_mapping_object(val: &Value) -> bool {
     matches!(val, Value::Object(_, Some(source)) if source.kind == ObjectKind::Mapping)
 }
@@ -1755,6 +1785,21 @@ pub(super) fn is_truthy(v: &Value) -> bool {
         Value::Float(f) => *f != 0.0,
         Value::String(s) => !s.is_empty(),
         _ => true,
+    }
+}
+
+/// The condition of an `if` or `when`: pkl requires a `Boolean`.
+pub(super) fn expect_bool(v: &Value) -> Result<bool> {
+    match v {
+        Value::Bool(b) => Ok(*b),
+        Value::Null => Err(Error::Eval(
+            "Expected value of type `Boolean`, but got `null`.".into(),
+        )),
+        _ => Err(Error::Eval(format!(
+            "Expected value of type `Boolean`, but got type `{}`.\nValue: {}",
+            pkl_class_name(v),
+            super::render::display_value(v)
+        ))),
     }
 }
 

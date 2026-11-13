@@ -4133,13 +4133,18 @@ fn invalid_supertypes_are_rejected() {
             "Cannot extend non-open class `Dynamic`.",
         ),
         (
-            "open class Foo\ntypealias Bar = Foo\nclass Baz extends Bar\n",
+            "open class Foo\ntypealias Bar = Foo(true)\nclass Baz extends Bar\n",
             "`Bar` is not a valid supertype.",
         ),
     ] {
         let err = eval_fails(src);
         assert!(err.contains(message), "{src}: {err}");
     }
+    // An alias that only names a class stands for it.
+    let json = eval(
+        "open class Foo { value = 42 }\ntypealias Bar = Foo\nclass Baz extends Bar {}\nx = new Baz {}.value\n",
+    );
+    assert_eq!(json["x"], 42);
     // Open and abstract classes can be extended.
     let json = eval(
         "open class A { a = 1 }\nabstract class B extends A { b = 2 }\nclass C extends B\nx = new C {}\n",
@@ -8072,7 +8077,7 @@ res6 = test.catch(() -> m[1.5])
     assert_eq!(val["res4"], "Element index `-1` is out of range `0`..`0`.");
     assert_eq!(
         val["res5"],
-        "Operator `[]` is not defined for operand types `List` and `String`.\nLeft operand : List(1, 2)\nRight operand: \"a\""
+        "Operator `[]` is not defined for operand types `List` and `String`. Left operand : List(1, 2) Right operand: \"a\""
     );
     assert_eq!(val["res6"], "Cannot find key `1.5`.");
 }
