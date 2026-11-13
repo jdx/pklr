@@ -519,3 +519,13 @@ same = reflect.Class(Foo).getClass() == Class
     );
     assert_eq!(result, json!({"same": false}));
 }
+
+#[test]
+fn bare_get_class_at_module_level_is_the_module_class() {
+    let result = eval(
+        r#"
+a = "\(getClass())"
+"#,
+    );
+    assert_eq!(result, json!({"a": "test"}));
+}

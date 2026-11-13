@@ -10,7 +10,9 @@ impl Evaluator {
         if let Some(class) = scope.get(super::entries::THIS_CLASS) {
             return Ok(class.clone());
         }
-        let receiver = if scope.get("this").is_some() {
+        // A module body binds `this` to a source-less object that does not
+        // name its class; the module does.
+        let receiver = if matches!(scope.get("this"), Some(Value::Object(_, Some(_)))) {
             "this"
         } else {
             "module"
