@@ -1237,6 +1237,11 @@ impl Evaluator {
                     }
                 }
             }
+            Entry::Elem(_) if cx.mapping_entries => {
+                return Err(Error::Eval(
+                    "Object of type `Mapping` cannot have an element.".into(),
+                ));
+            }
             Entry::Elem(expr) => {
                 let active_scope = shadowed(
                     scope_for_object_entry(

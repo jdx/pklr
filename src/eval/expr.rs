@@ -208,11 +208,7 @@ impl Evaluator {
                         })
                     }
                     Some("Listing") => {
-                        if entries.iter().any(|entry| {
-                            matches!(entry, Entry::Property(prop)
-                                if &*prop.name != "default"
-                                    && !has_modifier(&prop.modifiers, Modifier::Local))
-                        }) {
+                        if find_listing_body_property(entries).is_some() {
                             return Err(Error::Eval(
                                 "Object of type `Listing` cannot have a property (other than `default`)."
                                     .into(),
@@ -671,7 +667,9 @@ impl Evaluator {
                                 .ok()
                                 .and_then(|index| items.get(index))
                                 .cloned()
-                                .unwrap_or_else(|| Value::Object(Arc::default(), None))),
+                                .unwrap_or_else(|| {
+                                    tag_dynamic(Value::Object(Arc::default(), None))
+                                })),
                             _ => Err(Error::Eval("listing index must be an Int".into())),
                         };
                     }
@@ -1375,7 +1373,7 @@ fn list_property(list: &Value, items: &ListValue, name: &str) -> Option<Result<V
                 || items
                     .iter()
                     .enumerate()
-                    .all(|(i, a)| items[..i].iter().all(|b| !a.same_data(b))),
+                    .all(|(i, a)| items[..i].iter().all(|b| !values_eq(a, b))),
         )),
         "first" | "last" | "single" | "rest" | "firstOrNull" | "lastOrNull" | "singleOrNull"
         | "restOrNull" | "lastIndex" => list_element_member(list, items, name),

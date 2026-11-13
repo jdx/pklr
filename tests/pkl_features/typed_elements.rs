@@ -1854,3 +1854,21 @@ fn amended_function_parameters_are_checked() {
     );
     assert_eq!(value["x"], serde_json::json!({"prop": 2}));
 }
+
+#[test]
+fn listing_rejects_generated_properties() {
+    let err = eval_fails("x = new Listing { when (true) { foo = 1 } }");
+    assert!(err.contains("cannot have a property"), "{err}");
+}
+
+#[test]
+fn mapping_amendment_rejects_generated_elements() {
+    let err = eval_fails("local m = new Mapping { [\"a\"] = 1 }\nx = (m) { when (true) { 2 } }");
+    assert!(err.contains("cannot have an element"), "{err}");
+}
+
+#[test]
+fn listing_is_distinct_uses_equality() {
+    let v = eval("x = new Listing { 1; 1.0 }.isDistinct");
+    assert_eq!(v["x"], false);
+}
