@@ -40,9 +40,13 @@ impl Evaluator {
             {
                 namespace.to_string()
             } else {
-                super::resource::file_uri(std::path::Path::new(
-                    namespace.strip_prefix(r"\\?\").unwrap_or(namespace),
-                ))
+                match namespace.strip_prefix(r"\\?\UNC\") {
+                    // A verbatim UNC path names `file://server/share/...`.
+                    Some(unc) => format!("file://{}", unc.replace('\\', "/")),
+                    None => super::resource::file_uri(std::path::Path::new(
+                        namespace.strip_prefix(r"\\?\").unwrap_or(namespace),
+                    )),
+                }
             }
         };
         let (expected, actual) = (name_of(namespace), name_of(identity));
