@@ -1284,7 +1284,7 @@ impl Evaluator {
                 // member.
                 st.failed_iteration = 0;
                 let active_scope = shadowed(condition_scope, &st.shadow);
-                if is_truthy(&cond) {
+                if expect_bool(&cond)? {
                     let body_val = self.eval_entries_with_lexical_scopes(
                         &wgen.body,
                         &active_scope,

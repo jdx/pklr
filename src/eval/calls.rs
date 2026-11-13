@@ -1086,6 +1086,13 @@ pub(super) fn caught_error_message(error: Error) -> String {
         };
         return message.replacen("\nValue: ", " Value: ", 1);
     }
+    if message.starts_with("Operator `") {
+        return message
+            .replace("\nLeft operand : ", " Left operand : ")
+            .replace("\nRight operand: ", " Right operand: ")
+            .replace("\nLeft operand: ", " Left operand: ")
+            .replace("\nOperand: ", " Operand: ");
+    }
     if !(message.starts_with("Cannot render ")
         || message.starts_with("The top-level value of ")
         || message.starts_with("Cannot spread value of type `"))
@@ -1175,7 +1182,11 @@ impl Evaluator {
         // Only the selected branch counts.
         if let Expr::If(cond, then_expr, else_expr) = arg {
             let c = self.eval_expr(cond, scope, depth + 1)?;
-            let branch = if is_truthy(&c) { then_expr } else { else_expr };
+            let branch = if expect_bool(&c)? {
+                then_expr
+            } else {
+                else_expr
+            };
             return self.null_default(branch, scope, depth + 1);
         }
         // A `new` default is not built: it may name the class being

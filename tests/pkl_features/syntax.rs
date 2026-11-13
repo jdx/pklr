@@ -397,7 +397,7 @@ local x = null
 y = x!!
 "#,
     );
-    assert!(msg.contains("non-null assertion failed"));
+    assert!(msg.contains("Expected a non-null value, but got `null`."));
 }
 
 #[test]
@@ -3445,4 +3445,77 @@ fn module_type_rejects_another_module_of_the_same_name() {
         .unwrap_err()
         .to_string();
     assert!(err.contains("Module version conflict"), "{err}");
+}
+
+#[test]
+fn prefix_operators_chain() {
+    let json = eval(
+        r#"
+a = --1
+b = - -1
+c = ! !true
+d = -(-2)
+"#,
+    );
+    assert_eq!(json["a"], 1);
+    assert_eq!(json["b"], 1);
+    assert_eq!(json["c"], true);
+    assert_eq!(json["d"], 2);
+}
+
+#[test]
+fn if_condition_must_be_boolean() {
+    let json = eval(
+        r#"
+import "pkl:test"
+a = test.catch(() -> if ("") 1 else 2)
+b = test.catch(() -> if (0) 1 else 2)
+c = test.catch(() -> if (null) 1 else 2)
+"#,
+    );
+    assert_eq!(
+        json["a"],
+        "Expected value of type `Boolean`, but got type `String`. Value: \"\""
+    );
+    assert_eq!(
+        json["b"],
+        "Expected value of type `Boolean`, but got type `Int`. Value: 0"
+    );
+    assert_eq!(
+        json["c"],
+        "Expected value of type `Boolean`, but got `null`."
+    );
+}
+
+#[test]
+fn when_condition_must_be_boolean() {
+    let msg = eval_fails("x { when (1) { a = 1 } }");
+    assert!(msg.contains("Expected value of type `Boolean`"), "{msg}");
+}
+
+#[test]
+fn map_is_not_a_mapping_dynamic_or_collection() {
+    let json = eval(
+        r#"
+import "pkl:test"
+local map = Map(1, "one")
+a = test.catch(() -> map as Mapping)
+b = test.catch(() -> map as Dynamic)
+c = test.catch(() -> map as Collection)
+d = map as Map
+"#,
+    );
+    assert_eq!(
+        json["a"],
+        "Expected value of type `Mapping`, but got type `Map`. Value: Map(1, \"one\")"
+    );
+    assert_eq!(
+        json["b"],
+        "Expected value of type `Dynamic`, but got type `Map`. Value: Map(1, \"one\")"
+    );
+    assert_eq!(
+        json["c"],
+        "Expected value of type `Collection`, but got type `Map`. Value: Map(1, \"one\")"
+    );
+    assert_eq!(json["d"], serde_json::json!({"1": "one"}));
 }

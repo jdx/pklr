@@ -1029,7 +1029,7 @@ impl Evaluator {
                 if matches!(item, Value::List(_)) {
                     bind_listing_receiver(&mut cond_scope, item);
                 }
-                if is_truthy(&self.eval_expr(cond, &cond_scope, depth + 1)?) {
+                if expect_bool(&self.eval_expr(cond, &cond_scope, depth + 1)?)? {
                     expanded.push(Entry::DynProperty(Expr::Int(index as i64), value.clone()));
                 }
             }
