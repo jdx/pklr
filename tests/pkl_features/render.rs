@@ -2514,3 +2514,15 @@ fn listing_body_reads_overridden_member_through_outer() {
         serde_json::json!({"x": 1, "l": [0, 1]})
     );
 }
+
+#[test]
+fn listing_outer_is_not_shadowed_by_generators_or_locals() {
+    assert_eq!(
+        eval(
+            "x = 1\nl = new Listing { for (x in List(2)) { outer.x } }\n\
+             m = new Listing { local x = 7; outer.x }\n\
+             n = new Listing { when (true) { outer.x } }\n"
+        ),
+        serde_json::json!({"x": 1, "l": [1], "m": [1], "n": [1]})
+    );
+}
