@@ -40,7 +40,9 @@ impl Evaluator {
             {
                 namespace.to_string()
             } else {
-                super::resource::file_uri(std::path::Path::new(namespace))
+                super::resource::file_uri(std::path::Path::new(
+                    namespace.strip_prefix(r"\\?\").unwrap_or(namespace),
+                ))
             }
         };
         let (expected, actual) = (name_of(namespace), name_of(identity));
