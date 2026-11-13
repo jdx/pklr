@@ -893,6 +893,12 @@ impl Evaluator {
     /// so it adds nothing to the evaluator's stack frame.
     #[inline(never)]
     fn null_default(&mut self, arg: &Expr, scope: &Scope, depth: usize) -> Result<Value> {
+        // Only the selected branch counts.
+        if let Expr::If(cond, then_expr, else_expr) = arg {
+            let c = self.eval_expr(cond, scope, depth + 1)?;
+            let branch = if is_truthy(&c) { then_expr } else { else_expr };
+            return self.null_default(branch, scope, depth + 1);
+        }
         // A `new` default is not built: it may name the class being
         // instantiated, whose property this is.
         if matches!(arg, Expr::New(..)) {

@@ -273,3 +273,20 @@ fn list_single_rest_and_or_null_members() {
         "{error}"
     );
 }
+
+#[test]
+fn null_default_does_not_build_a_conditional_new_default() {
+    let json = eval("a = Null(if (true) new Listing { throw(\"unused\") } else new Listing {})\n");
+    assert!(json["a"].is_null());
+}
+
+#[test]
+fn a_path_converter_keeps_an_undefined_member_failing() {
+    let src = "class P { age: Int }\nitem = new P {}\nother = 1\noutput { renderer = new JsonRenderer { converters { [\"other\"] = (it) -> it } } }\n";
+    let mut ev = pklr::eval::Evaluator::new();
+    let val = ev
+        .eval_source(src, std::path::Path::new("test.pkl"))
+        .unwrap();
+    let err = ev.apply_converters(val).unwrap_err().to_string();
+    assert!(err.contains("`age`"), "{err}");
+}

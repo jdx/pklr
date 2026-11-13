@@ -1680,6 +1680,17 @@ impl JsonValue<'_> {
                 // values. This includes typed keys stored with an internal
                 // mapping-key prefix.
                 let converts_keys = !self.converters.is_empty();
+                // The module-wide failed-member check cannot match a path
+                // converter, so it is made here, where the path is known and
+                // a converter has already replaced what it matches.
+                if self.track_path
+                    && let Some(member) = source
+                        .as_ref()
+                        .and_then(|source| source.poisoned_members.as_ref())
+                        .and_then(|members| members.values().find(|member| member.rendered))
+                {
+                    return Err(Error::Eval(member.message.clone()));
+                }
                 let members = (self.track_path || converts_keys)
                     .then(|| Members::new(kind, source.as_deref()));
                 let mut changed: Option<ObjectMap> = None;
