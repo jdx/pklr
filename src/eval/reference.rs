@@ -270,6 +270,20 @@ impl Evaluator {
         }
     }
 
+    /// Records the parent of a class that a `local` member shadows, whether
+    /// or not `pkl:ref` is imported yet; the first record of a class stays.
+    pub(super) fn keep_reference_parent(&mut self, class: &Value) {
+        if let Value::Object(_, Some(source)) = class
+            && source.kind == ObjectKind::Class
+            && let Some(id) = source.type_identity.as_deref()
+        {
+            self.refs
+                .classes
+                .entry(id.into())
+                .or_insert_with(|| class.clone());
+        }
+    }
+
     fn class_type(&mut self, class: &Value) -> Option<RType> {
         let Value::Object(_, Some(source)) = class else {
             return None;
@@ -651,7 +665,7 @@ impl Evaluator {
         let Value::Object(_, Some(source)) = class else {
             return None;
         };
-        let (index, prop) = source
+        let found = source
             .entries
             .iter()
             .enumerate()
@@ -665,7 +679,23 @@ impl Evaluator {
                     Some((i, prop))
                 }
                 _ => None,
-            })?;
+            });
+        let Some((index, prop)) = found else {
+            // A `local` member of the class does not replace the inherited
+            // public member of that name, which the class merge leaves out.
+            let has_local = source.entries.iter().any(|e| {
+                matches!(e, Entry::Property(prop)
+                    if &*prop.name == name
+                        && !prop.is_method
+                        && has_modifier(&prop.modifiers, Modifier::Local))
+            });
+            if !has_local {
+                return None;
+            }
+            let parent = source.parent_type_identities.first()?;
+            let parent = self.refs.classes.get(parent.as_str())?.clone();
+            return self.property_type(&parent, name, scope);
+        };
         let Some(ty) = &prop.type_ann else {
             return Some(RType::Unknown);
         };

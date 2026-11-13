@@ -36,6 +36,18 @@ impl Evaluator {
         if let Some(Value::Object(_, Some(parent))) = &parent_val {
             check_override_modifiers(body, parent)?;
         }
+        // A `local` member shadows the parent's public member of its name in
+        // the class merge; `pkl:ref` finds that member through the parent,
+        // which it may not have recorded if the parent was loaded before
+        // `pkl:ref` was imported.
+        if let Some(parent) = &parent_val
+            && body.iter().any(|e| {
+                matches!(e, Entry::Property(p)
+                    if !p.is_method && has_modifier(&p.modifiers, Modifier::Local))
+            })
+        {
+            self.keep_reference_parent(parent);
+        }
         // A parent class that failed to evaluate fails its subclasses too,
         // rather than leaving them without the inherited members.
         if parent_val.is_none()
