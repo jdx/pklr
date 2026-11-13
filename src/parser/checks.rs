@@ -618,28 +618,31 @@ fn type_has_constraint(
     ty: &TypeExpr,
     aliases: &std::collections::HashMap<&str, (&[String], &TypeExpr)>,
     depth: usize,
+    budget: &std::cell::Cell<usize>,
 ) -> bool {
-    if depth > 32 {
+    // A shared work budget keeps repeated aliases from exploding.
+    if depth > 32 || budget.get() == 0 {
         return false;
     }
+    budget.set(budget.get() - 1);
     match ty {
         TypeExpr::Constrained(..) => true,
-        TypeExpr::Nullable(inner) => type_has_constraint(inner, aliases, depth + 1),
+        TypeExpr::Nullable(inner) => type_has_constraint(inner, aliases, depth + 1, budget),
         TypeExpr::Union(variants) => variants
             .iter()
-            .any(|variant| type_has_constraint(variant, aliases, depth + 1)),
+            .any(|variant| type_has_constraint(variant, aliases, depth + 1, budget)),
         TypeExpr::Generic(name, args) => {
             args.iter()
-                .any(|arg| type_has_constraint(arg, aliases, depth + 1))
+                .any(|arg| type_has_constraint(arg, aliases, depth + 1, budget))
                 || aliases.get(name.as_str()).is_some_and(|(params, body)| {
                     let body = substitute_type(body, params, args);
                     type_size(&body, EXPANSION_LIMIT) < EXPANSION_LIMIT
-                        && type_has_constraint(&body, aliases, depth + 1)
+                        && type_has_constraint(&body, aliases, depth + 1, budget)
                 })
         }
         TypeExpr::Named(name) => aliases
             .get(name.trim_start_matches('*'))
-            .is_some_and(|(_, body)| type_has_constraint(body, aliases, depth + 1)),
+            .is_some_and(|(_, body)| type_has_constraint(body, aliases, depth + 1, budget)),
     }
 }
 
@@ -690,37 +693,40 @@ fn reference_with_constraint(
     reference: &[String],
     aliases: &std::collections::HashMap<&str, (&[String], &TypeExpr)>,
     depth: usize,
+    budget: &std::cell::Cell<usize>,
 ) -> bool {
-    if depth > 32 {
+    // A shared work budget keeps repeated aliases from exploding.
+    if depth > 32 || budget.get() == 0 {
         return false;
     }
+    budget.set(budget.get() - 1);
     match ty {
         TypeExpr::Nullable(inner) => {
-            reference_with_constraint(inner, reference, aliases, depth + 1)
+            reference_with_constraint(inner, reference, aliases, depth + 1, budget)
         }
-        TypeExpr::Union(variants) => variants
-            .iter()
-            .any(|variant| reference_with_constraint(variant, reference, aliases, depth + 1)),
+        TypeExpr::Union(variants) => variants.iter().any(|variant| {
+            reference_with_constraint(variant, reference, aliases, depth + 1, budget)
+        }),
         TypeExpr::Generic(name, args) => {
             if reference.iter().any(|r| r == name) && args.len() == 2 {
-                return type_has_constraint(&args[1], aliases, depth + 1);
+                return type_has_constraint(&args[1], aliases, depth + 1, budget);
             }
             if let Some((params, body)) = aliases.get(name.as_str()) {
                 let body = substitute_type(body, params, args);
                 if type_size(&body, EXPANSION_LIMIT) < EXPANSION_LIMIT
-                    && reference_with_constraint(&body, reference, aliases, depth + 1)
+                    && reference_with_constraint(&body, reference, aliases, depth + 1, budget)
                 {
                     return true;
                 }
             }
             args.iter()
-                .any(|arg| reference_with_constraint(arg, reference, aliases, depth + 1))
+                .any(|arg| reference_with_constraint(arg, reference, aliases, depth + 1, budget))
         }
         TypeExpr::Named(name) => {
             aliases
                 .get(name.trim_start_matches('*'))
                 .is_some_and(|(_, body)| {
-                    reference_with_constraint(body, reference, aliases, depth + 1)
+                    reference_with_constraint(body, reference, aliases, depth + 1, budget)
                 })
         }
         TypeExpr::Constrained(..) => false,
@@ -749,10 +755,15 @@ pub(super) fn has_constrained_reference(body: &[Entry], imports: &[Import]) -> b
     }
     let annotated = |entries: &[Entry]| {
         entries.iter().any(|entry| match entry {
-            Entry::Property(prop) => prop
-                .type_ann
-                .as_ref()
-                .is_some_and(|ty| reference_with_constraint(ty, &reference, &aliases, 0)),
+            Entry::Property(prop) => prop.type_ann.as_ref().is_some_and(|ty| {
+                reference_with_constraint(
+                    ty,
+                    &reference,
+                    &aliases,
+                    0,
+                    &std::cell::Cell::new(20_000),
+                )
+            }),
             _ => false,
         })
     };
