@@ -175,7 +175,7 @@ has_self = Index.containsKey("hk.pkl")
 
     let val = pklr::eval_to_json(&dir.join("hk.pkl")).unwrap();
     assert_eq!(val["value"], "foo");
-    assert_eq!(val["has_self"], false);
+    assert_eq!(val["has_self"], true);
 }
 
 #[test]
@@ -311,7 +311,7 @@ count = generated.length
 }
 
 #[test]
-fn import_glob_expression_skips_the_enclosing_module() {
+fn import_glob_expression_includes_the_enclosing_module() {
     let temp = TestTempDir::new("pklr_test_import_glob_expr_self");
     let dir = temp.path();
     std::fs::write(dir.join("other.pkl"), r#"value = "other""#).unwrap();
@@ -325,7 +325,7 @@ keys = siblings.keys.toList()
     .unwrap();
 
     let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
-    assert_eq!(val["keys"], serde_json::json!(["other.pkl"]));
+    assert_eq!(val["keys"], serde_json::json!(["main.pkl", "other.pkl"]));
 }
 
 #[test]
@@ -1975,10 +1975,10 @@ fn narrowed_import_that_read_a_cycle_placeholder_is_not_reused() {
     .unwrap();
 
     let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
-    // While hub is being imported, dep sees hub's placeholder. Once hub is
-    // done, the same narrowed import of dep must see its real value rather
-    // than a result cached during the cycle.
-    assert_eq!(val["hubDuring"], "placeholder");
+    // Reads are lazy, so dep reads hub's `title` even while hub is being
+    // imported (as `pkl eval` does). A result computed against a cycle
+    // placeholder must still not be reused.
+    assert_eq!(val["hubDuring"], "T");
     assert_eq!(val["after"], "T");
 }
 
@@ -2059,7 +2059,7 @@ fn import_glob_field_read_named_like_a_module_sees_every_module() {
 
     let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
     assert_eq!(val["l"], "L");
-    assert_eq!(val["count"], 2);
+    assert_eq!(val["count"], 3);
 }
 
 #[test]
@@ -4434,4 +4434,72 @@ fn qualified_type_prefix_must_be_a_module_import() {
         let err = eval_fails(src);
         assert!(err.contains("module import"), "{src}: {err}");
     }
+}
+
+#[test]
+fn import_glob_keys_keep_the_dot_slash_prefix() {
+    let temp = TestTempDir::new("pklr_test_glob_dot_slash_keys");
+    let dir = temp.path();
+    std::fs::write(dir.join("other.pkl"), "value = 1\n").unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "local m = import*(\"./*.pkl\")\nkeys = m.keys.toList()\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
+    assert_eq!(
+        val["keys"],
+        serde_json::json!(["./main.pkl", "./other.pkl"])
+    );
+}
+
+#[test]
+fn extending_module_shadows_base_locals_in_base_members() {
+    let temp = TestTempDir::new("pklr_test_extends_base_locals");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("base.pkl"),
+        "open module base\nlocal secret = \"base\"\nfrom = secret\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "extends \"base.pkl\"\nlocal secret = \"child\"\nmine = secret\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
+    assert_eq!(val["from"], "base");
+    assert_eq!(val["mine"], "child");
+}
+
+#[test]
+fn read_glob_keys_keep_the_dot_slash_prefix() {
+    let temp = TestTempDir::new("pklr_test_read_glob_dot_slash_keys");
+    let dir = temp.path();
+    std::fs::write(dir.join("a.txt"), "a").unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "keys = read*(\"./*.txt\").keys.toList()\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
+    assert_eq!(val["keys"], serde_json::json!(["./a.txt"]));
+}
+
+#[test]
+fn import_glob_keys_keep_the_prefix_for_hidden_files() {
+    let temp = TestTempDir::new("pklr_test_glob_hidden_keys");
+    let dir = temp.path();
+    std::fs::write(dir.join(".hidden.pkl"), "value = 1\n").unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "local m = import*(\"./.*.pkl\")\nkeys = m.keys.toList()\n",
+    )
+    .unwrap();
+
+    let val = pklr::eval_to_json(&dir.join("main.pkl")).unwrap();
+    assert_eq!(val["keys"], serde_json::json!(["./.hidden.pkl"]));
 }

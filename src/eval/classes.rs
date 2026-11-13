@@ -49,6 +49,10 @@ impl Evaluator {
                     .collect();
                 (names, identities)
             }
+            // `extends module` inherits the module's declarations, which the
+            // snapshot bound to `module` does not carry; the marker lets
+            // `new` accept them.
+            _ if parent_name == Some("module") => (vec!["module".to_string()], Vec::new()),
             _ => (Vec::new(), Vec::new()),
         };
 

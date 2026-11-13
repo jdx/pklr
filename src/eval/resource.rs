@@ -297,6 +297,9 @@ impl Evaluator {
                     // percent-encoded URI exposed by the resource itself.
                     let key = if file_keys {
                         uri.clone()
+                    } else if pattern.starts_with("./") {
+                        // Keys keep the pattern's own `./` prefix.
+                        format!("./{}", relative_glob_key(&path, &base))
                     } else {
                         relative_glob_key(&path, &base)
                     };

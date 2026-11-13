@@ -1359,6 +1359,11 @@ impl Evaluator {
                         )?;
                     }
                 }
+                Entry::Elem(_) => {
+                    return Err(Error::Eval(
+                        "Object of type `Mapping` cannot have an element.".into(),
+                    ));
+                }
                 _ => {}
             }
         }

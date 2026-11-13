@@ -1702,11 +1702,14 @@ impl Evaluator {
 impl Evaluator {
     /// The check a typed `local` gets when it is evaluated. Listing and
     /// Mapping members are checked as they are read, so only the type of the
-    /// value itself is checked here.
+    /// value itself is checked here, unless `expr` is not a literal body: the
+    /// elements of a Listing or Mapping that already exists are not checked
+    /// by anything else.
     pub(super) fn check_local_value(
         &mut self,
         val: &Value,
         ty: &crate::parser::TypeExpr,
+        expr: &Expr,
         scope: &Scope,
         depth: usize,
     ) -> Result<()> {
@@ -1724,8 +1727,15 @@ impl Evaluator {
                 _ => None,
             }
         }
+        let literal = matches!(expr, Expr::New(..) | Expr::InferredNew(..));
         match shallow(ty) {
-            Some(ty) => self.check_declared_value(val, &ty, scope, depth),
+            Some(shallow) => {
+                self.check_declared_value(val, &shallow, scope, depth)?;
+                if literal {
+                    return Ok(());
+                }
+                self.check_declared_value(val, ty, scope, depth)
+            }
             None => self.check_declared_value(val, ty, scope, depth),
         }
     }
