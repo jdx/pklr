@@ -1998,3 +1998,12 @@ fn mutually_recursive_generic_aliases_are_reported() {
         "{msg}"
     );
 }
+
+#[test]
+fn nested_generic_alias_applications_mean_different_types() {
+    let v = eval(
+        "typealias L<T> = List<T>\ntypealias W<U> = L<U>\nx = List(List(1)) is W<W<Int>>\ny = List(1) is W<Int>",
+    );
+    assert_eq!(v["x"], true);
+    assert_eq!(v["y"], true);
+}

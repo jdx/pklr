@@ -1189,7 +1189,15 @@ impl Evaluator {
             "{}<{}>",
             alias_key(declaring, name),
             args.iter()
-                .map(display_type_expr)
+                .map(|arg| match arg {
+                    // A name bound in the caller's scope is keyed by what
+                    // it stands for, so one written argument that means
+                    // different types at two depths is no cycle.
+                    TypeExpr::Named(n) => use_scope
+                        .get_type_alias(n)
+                        .map_or_else(|| display_type_expr(arg), display_type_expr),
+                    _ => display_type_expr(arg),
+                })
                 .collect::<Vec<_>>()
                 .join(",")
         );
