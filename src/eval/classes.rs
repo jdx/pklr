@@ -126,12 +126,20 @@ impl Evaluator {
             // Its declarations (and its parent's) let a member of a type
             // be looked up before the class is complete.
             if let Value::Object(_, Some(source)) = &mut placeholder {
-                let mut entries: Vec<Entry> = match &parent_val {
-                    Some(Value::Object(_, Some(parent))) => parent.entries.to_vec(),
-                    _ => Vec::new(),
+                let (mut entries, mut scopes): (Vec<Entry>, Vec<_>) = match &parent_val {
+                    Some(Value::Object(_, Some(parent))) => (
+                        parent.entries.to_vec(),
+                        (0..parent.entries.len())
+                            .map(|i| parent.entry_scopes.get(i).cloned().flatten())
+                            .collect(),
+                    ),
+                    _ => (Vec::new(), Vec::new()),
                 };
+                scopes.resize(entries.len() + body.len(), None);
                 entries.extend(body.iter().cloned());
-                Arc::make_mut(source).entries = entries.into();
+                let source = Arc::make_mut(source);
+                source.entries = entries.into();
+                source.entry_scopes = scopes;
             }
             child_scope.set(class_name, placeholder);
         }

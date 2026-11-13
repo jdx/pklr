@@ -109,6 +109,7 @@ pub(super) struct RefState {
 
 impl RefState {
     /// Frees the classes, which hold value trees that free recursively.
+    #[cfg(feature = "native-io")]
     pub(super) fn release(&mut self) {
         self.classes.clear();
     }

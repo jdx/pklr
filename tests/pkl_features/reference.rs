@@ -305,3 +305,20 @@ y = p.b[Map("a", 1)].getPath().length
     assert_eq!(result["x"], 2);
     assert_eq!(result["y"], 2);
 }
+
+#[test]
+fn reference_self_class_placeholder_keeps_inherited_declaration_scopes() {
+    let result = run(r#"
+typealias Names = List<String>
+open class A { names: Names = List() }
+class B extends A {
+  hidden fixed `$` = ref.Reference(d, B, this).names
+  n = 1
+}
+local b: ref.Reference<D, List<String>> = new B {}.`$`
+n = new B {}.n
+len = b.getPath().length
+"#);
+    assert_eq!(result["n"], 1);
+    assert_eq!(result["len"], 1);
+}
