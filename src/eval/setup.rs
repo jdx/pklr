@@ -299,6 +299,7 @@ impl Evaluator {
         self.parse_cache.clear();
         self.body_roots_cache.clear();
         self.plan_cache.clear();
+        self.deferred_const.clear();
         self.resource_cache.clear();
         clear_names();
         self.module_scopes.clear();
@@ -405,6 +406,7 @@ impl Evaluator {
             std::mem::take(&mut self.output_props),
             self.module_output.take(),
             std::mem::take(&mut self.mapping_key_values),
+            std::mem::take(&mut self.deferred_const),
         );
         crate::stack::drop_on_large_stack(held);
     }
