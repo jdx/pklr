@@ -420,6 +420,15 @@ impl Evaluator {
                 let arg = args.first().cloned().unwrap_or(Value::Null);
                 Ok(Some(Value::Bool(set_contains(items, &arg))))
             }
+            (Value::List(items), "add")
+                if matches!(items.kind(), ListKind::List | ListKind::Set) && args.len() == 1 =>
+            {
+                let mut elements: Vec<Value> = items.iter().cloned().collect();
+                if items.kind() != ListKind::Set || !set_contains(&elements, &args[0]) {
+                    elements.push(args[0].clone());
+                }
+                Ok(Some(Value::List(ListValue::new(items.kind(), elements))))
+            }
             (Value::List(items), "toList") => {
                 Ok(Some(Value::List(items.clone().with_kind(ListKind::List))))
             }

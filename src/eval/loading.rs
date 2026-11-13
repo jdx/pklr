@@ -615,12 +615,23 @@ impl Evaluator {
         }
         self.check_module_path_allowed(path)?;
         let canonical = self.canonicalize_io(path)?;
-        if let Some(cached) = self.cached_import(&canonical) {
-            return Ok(cached);
-        }
         let mut fields: Vec<Name> = requested_fields.iter().flatten().cloned().collect();
         fields.sort_unstable();
         let key = (canonical.clone(), fields);
+        if self.imports_in_flight.contains(&canonical) {
+            // A module that reads itself finds its own placeholder. Evaluate
+            // just the members it reads, unless that is already under way.
+            if !self.narrowed_in_flight.insert(key.clone()) {
+                return Ok(self.cached_import(&canonical).unwrap_or_default());
+            }
+            self.placeholder_reads += 1;
+            let result = self.eval_file_requested_fields_inner(path, depth, requested_fields);
+            self.narrowed_in_flight.remove(&key);
+            return result;
+        }
+        if let Some(cached) = self.cached_import(&canonical) {
+            return Ok(cached);
+        }
         if let Some(cached) = self.narrowed_import_cache.get(&key) {
             return Ok(cached.clone());
         }
@@ -829,7 +840,11 @@ impl Evaluator {
         let matched = matched
             .into_iter()
             .map(|matched_path| {
-                let rel_key = pathdiff_or_full(&matched_path, base_dir);
+                let mut rel_key = pathdiff_or_full(&matched_path, base_dir);
+                // Keys keep the pattern's own `./` prefix.
+                if uri.starts_with("./") && !rel_key.starts_with(['.', '/']) {
+                    rel_key.insert_str(0, "./");
+                }
                 (matched_path, rel_key)
             })
             .collect::<Vec<_>>();
@@ -845,7 +860,13 @@ impl Evaluator {
             if requested.is_some_and(|requested| !requested.contains(rel_key.as_str())) {
                 continue;
             }
-            if self.same_local_path(&matched_path, path)? {
+            // The module itself matches too, as the placeholder of its own
+            // evaluation, when that is under way.
+            if self.same_local_path(&matched_path, path)?
+                && !self
+                    .canonicalize_io(path)
+                    .is_ok_and(|canonical| self.imports_in_flight.contains(&canonical))
+            {
                 continue;
             }
             // A match is checked by its own file URI, not by an earlier

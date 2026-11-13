@@ -3039,13 +3039,9 @@ fn member_predicate_amends_matching_dynamic_elements() {
 
 #[test]
 fn member_predicates_are_reported_as_unsupported() {
-    for src in [
-        "base = new Listing { 1 2 }\nres = (base) { [[this == 1]] = 3 }\n",
-        "base = new Mapping { [\"a\"] = 1 }\nres = (base) { [[this == 1]] = 3 }\n",
-    ] {
-        let err = eval_fails(src);
-        assert!(err.contains("member predicates"), "{src}: {err}");
-    }
+    let src = "base = new Mapping { [\"a\"] = 1 }\nres = (base) { [[this == 1]] = 3 }\n";
+    let err = eval_fails(src);
+    assert!(err.contains("member predicates"), "{src}: {err}");
 }
 
 #[test]
@@ -3356,4 +3352,24 @@ fn dynamic_amendment_key_errors_are_reported_once() {
     let err =
         eval_fails("hidden base = new Dynamic { 1; 2 }\nres = (base) { [\"a\" as Int] = 9 }\n");
     assert!(err.contains("Int"), "{err}");
+}
+
+#[test]
+fn list_and_set_add_append_an_element() {
+    let v = eval("a = List(1, 2).add(3)\nb = Set(1, 2).add(2)\nc = Set(1, 2).add(3)\n");
+    assert_eq!(v["a"], serde_json::json!([1, 2, 3]));
+    assert_eq!(v["b"], serde_json::json!([1, 2]));
+    assert_eq!(v["c"], serde_json::json!([1, 2, 3]));
+}
+
+#[test]
+fn listing_member_predicates_amend_matching_elements() {
+    let v = eval("base = new Listing { 1 2 }\nres = (base) { [[this == 1]] = 3 }\n");
+    assert_eq!(v["res"], serde_json::json!([3, 2]));
+}
+
+#[test]
+fn module_self_reads_see_members_evaluated_so_far() {
+    let v = eval("foo { b = 1 }\nbar = module.foo.b\n");
+    assert_eq!(v["bar"], 1);
 }

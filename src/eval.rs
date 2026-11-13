@@ -117,6 +117,8 @@ pub struct Evaluator {
     /// Narrowed evaluations of local imports, keyed by canonical path and the
     /// sorted requested fields.
     narrowed_import_cache: HashMap<(PathBuf, Vec<Name>), Value>,
+    /// Narrowed evaluations of a module that read their own in-flight import.
+    narrowed_in_flight: HashSet<(PathBuf, Vec<Name>)>,
     /// Parsed local modules (canonical path → AST)
     parse_cache: HashMap<PathBuf, Arc<Module>>,
     /// `referenced_roots` of object bodies amended in this run, keyed by the

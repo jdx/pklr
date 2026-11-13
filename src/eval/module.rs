@@ -258,6 +258,114 @@ impl Evaluator {
             .unwrap_or_default()
     }
 
+    /// The object member `prop` builds without the members that read `prop`
+    /// itself, directly or through other members: what `foo.b` and
+    /// `module.foo.b` can see while `foo` is still being built. `None` when
+    /// `prop` does not read itself or the rest does not build.
+    fn partial_self_reading_member(
+        &mut self,
+        prop: &Property,
+        scope: &Scope,
+        depth: usize,
+    ) -> Option<Value> {
+        let body = prop.body.as_ref()?;
+        if !property_reference_names(prop).contains(&prop.name) {
+            return None;
+        }
+        let refs: Vec<(Name, HashSet<Name>)> = body
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Property(member) => {
+                    Some((member.name.clone(), property_reference_names(member)))
+                }
+                _ => None,
+            })
+            .collect();
+        let mut excluded: HashSet<Name> = HashSet::default();
+        loop {
+            let before = excluded.len();
+            for (name, reads) in &refs {
+                if reads.contains(&prop.name) || reads.iter().any(|read| excluded.contains(read)) {
+                    excluded.insert(name.clone());
+                }
+            }
+            if excluded.len() == before {
+                break;
+            }
+        }
+        let kept: Vec<Entry> = body
+            .iter()
+            .filter(|entry| !matches!(entry, Entry::Property(member) if excluded.contains(&member.name)))
+            .cloned()
+            .collect();
+        let partial = Property {
+            body: Some(Arc::new(kept)),
+            ..prop.clone()
+        };
+        self.eval_property_with(&partial, scope, depth, true)
+            .ok()
+            .flatten()
+    }
+
+    /// A base module's own expressions keep reading the members they were
+    /// written against: a `local` member is never overridden, whether the base
+    /// or this module declares it. Bind those members' base values around the
+    /// inherited properties that read them.
+    fn shadow_inherited_locals(
+        &mut self,
+        module: &Module,
+        path: &Path,
+        late_inherited: &mut [Arc<Property>],
+    ) {
+        if late_inherited.is_empty() {
+            return;
+        }
+        let Some(base_path) = self.parent_module_key(module, path) else {
+            return;
+        };
+        let Some(base) = self.module_scopes.get(&base_path) else {
+            return;
+        };
+        let mut shadowed: Vec<(Name, Value)> = Vec::new();
+        for entry in module.body.iter() {
+            let (name, child_local, is_class) = match entry {
+                Entry::Property(prop) => (
+                    prop.name.clone(),
+                    has_modifier(&prop.modifiers, Modifier::Local),
+                    false,
+                ),
+                Entry::ClassDef(name, modifiers, ..) => (
+                    Name::from(name.as_str()),
+                    modifiers.contains(&Modifier::Local),
+                    true,
+                ),
+                _ => continue,
+            };
+            let Some(value) = base.values.get(name.as_ref()) else {
+                continue;
+            };
+            let base_member = if is_class {
+                base.exported_types.contains(name.as_ref())
+            } else {
+                base.late_properties.iter().any(|prop| prop.name == name)
+            };
+            if base_member && !child_local {
+                continue;
+            }
+            shadowed.push((name, value.clone()));
+        }
+        if shadowed.is_empty() {
+            return;
+        }
+        for prop in late_inherited.iter_mut() {
+            if let Entry::Property(wrapped) =
+                shadow_local_reads(&Entry::Property(prop.clone()), &shadowed)
+            {
+                *prop = wrapped;
+            }
+        }
+    }
+
     /// The member view a derived module exposes through `super`.
     ///
     /// A module's rendered value omits hidden properties and methods, but Pkl
@@ -403,9 +511,10 @@ impl Evaluator {
         )?;
         let ModuleBase {
             members: base_obj,
-            late_properties: late_inherited_properties,
+            late_properties: mut late_inherited_properties,
             mut super_members,
         } = base;
+        self.shadow_inherited_locals(module, path, &mut late_inherited_properties);
 
         if (module.amends.is_some() || module.extends.is_some()) && super_members.is_none() {
             super_members = Some(base_obj.clone());
@@ -1515,7 +1624,7 @@ impl Evaluator {
                             }
                             continue;
                         }
-                        let property_result = self
+                        let mut property_result = self
                             .eval_property_with(prop, scope, depth, true)
                             .and_then(|value| {
                                 if synthesized_inherited_types.contains(prop.name.as_ref())
@@ -1527,6 +1636,22 @@ impl Evaluator {
                                 }
                                 Ok(value)
                             });
+                        // A member that reads its own members through the
+                        // module (`foo.b`, `module.foo.b`) needs `foo` to exist
+                        // while it is built: give it the members that do not
+                        // read it, then build it in full.
+                        if matches!(&property_result, Err(Error::Eval(message))
+                            if message.starts_with("Cannot find property"))
+                            && let Some(partial) =
+                                self.partial_self_reading_member(prop, scope, depth)
+                        {
+                            scope.declare(&prop.name, partial.clone());
+                            module_props_insert(scope, all_props, prop.name.clone(), partial);
+                            let snapshot = Value::Object(Arc::clone(all_props), None);
+                            scope.set("this", snapshot.clone());
+                            scope.set("module", snapshot);
+                            property_result = self.eval_property_with(prop, scope, depth, true);
+                        }
                         let val = match property_result {
                             Ok(value) => value,
                             // Module properties are late-bound. Keep an unresolved
