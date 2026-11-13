@@ -127,7 +127,7 @@ impl Evaluator {
                 acc
             }
             "mapKeys" | "map" | "flatMap" => {
-                let transform = lambda_arg(args, 1)?;
+                let transform = lambda_arg(args, 2)?;
                 let mut out = ObjectMap::default();
                 for (key, value) in map {
                     let key = entry_key(self, key);
@@ -424,6 +424,7 @@ impl Evaluator {
                     "drop" => same(slice[n.min(len)..].to_vec()),
                     "takeLast" => same(slice[len - n.min(len)..].to_vec()),
                     "dropLast" => same(slice[..len - n.min(len)].to_vec()),
+                    _ if len == 0 => list(Vec::new()),
                     _ => {
                         let total = n.saturating_mul(len);
                         let mut out = Vec::new();
@@ -717,7 +718,7 @@ fn pair(first: Value, second: Value) -> Value {
 }
 
 fn is_pair(value: &Value) -> bool {
-    matches!(value, Value::Object(_, Some(source)) if source.type_name.as_deref() == Some("Pair"))
+    matches!(value, Value::Object(_, Some(source)) if source.type_identity.as_deref() == Some("pkl:base#Pair"))
 }
 
 fn pair_member(pair: &Value, name: &str) -> Value {

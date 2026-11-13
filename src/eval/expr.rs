@@ -549,9 +549,9 @@ impl Evaluator {
                     (Value::String(s), "isEmpty") => return Ok(Value::Bool(s.is_empty())),
                     // A read `Resource` has `uri`, `text` and `base64`, and derives the rest.
                     (
-                        Value::Object(map, None),
+                        Value::Object(map, Some(source)),
                         "bytes" | "md5" | "sha1" | "sha256" | "sha256Int",
-                    ) if map.contains_key("uri") && map.contains_key("base64") => {
+                    ) if source.type_name.as_deref() == Some("Resource") => {
                         if let Some(result) = stdlib::resource_property(map, field) {
                             return result;
                         }

@@ -44,7 +44,9 @@ fn java_syntax_error(pattern: &str) -> Option<String> {
     };
     let (mut open, mut in_class, mut escaped) = (0usize, false, false);
     let mut can_repeat = false;
+    let mut group_start = false;
     for (index, c) in pattern.chars().enumerate() {
+        let opens = std::mem::take(&mut group_start);
         if escaped {
             escaped = false;
             can_repeat = true;
@@ -60,7 +62,10 @@ fn java_syntax_error(pattern: &str) -> Option<String> {
             '(' => {
                 open += 1;
                 can_repeat = false;
+                group_start = true;
             }
+            // `(?` starts a group construct such as `(?i)` or `(?:...)`.
+            '?' if opens => {}
             '|' => can_repeat = false,
             ')' => {
                 open = open.saturating_sub(1);

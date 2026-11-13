@@ -179,3 +179,42 @@ step = test.catch(() -> IntSeq(1, 5).step(0))
         "Type constraint `isNonZero` violated. Value: 0"
     );
 }
+
+#[test]
+fn review_edge_cases() {
+    let json = eval(
+        r#"
+import "pkl:test"
+class C { hidden h = 1; v = 2 }
+repeatEmpty = List().repeat(9223372036854775807)
+elementLength = new Dynamic { 1; 2 }.length()
+hiddenHas = new C {}.hasProperty("h")
+hiddenGet = new C {}.getProperty("h")
+escapeEmpty = import("pkl:shell").escapeWithSingleQuotes("")
+mapNotFunction = test.catch(() -> Map(1, 2).map(1))
+setSplit = Set(1, 2, 3).split(1).first is Set
+setPartition = Set(1, 2, 3).partition((x) -> x > 1).second is Set
+setGroup = Set(1, 2, 3).groupBy((x) -> x.isOdd).values.toList()[0] is Set
+flags = "A".matches(Regex("(?i)a"))
+nonCapturing = "abab".matches(Regex("(?:ab)+"))
+named = "a".matches(Regex("(?<n>a)"))
+lookahead = Regex("a(?=b)").findMatchesIn("ab").length
+"#,
+    );
+    assert_eq!(json["repeatEmpty"], serde_json::json!([]));
+    assert_eq!(json["elementLength"], 2);
+    assert_eq!(json["hiddenHas"], true);
+    assert_eq!(json["hiddenGet"], 1);
+    assert_eq!(json["escapeEmpty"], "");
+    assert_eq!(
+        json["mapNotFunction"],
+        "Expected value of type `Function2`, but got type `Int`. Value: 1"
+    );
+    assert_eq!(json["setSplit"], true);
+    assert_eq!(json["setPartition"], true);
+    assert_eq!(json["setGroup"], true);
+    assert_eq!(json["flags"], true);
+    assert_eq!(json["nonCapturing"], true);
+    assert_eq!(json["named"], true);
+    assert_eq!(json["lookahead"], 1);
+}

@@ -766,14 +766,17 @@ impl Evaluator {
                 name @ ("hasProperty" | "getProperty" | "getPropertyOrNull"),
             ) if source.kind != ObjectKind::Mapping => {
                 let wanted = require_str_arg(args, 0, name)?;
+                let evaluated = source.evaluated_properties.iter().any(|p| &**p == wanted);
+                // Hidden properties are not in `map`; they live in the scope.
                 let found = map
                     .get(wanted)
-                    .filter(|_| {
-                        source.type_name.is_some()
-                            || source.is_module
-                            || source.evaluated_properties.iter().any(|p| &**p == wanted)
-                    })
-                    .cloned();
+                    .filter(|_| source.type_name.is_some() || source.is_module || evaluated)
+                    .cloned()
+                    .or_else(|| {
+                        evaluated
+                            .then(|| source.scope().get(wanted).cloned())
+                            .flatten()
+                    });
                 Ok(Some(match name {
                     "hasProperty" => Value::Bool(found.is_some()),
                     "getPropertyOrNull" => found.unwrap_or(Value::Null),
@@ -1175,6 +1178,7 @@ fn dynamic_elements_method(
 ) -> Result<Option<Value>> {
     match method {
         "toList" => Ok(Some(Value::List(items.clone().with_kind(ListKind::List)))),
+        "length" if args.is_empty() => Ok(Some(Value::Int(items.len() as i64))),
         "toMap" => Ok(Some(Value::Object(Arc::default(), None))),
         "getClass" if args.is_empty() => stdlib::get_class(this).map(Some),
         "hasProperty" => {
