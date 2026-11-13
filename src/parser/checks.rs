@@ -64,6 +64,26 @@ impl<'a> Parser<'a> {
     /// Reject `new X {}` where `X` names a module property rather than a
     /// class or type alias: types and values live in separate namespaces.
     pub(super) fn check_new_types(&self, body: &[Entry], imports: &[Import]) -> Result<()> {
+        for (qualifier, offset) in &self.new_qualifiers {
+            let is_property = body
+                .iter()
+                .any(|entry| matches!(entry, Entry::Property(p) if *p.name == **qualifier));
+            let is_import = imports.iter().any(|import| {
+                let inferred = import
+                    .uri
+                    .rsplit(['/', ':'])
+                    .next()
+                    .unwrap_or(&import.uri)
+                    .trim_end_matches(".pkl");
+                import.alias.as_deref().unwrap_or(inferred) == qualifier
+            });
+            if is_property && !is_import {
+                return Err(self.error_at(
+                    *offset,
+                    format!("Expected `{qualifier}` to be a module import, but it is not."),
+                ));
+            }
+        }
         if self.new_types.is_empty() {
             return Ok(());
         }
@@ -591,4 +611,130 @@ pub(super) fn constant_string(expr: &Expr) -> Option<String> {
             .collect(),
         _ => None,
     }
+}
+
+/// Whether a type, with the aliases it names expanded, carries a constraint.
+fn type_has_constraint(
+    ty: &TypeExpr,
+    aliases: &std::collections::HashMap<&str, (&[String], &TypeExpr)>,
+    depth: usize,
+) -> bool {
+    if depth > 32 {
+        return false;
+    }
+    match ty {
+        TypeExpr::Constrained(..) => true,
+        TypeExpr::Nullable(inner) => type_has_constraint(inner, aliases, depth + 1),
+        TypeExpr::Union(variants) => variants
+            .iter()
+            .any(|variant| type_has_constraint(variant, aliases, depth + 1)),
+        TypeExpr::Generic(name, args) => {
+            args.iter()
+                .any(|arg| type_has_constraint(arg, aliases, depth + 1))
+                || aliases.get(name.as_str()).is_some_and(|(params, body)| {
+                    let body = substitute_type(body, params, args);
+                    type_has_constraint(&body, aliases, depth + 1)
+                })
+        }
+        TypeExpr::Named(name) => aliases
+            .get(name.trim_start_matches('*'))
+            .is_some_and(|(_, body)| type_has_constraint(body, aliases, depth + 1)),
+    }
+}
+
+/// Replace the parameters of a generic type alias by the arguments it is used with.
+fn substitute_type(ty: &TypeExpr, params: &[String], args: &[TypeExpr]) -> TypeExpr {
+    let go = |inner: &TypeExpr| substitute_type(inner, params, args);
+    match ty {
+        TypeExpr::Named(name) => params
+            .iter()
+            .position(|param| param == name)
+            .and_then(|index| args.get(index).cloned())
+            .unwrap_or_else(|| ty.clone()),
+        // A parameter used as the base of a constraint stays constrained.
+        TypeExpr::Constrained(..) => ty.clone(),
+        TypeExpr::Nullable(inner) => TypeExpr::Nullable(Box::new(go(inner))),
+        TypeExpr::Union(variants) => TypeExpr::Union(variants.iter().map(go).collect()),
+        TypeExpr::Generic(name, inner) => {
+            TypeExpr::Generic(name.clone(), inner.iter().map(go).collect())
+        }
+    }
+}
+
+/// Whether a type, with aliases expanded, is a `Reference` of `pkl:ref` whose
+/// referent type includes a constraint.
+fn reference_with_constraint(
+    ty: &TypeExpr,
+    reference: &[String],
+    aliases: &std::collections::HashMap<&str, (&[String], &TypeExpr)>,
+    depth: usize,
+) -> bool {
+    if depth > 32 {
+        return false;
+    }
+    match ty {
+        TypeExpr::Nullable(inner) => {
+            reference_with_constraint(inner, reference, aliases, depth + 1)
+        }
+        TypeExpr::Union(variants) => variants
+            .iter()
+            .any(|variant| reference_with_constraint(variant, reference, aliases, depth + 1)),
+        TypeExpr::Generic(name, args) => {
+            if reference.iter().any(|r| r == name) && args.len() == 2 {
+                return type_has_constraint(&args[1], aliases, depth + 1);
+            }
+            if let Some((params, body)) = aliases.get(name.as_str()) {
+                let body = substitute_type(body, params, args);
+                if reference_with_constraint(&body, reference, aliases, depth + 1) {
+                    return true;
+                }
+            }
+            args.iter()
+                .any(|arg| reference_with_constraint(arg, reference, aliases, depth + 1))
+        }
+        TypeExpr::Named(name) => {
+            aliases
+                .get(name.trim_start_matches('*'))
+                .is_some_and(|(_, body)| {
+                    reference_with_constraint(body, reference, aliases, depth + 1)
+                })
+        }
+        TypeExpr::Constrained(..) => false,
+    }
+}
+
+/// Find a property annotation naming `pkl:ref`'s `Reference` with a referent
+/// type that includes a constraint, directly or through type aliases.
+pub(super) fn has_constrained_reference(body: &[Entry], imports: &[Import]) -> bool {
+    let reference: Vec<String> = imports
+        .iter()
+        .filter(|import| import.uri == "pkl:ref" && !import.is_glob)
+        .map(|import| format!("{}.Reference", import.alias.as_deref().unwrap_or("ref")))
+        .collect();
+    if reference.is_empty() {
+        return false;
+    }
+    let mut aliases = std::collections::HashMap::new();
+    for entry in body {
+        if let Entry::TypeAlias(name, ty, generic) = entry {
+            match generic {
+                Some(generic) => aliases.insert(name.as_str(), (generic.0.as_slice(), &generic.1)),
+                None => aliases.insert(name.as_str(), (&[][..], ty)),
+            };
+        }
+    }
+    let annotated = |entries: &[Entry]| {
+        entries.iter().any(|entry| match entry {
+            Entry::Property(prop) => prop
+                .type_ann
+                .as_ref()
+                .is_some_and(|ty| reference_with_constraint(ty, &reference, &aliases, 0)),
+            _ => false,
+        })
+    };
+    annotated(body)
+        || body.iter().any(|entry| match entry {
+            Entry::ClassDef(_, _, _, class_body) => annotated(class_body),
+            _ => false,
+        })
 }

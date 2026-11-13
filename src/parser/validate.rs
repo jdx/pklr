@@ -990,11 +990,18 @@ fn inferred_class(ty: &TypeExpr) -> Option<&str> {
 const READ: u8 = 0;
 const CALL: u8 = 1;
 const APPLY: u8 = 2;
+/// A call of a bare name, `name(...)`.
+const BARE_CALL: u8 = 3;
+/// A declared method.
+const METHOD: u8 = 4;
 
 fn collect_calls_in_entries<'m>(entries: &'m [Entry], called: &mut HashSet<(&'m str, u8)>) {
     for entry in entries {
         match entry {
             Entry::Property(prop) => {
+                if prop.is_method {
+                    called.insert((&prop.name, METHOD));
+                }
                 if let Some(ty) = &prop.type_ann {
                     collect_calls_in_type(ty, called);
                 }
@@ -1055,6 +1062,7 @@ fn collect_calls<'m>(expr: &'m Expr, called: &mut HashSet<(&'m str, u8)>) {
             match callee.as_ref() {
                 Expr::Ident(name) => {
                     called.insert((name, CALL));
+                    called.insert((name, BARE_CALL));
                 }
                 Expr::Field(base, name) | Expr::NullSafeField(base, name) => {
                     called.insert((name, CALL));
@@ -1118,6 +1126,34 @@ fn collect_calls<'m>(expr: &'m Expr, called: &mut HashSet<(&'m str, u8)>) {
             called.insert((name, READ));
         }
     }
+}
+
+/// Find a call `name(...)` of a module property that holds a lambda. A lambda is
+/// applied with `.apply`; a call resolves only to a method, so pkl reports a
+/// missing method. Modules that amend or extend another may inherit methods.
+pub(super) fn find_called_lambda(body: &[Entry], open: bool) -> Option<&str> {
+    if open {
+        return None;
+    }
+    let lambdas: Vec<&str> = body
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::Property(prop)
+                if !prop.is_method && matches!(prop.value, Some(Expr::Lambda(..))) =>
+            {
+                Some(&*prop.name)
+            }
+            _ => None,
+        })
+        .collect();
+    if lambdas.is_empty() {
+        return None;
+    }
+    let mut called = HashSet::default();
+    collect_calls_in_entries(body, &mut called);
+    lambdas
+        .into_iter()
+        .find(|name| called.contains(&(*name, BARE_CALL)) && !called.contains(&(*name, METHOD)))
 }
 
 /// Find a property of a class that redeclares one of an in-module parent class

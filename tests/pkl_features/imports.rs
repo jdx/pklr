@@ -2803,11 +2803,10 @@ fn narrowed_import_reads_qualified_type_roots_and_nested_classes() {
     let temp = TestTempDir::new("pklr_test_narrowed_import_qualified_roots");
     let dir = temp.path();
     std::fs::write(dir.join("types.pkl"), "class Item {\n  a: Int = 1\n}\n").unwrap();
-    // The root of `Dep.Item` is a property holding a module, so building one
-    // reads the property.
+    // The root of `Dep.Item` is an import.
     std::fs::write(
         dir.join("dep.pkl"),
-        "Dep = import(\"types.pkl\")\nresult = new Dep.Item {}\n",
+        "import \"types.pkl\" as Dep\nresult = new Dep.Item {}\n",
     )
     .unwrap();
     // A class declared in a body is bound as a value too, so reading it there

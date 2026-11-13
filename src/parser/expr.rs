@@ -398,6 +398,11 @@ impl<'a> Parser<'a> {
         {
             self.new_types.push((name.clone(), offset));
         }
+        if let TypeExpr::Named(name) | TypeExpr::Generic(name, _) = &ty
+            && let Some((qualifier, _)) = name.split_once('.')
+        {
+            self.new_qualifiers.push((qualifier.to_string(), offset));
+        }
         let checked = match &ty {
             TypeExpr::Generic(name, args)
                 if matches!(name.as_str(), "Listing" | "Mapping") && !args.is_empty() =>

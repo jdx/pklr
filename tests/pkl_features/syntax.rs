@@ -2952,7 +2952,7 @@ fn trailing_semicolons_before_end_of_file() {
 #[test]
 fn function_types_are_accepted_in_type_positions() {
     let json = eval(
-        "zero: () -> Int = () -> 1\none: (Int,) -> String = (x) -> x.toString()\ntwo: (Int, String) -> String = (x, y) -> y\nnested: ((Int) -> Int) -> Int = (f) -> f(2)\nresult = List(zero(), one(3), two(0, \"x\"), nested((x) -> x + 1))",
+        "zero: () -> Int = () -> 1\none: (Int,) -> String = (x) -> x.toString()\ntwo: (Int, String) -> String = (x, y) -> y\nnested: ((Int) -> Int) -> Int = (f) -> f.apply(2)\nresult = List(zero.apply(), one.apply(3), two.apply(0, \"x\"), nested.apply((x) -> x + 1))",
     );
     assert_eq!(json["result"], serde_json::json!([1, "3", "x", 3]));
 }
@@ -3015,7 +3015,7 @@ fn const_members_only_read_const_members() {
 #[test]
 fn lambda_calls_require_the_declared_arity() {
     for src in [
-        "f = (x) -> x\nresult = f()",
+        "f = (x) -> x\nresult = f.apply()",
         "obj { f = (x) -> x }\nresult = obj.f()",
         "result = List(1).map((x, y) -> x)",
     ] {
@@ -3384,4 +3384,51 @@ fn dynamic_member_predicates_do_not_bind_listing_members() {
         "local length = 5\nbase = new Listing { new Dynamic { 1; 2 } }\nres = (base) { [[length == 5]] = 9 }\n",
     );
     assert_eq!(v["res"], serde_json::json!([9]));
+}
+
+#[test]
+fn reference_referent_type_rejects_constraints() {
+    // Each is rejected by `pkl eval`, directly or through type aliases.
+    for src in [
+        "import \"pkl:ref\"\ntypealias Ref<T> = ref.Reference<ref.Domain, T>\ntypealias Ref2<T> = Ref<T>\nfoo: Ref2<String(isEmpty)>",
+        "import \"pkl:ref\"\ntypealias Ref<T> = ref.Reference<ref.Domain, T>\ntypealias Ref2<T> = Ref<T(isEmpty)>\nfoo: Ref2<String>",
+        "import \"pkl:ref\"\ntypealias Foo1 = Foo2\ntypealias Foo2 = String(isEmpty)\nfoo: ref.Reference<ref.Domain, Foo1>",
+    ] {
+        let err = eval_fails(src);
+        assert!(
+            err.contains("`Reference` referent type argument may not include type constraints."),
+            "{src}: {err}"
+        );
+    }
+}
+
+#[test]
+fn a_property_holding_a_lambda_is_not_a_method() {
+    // `pkl eval`: a call resolves to a method only; a lambda needs `.apply`.
+    let err = eval_fails("listing = (it) -> it\ncall = listing(10)");
+    assert!(err.contains("Cannot find method `listing`."), "{err}");
+    let json = eval("function f(x) = x\ng = (x) -> x\nresult = List(f(1), g.apply(2))");
+    assert_eq!(json["result"], serde_json::json!([1, 2]));
+}
+
+#[test]
+fn resource_has_no_properties_beyond_its_own() {
+    let err = eval_fails("resource = new Resource {\n  foo = \"bar\"\n}");
+    assert!(err.contains("foo"), "{err}");
+}
+
+#[test]
+fn module_type_rejects_another_module_of_the_same_name() {
+    let temp = TestTempDir::new("pklr_test_module_type_same_name");
+    let dir = temp.path();
+    std::fs::write(dir.join("helper.pkl"), "module foo.bar\n").unwrap();
+    std::fs::write(
+        dir.join("main.pkl"),
+        "module foo.bar\n\nimport \"helper.pkl\"\n\nmod: module = helper\n",
+    )
+    .unwrap();
+    let err = pklr::eval_to_json(&dir.join("main.pkl"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("Module version conflict"), "{err}");
 }

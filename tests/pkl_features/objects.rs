@@ -870,22 +870,28 @@ class Container<T> {
 
 #[test]
 fn new_with_dotted_type_name() {
-    // Dotted type names in new: resolves Config then .Step
+    // Dotted type names in new: an imported module, then a class of it.
     let json = eval(
         r#"
-local Config = new {
-    Step = new {
-        check = "default"
-        glob = "*.rs"
-    }
-}
-x = new Config.Step {
+import "pkl:base"
+x = new base.Dynamic {
     check = "custom"
 }
 "#,
     );
     assert_eq!(json["x"]["check"], "custom");
-    assert_eq!(json["x"]["glob"], "*.rs");
+
+    // The qualifier must be an import, not a property.
+    let err = eval_fails(
+        r#"
+local base = import("pkl:base")
+x = new base.Dynamic {}
+"#,
+    );
+    assert!(
+        err.contains("Expected `base` to be a module import, but it is not."),
+        "{err}"
+    );
 }
 
 // ============================================================
@@ -1546,7 +1552,7 @@ fn typed_lambda_parameters_evaluate() {
     let json = eval(
         r#"
 local choose = (value: String) -> value
-result = choose("ok")
+result = choose.apply("ok")
 "#,
     );
     assert_eq!(json["result"], "ok");
@@ -3833,7 +3839,7 @@ const expected = "b"
 const other = "o"
 d = new D {}
 made = make("z")
-lambda = mk("y")
+lambda = mk.apply("y")
 "#,
     );
     assert_eq!(val["d"], serde_json::json!({"v": "b", "w": "w", "u": "o"}));
