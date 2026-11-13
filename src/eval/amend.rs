@@ -1964,10 +1964,14 @@ pub(super) fn compose_amended_object(
         && (entries_are_listing_amendment(earlier) || entries_are_listing_amendment(body))
     {
         // Two bodies that add elements: the second adds to what the first
-        // made, so the member is rebuilt from both, in order.
-        let combined: Vec<Entry> = earlier.iter().chain(body.iter()).cloned().collect();
+        // made, so the member is rebuilt from both, in order. Each body stays
+        // a layer of its own, so the `local`s of one never replace the
+        // other's. (A body-only member has no type annotation to keep.)
+        let base = Expr::New(None, earlier.clone(), Vec::new());
+        let overlay = with_template_locals(locals, prop, Expr::ObjectBody(body.clone()));
         return Arc::new(Property {
-            body: Some(Arc::new(combined)),
+            value: Some(Expr::Binop(BinOp::Add, Box::new(base), Box::new(overlay))),
+            body: None,
             ..(**prop).clone()
         });
     }

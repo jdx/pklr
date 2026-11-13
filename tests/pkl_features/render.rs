@@ -2358,3 +2358,64 @@ fn output_super_text_applies_module_property_annotations() {
         "T:{\n  \"renamed\": 1,\n  \"b\": 0\n}\n"
     );
 }
+
+// Each amending module's body-only declaration keeps its own `local`s: a
+// later body's `local x` does not replace the earlier body's.
+#[cfg(feature = "native-io")]
+#[test]
+fn body_only_layers_keep_their_own_locals() {
+    let dir = TestTempDir::new("pklr_body_only_locals");
+    std::fs::write(
+        dir.path().join("base.pkl"),
+        "local y = 10\na = 1\no { local x = 1; x; y }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("mid.pkl"),
+        "amends \"base.pkl\"\nlocal y = 5\no { local x = 2; module.a + x; y }\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("main.pkl"), "amends \"mid.pkl\"\na = 2\n").unwrap();
+    assert_eq!(
+        pklr::eval_to_json(&dir.path().join("main.pkl")).unwrap(),
+        serde_json::json!({"a": 2, "o": [1, 10, 4, 5]})
+    );
+}
+
+// A converter keyed by a user class named like a builtin (`[mod.Int]`) never
+// converts the builtin's values.
+#[cfg(feature = "native-io")]
+#[test]
+fn user_class_converter_does_not_convert_the_builtin_of_the_same_name() {
+    let dir = TestTempDir::new("pklr_converter_builtin_name");
+    std::fs::write(
+        dir.path().join("mi.pkl"),
+        "class Int { x: Int(true) = 1 }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("main.pkl"),
+        "import \"mi.pkl\" as ma\na = 5\nb = new ma.Int {}\noutput { renderer = new JsonRenderer { converters {\n  [ma.Int] = (_) -> \"U\"\n  [Int] = (i) -> i + 1\n} } }\n",
+    )
+    .unwrap();
+    assert_eq!(
+        pklr::eval_to_json(&dir.path().join("main.pkl")).unwrap(),
+        serde_json::json!({"a": 6, "b": "U"})
+    );
+}
+
+// An annotation that reads a module member through `outer` finds it.
+#[cfg(feature = "native-io")]
+#[test]
+fn annotation_reads_module_members_through_outer() {
+    let dir = TestTempDir::new("pklr_annotation_outer");
+    std::fs::write(
+        dir.path().join("main.pkl"),
+        "import \"pkl:json\"\nconst label = \"renamed\"\n@json.Property { name = outer.label }\na = 1\nb = 2\noutput { renderer = new JsonRenderer {} }\n",
+    )
+    .unwrap();
+    assert_eq!(
+        pklr::eval_to_json(&dir.path().join("main.pkl")).unwrap(),
+        serde_json::json!({"label": "renamed", "renamed": 1, "b": 2})
+    );
+}
