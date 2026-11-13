@@ -151,6 +151,7 @@ impl Evaluator {
             http_rewrites: Vec::new(),
             converters: Vec::new(),
             builtin_classes: HashMap::default(),
+            refs: reference::RefState::default(),
             output_props: Vec::new(),
             module_output: None,
             output_sets_value: false,

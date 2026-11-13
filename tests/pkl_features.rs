@@ -77,6 +77,8 @@ mod numbers;
 mod objects;
 #[path = "pkl_features/quoted_types.rs"]
 mod quoted_types;
+#[path = "pkl_features/reference.rs"]
+mod reference;
 #[path = "pkl_features/render.rs"]
 mod render;
 #[path = "pkl_features/strictness.rs"]

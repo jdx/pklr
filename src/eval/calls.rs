@@ -46,6 +46,11 @@ impl Evaluator {
                 .reflect_call(method, arg_exprs, args, scope, depth)
                 .map(Box::new);
         }
+        if source.kind == ObjectKind::Reference
+            && let Some(result) = self.reference_method(obj, method)
+        {
+            return Some(Box::new(Ok(result)));
+        }
         if is_class_method_miss(receiver, source, method) {
             return Some(Box::new(Err(class_method_error(method))));
         }
@@ -392,6 +397,9 @@ impl Evaluator {
             if evaled_args.is_empty() {
                 return Ok(Some(func_val));
             }
+            if let Some(result) = self.reference_construct(&func_val, evaled_args) {
+                return result.map(Some);
+            }
             return Err(Error::Eval("cannot call non-function".into()));
         }
         Ok(None)
@@ -632,7 +640,14 @@ impl Evaluator {
             }
             (Value::List(items), "join") => {
                 let sep = args.first().and_then(|v| v.as_str()).unwrap_or(",");
-                let s: Vec<String> = items.iter().map(value_to_display).collect();
+                let mut s = Vec::with_capacity(items.len());
+                for item in items.iter() {
+                    s.push(if matches!(item, Value::Object(..)) {
+                        self.value_to_string(item, depth)?
+                    } else {
+                        value_to_display(item)
+                    });
+                }
                 Ok(Some(Value::String(s.join(sep).into())))
             }
             (Value::List(items), "reverse") => {

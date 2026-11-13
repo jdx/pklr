@@ -114,6 +114,18 @@ impl Evaluator {
             _ => None,
         };
         let body = without_local_overrides.as_ref().unwrap_or(body);
+        // A default that names its own class (`ref.Reference(d, A, this)` in
+        // `A`) reads it before the class is bound: it stands for the class by
+        // its identity, which is all its members of a type can ask of it.
+        if self.refs.active
+            && body_reads.contains(class_name)
+            && child_scope.get(class_name).is_none()
+        {
+            child_scope.set(
+                class_name,
+                stdlib::class_value(class_name, scope.runtime_type_identity(class_name)),
+            );
+        }
 
         let mut child_receiver_scope = child_scope.clone();
         child_receiver_scope.receiver_entries = Some(body.clone());

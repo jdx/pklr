@@ -180,7 +180,7 @@ fn mapping_object_identity(map: &ObjectMap, source: Option<&ObjectSource>) -> St
             // A class object and an instance intentionally share the class's
             // definition-site identity, but they are not equal Pkl values and
             // therefore must remain distinct when used as mapping keys.
-            ObjectKind::Object | ObjectKind::Dynamic => {
+            ObjectKind::Object | ObjectKind::Dynamic | ObjectKind::Reference => {
                 source.type_identity.as_deref().map_or_else(
                     || "Dynamic".to_string(),
                     |identity| format!("instance:{identity}"),
@@ -381,6 +381,8 @@ pub(crate) enum ObjectKind {
     Mapping,
     /// The class named by `type_name` itself, holding its defaults.
     Class,
+    /// A `pkl:ref` `Reference`, whose members are internal.
+    Reference,
 }
 
 impl ObjectKind {

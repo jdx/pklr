@@ -4,8 +4,9 @@ pub(super) fn refresh_this_aliases(
     scope: &mut Scope,
     aliases: &[Name],
     properties: &Arc<ObjectMap>,
+    source: Option<&Arc<ObjectSource>>,
 ) {
-    let snapshot = Value::Object(Arc::clone(properties), None);
+    let snapshot = Value::Object(Arc::clone(properties), source.cloned());
     scope.set("this", snapshot.clone());
     for alias in aliases {
         scope.set(alias, snapshot.clone());

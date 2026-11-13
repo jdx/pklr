@@ -38,6 +38,7 @@ mod output;
 mod package;
 mod parsers;
 mod prefetch;
+mod reference;
 mod reflect;
 mod relative_path;
 mod remote;
@@ -235,6 +236,8 @@ pub struct Evaluator {
     converters: Vec<(String, Value)>,
     /// Cached templates for the built-in classes used by module output.
     builtin_classes: HashMap<&'static str, Value>,
+    /// Referent types of `pkl:ref` references.
+    refs: reference::RefState,
     /// `output` declarations belonging to the module being evaluated.
     output_props: Vec<Arc<Property>>,
     /// Evaluated module output, when the module declares an `output` block.
