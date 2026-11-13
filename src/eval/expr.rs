@@ -356,7 +356,12 @@ impl Evaluator {
                         if let Some(Value::Object(ref base_map, Some(ref base_src))) = base {
                             check_no_elements(base_src, entries)?;
                             // Enforce open modifier: non-open classes reject new properties
-                            if !base_src.is_open {
+                            // A class extending `module` inherits declarations this
+                            // scope's `module` snapshot may not carry yet, so its
+                            // closed check cannot be made here.
+                            if !base_src.is_open
+                                && !base_src.parent_type_names.iter().any(|n| n == "module")
+                            {
                                 // Collect all declared property names from the base class
                                 // (includes those with no default value)
                                 let base_names: std::collections::HashSet<Name> = base_src

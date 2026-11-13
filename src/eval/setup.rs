@@ -101,6 +101,7 @@ impl Evaluator {
             type_violation: None,
             placeholder_reads: 0,
             narrowed_import_cache: HashMap::default(),
+            narrowed_in_flight: HashSet::default(),
             parse_cache: HashMap::default(),
             body_roots_cache: HashMap::default(),
             plan_cache: HashMap::default(),
