@@ -121,6 +121,7 @@ impl Evaluator {
                 depth,
             );
         }
+        check_stale_class_read(base_map, base_source, overlay_entries, current_scope)?;
         if let Some(value) = self.try_eval_simple_class_amendment(
             base_map,
             base_source,
@@ -1007,7 +1008,7 @@ impl Evaluator {
         let Value::List(items) = base else {
             return Err(member_predicates_unsupported());
         };
-        if items.kind() != ListKind::Dynamic {
+        if !matches!(items.kind(), ListKind::Dynamic | ListKind::Listing) {
             return Err(member_predicates_unsupported());
         }
         let mut expanded = Vec::with_capacity(entries.len());
@@ -1024,6 +1025,9 @@ impl Evaluator {
                     }
                 }
                 cond_scope.set("this", item.clone());
+                if matches!(item, Value::List(_)) {
+                    bind_listing_receiver(&mut cond_scope, item);
+                }
                 if is_truthy(&self.eval_expr(cond, &cond_scope, depth + 1)?) {
                     expanded.push(Entry::DynProperty(Expr::Int(index as i64), value.clone()));
                 }
@@ -1280,7 +1284,8 @@ impl Evaluator {
                     if &*prop.name != "default" && !has_modifier(&prop.modifiers, Modifier::Local))
             }) {
                 return Err(Error::Eval(
-                    "Object of type `Listing` cannot have a property.".into(),
+                    "Object of type `Listing` cannot have a property (other than `default`)."
+                        .into(),
                 ));
             }
             let mut amended = existing;
@@ -1537,7 +1542,9 @@ impl Evaluator {
                         Err(_) => complete = false,
                     }
                 }
-                Entry::TypeAlias(name, ty) => self.eval_type_alias(name, ty, &mut default_scope),
+                Entry::TypeAlias(name, ty, generic) => {
+                    self.eval_type_alias(name, ty, generic.as_ref(), &mut default_scope)
+                }
                 _ => {}
             }
         }
@@ -2286,4 +2293,86 @@ fn literal_key(key: &Expr) -> Option<String> {
         Expr::Int(n) => Some(format!("i:{n}")),
         _ => None,
     }
+}
+
+/// Let a member predicate's condition read the members of a `Listing` element
+/// by bare name, as it reads those of an object element: the properties by
+/// value, and the methods that take no arguments as functions.
+fn bind_listing_receiver(scope: &mut Scope, item: &Value) {
+    let Value::List(items) = item else {
+        return;
+    };
+    // A `Dynamic` has no `length` or other collection members.
+    if items.kind() != ListKind::Listing {
+        return;
+    }
+    let len = items.len();
+    scope.set("length", Value::Int(len as i64));
+    scope.set("isEmpty", Value::Bool(len == 0));
+    scope.set("isNotEmpty", Value::Bool(len != 0));
+    scope.set("lastIndex", Value::Int(len as i64 - 1));
+    if let (Some(first), Some(last)) = (items.iter().next(), items.iter().last()) {
+        scope.set("first", first.clone());
+        scope.set("last", last.clone());
+    }
+    let captured = Arc::new(scope.flatten());
+    for method in [
+        "toList",
+        "toSet",
+        "isDistinct",
+        "firstOrNull",
+        "lastOrNull",
+        "single",
+    ] {
+        scope.set(
+            method,
+            Value::Lambda(
+                Arc::new([]),
+                Arc::new(Expr::Call(
+                    Box::new(Expr::Field(
+                        Box::new(Expr::Ident("this".into())),
+                        method.to_string(),
+                    )),
+                    Vec::new(),
+                )),
+                Arc::clone(&captured),
+            ),
+        );
+    }
+}
+
+/// A body member declared later still shadows the class's own member of the
+/// same name for an amendment that reads it, so the read waits for that member
+/// rather than finding the class default.
+#[inline(never)]
+fn check_stale_class_read(
+    base_map: &ObjectMap,
+    base_source: &ObjectSource,
+    overlay_entries: &[Entry],
+    current_scope: &Scope,
+) -> Result<()> {
+    for (name, message) in current_scope.poisoned_bindings() {
+        // A nearer binding of the name hides the pending member.
+        if current_scope.get(name).is_some() {
+            continue;
+        }
+        if (base_map.contains_key(&**name) || base_source.evaluated_properties.contains(name))
+            && !overlay_entries
+                .iter()
+                .any(|entry| entry_member_name(entry).is_some_and(|member| member == *name))
+            && {
+                // A name an inner binding shadows is not a read of the member.
+                let mut refs = HashSet::default();
+                super::analysis::collect_entry_refs(
+                    overlay_entries,
+                    &mut refs,
+                    &HashSet::default(),
+                );
+                refs.contains(name)
+            }
+        {
+            return Err(Error::Eval(message.clone()));
+        }
+    }
+    Ok(())
 }

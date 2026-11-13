@@ -89,6 +89,7 @@ pub(super) fn capture_method_result_types(expr: &mut Expr, scope: &Scope) {
 pub(super) fn capture_type_aliases(expr: &mut Expr, scope: &Scope) {
     AliasResolver {
         scope,
+        bindings: Vec::new(),
         expanding: Vec::new(),
     }
     .expr(expr, &HashSet::default());
@@ -96,6 +97,9 @@ pub(super) fn capture_type_aliases(expr: &mut Expr, scope: &Scope) {
 
 struct AliasResolver<'a> {
     scope: &'a Scope,
+    /// Type parameters of the generic alias being expanded, with the
+    /// arguments they stand for.
+    bindings: Vec<(String, crate::parser::TypeExpr)>,
     /// Aliases whose definitions are being expanded. An alias that names
     /// itself, directly or in a constraint, is left as written there.
     expanding: Vec<String>,
@@ -159,7 +163,7 @@ impl AliasResolver<'_> {
 
     fn body(&mut self, entries: &mut crate::parser::Body, shadowed: &HashSet<Name>) {
         let declared = entries.iter().filter_map(|entry| match entry {
-            Entry::TypeAlias(name, _) | Entry::ClassDef(name, ..) => Some(name),
+            Entry::TypeAlias(name, ..) | Entry::ClassDef(name, ..) => Some(name),
             _ => None,
         });
         let mut inner_shadowed = None::<HashSet<Name>>;
@@ -207,7 +211,7 @@ impl AliasResolver<'_> {
             }
             Entry::Spread(expr) | Entry::Elem(expr) => self.expr(expr, shadowed),
             Entry::ClassDef(_, _, _, body) => self.body(body, shadowed),
-            Entry::TypeAlias(_, ty) => self.ty(ty, shadowed),
+            Entry::TypeAlias(_, ty, ..) => self.ty(ty, shadowed),
         }
     }
 
@@ -230,10 +234,52 @@ impl AliasResolver<'_> {
         Some(ty)
     }
 
+    /// A generic alias applied to arguments, expanded from its written
+    /// definition with the parameters replaced by the arguments.
+    fn generic_alias(
+        &mut self,
+        name: &str,
+        args: &[crate::parser::TypeExpr],
+        shadowed: &HashSet<Name>,
+    ) -> Option<crate::parser::TypeExpr> {
+        use crate::parser::TypeExpr;
+        if shadowed.contains(name) || self.expanding.iter().any(|n| n == name) {
+            return None;
+        }
+        let Some(TypeExpr::Generic(params, written)) = self
+            .scope
+            .get_type_alias(&super::typecheck::generic_alias_key(name))
+        else {
+            return None;
+        };
+        let params: Vec<&str> = params.split(',').collect();
+        if params.len() != args.len() {
+            return None;
+        }
+        let mut body = written.first()?.clone();
+        let mut args = args.to_vec();
+        for arg in &mut args {
+            self.ty(arg, shadowed);
+        }
+        let outer = std::mem::replace(
+            &mut self.bindings,
+            params.iter().map(|p| p.to_string()).zip(args).collect(),
+        );
+        self.expanding.push(name.to_string());
+        self.ty(&mut body, &HashSet::default());
+        self.expanding.pop();
+        self.bindings = outer;
+        Some(body)
+    }
+
     fn ty(&mut self, ty: &mut crate::parser::TypeExpr, shadowed: &HashSet<Name>) {
         use crate::parser::TypeExpr;
         match ty {
             TypeExpr::Named(name) => {
+                if let Some((_, arg)) = self.bindings.iter().find(|(param, _)| param == name) {
+                    *ty = arg.clone();
+                    return;
+                }
                 let (default_marker, plain) = match name.strip_prefix('*') {
                     Some(plain) => ("*", plain),
                     None => ("", name.as_str()),
@@ -256,6 +302,12 @@ impl AliasResolver<'_> {
                     Some(plain) => ("*", plain),
                     None => ("", name.as_str()),
                 };
+                if default_marker.is_empty()
+                    && let Some(resolved) = self.generic_alias(plain, args, shadowed)
+                {
+                    *ty = resolved;
+                    return;
+                }
                 if default_marker.is_empty()
                     && let Some(resolved) = self.resolved_alias(plain, shadowed)
                 {
@@ -298,7 +350,12 @@ impl AliasResolver<'_> {
                     }
                     return;
                 }
-                let Some(resolved) = self.resolved_alias(plain, shadowed) else {
+                let bound = self
+                    .bindings
+                    .iter()
+                    .find(|(param, _)| param == plain)
+                    .map(|(_, arg)| arg.clone());
+                let Some(resolved) = bound.or_else(|| self.resolved_alias(plain, shadowed)) else {
                     return;
                 };
                 // The expanded base is a quoted name when the alias's target is
@@ -841,8 +898,9 @@ fn exact_default(base_name: &str, scope: &Scope) -> Option<Value> {
             Some(Arc::new(mapping_source())),
         )),
         "Map" => Some(Value::Object(Arc::default(), None)),
-        "String" | "Boolean" | "Bool" | "Int" | "Float" | "Number" | "Any" | "Dynamic"
-        | "Duration" | "DataSize" | "Pair" | "Regex" => None,
+        "Dynamic" => empty_mapping_or_listing("Dynamic"),
+        "String" | "Boolean" | "Bool" | "Int" | "Float" | "Number" | "Any" | "Duration"
+        | "DataSize" | "Pair" | "Regex" => None,
         other => resolve_dotted(scope, other).map(as_instance),
     }
 }
@@ -1233,6 +1291,22 @@ pub(super) fn require_str_arg<'a>(args: &'a [Value], idx: usize, method: &str) -
     }
 }
 
+/// An integer as Pkl's error messages show it: digits in groups of three.
+pub(super) fn group_digits(n: i64) -> String {
+    let digits = n.unsigned_abs().to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3 + 1);
+    if n < 0 {
+        out.push('-');
+    }
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
 pub(super) fn value_type_name(v: &Value) -> &'static str {
     match v {
         Value::Null => "Null",
@@ -1445,8 +1519,12 @@ pub(super) fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
                 }
                 "Class" => is_class_value(val),
                 "Regex" => matches!(val, Value::Regex(_)),
-                "Function" | "Mixin" | "Function0" | "Function1" | "Function2" | "Function3"
-                | "Function4" | "Function5" => matches!(val, Value::Lambda(..)),
+                "Function" | "Mixin" => matches!(val, Value::Lambda(..)),
+                // A function type fixes the number of parameters.
+                name @ ("Function0" | "Function1" | "Function2" | "Function3" | "Function4"
+                | "Function5") => {
+                    matches!(val, Value::Lambda(params, ..) if params.len() < 10 && name.as_bytes()[8] == b'0' + params.len() as u8)
+                }
                 _ => matches!(val, Value::Object(..)),
             }
         }

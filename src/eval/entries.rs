@@ -334,6 +334,17 @@ impl Evaluator {
                         std::mem::take(list).with_elem_class(self.declared_elem_class(ty, scope));
                 }
             }
+            // The default of a constrained `Dynamic` is checked against its
+            // constraint like any other value. (Other defaults are template
+            // values that a subclass or amendment may replace.)
+            // Only a module's own property: a class member's default is a
+            // template that an instance replaces.
+            if require_union_default
+                && names_constrained_dynamic(ty, scope)
+                && let Some(default) = &default
+            {
+                self.check_declared_value(default, ty, scope, depth)?;
+            }
             if require_union_default
                 && default.is_none()
                 && matches!(ty, crate::parser::TypeExpr::Union(variants) if !variants.iter().any(is_default_type))
@@ -769,7 +780,13 @@ impl Evaluator {
                             .map(|value| self.const_local_lambda_guard(value, const_message))
                             .and_then(|value| {
                                 if let Some(ty) = &prop.type_ann {
-                                    self.check_local_value(&value, ty, &active_scope, cx.depth)?;
+                                    self.check_local_value(
+                                        &value,
+                                        ty,
+                                        expr,
+                                        &active_scope,
+                                        cx.depth,
+                                    )?;
                                 }
                                 Ok(value)
                             })
@@ -785,6 +802,7 @@ impl Evaluator {
                                             self.check_local_value(
                                                 &value,
                                                 ty,
+                                                expr,
                                                 &active_scope,
                                                 cx.depth,
                                             )?;
@@ -847,10 +865,19 @@ impl Evaluator {
                         st.child_scope.set(name, defaults);
                     }
                 }
-                Entry::TypeAlias(name, ty) => {
+                Entry::TypeAlias(name, ty, generic) => {
                     let mut resolved_scope = active_scope;
-                    self.eval_type_alias(name, ty, &mut resolved_scope);
+                    self.eval_type_alias(name, ty, generic.as_ref(), &mut resolved_scope);
                     st.child_scope.set_type_alias(name.clone(), ty.clone());
+                    if let Some(generic) = generic {
+                        st.child_scope.set_type_alias(
+                            generic_alias_key(name),
+                            crate::parser::TypeExpr::Generic(
+                                generic.0.join(","),
+                                vec![generic.1.clone()],
+                            ),
+                        );
+                    }
                     if let Some(value) = resolved_scope.vars.get(name.as_str()) {
                         st.child_scope.set(name, value.clone());
                     }
@@ -1230,6 +1257,11 @@ impl Evaluator {
                     }
                 }
             }
+            Entry::Elem(_) if cx.mapping_entries => {
+                return Err(Error::Eval(
+                    "Object of type `Mapping` cannot have an element.".into(),
+                ));
+            }
             Entry::Elem(expr) => {
                 let active_scope = shadowed(
                     scope_for_object_entry(
@@ -1287,6 +1319,18 @@ impl Evaluator {
             &cx.entry_owners,
             cx.own_body_scope(),
         );
+        // An amendment of a member whose own value is deferred waits for it.
+        if prop.value.is_none()
+            && prop.body.is_some()
+            && !st.failed_properties.is_empty()
+            && let Some(message) = st.failed_properties.iter().find_map(|(index, message)| {
+                matches!(&cx.entries[*index], Entry::Property(failed) if failed.name == prop.name)
+                    .then(|| message.clone())
+            })
+        {
+            st.failed_properties.push((entry_index, message));
+            return Ok(());
+        }
         // eval_property amends the value bound for the name in the
         // receiver's own scope. A generator body can amend both a
         // member previously generated in this body and one held by
@@ -1307,6 +1351,13 @@ impl Evaluator {
         // would be captured with it.
         if !cx.stale_members.is_empty() {
             poison_stale_members(cx, st, prop, &mut active_scope);
+        }
+        if matches!(
+            prop.value,
+            Some(Expr::New(Some(_), ..) | Expr::If(..) | Expr::Let(..))
+        ) && !cx.pending_members.is_empty()
+        {
+            poison_pending_reads(cx, st, prop, &mut active_scope);
         }
         let value = match self.eval_property(prop, &active_scope, cx.depth) {
             Ok(value) => value,
@@ -2000,15 +2051,27 @@ pub(super) fn this_member_reads_non_const(
 
 /// Reject elements in the body of an object of type `type_display`, and
 /// entries too when `typed` (a class instance has only properties).
-pub(super) fn check_member_kinds(type_display: &str, entries: &[Entry], typed: bool) -> Result<()> {
-    if body_has(entries, &|entry| matches!(entry, Entry::Elem(_))) {
+pub(super) fn check_member_kinds(
+    type_display: &str,
+    entry_display: &str,
+    entries: &[Entry],
+    typed: bool,
+) -> Result<()> {
+    // A Mapping body checks the elements its generators produce as it runs, so
+    // only a direct element counts here.
+    let is_elem = |entry: &Entry| matches!(entry, Entry::Elem(_));
+    if if typed {
+        body_has(entries, &is_elem)
+    } else {
+        entries.iter().any(is_elem)
+    } {
         return Err(Error::Eval(format!(
             "Object of type `{type_display}` cannot have an element."
         )));
     }
     if typed && body_has(entries, &|entry| matches!(entry, Entry::DynProperty(..))) {
         return Err(Error::Eval(format!(
-            "Object of type `{type_display}` cannot have an entry."
+            "Object of type `{entry_display}` cannot have an entry."
         )));
     }
     Ok(())
@@ -2154,6 +2217,57 @@ fn poison_stale_members(
     }
 }
 
+/// A `new Class { .. }` whose body reads a member declared later in this body
+/// reads that member, not the class's own default of the name. The
+/// constructor may be the result of an `if` or `let`.
+#[inline(never)]
+fn poison_pending_reads(
+    cx: &BodyContext,
+    st: &BodyState,
+    prop: &Property,
+    active_scope: &mut Scope,
+) {
+    let mut bodies = Vec::new();
+    if let Some(value) = &prop.value {
+        typed_new_bodies(value, &mut bodies, &HashSet::default());
+    }
+    if bodies.is_empty() {
+        return;
+    }
+    let mut refs = HashSet::default();
+    for (entries, bound) in bodies {
+        collect_entry_refs(entries, &mut refs, &bound);
+    }
+    for name in &cx.pending_members {
+        if *name != prop.name && !st.bound_members.contains(name) && refs.contains(name) {
+            active_scope.poison(name.clone(), format!("undefined variable: {name}"));
+        }
+    }
+}
+
+/// The bodies of the `new Class { .. }` expressions an expression can
+/// evaluate to.
+/// Each body is paired with the names the `let`s on its own path bind.
+fn typed_new_bodies<'a>(
+    expr: &'a Expr,
+    bodies: &mut Vec<(&'a [Entry], HashSet<Name>)>,
+    bound: &HashSet<Name>,
+) {
+    match expr {
+        Expr::New(Some(_), entries, _) => bodies.push((entries, bound.clone())),
+        Expr::If(_, then, otherwise) => {
+            typed_new_bodies(then, bodies, bound);
+            typed_new_bodies(otherwise, bodies, bound);
+        }
+        Expr::Let(name, _, body) => {
+            let mut inner = bound.clone();
+            inner.insert(nm(name));
+            typed_new_bodies(body, bodies, &inner);
+        }
+        _ => {}
+    }
+}
+
 /// The names of the `local` members a body declares, including those its
 /// nested generators declare, which stay readable after the generator.
 fn collect_generated_locals(body: &Body, out: &mut Vec<Name>) {
@@ -2172,4 +2286,21 @@ fn collect_generated_locals(body: &Body, out: &mut Vec<Name>) {
             _ => {}
         }
     }
+}
+
+/// Whether `ty`, directly or through type aliases, is a constrained `Dynamic`.
+fn names_constrained_dynamic(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
+    use crate::parser::TypeExpr;
+    let mut ty = ty;
+    for _ in 0..32 {
+        match ty {
+            TypeExpr::Constrained(base, ..) => return base == "Dynamic",
+            TypeExpr::Named(name) => match scope.get_type_alias(name) {
+                Some(next) => ty = next,
+                None => return false,
+            },
+            _ => return false,
+        }
+    }
+    false
 }

@@ -1400,7 +1400,7 @@ fn element_and_signature_types_match_pkl() {
 fn a_dynamic_is_not_accepted_for_a_listing_parameter() {
     let error = eval_fails("function f(x: Listing<Int>): Int = 1\ny = f(new Dynamic { 1 })\n");
     assert!(
-        error.contains("Expected value of type `Listing<Int>`, but got type `Dynamic`"),
+        error.contains("Expected value of type `Listing`, but got type `Dynamic`"),
         "{error}"
     );
 }
@@ -1409,7 +1409,7 @@ fn a_dynamic_is_not_accepted_for_a_listing_parameter() {
 fn a_wrong_element_is_named_in_the_error() {
     let error = eval_fails("a: Listing<Int> = new Listing { 1; \"x\" }\n");
     assert!(
-        error.contains("Expected value of type `Listing<Int>`"),
+        error.contains("Expected value of type `Int`, but got type `String`"),
         "{error}"
     );
     let error = eval_fails("function f(x: Int): Int = x\ny = f(\"x\")\n");
@@ -1425,7 +1425,7 @@ fn a_wrong_element_is_named_in_the_error() {
 fn elements_are_checked_when_the_value_is() {
     let error =
         eval_fails("function f(x: Listing<Int>): Int = x.length\ny = f(new Listing { \"a\" })\n");
-    assert!(error.contains("Listing<Int>"), "{error}");
+    assert!(error.contains("type `Int`"), "{error}");
 }
 
 // An untyped `new { ... }` element of a class-typed `Listing` is an instance
@@ -1765,4 +1765,245 @@ fn json_renderer_omits_null_entries_with_compound_keys() {
         pklr::eval_to_json(&file).unwrap(),
         serde_json::json!({"r": "{}"})
     );
+}
+
+// Expected values below come from `pkl eval` 0.32.2.
+
+#[test]
+fn listing_this_reads_the_elements_before_it() {
+    let value = eval(
+        "res = new Listing { \"one\"; this[0]; \"two\"; this[2]; this[1] }\n\
+         amended = (res) { \"three\"; this[0]; this[5] }\n",
+    );
+    assert_eq!(
+        value["res"],
+        serde_json::json!(["one", "one", "two", "two", "one"])
+    );
+    assert_eq!(value["amended"][7], serde_json::json!("three"));
+}
+
+#[test]
+fn super_index_past_the_parent_is_an_empty_dynamic() {
+    let value = eval("res = new Listing { super[0] }\n");
+    assert_eq!(value["res"], serde_json::json!([{}]));
+}
+
+#[test]
+fn listing_is_distinct() {
+    let value = eval(
+        "a = new Listing { 1; 2 }.isDistinct\n\
+         b = new Listing { 1; 1 }.isDistinct\n",
+    );
+    assert_eq!(value["a"], serde_json::json!(true));
+    assert_eq!(value["b"], serde_json::json!(false));
+}
+
+#[test]
+fn listing_index_errors_group_digits() {
+    let value = eval(
+        "import \"pkl:test\"\n\
+         x = new Listing { 1 }\n\
+         res = test.catch(() -> x[9223372036854775807])\n",
+    );
+    assert_eq!(
+        value["res"],
+        serde_json::json!("Element index `9,223,372,036,854,775,807` is out of range `0`..`0`.")
+    );
+}
+
+#[test]
+fn listing_rejects_properties() {
+    let error = eval_fails("x = new Listing { foo = 1 }\n");
+    assert!(
+        error.contains("Object of type `Listing` cannot have a property (other than `default`)."),
+        "{error}"
+    );
+}
+
+#[test]
+fn mapping_elements_are_rejected_only_when_generated() {
+    let value = eval("x = new Mapping { when (false) { 0 }; [\"a\"] = 1 }\n");
+    assert_eq!(value["x"], serde_json::json!({"a": 1}));
+    let error = eval_fails("x = new Mapping { when (true) { 0 } }\n");
+    assert!(
+        error.contains("Object of type `Mapping` cannot have an element."),
+        "{error}"
+    );
+}
+
+#[test]
+fn typed_local_checks_the_elements_of_an_existing_listing() {
+    let error = eval_fails(
+        "local a = new Listing { 1 }\n\
+         local b: Listing<String> = a\n\
+         x = b[0]\n",
+    );
+    assert!(error.contains("type `String`"), "{error}");
+}
+
+#[test]
+fn amended_function_parameters_are_checked() {
+    let error = eval_fails(
+        "local f = (x) -> new Dynamic {}\n\
+         x = (f) { a: String -> prop = a }.apply(1)\n",
+    );
+    assert!(error.contains("Expected value of type `String`"), "{error}");
+    let value = eval(
+        "local f = (x) -> new Dynamic {}\n\
+         x = (f) { a: Int -> prop = a + 1 }.apply(1)\n",
+    );
+    assert_eq!(value["x"], serde_json::json!({"prop": 2}));
+}
+
+#[test]
+fn listing_rejects_generated_properties() {
+    let err = eval_fails("x = new Listing { when (true) { foo = 1 } }");
+    assert!(err.contains("cannot have a property"), "{err}");
+}
+
+#[test]
+fn mapping_amendment_rejects_generated_elements() {
+    let err = eval_fails("local m = new Mapping { [\"a\"] = 1 }\nx = (m) { when (true) { 2 } }");
+    assert!(err.contains("cannot have an element"), "{err}");
+}
+
+#[test]
+fn listing_is_distinct_uses_equality() {
+    let v = eval("x = new Listing { 1; 1.0 }.isDistinct");
+    assert_eq!(v["x"], false);
+}
+
+#[test]
+fn dynamic_element_this_is_dynamic() {
+    let v = eval("x = new Dynamic { 1; this is Dynamic }");
+    assert_eq!(v["x"][1], true);
+}
+
+#[test]
+fn listing_unused_branch_property_is_not_rejected() {
+    let v = eval("x = new Listing { when (false) { foo = 1 }; 2 }");
+    assert_eq!(v["x"], serde_json::json!([2]));
+}
+
+#[test]
+fn constrained_dynamic_default_is_checked() {
+    let msg = eval_fails("foo: Dynamic(this == new Dynamic { ...List(1) })");
+    assert!(msg.contains("Type constraint `this == new Dynamic { ...List(1) }` violated."));
+}
+
+#[test]
+fn map_every_and_any_take_key_and_value() {
+    let json = eval(
+        r#"
+m = Map("a", 1, "b", 2)
+all = m.every((k, v) -> v > 0)
+some = m.any((k, v) -> k == "b")
+none = m.any((k, v) -> v > 5)
+"#,
+    );
+    assert_eq!(json["all"], true);
+    assert_eq!(json["some"], true);
+    assert_eq!(json["none"], false);
+}
+
+#[test]
+fn generic_alias_constraint_binds_its_arguments() {
+    let json = eval(
+        r#"
+typealias Same<T> = List(this[0] is T)
+ok = List(1) is Same<Int>
+bad = List("x") is Same<Int>
+"#,
+    );
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["bad"], false);
+    let msg = eval_fails(
+        r#"
+typealias Same<T> = List(this[0] is T)
+local xs = List("x")
+res = (() -> xs as Same<Int>).apply()
+"#,
+    );
+    assert!(
+        msg.contains("Type constraint `this[0] is T` violated."),
+        "{msg}"
+    );
+}
+
+#[test]
+fn null_for_a_class_type_reports_null() {
+    let msg = eval_fails("x: String = null");
+    assert!(
+        msg.contains("Expected value of type `String`, but got `null`."),
+        "{msg}"
+    );
+}
+
+#[test]
+fn generic_alias_arguments_keep_their_meaning() {
+    let json = eval(
+        r#"
+typealias L<T> = List<T>
+nested = List(List(1)) is L<L<Int>>
+typealias B = String
+typealias P<A, B> = Pair<A, B>
+pair = Pair("a", 1) is P<B, Int>
+"#,
+    );
+    assert_eq!(json["nested"], true);
+    assert_eq!(json["pair"], true);
+}
+
+#[test]
+fn user_methods_named_every_and_any_still_run() {
+    let json = eval("class C { function any() = 42 }\nresult = new C {}.any()");
+    assert_eq!(json["result"], 42);
+}
+
+#[test]
+fn aliased_constrained_dynamic_default_is_checked() {
+    let msg = eval_fails("typealias D = Dynamic(false)\nx: D");
+    assert!(msg.contains("Type constraint `false` violated."), "{msg}");
+}
+
+#[test]
+fn element_mismatch_keeps_the_property_name() {
+    let msg = eval_fails("xs: List<Int> = List(\"x\")");
+    assert!(msg.contains("in property 'xs'"), "{msg}");
+}
+
+#[test]
+fn class_member_dynamic_default_is_not_checked_before_assignment() {
+    let json = eval(
+        r#"
+typealias D = Dynamic(this.toList().length > 0)
+class C { x: D }
+result = new C { x = new Dynamic { 1 } }
+"#,
+    );
+    assert_eq!(json["result"]["x"][0], 1);
+}
+
+#[test]
+fn cast_to_a_constrained_generic_names_the_element() {
+    let msg = eval_fails("x = List(\"a\") as List<Int>(isEmpty)");
+    assert!(msg.contains("type `Int`"), "{msg}");
+}
+
+#[test]
+fn mutually_recursive_generic_aliases_are_reported() {
+    let msg = eval_fails("typealias A<T> = B<T>\ntypealias B<T> = A<T>\nx: A<Int> = 1\n");
+    assert!(
+        msg.contains("cyclic") || msg.contains("refers to itself"),
+        "{msg}"
+    );
+}
+
+#[test]
+fn nested_generic_alias_applications_mean_different_types() {
+    let v = eval(
+        "typealias L<T> = List<T>\ntypealias W<U> = L<U>\nx = List(List(1)) is W<W<Int>>\ny = List(1) is W<Int>",
+    );
+    assert_eq!(v["x"], true);
+    assert_eq!(v["y"], true);
 }

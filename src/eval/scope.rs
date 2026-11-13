@@ -378,6 +378,18 @@ impl Scope {
         Arc::make_mut(&mut self.poisoned).insert(name.into(), message);
     }
 
+    /// The poisoned bindings of this scope and its enclosing ones: names
+    /// declared by a body that have no value yet.
+    pub(super) fn poisoned_bindings(&self) -> Vec<(&Name, &String)> {
+        let mut found = Vec::new();
+        let mut level = Some(self);
+        while let Some(scope) = level {
+            found.extend(scope.poisoned.iter());
+            level = scope.parent.as_deref();
+        }
+        found
+    }
+
     pub(super) fn poison_of(&self, name: &str) -> Option<&String> {
         self.poisoned.get(name).or_else(|| {
             self.parent
@@ -1006,7 +1018,7 @@ pub(super) fn entry_scope_owners(
 pub(super) fn entry_member_name(entry: &Entry) -> Option<Name> {
     match entry {
         Entry::Property(prop) => Some(prop.name.clone()),
-        Entry::ClassDef(name, ..) | Entry::TypeAlias(name, _) => Some(Name::from(name.as_str())),
+        Entry::ClassDef(name, ..) | Entry::TypeAlias(name, ..) => Some(Name::from(name.as_str())),
         _ => None,
     }
 }

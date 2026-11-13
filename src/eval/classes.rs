@@ -49,6 +49,10 @@ impl Evaluator {
                     .collect();
                 (names, identities)
             }
+            // `extends module` inherits the module's declarations, which the
+            // snapshot bound to `module` does not carry; the marker lets
+            // `new` accept them.
+            _ if parent_name == Some("module") => (vec!["module".to_string()], Vec::new()),
             _ => (Vec::new(), Vec::new()),
         };
 
@@ -114,12 +118,16 @@ impl Evaluator {
         let mut child_receiver_scope = child_scope.clone();
         child_receiver_scope.receiver_entries = Some(body.clone());
         child_receiver_scope.receiver_list_base = None;
+        let parent_source = match &parent_val {
+            Some(Value::Object(_, Some(parent))) => Some(Arc::clone(parent)),
+            _ => None,
+        };
         let child_defaults = self.eval_entries_with_lexical_scopes(
             body,
             &child_receiver_scope,
             depth + 1,
             None,
-            None,
+            parent_source.as_deref(),
             Some(&inherited_non_const),
             false,
             None,
@@ -294,10 +302,17 @@ impl Evaluator {
         &self,
         name: &str,
         ty: &crate::parser::TypeExpr,
+        generic: Option<&crate::parser::GenericAlias>,
         scope: &mut Scope,
     ) {
         // Store the TypeExpr so `is`/`as` can resolve alias names to their definitions
         scope.set_type_alias(name.to_string(), ty.clone());
+        if let Some(generic) = generic {
+            scope.set_type_alias(
+                generic_alias_key(name),
+                crate::parser::TypeExpr::Generic(generic.0.join(","), vec![generic.1.clone()]),
+            );
+        }
         // Also mark the name as a type among the bindings, which a function
         // captures (its alias map is not), so `new Alias {}` inside one is
         // still known to name a type.

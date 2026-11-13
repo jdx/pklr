@@ -103,7 +103,7 @@ fn lexical_names(module: &Module) -> Vec<String> {
         Entry::Property(prop) if prop.modifiers.contains(&Modifier::Local) => {
             Some(prop.name.to_string())
         }
-        Entry::ClassDef(name, ..) | Entry::TypeAlias(name, _) => Some(name.clone()),
+        Entry::ClassDef(name, ..) | Entry::TypeAlias(name, ..) => Some(name.clone()),
         _ => None,
     });
     imports.chain(members).collect()
