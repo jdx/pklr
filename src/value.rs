@@ -1222,7 +1222,7 @@ impl Value {
                 unrenderable.get_or_insert(self);
                 serde_json::Value::Null
             }
-            Value::Regex(_) | Value::Duration(_) | Value::DataSize(_) => {
+            Value::Regex(_) | Value::Duration(_) | Value::DataSize(_) | Value::Failed(_) => {
                 unrenderable.get_or_insert(self);
                 serde_json::Value::Null
             }
@@ -1281,6 +1281,10 @@ impl Value {
 
     /// pkl's error for rendering this value as JSON.
     fn json_render_error(&self) -> crate::Error {
+        // A member that failed raises its own error when it is rendered.
+        if let Value::Failed(message) = self {
+            return crate::Error::Eval(message.to_string());
+        }
         if self.has_elements_and_members() {
             return crate::Error::Eval(format!(
                 "Cannot render object with both elements and properties/entries as JSON.\nObject: {}",

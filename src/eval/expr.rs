@@ -18,7 +18,7 @@ impl Evaluator {
             && let Ok(Value::Failed(message)) = &result
             && matches!(
                 expr,
-                Expr::Field(..) | Expr::NullSafeField(..) | Expr::Call(..)
+                Expr::Field(..) | Expr::NullSafeField(..) | Expr::Call(..) | Expr::Index(..)
             )
         {
             return Err(Error::Eval(message.to_string()));
