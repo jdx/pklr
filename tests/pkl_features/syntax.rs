@@ -3657,3 +3657,18 @@ fn alias_target_resolves_where_the_alias_is_declared() {
     let err = eval_fails("typealias A = B\ntypealias B = A\nclass C extends A\n");
     assert!(err.contains("must not be cyclic"), "{err}");
 }
+
+#[test]
+fn class_instance_defers_a_member_that_reads_an_unset_property() {
+    let json = eval(
+        r#"
+class App { m: Int; x = m + 1 }
+local base = new App {}
+result = (base) { m = 3 }
+"#,
+    );
+    assert_eq!(json["result"]["m"], 3);
+    assert_eq!(json["result"]["x"], 4);
+    let err = eval_fails("class App { m: Int; x = m + 1 }\nr = new App {}.x\n");
+    assert!(err.contains("`x`") || err.contains("`m`"), "{err}");
+}

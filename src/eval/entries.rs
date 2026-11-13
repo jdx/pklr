@@ -1839,11 +1839,14 @@ impl Evaluator {
                             })
                         })
                 };
-                // Only a class's defaults wait for an instance; an ordinary
-                // object has nothing to supply the member later.
+                // Only a class's defaults and its instances wait for a member
+                // to be supplied; an ordinary object has nothing to supply it.
                 if self
                     .class_template_bodies
                     .contains(&(Arc::as_ptr(cx.entries) as usize))
+                    || cx.inherited_source.is_some_and(|source| {
+                        source.type_name.is_some() || source.type_identity.is_some()
+                    })
                 {
                     st.failed_properties
                         .retain(|(_, message)| !valueless(message));
