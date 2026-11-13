@@ -528,8 +528,20 @@ pub(super) fn mapping_value_type_from_name(name: &str) -> Option<String> {
         .or_else(|| name.strip_prefix("Map<"))?
         .strip_suffix('>')?;
     let mut depth = 0usize;
+    // Brackets inside a string literal of a constraint do not nest.
+    let (mut in_string, mut escaped) = (false, false);
     for (index, ch) in inner.char_indices() {
+        if in_string {
+            match ch {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
         match ch {
+            '"' => in_string = true,
             '<' | '(' => depth += 1,
             '>' | ')' => depth = depth.saturating_sub(1),
             ',' if depth == 0 => {
