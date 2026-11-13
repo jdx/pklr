@@ -3403,6 +3403,12 @@ fn reference_referent_type_rejects_constraints() {
 }
 
 #[test]
+fn reference_referent_ignores_unused_alias_arguments() {
+    let src = "import \"pkl:ref\"\ntypealias Ignore<T> = String\nfoo: ref.Reference<ref.Domain, Ignore<Int(this > 0)>>\nbar = 1";
+    assert_eq!(eval(src)["bar"], serde_json::json!(1));
+}
+
+#[test]
 fn a_property_holding_a_lambda_is_not_a_method() {
     // `pkl eval`: a call resolves to a method only; a lambda needs `.apply`.
     let err = eval_fails("listing = (it) -> it\ncall = listing(10)");

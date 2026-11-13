@@ -436,7 +436,7 @@ fn file_glob_base_and_pattern(path: &Path) -> (PathBuf, String) {
         )
     }
 }
-fn percent_encode(text: &str) -> String {
+pub(super) fn percent_encode(text: &str) -> String {
     text.bytes()
         .map(|b| {
             if b.is_ascii_alphanumeric()

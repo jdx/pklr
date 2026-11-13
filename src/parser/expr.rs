@@ -217,6 +217,7 @@ impl<'a> Parser<'a> {
                                 )));
                             }
                             self.import_exprs.append(&mut nested.import_exprs);
+                            self.new_qualifiers.append(&mut nested.new_qualifiers);
                             interp_parts.push(StringInterpPart::Expr(expr));
                         }
                     }

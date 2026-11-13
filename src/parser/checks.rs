@@ -632,13 +632,14 @@ fn type_has_constraint(
             .iter()
             .any(|variant| type_has_constraint(variant, aliases, depth + 1, budget)),
         TypeExpr::Generic(name, args) => {
-            args.iter()
-                .any(|arg| type_has_constraint(arg, aliases, depth + 1, budget))
-                || aliases.get(name.as_str()).is_some_and(|(params, body)| {
-                    let body = substitute_type(body, params, args);
-                    type_size(&body, EXPANSION_LIMIT) < EXPANSION_LIMIT
-                        && type_has_constraint(&body, aliases, depth + 1, budget)
-                })
+            // An alias that expands is judged by its body, as Pkl does; unused
+            // arguments are not visited. Otherwise the arguments decide.
+            match expand_alias(name, args, aliases) {
+                Some(body) => type_has_constraint(&body, aliases, depth + 1, budget),
+                None => args
+                    .iter()
+                    .any(|arg| type_has_constraint(arg, aliases, depth + 1, budget)),
+            }
         }
         TypeExpr::Named(name) => aliases
             .get(name.trim_start_matches('*'))
@@ -666,6 +667,45 @@ fn type_size(ty: &TypeExpr, limit: usize) -> usize {
 /// The most nodes an expanded alias may have before the check gives up, which
 /// keeps repeated parameters from growing a type exponentially.
 const EXPANSION_LIMIT: usize = 4096;
+
+/// The body of a generic alias applied to `args`, unless it would be too large.
+/// The size is estimated first so no oversized tree is ever built.
+fn expand_alias(
+    name: &str,
+    args: &[TypeExpr],
+    aliases: &std::collections::HashMap<&str, (&[String], &TypeExpr)>,
+) -> Option<TypeExpr> {
+    let (params, body) = aliases.get(name)?;
+    let arg_sizes: Vec<usize> = args.iter().map(|a| type_size(a, EXPANSION_LIMIT)).collect();
+    let mut estimate = 0usize;
+    let mut stack = vec![*body];
+    while let Some(node) = stack.pop() {
+        match node {
+            TypeExpr::Named(n) => {
+                estimate = estimate.saturating_add(
+                    params
+                        .iter()
+                        .position(|p| p == n)
+                        .and_then(|i| arg_sizes.get(i).copied())
+                        .unwrap_or(1),
+                );
+            }
+            TypeExpr::Nullable(inner) => {
+                estimate += 1;
+                stack.push(inner);
+            }
+            TypeExpr::Union(items) | TypeExpr::Generic(_, items) => {
+                estimate += 1;
+                stack.extend(items.iter());
+            }
+            TypeExpr::Constrained(..) => estimate += 1,
+        }
+        if estimate >= EXPANSION_LIMIT {
+            return None;
+        }
+    }
+    Some(substitute_type(body, params, args))
+}
 
 /// Replace the parameters of a generic type alias by the arguments it is used with.
 fn substitute_type(ty: &TypeExpr, params: &[String], args: &[TypeExpr]) -> TypeExpr {
@@ -711,13 +751,10 @@ fn reference_with_constraint(
             if reference.iter().any(|r| r == name) && args.len() == 2 {
                 return type_has_constraint(&args[1], aliases, depth + 1, budget);
             }
-            if let Some((params, body)) = aliases.get(name.as_str()) {
-                let body = substitute_type(body, params, args);
-                if type_size(&body, EXPANSION_LIMIT) < EXPANSION_LIMIT
-                    && reference_with_constraint(&body, reference, aliases, depth + 1, budget)
-                {
-                    return true;
-                }
+            if let Some(body) = expand_alias(name, args, aliases)
+                && reference_with_constraint(&body, reference, aliases, depth + 1, budget)
+            {
+                return true;
             }
             args.iter()
                 .any(|arg| reference_with_constraint(arg, reference, aliases, depth + 1, budget))

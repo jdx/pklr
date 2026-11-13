@@ -42,7 +42,10 @@ impl Evaluator {
             } else {
                 match namespace.strip_prefix(r"\\?\UNC\") {
                     // A verbatim UNC path names `file://server/share/...`.
-                    Some(unc) => format!("file://{}", unc.replace('\\', "/")),
+                    Some(unc) => format!(
+                        "file://{}",
+                        super::resource::percent_encode(&unc.replace('\\', "/"))
+                    ),
                     None => super::resource::file_uri(std::path::Path::new(
                         namespace.strip_prefix(r"\\?\").unwrap_or(namespace),
                     )),
