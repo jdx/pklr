@@ -635,12 +635,23 @@ pub(super) fn listing_spread_values(value: Value) -> Result<Arc<Vec<Value>>> {
 /// Listings and Dynamic objects can have elements.
 pub(super) fn check_no_elements(source: &ObjectSource, entries: &[Entry]) -> Result<()> {
     match &source.type_name {
-        Some(type_name) => check_member_kinds(
-            &qualified_class_name(source.type_identity.as_deref(), type_name),
-            entries,
-            true,
-        ),
-        None if source.kind == ObjectKind::Mapping => check_member_kinds("Mapping", entries, false),
+        Some(type_name) => {
+            let qualified = qualified_class_name(source.type_identity.as_deref(), type_name);
+            // A body with generators is checked as it is evaluated, when
+            // Pkl names the object by its expression rather than its class.
+            let entry_display = if entries
+                .iter()
+                .any(|e| matches!(e, Entry::ForGenerator(_) | Entry::WhenGenerator(_)))
+            {
+                format!("new {type_name} {{}}")
+            } else {
+                qualified.clone()
+            };
+            check_member_kinds(&qualified, &entry_display, entries, true)
+        }
+        None if source.kind == ObjectKind::Mapping => {
+            check_member_kinds("Mapping", "Mapping", entries, false)
+        }
         None => Ok(()),
     }
 }

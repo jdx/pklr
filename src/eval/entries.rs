@@ -1322,6 +1322,18 @@ impl Evaluator {
             &cx.entry_owners,
             cx.own_body_scope(),
         );
+        // An amendment of a member whose own value is deferred waits for it.
+        if prop.value.is_none()
+            && prop.body.is_some()
+            && !st.failed_properties.is_empty()
+            && let Some(message) = st.failed_properties.iter().find_map(|(index, message)| {
+                matches!(&cx.entries[*index], Entry::Property(failed) if failed.name == prop.name)
+                    .then(|| message.clone())
+            })
+        {
+            st.failed_properties.push((entry_index, message));
+            return Ok(());
+        }
         // eval_property amends the value bound for the name in the
         // receiver's own scope. A generator body can amend both a
         // member previously generated in this body and one held by
@@ -1342,6 +1354,13 @@ impl Evaluator {
         // would be captured with it.
         if !cx.stale_members.is_empty() {
             poison_stale_members(cx, st, prop, &mut active_scope);
+        }
+        if matches!(
+            prop.value,
+            Some(Expr::New(Some(_), ..) | Expr::If(..) | Expr::Let(..))
+        ) && !cx.pending_members.is_empty()
+        {
+            poison_pending_reads(cx, st, prop, &mut active_scope);
         }
         let value = match self.eval_property(prop, &active_scope, cx.depth) {
             Ok(value) => value,
@@ -2035,7 +2054,12 @@ pub(super) fn this_member_reads_non_const(
 
 /// Reject elements in the body of an object of type `type_display`, and
 /// entries too when `typed` (a class instance has only properties).
-pub(super) fn check_member_kinds(type_display: &str, entries: &[Entry], typed: bool) -> Result<()> {
+pub(super) fn check_member_kinds(
+    type_display: &str,
+    entry_display: &str,
+    entries: &[Entry],
+    typed: bool,
+) -> Result<()> {
     // A Mapping body checks the elements its generators produce as it runs, so
     // only a direct element counts here.
     let is_elem = |entry: &Entry| matches!(entry, Entry::Elem(_));
@@ -2050,7 +2074,7 @@ pub(super) fn check_member_kinds(type_display: &str, entries: &[Entry], typed: b
     }
     if typed && body_has(entries, &|entry| matches!(entry, Entry::DynProperty(..))) {
         return Err(Error::Eval(format!(
-            "Object of type `{type_display}` cannot have an entry."
+            "Object of type `{entry_display}` cannot have an entry."
         )));
     }
     Ok(())
@@ -2193,6 +2217,57 @@ fn poison_stale_members(
         if *name != prop.name && !st.bound_members.contains(name) && expr_mentions(value, name) {
             active_scope.poison(name.clone(), format!("undefined variable: {name}"));
         }
+    }
+}
+
+/// A `new Class { .. }` whose body reads a member declared later in this body
+/// reads that member, not the class's own default of the name. The
+/// constructor may be the result of an `if` or `let`.
+#[inline(never)]
+fn poison_pending_reads(
+    cx: &BodyContext,
+    st: &BodyState,
+    prop: &Property,
+    active_scope: &mut Scope,
+) {
+    let mut bodies = Vec::new();
+    if let Some(value) = &prop.value {
+        typed_new_bodies(value, &mut bodies, &HashSet::default());
+    }
+    if bodies.is_empty() {
+        return;
+    }
+    let mut refs = HashSet::default();
+    for (entries, bound) in bodies {
+        collect_entry_refs(entries, &mut refs, &bound);
+    }
+    for name in &cx.pending_members {
+        if *name != prop.name && !st.bound_members.contains(name) && refs.contains(name) {
+            active_scope.poison(name.clone(), format!("undefined variable: {name}"));
+        }
+    }
+}
+
+/// The bodies of the `new Class { .. }` expressions an expression can
+/// evaluate to.
+/// Each body is paired with the names the `let`s on its own path bind.
+fn typed_new_bodies<'a>(
+    expr: &'a Expr,
+    bodies: &mut Vec<(&'a [Entry], HashSet<Name>)>,
+    bound: &HashSet<Name>,
+) {
+    match expr {
+        Expr::New(Some(_), entries, _) => bodies.push((entries, bound.clone())),
+        Expr::If(_, then, otherwise) => {
+            typed_new_bodies(then, bodies, bound);
+            typed_new_bodies(otherwise, bodies, bound);
+        }
+        Expr::Let(name, _, body) => {
+            let mut inner = bound.clone();
+            inner.insert(nm(name));
+            typed_new_bodies(body, bodies, &inner);
+        }
+        _ => {}
     }
 }
 

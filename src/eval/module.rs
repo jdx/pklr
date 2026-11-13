@@ -13,6 +13,8 @@ struct ModuleBase {
     late_properties: Vec<Arc<Property>>,
     /// The base module's members, which `super` reads.
     super_members: Option<ObjectMap>,
+    /// The name of the module `super` stands for.
+    super_name: Option<String>,
 }
 
 /// The members a module body evaluated.
@@ -513,6 +515,7 @@ impl Evaluator {
             members: base_obj,
             late_properties: mut late_inherited_properties,
             mut super_members,
+            super_name,
         } = base;
         self.shadow_inherited_locals(module, path, &mut late_inherited_properties);
 
@@ -522,6 +525,9 @@ impl Evaluator {
         let super_bound = super_members.is_some();
         if let Some(members) = super_members {
             scope.set("super", Value::Object(Arc::new(members), None));
+            if let Some(name) = super_name {
+                scope.set(SUPER_MODULE_NAME, Value::String(name.into()));
+            }
         }
         // Properties of an amending module are object members. Their modifier
         // applicability is a declaration error, so it must not depend on
@@ -794,6 +800,10 @@ impl Evaluator {
                 let refs = property_reference_names(prop);
                 if refs.iter().any(|name| late_bound_names.contains(name))
                     || (refs.contains(DYNAMIC_SIBLING_REF) && !late_bound_names.is_empty())
+                    // A member read through `super` may be late bound too.
+                    || (super_bound
+                        && !late_bound_names.is_empty()
+                        && property_reads_module_super(prop))
                 {
                     late_bound_names.insert(prop.name.clone());
                     late_child_properties.push(*prop);
@@ -1044,6 +1054,24 @@ impl Evaluator {
                     _ => prop.clone(),
                 },
             };
+            // `super` in this module's own member is its base, whichever
+            // module re-evaluates the member later.
+            let prop = match (&prop.value, scope.get("super")) {
+                (Some(value), Some(base))
+                    if !inherited
+                        && super_bound
+                        && matches!(base, Value::Object(..))
+                        && !effective_late_properties.contains_key(&prop.name)
+                        && property_reads_module_super(&prop) =>
+                {
+                    let bindings = LocalBindings(Arc::new(vec![(nm("super"), base.clone())]));
+                    Arc::new(Property {
+                        value: Some(Expr::TemplateLocals(bindings, Box::new(value.clone()))),
+                        ..(*prop).clone()
+                    })
+                }
+                _ => prop,
+            };
             effective_late_properties.insert(prop.name.clone(), prop);
         }
         let type_aliases = scope.flatten_type_aliases();
@@ -1268,14 +1296,8 @@ impl Evaluator {
         let late_passes = late_inherited_properties.len() + late_child_properties.len();
         // `super` in a base module's property is that module's own base, not
         // this module's: those keep the value the base computed.
-        let reads_super: HashSet<&str> = if super_bound {
-            late_inherited_properties
-                .iter()
-                .filter(|prop| property_reads_module_super(prop))
-                .map(|prop| prop.name.as_ref())
-                .collect()
-        } else {
-            HashSet::default()
+        let reads_super = |prop: &Property| {
+            super_bound && property_reads_module_super(prop) && !binds_own_super(prop)
         };
         // A pass that reproduces every value, as `settled_eq` compares them,
         // is the last: the next would start from the same state and repeat it.
@@ -1310,8 +1332,7 @@ impl Evaluator {
                 .iter()
                 .map(|prop| &**prop)
                 .filter(|prop| {
-                    !child_property_names.contains(prop.name.as_ref())
-                        && !reads_super.contains(prop.name.as_ref())
+                    !child_property_names.contains(prop.name.as_ref()) && !reads_super(prop)
                 })
                 .chain(late_child_properties.iter().copied())
                 .collect();
@@ -1337,9 +1358,7 @@ impl Evaluator {
             let mut change = Change::None;
             let mut errored = false;
             for prop in late_inherited_properties {
-                if child_property_names.contains(prop.name.as_ref())
-                    || reads_super.contains(prop.name.as_ref())
-                {
+                if child_property_names.contains(prop.name.as_ref()) || reads_super(prop) {
                     continue;
                 }
                 match self.eval_property_with(prop, scope, depth, true) {
@@ -1381,8 +1400,30 @@ impl Evaluator {
                 {
                     continue;
                 }
+                // What it reads through `super` is the base's member as this
+                // module's members late bind it.
+                let super_scope = super_bound
+                    .then(|| property_reads_module_super(prop))
+                    .filter(|reads| *reads)
+                    .and_then(|_| match scope.get("super") {
+                        Some(Value::Object(members, source)) => {
+                            let mut members = (**members).clone();
+                            for (name, value) in members.iter_mut() {
+                                if !child_property_names.contains(name.as_ref())
+                                    && !matches!(value, Value::Lambda(..))
+                                    && let Some(current) = all_props.get(name.as_ref())
+                                {
+                                    *value = current.clone();
+                                }
+                            }
+                            let mut overlay = scope.clone();
+                            overlay.set("super", Value::Object(Arc::new(members), source.clone()));
+                            Some(overlay)
+                        }
+                        _ => None,
+                    });
                 match self
-                    .eval_property_with(prop, scope, depth, true)
+                    .eval_property_with(prop, super_scope.as_ref().unwrap_or(scope), depth, true)
                     .and_then(|value| {
                         if synthesized_inherited_types.contains(prop.name.as_ref())
                             && let (Some(value), Some(ty)) = (&value, &prop.type_ann)
@@ -1732,6 +1773,7 @@ impl Evaluator {
             members: base_obj,
             late_properties: late_inherited_properties,
             super_members,
+            super_name: _,
         } = base;
         if let Some(amends_uri) = &module.amends {
             // A relative amends inside a remote module resolves against that URL.
@@ -1856,6 +1898,7 @@ impl Evaluator {
             members: base_obj,
             late_properties: late_inherited_properties,
             super_members: _,
+            super_name: _,
         } = base;
         // Inject class definitions from amends base into scope so the amending
         // module can reference them (e.g., `new Step { ... }`).
@@ -1933,6 +1976,7 @@ impl Evaluator {
             members: base_obj,
             late_properties: late_inherited_properties,
             super_members,
+            super_name,
         } = base;
         // Process extends: load base module, inherit all members and scope
         if let Some(extends_uri) = &module.extends {
@@ -2029,6 +2073,7 @@ impl Evaluator {
                         }
                     }
                     *super_members = Some(self.module_super_members(&extends_path, base_obj, true));
+                    *super_name = Some(module_display_name(&base_module, &extends_path));
                 }
             } else if uri.starts_with("https://") || uri.starts_with("http://") {
                 self.check_not_self(module, path, Path::new(uri), "extend")?;
@@ -2101,6 +2146,7 @@ impl Evaluator {
                     }
                 }
                 *super_members = Some(self.module_super_members(Path::new(uri), base_obj, true));
+                *super_name = Some(module_display_name(&ext_module, Path::new(uri)));
             }
         }
         Ok(())
@@ -2862,11 +2908,11 @@ mod late_binding_pass_tests {
             .spawn(|| {
                 let child = "amends \"Template.pkl\"\nbase = 10\n";
                 let (json, passes) =
-                    evaluate_amendment(&chain_of_lambdas_reading_the_module(30), child);
+                    evaluate_amendment(&chain_of_lambdas_reading_the_module(26), child);
                 assert_eq!(json["res"], 2);
                 // The template's own pass and pass 0 of the amending module, then a
                 // pass for each of the inherited properties, and one more.
-                assert_eq!(passes, 2 + 31, "every pass runs");
+                assert_eq!(passes, 2 + 27, "every pass runs");
                 assert_eq!(super::SAME_DATA_CHECKS.with(std::cell::Cell::get), 0);
             })
             .unwrap()
@@ -3138,3 +3184,12 @@ mod late_binding_pass_tests {
         assert_eq!(longest_chain("o = new { v = 1 }\nx = 1\n"), 0);
     }
 }
+
+/// Whether `prop` carries the `super` of the module that declared it.
+fn binds_own_super(prop: &Property) -> bool {
+    matches!(&prop.value, Some(Expr::TemplateLocals(bindings, _))
+        if bindings.0.iter().any(|(name, _)| &**name == "super"))
+}
+
+/// The scope binding that names the module `super` stands for.
+pub(super) const SUPER_MODULE_NAME: &str = "\0pklr:super-module";
