@@ -258,15 +258,25 @@ fn null_safe_resource_digests_and_user_resource_classes() {
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("data.txt");
     std::fs::write(&file, "abc").unwrap();
+    let path = file
+        .display()
+        .to_string()
+        .replace('\\', "/")
+        .replace(' ', "%20");
+    let uri = if path.starts_with('/') {
+        format!("file://{path}")
+    } else {
+        format!("file:///{path}")
+    };
     let json = eval(&format!(
         r#"
 class Resource {{ text: String = "abc"; base64: String = "x" }}
-dot = read("file://{path}").md5
-safe = read?("file://{path}")?.md5
-size = read?("file://{path}")?.bytes.size
+dot = read("{uri}").md5
+safe = read?("{uri}")?.md5
+size = read?("{uri}")?.bytes.size
 user = new Resource {{}}.hasProperty("md5")
 "#,
-        path = file.display()
+        uri = uri
     ));
     assert_eq!(json["dot"], "900150983cd24fb0d6963f7d28e17f72");
     assert_eq!(json["safe"], json["dot"]);
