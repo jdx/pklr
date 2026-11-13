@@ -4626,3 +4626,17 @@ fn relative_path_to_amended_module_argument_edge_cases() {
     .unwrap();
     assert_eq!(pklr::eval_to_json(&root).unwrap()["result"], 42);
 }
+
+#[test]
+fn relative_path_to_amended_module_argument_with_unloaded_receiver() {
+    let temp = TestTempDir::new("pklr_test_relative_path_to_amended_import");
+    std::fs::write(temp.path().join("other.pkl"), "x = 1\n").unwrap();
+    let root = temp.path().join("root.pkl");
+    std::fs::write(
+        &root,
+        "hidden path = import(\"other.pkl\").relativePathTo(module)\nresult = (module) {}.path\n",
+    )
+    .unwrap();
+    let err = pklr::eval_to_json(&root).unwrap_err().to_string();
+    assert!(err.contains("Expected a module as argument"), "{err}");
+}

@@ -46,7 +46,6 @@ impl Evaluator {
         other: &Expr,
         scope: &Scope,
     ) -> Option<Result<Value>> {
-        self.module_arg_used |= matches!(other, Expr::Ident(name) if name == "module");
         let from = self.module_uri_of(receiver, scope)?;
         let to = self.module_uri_of(other, scope)?;
         let directory = |uri: &str| {

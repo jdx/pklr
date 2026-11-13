@@ -93,6 +93,9 @@ impl Evaluator {
             // checks.
             self.eval_expr(obj_expr, scope, depth + 1)?;
             self.eval_expr(other, scope, depth + 1)?;
+            // Set after evaluating the receiver: that can load another
+            // module, whose own members reset the flag.
+            self.module_arg_used |= matches!(other, Expr::Ident(name) if name == "module");
             return result;
         }
         // Handle method calls: obj.method(args)
