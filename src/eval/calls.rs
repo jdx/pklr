@@ -431,18 +431,36 @@ impl Evaluator {
             }
             return Ok(Some(self.eval_expr(body, &call_scope, depth + 1)?));
         }
-        if let Value::Object(map, _) = obj
+        if let Value::Object(map, source) = obj
             && let "hasProperty" | "getPropertyOrNull" | "getProperty" = method
             && let [Value::String(name)] = evaled_args
+            && source
+                .as_ref()
+                .is_none_or(|s| s.kind != ObjectKind::Mapping)
         {
-            let found = map.get(&**name).cloned();
+            // A hidden member is in the definition scope, not the member map.
+            let hidden = || {
+                let source = source.as_ref()?;
+                source
+                    .evaluated_properties
+                    .iter()
+                    .any(|property| **property == **name)
+                    .then(|| source.scope().get(&**name).cloned())?
+            };
+            let found = map.get(&**name).cloned().or_else(hidden);
             return match (method, found) {
                 ("hasProperty", found) => Ok(Some(Value::Bool(found.is_some()))),
                 ("getPropertyOrNull", found) => Ok(Some(found.unwrap_or(Value::Null))),
                 (_, Some(value)) => Ok(Some(value)),
-                (_, None) => Err(Error::Eval(format!(
-                    "Cannot find property `{name}` in object of type `Dynamic`."
-                ))),
+                (_, None) => {
+                    let class = source
+                        .as_ref()
+                        .and_then(|s| s.type_name.as_deref())
+                        .unwrap_or("Dynamic");
+                    Err(Error::Eval(format!(
+                        "Cannot find property `{name}` in object of type `{class}`."
+                    )))
+                }
             };
         }
         Ok(None)

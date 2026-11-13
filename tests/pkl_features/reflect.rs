@@ -486,3 +486,20 @@ orNull = obj.getPropertyOrNull("b")
     assert_eq!(result["get"], json!(1));
     assert_eq!(result["orNull"], json!(null));
 }
+
+#[test]
+fn an_object_reads_its_hidden_members_through_get_property() {
+    let result = eval(
+        r#"
+class C {
+  hidden h = 1
+  v = 2
+}
+local obj = new C {}
+has = obj.hasProperty("h")
+get = obj.getPropertyOrNull("h")
+"#,
+    );
+    assert_eq!(result["has"], json!(true));
+    assert_eq!(result["get"], json!(1));
+}

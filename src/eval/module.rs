@@ -102,6 +102,21 @@ impl Evaluator {
                     Vec::new(),
                 ))
             })
+            .chain(declarations.iter().flat_map(|declaration| {
+                // A bodyless method's types name imports its entries do not.
+                let mut roots = Vec::new();
+                for signature in &declaration.signatures {
+                    for ty in signature
+                        .parameters
+                        .iter()
+                        .filter_map(|(_, ty)| ty.as_ref())
+                        .chain(signature.return_type.as_ref())
+                    {
+                        type_roots(ty, &mut roots);
+                    }
+                }
+                roots.into_iter().map(|root| Entry::Elem(Expr::Ident(root)))
+            }))
             .collect()
     }
 
@@ -3402,3 +3417,24 @@ fn binds_own_super(prop: &Property) -> bool {
 
 /// The scope binding that names the module `super` stands for.
 pub(super) const SUPER_MODULE_NAME: &str = "\0pklr:super-module";
+
+/// The leading names of the types `ty` mentions: `lib` of `lib.C`.
+fn type_roots(ty: &crate::parser::TypeExpr, roots: &mut Vec<String>) {
+    use crate::parser::TypeExpr;
+    match ty {
+        TypeExpr::Named(name) | TypeExpr::Constrained(name, _, _) => {
+            let name = name.trim_start_matches('*');
+            if let Some((root, _)) = name.split_once('.') {
+                roots.push(root.to_string());
+            }
+        }
+        TypeExpr::Nullable(inner) => type_roots(inner, roots),
+        TypeExpr::Union(items) => items.iter().for_each(|item| type_roots(item, roots)),
+        TypeExpr::Generic(name, arguments) => {
+            if let Some((root, _)) = name.split_once('.') {
+                roots.push(root.to_string());
+            }
+            arguments.iter().for_each(|item| type_roots(item, roots));
+        }
+    }
+}
