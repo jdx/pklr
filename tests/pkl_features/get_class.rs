@@ -507,3 +507,15 @@ props = reflect?.Class(Foo).properties.keys.toList()
     );
     assert_eq!(result, json!({"props": ["x"]}));
 }
+
+#[test]
+fn a_reflect_mirror_is_not_the_base_class() {
+    let result = eval(
+        r#"
+import "pkl:reflect"
+class Foo { x = 1 }
+same = reflect.Class(Foo).getClass() == Class
+"#,
+    );
+    assert_eq!(result, json!({"same": false}));
+}

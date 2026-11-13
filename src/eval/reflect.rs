@@ -177,7 +177,7 @@ impl Evaluator {
         members.insert("name".into(), Value::String(name.as_str().into()));
         members.insert("imports".into(), Value::Object(Arc::new(imports), None));
         members.insert("moduleClass".into(), module_class);
-        Ok(typed_object("Module", members))
+        Ok(mirror("Module", members))
     }
 
     /// The name of the module with class identity `identity` and the mirror of
@@ -242,7 +242,7 @@ impl Evaluator {
             Value::Object(Arc::new(properties), None),
         );
         members.insert("methods".into(), Value::Object(Arc::new(methods), None));
-        Ok(typed_object("Class", members))
+        Ok(mirror("Class", members))
     }
 
     /// The mirror of a property or method.
@@ -294,11 +294,22 @@ fn reflect_type_alias(alias: &Value) -> Result<Value> {
     members.insert("annotations".into(), empty_list(ListKind::Listing));
     members.insert("typeParameters".into(), empty_list(ListKind::List));
     members.insert("docComment".into(), Value::Null);
-    Ok(typed_object("TypeAlias", members))
+    Ok(mirror("TypeAlias", members))
 }
 
 fn unsupported_module() -> Error {
     Error::Eval(
         "reflect.Module() is not supported on this module: pklr does not track its source".into(),
     )
+}
+
+/// A `pkl:reflect` mirror of the given type, which names its own class rather
+/// than a `pkl:base` one.
+fn mirror(type_name: &str, members: ObjectMap) -> Value {
+    let Value::Object(members, Some(source)) = typed_object(type_name, members) else {
+        unreachable!("typed_object builds an object with a source")
+    };
+    let mut source = Arc::unwrap_or_clone(source);
+    source.type_identity = Some(format!("pkl:reflect#{type_name}"));
+    Value::Object(members, Some(Arc::new(source)))
 }
