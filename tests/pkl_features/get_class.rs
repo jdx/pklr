@@ -481,3 +481,17 @@ res2 = test.catch(() -> Person?.bar())
             .contains("Cannot find method `bar`")
     );
 }
+
+#[test]
+fn reflect_class_lists_only_the_members_a_class_declares() {
+    let result = eval(
+        r#"
+import "pkl:reflect"
+open class Base { x = 1; function f() = 1 }
+class Child extends Base { y = 2; function g() = 2 }
+props = reflect.Class(Child).properties.keys.toList()
+methods = reflect.Class(Child).methods.keys.toList()
+"#,
+    );
+    assert_eq!(result, json!({"props": ["y"], "methods": ["g"]}));
+}

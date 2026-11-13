@@ -56,6 +56,9 @@ struct ClassDecl<'a> {
     name: &'a str,
     modifiers: Value,
     entries: &'a [Entry],
+    /// The entry scopes of `entries`: an entry inherited from a parent class
+    /// carries the parent's scope, one declared here has none.
+    entry_scopes: &'a [Option<Arc<crate::value::CapturedScope>>],
 }
 
 impl Evaluator {
@@ -124,6 +127,7 @@ impl Evaluator {
             name,
             modifiers: modifier_names(&modifiers),
             entries: &source.entries,
+            entry_scopes: &source.entry_scopes,
         };
         self.class_mirror(&decl, &class_scope, depth)
     }
@@ -201,6 +205,7 @@ impl Evaluator {
             name: &name,
             modifiers: modifier_names(&modifiers),
             entries: &parsed.body,
+            entry_scopes: &[],
         };
         let class = self.class_mirror(&decl, scope, depth)?;
         Ok((parsed, class))
@@ -209,10 +214,14 @@ impl Evaluator {
     fn class_mirror(&mut self, decl: &ClassDecl, scope: &Scope, depth: usize) -> Result<Value> {
         let mut properties = ObjectMap::default();
         let mut methods = ObjectMap::default();
-        for entry in decl.entries {
+        for (index, entry) in decl.entries.iter().enumerate() {
             let Entry::Property(prop) = entry else {
                 continue;
             };
+            // `properties` and `methods` hold only what this class declares.
+            if decl.entry_scopes.get(index).is_some_and(Option::is_some) {
+                continue;
+            }
             if prop.modifiers.contains(&Modifier::Local) {
                 continue;
             }
