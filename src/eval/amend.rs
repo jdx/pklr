@@ -1959,6 +1959,18 @@ pub(super) fn compose_amended_object(
     prop: &Arc<Property>,
     locals: Option<&LocalBindings>,
 ) -> Arc<Property> {
+    if let (None, Some(earlier), Some(body), None) =
+        (&inherited.value, &inherited.body, &prop.body, &prop.value)
+        && (entries_are_listing_amendment(earlier) || entries_are_listing_amendment(body))
+    {
+        // Two bodies that add elements: the second adds to what the first
+        // made, so the member is rebuilt from both, in order.
+        let combined: Vec<Entry> = earlier.iter().chain(body.iter()).cloned().collect();
+        return Arc::new(Property {
+            body: Some(Arc::new(combined)),
+            ..(**prop).clone()
+        });
+    }
     let (Some(base), Some(body), None) = (&inherited.value, &prop.body, &prop.value) else {
         return prop.clone();
     };

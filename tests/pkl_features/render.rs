@@ -2242,3 +2242,23 @@ r4 = new jsonnet.Renderer {}.renderValue(new X {})"#,
     assert_eq!(json["r3"], "<a>1</a>");
     assert_eq!(json["r4"], "{\n  a: 1,\n}");
 }
+
+// Each amending module's body-only declaration of a member adds to the
+// elements the earlier ones made; a later one must not drop them when a
+// member it reads is overridden further down the chain.
+#[cfg(feature = "native-io")]
+#[test]
+fn body_only_declarations_accumulate_across_the_amends_chain() {
+    let dir = TestTempDir::new("pklr_body_only_chain");
+    std::fs::write(dir.path().join("base.pkl"), "a = 1\no { \"base\" }\n").unwrap();
+    std::fs::write(
+        dir.path().join("mid.pkl"),
+        "amends \"base.pkl\"\no { module.a }\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("main.pkl"), "amends \"mid.pkl\"\na = 2\n").unwrap();
+    assert_eq!(
+        pklr::eval_to_text(&dir.path().join("main.pkl")).unwrap(),
+        "a = 2\no {\n  \"base\"\n  2\n}\n"
+    );
+}
