@@ -36,6 +36,50 @@ pub struct Module {
     pub deferred_const_violations: Vec<(std::sync::Arc<Expr>, String)>,
 }
 
+/// A class or type alias declaration as `pkl:reflect` describes it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Declaration {
+    pub(crate) is_class: bool,
+    pub(crate) name: std::sync::Arc<str>,
+    /// Where the declaration starts, after its doc comment and annotations.
+    pub(crate) at: SourcePos,
+    pub(crate) doc: Option<std::sync::Arc<str>>,
+    pub(crate) annotations: Vec<Annotation>,
+    pub(crate) modifiers: Vec<Modifier>,
+    /// For a class, the parent it extends, as written.
+    pub(crate) parent: Option<String>,
+    /// For a class, the start of each member in its body.
+    pub(crate) members: Vec<(std::sync::Arc<str>, SourcePos)>,
+    /// For a generic type alias, its type parameters.
+    pub(crate) type_parameters: Vec<String>,
+    /// For a type alias, the type it stands for, as written.
+    pub(crate) target: Option<TypeExpr>,
+    /// For a class, the methods of its body that have no body of their own
+    /// (abstract or external), which the parsed entries leave out.
+    pub(crate) bodyless_methods: Vec<BodylessMethod>,
+    /// Whether it is declared inside a class or an object body rather than at
+    /// the top level of its module.
+    pub(crate) nested: bool,
+}
+
+/// A method declared without a body, such as `abstract function f(): Int`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct BodylessMethod {
+    pub(crate) name: std::sync::Arc<str>,
+    pub(crate) at: SourcePos,
+    pub(crate) doc: Option<std::sync::Arc<str>>,
+    pub(crate) annotations: Vec<Annotation>,
+    pub(crate) modifiers: Vec<Modifier>,
+    pub(crate) parameters: Vec<String>,
+}
+
+/// A line and column in a source file, both starting at 1.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub(crate) struct SourcePos {
+    pub(crate) line: u32,
+    pub(crate) col: u32,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Import {
     pub uri: String,
