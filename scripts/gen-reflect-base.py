@@ -35,10 +35,11 @@ MEMBER = re.compile(r"^  ((?:(?:%s) )*)(function )?(\w+)" % "|".join(MODS))
 def split_top(text):
     """Split on commas that are not nested in brackets or parens."""
     parts, depth, cur = [], 0, ""
-    for ch in text:
+    for index, ch in enumerate(text):
         if ch in "<([{":
             depth += 1
-        elif ch in ">)]}":
+        elif ch in ">)]}" and not (ch == ">" and text[index - 1 : index] == "-"):
+            # The `>` of a function type's `->` closes nothing.
             depth -= 1
         if ch == "," and depth == 0:
             parts.append(cur.strip())
@@ -48,6 +49,37 @@ def split_top(text):
     if cur.strip():
         parts.append(cur.strip())
     return parts
+
+
+def matching(text, start):
+    """The index of the bracket that closes the one at `text[start]`, not
+    counting the `>` of a `->`."""
+    depth = 0
+    for index in range(start, len(text)):
+        ch = text[index]
+        if ch in "<([{":
+            depth += 1
+        elif ch in ">)]}" and not (ch == ">" and text[index - 1] == "-"):
+            depth -= 1
+            if depth == 0:
+                return index
+    raise AssertionError(text)
+
+
+def signature(text):
+    """The type parameters and parameters of the method declared by `text`:
+    `function name<T>(a: A, b: (X) -> Y): R`."""
+    m = re.match(r"^\s*(?:(?:%s) )*function (\w+)" % "|".join(MODS), text)
+    assert m, text
+    pos = m.end()
+    tparams = ""
+    if text[pos] == "<":
+        end = matching(text, pos)
+        tparams = text[pos + 1 : end]
+        pos = end + 1
+    assert text[pos] == "(", text
+    end = matching(text, pos)
+    return tparams, text[pos + 1 : end]
 
 
 def type_params(text):
@@ -164,16 +196,15 @@ def main(path):
                 while not balanced(text):
                     j += 1
                     text += " " + lines[j].strip()
-                sig = re.match(r"^  (?:(?:%s) )*function (\w+)(<.*?>)?\((.*)\)" % "|".join(MODS), text)
-                assert sig, text
-                params = [p.split(":")[0].strip() for p in split_top(sig.group(3))]
+                tparams, plist = signature(text)
+                params = [p.split(":")[0].strip() for p in split_top(plist)]
                 emit(
                     "M",
                     [
                         str(i + 1),
                         ",".join(mods),
                         name,
-                        type_params(sig.group(2)[1:-1]) if sig.group(2) else "",
+                        type_params(tparams) if tparams else "",
                         ",".join(params),
                     ],
                 )

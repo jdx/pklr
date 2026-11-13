@@ -227,3 +227,142 @@ all = reflect.Class(B).properties["id"].allModifiers.toList()
     assert_eq!(result["own"], json!([]));
     assert_eq!(result["all"], json!(["hidden"]));
 }
+
+/// Evaluates `main` next to the other `files`.
+fn with_files(files: &[(&str, &str)], main: &str) -> serde_json::Value {
+    let dir = TestTempDir::new("reflect");
+    for (name, source) in files {
+        std::fs::write(dir.path().join(name), source).unwrap();
+    }
+    let path = dir.path().join("main.pkl");
+    let mut ev = Evaluator::new();
+    ev.eval_source(main, &path).unwrap().to_json()
+}
+
+#[test]
+fn an_imported_alias_is_mirrored_where_its_module_declares_it() {
+    let result = with_files(
+        &[(
+            "lib.pkl",
+            "typealias Inner = String | \"x\"\n/// outer doc\ntypealias Outer = Inner?\n",
+        )],
+        r#"
+import "pkl:reflect"
+import "lib.pkl"
+typealias Mine = lib.Outer
+alias = reflect.TypeAlias(Mine).referent.referent
+doc = alias.docComment
+inner = alias.referent.member.referent.name
+"#,
+    );
+    assert_eq!(result["doc"], json!("outer doc"));
+    assert_eq!(result["inner"], json!("Inner"));
+}
+
+#[test]
+fn a_chain_of_aliases_mirrors_each_alias() {
+    let result = with_snippet(
+        r#"
+class Base {}
+typealias First = Base
+typealias Second = First?
+chain = reflect.TypeAlias(Second).referent.member.referent.name
+"#,
+    );
+    assert_eq!(result["chain"], json!("First"));
+}
+
+#[test]
+fn a_constrained_generic_mirrors_the_type_it_constrains() {
+    let result = with_snippet(
+        r#"
+typealias Some = List<Int>(length > 0)
+referent = reflect.TypeAlias(Some).referent.referent.name
+argument = reflect.TypeAlias(Some).referent.typeArguments[0].referent.name
+"#,
+    );
+    assert_eq!(result["referent"], json!("List"));
+    assert_eq!(result["argument"], json!("Int"));
+}
+
+#[test]
+fn annotations_are_listings() {
+    let result = with_snippet(
+        r#"
+cls = reflect.Class(Pet).annotations is Listing
+prop = reflect.Class(Pet).properties["name"].annotations is Listing
+all = reflect.Class(Pet).properties["name"].allAnnotations is Listing
+"#,
+    );
+    assert_eq!(result, json!({"cls": true, "prop": true, "all": true}));
+}
+
+#[test]
+fn an_import_only_an_annotation_uses_is_bound() {
+    let result = with_files(
+        &[("ann.pkl", "message = \"hi\"\n")],
+        r#"
+import "pkl:reflect"
+import "ann.pkl" as ann
+@Deprecated { message = ann.message }
+class C {}
+message = reflect.Class(C).annotations[0].message
+"#,
+    );
+    assert_eq!(result["message"], json!("hi"));
+}
+
+#[test]
+fn a_nested_class_does_not_stand_for_a_module_level_one() {
+    let result = with_snippet(
+        r#"
+class Outer { class N { a: Int } }
+/// top level
+class N { b: Int }
+doc = reflect.Class(N).docComment
+members = reflect.Class(N).properties.keys.toList()
+"#,
+    );
+    assert_eq!(result["doc"], json!("top level"));
+    assert_eq!(result["members"], json!(["b"]));
+}
+
+#[test]
+fn a_method_without_a_body_is_reflected() {
+    let result = with_snippet(
+        r#"
+abstract class Shape {
+  /// The area.
+  abstract function area(x: Int, y: Int): Number
+  name: String
+  function perimeter(): Number = 1
+}
+methods = reflect.Class(Shape).methods.keys.toList()
+parameters = reflect.Class(Shape).methods["area"].parameters.keys.toList()
+doc = reflect.Class(Shape).methods["area"].docComment
+modifiers = reflect.Class(Shape).methods["area"].modifiers.toList()
+"#,
+    );
+    assert_eq!(result["methods"], json!(["area", "perimeter"]));
+    assert_eq!(result["parameters"], json!(["x", "y"]));
+    assert_eq!(result["doc"], json!("The area."));
+    assert_eq!(result["modifiers"], json!(["abstract"]));
+}
+
+#[test]
+fn the_implicit_parent_of_an_external_class_is_any() {
+    let result = with_snippet("parent = reflect.Class(Boolean).superclass.name");
+    assert_eq!(result["parent"], json!("Any"));
+}
+
+#[test]
+fn base_methods_keep_their_whole_parameter_lists() {
+    let result = with_snippet(
+        r#"
+filter = reflect.Class(List).methods["filterNonNull"].parameters.keys.toList()
+toMap = reflect.Class(List).methods["toMap"].parameters.keys.toList()
+"#,
+    );
+    assert_eq!(result["filter"], json!([]));
+    assert_eq!(result["toMap"], json!(["keyExtractor", "valueExtractor"]));
+}

@@ -2034,7 +2034,7 @@ D	List(1, 2, 3).filter((n) -> n.isEven) == List(2)
 D	List(1, 2, 3).filter((n) -> n > 9) == List()
 D	```
 A	AlsoKnownAs	names[]=findAllwhere
-M	2627	abstract	filterNonNull		)
+M	2627	abstract	filterNonNull		
 D	Retains non-null elements.
 D	
 D	Shorthand for `filter((it) -> it != null)`.
@@ -2261,7 +2261,7 @@ M	2912	abstract	toSet
 D	Converts this collection to a set.
 D	
 D	Returns this collection if it already is a set.
-M	2916	abstract	toMap	:Key,:Value	keyExtractor
+M	2916	abstract	toMap	:Key,:Value	keyExtractor,valueExtractor
 D	Converts this collection to a map by extracting a key and value from each element using the
 D	given functions.
 M	2922	abstract	toListing		
@@ -2450,7 +2450,7 @@ M	3144		split		index
 M	3145		splitOrNull		index
 M	3146		partition		predicate
 M	3148		filter		predicate
-M	3149		filterNonNull		)
+M	3149		filterNonNull		
 M	3150		map	:Result	transform
 M	3151		mapNonNull	:Result	transform
 M	3152		flatMap	:Result	transform
@@ -2619,7 +2619,7 @@ M	3369		zip	:Other	coll
 M	3371		join		separator
 M	3373		toList		
 M	3375		toSet		
-M	3377		toMap	:Key,:Value	keyExtractor
+M	3377		toMap	:Key,:Value	keyExtractor,valueExtractor
 M	3382		toListing		
 M	3384		toDynamic		
 M	3390		toBytes		
@@ -2657,7 +2657,7 @@ M	3438		split		index
 M	3439		splitOrNull		index
 M	3440		partition		predicate
 M	3442		filter		predicate
-M	3443		filterNonNull		)
+M	3443		filterNonNull		
 M	3444		map	:Result	transform
 M	3445		mapNonNull	:Result	transform
 M	3446		flatMap	:Result	transform
@@ -2711,7 +2711,7 @@ M	3530		zip	:Other	coll
 M	3532		join		separator
 M	3534		toList		
 M	3536		toSet		
-M	3538		toMap	:Key,:Value	keyExtractor
+M	3538		toMap	:Key,:Value	keyExtractor,valueExtractor
 M	3543		toListing		
 M	3545		toDynamic		
 M	3548		intersect		other
@@ -2750,13 +2750,13 @@ M	3620		filter		predicate
 D	Removes all entries for which [predicate] does not hold.
 M	3623		fold	:Result	initial,operator
 D	Folds the entries of this map in iteration order using [operator], starting with [initial].
-M	3626		map	:NewKey,:NewValue	transform,NewValue>,
+M	3626		map	:NewKey,:NewValue	transform
 D	Transforms the entries of this map using [transform].
 M	3631		mapKeys	:NewKey	transform
 D	Transforms the keys of this map using [transform].
 M	3634		mapValues	:NewValue	transform
 D	Transforms the values of this map using [transform].
-M	3637		flatMap	:NewKey,:NewValue	transform,NewValue>,
+M	3637		flatMap	:NewKey,:NewValue	transform
 D	Applies a map-generating [transform] to each map entry and concatenates the resulting maps.
 M	3644		every		predicate
 D	Tells if [predicate] holds for every entry of this map.

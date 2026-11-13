@@ -16,7 +16,7 @@ pub use ast::{
     Annotation, BinOp, Body, Entry, Expr, ForGenerator, GenericAlias, Import, LocalBindings,
     Modifier, Module, Property, StringInterpPart, TraceSite, TypeExpr, UnOp, WhenGenerator,
 };
-pub(crate) use ast::{Declaration, SourcePos};
+pub(crate) use ast::{BodylessMethod, Declaration, SourcePos};
 use ast::{
     check_signature, erase_type_parameters, infers_new, type_expr_constrained_name,
     type_expr_runtime_name,
@@ -36,6 +36,18 @@ pub fn parse(tokens: &[Token]) -> Result<Module> {
 pub fn parse_named(tokens: &[Token], source: &str, name: &str) -> Result<Module> {
     let mut p = Parser::new(tokens, source, name);
     p.parse_module()
+}
+
+/// Parse a module together with the declarations `pkl:reflect` describes,
+/// which the public `Module` does not carry.
+pub(crate) fn parse_named_declarations(
+    tokens: &[Token],
+    source: &str,
+    name: &str,
+) -> Result<(Module, std::sync::Arc<Vec<Declaration>>)> {
+    let mut p = Parser::new(tokens, source, name);
+    let module = p.parse_module()?;
+    Ok((module, std::mem::take(&mut p.declarations).into()))
 }
 
 pub fn parse_expr_tokens(tokens: &[Token], source: &str, name: &str) -> Result<Expr> {
@@ -191,4 +203,8 @@ struct Parser<'a> {
     depth: usize,
     /// The classes and type aliases declared so far, for `pkl:reflect`.
     declarations: Vec<Declaration>,
+    /// How many class or object bodies enclose what is being parsed.
+    declaration_nesting: u32,
+    /// The methods without a body in the class being parsed.
+    bodyless_methods: Vec<BodylessMethod>,
 }

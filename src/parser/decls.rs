@@ -212,7 +212,6 @@ impl<'a> Parser<'a> {
             body: body.into(),
             local_type_aliases: std::mem::take(&mut self.module_local_type_aliases),
             deferred_const_violations,
-            declarations: std::mem::take(&mut self.declarations).into(),
         })
     }
 
@@ -282,6 +281,7 @@ impl<'a> Parser<'a> {
                  (which must be `open` for extension).",
             ));
         }
+        let nested = self.declaration_nesting > 0;
         self.advance(); // typealias
         let name = self.expect_ident()?;
         let parameters = if matches!(self.peek(), TokenKind::Lt) {
@@ -314,6 +314,8 @@ impl<'a> Parser<'a> {
             parent: None,
             members: Vec::new(),
             type_parameters: parameters,
+            bodyless_methods: Vec::new(),
+            nested,
         });
         Ok(Entry::TypeAlias(name, ty, generic))
     }
@@ -366,6 +368,7 @@ impl<'a> Parser<'a> {
                  (which must be `open` for extension).",
             ));
         }
+        let nested = self.declaration_nesting > 0;
         self.advance(); // class
         let name = self.expect_ident()?;
         if matches!(self.peek(), TokenKind::Lt) {
@@ -386,6 +389,8 @@ impl<'a> Parser<'a> {
         };
         let mut body = Vec::new();
         let mut members = Vec::new();
+        let outer_methods = std::mem::take(&mut self.bodyless_methods);
+        self.declaration_nesting += 1;
         if matches!(self.peek(), TokenKind::LBrace) {
             self.advance();
             while !matches!(self.peek(), TokenKind::RBrace) {
@@ -410,6 +415,8 @@ impl<'a> Parser<'a> {
             }
             self.advance(); // }
         }
+        self.declaration_nesting -= 1;
+        let bodyless_methods = std::mem::replace(&mut self.bodyless_methods, outer_methods);
         self.declarations.push(Declaration {
             is_class: true,
             modifiers: header.modifiers(),
@@ -421,6 +428,8 @@ impl<'a> Parser<'a> {
             parent: parent.clone(),
             members,
             type_parameters: Vec::new(),
+            bodyless_methods,
+            nested,
         });
         Ok(Entry::ClassDef(
             name,
@@ -622,6 +631,14 @@ impl<'a> Parser<'a> {
                 return Err(self.unexpected_token("="));
             }
             // Abstract or external method without a body
+            self.bodyless_methods.push(BodylessMethod {
+                name: name.as_str().into(),
+                at: header.at,
+                doc: header.doc.clone(),
+                annotations: header.annotations.clone(),
+                modifiers: header.modifiers(),
+                parameters: params.into_iter().map(|(name, _)| name).collect(),
+            });
             return Ok(None);
         }
         self.advance(); // =

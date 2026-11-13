@@ -391,9 +391,9 @@ impl<'m> Walker<'m> {
     /// Walk the annotations of the class or type alias `name`.
     fn declaration_annotations(&mut self, name: &'m str, is_class: bool) -> Option<ConstViolation> {
         let declarations = self.declarations;
-        let declaration = declarations
-            .iter()
-            .find(|declaration| declaration.is_class == is_class && *declaration.name == *name)?;
+        let declaration = declarations.iter().find(|declaration| {
+            declaration.is_class == is_class && !declaration.nested && *declaration.name == *name
+        })?;
         self.members.push(name);
         let found = declaration
             .annotations
@@ -427,6 +427,11 @@ impl<'m> Walker<'m> {
         }
         let mut called: HashSet<(&str, u8)> = HashSet::default();
         collect_calls_in_entries(body, &mut called);
+        for declaration in self.declarations {
+            for annotation in &declaration.annotations {
+                collect_calls_in_entries(&annotation.body, &mut called);
+            }
+        }
         pending
             .into_iter()
             .find(|(name, kind, _)| match kind {

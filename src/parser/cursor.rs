@@ -20,6 +20,8 @@ impl<'a> Parser<'a> {
             local_type_aliases: std::collections::HashSet::new(),
             module_local_type_aliases: std::collections::HashSet::new(),
             declarations: Vec::new(),
+            declaration_nesting: 0,
+            bodyless_methods: Vec::new(),
             type_uses: std::collections::HashSet::new(),
             in_alias_definition: None,
             alias_definition_uses: std::collections::HashMap::new(),

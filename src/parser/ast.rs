@@ -34,9 +34,6 @@ pub struct Module {
     /// Const-scope violations inside lambdas passed to `catch`, which only
     /// fail when the lambda runs: the address of the lambda body and the message.
     pub deferred_const_violations: Vec<(std::sync::Arc<Expr>, String)>,
-    /// Where each class and type alias was declared, with what `pkl:reflect`
-    /// reads beyond the declaration itself. Kept for reflection only.
-    pub(crate) declarations: std::sync::Arc<Vec<Declaration>>,
 }
 
 /// A class or type alias declaration as `pkl:reflect` describes it.
@@ -57,6 +54,23 @@ pub(crate) struct Declaration {
     pub(crate) type_parameters: Vec<String>,
     /// For a type alias, the type it stands for, as written.
     pub(crate) target: Option<TypeExpr>,
+    /// For a class, the methods of its body that have no body of their own
+    /// (abstract or external), which the parsed entries leave out.
+    pub(crate) bodyless_methods: Vec<BodylessMethod>,
+    /// Whether it is declared inside a class or an object body rather than at
+    /// the top level of its module.
+    pub(crate) nested: bool,
+}
+
+/// A method declared without a body, such as `abstract function f(): Int`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct BodylessMethod {
+    pub(crate) name: std::sync::Arc<str>,
+    pub(crate) at: SourcePos,
+    pub(crate) doc: Option<std::sync::Arc<str>>,
+    pub(crate) annotations: Vec<Annotation>,
+    pub(crate) modifiers: Vec<Modifier>,
+    pub(crate) parameters: Vec<String>,
 }
 
 /// A line and column in a source file, both starting at 1.

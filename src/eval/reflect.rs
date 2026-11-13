@@ -13,7 +13,7 @@ use super::stdlib::{
 };
 use super::types::resolve_dotted;
 use super::*;
-use crate::parser::{Annotation, SourcePos, TypeExpr};
+use crate::parser::{Annotation, BaseForm, Declaration, SourcePos, TypeExpr};
 
 /// The identity of the `pkl:reflect` module object.
 pub(super) const MODULE: &str = "pkl:reflect";
@@ -181,7 +181,7 @@ impl MemberData {
         members.insert("docComment".into(), string_or_null(self.doc.as_deref()));
         members.insert(
             "annotations".into(),
-            list_of(ListKind::List, self.annotations.clone()),
+            list_of(ListKind::Listing, self.annotations.clone()),
         );
         members.insert("modifiers".into(), strings(self.modifiers.iter().copied()));
         members.insert("name".into(), Value::String(self.name.as_str().into()));
@@ -233,7 +233,7 @@ impl MemberData {
         members.insert("allModifiers".into(), list_of(ListKind::Set, all_modifiers));
         members.insert(
             "allAnnotations".into(),
-            list_of(ListKind::List, all_annotations),
+            list_of(ListKind::Listing, all_annotations),
         );
         mirror("Property", members)
     }
@@ -269,7 +269,7 @@ impl ClassData {
         members.insert("docComment".into(), string_or_null(self.doc.as_deref()));
         members.insert(
             "annotations".into(),
-            list_of(ListKind::List, self.annotations.clone()),
+            list_of(ListKind::Listing, self.annotations.clone()),
         );
         members.insert("modifiers".into(), strings(self.modifiers.iter().copied()));
         members.insert("name".into(), Value::String(self.name.as_str().into()));
@@ -373,6 +373,19 @@ fn split_arguments(list: &str) -> Vec<&str> {
     parts
 }
 
+/// The declaration of the class or type alias `name`. A declaration at the top
+/// of its module wins over a nested one of the same name.
+fn find_declaration<'a>(
+    declarations: &'a [Declaration],
+    name: &str,
+    is_class: bool,
+) -> Option<&'a Declaration> {
+    declarations
+        .iter()
+        .filter(|d| d.is_class == is_class && *d.name == *name)
+        .min_by_key(|d| d.nested)
+}
+
 /// The `pkl:base` class named `name`, with its superclasses.
 fn base_class_data(name: &str) -> Option<ClassData> {
     let class = reflect_base::find(name)?;
@@ -383,7 +396,10 @@ fn base_class_data_of(class: BaseClass) -> ClassData {
     let superclass_name = match class.extends {
         Some(extends) => extends.split('<').next().unwrap_or(extends),
         None if class.name == "Any" => "",
-        None => "Any",
+        // What a class without an `extends` clause extends: `Typed`, unless it
+        // is `external`, which extends `Any`.
+        None if class.modifiers.contains(&"external") => "Any",
+        None => "Typed",
     };
     let superclass = (!superclass_name.is_empty())
         .then(|| base_class_data(superclass_name))
@@ -543,7 +559,7 @@ impl Evaluator {
         };
         Some(match method {
             "Class" => self.reflect_class(arg, scope, depth),
-            "TypeAlias" => self.reflect_type_alias(arg, scope, depth),
+            "TypeAlias" => self.reflect_type_alias(arg, scope, depth, &mut Vec::new()),
             "DeclaredType" => declared_type(arg),
             "UnionType" => union_type(arg),
             "StringLiteralType" => string_literal_type(arg),
@@ -606,7 +622,7 @@ impl Evaluator {
             .cloned();
         let declaration = declarations
             .as_deref()
-            .and_then(|all| all.iter().find(|d| d.is_class && &*d.name == name));
+            .and_then(|all| find_declaration(all, name, true));
         let mut members = Vec::new();
         for (index, entry) in source.entries.iter().enumerate() {
             // Only what this class declares; the entries it inherits from a
@@ -631,6 +647,32 @@ impl Evaluator {
                 .zip(namespace.as_deref())
                 .map(|(at, namespace)| Location::in_module(namespace, at));
             members.push(self.member_data(prop, location, &class_scope, depth)?);
+        }
+        if let Some(declaration) = declaration
+            && !declaration.bodyless_methods.is_empty()
+        {
+            for method in &declaration.bodyless_methods {
+                let location = namespace
+                    .as_deref()
+                    .map(|namespace| Location::in_module(namespace, method.at));
+                members.push(MemberData {
+                    is_method: true,
+                    name: method.name.to_string(),
+                    location,
+                    doc: method.doc.as_deref().map(str::to_string),
+                    annotations: self.eval_annotations(&method.annotations, &class_scope, depth)?,
+                    modifiers: modifier_names(&method.modifiers),
+                    type_parameters: Vec::new(),
+                    parameters: method.parameters.clone(),
+                });
+            }
+            // Members read in the order the class declares them.
+            members.sort_by_key(|member| {
+                member
+                    .location
+                    .as_ref()
+                    .map_or((u32::MAX, 0), |at| (at.line, at.column))
+            });
         }
         let parent_name = declaration.and_then(|declaration| declaration.parent.as_deref());
         let parent = parent_name.and_then(|name| resolve_dotted(&class_scope, name));
@@ -814,7 +856,13 @@ impl Evaluator {
         })
     }
 
-    fn reflect_type_alias(&mut self, alias: &Value, scope: &Scope, depth: usize) -> Result<Value> {
+    fn reflect_type_alias(
+        &mut self,
+        alias: &Value,
+        scope: &Scope,
+        depth: usize,
+        seen: &mut Vec<String>,
+    ) -> Result<Value> {
         let members = match alias {
             Value::Object(members, Some(source))
                 if source.type_identity.as_deref() == Some("pkl:base#TypeAlias") =>
@@ -832,7 +880,7 @@ impl Evaluator {
                 .map(str::to_string),
             _ => None,
         };
-        self.alias_mirror(namespace, name, scope, depth, &mut Vec::new())
+        self.alias_mirror(namespace, name, scope, depth, seen)
     }
 
     /// The mirror of the type alias `name` that the module with type namespace
@@ -851,13 +899,23 @@ impl Evaluator {
             return Ok(mirror("UnknownType", ObjectMap::default()));
         }
         seen.push(key);
+        // The alias's annotations and target resolve where its module declares
+        // it, which is not the caller's scope for an imported alias.
+        let declaring_scope = if scope.type_namespace == namespace {
+            None
+        } else {
+            namespace
+                .as_deref()
+                .and_then(|namespace| self.module_type_scope(namespace))
+        };
+        let scope = declaring_scope.as_ref().unwrap_or(scope);
         let declarations = namespace
             .as_ref()
             .and_then(|namespace| self.module_declarations.get(namespace))
             .cloned();
         let declaration = declarations
             .as_deref()
-            .and_then(|all| all.iter().find(|d| !d.is_class && *d.name == *name));
+            .and_then(|all| find_declaration(all, name, false));
         let mut mirror_members = ObjectMap::default();
         let location = declaration
             .zip(namespace.as_deref())
@@ -874,7 +932,10 @@ impl Evaluator {
             Some(declaration) => self.eval_annotations(&declaration.annotations, scope, depth)?,
             None => Vec::new(),
         };
-        mirror_members.insert("annotations".into(), list_of(ListKind::List, annotations));
+        mirror_members.insert(
+            "annotations".into(),
+            list_of(ListKind::Listing, annotations),
+        );
         let modifiers = declaration
             .map(|declaration| modifier_names(&declaration.modifiers))
             .unwrap_or_default();
@@ -934,9 +995,14 @@ impl Evaluator {
                 }
                 union_type(&list_of(ListKind::List, members))?
             }
-            TypeExpr::Constrained(name, _, _) => {
-                self.named_type_mirror(name, &[], parameters, scope, depth, seen)?
-            }
+            // The constraint is not reflected; the type it constrains is.
+            TypeExpr::Constrained(base, _, form) => match form {
+                BaseForm::Text => match crate::parser::parse_type_name(base) {
+                    Ok(inner) => self.type_mirror(&inner, parameters, scope, depth, seen)?,
+                    Err(_) => unknown(),
+                },
+                _ => self.named_type_mirror(base, &[], parameters, scope, depth, seen)?,
+            },
             TypeExpr::Named(name) => {
                 self.named_type_mirror(name, &[], parameters, scope, depth, seen)?
             }
@@ -981,20 +1047,35 @@ impl Evaluator {
             };
             return type_variable(&parameter.value());
         }
+        // An alias comes first: `typealias A = C` binds `A` to the class `C`,
+        // but the type is the alias.
+        // `m.A` names the alias `A` of the module imported as `m`.
+        let imported = name
+            .split_once('.')
+            .filter(|(_, member)| !member.contains('.'))
+            .and_then(|(root, member)| {
+                let identity = scope.module_identity(root)?.clone();
+                let module_scope = self.module_type_scope(&identity)?;
+                module_scope.get_type_alias(member)?;
+                Some((identity, member))
+            });
         let referent = match resolve_dotted(scope, name) {
+            _ if imported.is_some() => {
+                let (identity, member) = imported.unwrap_or_default();
+                Some(self.alias_mirror(Some(identity), member, scope, depth, seen)?)
+            }
+            _ if scope.get_type_alias(name).is_some() => {
+                let namespace = scope.type_namespace.clone();
+                Some(self.alias_mirror(namespace, name, scope, depth, seen)?)
+            }
             Some(class @ Value::Object(_, Some(_))) => {
                 let is_alias = matches!(&class, Value::Object(members, _)
                     if members.contains_key(TYPE_ALIAS_NAME_KEY));
                 if is_alias {
-                    Some(self.reflect_type_alias(&class, scope, depth)?)
+                    Some(self.reflect_type_alias(&class, scope, depth, seen)?)
                 } else {
                     Some(self.reflect_class(&class, scope, depth)?)
                 }
-            }
-            // An alias of a module is not always bound as a value.
-            _ if scope.get_type_alias(name).is_some() => {
-                let namespace = scope.type_namespace.clone();
-                Some(self.alias_mirror(namespace, name, scope, depth, seen)?)
             }
             _ => base_class_data(name).map(|data| data.mirror().value),
         };
