@@ -343,3 +343,39 @@ local p = ref.Reference(d, P, null)
     ));
     assert!(err.contains("Expected value of type"), "{err}");
 }
+
+#[test]
+fn reference_generic_alias_with_nested_constraints_keeps_its_arguments() {
+    let prelude = r#"
+class Item { n: Int }
+typealias Rows<T> = Mapping<String(!isEmpty), T>(length > 0)
+typealias Items<T> = Listing<T(n > 0)>(length > 0)
+class P { rows: Rows<Item>; items: Items<Item> }
+local p = ref.Reference(d, P, null)
+"#;
+    let result = run(&format!(
+        "{prelude}\nrow = p.rows[\"a\"].n.getPath().length\nitem = p.items[0].n.getPath().length"
+    ));
+    assert_eq!(result["row"], 3);
+    assert_eq!(result["item"], 3);
+    for member in ["p.rows[\"a\"].nope", "p.items[0].nope"] {
+        let err = fails(&format!("{prelude}\nbad = {member}"));
+        assert!(
+            err.contains("Cannot find property `nope`"),
+            "{member}: {err}"
+        );
+    }
+}
+
+#[test]
+fn reference_generic_alias_parameters_do_not_collide_with_user_names() {
+    let result = run(r#"
+class Item { n: Int }
+typealias __refarg0 = String
+typealias Wrap<T> = Listing<T>
+class P { v: Wrap<Item> }
+local p = ref.Reference(d, P, null)
+n = p.v[0].n.getPath().length
+"#);
+    assert_eq!(result["n"], 3);
+}

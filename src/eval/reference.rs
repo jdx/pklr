@@ -102,8 +102,9 @@ pub(super) struct RefState {
     /// Set when a type being normalized has a constraint, which a referent
     /// type argument may not have.
     saw_constraint: bool,
-    /// Type arguments of generic aliases being expanded, by placeholder name:
-    /// the alias body resolves in its module, its arguments in the caller's.
+    /// The type parameters of the generic alias being expanded, bound to
+    /// their arguments: the alias body resolves in its module, its arguments
+    /// in the caller's.
     bindings: HashMap<String, RType>,
 }
 
@@ -243,34 +244,6 @@ fn make_union(items: Vec<RType>) -> RType {
     }
 }
 
-/// `ty` with the type parameters in `params` replaced by `args`.
-fn substitute(ty: &TypeExpr, params: &[&str], args: &[TypeExpr]) -> TypeExpr {
-    match ty {
-        TypeExpr::Named(name) => params
-            .iter()
-            .position(|p| p == name)
-            .map_or_else(|| ty.clone(), |i| args[i].clone()),
-        TypeExpr::Nullable(inner) => TypeExpr::Nullable(Box::new(substitute(inner, params, args))),
-        TypeExpr::Union(items) => {
-            TypeExpr::Union(items.iter().map(|i| substitute(i, params, args)).collect())
-        }
-        TypeExpr::Generic(name, inner) => TypeExpr::Generic(
-            name.clone(),
-            inner.iter().map(|i| substitute(i, params, args)).collect(),
-        ),
-        // The base is kept as text: substitute into it as a type.
-        TypeExpr::Constrained(base, constraint, form) => {
-            match crate::parser::parse_type_name(base) {
-                Ok(parsed) if !matches!(parsed, TypeExpr::Constrained(..)) => {
-                    let base = super::types::display_type_expr(&substitute(&parsed, params, args));
-                    TypeExpr::Constrained(base, constraint.clone(), *form)
-                }
-                _ => ty.clone(),
-            }
-        }
-    }
-}
-
 impl Evaluator {
     fn class_parents(&self, id: &str) -> Vec<Arc<str>> {
         match self.refs.classes.get(id) {
@@ -381,15 +354,16 @@ impl Evaluator {
                 {
                     let params: Vec<&str> = params.split(',').collect();
                     if params.len() == args.len() {
-                        let mut placeholders = Vec::with_capacity(args.len());
-                        for arg in args {
+                        let mut frame = HashMap::default();
+                        for (param, arg) in params.iter().zip(args) {
                             let ty = self.normalize_type(arg, scope);
-                            let key = format!("__refarg{}", self.refs.bindings.len());
-                            self.refs.bindings.insert(key.clone(), ty);
-                            placeholders.push(TypeExpr::Named(key));
+                            frame.insert((*param).to_string(), ty);
                         }
-                        let body = substitute(body, &params, &placeholders);
-                        self.normalize_into(&body, &declaring, out, depth + 1);
+                        // The body sees only its own parameters, bound to
+                        // the arguments as the caller's scope resolves them.
+                        let outer = std::mem::replace(&mut self.refs.bindings, frame);
+                        self.normalize_into(body, &declaring, out, depth + 1);
+                        self.refs.bindings = outer;
                         return;
                     }
                 }
