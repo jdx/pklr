@@ -1106,18 +1106,7 @@ impl Evaluator {
                     let annotations: Vec<_> = prop
                         .annotations
                         .iter()
-                        .filter(|annotation| {
-                            ![
-                                "Deprecated",
-                                "Since",
-                                "AlsoKnownAs",
-                                "Unlisted",
-                                "DocExample",
-                                "SourceCode",
-                                "ModuleInfo",
-                            ]
-                            .contains(&&*annotation.name)
-                        })
+                        .filter(|annotation| !STDLIB_ANNOTATIONS.contains(&&*annotation.name))
                         .cloned()
                         .collect();
                     (!annotations.is_empty()).then(|| (prop.name.clone(), annotations))
@@ -1588,6 +1577,27 @@ impl Evaluator {
         // `same_data` is not called, which matters for values that capture a
         // large scope.
         let can_stop = || settled_after() < late_passes;
+        // The names a changed member of this module reaches: its own members,
+        // and the inherited ones that read them, directly or through others.
+        let mut reaches_child: HashSet<Name> = child_property_names
+            .iter()
+            .map(|name| Name::from(&**name))
+            .collect();
+        loop {
+            let before = reaches_child.len();
+            for prop in late_inherited_properties {
+                if !reaches_child.contains(prop.name.as_ref())
+                    && property_reference_names(prop)
+                        .iter()
+                        .any(|name| reaches_child.contains(name))
+                {
+                    reaches_child.insert(prop.name.clone());
+                }
+            }
+            if reaches_child.len() == before {
+                break;
+            }
+        }
         let mut pass = 0;
         let mut quiet_passes = 0;
         loop {
@@ -1604,22 +1614,39 @@ impl Evaluator {
                 // An amendment's elements add to the member it amends, which
                 // already holds them: evaluating the body again would append
                 // them a second time. Only a read of a member this module
-                // defines can change what the body makes.
+                // defines, directly or through an inherited one, can change
+                // what the body makes.
+                let mut fresh_scope = None;
                 if prop.value.is_none()
                     && let Some(body) = &prop.body
                     && entries_are_listing_amendment(body)
                     && scope.vars.contains_key(prop.name.as_ref())
-                    && !{
-                        let reads = referenced_roots(body);
-                        reads.iter().any(|name| {
-                            child_property_names.contains(name.as_ref())
-                                || matches!(name.as_ref(), "this" | "module" | "super")
-                        })
-                    }
                 {
-                    continue;
+                    let reads = referenced_roots(body);
+                    if !reads.iter().any(|name| {
+                        reaches_child.contains(name)
+                            || matches!(name.as_ref(), "this" | "module" | "super")
+                    }) {
+                        continue;
+                    }
+                    // The first declaration of the member makes it anew; the
+                    // value in scope is what it made before.
+                    let first = late_inherited_properties
+                        .iter()
+                        .find(|other| other.name == prop.name)
+                        .is_some_and(|other| std::ptr::eq(&**other, &**prop));
+                    if first {
+                        let mut fresh = scope.clone();
+                        Arc::make_mut(&mut fresh.vars).shift_remove(prop.name.as_ref());
+                        fresh_scope = Some(fresh);
+                    }
                 }
-                match self.eval_property_with(prop, scope, depth, true) {
+                match self.eval_property_with(
+                    prop,
+                    fresh_scope.as_ref().unwrap_or(scope),
+                    depth,
+                    true,
+                ) {
                     Ok(Some(value)) => {
                         change = change.then(scope.get(&prop.name), &value, can_stop).then(
                             all_props.get(prop.name.as_ref()),
@@ -3473,3 +3500,14 @@ fn binds_own_super(prop: &Property) -> bool {
 
 /// The scope binding that names the module `super` stands for.
 pub(super) const SUPER_MODULE_NAME: &str = "\0pklr:super-module";
+
+/// Annotations `pkl:base` declares, which never convert a property.
+pub(super) const STDLIB_ANNOTATIONS: &[&str] = &[
+    "Deprecated",
+    "Since",
+    "AlsoKnownAs",
+    "Unlisted",
+    "DocExample",
+    "SourceCode",
+    "ModuleInfo",
+];

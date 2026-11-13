@@ -1605,11 +1605,24 @@ pub(crate) fn java_double_to_string(value: f64) -> String {
 /// Whether the properties of `source` can carry `ConvertProperty`
 /// annotations: only an instance of a class, or a module, can.
 fn has_annotated_properties(source: &ObjectSource) -> bool {
-    source.module_annotations.is_some()
-        || (source.type_identity.is_some()
-            && source.entries.iter().any(
-                |entry| matches!(entry, Entry::Property(prop) if !prop.annotations.is_empty()),
-            ))
+    // An amended instance replaces properties without their annotations, which
+    // the object it amends still has.
+    let mut next = Some(source);
+    while let Some(source) = next {
+        if source.module_annotations.is_some()
+            || (source.type_identity.is_some()
+                && source.entries.iter().any(
+                    |entry| matches!(entry, Entry::Property(prop) if !prop.annotations.is_empty()),
+                ))
+        {
+            return true;
+        }
+        next = match &source.prototype {
+            Some(Value::Object(_, Some(prototype))) => Some(prototype),
+            _ => None,
+        };
+    }
+    false
 }
 
 /// Apply the `ConvertProperty` annotations of the property `name` of an
@@ -1633,9 +1646,22 @@ fn apply_property_annotations(
             }
             None => annotation,
         };
-        let Value::Object(members, _) = &annotation else {
+        let Value::Object(members, source) = &annotation else {
             continue;
         };
+        // Only a `ConvertProperty` converts a property; another annotation
+        // may have a `render` member of its own.
+        let Some(source) = source else {
+            continue;
+        };
+        if source.type_name.as_deref() != Some("ConvertProperty")
+            && !source
+                .parent_type_names
+                .iter()
+                .any(|parent| parent == "ConvertProperty")
+        {
+            continue;
+        }
         let Some(render @ Value::Lambda(..)) = members.get("render") else {
             continue;
         };

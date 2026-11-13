@@ -2126,3 +2126,77 @@ res = new JsonRenderer {
     );
     assert_eq!(json["res"], "{\n  \"Ta\": 1\n}");
 }
+
+#[test]
+fn annotation_that_is_not_a_convert_property_is_not_rendered() {
+    let json = eval(
+        r#"class Note extends Annotation { render = (p, r) -> Pair("zzz", 9) }
+class C { @Note a: Int = 1 }
+res = new JsonRenderer {}.renderValue(new C {})"#,
+    );
+    assert_eq!(json["res"], "{\n  \"a\": 1\n}");
+}
+
+#[test]
+fn stdlib_annotations_on_a_class_property_are_not_evaluated_for_rendering() {
+    let json = eval(
+        r#"class C {
+  @Since { version = throw("boom") }
+  @DocExample { subjects { throw("boom") } }
+  a: Int = 1
+}
+res = new JsonRenderer {}.renderValue(new C {})"#,
+    );
+    assert_eq!(json["res"], "{\n  \"a\": 1\n}");
+}
+
+#[test]
+fn amended_instance_keeps_the_annotations_of_its_class() {
+    let json = eval(
+        r#"import "pkl:json"
+class C {
+  @json.Property { name = "renamed" }
+  a: Int = 1
+  b: Int = 2
+}
+base = new C {}
+res = new JsonRenderer {}.renderValue(new C { a = 5 })
+res2 = new JsonRenderer {}.renderValue((base) { a = 7 })"#,
+    );
+    assert_eq!(json["res"], "{\n  \"renamed\": 5,\n  \"b\": 2\n}");
+    assert_eq!(json["res2"], "{\n  \"renamed\": 7,\n  \"b\": 2\n}");
+}
+
+#[cfg(feature = "native-io")]
+#[test]
+fn inherited_listing_amendment_follows_indirect_reads_of_overridden_members() {
+    let (_dir, path) = annotated_modules(
+        "pklr_inherited_listing_indirect",
+        &[
+            ("base.pkl", "a = 1\nb = a\no { b }\n"),
+            ("main.pkl", "amends \"base.pkl\"\na = 2\n"),
+        ],
+    );
+    assert_eq!(
+        pklr::eval_to_json(&path).unwrap(),
+        serde_json::json!({"a": 2, "b": 2, "o": [2]})
+    );
+}
+
+#[test]
+fn xml_and_jsonnet_property_rename_only_their_own_renderer() {
+    let json = eval(
+        r#"import "pkl:xml"
+import "pkl:jsonnet"
+class X { @xml.Property { name = "xn" } a: Int = 1 }
+class J { @jsonnet.Property { name = "jn" } a: Int = 1 }
+r1 = new JsonRenderer {}.renderValue(new X {})
+r2 = new PcfRenderer {}.renderValue(new J {})
+r3 = new xml.Renderer {}.renderValue(new J {})
+r4 = new jsonnet.Renderer {}.renderValue(new X {})"#,
+    );
+    assert_eq!(json["r1"], "{\n  \"a\": 1\n}");
+    assert_eq!(json["r2"], "{\n  a = 1\n}");
+    assert_eq!(json["r3"], "<a>1</a>");
+    assert_eq!(json["r4"], "{\n  a: 1,\n}");
+}

@@ -820,10 +820,24 @@ impl Evaluator {
         depth: usize,
     ) -> Result<Vec<Value>> {
         let mut annotations = Vec::new();
+        self.collect_property_annotations(source, name, depth, true, &mut annotations)?;
+        Ok(annotations)
+    }
+
+    /// Append the annotations of the property `name` of `source` to `out`.
+    /// `inherited` says whether to include those a module or class inherits.
+    fn collect_property_annotations(
+        &mut self,
+        source: &ObjectSource,
+        name: &str,
+        depth: usize,
+        inherited: bool,
+        out: &mut Vec<Value>,
+    ) -> Result<()> {
         // What a module or class inherits comes first, each annotation
         // evaluated where its declaration is.
         let mut chain = Vec::new();
-        let mut next = source.module_annotations.as_ref();
+        let mut next = source.module_annotations.as_ref().filter(|_| inherited);
         while let Some(level) = next {
             chain.push(level);
             next = level.parent.as_ref();
@@ -831,10 +845,12 @@ impl Evaluator {
         for level in chain.into_iter().rev() {
             let scope = super::scope::restore_scope(&level.scope);
             for (_, list) in level.properties.iter().filter(|(n, _)| &**n == name) {
-                annotations.extend(self.eval_annotations(list, &scope, depth)?);
+                out.extend(self.eval_annotations(list, &scope, depth)?);
             }
         }
         let scope = definition_type_scope(source);
+        let mut declared_here = false;
+        let mut annotated = false;
         for (index, entry) in source.entries.iter().enumerate() {
             let Entry::Property(prop) = entry else {
                 continue;
@@ -842,6 +858,7 @@ impl Evaluator {
             if &*prop.name != name {
                 continue;
             }
+            declared_here = true;
             // An entry copied from a parent keeps the scope it was declared in.
             let declared = source
                 .entry_scopes
@@ -849,9 +866,28 @@ impl Evaluator {
                 .and_then(Option::as_ref)
                 .map(|captured| super::scope::restore_scope(captured));
             let scope = declared.as_ref().unwrap_or(&scope);
-            annotations.extend(self.eval_annotations(&prop.annotations, scope, depth)?);
+            // `pkl:base`'s own annotations never convert a property.
+            let own: Vec<Annotation> = prop
+                .annotations
+                .iter()
+                .filter(|annotation| {
+                    !super::module::STDLIB_ANNOTATIONS.contains(&&*annotation.name)
+                })
+                .cloned()
+                .collect();
+            annotated |= !prop.annotations.is_empty();
+            out.extend(self.eval_annotations(&own, scope, depth)?);
         }
-        Ok(annotations)
+        // An amendment (`new C { a = 1 }`) replaces the property without its
+        // annotations, which the object it amends still declares.
+        if declared_here
+            && !annotated
+            && let Some(Value::Object(_, Some(prototype))) = &source.prototype
+        {
+            let inherited = source.module_annotations.is_none();
+            self.collect_property_annotations(prototype, name, depth, inherited, out)?;
+        }
+        Ok(())
     }
 
     /// The values of `annotations`, each the instance its declaration writes.

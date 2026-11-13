@@ -1240,7 +1240,7 @@ impl Evaluator {
                                         mapping_value_types: Vec::new(),
                                         deprecated: merge_deprecated(&src.deprecated, body),
                                         poisoned_members: None,
-                                        module_annotations: None,
+                                        module_annotations: src.module_annotations.clone(),
                                         declared_as: None,
                                         kind: ObjectKind::Object,
                                         is_parsed_json: false,
