@@ -334,6 +334,17 @@ impl Evaluator {
                         std::mem::take(list).with_elem_class(self.declared_elem_class(ty, scope));
                 }
             }
+            // The default of a constrained `Dynamic` is checked against its
+            // constraint like any other value. (Other defaults are template
+            // values that a subclass or amendment may replace.)
+            // Only a module's own property: a class member's default is a
+            // template that an instance replaces.
+            if require_union_default
+                && names_constrained_dynamic(ty, scope)
+                && let Some(default) = &default
+            {
+                self.check_declared_value(default, ty, scope, depth)?;
+            }
             if require_union_default
                 && default.is_none()
                 && matches!(ty, crate::parser::TypeExpr::Union(variants) if !variants.iter().any(is_default_type))
@@ -854,10 +865,19 @@ impl Evaluator {
                         st.child_scope.set(name, defaults);
                     }
                 }
-                Entry::TypeAlias(name, ty) => {
+                Entry::TypeAlias(name, ty, generic) => {
                     let mut resolved_scope = active_scope;
-                    self.eval_type_alias(name, ty, &mut resolved_scope);
+                    self.eval_type_alias(name, ty, generic.as_ref(), &mut resolved_scope);
                     st.child_scope.set_type_alias(name.clone(), ty.clone());
+                    if let Some(generic) = generic {
+                        st.child_scope.set_type_alias(
+                            generic_alias_key(name),
+                            crate::parser::TypeExpr::Generic(
+                                generic.0.join(","),
+                                vec![generic.1.clone()],
+                            ),
+                        );
+                    }
                     if let Some(value) = resolved_scope.vars.get(name.as_str()) {
                         st.child_scope.set(name, value.clone());
                     }
@@ -2191,4 +2211,21 @@ fn collect_generated_locals(body: &Body, out: &mut Vec<Name>) {
             _ => {}
         }
     }
+}
+
+/// Whether `ty`, directly or through type aliases, is a constrained `Dynamic`.
+fn names_constrained_dynamic(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
+    use crate::parser::TypeExpr;
+    let mut ty = ty;
+    for _ in 0..32 {
+        match ty {
+            TypeExpr::Constrained(base, ..) => return base == "Dynamic",
+            TypeExpr::Named(name) => match scope.get_type_alias(name) {
+                Some(next) => ty = next,
+                None => return false,
+            },
+            _ => return false,
+        }
+    }
+    false
 }

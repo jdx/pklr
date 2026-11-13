@@ -134,7 +134,7 @@ pub(super) fn collect_entry_import_field_uses(
                 collect_entry_import_field_uses(body, uses, &entry_shadows);
             }
             // A type alias's constraint runs when a value is checked against it.
-            Entry::TypeAlias(_, ty) => collect_type_import_field_uses(ty, uses, &entry_shadows),
+            Entry::TypeAlias(_, ty, ..) => collect_type_import_field_uses(ty, uses, &entry_shadows),
         }
     }
 }
@@ -376,7 +376,7 @@ pub(super) fn expand_requested_fields(
     let mut module_aliases: TypeAliases = entries
         .iter()
         .filter_map(|entry| match entry {
-            Entry::TypeAlias(name, ty) => Some((name.as_str(), Some(ty))),
+            Entry::TypeAlias(name, ty, ..) => Some((name.as_str(), Some(ty))),
             _ => None,
         })
         .collect();
@@ -392,7 +392,7 @@ pub(super) fn expand_requested_fields(
         types: entries
             .iter()
             .filter_map(|entry| match entry {
-                Entry::TypeAlias(name, _) | Entry::ClassDef(name, ..) => {
+                Entry::TypeAlias(name, ..) | Entry::ClassDef(name, ..) => {
                     Some((name.as_str(), entry))
                 }
                 _ => None,
@@ -463,7 +463,7 @@ pub(super) fn expand_requested_fields(
                 }
                 // A requested class or alias also needs the module properties
                 // its transitive type constraints read, even without `module.`.
-                Entry::ClassDef(name, ..) | Entry::TypeAlias(name, _)
+                Entry::ClassDef(name, ..) | Entry::TypeAlias(name, ..)
                     if expanded.contains(name.as_str())
                         && module_reading_definitions.contains(name.as_str()) =>
                 {
@@ -677,7 +677,7 @@ fn collect_sibling_field_refs_entries_in(
             Entry::ClassDef(_, _, _, body) => {
                 collect_sibling_field_refs_entries_in(body, refs, shadowed)
             }
-            Entry::TypeAlias(_, ty) => collect_sibling_field_refs_type_in(ty, refs, shadowed),
+            Entry::TypeAlias(_, ty, ..) => collect_sibling_field_refs_type_in(ty, refs, shadowed),
         }
     }
 }
@@ -800,7 +800,7 @@ fn collect_entries_type_decls<'e>(
 ) {
     for entry in entries {
         match entry {
-            Entry::TypeAlias(name, ty) => {
+            Entry::TypeAlias(name, ty, ..) => {
                 if aliases
                     .get(name.as_str())
                     .is_none_or(|outer| *outer != Some(ty))
@@ -925,7 +925,7 @@ fn with_builtins_unresolved<'a>(
             return None;
         }
         let mut definitions = entries.iter().filter_map(|entry| match entry {
-            Entry::TypeAlias(name, ty) if name == builtin => Some(Some(ty)),
+            Entry::TypeAlias(name, ty, ..) if name == builtin => Some(Some(ty)),
             Entry::ClassDef(name, ..) if name == builtin => Some(None),
             _ => None,
         });
@@ -1307,7 +1307,7 @@ pub(super) fn is_module_sibling_ref(expr: &Expr, include_this: bool) -> bool {
 pub(super) fn module_member_name(entry: &Entry) -> Option<&str> {
     match entry {
         Entry::Property(prop) => Some(&prop.name),
-        Entry::ClassDef(name, ..) | Entry::TypeAlias(name, _) => Some(name),
+        Entry::ClassDef(name, ..) | Entry::TypeAlias(name, ..) => Some(name),
         _ => None,
     }
 }
@@ -1344,7 +1344,7 @@ fn module_member_dependencies(entry: &Entry) -> HashSet<Name> {
             }
             refs.extend(module_refs);
         }
-        Entry::TypeAlias(_, ty) => collect_sibling_field_refs_type(ty, &mut refs),
+        Entry::TypeAlias(_, ty, ..) => collect_sibling_field_refs_type(ty, &mut refs),
         _ => {}
     }
     refs
@@ -2191,7 +2191,7 @@ pub(super) fn module_dependent_members(entries: &[Entry]) -> indexmap::IndexSet<
                 }
                 Some((nm(name), true, refs))
             }
-            Entry::TypeAlias(name, ty) => {
+            Entry::TypeAlias(name, ty, ..) => {
                 let mut refs = HashSet::default();
                 collect_type_names(ty, &mut refs);
                 // `typealias Ok = Int(module.C.v == "b")` reads `C` when a
@@ -2466,7 +2466,7 @@ fn collect_entry_refs_unnarrowed(
                 }
                 collect_entry_refs_in(body, refs, &entry_shadows, aliases, definitions);
             }
-            Entry::TypeAlias(_, ty) => {
+            Entry::TypeAlias(_, ty, ..) => {
                 collect_type_refs(ty, refs, &entry_shadows, aliases, definitions)
             }
         }
@@ -2691,7 +2691,7 @@ fn declared_entry_names(entries: &[Entry]) -> Names {
                 insert_name!(names.types, name);
                 insert_name!(names.values, name);
             }
-            Entry::TypeAlias(name, _) => {
+            Entry::TypeAlias(name, ..) => {
                 insert_name!(names.types, name);
             }
             Entry::Property(prop)
@@ -2710,7 +2710,7 @@ pub(super) fn declared_entry_roots(entries: &[Entry]) -> HashSet<Name> {
     entries
         .iter()
         .filter_map(|entry| match entry {
-            Entry::ClassDef(name, ..) | Entry::TypeAlias(name, _) => Some(nm(name)),
+            Entry::ClassDef(name, ..) | Entry::TypeAlias(name, ..) => Some(nm(name)),
             Entry::Property(prop)
                 if has_modifier(&prop.modifiers, Modifier::Local)
                     || matches!(prop.value, Some(Expr::Lambda(..))) =>
@@ -2830,7 +2830,7 @@ fn collect_unshadowed_entry_names(entries: &[Entry], names: &mut HashSet<Name>) 
                 }
                 collect_unshadowed_entry_names(body, names);
             }
-            Entry::TypeAlias(_, ty) => collect_unshadowed_type_names(ty, names),
+            Entry::TypeAlias(_, ty, ..) => collect_unshadowed_type_names(ty, names),
         }
     }
 }
@@ -2951,7 +2951,7 @@ fn entry_mentions<N: Needle + ?Sized>(entry: &Entry, name: &N) -> bool {
                 .is_some_and(|parent| type_name_mentions(parent, name))
                 || entries_mention(body, name)
         }
-        Entry::TypeAlias(_, ty) => type_mentions(ty, name),
+        Entry::TypeAlias(_, ty, ..) => type_mentions(ty, name),
     }
 }
 

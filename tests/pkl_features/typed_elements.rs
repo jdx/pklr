@@ -1400,7 +1400,7 @@ fn element_and_signature_types_match_pkl() {
 fn a_dynamic_is_not_accepted_for_a_listing_parameter() {
     let error = eval_fails("function f(x: Listing<Int>): Int = 1\ny = f(new Dynamic { 1 })\n");
     assert!(
-        error.contains("Expected value of type `Listing<Int>`, but got type `Dynamic`"),
+        error.contains("Expected value of type `Listing`, but got type `Dynamic`"),
         "{error}"
     );
 }
@@ -1409,7 +1409,7 @@ fn a_dynamic_is_not_accepted_for_a_listing_parameter() {
 fn a_wrong_element_is_named_in_the_error() {
     let error = eval_fails("a: Listing<Int> = new Listing { 1; \"x\" }\n");
     assert!(
-        error.contains("Expected value of type `Listing<Int>`"),
+        error.contains("Expected value of type `Int`, but got type `String`"),
         "{error}"
     );
     let error = eval_fails("function f(x: Int): Int = x\ny = f(\"x\")\n");
@@ -1425,7 +1425,7 @@ fn a_wrong_element_is_named_in_the_error() {
 fn elements_are_checked_when_the_value_is() {
     let error =
         eval_fails("function f(x: Listing<Int>): Int = x.length\ny = f(new Listing { \"a\" })\n");
-    assert!(error.contains("Listing<Int>"), "{error}");
+    assert!(error.contains("type `Int`"), "{error}");
 }
 
 // An untyped `new { ... }` element of a class-typed `Listing` is an instance
@@ -1838,7 +1838,7 @@ fn typed_local_checks_the_elements_of_an_existing_listing() {
          local b: Listing<String> = a\n\
          x = b[0]\n",
     );
-    assert!(error.contains("Listing<String>"), "{error}");
+    assert!(error.contains("type `String`"), "{error}");
 }
 
 #[test]
@@ -1883,4 +1883,127 @@ fn dynamic_element_this_is_dynamic() {
 fn listing_unused_branch_property_is_not_rejected() {
     let v = eval("x = new Listing { when (false) { foo = 1 }; 2 }");
     assert_eq!(v["x"], serde_json::json!([2]));
+}
+
+#[test]
+fn constrained_dynamic_default_is_checked() {
+    let msg = eval_fails("foo: Dynamic(this == new Dynamic { ...List(1) })");
+    assert!(msg.contains("Type constraint `this == new Dynamic { ...List(1) }` violated."));
+}
+
+#[test]
+fn map_every_and_any_take_key_and_value() {
+    let json = eval(
+        r#"
+m = Map("a", 1, "b", 2)
+all = m.every((k, v) -> v > 0)
+some = m.any((k, v) -> k == "b")
+none = m.any((k, v) -> v > 5)
+"#,
+    );
+    assert_eq!(json["all"], true);
+    assert_eq!(json["some"], true);
+    assert_eq!(json["none"], false);
+}
+
+#[test]
+fn generic_alias_constraint_binds_its_arguments() {
+    let json = eval(
+        r#"
+typealias Same<T> = List(this[0] is T)
+ok = List(1) is Same<Int>
+bad = List("x") is Same<Int>
+"#,
+    );
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["bad"], false);
+    let msg = eval_fails(
+        r#"
+typealias Same<T> = List(this[0] is T)
+local xs = List("x")
+res = (() -> xs as Same<Int>).apply()
+"#,
+    );
+    assert!(
+        msg.contains("Type constraint `this[0] is T` violated."),
+        "{msg}"
+    );
+}
+
+#[test]
+fn null_for_a_class_type_reports_null() {
+    let msg = eval_fails("x: String = null");
+    assert!(
+        msg.contains("Expected value of type `String`, but got `null`."),
+        "{msg}"
+    );
+}
+
+#[test]
+fn generic_alias_arguments_keep_their_meaning() {
+    let json = eval(
+        r#"
+typealias L<T> = List<T>
+nested = List(List(1)) is L<L<Int>>
+typealias B = String
+typealias P<A, B> = Pair<A, B>
+pair = Pair("a", 1) is P<B, Int>
+"#,
+    );
+    assert_eq!(json["nested"], true);
+    assert_eq!(json["pair"], true);
+}
+
+#[test]
+fn user_methods_named_every_and_any_still_run() {
+    let json = eval("class C { function any() = 42 }\nresult = new C {}.any()");
+    assert_eq!(json["result"], 42);
+}
+
+#[test]
+fn aliased_constrained_dynamic_default_is_checked() {
+    let msg = eval_fails("typealias D = Dynamic(false)\nx: D");
+    assert!(msg.contains("Type constraint `false` violated."), "{msg}");
+}
+
+#[test]
+fn element_mismatch_keeps_the_property_name() {
+    let msg = eval_fails("xs: List<Int> = List(\"x\")");
+    assert!(msg.contains("in property 'xs'"), "{msg}");
+}
+
+#[test]
+fn class_member_dynamic_default_is_not_checked_before_assignment() {
+    let json = eval(
+        r#"
+typealias D = Dynamic(this.toList().length > 0)
+class C { x: D }
+result = new C { x = new Dynamic { 1 } }
+"#,
+    );
+    assert_eq!(json["result"]["x"][0], 1);
+}
+
+#[test]
+fn cast_to_a_constrained_generic_names_the_element() {
+    let msg = eval_fails("x = List(\"a\") as List<Int>(isEmpty)");
+    assert!(msg.contains("type `Int`"), "{msg}");
+}
+
+#[test]
+fn mutually_recursive_generic_aliases_are_reported() {
+    let msg = eval_fails("typealias A<T> = B<T>\ntypealias B<T> = A<T>\nx: A<Int> = 1\n");
+    assert!(
+        msg.contains("cyclic") || msg.contains("refers to itself"),
+        "{msg}"
+    );
+}
+
+#[test]
+fn nested_generic_alias_applications_mean_different_types() {
+    let v = eval(
+        "typealias L<T> = List<T>\ntypealias W<U> = L<U>\nx = List(List(1)) is W<W<Int>>\ny = List(1) is W<Int>",
+    );
+    assert_eq!(v["x"], true);
+    assert_eq!(v["y"], true);
 }

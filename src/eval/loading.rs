@@ -222,7 +222,7 @@ impl Evaluator {
             if let Some((base_module, source_path)) = self.load_parsed_module(uri, path)? {
                 refs.extend(referenced_roots(&base_module.body));
                 type_names.extend(base_module.body.iter().filter_map(|entry| match entry {
-                    Entry::TypeAlias(name, _) | Entry::ClassDef(name, ..) => Some(nm(name)),
+                    Entry::TypeAlias(name, ..) | Entry::ClassDef(name, ..) => Some(nm(name)),
                     _ => None,
                 }));
                 refs.extend(self.inherited_reference_roots(

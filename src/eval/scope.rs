@@ -1006,7 +1006,7 @@ pub(super) fn entry_scope_owners(
 pub(super) fn entry_member_name(entry: &Entry) -> Option<Name> {
     match entry {
         Entry::Property(prop) => Some(prop.name.clone()),
-        Entry::ClassDef(name, ..) | Entry::TypeAlias(name, _) => Some(Name::from(name.as_str())),
+        Entry::ClassDef(name, ..) | Entry::TypeAlias(name, ..) => Some(Name::from(name.as_str())),
         _ => None,
     }
 }
