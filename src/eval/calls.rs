@@ -719,12 +719,12 @@ impl Evaluator {
                 Ok(Some(Value::Bool(map.contains_key(key))))
             }
             (Value::Object(map, source), "toMap") => Ok(Some(Value::Object(
-                without_class_members(map, source.as_deref()),
+                reference_safe_members(map, source.as_deref()),
                 None,
             ))),
             // `Map.toMapping()` is a `Mapping`, which can be amended.
             (Value::Object(map, source), "toMapping") => Ok(Some(Value::Object(
-                without_class_members(map, source.as_deref()),
+                reference_safe_members(map, source.as_deref()),
                 Some(Arc::new(super::mapping::mapping_source())),
             ))),
             (Value::Object(map, _), "mapValues") => {
@@ -1172,6 +1172,15 @@ fn without_class_members(map: &Arc<ObjectMap>, source: Option<&ObjectSource>) ->
             .map(|(key, value)| (key.clone(), value.clone().into_entry_value()))
             .collect(),
     )
+}
+
+/// `without_class_members`, except that a `Reference` has no members to
+/// convert: its entries are internal.
+fn reference_safe_members(map: &Arc<ObjectMap>, source: Option<&ObjectSource>) -> Arc<ObjectMap> {
+    if source.is_some_and(|s| s.kind == ObjectKind::Reference) {
+        return Arc::default();
+    }
+    without_class_members(map, source)
 }
 
 /// Whether `expr` is `super.default`.

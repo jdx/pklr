@@ -404,3 +404,91 @@ bad = p.v["k"]
     );
     assert!(err.contains("Cannot subscript"), "{err}");
 }
+
+#[test]
+fn reference_to_map_has_no_internal_members() {
+    let result = run(r#"
+local s = ref.Reference(d, String, null)
+a = s.toMap()
+b = s.toMapping().toMap()
+c = s.toString().isEmpty
+"#);
+    assert_eq!(result["a"], json!({}));
+    assert_eq!(result["b"], json!({}));
+    assert_eq!(result["c"], false);
+}
+
+#[test]
+fn reference_to_self_default_keeps_parent_identities() {
+    let result = run(r#"
+open class A { x: Int = 1 }
+class B extends A { hidden fixed `$` = ref.Reference(d, B, this); y: Int = 2 }
+local b = new B {}
+local a: ref.Reference<D, A> = b.`$`
+n = a.getPath().length
+"#);
+    assert_eq!(result["n"], 0);
+}
+
+#[test]
+fn reference_self_class_placeholder_sees_inherited_members() {
+    let result = run(r#"
+open class A { x: Int = 1; y: Int = x }
+class B extends A { hidden fixed `$` = ref.Reference(d, B, this) }
+local b = new B {}
+n = b.`$`.y.getPath().length
+"#);
+    assert_eq!(result["n"], 1);
+}
+
+#[test]
+fn reference_alias_parameter_shadowing_alias_name() {
+    let result = run(r#"
+typealias Element = String
+typealias Label = Element
+typealias Wrap<Element> = Mapping<Element, Label>
+class P { v: Wrap<Int> }
+local p = ref.Reference(d, P, null)
+n = p.v[1].getPath().length
+"#);
+    assert_eq!(result["n"], 2);
+    let err = fails(
+        r#"
+typealias Element = String
+typealias Label = Element
+typealias Wrap<Element> = Mapping<Element, Label>
+class P { v: Wrap<Int> }
+local p = ref.Reference(d, P, null)
+bad = p.v["k"]
+"#,
+    );
+    assert!(err.contains("Cannot subscript"), "{err}");
+}
+
+#[test]
+fn reference_ignores_local_properties() {
+    let err = fails(
+        r#"
+class P { local label: String = "x"; name: String = "n" }
+local p = ref.Reference(d, P, null)
+bad = p.label
+"#,
+    );
+    assert!(err.contains("label"), "{err}");
+    let result = run(r#"
+open class A { label: Int }
+class B extends A { local label: String = "x" }
+local p = ref.Reference(d, B, null)
+n = p.label.getPath().length
+"#);
+    assert_eq!(result["n"], 1);
+}
+
+#[test]
+fn reference_subscripts_dynamic_referent() {
+    let result = run(r#"
+local r = ref.Reference(d, Dynamic, null)
+n = r["key"].getPath().length
+"#);
+    assert_eq!(result["n"], 1);
+}

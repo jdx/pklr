@@ -657,7 +657,13 @@ impl Evaluator {
             .enumerate()
             .rev()
             .find_map(|(i, e)| match e {
-                Entry::Property(prop) if &*prop.name == name && !prop.is_method => Some((i, prop)),
+                Entry::Property(prop)
+                    if &*prop.name == name
+                        && !prop.is_method
+                        && !has_modifier(&prop.modifiers, Modifier::Local) =>
+                {
+                    Some((i, prop))
+                }
                 _ => None,
             })?;
         let Some(ty) = &prop.type_ann else {
@@ -739,6 +745,7 @@ impl Evaluator {
             }
             RType::Class { id, args, .. } => match (id.as_ref(), key) {
                 ("pkl:base#Null", _) => Ok(ty.clone()),
+                ("pkl:base#Dynamic", _) => Ok(RType::Unknown),
                 ("pkl:base#Listing" | "pkl:base#List", Value::Int(_)) => {
                     Ok(args.first().cloned().unwrap_or(RType::Unknown))
                 }
