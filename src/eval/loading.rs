@@ -526,7 +526,7 @@ impl Evaluator {
         let Ok(tokens) = lexer::lex_named(&source, &source_path) else {
             return Ok(None);
         };
-        let Ok(module) = parser::parse_named(&tokens, &source, &source_path) else {
+        let Ok(module) = self.parse_registered(&tokens, &source, &source_path) else {
             return Ok(None);
         };
         let module = Arc::new(module);
@@ -568,7 +568,7 @@ impl Evaluator {
     pub(super) fn eval_entry_module(&mut self, source: &str, path: &Path) -> Result<Value> {
         let name = path.display().to_string();
         let tokens = lexer::lex_named(source, &name)?;
-        let module = parser::parse_named(&tokens, source, &name)?;
+        let module = self.parse_registered(&tokens, source, &name)?;
         self.eval_module(&module, path, 0)
     }
 
@@ -725,7 +725,7 @@ impl Evaluator {
         let source = self.read_to_string_io(path)?;
         let name = path.display().to_string();
         let tokens = lexer::lex_named(&source, &name)?;
-        let module = Arc::new(parser::parse_named(&tokens, &source, &name)?);
+        let module = Arc::new(self.parse_registered(&tokens, &source, &name)?);
         if let Some(canonical) = canonical {
             self.parse_cache.insert(canonical, Arc::clone(&module));
         }
@@ -956,7 +956,7 @@ impl Evaluator {
             return self.eval_file_with_requested_fields(Path::new(&name), depth + 1, requested);
         }
         let tokens = lexer::lex_named(&source, &name)?;
-        let imported = parser::parse_named(&tokens, &source, &name)?;
+        let imported = self.parse_registered(&tokens, &source, &name)?;
         self.eval_module_with_scope(&imported, Path::new(&name), depth + 1, None, requested)
     }
 

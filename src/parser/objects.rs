@@ -188,10 +188,16 @@ impl<'a> Parser<'a> {
                 }));
             }
             TokenKind::KwTypeAlias => {
-                entries.push(self.parse_type_alias(MemberHeader::default())?);
+                self.declaration_nesting += 1;
+                let alias = self.parse_type_alias(MemberHeader::default());
+                self.declaration_nesting -= 1;
+                entries.push(alias?);
             }
             TokenKind::KwClass => {
-                entries.push(self.parse_class(MemberHeader::default())?);
+                self.declaration_nesting += 1;
+                let class = self.parse_class(MemberHeader::default());
+                self.declaration_nesting -= 1;
+                entries.push(class?);
             }
             kind if matches!(kind, TokenKind::At) || token_modifier(kind).is_some() => {
                 let header = self.parse_member_header()?;
@@ -199,9 +205,15 @@ impl<'a> Parser<'a> {
                     let entry = self.parse_object_method(header, in_for)?;
                     entries.extend(entry);
                 } else if matches!(self.peek(), TokenKind::KwTypeAlias) {
-                    entries.push(self.parse_type_alias(header)?);
+                    self.declaration_nesting += 1;
+                    let alias = self.parse_type_alias(header);
+                    self.declaration_nesting -= 1;
+                    entries.push(alias?);
                 } else if matches!(self.peek(), TokenKind::KwClass) {
-                    entries.push(self.parse_class(header)?);
+                    self.declaration_nesting += 1;
+                    let class = self.parse_class(header);
+                    self.declaration_nesting -= 1;
+                    entries.push(class?);
                 } else {
                     let entry = self.parse_object_property(header, in_for)?;
                     entries.push(entry);

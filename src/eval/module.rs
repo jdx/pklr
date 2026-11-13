@@ -48,6 +48,60 @@ impl Evaluator {
         )
     }
 
+    /// Parse a module, keeping the declarations `pkl:reflect` describes for
+    /// when it is evaluated. They stay outside the public `Module`.
+    pub(super) fn parse_registered(
+        &mut self,
+        tokens: &[crate::lexer::Token],
+        source: &str,
+        name: &str,
+    ) -> Result<Module> {
+        let (module, declarations) = parser::parse_named_declarations(tokens, source, name)?;
+        if !declarations.is_empty() {
+            if self.parsed_declarations.len() >= 64 {
+                self.parsed_declarations
+                    .retain(|_, (body, _)| body.strong_count() > 0);
+            }
+            self.parsed_declarations.insert(
+                Arc::as_ptr(&module.body) as usize,
+                (Arc::downgrade(&module.body), declarations),
+            );
+        }
+        Ok(module)
+    }
+
+    /// The annotations of the module's classes and type aliases as entries
+    /// for import analysis, which its own entries do not carry.
+    fn declaration_annotation_entries(&self, module: &Module) -> Vec<Entry> {
+        let key = Arc::as_ptr(&module.body) as usize;
+        let Some((body, declarations)) = self.parsed_declarations.get(&key) else {
+            return Vec::new();
+        };
+        if !body
+            .upgrade()
+            .is_some_and(|b| Arc::ptr_eq(&b, &module.body))
+        {
+            return Vec::new();
+        }
+        declarations
+            .iter()
+            .flat_map(|declaration| {
+                let methods = declaration
+                    .bodyless_methods
+                    .iter()
+                    .flat_map(|method| &method.annotations);
+                declaration.annotations.iter().chain(methods)
+            })
+            .map(|annotation| {
+                Entry::Elem(Expr::New(
+                    Some(annotation.name.clone()),
+                    Arc::new(annotation.body.clone()),
+                    Vec::new(),
+                ))
+            })
+            .collect()
+    }
+
     pub(super) fn eval_module(
         &mut self,
         module: &Module,
@@ -427,6 +481,15 @@ impl Evaluator {
             return Err(Error::Eval("Invalid property definition".into()));
         }
         let type_namespace = self.module_type_namespace(path);
+        let key = Arc::as_ptr(&module.body) as usize;
+        if let Some((body, declarations)) = self.parsed_declarations.get(&key)
+            && body
+                .upgrade()
+                .is_some_and(|b| Arc::ptr_eq(&b, &module.body))
+        {
+            self.module_declarations
+                .insert(type_namespace.clone(), Arc::clone(declarations));
+        }
         let mut scope = Scope {
             type_namespace: Some(type_namespace),
             ..Scope::default()
@@ -459,8 +522,10 @@ impl Evaluator {
         let requested_output_fields = requested_fields
             .as_ref()
             .map(|fields| expand_requested_fields(&module.body, fields, &inherited_builtins));
-        let analysis_entries =
+        let mut analysis_entries =
             analysis_entries_for_requested_fields(&module.body, requested_output_fields.as_ref());
+        // What the annotations of a class or type alias read counts as used.
+        analysis_entries.extend(self.declaration_annotation_entries(module));
         let mut referenced_imports = referenced_roots(&analysis_entries);
         referenced_imports.extend(inherited_references);
         let import_field_uses = import_field_uses(&analysis_entries);
@@ -1912,7 +1977,7 @@ impl Evaluator {
                 self.check_not_self(module, path, Path::new(uri), "amend")?;
                 let source = self.fetch_source(uri)?;
                 let tokens = lexer::lex_named(&source, uri)?;
-                let base_module = parser::parse_named(&tokens, &source, uri)?;
+                let base_module = self.parse_registered(&tokens, &source, uri)?;
                 let base_val = self.eval_module_with_scope(
                     &base_module,
                     Path::new(uri),
@@ -1939,7 +2004,7 @@ impl Evaluator {
                         let source = self.read_to_string_io(&local_path)?;
                         let name = local_path.display().to_string();
                         let tokens = lexer::lex_named(&source, &name)?;
-                        let base_module = parser::parse_named(&tokens, &source, &name)?;
+                        let base_module = self.parse_registered(&tokens, &source, &name)?;
                         let base_val = self.eval_module_with_scope(
                             &base_module,
                             &local_path,
@@ -1967,7 +2032,7 @@ impl Evaluator {
                     self.check_not_self(module, path, Path::new(url.as_str()), "amend")?;
                     let source = self.fetch_direct_package_source(url, root)?;
                     let tokens = lexer::lex_named(&source, url)?;
-                    let base_module = parser::parse_named(&tokens, &source, url)?;
+                    let base_module = self.parse_registered(&tokens, &source, url)?;
                     let base_val = self.eval_module_with_scope(
                         &base_module,
                         Path::new(url.as_str()),
@@ -2133,7 +2198,7 @@ impl Evaluator {
                     let name = extends_path.display().to_string();
                     let source = self.read_to_string_io(&extends_path)?;
                     let tokens = lexer::lex_named(&source, &name)?;
-                    let ext_module = parser::parse_named(&tokens, &source, &name)?;
+                    let ext_module = self.parse_registered(&tokens, &source, &name)?;
                     if !ext_module.annotations.iter().any(|annotation| {
                         matches!(
                             annotation.name.as_str(),
@@ -2207,7 +2272,7 @@ impl Evaluator {
                 self.check_not_self(module, path, Path::new(uri), "extend")?;
                 let source = self.fetch_source(uri)?;
                 let tokens = lexer::lex_named(&source, uri)?;
-                let ext_module = parser::parse_named(&tokens, &source, uri)?;
+                let ext_module = self.parse_registered(&tokens, &source, uri)?;
                 if ext_module.amends.is_some() {
                     return Err(Error::Eval(format!(
                         "Module `{}` cannot be extended or used as type because it amends another module.",
@@ -2344,7 +2409,7 @@ impl Evaluator {
                 let source = self.fetch_source(uri)?;
                 let imported_val = {
                     let tokens = lexer::lex_named(&source, uri)?;
-                    let imp_module = parser::parse_named(&tokens, &source, uri)?;
+                    let imp_module = self.parse_registered(&tokens, &source, uri)?;
                     self.eval_module_with_scope(
                         &imp_module,
                         Path::new(uri),
@@ -2425,7 +2490,7 @@ impl Evaluator {
                 let source = self.fetch_direct_package_source(&url, root)?;
                 let imported_val = {
                     let tokens = lexer::lex_named(&source, &url)?;
-                    let imp_module = parser::parse_named(&tokens, &source, &url)?;
+                    let imp_module = self.parse_registered(&tokens, &source, &url)?;
                     self.eval_module_with_scope(
                         &imp_module,
                         Path::new(&url),
