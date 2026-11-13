@@ -121,6 +121,7 @@ impl Evaluator {
                 depth,
             );
         }
+        check_stale_class_read(base_map, base_source, overlay_entries, current_scope)?;
         if let Some(value) = self.try_eval_simple_class_amendment(
             base_map,
             base_source,
@@ -2338,4 +2339,40 @@ fn bind_listing_receiver(scope: &mut Scope, item: &Value) {
             ),
         );
     }
+}
+
+/// A body member declared later still shadows the class's own member of the
+/// same name for an amendment that reads it, so the read waits for that member
+/// rather than finding the class default.
+#[inline(never)]
+fn check_stale_class_read(
+    base_map: &ObjectMap,
+    base_source: &ObjectSource,
+    overlay_entries: &[Entry],
+    current_scope: &Scope,
+) -> Result<()> {
+    for (name, message) in current_scope.poisoned_bindings() {
+        // A nearer binding of the name hides the pending member.
+        if current_scope.get(name).is_some() {
+            continue;
+        }
+        if (base_map.contains_key(&**name) || base_source.evaluated_properties.contains(name))
+            && !overlay_entries
+                .iter()
+                .any(|entry| entry_member_name(entry).is_some_and(|member| member == *name))
+            && {
+                // A name an inner binding shadows is not a read of the member.
+                let mut refs = HashSet::default();
+                super::analysis::collect_entry_refs(
+                    overlay_entries,
+                    &mut refs,
+                    &HashSet::default(),
+                );
+                refs.contains(name)
+            }
+        {
+            return Err(Error::Eval(message.clone()));
+        }
+    }
+    Ok(())
 }

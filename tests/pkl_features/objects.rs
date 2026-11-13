@@ -8206,3 +8206,164 @@ fn replacing_an_amended_mapping_entry_drops_its_old_body_amendments() {
     assert_eq!(v["r"], serde_json::json!({"z": 3}));
     assert_eq!(v["n"], 1);
 }
+
+// ============================================================
+// Late binding and super calls
+// ============================================================
+
+#[test]
+fn typed_object_entry_error_names_a_generator_body_by_its_expression() {
+    let json = eval(
+        r#"
+import "pkl:test"
+class Person {}
+plain = test.catch(() -> new Person { ["a"] = true })
+generated = test.catch(() -> new Person { when (false) { [0] = 0 }; ["a"] = true })
+"#,
+    );
+    assert_eq!(
+        json["plain"],
+        "Object of type `test#Person` cannot have an entry."
+    );
+    assert_eq!(
+        json["generated"],
+        "Object of type `new Person {}` cannot have an entry."
+    );
+}
+
+#[test]
+fn class_super_method_call_reads_the_receivers_members() {
+    let json = eval(
+        r#"
+open class A {
+  prefix = "a"
+  function say(s: String) = prefix + s
+}
+class B extends A {
+  prefix = "b"
+  function say(s: String) = super.say(s) + "!"
+  greeting = say("hi")
+}
+b = new B {}
+c = new B { prefix = "c" }
+"#,
+    );
+    assert_eq!(json["b"]["greeting"], "bhi!");
+    assert_eq!(json["c"]["greeting"], "chi!");
+}
+
+#[test]
+fn module_super_calls_late_bind_through_an_extends_chain() {
+    let temp = TestTempDir::new("pklr_test_super_calls_chain");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("base.pkl"),
+        "open module base\nprefix = \"a\"\nfunction say(s: String) = prefix + s\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("mid.pkl"),
+        "open module mid\nextends \"base.pkl\"\nprefix = \"b\"\nfunction twice() = super.say(\"x\") + super.say(\"y\")\n",
+    )
+    .unwrap();
+    let main = dir.join("main.pkl");
+    std::fs::write(
+        &main,
+        "extends \"mid.pkl\"\nimport \"pkl:test\"\nprefix = \"c\"\nr1 = twice()\nr2 = super.say(\"z\")\nr3 = test.catch(() -> missing())\nfunction missing() = super.missing()\n",
+    )
+    .unwrap();
+    let json = pklr::eval_to_json(&main).unwrap();
+    assert_eq!(json["r1"], "cxcy");
+    assert_eq!(json["r2"], "cz");
+    assert_eq!(json["r3"], "Cannot find method `missing` in module `mid`.");
+}
+
+#[test]
+fn new_class_body_reads_an_enclosing_member_declared_later() {
+    let json = eval(
+        r#"
+class Foo {
+  x: Int
+  y = 1
+}
+v1 {
+  foo = new Foo { x = y }
+  y = 3
+}
+v2 = (v1) { y = 4 }
+v3 = (v1) { foo { y = 5 } }
+"#,
+    );
+    assert_eq!(json["v1"]["foo"]["x"], 3);
+    assert_eq!(json["v2"]["foo"]["x"], 4);
+    assert_eq!(json["v3"]["foo"]["x"], 3);
+    assert_eq!(json["v3"]["foo"]["y"], 5);
+}
+
+#[test]
+fn new_class_body_late_member_read_respects_shadowing_and_wrapping() {
+    let json = eval(
+        r#"
+class Foo { x: Int; y = 1 }
+v {
+  foo = new Foo { x = let (y = 2) y }
+  y = foo.x
+  bar = if (true) new Foo { x = z } else new Foo { x = 0 }
+  z = 3
+  baz = let (q = 1) new Foo { x = z + q }
+}
+"#,
+    );
+    assert_eq!(json["v"]["foo"]["x"], 2);
+    assert_eq!(json["v"]["y"], 2);
+    assert_eq!(json["v"]["bar"]["x"], 3);
+    assert_eq!(json["v"]["baz"]["x"], 4);
+}
+
+#[test]
+fn module_super_call_keeps_the_declaring_modules_locals() {
+    let temp = TestTempDir::new("pklr_test_super_call_locals");
+    let dir = temp.path();
+    std::fs::write(
+        dir.join("base.pkl"),
+        "open module base\nlocal prefix = \"local\"\nfunction say() = prefix\n",
+    )
+    .unwrap();
+    let main = dir.join("main.pkl");
+    std::fs::write(
+        &main,
+        "extends \"base.pkl\"\nprefix = \"child\"\nr = super.say()\n",
+    )
+    .unwrap();
+    let json = pklr::eval_to_json(&main).unwrap();
+    assert_eq!(json["r"], "local");
+}
+
+#[test]
+fn new_class_body_inside_let_reads_the_let_binding() {
+    let json = eval(
+        r#"
+class Foo { x: Int }
+v {
+  foo = let (y = 2) new Foo { x = y }
+  y = foo.x
+}
+"#,
+    );
+    assert_eq!(json["v"]["foo"]["x"], 2);
+    assert_eq!(json["v"]["y"], 2);
+}
+
+#[test]
+fn let_in_an_unused_branch_does_not_hide_reads_in_the_selected_one() {
+    let json = eval(
+        r#"
+class Foo { x: Int; y = 1 }
+v {
+  foo = if (false) let (y = 2) new Foo { x = y } else new Foo { x = y }
+  y = 3
+}
+"#,
+    );
+    assert_eq!(json["v"]["foo"]["x"], 3);
+}

@@ -118,12 +118,16 @@ impl Evaluator {
         let mut child_receiver_scope = child_scope.clone();
         child_receiver_scope.receiver_entries = Some(body.clone());
         child_receiver_scope.receiver_list_base = None;
+        let parent_source = match &parent_val {
+            Some(Value::Object(_, Some(parent))) => Some(Arc::clone(parent)),
+            _ => None,
+        };
         let child_defaults = self.eval_entries_with_lexical_scopes(
             body,
             &child_receiver_scope,
             depth + 1,
             None,
-            None,
+            parent_source.as_deref(),
             Some(&inherited_non_const),
             false,
             None,

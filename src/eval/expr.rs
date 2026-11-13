@@ -119,7 +119,7 @@ impl Evaluator {
                         names
                             .iter()
                             .map(|name| &**name)
-                            .chain(["this", "module", "super"])
+                            .chain(["this", "module", "super", SUPER_MODULE_NAME])
                             .chain(
                                 captures_output_text_context.then_some(MODULE_OUTPUT_TEXT_CONTEXT),
                             ),
@@ -241,7 +241,7 @@ impl Evaluator {
                         ))
                     }
                     Some("Mapping") => {
-                        check_member_kinds("Mapping", entries, false)?;
+                        check_member_kinds("Mapping", "Mapping", entries, false)?;
                         // If the Mapping has a value type param (e.g., Mapping<String, Step>),
                         // resolve it as a default template so entries inherit the class type.
                         let value_type_defaults = generic_params
@@ -745,7 +745,14 @@ impl Evaluator {
                     other => Err(stdlib::operator_not_defined("[]", &other, &key)),
                 }
             }
-            Expr::Call(func_expr, args) => self.eval_call(func_expr, args, scope, depth),
+            Expr::Call(func_expr, args) => {
+                if matches!(&**func_expr, Expr::Field(obj, _) if matches!(&**obj, Expr::Ident(name) if name == "super"))
+                {
+                    self.eval_super_or_call(func_expr, args, scope, depth)
+                } else {
+                    self.eval_call(func_expr, args, scope, depth)
+                }
+            }
             Expr::If(cond, then_expr, else_expr) => {
                 let c = self.eval_expr(cond, scope, depth + 1)?;
                 if is_truthy(&c) {
