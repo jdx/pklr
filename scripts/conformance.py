@@ -15,6 +15,13 @@ Files are classified as:
   crash        pklr panicked or was killed (any exit other than 0 or 1)
   expected-err pkl rejects the file and pklr fails too
   missed-err   pkl rejects the file but pklr succeeds
+  text-match, text-mismatch, text-error, text-timeout, text-crash,
+  text-expected-err, text-missed-err
+               the same outcomes for files whose JSON can't be compared because
+               of a rendering limitation (a module with its own renderer,
+               non-string keys, Bytes, ...): `pkl eval FILE` and pklr's
+               `eval_text` example are compared byte for byte instead. The
+               summary's JSON numbers count these files as skipped, as before.
   skipped      pkl fails for a reason outside the language: the value can't be
                rendered as JSON, or the test needs a project, the network or a
                module that isn't in the checkout
@@ -63,11 +70,15 @@ def checkout(version, repo):
 
 
 def build():
+    return {name: build_example(name) for name in ("eval_json", "eval_text")}
+
+
+def build_example(name):
     # Ask cargo where it put the binary, so CARGO_TARGET_DIR and the like work.
     # With --message-format=json, compiler diagnostics arrive on stdout as JSON;
     # stderr (cargo's own errors) is passed through.
     p = subprocess.run(
-        ["cargo", "build", "-q", "--release", "--example", "eval_json",
+        ["cargo", "build", "-q", "--release", "--example", name,
          "--message-format=json-diagnostic-rendered-ansi"],
         cwd=ROOT, stdout=subprocess.PIPE, text=True,
     )
@@ -79,13 +90,16 @@ def build():
         sys.exit(f"cargo build failed (exit {p.returncode})")
     for msg in messages:
         if (msg.get("reason") == "compiler-artifact"
-                and msg["target"]["name"] == "eval_json" and msg.get("executable")):
+                and msg["target"]["name"] == name and msg.get("executable")):
             return Path(msg["executable"])
-    sys.exit("cargo did not report the eval_json executable")
+    sys.exit(f"cargo did not report the {name} executable")
 
 
-def run(cmd, timeout):
+def run(cmd, timeout, binary=False):
     try:
+        if binary:
+            p = subprocess.run(cmd, capture_output=True, timeout=timeout)
+            return p.returncode, p.stdout, p.stderr.decode("utf-8", "replace")
         p = subprocess.run(
             cmd, capture_output=True, encoding="utf-8", errors="replace", timeout=timeout
         )
@@ -111,6 +125,15 @@ def normalize(v):
 # pkl errors that say nothing about whether pklr should accept the file.
 SKIP_ERRORS = re.compile(
     r"Cannot render|as JSON|no project found|Exception when making request|"
+    r"Cannot find module|Cannot find resource|I/O error"
+)
+# The subset that only says JSON can't represent the value; the text route
+# applies to these. The rest (network, project, missing module) skip both.
+RENDER_ERRORS = re.compile(r"Cannot render|as JSON")
+# What still skips the text route: problems outside the evaluator. A render
+# error there is a real result, so pklr must reject it too.
+EXTERNAL_ERRORS = re.compile(
+    r"no project found|Exception when making request|"
     r"Cannot find module|Cannot find resource|I/O error"
 )
 
@@ -146,11 +169,46 @@ def diff_paths(a, b, path=""):
     return [] if a == b else [path or "/"]
 
 
-def check(rel, inputs, exe, timeout):
+def check_text(path, exe, timeout):
+    """Compare `pkl eval` (Pcf text) with pklr's text rendering, byte for byte."""
+    prc, pout, perr = run(["pkl", "eval", path], timeout, binary=True)
+    if prc is None:
+        return "skipped", "pkl timed out"
+    if prc != 0 and EXTERNAL_ERRORS.search(perr):
+        return "skipped", pkl_message(perr)
+    rrc, rout, rerr = run([str(exe), path], timeout, binary=True)
+    if rrc is None:
+        return "text-timeout", ""
+    if rrc not in (0, 1):
+        return "text-crash", first_line(rerr)
+    if prc != 0:
+        return ("text-expected-err", "") if rrc == 1 else ("text-missed-err", pkl_message(perr))
+    if rrc != 0:
+        return "text-error", first_line(rerr)
+    if rout == pout:
+        return "text-match", ""
+    return "text-mismatch", first_difference(pout, rout)
+
+
+def first_difference(a, b):
+    la = a.decode("utf-8", "replace").splitlines()
+    lb = b.decode("utf-8", "replace").splitlines()
+    for i in range(max(len(la), len(lb))):
+        x = la[i] if i < len(la) else "<end>"
+        y = lb[i] if i < len(lb) else "<end>"
+        if x != y:
+            return f"line {i + 1}: pkl {x[:60]!r} vs pklr {y[:60]!r}"
+    return "trailing newline"
+
+
+def check(rel, inputs, exes, timeout):
     path = str(inputs / rel)
+    exe = exes["eval_json"]
     prc, pout, perr = run(["pkl", "eval", "-f", "json", path], timeout)
     if prc is None:
         return "skipped", "pkl timed out"
+    if prc != 0 and RENDER_ERRORS.search(perr):
+        return check_text(path, exes["eval_text"], timeout)
     if prc != 0 and SKIP_ERRORS.search(perr):
         return "skipped", pkl_message(perr)
     # A module with its own (non-JSON) renderer can't be compared, whatever
@@ -160,7 +218,7 @@ def check(rel, inputs, exe, timeout):
         try:
             a = normalize(json.loads(pout))
         except json.JSONDecodeError:
-            return "skipped", "pkl output is not JSON"
+            return check_text(path, exes["eval_text"], timeout)
     rrc, rout, rerr = run([str(exe), path], timeout)
     if rrc is None:
         return "timeout", ""
@@ -200,7 +258,7 @@ def main():
     inputs = checkout(version, args.repo) / SNIPPETS
     if not inputs.is_dir():
         sys.exit(f"no snippet tests at {inputs}")
-    exe = build()
+    exes = build()
     files = sorted(str(p.relative_to(inputs)) for p in inputs.rglob("*.pkl"))
     if args.filters:
         files = [f for f in files if any(x in f for x in args.filters)]
@@ -208,27 +266,37 @@ def main():
         sys.exit("no snippet tests selected")
 
     with concurrent.futures.ThreadPoolExecutor(args.jobs) as pool:
-        results = dict(zip(files, pool.map(lambda f: check(f, inputs, exe, args.timeout), files)))
+        results = dict(zip(files, pool.map(lambda f: check(f, inputs, exes, args.timeout), files)))
 
     counts = {}
     for status, _ in results.values():
         counts[status] = counts.get(status, 0) + 1
+    text_order = ["text-match", "text-mismatch", "text-error", "text-timeout", "text-crash",
+                  "text-expected-err", "text-missed-err"]
+    text_total = sum(counts.get(s, 0) for s in text_order)
     if args.verbose:
         for f, (status, detail) in results.items():
-            if status not in ("match", "expected-err", "skipped"):
+            if status not in ("match", "expected-err", "text-match", "text-expected-err",
+                              "skipped"):
                 print(f"{status:12} {f}  {detail}")
         print()
     order = ["match", "mismatch", "error", "timeout", "crash", "expected-err", "missed-err",
              "skipped"]
-    print(f"pkl {version}: " + ", ".join(f"{s} {counts.get(s, 0)}" for s in order))
+    # Text-compared files are skipped as far as the JSON numbers go.
+    shown = {**counts, "skipped": counts.get("skipped", 0) + text_total}
+    print(f"pkl {version}: " + ", ".join(f"{s} {shown.get(s, 0)}" for s in order))
     comparable = sum(counts.get(s, 0) for s in order if s != "skipped")
     passing = counts.get("match", 0) + counts.get("expected-err", 0)
     print(f"passing: {passing}/{comparable}")
+    print(f"text (of the skipped, compared as `pkl eval` text): "
+          + ", ".join(f"{s[5:]} {counts.get(s, 0)}" for s in text_order))
+    text_passing = counts.get("text-match", 0) + counts.get("text-expected-err", 0)
+    print(f"text passing: {text_passing}/{text_total}")
 
     if args.save:
         Path(args.save).write_text(json.dumps({f: s for f, (s, _) in results.items()}, indent=1))
     if base is not None:
-        good = {"match", "expected-err"}
+        good = {"match", "expected-err", "text-match", "text-expected-err"}
         # Only files with a usable result in both runs say anything about
         # pklr: a skip (e.g. pkl timing out) or a file missing from one run
         # is reported separately instead of as fixed or broken.
