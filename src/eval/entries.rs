@@ -32,10 +32,20 @@ impl Evaluator {
                     file.strip_suffix(".pkl").unwrap_or(file).to_string()
                 })
         };
+        // A local path becomes a `file:` URI; a namespace with a scheme is one.
+        let as_uri = |namespace: &str| {
+            if namespace.contains(':') && !namespace.starts_with('/') {
+                namespace.to_string()
+            } else {
+                format!("file://{namespace}")
+            }
+        };
         let (expected, actual) = (name_of(namespace), name_of(identity));
         Some(if expected == actual {
             format!(
-                "Module version conflict: Expected value of type `{expected}` defined by module `file://{namespace}`, but got type `{actual}` defined by module `file://{identity}`."
+                "Module version conflict: Expected value of type `{expected}` defined by module `{}`, but got type `{actual}` defined by module `{}`.",
+                as_uri(namespace),
+                as_uri(identity)
             )
         } else {
             format!("Expected value of type `module`, but got a value of type `{actual}`.")
