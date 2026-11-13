@@ -47,7 +47,7 @@ pub(super) fn trace_value(value: &Value) -> String {
 
 fn write_trace_value(value: &Value, out: &mut String, top: bool) {
     match value {
-        Value::Null => out.push_str("null"),
+        Value::Null | Value::Failed(_) => out.push_str("null"),
         Value::Bool(b) => out.push_str(&b.to_string()),
         Value::Int(n) => out.push_str(&n.to_string()),
         Value::Float(f) => out.push_str(&format_float(*f)),

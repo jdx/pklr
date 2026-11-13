@@ -696,6 +696,12 @@ pub enum Value {
     Duration(Duration),
     /// A quantity of digital information (`5.mb`).
     DataSize(DataSize),
+    /// An element of a `Listing` or a value of a `Mapping` that raised an
+    /// error when it was evaluated or type checked. pkl evaluates those
+    /// members only when they are read, so the error is kept in their place
+    /// and raised by the read, or by anything that reads every member. Never
+    /// the result of an expression.
+    Failed(Arc<str>),
 }
 
 /// The unit of a [`Duration`], smallest first.
@@ -1183,6 +1189,7 @@ impl Value {
             Value::Regex(_) => "Regex",
             Value::Duration(_) => "Duration",
             Value::DataSize(_) => "DataSize",
+            Value::Failed(_) => "Null",
         }
     }
 
@@ -1360,6 +1367,7 @@ impl Value {
                 serde_json::Value::Array(items.iter().map(|v| v.json_with(keep_classes)).collect())
             }
             Value::Lambda(..) => json!("<lambda>"),
+            Value::Failed(message) => json!(format!("<error: {message}>")),
             Value::Regex(regex) => json!({ "_type": "regex", "pattern": regex.pattern() }),
             Value::Duration(_) | Value::DataSize(_) => {
                 json!(crate::eval::stdlib::render_value(self))

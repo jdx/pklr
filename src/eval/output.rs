@@ -919,6 +919,7 @@ fn unconverted_member_failure_in<'a>(
                 .iter()
                 .find_map(|value| unconverted_member_failure_in(value, None, converters, seen))
         }
+        Value::Failed(message) => Some(&**message),
         _ => None,
     }
 }

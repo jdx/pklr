@@ -1339,6 +1339,7 @@ pub(super) fn value_type_name(v: &Value) -> &'static str {
         Value::Lambda(..) => "Function",
         Value::Duration(_) => "Duration",
         Value::DataSize(_) => "DataSize",
+        Value::Failed(_) => "Null",
     }
 }
 
@@ -1361,6 +1362,7 @@ pub(super) fn value_to_key(v: &Value) -> Result<Arc<str>> {
         | Value::Regex(_)
         | Value::Duration(_)
         | Value::DataSize(_)
+        | Value::Failed(_)
         | Value::Null => Ok(value_to_display(v).into()),
     }
 }
@@ -1431,7 +1433,10 @@ pub(super) fn error_type_expr(ty: &crate::parser::TypeExpr, scope: &Scope) -> St
         TypeExpr::Nullable(inner) => format!("{}?", error_type_expr(inner, scope)),
         TypeExpr::Union(variants) => variants
             .iter()
-            .map(|variant| error_type_expr(variant, scope))
+            .map(|variant| match variant {
+                TypeExpr::Union(_) => format!("({})", error_type_expr(variant, scope)),
+                _ => error_type_expr(variant, scope),
+            })
             .collect::<Vec<_>>()
             .join("|"),
         TypeExpr::Generic(name, args) => {

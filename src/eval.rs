@@ -26,6 +26,7 @@ mod classes;
 mod converters;
 mod entries;
 mod expr;
+mod failed;
 mod glob;
 mod lambda_guard;
 mod listing;
@@ -116,6 +117,12 @@ pub struct Evaluator {
     /// the lambda runs, from the modules that declared them.
     deferred_const: HashMap<usize, (Arc<Expr>, Arc<str>)>,
     leaked_this: Option<Value>,
+    /// Whether any [`Value::Failed`] member was made, so reads that look for
+    /// failed members can be skipped until one exists.
+    failed_seen: bool,
+    /// Nonzero while a constraint predicate runs: its parameter checks are
+    /// eager, as in pkl.
+    eager_param_checks: u32,
     /// Cache for evaluated local imports (canonical path → Value)
     import_cache: HashMap<PathBuf, Value>,
     /// Local imports whose `import_cache` entry is still the placeholder that

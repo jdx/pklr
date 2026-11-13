@@ -212,11 +212,13 @@ impl Evaluator {
                         );
                         Expr::Binop(BinOp::Add, Box::new(made), Box::new(Expr::ObjectBody(body)))
                     });
-                    items.push(self.eval_expr(&element, &listing_scope, depth + 1)?)
+                    let element = self.eval_expr(&element, &listing_scope, depth + 1);
+                    items.push(self.defer_member_error(element)?)
                 }
                 Entry::Elem(expr) => {
                     let (expr, elem_scope) = typed_listing_elem(expr, &listing_scope, elem_class);
-                    items.push(self.eval_expr(&expr, &elem_scope, depth + 1)?)
+                    let element = self.eval_expr(&expr, &elem_scope, depth + 1);
+                    items.push(self.defer_member_error(element)?)
                 }
                 Entry::DynProperty(index, value) => {
                     let index = self.eval_expr(index, &listing_scope, depth + 1)?;

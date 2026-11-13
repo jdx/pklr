@@ -1110,6 +1110,11 @@ impl Evaluator {
         // An imported module whose failed property this output renders fails
         // the output, as rendering that property directly would.
         let module_map = Arc::new(out);
+        if depth == 0 && self.failed_seen {
+            // A member of a `Listing` or `Mapping` that failed is read by
+            // rendering it.
+            self.raise_deep_failed(&Value::Object(Arc::clone(&module_map), None))?;
+        }
         if depth == 0 {
             self.eval_module_output(module, &module_map, &scope, path, depth)?;
             if self.rendered_member_failed
@@ -1658,16 +1663,10 @@ impl Evaluator {
                             .and_then(|value| {
                                 // A declared type is checked when the local is
                                 // read, so a mismatch poisons it.
-                                if let Some(ty) = &prop.type_ann {
-                                    self.check_local_value(
-                                        &value,
-                                        ty,
-                                        prop.value.as_ref().unwrap(),
-                                        scope,
-                                        depth,
-                                    )?;
+                                match &prop.type_ann {
+                                    Some(ty) => self.check_local_value(value, ty, scope, depth),
+                                    None => Ok(value),
                                 }
-                                Ok(value)
                             });
                         match evaluated {
                             Ok(val) => scope.declare(&prop.name, val),

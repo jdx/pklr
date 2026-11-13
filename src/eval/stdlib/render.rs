@@ -430,6 +430,7 @@ fn render(value: &Value, explicit: bool, out: &mut String) {
             out.push('.');
             out.push_str(d.unit.symbol());
         }
+        Value::Failed(_) => out.push_str("null"),
     }
 }
 

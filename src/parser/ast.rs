@@ -140,6 +140,20 @@ pub enum BaseForm {
 }
 
 impl TypeExpr {
+    /// Whether the type can hold a `Listing` or `Mapping`, whose members are
+    /// checked as they are read.
+    pub fn holds_lazy_collection(&self) -> bool {
+        match self {
+            TypeExpr::Nullable(inner) => inner.holds_lazy_collection(),
+            TypeExpr::Union(alternatives) => alternatives.iter().any(Self::holds_lazy_collection),
+            TypeExpr::Generic(name, args) => {
+                matches!(name.trim_start_matches('*'), "Listing" | "Mapping")
+                    || args.iter().any(Self::holds_lazy_collection)
+            }
+            _ => false,
+        }
+    }
+
     /// Whether this is a `Listing<...>` type, possibly nullable.
     pub(crate) fn is_listing_type(&self) -> bool {
         match self {
@@ -256,8 +270,15 @@ pub(crate) fn check_signature(
         if let Some(ty) = ty
             && !unchecked(ty)
         {
+            // A parameter that holds a `Listing` or `Mapping` is rebound to
+            // the value as checked, whose members are checked when read.
+            let bound = if ty.holds_lazy_collection() {
+                name.as_str()
+            } else {
+                "_"
+            };
             body = Expr::Let(
-                "_".to_string(),
+                bound.to_string(),
                 Box::new(Expr::Checked(
                     Box::new(Expr::Ident(name.clone())),
                     ty.clone(),
