@@ -514,7 +514,7 @@ fn a_bodyless_method_signature_loads_the_import_it_names() {
         &main,
         r#"import "pkl:reflect"
 import "lib.pkl"
-abstract class A { abstract function f(x: lib.C): lib.C }
+abstract class A { abstract function f(x: *lib.C | String): lib.C }
 name = reflect.Class(A).methods["f"].returnType.referent.name
 "#,
     )

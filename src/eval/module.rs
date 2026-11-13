@@ -111,7 +111,9 @@ impl Evaluator {
                         .iter()
                         .filter_map(|(_, ty)| ty.as_ref())
                         .chain(signature.return_type.as_ref())
-                        .map(|ty| Entry::Elem(Expr::Is(Box::new(Expr::Null), ty.clone())))
+                        .map(|ty| {
+                            Entry::Elem(Expr::Is(Box::new(Expr::Null), without_default_marks(ty)))
+                        })
                 })
             }))
             .collect()
@@ -3414,3 +3416,22 @@ fn binds_own_super(prop: &Property) -> bool {
 
 /// The scope binding that names the module `super` stands for.
 pub(super) const SUPER_MODULE_NAME: &str = "\0pklr:super-module";
+
+/// `ty` without the `*` that marks a union's default arm, which names no
+/// import of its own.
+fn without_default_marks(ty: &crate::parser::TypeExpr) -> crate::parser::TypeExpr {
+    use crate::parser::TypeExpr;
+    let bare = |name: &str| name.strip_prefix('*').unwrap_or(name).to_string();
+    match ty {
+        TypeExpr::Named(name) => TypeExpr::Named(bare(name)),
+        TypeExpr::Nullable(inner) => TypeExpr::Nullable(Box::new(without_default_marks(inner))),
+        TypeExpr::Union(items) => {
+            TypeExpr::Union(items.iter().map(without_default_marks).collect())
+        }
+        TypeExpr::Generic(name, arguments) => TypeExpr::Generic(
+            bare(name),
+            arguments.iter().map(without_default_marks).collect(),
+        ),
+        TypeExpr::Constrained(..) => ty.clone(),
+    }
+}
