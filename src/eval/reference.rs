@@ -258,7 +258,16 @@ fn substitute(ty: &TypeExpr, params: &[&str], args: &[TypeExpr]) -> TypeExpr {
             name.clone(),
             inner.iter().map(|i| substitute(i, params, args)).collect(),
         ),
-        TypeExpr::Constrained(..) => ty.clone(),
+        // The base is kept as text: substitute into it as a type.
+        TypeExpr::Constrained(base, constraint, form) => {
+            match crate::parser::parse_type_name(base) {
+                Ok(parsed) if !matches!(parsed, TypeExpr::Constrained(..)) => {
+                    let base = super::types::display_type_expr(&substitute(&parsed, params, args));
+                    TypeExpr::Constrained(base, constraint.clone(), *form)
+                }
+                _ => ty.clone(),
+            }
+        }
     }
 }
 
@@ -375,7 +384,7 @@ impl Evaluator {
                         let mut placeholders = Vec::with_capacity(args.len());
                         for arg in args {
                             let ty = self.normalize_type(arg, scope);
-                            let key = format!("\0arg{}", self.refs.bindings.len());
+                            let key = format!("__refarg{}", self.refs.bindings.len());
                             self.refs.bindings.insert(key.clone(), ty);
                             placeholders.push(TypeExpr::Named(key));
                         }

@@ -322,3 +322,24 @@ len = b.getPath().length
     assert_eq!(result["n"], 1);
     assert_eq!(result["len"], 1);
 }
+
+#[test]
+fn reference_constrained_generic_alias_gets_its_type_arguments() {
+    let prelude = r#"
+class Item { n: Int }
+typealias NonEmpty<T> = Listing<T>(length > 0)
+class P { items: NonEmpty<Item> }
+local p = ref.Reference(d, P, null)
+"#;
+    let result = run(&format!(
+        "{prelude}\nlocal ok: ref.Reference<D, Listing<Item>> = p.items\nres = ok.getPath().length\nn = p.items[0].n.getPath().length"
+    ));
+    assert_eq!(result["res"], 1);
+    assert_eq!(result["n"], 3);
+    let err = fails(&format!("{prelude}\nbad = p.items[0].nope"));
+    assert!(err.contains("Cannot find property `nope`"), "{err}");
+    let err = fails(&format!(
+        "{prelude}\nbad: ref.Reference<D, Listing<String>> = p.items"
+    ));
+    assert!(err.contains("Expected value of type"), "{err}");
+}
