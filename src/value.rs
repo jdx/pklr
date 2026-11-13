@@ -500,6 +500,8 @@ impl ObjectSource {
     pub(crate) fn is_metadata_only(&self) -> bool {
         (self.poisoned_members.is_some()
             || self.is_abstract
+            || self.module_annotations.is_some()
+            || !self.deprecated.is_empty()
             || (matches!(self.kind, ObjectKind::Mapping) && self.mapping_value_types.is_empty()))
             && self.entries.is_empty()
             && self.evaluated_properties.is_empty()

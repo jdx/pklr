@@ -2072,7 +2072,8 @@ pub(super) fn merge_values(base: Value, overlay: Value) -> Value {
                             .cloned()
                     })
                     .unwrap_or_else(|| k.clone());
-                if let Some(existing) = b_map.shift_remove(&storage_key) {
+                // A member the overlay redefines keeps its place.
+                if let Some(existing) = b_map.get(&storage_key).cloned() {
                     b_map.insert(storage_key, merge_values(existing, v.clone()));
                 } else {
                     b_map.insert(storage_key, v.clone());
