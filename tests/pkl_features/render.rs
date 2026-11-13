@@ -1848,3 +1848,15 @@ res = (once) { ["baz"] { names { "again" } } }
         serde_json::json!(["z", "again"])
     );
 }
+
+#[test]
+fn computed_key_amendment_adds_properties_to_a_dynamic_entry() {
+    let json = eval(
+        r#"
+local k = "a"
+local m = Map("a", new Dynamic { 1 }).toMapping()
+res = (m) { [k] { foo = 2 } }
+"#,
+    );
+    assert_eq!(json["res"]["a"]["foo"], 2);
+}

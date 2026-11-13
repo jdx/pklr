@@ -1180,13 +1180,22 @@ impl Evaluator {
             // A body that amends an existing object entry amends it member
             // by member, which the general path (replacing whatever the body
             // redefines) does not. A computed key may name such an entry.
-            let amends_entry = body_has(overlay_entries, &|entry| match entry {
-                Entry::DynProperty(Expr::String(key), Expr::ObjectBody(_)) => {
-                    matches!(base_map.get(&**key), Some(Value::Object(_, Some(_))))
+            let amended_keys = std::cell::RefCell::new(Vec::new());
+            let _ = body_has(overlay_entries, &|entry| {
+                if let Entry::DynProperty(key, Expr::ObjectBody(_)) = entry {
+                    amended_keys.borrow_mut().push(key.clone());
                 }
-                Entry::DynProperty(_, Expr::ObjectBody(_)) => true,
-                _ => false,
+                false
             });
+            let amended_keys = amended_keys.into_inner();
+            let mut amends_entry = false;
+            for key in &amended_keys {
+                if let Value::String(key) = self.eval_expr(key, scope, depth + 1)?
+                    && matches!(base_map.get(&*key), Some(Value::Object(_, Some(_))))
+                {
+                    amends_entry = true;
+                }
+            }
             let needs_mapping_evaluation = defines_members || amends_entry;
             if !base_src.is_metadata_only() || !needs_mapping_evaluation {
                 // Unannotated mapping entries with bodies still use the general
