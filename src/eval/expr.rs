@@ -634,7 +634,9 @@ impl Evaluator {
                     }
                     Value::List(items) => null_safe_list_member(&obj, items, field),
                     Value::Object(map, source) => {
-                        if let Some(message) = poisoned_member_error(source.as_deref(), field) {
+                        if let Some(message) = poisoned_member_error(source.as_deref(), field)
+                            .or_else(|| class_property_error(source.as_deref(), field))
+                        {
                             return Err(Error::Eval(message));
                         }
                         if !map.contains_key(field.as_str())

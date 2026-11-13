@@ -457,3 +457,27 @@ res2 = test.catch(() -> Person.bar())
             .contains("Cannot find method `bar`")
     );
 }
+
+#[test]
+fn null_safe_access_on_a_class_finds_no_instance_members() {
+    let result = eval(
+        r#"
+import "pkl:test"
+class Person { foo = 1; function bar() = 2 }
+res1 = test.catch(() -> Person?.foo)
+res2 = test.catch(() -> Person?.bar())
+"#,
+    );
+    assert!(
+        result["res1"]
+            .as_str()
+            .unwrap()
+            .contains("Cannot find property `foo`")
+    );
+    assert!(
+        result["res2"]
+            .as_str()
+            .unwrap()
+            .contains("Cannot find method `bar`")
+    );
+}

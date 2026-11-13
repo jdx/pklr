@@ -182,6 +182,11 @@ impl Evaluator {
                     _ => {}
                 }
             }
+            if let Some(result) =
+                self.special_receiver_call(obj_expr, &obj, method, args, &evaled_args, scope, depth)
+            {
+                return *result;
+            }
             if let Some(result) = self.eval_method_call(&obj, method, &evaled_args, depth)? {
                 return Ok(result);
             }
