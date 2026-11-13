@@ -620,7 +620,7 @@ pub(super) fn listing_spread_values(value: Value) -> Result<Arc<Vec<Value>>> {
         value @ Value::Object(_, None) => Err(stdlib::error_with_values(
             format!(
                 "Cannot spread value of type `{}` into object of type `Listing`.",
-                pkl_class_name(&value)
+                "Map"
             ),
             &[("Value", &value)],
         )),

@@ -8410,3 +8410,14 @@ v {
     );
     assert_eq!(json["v"]["foo"]["x"], 3);
 }
+
+#[test]
+fn map_spread_into_listing_names_map_and_int_seq_has_no_to_map() {
+    let v = eval(
+        "import \"pkl:test\"\n\
+         a = test.catch(() -> new Listing { ...Map() })\n\
+         b = test.catch(() -> IntSeq(1, 3).toMap((x) -> x, (x) -> x))",
+    );
+    assert!(v["a"].as_str().unwrap().contains("type `Map`"), "{v}");
+    assert!(v["b"].as_str().is_some(), "{v}");
+}

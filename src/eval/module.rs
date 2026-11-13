@@ -1221,6 +1221,14 @@ impl Evaluator {
         depth: usize,
         failures: &mut IndexMap<Name, String>,
     ) {
+        // The inherited type is resolved here, where a child alias of the same
+        // name could shadow the base's; leave such a child unchecked.
+        if body
+            .iter()
+            .any(|entry| matches!(entry, Entry::TypeAlias(..)))
+        {
+            return;
+        }
         for entry in body.iter() {
             let Entry::Property(prop) = entry else {
                 continue;
