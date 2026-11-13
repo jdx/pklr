@@ -3432,6 +3432,8 @@ fn without_default_marks(ty: &crate::parser::TypeExpr) -> crate::parser::TypeExp
             bare(name),
             arguments.iter().map(without_default_marks).collect(),
         ),
-        TypeExpr::Constrained(..) => ty.clone(),
+        TypeExpr::Constrained(base, constraint, form) => {
+            TypeExpr::Constrained(bare(base), constraint.clone(), *form)
+        }
     }
 }
