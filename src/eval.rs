@@ -183,6 +183,14 @@ pub struct Evaluator {
     /// rendering it would output (see `PoisonedMember::rendered`), so the
     /// output must be checked for one.
     rendered_member_failed: bool,
+    /// Per module namespace, the properties that pass `module` to
+    /// `relativePathTo` (with whether the module renders them). An amended
+    /// copy of the module makes `module` the amending object, so reading one
+    /// of them there fails.
+    module_arg_members: HashMap<String, Vec<(Name, bool)>>,
+    /// Set when `relativePathTo(module)` runs, so the module member being
+    /// evaluated can be recorded in `module_arg_members`.
+    module_arg_used: bool,
     /// Environment variables read during evaluation (name → observed value).
     env_reads: BTreeMap<String, Option<String>>,
     /// Local files currently being evaluated with inherited scope.

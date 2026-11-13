@@ -3,6 +3,8 @@
 
 use super::*;
 
+const MESSAGE: &str = "Expected a module as argument, but got an object that amends a module.";
+
 impl Evaluator {
     /// The URI of the module an expression names: `module`, an import's name
     /// or an `import(...)` expression. `None` for any other expression, whose
@@ -69,5 +71,54 @@ impl Evaluator {
                 "No descendent path exists between modules `{from}` and `{to}`."
             ))),
         })
+    }
+
+    /// An amended copy of the module: `module` now names the amending object,
+    /// which `relativePathTo` rejects, so reading a member that passes it
+    /// fails (an overlay that assigns the member replaces it).
+    pub(super) fn poison_module_arguments(
+        &self,
+        amended: Value,
+        overlay: &[Entry],
+        scope: &Scope,
+    ) -> Value {
+        let Some(members) = scope
+            .type_namespace
+            .as_ref()
+            .and_then(|namespace| self.module_arg_members.get(namespace))
+        else {
+            return amended;
+        };
+        let Value::Object(map, source) = amended else {
+            return amended;
+        };
+        let mut source = source.map_or_else(
+            || ObjectSource {
+                kind: ObjectKind::Object,
+                ..mapping::mapping_source()
+            },
+            Arc::unwrap_or_clone,
+        );
+        let mut poisoned = source
+            .poisoned_members
+            .as_deref()
+            .cloned()
+            .unwrap_or_default();
+        for (name, rendered) in members {
+            let assigned = overlay
+                .iter()
+                .any(|entry| matches!(entry, Entry::Property(prop) if prop.name == *name && prop.value.is_some() && !has_modifier(&prop.modifiers, Modifier::Local)));
+            if !assigned {
+                poisoned.insert(
+                    name.clone(),
+                    PoisonedMember {
+                        message: MESSAGE.into(),
+                        rendered: *rendered,
+                    },
+                );
+            }
+        }
+        source.poisoned_members = Some(Arc::new(poisoned));
+        Value::Object(map, Some(Arc::new(source)))
     }
 }

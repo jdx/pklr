@@ -4571,3 +4571,72 @@ fn relative_path_to_requires_the_modules_to_exist() {
     .unwrap();
     assert!(pklr::eval_to_json(&root).is_err());
 }
+
+#[test]
+fn relative_path_to_rejects_an_amended_module_argument() {
+    let temp = TestTempDir::new("pklr_test_relative_path_to_amended");
+    let root = temp.path().join("root.pkl");
+    let source = |tail: &str| {
+        format!(
+            "hidden path: List<String> = import(\"root.pkl\").relativePathTo(module)\ndummy = 42\n{tail}\n"
+        )
+    };
+    // Reading the member through an amendment makes `module` the amending
+    // object, which is not a module.
+    std::fs::write(&root, source("result = (module) { dummy = 0 }.path")).unwrap();
+    let err = pklr::eval_to_json(&root).unwrap_err().to_string();
+    assert!(
+        err.contains("Expected a module as argument, but got an object that amends a module."),
+        "{err}"
+    );
+    // Not reading it, or replacing it, is fine, as is the module itself.
+    std::fs::write(&root, source("other = (module) { dummy = 0 }.dummy")).unwrap();
+    assert_eq!(pklr::eval_to_json(&root).unwrap()["other"], 0);
+    std::fs::write(
+        &root,
+        source("replaced = (module) { path = List(\"x\") }.path"),
+    )
+    .unwrap();
+    assert_eq!(
+        pklr::eval_to_json(&root).unwrap()["replaced"],
+        serde_json::json!(["x"])
+    );
+}
+
+#[test]
+fn relative_path_to_amended_module_argument_edge_cases() {
+    let temp = TestTempDir::new("pklr_test_relative_path_to_amended_edges");
+    let root = temp.path().join("root.pkl");
+    let msg = "Expected a module as argument, but got an object that amends a module.";
+    // A wrapped call, and the amendment evaluated before the member.
+    std::fs::write(
+        &root,
+        "result = (module) { dummy = 0 }.path\n\
+         hidden path = if (true) module.relativePathTo(module) else List()\n\
+         dummy = 42\n",
+    )
+    .unwrap();
+    let err = pklr::eval_to_json(&root).unwrap_err().to_string();
+    assert!(err.contains(msg), "{err}");
+    // An unrelated member of the same name in a nested object is not affected.
+    std::fs::write(
+        &root,
+        "c { a = module.relativePathTo(module) }\na = 42\nresult = (module) {}.a\n",
+    )
+    .unwrap();
+    assert_eq!(pklr::eval_to_json(&root).unwrap()["result"], 42);
+}
+
+#[test]
+fn relative_path_to_amended_module_argument_with_unloaded_receiver() {
+    let temp = TestTempDir::new("pklr_test_relative_path_to_amended_import");
+    std::fs::write(temp.path().join("other.pkl"), "x = 1\n").unwrap();
+    let root = temp.path().join("root.pkl");
+    std::fs::write(
+        &root,
+        "hidden path = import(\"other.pkl\").relativePathTo(module)\nresult = (module) {}.path\n",
+    )
+    .unwrap();
+    let err = pklr::eval_to_json(&root).unwrap_err().to_string();
+    assert!(err.contains("Expected a module as argument"), "{err}");
+}

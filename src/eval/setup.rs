@@ -130,6 +130,8 @@ impl Evaluator {
             scope_keys: HashMap::default(),
             layered_scopes: HashMap::default(),
             rendered_member_failed: false,
+            module_arg_members: HashMap::default(),
+            module_arg_used: false,
             env_reads: BTreeMap::new(),
             scoped_imports_in_flight: HashSet::default(),
             capabilities: Box::new(capabilities),
@@ -307,6 +309,7 @@ impl Evaluator {
         self.scope_keys.clear();
         self.layered_scopes.clear();
         self.rendered_member_failed = false;
+        self.module_arg_members.clear();
         self.scoped_imports_in_flight.clear();
         self.converters.clear();
         self.output_props.clear();

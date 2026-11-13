@@ -975,6 +975,11 @@ impl Evaluator {
             if let Value::Lambda(params, ..) = &base {
                 return Ok(amended_function(params.len(), base, overlay_entries, scope));
             }
+            let base = if matches!(left, Expr::Ident(name) if name == "module") {
+                self.poison_module_arguments(base, overlay_entries, scope)
+            } else {
+                base
+            };
             return self.eval_value_amendment(base, overlay_entries, scope, depth);
         }
 
