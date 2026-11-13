@@ -2285,3 +2285,31 @@ fn class_converters_tell_same_named_classes_apart() {
         serde_json::json!({"a": "A", "b": {"x": 2}, "s": "A"})
     );
 }
+
+// A property annotation a class inherits through an intermediate class that
+// does not redeclare the property resolves its names where it was written,
+// not in the intermediate class's module.
+#[cfg(feature = "native-io")]
+#[test]
+fn inherited_property_annotations_resolve_in_their_declaring_module() {
+    let dir = TestTempDir::new("pklr_annotation_scope_chain");
+    std::fs::write(
+        dir.path().join("a.pkl"),
+        "import \"pkl:json\" as tags\nopen class A {\n  @tags.Property { name = \"renamed\" }\n  p: Int = 1\n  q: Int = 2\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("b.pkl"),
+        "import \"a.pkl\"\nopen class B extends a.A {\n  q: Int = 9\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("c.pkl"),
+        "import \"b.pkl\"\nclass C extends b.B {\n  p: Int = 6\n}\nv = new C {}\noutput { renderer = new JsonRenderer {} }\n",
+    )
+    .unwrap();
+    assert_eq!(
+        pklr::eval_to_json(&dir.path().join("c.pkl")).unwrap(),
+        serde_json::json!({"v": {"renamed": 6, "q": 9}})
+    );
+}

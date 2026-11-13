@@ -268,33 +268,64 @@ impl Evaluator {
                         // An annotation on a property the parent declares also
                         // applies to the child's override, ahead of its own,
                         // and is evaluated where the parent declared it.
-                        let inherited_annotations: Vec<(Name, Vec<crate::parser::Annotation>)> =
-                            psrc.entries
+                        let mut inherited_annotations: Vec<(
+                            Name,
+                            Vec<crate::parser::Annotation>,
+                            Arc<CapturedScope>,
+                        )> = Vec::new();
+                        for (index, entry) in psrc.entries.iter().enumerate() {
+                            let Entry::Property(p) = entry else {
+                                continue;
+                            };
+                            if !child_names.contains(&p.name) {
+                                continue;
+                            }
+                            let annotations: Vec<_> = p
+                                .annotations
                                 .iter()
-                                .filter_map(|entry| match entry {
-                                    Entry::Property(p) if child_names.contains(&p.name) => {
-                                        let annotations: Vec<_> = p
-                                            .annotations
-                                            .iter()
-                                            .filter(|annotation| {
-                                                !super::module::STDLIB_ANNOTATIONS
-                                                    .contains(&&*annotation.name)
-                                            })
-                                            .cloned()
-                                            .collect();
-                                        (!annotations.is_empty())
-                                            .then(|| (p.name.clone(), annotations))
-                                    }
-                                    _ => None,
+                                .filter(|annotation| {
+                                    !super::module::STDLIB_ANNOTATIONS.contains(&&*annotation.name)
                                 })
+                                .cloned()
                                 .collect();
+                            if annotations.is_empty() {
+                                continue;
+                            }
+                            // An entry the parent copied from its own parent
+                            // keeps the scope that declared it.
+                            let scope = psrc
+                                .entry_scopes
+                                .get(index)
+                                .cloned()
+                                .flatten()
+                                .unwrap_or_else(|| Arc::clone(&parent_scope));
+                            inherited_annotations.push((p.name.clone(), annotations, scope));
+                        }
                         if !inherited_annotations.is_empty() || psrc.module_annotations.is_some() {
-                            src.module_annotations =
-                                Some(Arc::new(crate::value::ModuleAnnotations {
-                                    properties: inherited_annotations.clone(),
-                                    scope: (*parent_scope).clone(),
-                                    parent: psrc.module_annotations.clone(),
+                            // One level per declaring scope, so each
+                            // annotation resolves its names where it was written.
+                            let mut level = psrc.module_annotations.clone();
+                            let mut groups: Vec<(Arc<CapturedScope>, Vec<_>)> = Vec::new();
+                            for (name, annotations, scope) in inherited_annotations {
+                                match groups
+                                    .iter_mut()
+                                    .find(|(known, _)| Arc::ptr_eq(known, &scope))
+                                {
+                                    Some((_, properties)) => properties.push((name, annotations)),
+                                    None => groups.push((scope, vec![(name, annotations)])),
+                                }
+                            }
+                            if groups.is_empty() {
+                                groups.push((Arc::clone(&parent_scope), Vec::new()));
+                            }
+                            for (scope, properties) in groups {
+                                level = Some(Arc::new(crate::value::ModuleAnnotations {
+                                    properties,
+                                    scope: (*scope).clone(),
+                                    parent: level,
                                 }));
+                            }
+                            src.module_annotations = level;
                         }
                         let mut prepared_child: Vec<(Entry, Option<Arc<CapturedScope>>)> =
                             Vec::new();
