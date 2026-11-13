@@ -1,0 +1,2849 @@
+C	47	abstract,external	Any		
+D	The top type of the type hierarchy.
+D	
+D	Every type is a subtype of [Any].
+D	
+D	The following operators are supported for all values:
+D	
+D	```
+D	value1 == value2 // equality
+D	value1 != value2 // inequality
+D	value.member     // member access
+D	value?.member    // conditional member access; returns `value.member` if `value` is non-null and `null` otherwise
+D	value ?? default // null coalescing; returns `value` if `value` is non-null and `default` otherwise
+D	value!!          // non-null assertion; throws if `value` is `null`, and returns `value` otherwise
+D	value is String  // type test
+D	value as String  // type cast; throws an error unless `value is String`
+D	```
+M	49		getClass		
+D	Returns the class of [this].
+M	54		toString		
+D	Returns a string representation of [this].
+D	
+D	This method is used to convert the values of string interpolation expressions to strings.
+M	60		ifNonNull	:Result	transform
+D	Returns `this |> transform` if [this] is non-null, and [null] otherwise.
+D	
+D	This method is the complement of the `??` operator and the equivalent of an `Option` type's
+D	`map` and `flatMap` methods.
+C	66	external	Null		Any
+D	The type of [null] and null values created with [Null()].
+D	
+D	All null values are pairwise equal according to `==`.
+C	72	external	Class	out:Type	Any
+D	The runtime representation of a class.
+P	74		simpleName
+D	The unqualified name of this class.
+C	78	external	TypeAlias		Any
+D	The runtime representation of a type alias.
+C	81	abstract,external	Module		
+D	Base class for modules.
+M	97		relativePathTo		other
+D	Returns the relative, descendent directory path between this module and [other].
+D	
+D	Throws if no such path exists.
+D	
+D	For example, if module `mod1` has path `/dir1/mod1.pkl`, and module `mod2` has path
+D	`/dir1/dir2/dir3/mod2.pkl`, then `mod1.relativePathTo(mod2)` will return
+D	`List("dir2", "dir3")`.
+D	
+D	A common use case is to compute the directory path between a template located at the root of a
+D	hierarchy (say `rootModule.pkl`) and the currently evaluated module (accessible via the
+D	`module` keyword):
+D	```
+D	import "rootModule.pkl" // self-import
+D	path = rootModule.relativePathTo(module)
+D	```
+P	103	hidden	output
+D	The output of this module.
+D	
+D	Defaults to all module properties rendered as either Pcf or the format specified on the
+D	command line.
+C	140	abstract	Annotation		
+D	Base class for annotation types.
+C	143		Since		Annotation
+D	Indicates that the annotated member was introduced in [version].
+P	145		version
+D	The version that the annotated member was introduced in.
+C	149		Deprecated		Annotation
+D	Indicates that the annotated member is deprecated and will likely be removed in the future.
+P	151		since
+D	The version in which the annotated member became deprecated.
+P	159		message
+D	A message explaining how to deal with the deprecation.
+D	
+D	The message may contain member links, should end with a period, and should not contain line
+D	breaks.
+D	
+D	Example: `"Use [String.codePoints] instead."`
+P	182		replaceWith
+D	The code fragment to replace usages of the deprecated member with.
+D	
+D	Setting this property instructs tools to automatically replace usages of the deprecated
+D	member.
+D	For human instructions, use [message].
+D	
+D	Examples:
+D	```
+D	// replace usages of a deprecated class or type alias with `Inventory`
+D	replaceWith = "Inventory"
+D	// replace usages of a deprecated property or method with `inventory`
+D	replaceWith = "inventory"
+D	// replace usages of a deprecated property or method with `store.inventory`
+D	// and an import of `store`, which must resolve to an import of the current module
+D	replaceWith = "store.inventory"
+D	// replace usages of a deprecated property or method with `order(42)`
+D	replaceWith = "order(42)"
+D	// replace usages of a deprecated method (that has a parameter named `amount`) with `order(amount)`
+D	replaceWith = "order(amount)"
+D	```
+A	SourceCode	language=PklExpr
+C	188		AlsoKnownAs		Annotation
+D	Lists alternative names that the annotated member is known under.
+D	
+D	The alternative names will be included in Pkldoc's search index.
+P	190		names
+D	The alternative names for the annotated member.
+C	194		Unlisted		Annotation
+D	Indicates that the annotated member should not be advertised by Pkldoc and other tools.
+C	197		DocExample		Annotation
+D	Indicates to Pkldoc that the annotated module is an example for how to use [subjects].
+P	199		subjects
+D	The fully qualified names of the modules that are the subjects of the example.
+C	203		SourceCode		Annotation
+D	Indicates that the annotated property's string value contains source code written in [language].
+P	210		language
+D	The language that the source code is written in.
+D	
+D	Examples:
+D	- `"x = 42"` is valid source code for language `"Pkl"`.
+D	- `"42"` is valid source code for language `"PklExpr"`.
+D	- `"42"` is valid source code for language `"Pkl"` with [prefix] `"x = "`.
+P	226		prefix
+D	A source code prefix to help tools understand the source code.
+D	
+D	For example, an expression may not be considered valid unless wrapped in a statement.
+P	231		suffix
+D	A source code suffix to help tools understand the source code.
+D	
+D	For example, an expression may not be considered valid unless wrapped in a statement.
+C	245		ModuleInfo		Annotation
+D	Metadata for a module.
+D	
+D	To annotate a module, place the annotation
+D	before the `module`, `amends`, or `extends` keyword, whichever comes first.
+D	
+D	```
+D	@ModuleInfo { minPklVersion = "1.2.3"; author = "author@apple.com" }
+D	module myModule
+D	```
+D	
+D	All library modules should have a [ModuleInfo] annotation.
+P	251		minPklVersion
+D	The minimum Pkl version required by this module.
+D	
+D	The expected format is `"major.minor.patch"`.
+D	
+D	This version constraint is enforced by the Pkl runtime.
+C	255	open	FileOutput		
+D	A representation of a rendered output.
+P	257		value
+D	The value to render.
+P	260		renderer
+D	The renderer for [value].
+P	263		text
+D	The textual rendered output.
+P	273		bytes
+D	The underlying byte output.
+D	
+D	If unset, defaults to the UTF-8 encoding of [text].
+A	Since	version=0.29.0
+C	278		ModuleOutput		FileOutput
+D	The contents and appearance of a module's output.
+P	305		files
+D	The files to be produced by this module when rendering in multiple file output mode.
+D	
+D	Keys determine file paths, and may include subdirectories.
+D	[FileOutput.text] determines file contents.
+D	
+D	Example:
+D	```
+D	output {
+D	  files {
+D	    ["foo/bar.yml"] {
+D	      value = new { bar = "bar" }
+D	      renderer = new YamlRenderer {}
+D	    }
+D	  }
+D	}
+D	```
+D	
+D	A file can be set to the `output` of another module.
+D	For example:
+D	```
+D	output {
+D	  files {
+D	    ["foo.yml"] = import("foo.pkl").output
+D	  }
+D	}
+D	```
+C	310	abstract	BaseValueRenderer		
+D	Base class for rendering Pkl values in some output format.
+A	Since	version=0.30.0
+P	353		converters
+D	Value converters to apply before values are rendered.
+D	
+D	A value converter is a function that converts a value to another value
+D	immediately before the value is rendered (and after the value has been type-checked).
+D	The converted value is then rendered by the renderer's hardwired rendering logic.
+D	
+D	When a converter returns a value of type [Object], [Collection], [Map], or [Pair],
+D	converters are recursively applied to the returned value's components (object properties,
+D	list elements, etc.).
+D	
+D	At most one converter is applied per value.
+D	If multiple converters are applicable, a winner is chosen as follows:
+D	- A converter with [String] key wins over a converter with [Class] key.
+D	- Between multiple [String] key converters, the converter defined earlier
+D	  (according to the mapping's definition order) wins.
+D	- Between multiple [Class] key converters, the most specific class (according to class
+D	  hierarchy) wins.
+D	
+D	A converter's key specifies which values the converter should be applied to.
+D	A converter with [Class] key is applied to values of that class, including values of its
+D	subclasses.
+D	A converter with [String] key is applied to values whose path matches the *path spec*
+D	described by the string.
+D	
+D	Path specs can have the following components:
+D	- `^` matches the top-level value passed to `renderDocument()` or `renderValue()` (often the
+D	   module object)
+D	- `pigeon` matches property `pigeon` at any hierarchy level
+D	- `[pigeon]` matches map(ping) entry with String key `"pigeon"` at any hierarchy level
+D	- `*` matches any property
+D	- `[*]` matches any list(ing) element or map(ping) entry
+D	
+D	Here are some examples of valid property paths:
+D	- `"server"`
+D	- `"server.timeout"`
+D	- `"^server.timeout"` (matches `server.timeout`, but not `racks[12345].server.timeout`)
+D	- `"racks[12345].server"`
+D	- `"racks[*].server`
+D	
+D	Paths are matched against path specs component-wise in reverse order.
+D	For example, paths `server.timeout` and `racks[*].server.timeout`
+D	both match path spec `server.timeout`, whereas path `server.timeout.millis` does not.
+P	364		convertPropertyTransformers
+D	Customizations for [ConvertProperty] annotation behaviors.
+D	
+D	This property is consulted to transform [ConvertProperty] annotation values.
+D	This can be used to customize or override the conversion behavior for a specific renderer.
+D	If multiple entries match the annotation's class, the most specific class (according to class
+D	hierarchy) wins.
+D	
+D	See [ConvertProperty] for detailed information.
+A	Since	version=0.31.0
+P	368		extension
+D	The file extension associated with this output format,
+D	or [null] if this format does not have an extension.
+C	413	open	ConvertProperty		Annotation
+D	Conversion to be applied to properties when rendered through [BaseValueRenderer].
+D	
+D	During rendering, the annotation's [render] function is called.
+D	The function must return a [Pair] of the converted property name and value.
+D	
+D	Multiple [ConvertProperty] annotations can apply per property, and the output of one
+D	annotation's [render] function is used as input to the next.
+D	Annotations are applied the order as declared on the property.
+D	If the annotated property is overriding a parent property, the parent property's annotations are
+D	applied first.
+D	
+D	These conversions can coexist with [BaseValueRenderer.converters], and applies first.
+D	
+D	These conversions only affect rendering of class properties.
+D	Applying this to other types of members does not impact rendering.
+D	
+D	These conversions can be overriden with [BaseValueRenderer.convertPropertyTransformers].
+D	
+D	Example:
+D	
+D	```
+D	// convert duration to the number of seconds
+D	@ConvertProperty {
+D	  render = (property, _) -> Pair(property.key, property.value.toUnit("s"))
+D	}
+D	timeout: Duration
+D	```
+D	
+D	[ConvertProperty] can be subclassed to define re-usable property converters.
+D	The conversion defined in the previous example can be rewritten as:
+D	
+D	```
+D	class ConvertDuration extends ConvertProperty {
+D	  unit: DurationUnit
+D	
+D	  render = (property: Pair<String, Duration>, _) -> Pair(property.key, property.value.toUnit(unit))
+D	}
+D	
+D	@ConvertDuration { unit = "s" }
+D	timeout: Duration
+D	```
+A	Since	version=0.31.0
+P	416	hidden	render
+D	Function called by [BaseValueRenderer] types during rendering to transform property
+D	names and values.
+C	423	abstract	ValueRenderer		BaseValueRenderer
+D	Base class for rendering Pkl values in some textual output format.
+D	
+D	A renderer's output is guaranteed to be well-formed unless [RenderDirective] is part of the
+D	input.
+M	430	abstract	renderDocument		value
+D	Renders [value] as a complete document.
+D	
+D	Some renderers impose restrictions on which types of values can be rendered as document.
+D	
+D	A typical implementation of this method renders a document header/footer
+D	and otherwise delegates to [renderValue()].
+M	433	abstract	renderValue		value
+D	Renders [value].
+C	441	abstract	BytesRenderer		BaseValueRenderer
+D	Base class for rendering Pkl values in some binary output format.
+D	
+D	A renderer's output is guaranteed to be well-formed unless [RenderDirective] is part of the
+D	input.
+A	Since	version=0.30.0
+M	448	abstract	renderDocument		value
+D	Renders [value] as a complete document.
+D	
+D	Some renderers impose restrictions on which types of values can be rendered as document.
+D	
+D	A typical implementation of this method renders a document header/footer
+D	and otherwise delegates to [renderValue()].
+M	451	abstract	renderValue		value
+D	Renders [value].
+C	455		PcfRenderer		ValueRenderer
+D	Renders values as Pcf, a static subset of Pkl.
+P	456		extension
+P	460		indent
+D	The characters to use for indenting output.
+D	Defaults to two spaces.
+P	463		omitNullProperties
+D	Whether to skip rendering properties whose value is [null].
+P	469		useCustomStringDelimiters
+D	Whether to use custom string delimiters for string values.
+D	
+D	If [true], custom string delimiters (such as `#"..."#`) are preferred
+D	over escaping quotes and backslashes.
+M	471		renderDocument		value
+M	473		renderValue		value
+C	505		RenderDirective		
+D	Directs a [ValueRenderer] to output [text] as-is in place of this directive.
+D	
+D	[RenderDirective] is an escape hatch for exceptional cases.
+D	It gives full control over how a value is rendered
+D	without having to manipulate `output.text` as a whole.
+D	It is the user's responsibility to ensure that the resulting output is well-formed.
+D	
+D	Example:
+D	```
+D	name = "Pigeon"
+D	hobby = "singing"
+D	
+D	output {
+D	  renderer = new JsonRenderer {
+D	    converters {
+D	      // render String values without quotes (not valid JSON)
+D	      [String] = (str) -> new RenderDirective { text = str }
+D	    }
+D	  }
+D	}
+D	```
+D	
+D	Output:
+D	```
+D	{
+D	  "name": Pigeon
+D	  "hobby": singing
+D	}
+D	```
+P	507		text
+D	The text to output as-is (without escaping or quoting).
+P	513		bytes
+D	The bytes to output as-is (without escaping or quoting).
+D	
+D	Only used by [BytesRenderer], ignored by [ValueRenderer].
+A	Since	version=0.30.0
+C	517		PcfRenderDirective		
+D	Directs [PcfRenderer] to output additional text [before] and/or [after] rendering a [value].
+P	519		before
+D	The text to output before rendering [value].
+P	522		value
+D	The value to render.
+P	525		after
+D	The text to output after rendering [value].
+C	539		JsonRenderer		ValueRenderer
+D	Renders values as JSON.
+D	
+D	The [json.Property] annotation can be used to change how a property name renders into JSON.
+D	
+D	Example:
+D	```
+D	import "pkl:json"
+D	
+D	@json.Property { name = "wing_span" }
+D	wingSpan: Int
+D	```
+P	540		extension
+P	543		indent
+D	The characters to use for indenting output.
+P	546		omitNullProperties
+D	Whether to omit JSON object fields whose value is `null`.
+M	551		renderDocument		value
+D	Renders [value] as a JSON document.
+D	
+D	Every JSON value is a valid JSON document.
+M	553		renderValue		value
+C	569		YamlRenderer		ValueRenderer
+D	Renders values as YAML.
+D	
+D	To render a YAML stream, set [isStream] to [true].
+D	
+D	The [yaml.Property] annotation can be used to change how a property name renders into YAML.
+D	
+D	Example:
+D	```
+D	import "pkl:yaml"
+D	
+D	@yaml.Property { name = "wing_span" }
+D	wingSpan: Int
+D	```
+P	570		extension
+P	581		mode
+D	The YAML version used by consumers of the rendered documents.
+D	
+D	- `"compat"` - YAML 1.1 _or_ 1.2 (default)
+D	- `"1.1"` - YAML 1.1
+D	- `"1.2"` - YAML 1.2 (Core schema)
+D	
+D	At present, the mode only affects which String values are quoted in YAML.
+D	For example, `x = "yes"` is rendered as `x: 'yes'` in modes `"compat"` and `"1.1"`,
+D	and as `x: yes` in mode `"1.2"`.
+P	584		indentWidth
+D	The number of spaces to use for indenting output.
+P	587		omitNullProperties
+D	Whether to skip rendering properties whose value is [null].
+P	591		isStream
+D	If [true], [renderDocument] expects an argument of type [Listing] or [Collection]
+D	and renders it as YAML stream.
+M	596		renderDocument		value
+D	Renders [value] as a YAML document.
+D	
+D	Every YAML value is a valid YAML document.
+M	599		renderValue		value
+D	Renders [value] as YAML value.
+C	609		PListRenderer		ValueRenderer
+D	Renders values as
+D	[XML property lists](https://developer.apple.com/library/content/documentation/Cocoa/Conceptual/PropertyLists/UnderstandXMLPlist/UnderstandXMLPlist.html).
+D	
+D	XML property lists do not support [null] values.
+D	This renderer handles [null] values as follows:
+D	- Object and map properties whose value is [null] are skipped.
+D	- [null] values occurring in a list or set result in an error.
+P	610		extension
+P	613		indent
+D	The characters to use for indenting output.
+M	615		renderDocument		value
+M	617		renderValue		value
+C	654		PropertiesRenderer		ValueRenderer
+D	Renders values as
+D	[Java Properties](https://docs.oracle.com/javase/8/docs/api/java/util/Properties.html).
+D	
+D	Pkl object properties and keys of type [Boolean], [String], [Int], and [Float]
+D	are flattened into dot-separated Java property keys.
+D	
+D	Pkl values of type [Boolean], [String], [Int], and [Float] are rendered as Java property values.
+D	
+D	To render Pkl values of other types, convert them to one of the above types with [converters].
+D	
+D	Example:
+D	```
+D	person {
+D	  name = "Pigeon"
+D	  age = 42
+D	  hobbies = List("surfing", "fire making")
+D	}
+D	
+D	output {
+D	  renderer = new PropertiesRenderer {
+D	    converters {
+D	      // render lists as comma-separated values
+D	      [List] = (it) -> it.join(",")
+D	    }
+D	  }
+D	}
+D	```
+D	
+D	The above example produces the following output:
+D	```
+D	person.name = Pigeon
+D	person.age = 42
+D	person.hobbies = surfing,fire making
+D	```
+P	655		extension
+P	658		omitNullProperties
+D	Whether to skip rendering properties whose value is [null].
+P	662		restrictCharset
+D	Whether to render characters outside the printable US-ASCII charset range as
+D	[Unicode escapes](https://docs.oracle.com/javase/specs/jls/se8/html/jls-3.html#jls-3.3).
+M	664		renderDocument		value
+M	666		renderValue		value
+C	675		Resource		
+D	An external (file, HTTP, etc.) resource.
+D	
+D	Usually, a [Resource] is obtained via a `read()` expression, such as `read("some/file")`.
+D	
+D	When created directly, either of [bytes] or [base64] can be set, and the other will be
+D	computed in terms of the set value.
+P	677		uri
+D	The URI of this resource.
+P	680		text
+D	The text content of this resource.
+P	683		base64
+D	The content of this resource in Base64 encoding.
+P	687	hidden	bytes
+D	The bytes of this resource.
+A	Since	version=0.29.0
+P	694	hidden,fixed	md5
+D	The [MD5](https://en.wikipedia.org/wiki/MD5)
+D	hash of this resource as hexadecimal string.
+D	
+D	MD5 is cryptographically broken and should not be used for secure applications.
+A	Deprecated	since=0.29.0	message=Use bytes.md5 instead
+P	701	hidden,fixed	sha1
+D	The [SHA-1](https://en.wikipedia.org/wiki/SHA-1)
+D	hash of this resource as hexadecimal string.
+D	
+D	SHA-1 is cryptographically broken and should not be used for secure applications.
+A	Deprecated	since=0.29.0	message=Use bytes.sha1 instead
+P	706	hidden,fixed	sha256
+D	The [SHA-256](https://en.wikipedia.org/wiki/SHA-2)
+D	cryptographic hash of this resource as hexadecimal string.
+A	Deprecated	since=0.29.0	message=Use bytes.sha256 instead
+P	711	hidden,fixed	sha256Int
+D	The first 64 bits of the [SHA-256](https://en.wikipedia.org/wiki/SHA-2)
+D	cryptographic hash of this resource.
+A	Deprecated	since=0.29.0	message=Use bytes.sha256Int instead
+C	741	abstract,external	Number		Any
+D	Common base class of [Int] and [Float].
+D	
+D	## Arithmetic Operators
+D	```
+D	-a     // negation
+D	a + b  // addition
+D	a - b  // subtraction
+D	a * b  // multiplication
+D	a / b  // division
+D	a ~/ b // integer division
+D	a % b  // remainder
+D	a ** b // exponentiation
+D	```
+D	
+D	## Comparison Operators
+D	```
+D	a == b // equality
+D	a != b // inequality
+D	a < b  // less than
+D	a > b  // greater than
+D	a <= b // less than or equal
+D	a >= b // greater than or equal
+D	```
+D	
+D	## Number vs. Float
+D	To allow transparent use of [Float] and [Int],
+D	use [Number] instead of [Float] in type annotations.
+P	743	abstract	ns
+D	A [Duration] with value [this] and unit `"ns"` (nanoseconds).
+P	746	abstract	us
+D	A [Duration] with value [this] and unit `"us"` (microseconds).
+P	749	abstract	ms
+D	A [Duration] with value [this] and unit `"ms"` (milliseconds).
+P	752	abstract	s
+D	A [Duration] with value [this] and unit `"s"` (seconds).
+P	755	abstract	min
+D	A [Duration] with value [this] and unit `"min"` (minutes).
+P	758	abstract	h
+D	A [Duration] with value [this] and unit `"h"` (hours).
+P	761	abstract	d
+D	A [Duration] with value [this] and unit `"d"` (days).
+P	764	abstract	b
+D	A [DataSize] with value [this] and unit `"b"` (bytes).
+P	772	abstract	kb
+D	A [DataSize] with value [this] and unit `"kb"` (kilobytes).
+D	
+D	Facts:
+D	```
+D	1.kb == 1000.b
+D	```
+P	780	abstract	mb
+D	A [DataSize] with value [this] and unit `"mb"` (megabytes).
+D	
+D	Facts:
+D	```
+D	1.mb == 1000.kb
+D	```
+P	788	abstract	gb
+D	A [DataSize] with value [this] and unit `"gb"` (gigabytes).
+D	
+D	Facts:
+D	```
+D	1.gb == 1000.mb
+D	```
+P	796	abstract	tb
+D	A [DataSize] with value [this] and unit `"tb"` (terabytes).
+D	
+D	Facts:
+D	```
+D	1.tb == 1000.gb
+D	```
+P	804	abstract	pb
+D	A [DataSize] with value [this] and unit `"pb"` (petabytes).
+D	
+D	Facts:
+D	```
+D	1.pb == 1000.tb
+D	```
+P	812	abstract	kib
+D	A [DataSize] with value [this] and unit `"kib"` (kibibytes).
+D	
+D	Facts:
+D	```
+D	1.kib == 1024.b
+D	```
+P	820	abstract	mib
+D	A [DataSize] with value [this] and unit `"mib"` (mebibytes).
+D	
+D	Facts:
+D	```
+D	1.mib == 1024.kib
+D	```
+P	828	abstract	gib
+D	A [DataSize] with value [this] and unit `"gib"` (gibibytes).
+D	
+D	Facts:
+D	```
+D	1.gib == 1024.mib
+D	```
+P	836	abstract	tib
+D	A [DataSize] with value [this] and unit `"tib"` (tebibytes).
+D	
+D	Facts:
+D	```
+D	1.tib == 1024.gib
+D	```
+P	844	abstract	pib
+D	A [DataSize] with value [this] and unit `"pib"` (pebibytes).
+D	
+D	Facts:
+D	```
+D	1.pib == 1024.tib
+D	```
+P	851	abstract	sign
+D	The sign of this number.
+D	
+D	Returns `0` for `0`, `0.0`, `-0.0`, and [NaN],
+D	`1` for positive numbers (including [Infinity]),
+D	and `-1` for negative numbers (including `-`[Infinity]).
+P	865	abstract	abs
+D	The absolute value of this number.
+D	
+D	Facts:
+D	```
+D	42.abs == 42
+D	-42.abs == 42
+D	0.0.abs == 0.0
+D	(-0.0).abs == 0.0
+D	Infinity.abs == Infinity
+D	(-Infinity).abs == Infinity
+D	NaN.abs == NaN
+D	```
+P	873	abstract	ceil
+D	Rounds this number to the next mathematical integer towards [Infinity].
+D	
+D	If [this] is an [Int], returns [this].
+D	If [this] is [NaN], [Infinity], -[Infinity], `0.0`, or `-0.0`, returns [this].
+D	Otherwise, returns the smallest [Float] that is greater than or equal to [this]
+D	and is equal to a mathematical integer.
+P	881	abstract	floor
+D	Rounds this number to the next mathematical integer towards -[Infinity].
+D	
+D	If [this] is an [Int], returns [this].
+D	If [this] is [NaN], [Infinity], -[Infinity], `0.0`, or `-0.0`, returns [this].
+D	Otherwise, returns the largest [Float] that is less than or equal to [this]
+D	and is equal to a mathematical integer.
+M	891	abstract	round		
+D	Rounds this number to the nearest mathematical integer, breaking ties in favor
+D	of the even integer.
+D	
+D	If [this] is an [Int], returns [this].
+D	If [this] is [NaN], [Infinity], -[Infinity], `0.0`, or `-0.0`, returns [this].
+D	Otherwise, return the [Float] that is nearest to [this] and is equal to a
+D	mathematical integer. If two mathematical integers are equally near, returns
+D	the even integer.
+M	902	abstract	truncate		
+D	Rounds this number to the next mathematical integer towards zero.
+D	
+D	If [this] is an [Int], returns [this].
+D	If [this] is [NaN], [Infinity], -[Infinity], `0.0`, or `-0.0`, returns [this].
+D	If [this] is less than zero, returns the smallest [Float] that is greater than or equal to
+D	[this] and is equal to a mathematical integer.
+D	Otherwise, returns the largest [Float] that is less than or equal to [this]
+D	and is equal to a mathematical integer.
+M	910	abstract	toInt		
+D	Converts this number to an [Int].
+D	
+D	If [this] is an [Int], returns [this].
+D	If [this] is [NaN], [Infinity], or -[Infinity], throws an error.
+D	Otherwise, returns the [Int] representation for `this.truncate()`.
+D	If `this.truncate()` is not representable in (that is, too large for) [Int], throws an error.
+M	917	abstract	toFloat		
+D	Converts this number to a [Float].
+D	
+D	If [this] is a [Float], returns [this].
+D	Otherwise, returns the [Float] representation for [this].
+D	If [this] is not representable in [Float], returns the [Float] nearest to [this].
+M	920	abstract	toString		
+D	Converts this number to its decimal string representation.
+M	924	abstract	toFixed		fractionDigits
+D	Converts this number to a decimal fixed-point representation with [fractionDigits] digits
+D	after the decimal point.
+M	927	abstract	toDuration		unit
+D	Converts this number to a duration with [this] value and the given [unit].
+M	930	abstract	toDataSize		unit
+D	Converts this number to a data size with [this] value and the given [unit].
+P	949	abstract	isPositive
+D	Tells if this number is greater than or equal to zero.
+D	
+D	Facts:
+D	```
+D	0.isPositive
+D	(-0).isPositive
+D	0.0.isPositive
+D	(-0.0).isPositive
+D	3.isPositive
+D	3.14.isPositive
+D	Infinity.isPositive
+D	
+D	!(-3).isPositive
+D	!(-3.14).isPositive
+D	!(-Infinity).isPositive
+D	!NaN.isPositive
+D	```
+P	952	abstract	isFinite
+D	Tells if this number is neither [NaN] nor [isInfinite].
+P	955	abstract	isInfinite
+D	Tells if this number is [Infinity] or -[Infinity].
+P	962	abstract	isNaN
+D	Tells if this number is [NaN].
+D	
+D	Always use this method when testing for [NaN].
+D	Note that `x == NaN` is *not* a correct way to test for [NaN] because `NaN != NaN` as per the
+D	IEEE spec.
+P	965	abstract	isNonZero
+D	Tells if this number is not 0.
+M	977	abstract	isBetween		start,inclusiveEnd
+D	Tells if this number is greater than or equal to [start] and less than or equal to
+D	[inclusiveEnd].
+D	
+D	Facts:
+D	```
+D	3.2.isBetween(2.6, 4)
+D	3.2.isBetween(2.6, 3.2)
+D	3.2.isBetween(3.2, 4)
+D	!3.2.isBetween(1, 3.1)
+D	```
+C	993	external	Int		Number
+D	A 64-bit signed integer.
+D	
+D	The following operators are supported for [Number]s:
+D	```
+D	-a     // negation
+D	a + b  // addition
+D	a - b  // subtraction
+D	a * b  // multiplication
+D	a / b  // division
+D	a ~/ b // truncating division
+D	a % b  // remainder
+D	a ** b // exponentiation
+D	```
+P	994		ns
+P	995		us
+P	996		ms
+P	997		s
+P	998		min
+P	999		h
+P	1000		d
+P	1002		b
+P	1004		kb
+P	1005		mb
+P	1006		gb
+P	1007		tb
+P	1008		pb
+P	1010		kib
+P	1011		mib
+P	1012		gib
+P	1013		tib
+P	1014		pib
+P	1016		sign
+P	1018		abs
+P	1020		ceil
+P	1022		floor
+M	1024		round		
+M	1026		truncate		
+M	1028		toInt		
+M	1030		toFloat		
+M	1032		toString		
+M	1044		toRadixString		radix
+D	Converts this number to a string representation in the given radix.
+D	
+D	Digits above 9 are converted to lowercase letters `a` to `z`.
+D	To pad the resulting string with zeros, use [String.padStart()].
+D	
+D	Facts:
+D	```
+D	(-1).toRadixString(20) == "-1"
+D	42.toRadixString(16) == "2a"
+D	```
+M	1046		toFixed		fractionDigits
+M	1048		toDuration		unit
+M	1050		toDataSize		unit
+M	1053		shl		n
+D	Shifts this integer left by [n] bits.
+M	1056		shr		n
+D	Shifts this integer right by [n] bits, preserving the sign bit.
+M	1061		ushr		n
+D	Shifts this integer right by [n] bits, setting the sign bit to zero.
+D	
+D	This operation is known as *unsigned right shift*.
+M	1064		and		n
+D	Bitwise AND of this integer and [n].
+M	1067		or		n
+D	Bitwise OR of this integer and [n].
+M	1070		xor		n
+D	Bitwise XOR of this integer and [n].
+P	1073		inv
+D	Bitwise NOT (inverse) of this integer.
+P	1075		isPositive
+P	1077		isFinite
+P	1079		isInfinite
+P	1081		isNaN
+P	1084		isEven
+D	Tells if this integer is evenly divisible by two.
+P	1087		isOdd
+D	Tells if this number is not [isEven].
+P	1089		isNonZero
+M	1091		isBetween		start,inclusiveEnd
+M	1096		toChar		
+D	Returns the Unicode character with code point [this].
+D	
+D	Throws if [this] is not a valid code point.
+C	1143	external	Float		Number
+D	A 64-bit floating-point number conforming to the IEEE 754 binary64 format.
+D	
+D	The following binary operators are supported for [Number]s:
+D	```
+D	-a     // negative
+D	a + b  // addition
+D	a - b  // subtraction
+D	a * b  // multiplication
+D	a / b  // division
+D	a ~/ b // integer division
+D	a % b  // remainder
+D	a ** b // exponentiation
+D	```
+D	
+D	Tip: To allow transparent use of [Float] and [Int],
+D	use [Number] instead of [Float] in type annotations.
+P	1144		ns
+P	1145		us
+P	1146		ms
+P	1147		s
+P	1148		min
+P	1149		h
+P	1150		d
+P	1152		b
+P	1154		kb
+P	1155		mb
+P	1156		gb
+P	1157		tb
+P	1158		pb
+P	1160		kib
+P	1161		mib
+P	1162		gib
+P	1163		tib
+P	1164		pib
+P	1166		sign
+P	1168		abs
+P	1170		ceil
+P	1172		floor
+M	1174		round		
+M	1176		truncate		
+M	1178		toInt		
+M	1180		toFloat		
+M	1182		toString		
+M	1184		toFixed		fractionDigits
+M	1186		toDuration		unit
+M	1188		toDataSize		unit
+P	1190		isPositive
+P	1192		isFinite
+P	1194		isInfinite
+P	1196		isNaN
+P	1198		isNonZero
+M	1200		isBetween		start,inclusiveEnd
+C	1217	external	Boolean		Any
+D	A boolean value, either [true] or [false].
+D	
+D	The following operators are supported for booleans:
+D	```
+D	!bool          // logical negation
+D	bool1 && bool2 // logical conjunction
+D	bool1 || bool2 // logical disjunction
+D	```
+M	1227		xor		other
+D	Tells if exactly one of [this] and [other] is [true] (exclusive or).
+D	
+D	Facts:
+D	```
+D	!true.xor(true)
+D	true.xor(false)
+D	false.xor(true)
+D	!false.xor(false)
+D	```
+M	1240		implies		other
+D	Tells if [this] implies [other] (logical consequence).
+D	
+D	*Note*: This function does not short-circuit; [other] is always evaluated.
+D	
+D	Facts:
+D	```
+D	true.implies(true)
+D	!true.implies(false)
+D	false.implies(true)
+D	false.implies(false)
+D	```
+C	1253	external	String		Any
+D	A sequence of Unicode characters (code points).
+D	
+D	The following operators are supported for strings:
+D	```
+D	str[3]      // subscript
+D	str1 + str2 // concatenation
+D	```
+P	1264		length
+D	The number of characters in this string.
+D	
+D	*Note*: The runtime complexity of this operation is `O(n)`.
+D	
+D	Facts:
+D	```
+D	"".length == 0
+D	"abc".length == 3
+D	```
+A	AlsoKnownAs	names[]=sizecount
+P	1277		lastIndex
+D	The index of the last character in this string (same as `length - 1`).
+D	
+D	Returns `-1` for an empty string.
+D	
+D	*Note*: The runtime complexity of this operation is `O(n)`.
+D	
+D	Facts:
+D	```
+D	"".lastIndex == -1
+D	"abc".lastIndex == 2
+D	```
+P	1287		isEmpty
+D	Tells whether this string is empty.
+D	
+D	Facts:
+D	```
+D	"".isEmpty
+D	!("   ".isEmpty)
+D	!("abc".isEmpty)
+D	```
+P	1297		isNotEmpty
+D	Tells whether this string is not empty.
+D	
+D	Facts:
+D	```
+D	!"".isNotEmpty
+D	"abc".isNotEmpty
+D	```
+A	Since	version=0.31.0
+P	1308		isBlank
+D	Tells if all characters in this string have Unicode property "White_Space".
+D	
+D	Facts:
+D	```
+D	"".isBlank
+D	"   ".isBlank
+D	"\t\n\r".isBlank
+D	!("abc".isBlank)
+D	```
+P	1320		isNotBlank
+D	Tells if at least one character is not Unicode "White_Space".
+D	
+D	Facts:
+D	```
+D	!"".isNotBlank
+D	!"   ".isNotBlank
+D	!"\t\n\r".isNotBlank
+D	"abc".isNotBlank
+D	```
+A	Since	version=0.31.0
+P	1323		isRegex
+D	Tells if this string is a valid regular expression according to [Regex].
+P	1330		isGlobPattern
+D	Tells if this string is a valid glob pattern.
+D	
+D	For reference, see
+D	<https://pkl-lang.org/main/current/language-reference/index.html#glob-patterns>.
+A	Since	version=0.32.0
+P	1340		isBase64
+D	Tells if this is a valid base64-encoded string.
+D	
+D	Facts:
+D	```
+D	"AQIDBA==".isBase64
+D	!"hello there".isBase64
+D	```
+A	Since	version=0.29.0
+P	1347		md5
+D	The [MD5](https://en.wikipedia.org/wiki/MD5)
+D	hash of this string's UTF-8 byte sequence
+D	as hexadecimal string.
+D	
+D	MD5 is cryptographically broken and should not be used for secure applications.
+P	1353		sha1
+D	The [SHA-1](https://en.wikipedia.org/wiki/SHA-1)
+D	hash of this string's UTF-8 byte sequence.
+D	
+D	SHA-1 is cryptographically broken and should not be used for secure applications.
+P	1358		sha256
+D	The [SHA-256](https://en.wikipedia.org/wiki/SHA-2)
+D	cryptographic hash of this string's UTF-8 byte sequence
+D	as hexadecimal string.
+P	1362		sha256Int
+D	The first 64 bits of the [SHA-256](https://en.wikipedia.org/wiki/SHA-2)
+D	cryptographic hash of this string's UTF-8 byte sequence.
+P	1365		base64
+D	The Base64 encoding of this string's UTF-8 byte sequence.
+P	1373		base64Decoded
+D	The inverse of [base64].
+D	
+D	Facts:
+D	```
+D	"abc".base64.base64Decoded == "abc"
+D	```
+P	1382		base64DecodedBytes
+D	Converts this base64-format string into [Bytes].
+D	
+D	Facts:
+D	```
+D	"AQIDBA==".base64DecodedBytes = Bytes(1, 2, 3, 4)
+D	```
+A	Since	version=0.29.0
+P	1390		chars
+D	The Unicode characters in this string.
+D	
+D	Facts:
+D	```
+D	"abc".chars == List("a", "b", "c")
+D	```
+P	1398		codePoints
+D	The Unicode code points in this string.
+D	
+D	Facts:
+D	```
+D	"abc".codePoints == List(0x61, 0x62, 0x63)
+D	```
+M	1410		getOrNull		index
+D	Returns the character at [index], or [null] if [index] is out of range.
+D	
+D	Facts:
+D	```
+D	"abcde".getOrNull(-1) == null
+D	"abcde".getOrNull(0) == "a"
+D	"abcde".getOrNull(2) == "c"
+D	"abcde".getOrNull(4) == "e"
+D	"abcde".getOrNull(5) == null
+D	```
+M	1425		substring		start,exclusiveEnd
+D	Returns the substring from [start] until [exclusiveEnd].
+D	
+D	Throws if [start] is outside range `0`..[length] or [exclusiveEnd] is outside range
+D	[start]..[length].
+D	
+D	Facts:
+D	```
+D	"abcde".substring(0, 0) == ""
+D	"abcde".substring(0, 1) == "a"
+D	"abcde".substring(1, 4) == "bcd"
+D	"abcde".substring(4, 5) == "e"
+D	"abcde".substring(5, 5) == ""
+D	```
+M	1444		substringOrNull		start,exclusiveEnd
+D	Returns the substring from [start] until [exclusiveEnd].
+D	
+D	Returns [null] if [start] is outside range `0`..[length] or [exclusiveEnd] is outside range
+D	[start]..[length].
+D	
+D	Facts:
+D	```
+D	"abcde".substringOrNull(0, 0) == ""
+D	"abcde".substringOrNull(0, 1) == "a"
+D	"abcde".substringOrNull(1, 4) == "bcd"
+D	"abcde".substringOrNull(4, 5) == "e"
+D	"abcde".substringOrNull(5, 5) == ""
+D	
+D	"abcde".substringOrNull(-1, 3) == null
+D	"abcde".substringOrNull(0, 6) == null
+D	"abcde".substringOrNull(3, 2) == null
+D	```
+M	1454		repeat		count
+D	Concatenates [count] copies of this string.
+D	
+D	Facts:
+D	```
+D	"abc".repeat(0) == ""
+D	"abc".repeat(1) == "abc"
+D	"abc".repeat(3) == "abcabcabc"
+D	```
+M	1457		contains		pattern
+D	Tells whether this string contains [pattern].
+M	1461		matches		regex
+D	Tells whether this string matches [regex] in its entirety.
+A	AlsoKnownAs	names[]=test
+M	1464		startsWith		pattern
+D	Tells whether this string starts with [pattern].
+M	1467		endsWith		pattern
+D	Tells whether this string ends with [pattern].
+M	1473		indexOf		pattern
+D	Returns the zero-based index of the first occurrence of [pattern]
+D	in this string.
+D	
+D	Throws if [pattern] does not occur in this string.
+M	1477		indexOfOrNull		pattern
+D	Returns the zero-based index of the first occurrence of [pattern]
+D	in this string, or [null] if [pattern] does not occur in this string.
+M	1483		lastIndexOf		pattern
+D	Returns the zero-based index of the last occurrence of [pattern]
+D	in this string.
+D	
+D	Throws if [pattern] does not occur in this string.
+M	1487		lastIndexOfOrNull		pattern
+D	Returns the zero-based index of the last occurrence of [pattern]
+D	in this string, or [null] if [pattern] does not occur in this string.
+M	1493		take		n
+D	Returns the first [n] characters of this string.
+D	
+D	Returns [this] if [n] is greater than or equal to [length].
+A	AlsoKnownAs	names[]=limit
+M	1496		takeWhile		predicate
+D	Returns the longest prefix of this string that satisfies [predicate].
+M	1501		takeLast		n
+D	Returns the last [n] characters of this string.
+D	
+D	Returns [this] if [n] is greater than or equal to [length].
+M	1504		takeLastWhile		predicate
+D	Returns the longest suffix of this string that satisfies [predicate].
+M	1510		drop		n
+D	Removes the first [n] characters of this string.
+D	
+D	Returns the empty string if [n] is greater than or equal to [length].
+A	AlsoKnownAs	names[]=skip
+M	1514		dropWhile		predicate
+D	Removes the longest prefix of this string that satisfies [predicate].
+A	AlsoKnownAs	names[]=skipWhile
+M	1520		dropLast		n
+D	Removes the last [n] characters of this string.
+D	
+D	Returns the empty string if [n] is greater than or equal to [length].
+A	AlsoKnownAs	names[]=skipLast
+M	1524		dropLastWhile		predicate
+D	Removes the longest suffix of this string that satisfies [predicate].
+A	AlsoKnownAs	names[]=skipLastWhile
+M	1529		replaceFirst		pattern,replacement
+D	Replaces the first occurrence of [pattern] in this string with [replacement].
+D	
+D	Returns this string unchanged if [pattern] does not occur in this string.
+M	1534		replaceLast		pattern,replacement
+D	Replaces the last occurrence of [pattern] in this string with [replacement].
+D	
+D	Returns this string unchanged if [pattern] does not occur in this string.
+M	1539		replaceAll		pattern,replacement
+D	Replaces all occurrences of [pattern] in this string with [replacement].
+D	
+D	Returns this string unchanged if [pattern] does not occur in this string.
+M	1544		replaceFirstMapped		pattern,mapper
+D	Replaces the first occurrence of [pattern] in this string with the return value of [mapper].
+D	
+D	Returns this string unchanged if [pattern] does not occur in this string.
+M	1552		replaceLastMapped		pattern,mapper
+D	Replaces the last occurrence of [pattern] in this string with the return value of [mapper].
+D	
+D	Returns this string unchanged if [pattern] does not occur in this string.
+M	1560		replaceAllMapped		pattern,mapper
+D	Replaces all occurrences of [pattern] in this string with the return value of [mapper].
+D	
+D	Returns this string unchanged if [pattern] does not occur in this string.
+M	1568		replaceRange		start,exclusiveEnd,replacement
+D	Replaces the characters between [start] and [exclusiveEnd] with [replacement].
+D	
+D	Inserts [replacement] at index [start] if `start == exclusiveEnd`.
+M	1571		toUpperCase		
+D	Performs a locale-independent character-by-character conversion of this string to uppercase.
+M	1574		toLowerCase		
+D	Performs a locale-independent character-by-character conversion of this string to lowercase.
+M	1577		reverse		
+D	Reverses the order of characters in this string.
+M	1582		trim		
+D	Removes any leading and trailing characters with Unicode property "White_Space" from this
+D	string.
+A	AlsoKnownAs	names[]=strip
+M	1586		trimStart		
+D	Removes any leading characters with Unicode property "White_Space" from this string.
+A	AlsoKnownAs	names[]=stripLeftstripStartstripLeadingtrimLefttrimLeading
+M	1590		trimEnd		
+D	Removes any trailing characters with Unicode property "White_Space" from this string.
+A	AlsoKnownAs	names[]=stripRightstripEndstripTrailingtrimRighttrimTrailin
+M	1596		padStart		width,char
+D	Increases the length of this string to [width] by adding leading [char]s.
+D	
+D	Returns this string unchanged if its length is already equal to or greater than [width].
+A	AlsoKnownAs	names[]=padLeft
+M	1602		padEnd		width,char
+D	Increases the length of this string to [width] by adding trailing [char]s.
+D	
+D	Returns this string unchanged if its length is already equal to or greater than [width].
+A	AlsoKnownAs	names[]=padRight
+M	1605		split		pattern
+D	Splits this string around matches of [pattern].
+M	1621		splitLimit		pattern,limit
+D	Splits this string matches of [pattern], up to [limit] substrings.
+D	
+D	Returns a [List] with at most [limit] elements.
+D	If the limit has been reached, the last entry will contain the un-split remainder of this
+D	string.
+D	
+D	Facts:
+D	```
+D	"a.b.c".splitLimit(".", 2) == List("a", "b.c")
+D	"a.b.c".splitLimit(".", 1) == List("a.b.c")
+D	"a.b.c".splitLimit(".", 50) == List("a", "b", "c")
+D	"a.b:c".splitLimit(Regex("[.:]"), 3) == List("a", "b", "c")
+D	```
+A	Since	version=0.27.0
+M	1631		capitalize		
+D	Converts the first character of this string to title case.
+D	
+D	Facts:
+D	```
+D	"pigeon".capitalize() == "Pigeon"
+D	"pigeon bird".capitalize() == "Pigeon bird"
+D	"".capitalize() == ""
+D	```
+M	1641		decapitalize		
+D	Converts the first character of this string to lower case.
+D	
+D	Facts:
+D	```
+D	"Pigeon".decapitalize() == "pigeon"
+D	"Pigeon Bird".decapitalize() == "pigeon Bird"
+D	"".decapitalize() == ""
+D	```
+M	1647		toInt		
+D	Parses this string as a signed decimal (base 10) integer.
+D	
+D	Throws if this string cannot be parsed as a signed decimal integer,
+D	or if the integer is too large to fit into [Int].
+M	1653		toIntOrNull		
+D	Parses this string as a signed decimal (base 10) integer.
+D	
+D	Returns [null] if this string cannot be parsed as a signed decimal integer,
+D	or if the integer is too large to fit into [Int].
+M	1658		toFloat		
+D	Parses this string as a floating point number.
+D	
+D	Throws if this string cannot be parsed as a floating point number.
+M	1663		toFloatOrNull		
+D	Parses this string as a floating point number.
+D	
+D	Returns [null] if this string cannot be parsed as a floating point number.
+M	1668		toBoolean		
+D	Parses `"true"` to [true] and `"false"` to [false] (case-insensitive).
+D	
+D	Throws if this string is neither `"true"` nor `"false"` (case-insensitive).
+M	1673		toBooleanOrNull		
+D	Parses `"true"` to [true] and `"false"` to [false] (case-insensitive).
+D	
+D	Returns [null] if this string is neither `"true"` nor `"false"` (case-insensitive).
+M	1682		encodeToBytes		charset
+D	Returns the bytes of this string, encoded using [charset]. 
+D	
+D	Facts:
+D	```
+D	"Parrot".encodeToBytes("UTF-8") == Bytes(80, 97, 114, 114, 111, 116)
+D	```
+A	Since	version=0.29.0
+C	1704	external	Regex		
+D	A regular expression to match strings against.
+P	1711		pattern
+D	The pattern string of this regular expression.
+D	
+D	Facts:
+D	```
+D	Regex("some pattern string").pattern == "some pattern string"
+D	```
+P	1723		groupCount
+D	The number of capturing groups in this regular expression.
+D	
+D	Returns zero if this regular expression does not have any capturing groups.
+D	
+D	Facts:
+D	```
+D	Regex(#"abc"#).groupCount == 0
+D	Regex(#"a(\s*)b(\s*)c"#).groupCount == 2 // `()` denotes a capturing group
+D	Regex(#"a(?:\s*)bc"#).groupCount == 0    // `(?:)` denotes a non-capturing group
+D	```
+M	1727		findMatchesIn		input
+D	Finds all matches of this regular expression in [input].
+A	AlsoKnownAs	names[]=match
+M	1730		matchEntire		input
+D	Matches this regular expression against the entire [input].
+C	1734		RegexMatch		
+D	A match of a regular expression in a string.
+P	1736		value
+D	The string value of this match.
+P	1739		start
+D	The start index of this match.
+P	1742		end
+D	The exclusive end index of this match.
+P	1751		groups
+D	The capturing group matches within this match.
+D	
+D	If [this] is already a capturing group match, returns the empty list.
+D	Otherwise, returns a list of length `regex.groupCount + 1`,
+D	where `groups[0]` contains the entire match (for consistency with other regex APIs),
+D	and `groups[1]` to `groups[regex.groupCount]` contain capturing group matches.
+D	If a capturing group did not produce a match, the corresponding [RegexMatch] element is [null].
+M	1754		toString		
+D	Returns [value].
+C	1761	external	Duration		Any
+D	A quantity of elapsed time, represented as a [value] (e.g. `30.5`) and [unit] (e.g. `min`).
+P	1771		value
+D	The value of this duration.
+D	
+D	Returns [Int] if possible and [Float] otherwise.
+D	
+D	Facts:
+D	```
+D	1.min.value == 1
+D	2.2.h.value == 2.2
+D	```
+P	1791		isoString
+D	An [ISO 8601](https://en.wikipedia.org/wiki/ISO_8601#Durations) representation of this
+D	duration.
+D	
+D	The ISO representation has the format `[-]PT{hours}H{minutes}M{seconds}S`, where
+D	
+D	- negative durations have a leading minus sign,
+D	- `{hours}` and `{minutes}` are positive integers,
+D	- `{seconds}` is a positive integer or a positive decimal with decimal point (`.`),
+D	- zero-valued components are omitted, and
+D	- durations with length zero are represented as `PT0S`.
+D	
+D	Facts:
+D	```
+D	1.5.h.isoString == "PT1H30M"
+D	-1.5.h.isoString == "-PT1H30M"
+D	1.23.s.isoString == "PT1.23S"
+D	0.ms.isoString == "PT0S"
+D	```
+P	1800		unit
+D	The unit of this duration.
+D	
+D	Facts:
+D	```
+D	1.min.unit == "min"
+D	2.2.h.unit == "h"
+D	```
+P	1809		isPositive
+D	Tells if this duration has a value of zero or greater.
+D	
+D	Facts:
+D	```
+D	2.min.isPositive
+D	!(-2.min.isPositive)
+D	```
+M	1821		isBetween		start,inclusiveEnd
+D	Tells if this duration is greater than or equal to [start] and less than or equal to
+D	[inclusiveEnd].
+D	
+D	Facts:
+D	```
+D	3.min.isBetween(120.s, 4.min)
+D	3.min.isBetween(180.s, 4.min)
+D	3.min.isBetween(120.s, 3.min)
+D	!3.min.isBetween(1.min, 2.min)
+D	```
+M	1830		toUnit		unit
+D	Returns the equivalent duration with the given unit.
+D	
+D	Facts:
+D	```
+D	60.min.toUnit("h") == 1.h
+D	1.h.toUnit("min") == 60.min
+D	```
+C	1838	external	DataSize		Any
+D	A quantity of binary data, represented as a [value] (e.g. `30.5`) and [unit] (e.g. `mb`).
+P	1848		value
+D	The value of this data size.
+D	
+D	Returns [Int] if possible and [Float] otherwise.
+D	
+D	Facts:
+D	```
+D	1.mb.value == 1
+D	2.2.mib.value == 2.2
+D	```
+P	1857		unit
+D	The unit of this data size.
+D	
+D	Facts:
+D	```
+D	1.mb.unit == "mb"
+D	2.2.mib.unit == "mib"
+D	```
+P	1866		isPositive
+D	Tells if this data size has a value of zero or greater.
+D	
+D	Facts:
+D	```
+D	2.mb.isPositive
+D	!(-2.mb.isPositive)
+D	```
+M	1878		isBetween		start,inclusiveEnd
+D	Tells if this data size is greater than or equal to [start] and less than or equal to
+D	[inclusiveEnd].
+D	
+D	Facts:
+D	```
+D	3.kb.isBetween(2000.b, 4.kb)
+D	3.kb.isBetween(3000.b, 4.kb)
+D	3.kb.isBetween(2000.b, 3.kb)
+D	!3.kb.isBetween(1.kb, 2.kb)
+D	```
+M	1887		toUnit		unit
+D	Returns the equivalent data size with the given unit.
+D	
+D	Facts:
+D	```
+D	1000.kb.toUnit("mb") == 1.mb
+D	1.mb.toUnit("kb") == 1000.kb
+D	```
+P	1892		isBinaryUnit
+D	Tells if this data size has a binary unit, for example `mib`.
+D	
+D	Returns [true] for unit `b` (bytes).
+P	1897		isDecimalUnit
+D	Tells if this data size has a decimal unit, for example `mb`.
+D	
+D	Returns [true] for unit `b` (bytes).
+M	1910		toBinaryUnit		
+D	Returns the equivalent data size with a binary unit.
+D	
+D	Returns this data size unchanged if it already has a binary unit.
+D	
+D	Facts:
+D	```
+D	1024.kb.toBinaryUnit() == 1000.kib
+D	
+D	1000.kib.toBinaryUnit() == 1000.kib
+D	1000.b.toBinaryUnit() == 1000.b
+D	```
+M	1923		toDecimalUnit		
+D	Returns the equivalent data size with a decimal unit.
+D	
+D	Returns this data size unchanged if it already has a decimal unit.
+D	
+D	Facts:
+D	```
+D	1000.kib.toDecimalUnit() == 1024.kb
+D	
+D	1000.kb.toDecimalUnit() == 1000.kb
+D	1000.b.toDecimalUnit() == 1000.b
+D	```
+C	1973	abstract,external	Object		Any
+D	A composite value containing members (properties, elements, entries).
+D	
+D	```
+D	obj = new {
+D	  name = "Pigeon" // property
+D	  "Hello"       // element
+D	  ["two"] = 2   // entry
+D	}
+D	
+D	obj.name   // "Pigeon"
+D	obj[0]     // "Hello"
+D	obj["two"] // 2
+D	```
+D	
+D	An object can be *amended* to create variants of itself.
+D	This is similar to inheritance in prototype-oriented programming.
+D	
+D	```
+D	pigeon = new { name = "Pigeon"; age = 42 }
+D	barnOwl = (pigeon) { name = "Barn Owl" } // override property `name`
+D	oldPigeon = (pigeon) { age = 84 } // override property `age`
+D	```
+D	
+D	Object members may reference other members:
+D	
+D	```
+D	thresholds = new { lower = 10; upper = lower + 5 }
+D	```
+D	
+D	Object members are dynamically bound.
+D	This is similar to how computed cells in a spreadsheet work.
+D	
+D	```
+D	thresholds = new { lower = 10; upper = lower + 5 }
+D	thresholds2 = new { lower = 7 } // thresholds2.upper == 12
+D	```
+D	
+D	Objects have memberwise equality and hash code.
+D	
+D	To arbitrarily manipulate an object, convert it to a [Collection].
+D	If necessary, the manipulated [Collection] can be converted back to an [Object].
+D	
+D	```
+D	pigeon = new { name = "Pigeon"; age = 42 }
+D	manipulated = pigeon.toMap().mapKeys((key, value) -> key.reverse())
+D	manipulated.toDynamic() // new { eman = "Pigeon"; ega = 42 }
+D	```
+C	1979	abstract	Typed		Object
+D	Base class for objects whose members are described by a class definition.
+D	
+D	User-defined classes (that is, classes without `external` modifier) implicitly extend this
+D	class.
+M	1981		hasProperty		name
+D	Tells if this object has a property with the given [name].
+M	1986		getProperty		name
+D	Returns the value of the property with the given [name].
+D	
+D	Throws if a property with this name does not exist.
+M	1991		getPropertyOrNull		name
+D	Returns the value of the property with the given [name].
+D	
+D	Returns [null] if a property with this name does not exist.
+M	1994		toDynamic		
+D	Converts this object to a [Dynamic] object.
+M	1997		toMap		
+D	Converts this object to a [Map].
+C	2013		Dynamic		Object
+D	An object that can contain arbitrary properties, elements, and entries.
+D	
+D	Example:
+D	```
+D	obj = new Dynamic {
+D	  propertyName = "propertyValue"
+D	  "element"
+D	  ["entryKey"] = "entryValue"
+D	}
+D	```
+D	
+D	Unlike a [Typed] object, a dynamic object does not have an associated class describing its
+D	shape.
+P	2015	hidden	default
+D	The function used to compute the default value for an object element or entry given its key.
+M	2018		length		
+D	Returns the number of elements in this object.
+M	2021		hasProperty		name
+D	Tells if this object has a property with the given [name].
+M	2026		getProperty		name
+D	Returns the value of the property with the given [name].
+D	
+D	Throws if a property with this name does not exist.
+M	2031		getPropertyOrNull		name
+D	Returns the value of the property with the given [name].
+D	
+D	Returns [null] if a property with this name does not exist.
+M	2034		toMap		
+D	Converts the properties and/or entries of this dynamic object to a [Map].
+M	2037		toList		
+D	Converts the elements of this dynamic object to a [List].
+M	2060		toTyped	:Type	clazz
+D	Converts this object to a typed object of class [clazz].
+D	
+D	Conforms to the semantics of the following manual conversion:
+D	```
+D	class Person { name: String; age: Int }
+D	dynamic = new Dynamic { name = "Pigeon"; age = 42 }
+D	function toTyped(dynamic: Dynamic): Person = new {
+D	  name = dynamic.getPropertyOrNull("name") ?? super.name
+D	  age = dynamic.getPropertyOrNull("age") ?? super.age
+D	}
+D	```
+D	
+D	Notable behavior:
+D	- Elements and entries of [this] are ignored.
+D	- Properties of [this] that have no corresponding property in [clazz] are ignored.
+D	- [clazz] properties that have no corresponding property in [this] have their defaults
+D	  preserved.
+D	- [clazz] properties that have neither a default nor a corresponding property in [this]
+D	  throw an "undefined property" error (only) when accessed.
+D	
+D	Throws if [clazz] is abstract or not a subclass of [Typed].
+C	2066		Listing	out:Element	Object
+D	An object containing an ordered sequence of elements.
+D	
+D	This class is the object equivalent of [List].
+P	2068	hidden	default
+D	The function used to compute the default value for a listing element given its index.
+P	2071		length
+D	The number of elements in this listing.
+P	2074		isEmpty
+D	Tells if this listing is empty, that is, has zero elements.
+P	2078		isNotEmpty
+D	Tells if this listing is not empty, that is, it has at least one element.
+A	Since	version=0.31.0
+P	2084		lastIndex
+D	The index of the last element in this listing (same as `length - 1`).
+D	
+D	Returns `-1` for an empty list.
+A	Since	version=0.27.0
+M	2100		getOrNull		index
+D	Returns the element at [index].
+D	
+D	Returns [null] if [index] is outside the bounds of this listing.
+D	
+D	Facts:
+D	```
+D	new Listing { 3 ; 9 ; 6 }.getOrNull(0) == 3
+D	new Listing { 3 ; 9 ; 6 }.getOrNull(1) == 9
+D	new Listing { 3 ; 9 ; 6 }.getOrNull(2) == 6
+D	new Listing { 3 ; 9 ; 6 }.getOrNull(-1) == null
+D	new Listing { 3 ; 9 ; 6 }.getOrNull(3) == null
+D	new Listing { 3 ; 9 ; 6 }.getOrNull(99) == null
+D	```
+A	Since	version=0.27.0
+M	2108		getOrDefault		index
+D	Returns the element at [index].
+D	
+D	Returns [default] applied to [index] if [index] is outside the bounds of this listing.
+D	
+D	This is equivalent to `getOrNull(index) ?? default.apply(index)`.
+A	Since	version=0.29.0
+P	2118		isDistinct
+D	Tells if this listing has no duplicate elements.
+D	
+D	Facts:
+D	```
+D	new Listing { 1; 2; 3 }.isDistinct
+D	!new Listing { 1; 2; 1 }.isDistinct
+D	```
+A	AlsoKnownAs	names[]=isUnique
+M	2128		isDistinctBy		selector
+D	Tells if this listing has no elements that are duplicates after applying [selector].
+D	
+D	Facts:
+D	```
+D	new Listing { "a"; "ab"; "abc" }.isDistinctBy((it) -> it.length)
+D	!new Listing { "a"; "ab"; "c" }.isDistinctBy((it) -> it.length)
+D	```
+A	AlsoKnownAs	names[]=isUniqueBy
+P	2138		distinct
+D	Removes duplicate elements from this listing, preserving the first occurrence.
+D	
+D	Facts:
+D	```
+D	new Listing { 1; 2; 3 }.distinct == new Listing { 1; 2; 3 }
+D	new Listing { 1; 2; 1 }.distinct == new Listing { 1; 2 }
+D	```
+A	AlsoKnownAs	names[]=unique
+P	2150		first
+D	The first element in this listing.
+D	
+D	Throws if this listing is empty.
+D	
+D	Facts:
+D	```
+D	new Listing { 1 ; 2 ; 3 }.first == 1
+D	import("pkl:test").catch(() -> new Listing {}.first)
+D	```
+A	Since	version=0.27.0
+P	2154		firstOrNull
+D	Same as [first] but returns [null] if this listing is empty.
+A	Since	version=0.27.0
+P	2166		last
+D	The last element in this listing.
+D	
+D	Throws if this listing is empty.
+D	
+D	Facts:
+D	```
+D	new Listing { 1 ; 2 ; 3 }.last == 3
+D	import("pkl:test").catch(() -> new Listing {}.last)
+D	```
+A	Since	version=0.27.0
+P	2170		lastOrNull
+D	Same as [last] but returns [null] if this listing is empty.
+A	Since	version=0.27.0
+P	2183		single
+D	The single element in this listing.
+D	
+D	Throws if this listing does not have exactly one element.
+D	
+D	Facts:
+D	```
+D	new Listing { 1 }.single == 1
+D	import("pkl:test").catch(() -> new Listing {}.single)
+D	import("pkl:test").catch(() -> new Listing { 1 ; 2 ; 3 }.single)
+D	```
+A	Since	version=0.27.0
+P	2187		singleOrNull
+D	Same as [single] but returns [null] if this collection is empty or has more than one element.
+A	Since	version=0.27.0
+M	2198		distinctBy		selector
+D	Removes elements that are duplicates after applying [selector] from this listing, preserving
+D	the first occurrence.
+D	
+D	Facts:
+D	```
+D	new Listing { "a"; "ab"; "abc" }.distinctBy((it) -> it.length) == new Listing { "a"; "ab"; "abc" }
+D	new Listing { "a"; "ab"; "c" }.distinctBy((it) -> it.length) == new Listing { "a"; "ab" }
+D	```
+A	AlsoKnownAs	names[]=uniqueBy
+M	2204		every		predicate
+D	Tells if [predicate] holds for every element of this listing.
+D	
+D	Returns [true] for an empty listing.
+A	Since	version=0.27.0
+M	2210		any		predicate
+D	Tells if [predicate] holds for at least one element of this listing.
+D	
+D	Returns [false] for an empty listing.
+A	Since	version=0.27.0
+M	2222		contains		element
+D	Tests if [element] is contained in this listing.
+D	
+D	Facts:
+D	```
+D	new Listing { 1 ; 2 ; 3 }.contains(1)
+D	new Listing { 1 ; 2 ; 3 }.contains(2)
+D	new Listing { 1 ; 2 ; 3 }.contains(3)
+D	!new Listing { 1 ; 2 ; 3 }.contains(4)
+D	```
+A	Since	version=0.27.0
+M	2225		fold	:Result	initial,operator
+D	Folds this listing in iteration order using [operator], starting with [initial].
+M	2230		foldIndexed	:Result	initial,operator
+D	Folds this listing in iteration order using [operator], starting with [initial].
+D	
+D	The first parameter of [operator] is the zero-based index of the current element.
+M	2237		join		separator
+D	Converts the elements of this listing to strings and concatenates them inserting [separator]
+D	between elements.
+M	2240		toList		
+D	Converts this listing to a [List].
+M	2243		toSet		
+D	Converts this listing to a [Set].
+C	2253		Mapping	out:Key,out:Value	Object
+P	2255	hidden	default
+D	The function used to compute the default value for a mapping entry given its key.
+P	2258		isEmpty
+D	Tells if this mapping is empty, that is, has zero entries.
+P	2262		isNotEmpty
+D	Tells whether this mapping is not empty, that is, it has at least one entry.
+A	Since	version=0.31.0
+P	2265		length
+D	The number of entries in this mapping.
+P	2268		keys
+D	The keys contained in this mapping.
+M	2271		containsKey		key
+D	Tells if this mapping contains [key].
+M	2275		containsValue		value
+D	Tells if this mapping contains an entry with the given [value].
+A	Since	version=0.27.0
+M	2280		getOrNull		key
+D	Returns the value associated with [key] or [null] if this mapping does not contain [key].
+D	
+D	This is the nullable equivalent of the subscript operator (`object[key]`).
+M	2287		getOrDefault		key
+D	Returns the value associated with [key] or [default] applied to [key] if this mapping does
+D	not contain [key].
+D	
+D	This is equivalent to `getOrNull(key) ?? default.apply(key)`.
+A	Since	version=0.29.0
+M	2291		fold	:Result	initial,operator
+D	Folds the entries of this mapping in iteration order using [operator], starting with
+D	[initial].
+M	2297		every		predicate
+D	Tells if [predicate] holds for every entry of this mapping.
+D	
+D	Returns [true] for an empty mapping.
+A	Since	version=0.27.0
+M	2303		any		predicate
+D	Tells if [predicate] holds for at least one entry of this mapping.
+D	
+D	Returns [false] for an empty mapping.
+A	Since	version=0.27.0
+M	2306		toMap		
+D	Converts this mapping to a [Map].
+C	2310	abstract,external	Function	out:Result	Any
+D	Base class for function literals (also known as *lambda expressions*).
+M	2312		applyToList		argumentList
+A	AlsoKnownAs	names[]=callinvoke
+C	2316	external	Function0	out:Result	Function<Result>
+D	A function literal with zero parameters.
+M	2318		apply		
+A	AlsoKnownAs	names[]=callinvoke
+C	2322	external	Function1	in:Param1,out:Result	Function<Result>
+D	A function literal with one parameter.
+M	2324		apply		p1
+A	AlsoKnownAs	names[]=callinvoke
+C	2328	external	Function2	in:Param1,in:Param2,out:Result	Function<Result>
+D	A function literal with two parameters.
+M	2330		apply		p1,p2
+A	AlsoKnownAs	names[]=callinvoke
+C	2334	external	Function3	in:Param1,in:Param2,in:Param3,out:Result	Function<Result>
+D	A function literal with three parameters.
+M	2336		apply		p1,p2,p3
+A	AlsoKnownAs	names[]=callinvoke
+C	2340	external	Function4	in:Param1,in:Param2,in:Param3,in:Param4,out:Result	Function<Result>
+D	A function literal with four parameters.
+M	2343		apply		p1,p2,p3,p4
+A	AlsoKnownAs	names[]=callinvoke
+C	2347	external	Function5	in:Param1,in:Param2,in:Param3,in:Param4,in:Param5,out:Result	Function<Result>
+D	A function literal with five parameters.
+M	2350		apply		p1,p2,p3,p4,p5
+A	AlsoKnownAs	names[]=callinvoke
+C	2388	external	Pair	out:First,out:Second	Any
+D	An ordered pair of elements.
+D	
+D	To construct a [Pair], use method [Pair()].
+P	2390		first
+D	The first element of this pair.
+P	2393		second
+D	The second element of this pair.
+P	2396		key
+D	Alias for [first].
+P	2399		value
+D	Alias for [second].
+C	2413	abstract,external	Collection	out:Element	Any
+D	Common base class for [List] and [Set].
+D	
+D	The following operators are supported for all collections:
+D	```
+D	coll1 + coll2  // concatenation; result type is `Set` if `coll1` is a set and `List` otherwise
+D	```
+D	
+D	Additionally, the following operators are supported for [List]s:
+D	```
+D	coll[3]    // subscript
+D	```
+P	2422	abstract	length
+D	The number of elements in this collection.
+D	
+D	Facts:
+D	```
+D	List(1, 2, 3).length == 3
+D	List().length == 0
+D	```
+A	AlsoKnownAs	names[]=sizecount
+P	2431	abstract	isEmpty
+D	Tells whether this collection is empty.
+D	
+D	Facts:
+D	```
+D	!List(1, 2, 3).isEmpty
+D	List().isEmpty
+D	```
+P	2441	abstract	isNotEmpty
+D	Tells whether this collection is not empty.
+D	
+D	Facts:
+D	```
+D	List(1, 2, 3).isNotEmpty
+D	!List().isNotEmpty
+D	```
+A	Since	version=0.31.0
+P	2453	abstract	first
+D	The first element in this collection.
+D	
+D	Throws if this collection is empty.
+D	
+D	Facts:
+D	```
+D	List(1, 2, 3).first == 1
+D	import("pkl:test").catch(() -> List().first)
+D	```
+A	AlsoKnownAs	names[]=head
+P	2457	abstract	firstOrNull
+D	Same as [first] but returns [null] if this collection is empty.
+A	AlsoKnownAs	names[]=head
+P	2469	abstract	rest
+D	The tail of this collection.
+D	
+D	Throws if this collection is empty.
+D	
+D	Facts:
+D	```
+D	List(1, 2, 3).rest == List(2, 3)
+D	import("pkl:test").catch(() -> List().rest)
+D	```
+A	AlsoKnownAs	names[]=tail
+P	2473	abstract	restOrNull
+D	Same as [rest] but returns [null] if this collection is empty.
+A	AlsoKnownAs	names[]=tail
+P	2484	abstract	last
+D	The last element in this collection.
+D	
+D	Throws if this collection is empty.
+D	
+D	Facts:
+D	```
+D	List(1, 2, 3).last == 3
+D	import("pkl:test").catch(() -> List().last)
+D	```
+P	2487	abstract	lastOrNull
+D	Same as [last] but returns [null] if this collection is empty.
+P	2499	abstract	single
+D	The single element in this collection.
+D	
+D	Throws if this collection has zero or more than one element.
+D	
+D	Facts:
+D	```
+D	List(1).single == 1
+D	throws(() -> List().single)
+D	throws(() -> List(1, 2, 3).single)
+D	```
+P	2502	abstract	singleOrNull
+D	Same as [single] but returns [null] if this collection is empty or has more than one element.
+M	2514	abstract	contains		element
+D	Tests if [element] is contained in this collection.
+D	
+D	Facts:
+D	```
+D	List(1, 2, 3).contains(1)
+D	List(1, 2, 3).contains(2)
+D	List(1, 2, 3).contains(3)
+D	!List(1, 2, 3).contains(4)
+D	```
+M	2524	abstract	startsWith		coll
+D	Tests if this collection starts with the elements in [coll].
+D	
+D	Facts:
+D	```
+D	List(1, 2, 3).startsWith(List(1, 2))
+D	List(1, 2, 3).startsWith(List())
+D	!List(1, 2, 3).startsWith(List(2, 3))
+D	```
+M	2534	abstract	endsWith		coll
+D	Tests if this collection ends with the elements in [coll].
+D	
+D	Facts:
+D	```
+D	List(1, 2, 3).endsWith(List(2, 3))
+D	List(1, 2, 3).endsWith(List())
+D	!List(1, 2, 3).endsWith(List(1, 2))
+D	```
+M	2540	abstract	split		index
+D	Splits this collection into two at split point [index].
+D	
+D	If [index] is zero or [length], one of the two collections is empty.
+D	Throws if [index] is outside range `0`..[length].
+M	2543	abstract	splitOrNull		index
+D	Same as [split()] but returns [null] if [index] is outside range `0`..[length].
+M	2545	abstract	partition		predicate
+M	2559	abstract	find		predicate
+D	The first element for which [predicate] returns [true].
+D	
+D	Throws if [predicate] does not hold for any element in this collection.
+D	
+D	Facts:
+D	```
+D	List(5, 6, 7).find((n) -> n.isEven) == 6
+D	List(4, 6, 7).find((n) -> n.isEven) == 4
+D	import("pkl:test").catch(() -> List(5, 7, 9).find((n) -> n.isEven))
+D	```
+M	2563	abstract	findOrNull		predicate
+D	Same as [find()] but returns [null] if [predicate] does not hold for any element in this
+D	collection.
+M	2575	abstract	findLast		predicate
+D	The last element for which [predicate] returns [true].
+D	
+D	Throws if [predicate] does not hold for any element in this collection.
+D	
+D	Facts:
+D	```
+D	List(5, 6, 7).findLast((n) -> n.isEven) == 6
+D	List(4, 6, 8).findLast((n) -> n.isEven) == 8
+D	List(5, 7, 9).findLast((n) -> n.isEven) == null
+D	```
+M	2579	abstract	findLastOrNull		predicate
+D	Same as [findLast()] but returns [null] if [predicate] does not hold for any element in this
+D	collection.
+M	2589	abstract	count		predicate
+D	The number of elements for which [predicate] returns [true].
+D	
+D	Facts:
+D	```
+D	List(1, 2, 3).count((n) -> n.isEven) == 1
+D	List(1, 2, 3).count((n) -> n.isOdd) == 2
+D	List(1, 2, 3).count((n) -> n > 9) == 0
+D	```
+M	2600	abstract	every		predicate
+D	Tests whether [predicate] holds for every element in this collection.
+D	
+D	Facts:
+D	```
+D	List(1, 3, 3).every((n) -> n.isOdd)
+D	List().every((n) -> n.isOdd)
+D	!List(1, 2, 3).every((n) -> n.isOdd)
+D	```
+A	AlsoKnownAs	names[]=allforall
+M	2611	abstract	any		predicate
+D	Tests whether [predicate] holds for at least one element in this collection.
+D	
+D	Facts:
+D	```
+D	List(1, 2, 3).any((n) -> n.isEven)
+D	!List(1, 3, 5).any((n) -> n.isEven)
+D	!List().any((n) -> n.isEven)
+D	```
+A	AlsoKnownAs	names[]=exists
+M	2622	abstract	filter		predicate
+D	Retains elements for which [predicate] holds.
+D	
+D	Facts:
+D	```
+D	List(1, 2, 3).filter((n) -> n.isOdd) == List(1, 3)
+D	List(1, 2, 3).filter((n) -> n.isEven) == List(2)
+D	List(1, 2, 3).filter((n) -> n > 9) == List()
+D	```
+A	AlsoKnownAs	names[]=findAllwhere
+M	2627	abstract	filterNonNull		
+D	Retains non-null elements.
+D	
+D	Shorthand for `filter((it) -> it != null)`.
+M	2641	abstract	filterIndexed		predicate
+D	Retains elements for which [predicate] holds.
+D	
+D	[predicate] takes two arguments: the index of the element, and the element itself.
+D	
+D	Facts:
+D	```
+D	List(1, 2, 3).filterIndexed((i, n) -> i.isOdd) == List(2)
+D	List(1, 2, 3).filterIndexed((i, n) -> i.isEven) == List(1, 3)
+D	List(1, 2, 3).filterIndexed((i, n) -> i.isOdd && n > 2) == List()
+D	List(1, 2, 3).filterIndexed((i, n) -> i.isEven && n > 2) == List(3)
+D	```
+A	AlsoKnownAs	names[]=findAllwhere
+M	2652	abstract	filterIsInstance	:Type	clazz
+D	Retains elements whose class is a subclass of [clazz].
+D	
+D	Shorthand for `filter((it) -> it is X)`.
+D	
+D	Facts:
+D	```
+D	List(42, "Pigeon", true, "Parrot").filterIsInstance(String) == List("Pigeon", "Parrot")
+D	```
+A	AlsoKnownAs	names[]=whereType
+M	2661	abstract	map	:Result	transform
+D	Transforms this collection by applying [transform] to each element.
+D	
+D	Facts:
+D	```
+D	List(1, 2, 3).map((n) -> n * 2) == List(2, 4, 6)
+D	List(1, 2, 3).map((n) -> n.isEven) == List(false, true, false)
+D	```
+M	2672	abstract	mapIndexed	:Result	transform
+D	Transforms this collection by applying [transform] to each element.
+D	
+D	[transform] takes two arguments: the index of the element, and the element itself.
+D	
+D	Facts:
+D	```
+D	List(1, 2, 3).mapIndexed((i, n) -> n * i) == List(0, 2, 6)
+D	List(1, 2, 3).mapIndexed((i, n) -> i.isOdd && n.isEven) == List(false, true, false)
+D	```
+M	2684	abstract	mapNonNull	:Result	transform
+D	Transforms this collection by applying [transform] to each element and removing resulting
+D	[null] elements.
+D	
+D	Equivalent to `map(transform).filterNonNull()`.
+D	
+D	Facts:
+D	```
+D	List(1, 2, 3).mapNonNull((n) -> if (n.isOdd) null else n + 2) == List(4)
+D	```
+A	AlsoKnownAs	names[]=filterMap
+M	2699	abstract	mapNonNullIndexed	:Result	transform
+D	Transforms this collection by applying [transform] to each element and removing resulting
+D	[null] elements.
+D	
+D	[transform] takes two arguments: the index of the element, and the element itself.
+D	
+D	Facts:
+D	```
+D	List(1, 2, 3, 4).mapNonNullIndexed((i, n) -> if (n.isOdd) null else n * i) == List(2, 12)
+D	List(1, 2, 3, 4, null).mapNonNullIndexed((i, n) -> if (n?.isOdd ?? true) null else n * i) == List(2, 12)
+D	```
+A	Since	version=0.29.0
+M	2707	abstract	flatMap	:Result	transform
+D	Applies a collection-generating [transform] to each element in this collection
+D	and concatenates the resulting collections.
+D	
+D	Throws if [transform] produces a non-collection value.
+M	2715	abstract	flatMapIndexed	:Result	transform
+D	Applies a collection-generating [transform] to each element in this collection
+D	and concatenates the resulting collections.
+D	
+D	[transform] takes two arguments: the index of the element, and the element itself.
+D	
+D	Throws if [transform] produces a non-collection value.
+M	2723	abstract	flatten		
+M	2728	abstract	add	:Other	element
+D	Adds [element] to this collection.
+D	
+D	For [List], [element] is appended.
+M	2732	abstract	take		n
+D	Returns the first [n] elements in this collection.
+A	AlsoKnownAs	names[]=limit
+M	2735	abstract	takeLast		n
+D	Returns the last [n] elements in this collection.
+M	2738	abstract	takeWhile		predicate
+D	Returns the longest prefix of this collection that satisfies [predicate].
+M	2741	abstract	takeLastWhile		predicate
+D	Returns the longest suffix of this collection that satisfies [predicate].
+M	2745	abstract	drop		n
+D	Removes the first [n] elements in this collection.
+A	AlsoKnownAs	names[]=skip
+M	2749	abstract	dropLast		n
+D	Removes the last [n] elements in this collection.
+A	AlsoKnownAs	names[]=skipLast
+M	2753	abstract	dropWhile		predicate
+D	Removes the longest prefix of this collection that satisfies [predicate].
+A	AlsoKnownAs	names[]=skipWhile
+M	2757	abstract	dropLastWhile		predicate
+D	Removes the longest suffix of this collection that satisfies [predicate].
+A	AlsoKnownAs	names[]=skipLastWhile
+M	2760	abstract	fold	:Result	initial,operator
+D	Folds this collection in iteration order using [operator], starting with [initial].
+M	2764	abstract	foldBack	:Result	initial,operator
+D	Folds this collection in reverse iteration order using [operator], starting with [initial].
+A	AlsoKnownAs	names[]=foldRight
+M	2769	abstract	foldIndexed	:Result	initial,operator
+D	Folds this collection in iteration order using [operator], starting with [initial].
+D	
+D	The first parameter of [operator] is the zero-based index of the current element.
+M	2777	abstract	reduce	:Result	operator
+D	Folds this collection in iteration order using [operator], starting with the first element.
+D	
+D	Throws if this collection is empty.
+M	2780	abstract	reduceOrNull	:Result	operator
+D	Same as [reduce()] but returns [null] if this collection is empty.
+M	2783	abstract	groupBy	:Key	selector
+D	Groups the elements in this collection according to keys returned by [selector].
+M	2786	abstract	repeat		n
+D	Concatenates this collection [n] times.
+P	2793	abstract	min
+D	Returns the first element in this collection that is less than or equal to any other element.
+D	
+D	Shorthand for `minWith((a, b) -> a < b)`.
+D	
+D	Throws if this collection is empty, or if any two elements cannot be compared with `<`.
+P	2796	abstract	minOrNull
+D	Same as [min] but returns [null] if this collection is empty.
+M	2804	abstract	minBy		selector
+D	Returns the first element in this collection that is less than or equal to any other element
+D	after applying [selector].
+D	
+D	Shorthand for `minWith((a, b) -> selector.apply(a) < selector.apply(b))`.
+D	
+D	Throws if this collection is empty or if any two elements cannot be compared with `<`.
+M	2807	abstract	minByOrNull		selector
+D	Same as [minBy()] but returns [null] if this collection is empty.
+M	2816	abstract	minWith		comparator
+D	Returns the first element in this collection that is less than or equal to any other element
+D	according to [comparator].
+D	
+D	[comparator] should return [true] if its first argument is less than its second argument, and
+D	[false] otherwise.
+D	
+D	Throws if this collection is empty.
+M	2819	abstract	minWithOrNull		comparator
+D	Same as [minWith()] but returns [null] if this collection is empty.
+P	2827	abstract	max
+D	Returns the first element in this collection that is greater than or equal to any other
+D	element.
+D	
+D	Shorthand for `maxWith((a, b) -> a < b)`.
+D	
+D	Throws if this collection is empty, or if any two elements cannot be compared with `<`.
+P	2830	abstract	maxOrNull
+D	Same as [max] but returns [null] if this collection empty.
+M	2839	abstract	maxBy		selector
+D	Returns the first element in this collection that is greater than or equal to any other
+D	element after applying [selector].
+D	
+D	Shorthand for `maxWith((a, b) -> selector.apply(a) < selector.apply(b))`.
+D	
+D	Throws if this collection is empty, or if any two elements cannot be compared with `<` after
+D	applying [selector].
+M	2842	abstract	maxByOrNull		selector
+D	Same as [maxBy()] but returns [null] if this collection is empty.
+M	2851	abstract	maxWith		comparator
+D	Returns the first element in this collection that is greater than or equal to any other
+D	element according to [comparator].
+D	
+D	[comparator] should return [true] if its first argument is less than its second argument, and
+D	[false] otherwise.
+D	
+D	Throws if this collection is empty.
+M	2854	abstract	maxWithOrNull		comparator
+D	Same as [maxWith()] but returns [null] if this collection is empty.
+M	2863	abstract	sort		
+D	Sorts this collection of [Comparable] elements in ascending order.
+D	
+D	Shorthand for `sortWith((a, b) -> a < b)`.
+D	
+D	Throws if any two elements in this collection cannot be compared with `<`.
+M	2871	abstract	sortBy		selector
+D	Sorts this collection in ascending order after applying [selector].
+D	
+D	Shorthand for `sortWith((a, b) -> selector.apply(a) < selector.apply(b))`.
+D	
+D	Throws if any two elements in this collection cannot be compared with `<` after applying
+D	[selector].
+M	2882	abstract	sortWith		comparator
+D	Sorts this collection according to [comparator].
+D	
+D	[comparator] should return [true] if its first argument
+D	comes before its second argument in the sort order, and [false] otherwise.
+D	
+D	Facts:
+D	```
+D	List(1, 2, 3).sortWith((a, b) -> a > b)) == List(3, 2, 1)
+D	```
+M	2887	abstract	reverse		
+D	Reverses the order of elements in this collection.
+M	2898	abstract	zip	:Other	coll
+D	Returns a collection that combines corresponding elements of [this] and [coll] in pairs.
+D	
+D	The returned collection's length is the minimum of `this.length` and `coll.length`.
+D	
+D	Facts:
+D	```
+D	List(1, 2, 3).zip(List(4, 5, 6)) == List(Pair(1, 4), Pair(2, 5), Pair(3, 6))
+D	List(1, 2, 3).zip(List(4, 5, 6, 7, 8)) == List(Pair(1, 4), Pair(2, 5), Pair(3, 6))
+D	```
+M	2902	abstract	join		separator
+D	Converts the elements of this collection to strings and concatenates them inserting
+D	[separator] between elements.
+M	2907	abstract	toList		
+D	Converts this collection to a list.
+D	
+D	Returns this collection if it already is a list.
+M	2912	abstract	toSet		
+D	Converts this collection to a set.
+D	
+D	Returns this collection if it already is a set.
+M	2916	abstract	toMap	:Key,:Value	keyExtractor,valueExtractor
+D	Converts this collection to a map by extracting a key and value from each element using the
+D	given functions.
+M	2922	abstract	toListing		
+D	Converts this collection to a [Listing].
+M	2925	abstract	toDynamic		
+D	Converts this collection to a [Dynamic] object.
+C	2985	external	IntSeq		Any
+D	A finite arithmetic sequence of integers.
+D	
+D	A sequence has a [start], [end], and [step].
+D	It is either ascending ([step] > 0) or descending ([step] < 0).
+D	The default [step] is 1.
+D	
+D	The members of a sequence are defined as:
+D	
+D	- seq(0) = [start] + 0 * [step]
+D	- seq(1) = [start] + 1 * [step]
+D	- seq(2) = [start] + 2 * [step]
+D	- etc. where seq(n) <= [end] if [step] > 0, and seq(n) >= [end] if [step] < 0
+D	
+D	## Construction
+D	
+D	To construct a sequence, use method [IntSeq()]:
+D	```
+D	ascending = IntSeq(2, 5)
+D	empty = IntSeq(5, 2)
+D	```
+D	
+D	To set a step other than 1, use method [step()]:
+D	```
+D	descending = IntSeq(5, 2).step(-2)
+D	```
+D	
+D	## Iteration
+D	
+D	To iterate over a sequence, use method [map()]:
+D	```
+D	numbers = IntSeq(2, 5).map((n) -> n * 2)
+D	```
+D	
+D	A sequence can also be iterated over in a *for-generator*:
+D	```
+D	numbers {
+D	  for (n in IntSeq(2, 5)) {
+D	    n * 2
+D	  }
+D	}
+D	```
+D	
+D	## Equality
+D	
+D	Two sequences are equal if and only if they contain the same members in the same order.
+D	
+D	Facts:
+D	```
+D	IntSeq(2, 5) == IntSeq(2, 5)
+D	IntSeq(2, -3) == IntSeq(2, -2) // both empty
+D	IntSeq(2, 5).step(2) == IntSeq(2, 4).step(2)
+D	```
+P	2992		start
+D	The start of this sequence.
+D	
+D	Facts:
+D	```
+D	IntSeq(2, 5).start == 2
+D	```
+P	3002		end
+D	The inclusive end of this sequence.
+D	
+D	Note that [end] may or may not be a member of this sequence.
+D	
+D	Facts:
+D	```
+D	IntSeq(2, 5).end == 5
+D	```
+P	3011		step
+D	The common difference of successive members of this sequence.
+D	
+D	Facts:
+D	```
+D	IntSeq(5, 2).step == 1
+D	IntSeq(5, 2).step(-2).step == -2
+D	```
+M	3020		step		newValue
+D	Changes [step] to [newValue].
+D	
+D	Facts:
+D	```
+D	IntSeq(5, 2).step == 1
+D	IntSeq(5, 2).step(-2).step == -2
+D	```
+M	3023		fold	:Result	initial,operator
+D	Folds this sequence in iteration order using [operator], starting with [initial].
+M	3033		map	:Result	mapper
+D	Applies [mapper] to each member of this sequence and returns the resulting values as a list.
+D	
+D	Facts:
+D	```
+D	IntSeq(2, 5).map((it) -> it) == List(2, 3, 4, 5)
+D	IntSeq(5, 2).map((it) -> it) == List()
+D	IntSeq(5, 2).step(-1).map((it) -> it * 2) == List(10, 8, 6, 4)
+D	```
+M	3036		toList		
+D	Converts the elements of this sequence to a [List].
+M	3039		toListing		
+D	Converts the elements of this sequence to a [Listing].
+C	3046	external	VarArgs	:Type	
+D	A variable number of method arguments of type [Type].
+D	
+D	The purpose of this class is to document methods that accept a variable number of arguments.
+D	Only standard library methods can accept a variable number of arguments.
+C	3066	external	List	out:Element	Collection<Element>
+D	An indexed sequence of elements.
+D	
+D	The following operators are supported for lists:
+D	```
+D	list[3]       // subscript
+D	list1 + list2 // concatenation
+D	```
+P	3067		length
+P	3069		isEmpty
+P	3072		isNotEmpty
+A	Since	version=0.31.0
+P	3077		lastIndex
+D	The index of the last element in this list (same as `length - 1`).
+D	
+D	Returns `-1` for an empty list.
+M	3092		getOrNull		index
+D	Returns the element at [index].
+D	
+D	Returns [null] if [index] is outside the bounds of this list.
+D	
+D	Facts:
+D	```
+D	List(3, 9, 6).getOrNull(0) == 3
+D	List(3, 9, 6).getOrNull(1) == 9
+D	List(3, 9, 6).getOrNull(2) == 6
+D	List(3, 9, 6).getOrNull(-1) == null
+D	List(3, 9, 6).getOrNull(3) == null
+D	List(3, 9, 6).getOrNull(99) == null
+D	```
+M	3109		sublist		start,exclusiveEnd
+D	Returns the sublist from [start] until [exclusiveEnd].
+D	
+D	Throws if [start] is outside range `0`..[length] or [exclusiveEnd] is outside range
+D	[start]..[length].
+D	
+D	Facts:
+D	```
+D	List(3, 9, 6).sublist(0, 1) == List(3)
+D	List(3, 9, 6).sublist(0, 2) == List(3, 9)
+D	List(3, 9, 6).sublist(1, 3) == List(9, 6)
+D	List(3, 9, 6).sublist(0, 3) == List(3, 9, 6)
+D	List(3, 9, 6).sublist(-1, 2) // error
+D	List(3, 9, 6).sublist(1, 4)  // error
+D	List(3, 9, 6).sublist(9, 99) // error
+D	```
+M	3126		sublistOrNull		start,exclusiveEnd
+D	Returns the sublist from [start] until [exclusiveEnd].
+D	
+D	Returns [null] if [start] is outside range `0`..[length] or [exclusiveEnd] is outside range
+D	[start]..[length].
+D	
+D	Facts:
+D	```
+D	List(3, 9, 6).sublistOrNull(0, 1) == List(3)
+D	List(3, 9, 6).sublistOrNull(0, 2) == List(3, 9)
+D	List(3, 9, 6).sublistOrNull(1, 3) == List(9, 6)
+D	List(3, 9, 6).sublistOrNull(0, 3) == List(3, 9, 6)
+D	List(3, 9, 6).sublistOrNull(-1, 2) == null
+D	List(3, 9, 6).sublistOrNull(1, 4) == null
+D	List(3, 9, 6).sublistOrNull(9, 99) == null
+D	```
+P	3128		first
+P	3129		firstOrNull
+P	3131		rest
+P	3132		restOrNull
+P	3134		last
+P	3135		lastOrNull
+P	3137		single
+P	3138		singleOrNull
+M	3140		contains		element
+M	3141		startsWith		coll
+M	3142		endsWith		coll
+M	3144		split		index
+M	3145		splitOrNull		index
+M	3146		partition		predicate
+M	3148		filter		predicate
+M	3149		filterNonNull		
+M	3150		map	:Result	transform
+M	3151		mapNonNull	:Result	transform
+M	3152		flatMap	:Result	transform
+M	3154		filterIndexed		predicate
+M	3155		mapIndexed	:Result	transform
+M	3158		mapNonNullIndexed	:Result	transform
+A	Since	version=0.29.0
+M	3161		flatMapIndexed	:Result	transform
+M	3165		filterIsInstance	:Type	clazz
+P	3177		isDistinct
+D	Tells whether this list contains no duplicate elements.
+D	
+D	Equivalent to `length == toSet().length`.
+D	
+D	Facts:
+D	```
+D	List(1, 2, 3).isDistinct
+D	!List(1, 2, 1).isDistinct
+D	```
+A	AlsoKnownAs	names[]=isUnique
+M	3187		isDistinctBy		selector
+D	Tells whether this list contains no duplicate elements after applying [selector].
+D	
+D	Facts:
+D	```
+D	List("a", "bb", "ccc").isDistinctBy((it) -> it.length)
+D	!List("a", "ab", "c").isDistinctBy((it) -> it.length)
+D	```
+A	AlsoKnownAs	names[]=isUniqueBy
+P	3199		distinct
+D	Removes duplicate elements from this list, preserving the first occurrence of each element.
+D	
+D	Equivalent to `toSet().toList()`.
+D	
+D	Facts:
+D	```
+D	List(1, 2, 3).distinct == List(1, 2, 3)
+D	List(1, 2, 1).distinct == List(1, 2)
+D	```
+A	AlsoKnownAs	names[]=unique
+M	3210		distinctBy		selector
+D	Removes elements that are duplicates after applying [selector] from this list, preserving the
+D	first occurrence.
+D	
+D	Facts:
+D	```
+D	List("a", "bb", "ccc").distinctBy((it) -> it.length) == List("a", "bb", "ccc")
+D	List("a", "ab", "c").distinctBy((it) -> it.length) == List("a", "ab")
+D	```
+A	AlsoKnownAs	names[]=uniqueBy
+M	3212		flatten		
+M	3214		every		predicate
+M	3215		any		predicate
+M	3217		add	:Other	element
+M	3222		replace	:Other	index,replacement
+D	Replaces the element at [index] with [replacement].
+D	
+D	Throws if [index] is outside the bounds of this list.
+M	3227		replaceOrNull	:Other	index,replacement
+D	Replaces the element at [index] with [replacement].
+D	
+D	Returns [null] if [index] is outside the bounds of this list.
+M	3232		replaceRange	:Other	start,exclusiveEnd,replacement
+D	Replaces the elements between indices [start] and [exclusiveEnd] with [replacement].
+D	
+D	Throws if [start] or [exclusiveEnd] is outside the bounds of this list.
+M	3241		replaceRangeOrNull	:Other	start,exclusiveEnd,replacement
+D	Replaces the elements between indices [start] and [exclusiveEnd] with [replacement].
+D	
+D	Returns [null] if [range] or [exclusiveEnd] is outside the bounds of this list.
+M	3247		find		predicate
+M	3248		findOrNull		predicate
+M	3250		findLast		predicate
+M	3251		findLastOrNull		predicate
+M	3264		findIndex		predicate
+D	The index of the first element for which [predicate] returns [true].
+D	
+D	Throws  if [predicate] does not hold for any element in this collection.
+D	
+D	Facts:
+D	```
+D	List(5, 6, 7).findIndex((n) -> n.isEven) == 1
+D	List(4, 6, 8).findIndex((n) -> n.isEven) == 0
+D	import("pkl:test").catch(() -> List(5, 7, 9).findLast((n) -> n.isEven))
+D	```
+A	AlsoKnownAs	names[]=indexWhere
+M	3269		findIndexOrNull		predicate
+D	Same as [findIndex()] but returns [null] if [predicate] does not hold for any element in this
+D	collection.
+A	AlsoKnownAs	names[]=indexWhere
+M	3282		findLastIndex		predicate
+D	The index of the last element for which [predicate] returns [true].
+D	
+D	Throws if [predicate] does not hold for any element in this collection.
+D	
+D	Facts:
+D	```
+D	List(5, 6, 7).findLastIndex((n) -> n.isEven) == 1
+D	List(4, 6, 8).findLastIndex((n) -> n.isEven) == 2
+D	import("pkl:test").catch(() -> List(5, 7, 9).findLastIndex((n) -> n.isEven))
+D	```
+A	AlsoKnownAs	names[]=lastIndexWhere
+M	3287		findLastIndexOrNull		predicate
+D	Same as [findLastIndex()] but returns [null] if [predicate] does not hold for any element in
+D	this collection.
+A	AlsoKnownAs	names[]=lastIndexWhere
+M	3299		indexOf		element
+D	The zero-based index of the first occurrence of [element] in this collection.
+D	
+D	Throws if this collection does not contains [element].
+D	
+D	Facts:
+D	```
+D	List(1, 2, 3).indexOf(2) == 1
+D	List(1, 2, 2).indexOf(2) == 1
+D	import("pkl:test").catch(() -> List(1, 2, 3).indexOf(4))
+D	```
+M	3302		indexOfOrNull		element
+D	Same as [indexOf()] but returns [null] if this collection does not contain [element].
+M	3314		lastIndexOf		element
+D	The zero-based index of the last occurrence of [element] in this collection.
+D	
+D	Throws if this collection does not contain [element].
+D	
+D	Facts:
+D	```
+D	List(1, 2, 3).lastIndexOf(2) == 1
+D	List(1, 2, 2).lastIndexOf(2) == 2
+D	import("pkl:test").catch(() -> List(1, 2, 3).lastIndexOf(4))
+D	```
+M	3317		lastIndexOfOrNull		element
+D	Same as [lastIndexOf()] but returns [null] if this collection does not contain [element].
+M	3319		count		predicate
+M	3321		take		n
+M	3322		takeWhile		predicate
+M	3323		takeLast		n
+M	3324		takeLastWhile		predicate
+M	3326		drop		n
+M	3327		dropWhile		predicate
+M	3328		dropLast		n
+M	3329		dropLastWhile		predicate
+M	3331		fold	:Result	initial,operator
+M	3332		foldBack	:Result	initial,operator
+M	3333		foldIndexed	:Result	initial,operator
+M	3338		reduce	:Result	operator
+M	3339		reduceOrNull	:Result	operator
+M	3341		groupBy	:Key	selector
+M	3343		repeat		n
+P	3345		min
+P	3346		minOrNull
+M	3348		minBy		selector
+M	3349		minByOrNull		selector
+M	3351		minWith		comparator
+M	3352		minWithOrNull		comparator
+P	3354		max
+P	3355		maxOrNull
+M	3357		maxBy		selector
+M	3358		maxByOrNull		selector
+M	3360		maxWith		comparator
+M	3361		maxWithOrNull		comparator
+M	3363		sort		
+M	3364		sortBy		selector
+M	3365		sortWith		comparator
+M	3367		reverse		
+M	3369		zip	:Other	coll
+M	3371		join		separator
+M	3373		toList		
+M	3375		toSet		
+M	3377		toMap	:Key,:Value	keyExtractor,valueExtractor
+M	3382		toListing		
+M	3384		toDynamic		
+M	3390		toBytes		
+D	Converts this list to [Bytes].
+D	
+D	Throws a type error if any of its elements are not [UInt8].
+A	Since	version=0.29.0
+C	3414	external	Set	out:Element	Collection<Element>
+D	A collection of unique elements.
+D	
+D	Sets retain the order of elements when constructed, which affects the how they are iterated
+D	over.
+D	However, ordering does not affect equality between two sets.
+D	
+D	The following operators are supported for sets:
+D	```
+D	set1 + set2  // union
+D	```
+P	3415		length
+P	3417		isEmpty
+P	3420		isNotEmpty
+A	Since	version=0.31.0
+P	3422		first
+P	3423		firstOrNull
+P	3425		rest
+P	3426		restOrNull
+P	3428		last
+P	3429		lastOrNull
+P	3431		single
+P	3432		singleOrNull
+M	3434		contains		element
+M	3435		startsWith		coll
+M	3436		endsWith		coll
+M	3438		split		index
+M	3439		splitOrNull		index
+M	3440		partition		predicate
+M	3442		filter		predicate
+M	3443		filterNonNull		
+M	3444		map	:Result	transform
+M	3445		mapNonNull	:Result	transform
+M	3446		flatMap	:Result	transform
+M	3448		filterIndexed		predicate
+M	3449		mapIndexed	:Result	transform
+M	3452		mapNonNullIndexed	:Result	transform
+A	Since	version=0.29.0
+M	3455		flatMapIndexed	:Result	transform
+M	3459		filterIsInstance	:Type	clazz
+M	3461		flatten		
+M	3463		every		predicate
+M	3464		any		predicate
+M	3466		add	:Other	element
+M	3468		find		predicate
+M	3469		findOrNull		predicate
+M	3471		findLast		predicate
+M	3472		findLastOrNull		predicate
+M	3474		count		predicate
+M	3476		take		n
+M	3477		takeWhile		predicate
+M	3478		takeLast		n
+M	3479		takeLastWhile		predicate
+M	3481		drop		n
+M	3482		dropWhile		predicate
+M	3483		dropLast		n
+M	3484		dropLastWhile		predicate
+M	3486		fold	:Result	initial,operator
+M	3487		foldBack	:Result	initial,operator
+M	3488		foldIndexed	:Result	initial,operator
+M	3493		reduce	:Result	operator
+M	3494		reduceOrNull	:Result	operator
+M	3496		groupBy	:Key	selector
+M	3498		repeat		n
+P	3500		min
+P	3501		minOrNull
+M	3503		minBy		selector
+M	3504		minByOrNull		selector
+M	3506		minWith		comparator
+M	3507		minWithOrNull		comparator
+P	3511		max
+P	3512		maxOrNull
+M	3514		maxBy		selector
+M	3515		maxByOrNull		selector
+M	3517		maxWith		comparator
+M	3518		maxWithOrNull		comparator
+M	3522		sort		
+M	3523		sortBy		selector
+M	3524		sortWith		comparator
+M	3528		reverse		
+M	3530		zip	:Other	coll
+M	3532		join		separator
+M	3534		toList		
+M	3536		toSet		
+M	3538		toMap	:Key,:Value	keyExtractor,valueExtractor
+M	3543		toListing		
+M	3545		toDynamic		
+M	3548		intersect		other
+D	The intersection of this set and [other].
+M	3551		difference		other
+D	The difference of this set and [other].
+C	3577	external	Map	out:Key,out:Value	Any
+P	3579		length
+D	The number of entries in this map.
+P	3582		isEmpty
+D	Tells whether this map is empty.
+P	3586		isNotEmpty
+D	Tells whether this map not empty.
+A	Since	version=0.31.0
+M	3591		getOrNull		key
+D	Returns the value for [key].
+D	
+D	Returns [null] if this map does not contain [key].
+P	3594		keys
+D	The keys contained in this map.
+P	3597		values
+D	The values contained in this map.
+P	3600		entries
+D	The entries contained in this map.
+M	3603		containsKey		key
+D	Tells if this map contains an entry with the given key.
+M	3606		containsValue		value
+D	Tells if this map contains an entry with the given value.
+M	3609		put	:NewKey,:NewValue	key,value
+D	Adds or updates [key] to [value].
+M	3617		remove		key
+D	Removes the map entry with the given key.
+D	
+D	Returns this map unchanged if it does not contain an entry with the given key.
+M	3620		filter		predicate
+D	Removes all entries for which [predicate] does not hold.
+M	3623		fold	:Result	initial,operator
+D	Folds the entries of this map in iteration order using [operator], starting with [initial].
+M	3626		map	:NewKey,:NewValue	transform
+D	Transforms the entries of this map using [transform].
+M	3631		mapKeys	:NewKey	transform
+D	Transforms the keys of this map using [transform].
+M	3634		mapValues	:NewValue	transform
+D	Transforms the values of this map using [transform].
+M	3637		flatMap	:NewKey,:NewValue	transform
+D	Applies a map-generating [transform] to each map entry and concatenates the resulting maps.
+M	3644		every		predicate
+D	Tells if [predicate] holds for every entry of this map.
+D	
+D	Returns [true] for an empty map.
+M	3649		any		predicate
+D	Tells if [predicate] holds for at least one entry of this map.
+D	
+D	Returns [false] for an empty map.
+M	3652		toMap		
+D	Returns this map.
+M	3655		toDynamic		
+D	Converts this map to a [Dynamic] object.
+M	3676		toTyped	:Type	clazz
+D	Converts this map to a typed object of class [clazz].
+D	
+D	Conforms to the semantics of the following manual conversion:
+D	```
+D	class Person { name: String; age: Int }
+D	map = Map(name, "Pigeon", age, 42)
+D	function toTyped(map: Map): Person = new {
+D	  name = map.getOrNull("name") ?? super.name
+D	  age = map.getOrNull("age") ?? super.age
+D	}
+D	```
+D	
+D	Notable behavior:
+D	- Entries of [this] that have no corresponding property in [clazz] are ignored.
+D	- [clazz] properties that have no corresponding entry in [this] have their defaults preserved.
+D	- [clazz] properties that have neither a default nor a corresponding entry in [this]
+D	  throw an "undefined property" error (only) when accessed.
+D	
+D	Throws if [clazz] is abstract or not a subclass of [Typed].
+M	3679		toMapping		
+D	Converts this map to a [Mapping].
+C	3703	external	Bytes		Any
+D	A sequence of [UInt8] values.
+D	
+D	Bytes can hold up to [math.maxInt] amount of bytes.
+D	
+D	The following operators are supported for [Bytes]:
+D	```
+D	bytes1 + bytes2  // concatenation
+D	bytes[3]         // subscript
+D	```
+D	
+D	For other list-like procedures, convert this into a [List] using [toList()].
+A	Since	version=0.29.0
+P	3705		length
+D	The length of these bytes.
+P	3708		size
+D	The number of bytes as [DataSize].
+P	3711		base64
+D	The bytes in base64 encoding.
+P	3714		hex
+D	The bytes in hexadecimal encoding.
+P	3719		md5
+D	The [MD5](https://en.wikipedia.org/wiki/MD5) hash of these bytes as hexadecimal string.
+D	
+D	MD5 is cryptographically broken and should not be used for secure applications.
+P	3724		sha1
+D	The [SHA-1](https://en.wikipedia.org/wiki/SHA-1) hash of these bytes as hexadecimal string.
+D	
+D	SHA-1 is cryptographically broken and should not be used for secure applications.
+P	3728		sha256
+D	The [SHA-256](https://en.wikipedia.org/wiki/SHA-2) cryptographic hash of these bytes as
+D	hexadecimal string.
+P	3732		sha256Int
+D	The first 64 bits of the [SHA-256](https://en.wikipedia.org/wiki/SHA-2) cryptographic hash of
+D	these bytes.
+M	3747		getOrNull		index
+D	Returns the element at [index].
+D	
+D	Returns [null] if [index] is outside the bounds of these Bytes.
+D	
+D	Facts:
+D	```
+D	Bytes(3, 9, 6).getOrNull(0) == 3
+D	Bytes(3, 9, 6).getOrNull(1) == 9
+D	Bytes(3, 9, 6).getOrNull(2) == 6
+D	Bytes(3, 9, 6).getOrNull(-1) == null
+D	Bytes(3, 9, 6).getOrNull(3) == null
+D	Bytes(3, 9, 6).getOrNull(99) == null
+D	```
+M	3752		decodeToString		charset
+D	Converts these bytes into a string using the given [charset].
+D	
+D	Throws if these bytes are invalid according to the given [charset].
+M	3755		toList		
+D	Converts these bytes into a [List].
