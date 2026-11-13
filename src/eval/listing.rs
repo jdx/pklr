@@ -181,7 +181,26 @@ impl Evaluator {
             bind_listing_member(&mut listing_scope, prop, value);
             unbound.remove(&prop.name);
         }
+        // `this` in an element reads the elements before it.
+        let reads_this = entries.iter().any(|entry| {
+            matches!(entry, Entry::Elem(expr) | Entry::DynProperty(_, expr)
+                if mapping_entry_mentions_this(expr))
+        });
+        let total_len = items.len()
+            + entries
+                .iter()
+                .filter(|entry| matches!(entry, Entry::Elem(_)))
+                .count();
         for entry in entries {
+            if reads_this && matches!(entry, Entry::Elem(_) | Entry::DynProperty(..)) {
+                let mut snapshot = items.clone();
+                // Elements still to come, so `this` has about its final length.
+                snapshot.resize(total_len.max(items.len()), Value::Null);
+                listing_scope.set(
+                    "this",
+                    Value::List(ListValue::new(ListKind::Listing, snapshot)),
+                );
+            }
             match entry {
                 Entry::Predicate(..) => return Err(member_predicates_unsupported()),
                 Entry::Property(_) => {}
@@ -207,7 +226,8 @@ impl Evaluator {
                         .filter(|index| *index < parent_len)
                         .ok_or_else(|| {
                             Error::Eval(format!(
-                                "Element index `{index}` is out of range `0`..`{}`.",
+                                "Element index `{}` is out of range `0`..`{}`.",
+                                group_digits(index),
                                 parent_len as i64 - 1
                             ))
                         })?;

@@ -574,16 +574,6 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse a comma-separated parameter list up to `terminator`, allowing a
-    /// trailing comma. The types are checked but not kept.
-    pub(super) fn parse_parameters(&mut self, terminator: &TokenKind) -> Result<Vec<String>> {
-        Ok(self
-            .parse_typed_parameters(terminator)?
-            .into_iter()
-            .map(|(name, _)| name)
-            .collect())
-    }
-
-    /// Parse a comma-separated parameter list up to `terminator`, allowing a
     /// trailing comma, keeping the types.
     pub(super) fn parse_typed_parameters(
         &mut self,
