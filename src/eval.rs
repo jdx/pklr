@@ -112,7 +112,7 @@ pub struct Evaluator {
     constraint_nesting: u32,
     /// Lambda bodies (by address) whose const-scope violation pkl raises when
     /// the lambda runs, from the modules that declared them.
-    deferred_const: HashMap<usize, Arc<str>>,
+    deferred_const: HashMap<usize, (Arc<Expr>, Arc<str>)>,
     leaked_this: Option<Value>,
     /// Cache for evaluated local imports (canonical path → Value)
     import_cache: HashMap<PathBuf, Value>,

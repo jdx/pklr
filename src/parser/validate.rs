@@ -14,6 +14,7 @@
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use super::ast::{Annotation, Entry, Expr, Modifier, Property, StringInterpPart, TypeExpr};
 
@@ -40,7 +41,7 @@ impl ConstViolation {
 pub(super) fn find_const_violation(
     body: &[Entry],
     open: bool,
-) -> (Option<ConstViolation>, Vec<(usize, String)>) {
+) -> (Option<ConstViolation>, Vec<(Arc<Expr>, String)>) {
     let mut walker = Walker::new(body);
     walker.frames.push(Frame::object(members_of(body), open));
     let found = walker.module(body);
@@ -335,7 +336,7 @@ struct Walker<'m> {
     constraint_bases: Vec<&'m str>,
     /// Violations inside a lambda passed to `catch`, which pkl raises only
     /// when the lambda runs: the address of the lambda body and the message.
-    deferred: Vec<(usize, String)>,
+    deferred: Vec<(Arc<Expr>, String)>,
 }
 
 fn violation(message: impl Into<String>) -> Option<ConstViolation> {
@@ -766,8 +767,7 @@ impl<'m> Walker<'m> {
                         let found = self.expr(arg);
                         match (found, arg, catches) {
                             (Some(found), Expr::Lambda(_, body), true) => {
-                                self.deferred
-                                    .push((std::sync::Arc::as_ptr(body) as usize, found.message()));
+                                self.deferred.push((Arc::clone(body), found.message()));
                                 None
                             }
                             (found, ..) => found,

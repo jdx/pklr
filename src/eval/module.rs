@@ -1630,8 +1630,10 @@ impl Evaluator {
         // module body for the evaluator's lifetime, so the addresses stay
         // valid and cannot be reused by another allocation.
         for (body, message) in &module.deferred_const_violations {
-            self.deferred_const
-                .insert(*body, Arc::from(message.as_str()));
+            self.deferred_const.insert(
+                Arc::as_ptr(body) as usize,
+                (Arc::clone(body), Arc::from(message.as_str())),
+            );
         }
         let mut todo = plan.order.clone();
         // A member can fail because it read another before that one could be

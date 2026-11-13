@@ -33,7 +33,7 @@ pub struct Module {
     pub local_type_aliases: std::collections::HashSet<String>,
     /// Const-scope violations inside lambdas passed to `catch`, which only
     /// fail when the lambda runs: the address of the lambda body and the message.
-    pub deferred_const_violations: Vec<(usize, String)>,
+    pub deferred_const_violations: Vec<(std::sync::Arc<Expr>, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

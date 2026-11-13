@@ -457,3 +457,24 @@ c = new C {}
         "Cannot reference property `y` from here because it is not `const`."
     );
 }
+
+// The deferral survives the rewrite that resolves type aliases in an
+// enclosing lambda's body.
+#[test]
+fn const_violation_deferral_survives_alias_capture() {
+    let json = eval(
+        r#"
+import "pkl:test"
+typealias A = Int
+y = 1
+class C {
+  m = () -> test.catch(() -> if (1 is A) y else 0)
+}
+c = new C {}.m.apply()
+"#,
+    );
+    assert_eq!(
+        json["c"],
+        "Cannot reference property `y` from here because it is not `const`."
+    );
+}

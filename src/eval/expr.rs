@@ -75,7 +75,8 @@ impl Evaluator {
                 // below applies to it.
                 let mut body = Arc::clone(body);
                 if !self.deferred_const.is_empty()
-                    && let Some(message) = self.deferred_const.get(&(Arc::as_ptr(&body) as usize))
+                    && let Some((_, message)) =
+                        self.deferred_const.get(&(Arc::as_ptr(&body) as usize))
                 {
                     body = Arc::new(Expr::Throw(Box::new(Expr::String(Arc::clone(message)))));
                 }
@@ -87,7 +88,7 @@ impl Evaluator {
                 // A body that names a type captures the whole scope (below),
                 // so resolving its aliases leaves `names` as it is.
                 if names.contains(NAMES_A_TYPE) && scope.has_type_aliases() {
-                    capture_type_aliases(Arc::make_mut(&mut body), scope);
+                    capture_type_aliases(Arc::make_mut(&mut body), scope, &self.deferred_const);
                 }
                 let mut refs = HashSet::default();
                 let shadows = params.iter().map(nm).collect::<HashSet<_>>();
