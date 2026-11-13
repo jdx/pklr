@@ -229,6 +229,12 @@ impl Evaluator {
                 "getClass" if args.is_empty() && scope.get("getClass").is_none() => {
                     return self.eval_bare_get_class(scope, depth);
                 }
+                "TODO" if args.is_empty() && scope.get("TODO").is_none() => {
+                    return Err(Error::Eval("TODO".into()));
+                }
+                "Undefined" if args.is_empty() && scope.get("Undefined").is_none() => {
+                    return Err(Error::Eval("Undefined value.".into()));
+                }
                 "List" | "Listing" => {
                     let mut items = Vec::new();
                     for a in args {
@@ -754,6 +760,39 @@ impl Evaluator {
                     && source.type_name.is_none() =>
             {
                 Ok(Some(Value::List(source.elements.clone().into())))
+            }
+            (
+                Value::Object(map, Some(source)),
+                name @ ("hasProperty" | "getProperty" | "getPropertyOrNull"),
+            ) if source.kind != ObjectKind::Mapping => {
+                let wanted = require_str_arg(args, 0, name)?;
+                let found = map
+                    .get(wanted)
+                    .filter(|_| {
+                        source.type_name.is_some()
+                            || source.is_module
+                            || source.evaluated_properties.iter().any(|p| &**p == wanted)
+                    })
+                    .cloned();
+                Ok(Some(match name {
+                    "hasProperty" => Value::Bool(found.is_some()),
+                    "getPropertyOrNull" => found.unwrap_or(Value::Null),
+                    _ => found.ok_or_else(|| {
+                        let class =
+                            super::types::object_class_name(Some(source), Some(&self.module_names));
+                        Error::Eval(format!(
+                            "Cannot find property `{wanted}` in object of type `{class}`."
+                        ))
+                    })?,
+                }))
+            }
+            // `Dynamic.length()` counts its elements.
+            (Value::Object(_, Some(source)), "length")
+                if args.is_empty()
+                    && source.kind.dynamic_as_object() == ObjectKind::Object
+                    && source.type_name.is_none() =>
+            {
+                Ok(Some(Value::Int(source.elements.len() as i64)))
             }
             (Value::Object(..), "toList") => Ok(Some(obj.clone())),
             // `Dynamic` and `Mapping` have no `toDynamic()`; it is a method of

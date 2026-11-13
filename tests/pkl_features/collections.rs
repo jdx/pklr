@@ -113,3 +113,69 @@ res = test.catch(() -> (people) {
     );
     assert_eq!(json["res"], "Duplicate definition of member `0`.");
 }
+
+#[test]
+fn dynamic_length_and_property_reflection() {
+    let json = eval(
+        r#"
+class Animal { species: String; age: Int = 3 }
+local pigeon = new Animal { species = "Pigeon" }
+local obj = new Dynamic { x = 1; "one"; "two" }
+length = obj.length()
+noElements = new Dynamic { name = "Pigeon" }.length()
+get = pigeon.getProperty("age")
+getOrNull = pigeon.getPropertyOrNull("species")
+has = pigeon.hasProperty("species")
+hasNot = pigeon.hasProperty("other")
+dynHas = obj.hasProperty("x")
+"#,
+    );
+    assert_eq!(json["length"], 2);
+    assert_eq!(json["noElements"], 0);
+    assert_eq!(json["get"], 3);
+    assert_eq!(json["getOrNull"], "Pigeon");
+    assert_eq!(json["has"], true);
+    assert_eq!(json["hasNot"], false);
+    assert_eq!(json["dynHas"], true);
+    let message = eval_fails("class A { x: Int = 1 }\nres = new A {}.getProperty(\"y\")");
+    assert!(
+        message.contains("Cannot find property `y` in object of type `test#A`."),
+        "{message}"
+    );
+}
+
+#[test]
+fn shell_platform_and_base_functions() {
+    let json = eval(
+        r#"
+import "pkl:platform"
+import "pkl:shell"
+import "pkl:test"
+quoted = shell.escapeWithSingleQuotes("abc'def''ghi")
+quotedEdge = shell.escapeWithSingleQuotes("'abc'")
+os = platform.current.operatingSystem.name != ""
+todo = test.catch(() -> TODO())
+undefined = test.catch(() -> Undefined())
+dangling = test.catch(() -> Regex("*"))
+unclosed = test.catch(() -> Regex("("))
+step = test.catch(() -> IntSeq(1, 5).step(0))
+"#,
+    );
+    assert_eq!(json["quoted"], r"'abc'\''def'\'\''ghi'");
+    assert_eq!(json["quotedEdge"], r"\''abc'\'");
+    assert_eq!(json["os"], true);
+    assert_eq!(json["todo"], "TODO");
+    assert_eq!(json["undefined"], "Undefined value.");
+    assert_eq!(
+        json["dangling"],
+        "Syntax error in regex `*`: Dangling meta character '*' near index 0 * ^"
+    );
+    assert_eq!(
+        json["unclosed"],
+        "Syntax error in regex `(`: Unclosed group near index 1 ("
+    );
+    assert_eq!(
+        json["step"],
+        "Type constraint `isNonZero` violated. Value: 0"
+    );
+}

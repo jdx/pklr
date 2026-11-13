@@ -547,6 +547,15 @@ impl Evaluator {
                         return Ok(Value::Int(s.chars().count() as i64));
                     }
                     (Value::String(s), "isEmpty") => return Ok(Value::Bool(s.is_empty())),
+                    // A read `Resource` has `uri`, `text` and `base64`, and derives the rest.
+                    (
+                        Value::Object(map, None),
+                        "bytes" | "md5" | "sha1" | "sha256" | "sha256Int",
+                    ) if map.contains_key("uri") && map.contains_key("base64") => {
+                        if let Some(result) = stdlib::resource_property(map, field) {
+                            return result;
+                        }
+                    }
                     (Value::Object(map, _), "length") => return Ok(Value::Int(map.len() as i64)),
                     (Value::Object(map, _), "isEmpty") => return Ok(Value::Bool(map.is_empty())),
                     (Value::Object(map, None), "isNotEmpty") => {
@@ -1264,7 +1273,9 @@ pub(super) const MAX_INT_SEQ_LEN: i128 = 1_000_000;
 /// away from `end` (e.g. `IntSeq(5, 1)` with the default step of 1).
 pub(super) fn int_seq(start: i64, end: i64, step: i64) -> Result<Value> {
     if step == 0 {
-        return Err(Error::Eval("IntSeq step must not be 0".into()));
+        return Err(Error::Eval(
+            "Type constraint `isNonZero` violated. Value: 0".into(),
+        ));
     }
     let (start_w, end_w, step_w) = (start as i128, end as i128, step as i128);
     let len = if (step > 0 && start <= end) || (step < 0 && start >= end) {

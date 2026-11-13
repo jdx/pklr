@@ -25,7 +25,54 @@ pub(crate) fn compile(pattern: &str) -> Result<Regex> {
     let syntax_error =
         |message: String| Error::Eval(format!("Syntax error in regex `{pattern}`: {message}"));
     check_group_names(pattern).map_err(syntax_error)?;
-    Regex::new(pattern).map_err(syntax_error)
+    Regex::new(pattern).map_err(|error| {
+        syntax_error(java_syntax_error(pattern).unwrap_or_else(|| error.to_string()))
+    })
+}
+
+/// Java's message for the two mistakes people make most, which is what Pkl
+/// reports: a repeat operator with nothing to repeat, and an unclosed group.
+fn java_syntax_error(pattern: &str) -> Option<String> {
+    let at = |description: &str, index: usize| {
+        let mut message = format!("{description} near index {index}\n{pattern}");
+        if index < pattern.chars().count() {
+            message.push('\n');
+            message.push_str(&" ".repeat(index));
+            message.push('^');
+        }
+        message
+    };
+    let (mut open, mut in_class, mut escaped) = (0usize, false, false);
+    let mut can_repeat = false;
+    for (index, c) in pattern.chars().enumerate() {
+        if escaped {
+            escaped = false;
+            can_repeat = true;
+            continue;
+        }
+        match c {
+            '\\' => escaped = true,
+            _ if in_class => in_class = c != ']',
+            '[' => {
+                in_class = true;
+                can_repeat = true;
+            }
+            '(' => {
+                open += 1;
+                can_repeat = false;
+            }
+            '|' => can_repeat = false,
+            ')' => {
+                open = open.saturating_sub(1);
+                can_repeat = true;
+            }
+            '*' | '+' | '?' if !can_repeat => {
+                return Some(at(&format!("Dangling meta character '{c}'"), index));
+            }
+            _ => can_repeat = true,
+        }
+    }
+    (open > 0).then(|| at("Unclosed group", pattern.chars().count()))
 }
 
 /// Java only accepts group names made of ASCII letters and digits, starting

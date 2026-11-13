@@ -135,6 +135,67 @@ class ImportStrClass { path: String }
 class ExtVarClass { name: String }
 "#;
 
+/// `pkl:shell`, as Pkl source.
+const SHELL_MODULE: &str = r##"
+function escapeWithSingleQuotes(str: String): String =
+  str.replaceAllMapped(Regex("[^']+|'"), (m) -> if (m.value == "'") #"\'"# else "'\(m.value)'")
+"##;
+
+/// `pkl:platform`'s classes. Its `current` describes pklr and the host, so
+/// the source is completed by [`platform_module_source`].
+const PLATFORM_MODULE: &str = r#"
+class Platform {
+  language: Language
+  runtime: Runtime
+  virtualMachine: VirtualMachine
+  operatingSystem: OperatingSystem
+  processor: Processor
+}
+
+class Language { version: String }
+
+class Runtime {
+  name: String
+  version: String
+}
+
+class VirtualMachine {
+  name: String
+  version: String
+}
+
+class OperatingSystem {
+  name: "macOS" | "Linux" | "Windows" | String
+  version: String
+}
+
+class Processor { architecture: String }
+"#;
+
+/// `pkl:platform` with `current` filled in for the running host. pklr is not
+/// a JVM, so the virtual machine is reported as `pklr` as well.
+fn platform_module_source() -> String {
+    let os = match std::env::consts::OS {
+        "macos" => "macOS",
+        "linux" => "Linux",
+        "windows" => "Windows",
+        other => other,
+    };
+    let version = env!("CARGO_PKG_VERSION");
+    format!(
+        r#"{PLATFORM_MODULE}
+current: Platform = new Platform {{
+  language {{ version = "0.32.2" }}
+  runtime {{ name = "pklr"; version = "{version}" }}
+  virtualMachine {{ name = "pklr"; version = "{version}" }}
+  operatingSystem {{ name = "{os}"; version = "unknown" }}
+  processor {{ architecture = "{arch}" }}
+}}
+"#,
+        arch = std::env::consts::ARCH,
+    )
+}
+
 /// `pkl:json`, as Pkl source.
 const JSON_MODULE: &str = r#"
 class Parser {
@@ -224,11 +285,20 @@ impl Evaluator {
             "jsonnet" => ("pkl:jsonnet", JSONNET_MODULE),
             "xml" => ("pkl:xml", XML_MODULE),
             "yaml" => ("pkl:yaml", YAML_MODULE),
+            "shell" => ("pkl:shell", SHELL_MODULE),
+            "platform" => ("pkl:platform", PLATFORM_MODULE),
             _ => return Ok(super::stdlib_module(name)),
         };
         if let Some(module) = self.builtin_classes.get(key) {
             return Ok(module.clone());
         }
+        let platform_source;
+        let source = if name == "platform" {
+            platform_source = platform_module_source();
+            platform_source.as_str()
+        } else {
+            source
+        };
         let tokens = lexer::lex_named(source, key)?;
         let module = parser::parse_named(&tokens, source, key)?;
         let value = self.eval_module_with_scope(&module, Path::new(key), depth + 1, None, None)?;

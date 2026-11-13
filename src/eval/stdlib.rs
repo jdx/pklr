@@ -17,7 +17,7 @@ pub(crate) mod render;
 pub(crate) mod string;
 mod units;
 
-pub(super) use collections::collection_property;
+pub(super) use collections::{collection_property, resource_property};
 pub(crate) use numbers::{
     binary_op, logical_left, logical_not, logical_right, negate, units_equal,
 };

@@ -28,7 +28,11 @@ impl Evaluator {
                     return None;
                 }
             }
-            ListKind::Dynamic => return None,
+            ListKind::Dynamic => {
+                // `Dynamic.length()` counts the elements.
+                return (name == "length" && args.is_empty())
+                    .then(|| Ok(Value::Int(items.len() as i64)));
+            }
         }
         self.collection_method_inner(items, name, args, depth)
             .transpose()
@@ -850,6 +854,32 @@ fn byte_vec(items: &ListValue) -> Vec<u8> {
 }
 
 /// A property that `Bytes` has and a `List` does not.
+/// `bytes` and the digests of a `Resource`, from its `base64` or `text`.
+pub(in crate::eval) fn resource_property(members: &ObjectMap, name: &str) -> Option<Result<Value>> {
+    if !matches!(name, "bytes" | "md5" | "sha1" | "sha256" | "sha256Int") {
+        return None;
+    }
+    let bytes = match (
+        members.get("bytes"),
+        members.get("base64"),
+        members.get("text"),
+    ) {
+        (Some(bytes @ Value::List(items)), ..) if items.is_bytes() => bytes.clone(),
+        (_, Some(Value::String(encoded)), _) => {
+            super::string::bytes_value(super::string::base64_decode(encoded).ok()?)
+        }
+        (.., Some(Value::String(text))) => super::string::bytes_value(text.as_bytes().to_vec()),
+        _ => return None,
+    };
+    if name == "bytes" {
+        return Some(Ok(bytes));
+    }
+    let Value::List(items) = &bytes else {
+        return None;
+    };
+    bytes_property(items, name)
+}
+
 fn bytes_property(items: &ListValue, name: &str) -> Option<Result<Value>> {
     use super::string::{base64_encode, hex};
     Some(Ok(match name {
