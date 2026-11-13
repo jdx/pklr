@@ -1802,6 +1802,7 @@ fn inherited_constraint_errors_stay_lazy_but_poison_dependents() {
         temp.path().join("Base.pkl"),
         r#"
 hidden checks: Listing(throw("constraint boom")) = new { 1 }
+noisy = ""
 summary = checks.length
 other = 42
 "#,
@@ -1874,6 +1875,7 @@ fn inherited_constraint_probes_do_not_evaluate_unrequested_child_members() {
         temp.path().join("Base.pkl"),
         r#"
 hidden checks: Listing(throw("constraint boom")) = new { 1 }
+noisy = ""
 summary = if (false) checks.length else 42
 "#,
     )

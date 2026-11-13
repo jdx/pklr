@@ -484,6 +484,9 @@ pub struct ListValue {
     /// Made by `IntSeq(...)`: a `List` that is also of type `IntSeq`. Any
     /// change of the items or the kind clears it, and equality ignores it.
     int_seq: bool,
+    /// Made by `Bytes(...)`: a `List` of ints in 0..=255 that is of type
+    /// `Bytes`. Cleared like `int_seq`, and ignored by equality.
+    bytes: bool,
 }
 
 impl PartialEq for ListValue {
@@ -499,7 +502,18 @@ impl ListValue {
             kind,
             elem_class: None,
             int_seq: false,
+            bytes: false,
         }
+    }
+
+    /// The same list, marked as the result of `Bytes(...)`.
+    pub(crate) fn into_bytes(mut self) -> Self {
+        self.bytes = true;
+        self
+    }
+
+    pub(crate) fn is_bytes(&self) -> bool {
+        self.bytes
     }
 
     /// The class of a `Listing<T>`'s elements, if `T` is a class.
@@ -553,6 +567,7 @@ impl ListValue {
     }
 
     fn clear_int_seq(&mut self) {
+        self.bytes = false;
         if self.int_seq {
             self.int_seq = false;
             self.elem_class = None;
