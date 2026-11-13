@@ -3357,7 +3357,10 @@ names = IntSeq(1, 3).map((i) -> "host\(i)").join(",")
 #[test]
 fn int_seq_errors() {
     let err = eval_fails("x = IntSeq(1, 5).step(0).toList()");
-    assert!(err.contains("step must not be 0"), "{err}");
+    assert!(
+        err.contains("Type constraint `isNonZero` violated. Value: 0"),
+        "{err}"
+    );
     let err = eval_fails("x = IntSeq(0, 9223372036854775807).toList()");
     assert!(err.contains("supported maximum"), "{err}");
     let err = eval_fails(r#"x = IntSeq(1, "5")"#);

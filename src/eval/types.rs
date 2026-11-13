@@ -1155,7 +1155,7 @@ pub(super) fn missing_property_message(
 
 /// The name Pkl gives the class of an object `source` describes: `Dynamic`,
 /// or `module#Class` for an instance of a class.
-fn object_class_name(
+pub(super) fn object_class_name(
     source: Option<&ObjectSource>,
     module_names: Option<&HashMap<String, String>>,
 ) -> String {

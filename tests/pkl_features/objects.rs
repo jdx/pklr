@@ -8070,7 +8070,7 @@ res6 = test.catch(() -> m[1.5])
     );
     assert_eq!(
         val["res1"],
-        "Element index `5` is out of range `0`..`1`.\nCollection: List(1, 2)"
+        "Element index `5` is out of range `0`..`1`. Collection: List(1, 2)"
     );
     assert_eq!(val["res2"], "Cannot find key `\"b\"`.");
     assert_eq!(val["res3"], "Cannot find key `3`.");

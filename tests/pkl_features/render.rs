@@ -1327,7 +1327,7 @@ userError = test.catch(() -> throw("Error parsing mine.\n\ndetail"))
         serde_json::json!(["multi line", {"k": "a b"}])
     );
     assert_eq!(json["missing"], "Error parsing YAML document.");
-    assert_eq!(json["userError"], "Error parsing mine.\n\ndetail");
+    assert_eq!(json["userError"], "Error parsing mine.  detail");
 }
 
 #[test]
@@ -1493,14 +1493,14 @@ aliasOut = new JsonRenderer {}.renderValue(new TypeAlias {})
 }
 
 #[test]
-fn thrown_text_with_value_lines_is_not_rewritten_by_catch() {
+fn catch_flattens_newlines_of_thrown_text() {
     let json = eval(
         r#"
 import "pkl:test"
 msg = test.catch(() -> throw("bad\nValue: x"))
 "#,
     );
-    assert_eq!(json["msg"], "bad\nValue: x");
+    assert_eq!(json["msg"], "bad Value: x");
 }
 
 #[test]

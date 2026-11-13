@@ -552,8 +552,20 @@ impl Evaluator {
                         return Ok(Value::Int(s.chars().count() as i64));
                     }
                     (Value::String(s), "isEmpty") => return Ok(Value::Bool(s.is_empty())),
+                    // A read `Resource` has `uri`, `text` and `base64`, and derives the rest.
+                    (
+                        Value::Object(map, Some(source)),
+                        "bytes" | "md5" | "sha1" | "sha256" | "sha256Int",
+                    ) if source.type_identity.as_deref() == Some("pkl:base#Resource") => {
+                        if let Some(result) = stdlib::resource_property(map, field) {
+                            return result;
+                        }
+                    }
                     (Value::Object(map, _), "length") => return Ok(Value::Int(map.len() as i64)),
                     (Value::Object(map, _), "isEmpty") => return Ok(Value::Bool(map.is_empty())),
+                    (Value::Object(map, None), "isNotEmpty") => {
+                        return Ok(Value::Bool(!map.is_empty()));
+                    }
                     (Value::Object(map, _), "keys") => {
                         return Ok(Value::List(ListValue::new(
                             ListKind::Set,
@@ -654,6 +666,18 @@ impl Evaluator {
                     }
                     _ if self.stdlib_property(&obj, field).is_some() => {
                         self.stdlib_property(&obj, field).unwrap()
+                    }
+                    Value::Object(map, Some(source))
+                        if source.type_identity.as_deref() == Some("pkl:base#Resource")
+                            && matches!(
+                                field.as_str(),
+                                "bytes" | "md5" | "sha1" | "sha256" | "sha256Int"
+                            ) =>
+                    {
+                        match stdlib::resource_property(map, field) {
+                            Some(result) => result,
+                            None => Ok(Value::Null),
+                        }
                     }
                     Value::List(items) => null_safe_list_member(&obj, items, field),
                     Value::Object(map, source) => {
@@ -1274,7 +1298,9 @@ pub(super) const MAX_INT_SEQ_LEN: i128 = 1_000_000;
 /// away from `end` (e.g. `IntSeq(5, 1)` with the default step of 1).
 pub(super) fn int_seq(start: i64, end: i64, step: i64) -> Result<Value> {
     if step == 0 {
-        return Err(Error::Eval("IntSeq step must not be 0".into()));
+        return Err(Error::Eval(
+            "Type constraint `isNonZero` violated. Value: 0".into(),
+        ));
     }
     let (start_w, end_w, step_w) = (start as i128, end as i128, step as i128);
     let len = if (step > 0 && start <= end) || (step < 0 && start >= end) {
@@ -1447,7 +1473,7 @@ fn list_property(list: &Value, items: &ListValue, name: &str) -> Option<Result<V
                 _ => step,
             }))
         }
-        _ => return None,
+        _ => return stdlib::collection_property(items, name),
     })
 }
 
@@ -1484,6 +1510,9 @@ fn list_element_member(list: &Value, items: &ListValue, name: &str) -> Result<Va
         } else {
             "a non-empty"
         };
+        if items.kind() == ListKind::Listing {
+            return Error::Eval(format!("Expected {expected} Listing."));
+        }
         Error::Eval(format!(
             "Expected {expected} collection.\nCollection: {}",
             crate::eval::render::display_value(list)
