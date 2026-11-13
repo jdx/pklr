@@ -284,13 +284,27 @@ impl Evaluator {
                             if !child_names.contains(&p.name) {
                                 continue;
                             }
+                            // An entry the parent copied from its own parent
+                            // keeps the scope that declared it, and the
+                            // annotation names resolve there.
+                            let scope = psrc
+                                .entry_scopes
+                                .get(index)
+                                .cloned()
+                                .flatten()
+                                .unwrap_or_else(|| Arc::clone(&parent_scope));
                             let annotations: Vec<_> = p
                                 .annotations
                                 .iter()
                                 .filter(|annotation| {
+                                    let declared = super::module::STDLIB_ANNOTATIONS
+                                        .contains(&&*annotation.name)
+                                        .then(|| super::scope::restore_scope(&scope));
                                     !super::module::is_stdlib_annotation(
                                         &annotation.name,
-                                        psrc.scope().get(&*annotation.name),
+                                        declared
+                                            .as_ref()
+                                            .and_then(|scope| scope.get(&annotation.name)),
                                     )
                                 })
                                 .cloned()
@@ -298,14 +312,6 @@ impl Evaluator {
                             if annotations.is_empty() {
                                 continue;
                             }
-                            // An entry the parent copied from its own parent
-                            // keeps the scope that declared it.
-                            let scope = psrc
-                                .entry_scopes
-                                .get(index)
-                                .cloned()
-                                .flatten()
-                                .unwrap_or_else(|| Arc::clone(&parent_scope));
                             inherited_annotations.push((p.name.clone(), annotations, scope));
                         }
                         if !inherited_annotations.is_empty() || psrc.module_annotations.is_some() {

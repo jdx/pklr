@@ -2460,3 +2460,30 @@ fn mapping_class_key_keeps_its_declaring_module() {
         .to_string();
     assert!(err.contains("Value: cb#P"), "{err}");
 }
+
+// An inherited annotation named like a stdlib one resolves where its class
+// declared it, even when an intermediate module does not bind that name.
+#[cfg(feature = "native-io")]
+#[test]
+fn inherited_user_annotation_resolves_in_the_declaring_module() {
+    let dir = TestTempDir::new("pklr_inherited_user_since");
+    std::fs::write(
+        dir.path().join("m1.pkl"),
+        "class Since extends ConvertProperty {\n  render = (prop, r) -> Pair(\"S_\" + prop.first, prop.second)\n}\nopen class A {\n  @Since {}\n  p: Int = 1\n  q: Int = 2\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("m2.pkl"),
+        "import \"m1.pkl\"\nopen class B extends m1.A {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("m3.pkl"),
+        "import \"m2.pkl\"\nclass C extends m2.B { p = 5 }\nres = new C {}\noutput { renderer = new JsonRenderer {} }\n",
+    )
+    .unwrap();
+    assert_eq!(
+        pklr::eval_to_text(&dir.path().join("m3.pkl")).unwrap(),
+        "{\n  \"res\": {\n    \"S_p\": 5,\n    \"q\": 2\n  }\n}\n"
+    );
+}
