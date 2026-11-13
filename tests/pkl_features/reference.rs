@@ -498,7 +498,35 @@ fn reference_member_inherited_public_survives_a_used_local_of_the_same_name() {
     let result = run(r#"
 open class A { label: Int = 1 }
 class B extends A { local label: String = "x"; text: String = label }
-n = ref.Reference(d, B, null).label.getPath().length
+local l: ref.Reference<D, Int> = ref.Reference(d, B, null).label
+n = l.getPath().length
+bad = ref.Reference(d, B, null).label is ref.Reference<D, String>
 "#);
+    assert_eq!(result["n"], 1);
+    assert_eq!(result["bad"], false);
+}
+
+#[test]
+fn reference_member_inherited_from_a_module_loaded_before_pkl_ref() {
+    let dir = TestTempDir::new("reference_parent_first");
+    std::fs::write(
+        dir.path().join("base.pkl"),
+        "open class A { label: Int = 1 }\n",
+    )
+    .unwrap();
+    let path = dir.path().join("main.pkl");
+    let src = r#"
+import "base.pkl"
+import "pkl:ref"
+
+class D extends ref.Domain {
+  function renderReference(reference: ref.Reference<D, Any>): String = "r"
+}
+local const d: D = new {}
+class B extends base.A { local label: String = "x"; text: String = label }
+local l: ref.Reference<D, Int> = ref.Reference(d, B, null).label
+n = l.getPath().length
+"#;
+    let result = Evaluator::new().eval_source(src, &path).unwrap().to_json();
     assert_eq!(result["n"], 1);
 }

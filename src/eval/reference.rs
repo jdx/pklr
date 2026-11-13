@@ -270,6 +270,20 @@ impl Evaluator {
         }
     }
 
+    /// Records the parent of a class that a `local` member shadows, whether
+    /// or not `pkl:ref` is imported yet; the first record of a class stays.
+    pub(super) fn keep_reference_parent(&mut self, class: &Value) {
+        if let Value::Object(_, Some(source)) = class
+            && source.kind == ObjectKind::Class
+            && let Some(id) = source.type_identity.as_deref()
+        {
+            self.refs
+                .classes
+                .entry(id.into())
+                .or_insert_with(|| class.clone());
+        }
+    }
+
     fn class_type(&mut self, class: &Value) -> Option<RType> {
         let Value::Object(_, Some(source)) = class else {
             return None;
