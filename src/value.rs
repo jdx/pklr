@@ -526,6 +526,11 @@ impl PartialEq for ListValue {
 }
 
 impl ListValue {
+    /// The address of the shared items, to recognise a list met twice.
+    pub(crate) fn storage_addr(&self) -> usize {
+        Arc::as_ptr(&self.items) as *const () as usize
+    }
+
     /// Whether both lists share their items.
     pub(crate) fn same_items(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.items, &other.items)

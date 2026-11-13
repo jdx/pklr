@@ -12,7 +12,18 @@ impl Evaluator {
         {
             return result;
         }
-        self.eval_expr_boxed(expr, scope, depth)
+        let result = self.eval_expr_boxed(expr, scope, depth);
+        // A member read that selects one failed member raises its error.
+        if self.failed_seen
+            && let Ok(Value::Failed(message)) = &result
+            && matches!(
+                expr,
+                Expr::Field(..) | Expr::NullSafeField(..) | Expr::Call(..)
+            )
+        {
+            return Err(Error::Eval(message.to_string()));
+        }
+        result
     }
 
     pub(super) fn eval_expr_boxed(
@@ -625,6 +636,7 @@ impl Evaluator {
             }
             Expr::NullSafeField(obj_expr, field) => {
                 let obj = self.eval_field_base(obj_expr, field, scope, depth)?;
+                self.raise_failed_members(&obj, field)?;
                 match &obj {
                     Value::Null => Ok(Value::Null),
                     Value::Object(..)

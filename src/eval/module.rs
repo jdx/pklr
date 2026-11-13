@@ -1110,13 +1110,16 @@ impl Evaluator {
         // An imported module whose failed property this output renders fails
         // the output, as rendering that property directly would.
         let module_map = Arc::new(out);
-        if depth == 0 && self.failed_seen {
-            // A member of a `Listing` or `Mapping` that failed is read by
-            // rendering it.
-            self.raise_deep_failed(&Value::Object(Arc::clone(&module_map), None))?;
-        }
         if depth == 0 {
             self.eval_module_output(module, &module_map, &scope, path, depth)?;
+            // A member of a `Listing` or `Mapping` that failed is read by
+            // rendering it, which only the value the module renders does.
+            #[cfg(feature = "native-io")]
+            if self.failed_seen {
+                let module_value = Value::Object(Arc::clone(&module_map), source.clone());
+                let (rendered, _) = self.output_value(module_value);
+                self.raise_deep_failed(&rendered)?;
+            }
             if self.rendered_member_failed
                 && let Some(message) = self.unconverted_module_failure(&module_map)
             {

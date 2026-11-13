@@ -311,6 +311,7 @@ impl Evaluator {
                 args.len()
             )));
         };
+        self.raise_deep_failed(value)?;
         let settings = Settings::read(kind, renderer)?;
         let text = settings.render(value, document, None, &mut Invoker(self, depth))?;
         Ok(Some(Value::String(text.into())))
@@ -757,7 +758,7 @@ impl Evaluator {
 
     /// The value the module renders: `output.value`, or the module itself.
     #[cfg(feature = "native-io")]
-    fn output_value(&self, module: Value) -> (Value, Option<Kind>) {
+    pub(super) fn output_value(&self, module: Value) -> (Value, Option<Kind>) {
         let output = match &self.module_output {
             Some(Value::Object(map, _)) => Some(&**map),
             _ => None,

@@ -71,6 +71,33 @@ impl Evaluator {
         depth: usize,
         require_union_default: bool,
     ) -> Result<Option<Value>> {
+        let result = self.eval_property_unchecked(prop, scope, depth, require_union_default)?;
+        // The members of a declared `Listing` or `Mapping` that an amendment
+        // body makes are checked as they are read too. Only a type of built-in
+        // names is read here: the amending module may not see the others as
+        // the declaring one does, which checks them.
+        if prop.value.is_none()
+            && let Some(ty) = &prop.type_ann
+            && let Some(value) = &result
+            && !super::failed::is_empty_collection(value)
+            && super::failed::type_holds_lazy(ty)
+            && super::failed::names_only_builtins(ty)
+            && type_is_runtime_checkable(ty, scope)
+            && let Ok(coerced) = self.coerce_lazy(value.clone(), ty, scope, depth)
+        {
+            self.last_coerced = Some((coerced.clone(), ty as *const _ as usize));
+            return Ok(Some(coerced));
+        }
+        Ok(result)
+    }
+
+    fn eval_property_unchecked(
+        &mut self,
+        prop: &Property,
+        scope: &Scope,
+        depth: usize,
+        require_union_default: bool,
+    ) -> Result<Option<Value>> {
         if let Some(expr) = &prop.value {
             // `x: T = new { ... }` amends T's default, so an untyped `new`
             // takes its parent from the declared type.

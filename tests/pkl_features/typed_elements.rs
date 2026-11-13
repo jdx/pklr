@@ -2063,3 +2063,38 @@ fn a_constraint_function_checks_its_parameter_eagerly() {
     );
     assert!(error.contains("Bird"), "{error}");
 }
+
+// A read that selects one member does not read the others, and output that
+// does not render a failed member does not raise it. Expectations are from `pkl eval` 0.32.2.
+#[test]
+fn single_member_reads_return_their_members() {
+    let json = eval(
+        r####"import "pkl:test"
+local l: Listing<Int> = new { 1; "bad" }
+a = l.first
+c = test.catch(() -> l?.last)
+local shared = new Listing { throw("unused") }
+local twice = List(shared, shared)
+local four = List(twice, twice)
+e = four.length
+"####,
+    );
+    assert_eq!(json["a"], 1);
+    assert_eq!(json["e"], 2);
+    assert_eq!(
+        json["c"],
+        "Expected value of type `Int`, but got type `String`. Value: \"bad\""
+    );
+}
+
+#[test]
+fn output_that_skips_a_failed_member_does_not_raise_it() {
+    let temp = TestTempDir::new("pklr_output_skips_failed_member");
+    let path = temp.path().join("main.pkl");
+    std::fs::write(
+        &path,
+        "local bad: Listing<Int> = new { \"x\" }\noutput { value = 42 }\n",
+    )
+    .unwrap();
+    assert_eq!(pklr::eval_to_json(&path).unwrap(), 42);
+}

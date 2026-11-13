@@ -67,7 +67,16 @@ impl Evaluator {
         if !self.failed_seen
             || matches!(
                 member,
-                "length" | "isEmpty" | "keys" | "containsKey" | "getOrNull"
+                "length"
+                    | "isEmpty"
+                    | "keys"
+                    | "containsKey"
+                    | "getOrNull"
+                    | "first"
+                    | "firstOrNull"
+                    | "last"
+                    | "lastOrNull"
+                    | "getOrDefault"
             )
         {
             return Ok(());
@@ -97,6 +106,27 @@ pub(super) fn union_alternatives<'t>(
         }
         TypeExpr::Nullable(inner) => union_alternatives(inner, out),
         other => out.push(other),
+    }
+}
+
+/// Whether `ty` names only primitive types and the standard collections, which
+/// mean the same wherever they are read.
+pub(super) fn names_only_builtins(ty: &crate::parser::TypeExpr) -> bool {
+    use crate::parser::TypeExpr;
+    match ty {
+        TypeExpr::Named(name) => matches!(
+            name.as_str(),
+            "String" | "Int" | "Float" | "Number" | "Boolean" | "Any"
+        ),
+        TypeExpr::Nullable(inner) => names_only_builtins(inner),
+        TypeExpr::Union(alternatives) => alternatives.iter().all(names_only_builtins),
+        TypeExpr::Generic(name, args) => {
+            matches!(
+                name.trim_start_matches('*'),
+                "Listing" | "Mapping" | "List" | "Map" | "Set"
+            ) && args.iter().all(names_only_builtins)
+        }
+        TypeExpr::Constrained(..) => false,
     }
 }
 
@@ -148,18 +178,34 @@ pub(super) fn same_storage(a: &Value, b: &Value) -> bool {
     }
 }
 
-/// The first failed member anywhere inside `value`.
-fn deep_failed(value: &Value, depth: usize) -> Option<&Arc<str>> {
+/// The first failed member anywhere inside `value`. A collection met again
+/// through another path is not walked twice.
+fn deep_failed<'v>(
+    value: &'v Value,
+    depth: usize,
+    seen: &mut HashSet<usize>,
+) -> Option<&'v Arc<str>> {
     if depth > 64 {
         return None;
     }
     match value {
         Value::Failed(message) => Some(message),
-        Value::List(items) => items.iter().find_map(|item| deep_failed(item, depth + 1)),
-        Value::Object(map, source) => map
-            .values()
-            .chain(source.iter().flat_map(|source| source.elements.iter()))
-            .find_map(|item| deep_failed(item, depth + 1)),
+        Value::List(items) => {
+            if !seen.insert(items.storage_addr()) {
+                return None;
+            }
+            items
+                .iter()
+                .find_map(|item| deep_failed(item, depth + 1, seen))
+        }
+        Value::Object(map, source) => {
+            if !seen.insert(Arc::as_ptr(map) as *const () as usize) {
+                return None;
+            }
+            map.values()
+                .chain(source.iter().flat_map(|source| source.elements.iter()))
+                .find_map(|item| deep_failed(item, depth + 1, seen))
+        }
         _ => None,
     }
 }
@@ -187,7 +233,7 @@ impl Evaluator {
 
     /// Whether a member of `value` failed.
     pub(super) fn holds_failed(&self, value: &Value) -> bool {
-        self.failed_seen && deep_failed(value, 0).is_some()
+        self.failed_seen && deep_failed(value, 0, &mut HashSet::default()).is_some()
     }
 
     /// The error of a failed member inside `value`, for an operation that
@@ -196,7 +242,7 @@ impl Evaluator {
         if !self.failed_seen {
             return Ok(());
         }
-        match deep_failed(value, 0) {
+        match deep_failed(value, 0, &mut HashSet::default()) {
             Some(message) => Err(Error::Eval(message.to_string())),
             None => Ok(()),
         }
