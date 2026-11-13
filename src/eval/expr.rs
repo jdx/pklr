@@ -12,7 +12,18 @@ impl Evaluator {
         {
             return result;
         }
-        self.eval_expr_boxed(expr, scope, depth)
+        let result = self.eval_expr_boxed(expr, scope, depth);
+        // A member read that selects one failed member raises its error.
+        if self.failed_seen
+            && let Ok(Value::Failed(message)) = &result
+            && matches!(
+                expr,
+                Expr::Field(..) | Expr::NullSafeField(..) | Expr::Call(..) | Expr::Index(..)
+            )
+        {
+            return Err(Error::Eval(message.to_string()));
+        }
+        result
     }
 
     pub(super) fn eval_expr_boxed(
@@ -506,6 +517,7 @@ impl Evaluator {
                     return Ok(value);
                 }
                 let obj = self.eval_field_base(obj_expr, field, scope, depth)?;
+                self.raise_failed_members(&obj, field)?;
                 // Objects resolve their own members below; built-in values
                 // answer from the standard library.
                 if !matches!(obj, Value::Object(..))
@@ -624,6 +636,7 @@ impl Evaluator {
             }
             Expr::NullSafeField(obj_expr, field) => {
                 let obj = self.eval_field_base(obj_expr, field, scope, depth)?;
+                self.raise_failed_members(&obj, field)?;
                 match &obj {
                     Value::Null => Ok(Value::Null),
                     Value::Object(..)
@@ -678,6 +691,9 @@ impl Evaluator {
                 }
                 let obj = self.eval_expr(obj_expr, scope, depth + 1)?;
                 let key = self.eval_expr(key_expr, scope, depth + 1)?;
+                if self.failed_seen {
+                    self.raise_failed_at(&obj, &key)?;
+                }
                 if let Some(result) = stdlib::index(&obj, &key) {
                     return result;
                 }
@@ -793,7 +809,12 @@ impl Evaluator {
                     return Err(Error::Eval(message));
                 }
                 let val = self.eval_expr(expr, scope, depth + 1)?;
-                let matches = self.eval_type_check(&val, ty, scope, depth)?;
+                // A member that failed its own type check makes the value
+                // not of the type.
+                let matches = match self.eval_type_check(&val, ty, scope, depth) {
+                    Err(Error::Eval(_)) if self.holds_failed(&val) => false,
+                    other => other?,
+                };
                 Ok(Value::Bool(matches))
             }
             Expr::As(expr, ty) => {
@@ -801,6 +822,9 @@ impl Evaluator {
                     return Err(Error::Eval(message));
                 }
                 let val = self.eval_expr(expr, scope, depth + 1)?;
+                if super::failed::type_holds_lazy(ty) {
+                    return self.coerce_lazy(val, ty, scope, depth);
+                }
                 let matches = self.eval_type_check(&val, ty, scope, depth)?;
                 if matches {
                     Ok(val)
@@ -818,6 +842,9 @@ impl Evaluator {
                         Some(message) => Err(Error::Eval(message)),
                         None => Ok(val),
                     };
+                }
+                if self.eager_param_checks == 0 && super::failed::type_holds_lazy(ty) {
+                    return self.coerce_lazy(val, ty, scope, depth);
                 }
                 if self.eval_argument_check(&val, ty, scope, depth, &mut Vec::new())? {
                     Ok(val)
@@ -1260,7 +1287,8 @@ pub(super) fn int_seq(start: i64, end: i64, step: i64) -> Result<Value> {
 /// The key/value pairs a for-generator iterates over.
 pub(super) fn collection_to_items(v: Value) -> Result<Vec<(Value, Value)>> {
     check_iterable(&v)?;
-    Ok(match v {
+    // A loop reads every member, so one that failed raises its error.
+    let items: Vec<(Value, Value)> = match v {
         Value::List(items) => items
             .iter()
             .cloned()
@@ -1272,7 +1300,13 @@ pub(super) fn collection_to_items(v: Value) -> Result<Vec<(Value, Value)>> {
             .map(|(k, v)| (Value::String(k.clone()), v.clone()))
             .collect(),
         _ => vec![],
-    })
+    };
+    for (_, member) in &items {
+        if let Value::Failed(message) = member {
+            return Err(Error::Eval(message.to_string()));
+        }
+    }
+    Ok(items)
 }
 
 /// A value's type as pkl names it in error messages: `module#Class` for a

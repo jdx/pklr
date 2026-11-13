@@ -212,11 +212,13 @@ impl Evaluator {
                         );
                         Expr::Binop(BinOp::Add, Box::new(made), Box::new(Expr::ObjectBody(body)))
                     });
-                    items.push(self.eval_expr(&element, &listing_scope, depth + 1)?)
+                    let element = self.eval_expr(&element, &listing_scope, depth + 1);
+                    items.push(self.defer_member_error(element)?)
                 }
                 Entry::Elem(expr) => {
                     let (expr, elem_scope) = typed_listing_elem(expr, &listing_scope, elem_class);
-                    items.push(self.eval_expr(&expr, &elem_scope, depth + 1)?)
+                    let element = self.eval_expr(&expr, &elem_scope, depth + 1);
+                    items.push(self.defer_member_error(element)?)
                 }
                 Entry::DynProperty(index, value) => {
                     let index = self.eval_expr(index, &listing_scope, depth + 1)?;
@@ -241,20 +243,21 @@ impl Evaluator {
                                 parent_len as i64 - 1
                             ))
                         })?;
-                    items[index] = if let Expr::ObjectBody(entries) = value {
+                    let element = if let Expr::ObjectBody(entries) = value {
                         self.eval_value_amendment(
                             items[index].clone(),
                             entries,
                             &listing_scope,
                             depth + 1,
-                        )?
+                        )
                     } else {
                         // A replacement `new { ... }` is an element of the
                         // declared class too.
                         let (value, elem_scope) =
                             typed_listing_elem(value, &listing_scope, elem_class);
-                        self.eval_expr(&value, &elem_scope, depth + 1)?
+                        self.eval_expr(&value, &elem_scope, depth + 1)
                     };
+                    items[index] = self.defer_member_error(element)?;
                 }
                 Entry::Spread(expr) => {
                     let value = self.eval_expr(expr, &listing_scope, depth + 1)?;

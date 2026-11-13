@@ -71,6 +71,33 @@ impl Evaluator {
         depth: usize,
         require_union_default: bool,
     ) -> Result<Option<Value>> {
+        let result = self.eval_property_unchecked(prop, scope, depth, require_union_default)?;
+        // The members of a declared `Listing` or `Mapping` that an amendment
+        // body makes are checked as they are read too. Only a type of built-in
+        // names is read here: the amending module may not see the others as
+        // the declaring one does, which checks them.
+        if prop.value.is_none()
+            && let Some(ty) = &prop.type_ann
+            && let Some(value) = &result
+            && !super::failed::is_empty_collection(value)
+            && super::failed::type_holds_lazy(ty)
+            && super::failed::names_only_builtins(ty)
+            && type_is_runtime_checkable(ty, scope)
+            && let Ok(coerced) = self.coerce_lazy(value.clone(), ty, scope, depth)
+        {
+            self.last_coerced = Some((coerced.clone(), ty as *const _ as usize));
+            return Ok(Some(coerced));
+        }
+        Ok(result)
+    }
+
+    fn eval_property_unchecked(
+        &mut self,
+        prop: &Property,
+        scope: &Scope,
+        depth: usize,
+        require_union_default: bool,
+    ) -> Result<Option<Value>> {
         if let Some(expr) = &prop.value {
             // `x: T = new { ... }` amends T's default, so an untyped `new`
             // takes its parent from the declared type.
@@ -90,6 +117,18 @@ impl Evaluator {
                 return Err(Error::Eval(message));
             }
             apply_mapping_type_annotation(&mut value, prop.type_ann.as_ref(), scope);
+            // The members of a declared `Listing` or `Mapping` are checked as
+            // they are read. A value of the wrong kind is left for the
+            // declaration's own check to report.
+            if let Some(ty) = &prop.type_ann
+                && !super::failed::is_empty_collection(&value)
+                && super::failed::type_holds_lazy(ty)
+                && type_is_runtime_checkable(ty, scope)
+                && let Ok(coerced) = self.coerce_lazy(value.clone(), ty, scope, depth)
+            {
+                self.last_coerced = Some((coerced.clone(), ty as *const _ as usize));
+                value = coerced;
+            }
             return Ok(Some(value));
         }
         if let Some(body) = &prop.body {
@@ -390,7 +429,7 @@ impl Evaluator {
             // Only a module's own property: a class member's default is a
             // template that an instance replaces.
             if require_union_default
-                && names_constrained_dynamic(ty, scope)
+                && (names_constrained_dynamic(ty, scope) || names_constrained_collection(ty))
                 && let Some(default) = &default
             {
                 self.check_declared_value(default, ty, scope, depth)?;
@@ -831,17 +870,11 @@ impl Evaluator {
                     let result = if is_lambda {
                         self.eval_expr(expr, &active_scope, cx.depth)
                             .map(|value| self.const_local_lambda_guard(value, const_message))
-                            .and_then(|value| {
-                                if let Some(ty) = &prop.type_ann {
-                                    self.check_local_value(
-                                        &value,
-                                        ty,
-                                        expr,
-                                        &active_scope,
-                                        cx.depth,
-                                    )?;
+                            .and_then(|value| match &prop.type_ann {
+                                Some(ty) => {
+                                    self.check_local_value(value, ty, &active_scope, cx.depth)
                                 }
-                                Ok(value)
+                                None => Ok(value),
                             })
                     } else {
                         match const_message {
@@ -851,16 +884,15 @@ impl Evaluator {
                                     .and_then(|value| {
                                         // A declared type is checked when the local
                                         // is read, so a mismatch poisons it.
-                                        if let Some(ty) = &prop.type_ann {
-                                            self.check_local_value(
-                                                &value,
+                                        match &prop.type_ann {
+                                            Some(ty) => self.check_local_value(
+                                                value,
                                                 ty,
-                                                expr,
                                                 &active_scope,
                                                 cx.depth,
-                                            )?;
+                                            ),
+                                            None => Ok(value),
                                         }
-                                        Ok(value)
                                     })
                             }
                         }
@@ -2361,6 +2393,13 @@ fn this_class(source: Option<&ObjectSource>, mapping: bool) -> Value {
 }
 
 /// Whether `ty`, directly or through type aliases, is a constrained `Dynamic`.
+/// Whether `ty` is a `Listing` or `Mapping` with a constraint, whose empty
+/// default the constraint checks.
+fn names_constrained_collection(ty: &crate::parser::TypeExpr) -> bool {
+    matches!(ty, crate::parser::TypeExpr::Constrained(base, ..)
+        if matches!(base.split('<').next(), Some("Listing" | "Mapping")))
+}
+
 fn names_constrained_dynamic(ty: &crate::parser::TypeExpr, scope: &Scope) -> bool {
     use crate::parser::TypeExpr;
     let mut ty = ty;

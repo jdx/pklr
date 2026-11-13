@@ -365,9 +365,25 @@ impl Evaluator {
         let Some(ty) = &prop.type_ann else {
             return Ok(());
         };
-        if !type_is_runtime_checkable(ty, scope)
-            || self.eval_type_check(value, ty, scope, depth + 1)?
+        if !type_is_runtime_checkable(ty, scope) {
+            return Ok(());
+        }
+        // The members of a `Listing` or `Mapping` are checked as they are
+        // read: a value whose members alone fail is a good value here.
+        if let Some((coerced, coerced_ty)) = &self.last_coerced
+            && *coerced_ty == ty as *const _ as usize
+            && super::failed::same_storage(coerced, value)
         {
+            return Ok(());
+        }
+        if super::failed::type_holds_lazy(ty)
+            && self
+                .coerce_lazy(value.clone(), ty, scope, depth + 1)
+                .is_ok()
+        {
+            return Ok(());
+        }
+        if self.eval_type_check(value, ty, scope, depth + 1)? {
             return Ok(());
         }
         Err(Error::Eval(self.type_mismatch_message(
@@ -707,6 +723,12 @@ impl Evaluator {
                 "Expected value of type `{expected}`, but got `null`.\nValue: null{location}"
             );
         }
+        if let Some(class) = union_class_match(ty, val) {
+            return format!(
+                "Expected value of type `{expected}`, but got a different `{class}`.\nValue: {}{location}",
+                super::failed::display_forced(val)
+            );
+        }
         format!(
             "Expected value of type `{expected}`, but got type `{}`.\nValue: {}{location}",
             pkl_class_name(val),
@@ -775,6 +797,9 @@ impl Evaluator {
         depth: usize,
         resolving: &mut Vec<String>,
     ) -> Result<bool> {
+        if let Value::Failed(message) = val {
+            return Err(Error::Eval(message.to_string()));
+        }
         if is_uninferred_object(val) && type_names_user_class(ty, scope, 0) {
             return Ok(true);
         }
@@ -1057,11 +1082,11 @@ impl Evaluator {
                     // it to the value being checked.
                     let mut expected = "`Boolean` or `Function`";
                     if matches!(result, Value::Lambda(..)) {
-                        result = match self.invoke_lambda(
-                            &result,
-                            std::slice::from_ref(val),
-                            depth + 1,
-                        ) {
+                        self.eager_param_checks += 1;
+                        let called =
+                            self.invoke_lambda(&result, std::slice::from_ref(val), depth + 1);
+                        self.eager_param_checks -= 1;
+                        result = match called {
                             Ok(result) => result,
                             // A predicate reading a member that the value does
                             // not have yet, because pklr has not filled in the
@@ -1727,6 +1752,8 @@ impl Evaluator {
         {
             self.check_declared_value(val, &base, scope, depth)?;
         }
+        // The error of a member that failed is the one to show.
+        self.raise_deep_failed(val)?;
         Err(Error::Eval(
             self.type_mismatch_message(ty, val, None, scope),
         ))
@@ -1734,44 +1761,21 @@ impl Evaluator {
 }
 
 impl Evaluator {
-    /// The check a typed `local` gets when it is evaluated. Listing and
-    /// Mapping members are checked as they are read, so only the type of the
-    /// value itself is checked here, unless `expr` is not a literal body: the
-    /// elements of a Listing or Mapping that already exists are not checked
-    /// by anything else.
+    /// The check a typed `local` gets when it is evaluated. The members of a
+    /// Listing or Mapping are checked as they are read, so a member that
+    /// fails the check is kept as its error (see `coerce_lazy`).
     pub(super) fn check_local_value(
         &mut self,
-        val: &Value,
+        val: Value,
         ty: &crate::parser::TypeExpr,
-        expr: &Expr,
         scope: &Scope,
         depth: usize,
-    ) -> Result<()> {
-        use crate::parser::TypeExpr;
-        // Elements of a listing or mapping are checked as they are read, so
-        // only the collection itself is checked here.
-        fn shallow(ty: &TypeExpr) -> Option<TypeExpr> {
-            match ty {
-                TypeExpr::Generic(name, _) if matches!(name.as_str(), "Listing" | "Mapping") => {
-                    Some(TypeExpr::Named(name.clone()))
-                }
-                TypeExpr::Nullable(inner) => {
-                    shallow(inner).map(|ty| TypeExpr::Nullable(Box::new(ty)))
-                }
-                _ => None,
-            }
+    ) -> Result<Value> {
+        if super::failed::type_holds_lazy(ty) {
+            return self.coerce_lazy(val, ty, scope, depth);
         }
-        let literal = matches!(expr, Expr::New(..) | Expr::InferredNew(..));
-        match shallow(ty) {
-            Some(shallow) => {
-                self.check_declared_value(val, &shallow, scope, depth)?;
-                if literal {
-                    return Ok(());
-                }
-                self.check_declared_value(val, ty, scope, depth)
-            }
-            None => self.check_declared_value(val, ty, scope, depth),
-        }
+        self.check_declared_value(&val, ty, scope, depth)?;
+        Ok(val)
     }
 }
 /// The constraints a constrained type's predicate joins, in source order, each
@@ -1892,4 +1896,30 @@ fn constraint_scope_for(scope: &Scope, val: &Value) -> Scope {
         _ => {}
     }
     constraint_scope
+}
+
+/// The class of `val` when an alternative of the union `ty` is a generic of
+/// that class: the value is of the right class, but not of the right type
+/// arguments.
+fn union_class_match(ty: &crate::parser::TypeExpr, val: &Value) -> Option<&'static str> {
+    let class = match val {
+        Value::List(items) => match items.kind() {
+            ListKind::Listing => "Listing",
+            ListKind::List => "List",
+            ListKind::Set => "Set",
+            ListKind::Dynamic => return None,
+        },
+        Value::Object(_, Some(source)) if source.kind == ObjectKind::Mapping => "Mapping",
+        _ => return None,
+    };
+    let mut alternatives = Vec::new();
+    super::failed::union_alternatives(ty, &mut alternatives);
+    (alternatives.len() > 1
+        && alternatives.iter().any(|alt| {
+            matches!(alt, crate::parser::TypeExpr::Generic(name, _)
+                if name.trim_start_matches('*') == class
+                    || (name.trim_start_matches('*') == "Collection"
+                        && matches!(class, "List" | "Set")))
+        }))
+    .then_some(class)
 }

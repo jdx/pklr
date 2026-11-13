@@ -240,6 +240,8 @@ impl Evaluator {
                     let mut items = Vec::new();
                     for a in args {
                         let val = self.eval_expr(a, scope, depth + 1)?;
+                        // Hashing a member reads all of it.
+                        self.raise_deep_failed(&val)?;
                         if !set_contains(&items, &val) {
                             items.push(val);
                         }
@@ -297,6 +299,7 @@ impl Evaluator {
                     }
                     for pair in evaled.chunks(2) {
                         if let [k, v] = pair {
+                            self.raise_deep_failed(k)?;
                             let key = value_to_key(k)?;
                             let storage_key =
                                 equivalent_mapping_key(&map, &key).unwrap_or_else(|| key.clone());
@@ -438,6 +441,7 @@ impl Evaluator {
         args: &[Value],
         depth: usize,
     ) -> Result<Option<Value>> {
+        self.raise_failed_members(obj, method)?;
         if let Some(result) = self.stdlib_method(obj, method, args, depth) {
             return result.map(Some);
         }
@@ -516,6 +520,13 @@ impl Evaluator {
             }
             (Value::List(items), "toList") => {
                 Ok(Some(Value::List(items.clone().with_kind(ListKind::List))))
+            }
+            (Value::List(items), "toListing")
+                if matches!(items.kind(), ListKind::List | ListKind::Set) && args.is_empty() =>
+            {
+                Ok(Some(Value::List(
+                    items.clone().with_kind(ListKind::Listing),
+                )))
             }
             (Value::List(items), "toSet") => {
                 if items.kind() == ListKind::Set {

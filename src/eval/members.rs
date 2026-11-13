@@ -370,6 +370,7 @@ fn rendered_member_failure_in<'a>(value: &'a Value, seen: &mut HashSet<usize>) -
                 .iter()
                 .find_map(|item| rendered_member_failure_in(item, seen))
         }
+        Value::Failed(message) => Some(&**message),
         _ => None,
     }
 }

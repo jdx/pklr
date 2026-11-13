@@ -1423,8 +1423,11 @@ fn a_wrong_element_is_named_in_the_error() {
 // checked: an ill-typed element is an error even if nothing reads it.
 #[test]
 fn elements_are_checked_when_the_value_is() {
+    // Reading `length` reads no element, so the call succeeds, as in pkl.
+    let json = eval("function f(x: Listing<Int>): Int = x.length\ny = f(new Listing { \"a\" })\n");
+    assert_eq!(json["y"], 1);
     let error =
-        eval_fails("function f(x: Listing<Int>): Int = x.length\ny = f(new Listing { \"a\" })\n");
+        eval_fails("function f(x: Listing<Int>): Int = x[0]\ny = f(new Listing { \"a\" })\n");
     assert!(error.contains("type `Int`"), "{error}");
 }
 
@@ -2006,4 +2009,92 @@ fn nested_generic_alias_applications_mean_different_types() {
     );
     assert_eq!(v["x"], true);
     assert_eq!(v["y"], true);
+}
+
+// A typed `Listing` or `Mapping` checks a member when it is read, not when the
+// collection is built; the expectations are from `pkl eval` 0.32.2.
+#[test]
+fn listing_and_mapping_members_are_checked_when_read() {
+    let json = eval(
+        r####"import "pkl:test"
+class Bird
+local l: Listing<Int> = new { 1; "a" }
+a = l.length
+b = test.catch(() -> l[1])
+c = l[0]
+d = test.catch(() -> l.toList())
+local m: Mapping<String, Int> = new { ["k"] = "v"; ["j"] = 2 }
+e = m.length
+f = m["j"]
+g = test.catch(() -> m["k"])
+function fn(x: Listing<Int>): Int = x.length
+h = fn(new Listing { "a" })
+i = test.catch(() -> Set(l))
+j = (new Listing { 1; "a" }) is Listing<Int>
+k = test.catch(() -> new Listing { 1 }.toList() as List<String>)
+"####,
+    );
+    assert_eq!(json["a"], 2);
+    assert_eq!(json["c"], 1);
+    assert_eq!(json["e"], 2);
+    assert_eq!(json["f"], 2);
+    assert_eq!(json["h"], 1);
+    assert_eq!(json["j"], false);
+    for key in ["b", "d", "i"] {
+        assert_eq!(
+            json[key], "Expected value of type `Int`, but got type `String`. Value: \"a\"",
+            "{key}"
+        );
+    }
+    assert_eq!(
+        json["g"],
+        "Expected value of type `Int`, but got type `String`. Value: \"v\""
+    );
+    assert_eq!(
+        json["k"],
+        "Expected value of type `String`, but got type `Int`. Value: 1"
+    );
+}
+
+#[test]
+fn a_constraint_function_checks_its_parameter_eagerly() {
+    let error = eval_fails(
+        "class Bird\nconst local g = (it: Listing<Bird>) -> false\nclass A { x: Listing(g) = new { 1 } }\nres = new A {}.x\n",
+    );
+    assert!(error.contains("Bird"), "{error}");
+}
+
+// A read that selects one member does not read the others, and output that
+// does not render a failed member does not raise it. Expectations are from `pkl eval` 0.32.2.
+#[test]
+fn single_member_reads_return_their_members() {
+    let json = eval(
+        r####"import "pkl:test"
+local l: Listing<Int> = new { 1; "bad" }
+a = l.first
+c = test.catch(() -> l?.last)
+local shared = new Listing { throw("unused") }
+local twice = List(shared, shared)
+local four = List(twice, twice)
+e = four.length
+"####,
+    );
+    assert_eq!(json["a"], 1);
+    assert_eq!(json["e"], 2);
+    assert_eq!(
+        json["c"],
+        "Expected value of type `Int`, but got type `String`. Value: \"bad\""
+    );
+}
+
+#[test]
+fn output_that_skips_a_failed_member_does_not_raise_it() {
+    let temp = TestTempDir::new("pklr_output_skips_failed_member");
+    let path = temp.path().join("main.pkl");
+    std::fs::write(
+        &path,
+        "local bad: Listing<Int> = new { \"x\" }\noutput { value = 42 }\n",
+    )
+    .unwrap();
+    assert_eq!(pklr::eval_to_json(&path).unwrap(), 42);
 }

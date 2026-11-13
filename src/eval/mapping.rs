@@ -1240,7 +1240,8 @@ impl Evaluator {
                             }
                             result
                         } else {
-                            let val = self.eval_expr(val_expr, entry_scope, depth + 1)?;
+                            let val = self.eval_expr(val_expr, entry_scope, depth + 1);
+                            let val = self.defer_member_error(val)?;
                             apply_mapping_entry_template(
                                 default_template.map(|(_, template)| template),
                                 val,

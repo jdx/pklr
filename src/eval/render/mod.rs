@@ -329,7 +329,7 @@ pub(crate) fn kind_of(value: &Value) -> Kind {
         Value::Duration(_) => Kind::Duration,
         Value::DataSize(_) => Kind::DataSize,
         Value::Regex(_) => Kind::Regex,
-        Value::Lambda(..) => Kind::Function,
+        Value::Lambda(..) | Value::Failed(_) => Kind::Function,
         Value::List(items) if items.kind() == ListKind::List && items.is_int_seq() => Kind::IntSeq,
         Value::List(items) if items.kind() == ListKind::List && items.is_bytes() => Kind::Bytes,
         Value::List(_) => Kind::Listing,

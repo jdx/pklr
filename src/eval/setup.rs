@@ -102,6 +102,9 @@ impl Evaluator {
             constraint_nesting: 0,
             deferred_const: HashMap::default(),
             leaked_this: None,
+            failed_seen: false,
+            last_coerced: None,
+            eager_param_checks: 0,
             placeholder_reads: 0,
             narrowed_import_cache: HashMap::default(),
             narrowed_in_flight: HashSet::default(),
@@ -410,6 +413,7 @@ impl Evaluator {
             self.module_output.take(),
             std::mem::take(&mut self.mapping_key_values),
             std::mem::take(&mut self.deferred_const),
+            self.last_coerced.take(),
         );
         crate::stack::drop_on_large_stack(held);
     }

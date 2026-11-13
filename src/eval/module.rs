@@ -1112,6 +1112,17 @@ impl Evaluator {
         let module_map = Arc::new(out);
         if depth == 0 {
             self.eval_module_output(module, &module_map, &scope, path, depth)?;
+            // A member of a `Listing` or `Mapping` that failed is read by
+            // rendering it, which only the value the module renders does.
+            if self.failed_seen {
+                let module_value = Value::Object(Arc::clone(&module_map), source.clone());
+                let (rendered, _) = self.output_value(module_value);
+                let renderer = match &self.module_output {
+                    Some(Value::Object(output, _)) => output.get("renderer").cloned(),
+                    _ => None,
+                };
+                self.raise_rendered_failure(&rendered, &renderer.unwrap_or_default())?;
+            }
             if self.rendered_member_failed
                 && let Some(message) = self.unconverted_module_failure(&module_map)
             {
@@ -1658,16 +1669,10 @@ impl Evaluator {
                             .and_then(|value| {
                                 // A declared type is checked when the local is
                                 // read, so a mismatch poisons it.
-                                if let Some(ty) = &prop.type_ann {
-                                    self.check_local_value(
-                                        &value,
-                                        ty,
-                                        prop.value.as_ref().unwrap(),
-                                        scope,
-                                        depth,
-                                    )?;
+                                match &prop.type_ann {
+                                    Some(ty) => self.check_local_value(value, ty, scope, depth),
+                                    None => Ok(value),
                                 }
-                                Ok(value)
                             });
                         match evaluated {
                             Ok(val) => scope.declare(&prop.name, val),
