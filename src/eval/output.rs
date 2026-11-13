@@ -508,7 +508,13 @@ impl Evaluator {
         let renderer = self
             .builtin_class(self.output_format.class_name())?
             .unwrap_or_default();
-        let default_value = module_object(module_map, path);
+        // The module's own annotations convert the properties of the value
+        // `output.text` renders, as they do for the module itself.
+        let annotations = self
+            .module_scopes
+            .get(path)
+            .and_then(|snapshot| snapshot.annotations.clone());
+        let default_value = module_object(module_map, path, annotations);
         let default_renderer = renderer.clone();
         let mut output_value_is_explicit = false;
         if let Value::Object(map, _) = &mut output {
@@ -1099,7 +1105,11 @@ fn dotted_name(expr: &Expr) -> Option<String> {
 
 /// The module itself as a value: typed, with the module's name as its class
 /// (as in Pkl), so renderers treat its members as properties.
-fn module_object(map: &Arc<ObjectMap>, path: &Path) -> Value {
+fn module_object(
+    map: &Arc<ObjectMap>,
+    path: &Path,
+    annotations: Option<Arc<crate::value::ModuleAnnotations>>,
+) -> Value {
     let name = path
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
@@ -1120,7 +1130,7 @@ fn module_object(map: &Arc<ObjectMap>, path: &Path) -> Value {
         mapping_value_types: Vec::new(),
         deprecated: Default::default(),
         poisoned_members: None,
-        module_annotations: None,
+        module_annotations: annotations,
         declared_as: None,
         kind: crate::value::ObjectKind::Object,
         is_parsed_json: false,

@@ -2313,3 +2313,48 @@ fn inherited_property_annotations_resolve_in_their_declaring_module() {
         serde_json::json!({"v": {"renamed": 6, "q": 9}})
     );
 }
+
+// A module whose properties carry a converting annotation still has members
+// to amend: `(module) { ... }` keeps the ones the body leaves alone, in place.
+#[cfg(feature = "native-io")]
+#[test]
+fn amending_an_annotated_module_keeps_its_members() {
+    let dir = TestTempDir::new("pklr_annotated_module_amend");
+    std::fs::write(
+        dir.path().join("base.pkl"),
+        "import \"pkl:json\"\n@json.Property { name = \"renamed\" }\na = 1\nb = 2\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("main.pkl"),
+        "import \"base.pkl\" as base\nx = (base) { a = 9 }\noutput { renderer = new JsonRenderer {} }\n",
+    )
+    .unwrap();
+    let json = pklr::eval_to_text(&dir.path().join("main.pkl")).unwrap();
+    assert_eq!(
+        json,
+        "{\n  \"x\": {\n    \"renamed\": 9,\n    \"b\": 2\n  }\n}\n"
+    );
+}
+
+// `super.text` of an `output` that amends a module's renders the module with
+// its property annotations applied.
+#[cfg(feature = "native-io")]
+#[test]
+fn output_super_text_applies_module_property_annotations() {
+    let dir = TestTempDir::new("pklr_annotated_output_super_text");
+    std::fs::write(
+        dir.path().join("base.pkl"),
+        "import \"pkl:json\"\n@json.Property { name = \"renamed\" }\na = 0\nb = 0\noutput { renderer = new JsonRenderer {} }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("main.pkl"),
+        "amends \"base.pkl\"\na = 1\noutput { text = \"T:\" + super.text }\n",
+    )
+    .unwrap();
+    assert_eq!(
+        pklr::eval_to_text(&dir.path().join("main.pkl")).unwrap(),
+        "T:{\n  \"renamed\": 1,\n  \"b\": 0\n}\n"
+    );
+}
