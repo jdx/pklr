@@ -69,3 +69,11 @@ fn conditional_element_gets_the_default() {
     let v = eval("l = new Listing { default { n = 1 }; if (true) new { m = 2 } else new {} }\n");
     assert_eq!(v["l"], serde_json::json!([{"n": 1, "m": 2}]));
 }
+
+#[test]
+fn long_this_chain_settles_when_amended() {
+    let v = eval(
+        "a = new Listing { 1; this[0]; this[1]; this[2]; this[3]; this[4]; this[5]; this[6]; this[7]; this[8] }\nb = (a) { [0] = 9 }\n",
+    );
+    assert_eq!(v["b"], serde_json::json!(vec![9; 10]));
+}

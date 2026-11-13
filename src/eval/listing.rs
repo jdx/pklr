@@ -521,12 +521,11 @@ impl Evaluator {
         let mut final_items: Option<Vec<Value>> = None;
         // Elements that read `this` read the previous pass's result, so
         // repeat until they settle (each pass fixes at least one more).
-        let passes = if layers.reads_this {
-            layers.init.len() + layers.layers.len() + 4
-        } else {
-            1
-        };
-        for _ in 0..passes {
+        // A chain of `this[i]` reads is at most as long as the final list, so
+        // the pass limit follows the result, not the layers.
+        let mut pass = 0usize;
+        loop {
+            pass += 1;
             let mut items = layers.init.to_vec();
             let mut parent_default = None;
             for layer in &layers.layers {
@@ -565,9 +564,10 @@ impl Evaluator {
                     elem_class,
                 )?;
             }
-            let settled = final_items.as_ref() == Some(&items);
+            let settled = !layers.reads_this || final_items.as_ref() == Some(&items);
+            let limit = items.len() + layers.layers.len() + 4;
             final_items = Some(items);
-            if settled {
+            if settled || pass > limit {
                 break;
             }
         }
