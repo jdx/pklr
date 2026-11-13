@@ -1681,7 +1681,7 @@ impl Evaluator {
                     let reads = referenced_roots(body);
                     if !reads.iter().any(|name| {
                         reaches_child().contains(name)
-                            || matches!(name.as_ref(), "this" | "module" | "super")
+                            || matches!(name.as_ref(), "this" | "module" | "super" | "outer")
                     }) {
                         continue;
                     }

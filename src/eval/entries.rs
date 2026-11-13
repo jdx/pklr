@@ -2098,7 +2098,7 @@ fn tracks_dynamic_members(entries: &[Entry]) -> bool {
 /// Also insert Null for any nullable-no-default properties declared in these
 /// entries but absent from the parent scope, so that `outer.optionalProp`
 /// resolves to Null rather than failing with "field not found".
-fn bind_outer(
+pub(super) fn bind_outer(
     child_scope: &mut Scope,
     scope: &Scope,
     entries: &[Entry],

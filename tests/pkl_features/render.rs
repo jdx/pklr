@@ -2487,3 +2487,30 @@ fn inherited_user_annotation_resolves_in_the_declaring_module() {
         "{\n  \"res\": {\n    \"S_p\": 5,\n    \"q\": 2\n  }\n}\n"
     );
 }
+
+// A listing body reads the object it sits in through `outer`, also in a
+// module that amends the listing of a base whose member it overrides.
+#[cfg(feature = "native-io")]
+#[test]
+fn listing_body_reads_overridden_member_through_outer() {
+    let dir = TestTempDir::new("pklr_listing_outer");
+    std::fs::write(
+        dir.path().join("b0.pkl"),
+        "open module b0\nx = 1\nl = new Listing { 0 }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("b1.pkl"),
+        "open module b1\nextends \"b0.pkl\"\nl { outer.x }\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("main.pkl"), "amends \"b1.pkl\"\nx = 2\n").unwrap();
+    assert_eq!(
+        pklr::eval_to_json(&dir.path().join("main.pkl")).unwrap(),
+        serde_json::json!({"x": 2, "l": [0, 2]})
+    );
+    assert_eq!(
+        eval("x = 1\nl = new Listing { 0; outer.x }\n"),
+        serde_json::json!({"x": 1, "l": [0, 1]})
+    );
+}

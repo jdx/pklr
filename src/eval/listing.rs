@@ -152,6 +152,10 @@ impl Evaluator {
         elem_class: Option<&Arc<Value>>,
     ) -> Result<()> {
         let mut listing_scope = scope.child();
+        // `outer` is the object the listing body sits in.
+        if super::entries_mention(entries, "outer") {
+            super::entries::bind_outer(&mut listing_scope, scope, entries, &[]);
+        }
         // The listing's `default`, which an untyped `new { ... }` element
         // amends and the body may read.
         let listing_default = match scope.get(LISTING_DEFAULT) {
