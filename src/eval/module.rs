@@ -427,6 +427,10 @@ impl Evaluator {
             return Err(Error::Eval("Invalid property definition".into()));
         }
         let type_namespace = self.module_type_namespace(path);
+        if !module.declarations.is_empty() {
+            self.module_declarations
+                .insert(type_namespace.clone(), Arc::clone(&module.declarations));
+        }
         let mut scope = Scope {
             type_namespace: Some(type_namespace),
             ..Scope::default()

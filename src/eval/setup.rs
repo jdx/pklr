@@ -159,6 +159,7 @@ impl Evaluator {
             active_typed_defaults: HashSet::default(),
             mapping_key_values: HashMap::default(),
             module_names: HashMap::default(),
+            module_declarations: HashMap::default(),
             grew: false,
         }
     }
@@ -322,6 +323,7 @@ impl Evaluator {
         self.active_typed_defaults.clear();
         self.mapping_key_values.clear();
         self.module_names.clear();
+        self.module_declarations.clear();
         self.module_path_admitted.clear();
     }
 

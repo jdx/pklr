@@ -16,6 +16,7 @@ pub use ast::{
     Annotation, BinOp, Body, Entry, Expr, ForGenerator, GenericAlias, Import, LocalBindings,
     Modifier, Module, Property, StringInterpPart, TraceSite, TypeExpr, UnOp, WhenGenerator,
 };
+pub(crate) use ast::{Declaration, SourcePos};
 use ast::{
     check_signature, erase_type_parameters, infers_new, type_expr_constrained_name,
     type_expr_runtime_name,
@@ -82,6 +83,8 @@ struct MemberHeader {
     annotations: Vec<Annotation>,
     /// Offset of the first annotation
     annotations_start: Option<usize>,
+    /// Where the declaration proper starts: its first modifier or keyword.
+    at: SourcePos,
     /// Modifiers and their offsets
     modifiers: Vec<(Modifier, usize)>,
 }
@@ -186,4 +189,6 @@ struct Parser<'a> {
     alias_definition_uses: std::collections::HashMap<String, std::collections::HashSet<String>>,
     /// Expressions and type constraints currently nested around the cursor.
     depth: usize,
+    /// The classes and type aliases declared so far, for `pkl:reflect`.
+    declarations: Vec<Declaration>,
 }

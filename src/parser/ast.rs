@@ -34,6 +34,36 @@ pub struct Module {
     /// Const-scope violations inside lambdas passed to `catch`, which only
     /// fail when the lambda runs: the address of the lambda body and the message.
     pub deferred_const_violations: Vec<(std::sync::Arc<Expr>, String)>,
+    /// Where each class and type alias was declared, with what `pkl:reflect`
+    /// reads beyond the declaration itself. Kept for reflection only.
+    pub(crate) declarations: std::sync::Arc<Vec<Declaration>>,
+}
+
+/// A class or type alias declaration as `pkl:reflect` describes it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Declaration {
+    pub(crate) is_class: bool,
+    pub(crate) name: std::sync::Arc<str>,
+    /// Where the declaration starts, after its doc comment and annotations.
+    pub(crate) at: SourcePos,
+    pub(crate) doc: Option<std::sync::Arc<str>>,
+    pub(crate) annotations: Vec<Annotation>,
+    pub(crate) modifiers: Vec<Modifier>,
+    /// For a class, the parent it extends, as written.
+    pub(crate) parent: Option<String>,
+    /// For a class, the start of each member in its body.
+    pub(crate) members: Vec<(std::sync::Arc<str>, SourcePos)>,
+    /// For a generic type alias, its type parameters.
+    pub(crate) type_parameters: Vec<String>,
+    /// For a type alias, the type it stands for, as written.
+    pub(crate) target: Option<TypeExpr>,
+}
+
+/// A line and column in a source file, both starting at 1.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub(crate) struct SourcePos {
+    pub(crate) line: u32,
+    pub(crate) col: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]

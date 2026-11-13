@@ -16,7 +16,9 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use super::ast::{Annotation, Entry, Expr, Modifier, Property, StringInterpPart, TypeExpr};
+use super::ast::{
+    Annotation, Declaration, Entry, Expr, Modifier, Property, StringInterpPart, TypeExpr,
+};
 
 macro_rules! bail {
     ($e:expr) => {
@@ -38,11 +40,13 @@ impl ConstViolation {
 /// Find the first const-scope violation in a module body. `open` says the
 /// module amends or extends another, so it may have members the body does not
 /// declare.
-pub(super) fn find_const_violation(
-    body: &[Entry],
+pub(super) fn find_const_violation<'m>(
+    body: &'m [Entry],
+    declarations: &'m [Declaration],
     open: bool,
 ) -> (Option<ConstViolation>, Vec<(Arc<Expr>, String)>) {
     let mut walker = Walker::new(body);
+    walker.declarations = declarations;
     walker.frames.push(Frame::object(members_of(body), open));
     let found = walker.module(body);
     (found, walker.deferred)
@@ -337,6 +341,9 @@ struct Walker<'m> {
     /// Violations inside a lambda passed to `catch`, which pkl raises only
     /// when the lambda runs: the address of the lambda body and the message.
     deferred: Vec<(Arc<Expr>, String)>,
+    /// The module's classes and type aliases, whose annotations the entries
+    /// that declare them do not carry.
+    declarations: &'m [Declaration],
 }
 
 fn violation(message: impl Into<String>) -> Option<ConstViolation> {
@@ -377,7 +384,23 @@ impl<'m> Walker<'m> {
             pending: Vec::new(),
             constraint_bases: Vec::new(),
             deferred: Vec::new(),
+            declarations: &[],
         }
+    }
+
+    /// Walk the annotations of the class or type alias `name`.
+    fn declaration_annotations(&mut self, name: &'m str, is_class: bool) -> Option<ConstViolation> {
+        let declarations = self.declarations;
+        let declaration = declarations
+            .iter()
+            .find(|declaration| declaration.is_class == is_class && *declaration.name == *name)?;
+        self.members.push(name);
+        let found = declaration
+            .annotations
+            .iter()
+            .find_map(|annotation| self.annotation(annotation, 0));
+        self.members.pop();
+        found
     }
 
     fn module(&mut self, body: &'m [Entry]) -> Option<ConstViolation> {
@@ -385,9 +408,11 @@ impl<'m> Walker<'m> {
             match entry {
                 Entry::Property(prop) => bail!(self.property(prop, 0)),
                 Entry::ClassDef(name, _, parent, class_body) => {
+                    bail!(self.declaration_annotations(name, true));
                     bail!(self.class(name, parent.as_deref(), class_body));
                 }
                 Entry::TypeAlias(name, ty, ..) => {
+                    bail!(self.declaration_annotations(name, false));
                     self.members.push(name);
                     let found = self.scoped(0, |walker| walker.type_expr(ty));
                     self.members.pop();
