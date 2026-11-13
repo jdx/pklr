@@ -651,7 +651,7 @@ impl Evaluator {
         let Value::Object(_, Some(source)) = class else {
             return None;
         };
-        let (index, prop) = source
+        let found = source
             .entries
             .iter()
             .enumerate()
@@ -665,7 +665,23 @@ impl Evaluator {
                     Some((i, prop))
                 }
                 _ => None,
-            })?;
+            });
+        let Some((index, prop)) = found else {
+            // A `local` member of the class does not replace the inherited
+            // public member of that name, which the class merge leaves out.
+            let has_local = source.entries.iter().any(|e| {
+                matches!(e, Entry::Property(prop)
+                    if &*prop.name == name
+                        && !prop.is_method
+                        && has_modifier(&prop.modifiers, Modifier::Local))
+            });
+            if !has_local {
+                return None;
+            }
+            let parent = source.parent_type_identities.first()?;
+            let parent = self.refs.classes.get(parent.as_str())?.clone();
+            return self.property_type(&parent, name, scope);
+        };
         let Some(ty) = &prop.type_ann else {
             return Some(RType::Unknown);
         };

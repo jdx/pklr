@@ -492,3 +492,13 @@ n = dyn["key"].getPath().length
 "#);
     assert_eq!(result["n"], 1);
 }
+
+#[test]
+fn reference_member_inherited_public_survives_a_used_local_of_the_same_name() {
+    let result = run(r#"
+open class A { label: Int = 1 }
+class B extends A { local label: String = "x"; text: String = label }
+n = ref.Reference(d, B, null).label.getPath().length
+"#);
+    assert_eq!(result["n"], 1);
+}
