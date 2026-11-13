@@ -89,3 +89,17 @@ fn shadowed_default_name_does_not_break_elements() {
     let v = eval("l = new Listing { default { n = 1 }; let (`default` = 0) new { m = 2 } }\n");
     assert_eq!(v["l"], serde_json::json!([{"n": 1, "m": 2}]));
 }
+
+#[test]
+fn growing_this_listing_errors_instead_of_hanging() {
+    let src = "a = new Listing { this.length; ...this }\nb = (a) { 0 }\n";
+    let _ = eval_fails(src);
+}
+
+#[test]
+fn functions_reading_this_see_the_amendment() {
+    let v = eval(
+        "a = new Listing { 1; () -> this[0]; () -> this[1].apply(); () -> this[2].apply(); () -> this[3].apply() }\nb = (a) { [0] = 9 }\nr = b[4].apply()\n",
+    );
+    assert_eq!(v["r"], 9);
+}

@@ -425,6 +425,12 @@ impl Evaluator {
         if prop.value.is_none() {
             let first = self.eval_expr(&function, &scope, depth + 1)?;
             scope.set("default", first);
+            // Then one with the locals bound against that, for the locals
+            // to read in turn.
+            let mut round = scope.child();
+            self.bind_listing_members(entries, &mut round, false, depth)?;
+            let second = self.eval_expr(&function, &round, depth + 1)?;
+            scope.set("default", second);
         }
         self.bind_listing_members(entries, &mut scope, false, depth)?;
         self.eval_expr(&function, &scope, depth + 1).map(Some)
@@ -533,6 +539,7 @@ impl Evaluator {
         // A chain of `this[i]` reads is at most as long as the final list, so
         // the pass limit follows the result, not the layers.
         let mut pass = 0usize;
+        let mut limit: Option<usize> = None;
         loop {
             pass += 1;
             let mut items = layers.init.to_vec();
@@ -573,14 +580,26 @@ impl Evaluator {
                     elem_class,
                 )?;
             }
+            // A function holds the elements it read, which `same_data` does
+            // not follow, so a list of functions runs every pass.
             let settled = !layers.reads_this
-                || final_items.as_ref().is_some_and(|prev| {
-                    prev.len() == items.len()
-                        && prev.iter().zip(&items).all(|(a, b)| a.same_data(b))
-                });
-            let limit = items.len() + layers.layers.len() + 4;
+                || (!items.iter().any(|item| matches!(item, Value::Lambda(..)))
+                    && final_items.as_ref().is_some_and(|prev| {
+                        prev.len() == items.len()
+                            && prev.iter().zip(&items).all(|(a, b)| a.same_data(b))
+                    }));
+            // Fixed by the first pass, so a list that keeps growing ends.
+            let limit = *limit.get_or_insert(items.len() + layers.layers.len() + 4);
+            let grew = final_items
+                .as_ref()
+                .is_some_and(|prev| prev.len() != items.len());
             final_items = Some(items);
-            if settled || pass > limit {
+            if settled || pass >= limit {
+                if grew {
+                    return Err(Error::Eval(
+                        "Listing elements that read `this` do not settle.".into(),
+                    ));
+                }
                 break;
             }
         }
