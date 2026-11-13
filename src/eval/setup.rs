@@ -413,6 +413,7 @@ impl Evaluator {
             self.module_output.take(),
             std::mem::take(&mut self.mapping_key_values),
             std::mem::take(&mut self.deferred_const),
+            self.last_coerced.take(),
         );
         crate::stack::drop_on_large_stack(held);
     }

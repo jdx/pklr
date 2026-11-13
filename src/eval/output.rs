@@ -311,7 +311,7 @@ impl Evaluator {
                 args.len()
             )));
         };
-        self.raise_deep_failed(value)?;
+        self.raise_rendered_failure(value, renderer)?;
         let settings = Settings::read(kind, renderer)?;
         let text = settings.render(value, document, None, &mut Invoker(self, depth))?;
         Ok(Some(Value::String(text.into())))
@@ -756,8 +756,17 @@ impl Evaluator {
         }
     }
 
+    /// The error of a failed `Listing` or `Mapping` member inside `value`, which
+    /// rendering reads. A renderer with converters may replace the collection
+    /// without reading its members, so it is left to the render.
+    pub(super) fn raise_rendered_failure(&self, value: &Value, renderer: &Value) -> Result<()> {
+        if !self.failed_seen || !renderer_converters(renderer)?.is_empty() {
+            return Ok(());
+        }
+        self.raise_deep_failed(value)
+    }
+
     /// The value the module renders: `output.value`, or the module itself.
-    #[cfg(feature = "native-io")]
     pub(super) fn output_value(&self, module: Value) -> (Value, Option<Kind>) {
         let output = match &self.module_output {
             Some(Value::Object(map, _)) => Some(&**map),

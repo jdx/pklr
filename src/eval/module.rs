@@ -1114,11 +1114,14 @@ impl Evaluator {
             self.eval_module_output(module, &module_map, &scope, path, depth)?;
             // A member of a `Listing` or `Mapping` that failed is read by
             // rendering it, which only the value the module renders does.
-            #[cfg(feature = "native-io")]
             if self.failed_seen {
                 let module_value = Value::Object(Arc::clone(&module_map), source.clone());
                 let (rendered, _) = self.output_value(module_value);
-                self.raise_deep_failed(&rendered)?;
+                let renderer = match &self.module_output {
+                    Some(Value::Object(output, _)) => output.get("renderer").cloned(),
+                    _ => None,
+                };
+                self.raise_rendered_failure(&rendered, &renderer.unwrap_or_default())?;
             }
             if self.rendered_member_failed
                 && let Some(message) = self.unconverted_module_failure(&module_map)
