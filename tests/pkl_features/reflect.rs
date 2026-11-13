@@ -503,3 +503,23 @@ get = obj.getPropertyOrNull("h")
     assert_eq!(result["has"], json!(true));
     assert_eq!(result["get"], json!(1));
 }
+
+#[test]
+fn a_bodyless_method_signature_loads_the_import_it_names() {
+    let dir = std::env::temp_dir().join(format!("pklr-sig-import-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("lib.pkl"), "class C {}\n").unwrap();
+    let main = dir.join("main.pkl");
+    std::fs::write(
+        &main,
+        r#"import "pkl:reflect"
+import "lib.pkl"
+abstract class A { abstract function f(x: lib.C): lib.C }
+name = reflect.Class(A).methods["f"].returnType.referent.name
+"#,
+    )
+    .unwrap();
+    let result = pklr::eval_to_json(&main).unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(result["name"], json!("C"));
+}
