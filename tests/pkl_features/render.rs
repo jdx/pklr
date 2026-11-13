@@ -1877,3 +1877,18 @@ res2 = (m) { when (false) { [throw("unused")] {} } }
     );
     assert_eq!(json["res2"]["a"]["names"], serde_json::json!(["orig"]));
 }
+
+#[test]
+fn computed_key_amends_a_dynamic_entry_in_a_mixed_mapping() {
+    let json = eval(
+        r#"
+class Foo { names: Listing<String> }
+local k = "a"
+local m = Map("a", new Dynamic { 1 }, "b", new Foo { names { "x" } }).toMapping()
+res = (m) { [k] { foo = 2 } }["a"].foo
+res2 = (m) { [k] { foo = 2 } }["b"].names
+"#,
+    );
+    assert_eq!(json["res"], 2);
+    assert_eq!(json["res2"], serde_json::json!(["x"]));
+}
