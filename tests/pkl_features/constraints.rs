@@ -239,4 +239,12 @@ h = new H { m { ["a"] {} } }
 "##,
     );
     assert_eq!(json["h"]["m"]["a"]["x"], 1);
+    let json = eval(
+        r#"
+class Node { x = 1 }
+class H { m: Mapping<String(this != "é\u{e9}"), Node>(true) }
+h = new H { m { ["a"] {} } }
+"#,
+    );
+    assert_eq!(json["h"]["m"]["a"]["x"], 1);
 }

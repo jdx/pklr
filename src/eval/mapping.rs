@@ -572,17 +572,16 @@ fn string_literal_end(text: &str, start: usize) -> Option<usize> {
     } else {
         1
     };
-    let closing = format!("{}{}", "\"".repeat(quotes), "#".repeat(hashes));
-    let escape = format!("\\{}", "#".repeat(hashes));
+    let closing = [b"\"".repeat(quotes), b"#".repeat(hashes)].concat();
+    let escape = [b"\\".to_vec(), b"#".repeat(hashes)].concat();
     let mut index = quote + quotes;
     while index < bytes.len() {
-        if text[index..].starts_with(&closing) {
+        if bytes[index..].starts_with(&closing) {
             return Some(index + closing.len());
         }
-        if text[index..].starts_with(&escape) && index + escape.len() < bytes.len() {
-            // Skip the escaped character, which may be a quote.
-            let escaped = text[index + escape.len()..].chars().next()?;
-            index += escape.len() + escaped.len_utf8();
+        if bytes[index..].starts_with(&escape) {
+            // Skip the escaped byte, which may be a quote.
+            index += escape.len() + 1;
         } else {
             index += 1;
         }
