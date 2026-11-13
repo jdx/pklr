@@ -159,6 +159,8 @@ impl Evaluator {
             active_typed_defaults: HashSet::default(),
             mapping_key_values: HashMap::default(),
             module_names: HashMap::default(),
+            module_declarations: HashMap::default(),
+            parsed_declarations: HashMap::default(),
             grew: false,
         }
     }
@@ -203,6 +205,8 @@ impl Evaluator {
                 self.parse_cache.clear();
                 self.plan_cache.clear();
                 self.body_roots_cache.clear();
+                self.module_declarations.clear();
+                self.parsed_declarations.clear();
             }
             result
         })
@@ -322,6 +326,16 @@ impl Evaluator {
         self.active_typed_defaults.clear();
         self.mapping_key_values.clear();
         self.module_names.clear();
+        if self.grew {
+            // Alias targets can nest deeply, so free them on a large stack.
+            crate::stack::drop_on_large_stack((
+                std::mem::take(&mut self.module_declarations),
+                std::mem::take(&mut self.parsed_declarations),
+            ));
+        } else {
+            self.module_declarations.clear();
+            self.parsed_declarations.clear();
+        }
         self.module_path_admitted.clear();
     }
 
@@ -414,6 +428,8 @@ impl Evaluator {
             std::mem::take(&mut self.mapping_key_values),
             std::mem::take(&mut self.deferred_const),
             self.last_coerced.take(),
+            std::mem::take(&mut self.module_declarations),
+            std::mem::take(&mut self.parsed_declarations),
         );
         crate::stack::drop_on_large_stack(held);
     }
