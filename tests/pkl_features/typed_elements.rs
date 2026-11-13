@@ -1878,3 +1878,9 @@ fn dynamic_element_this_is_dynamic() {
     let v = eval("x = new Dynamic { 1; this is Dynamic }");
     assert_eq!(v["x"][1], true);
 }
+
+#[test]
+fn listing_unused_branch_property_is_not_rejected() {
+    let v = eval("x = new Listing { when (false) { foo = 1 }; 2 }");
+    assert_eq!(v["x"], serde_json::json!([2]));
+}

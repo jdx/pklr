@@ -208,7 +208,11 @@ impl Evaluator {
                         })
                     }
                     Some("Listing") => {
-                        if find_listing_body_property(entries).is_some() {
+                        if entries.iter().any(|entry| {
+                            matches!(entry, Entry::Property(prop)
+                                if &*prop.name != "default"
+                                    && !has_modifier(&prop.modifiers, Modifier::Local))
+                        }) {
                             return Err(Error::Eval(
                                 "Object of type `Listing` cannot have a property (other than `default`)."
                                     .into(),

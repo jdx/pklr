@@ -262,6 +262,7 @@ impl Evaluator {
                         if let Some(key_var) = &generator.key_var {
                             iter_scope.set(key_var, key);
                         }
+                        reject_generated_property(&listing_scope, &generator.body)?;
                         self.eval_listing_entries(
                             &generator.body,
                             &iter_scope,
@@ -280,6 +281,7 @@ impl Evaluator {
                         generator.else_body.as_deref().map(Vec::as_slice)
                     };
                     if let Some(selected) = selected {
+                        reject_generated_property(&listing_scope, selected)?;
                         self.eval_listing_entries(
                             selected,
                             &listing_scope,
@@ -294,6 +296,23 @@ impl Evaluator {
         }
         Ok(())
     }
+}
+
+/// A `for` or `when` body of a Listing that runs may not assign a property,
+/// which would otherwise be dropped silently.
+fn reject_generated_property(scope: &Scope, body: &[Entry]) -> Result<()> {
+    let is_listing = matches!(scope.get("super"),
+        Some(Value::List(parent)) if parent.kind() == ListKind::Listing);
+    let assigns = body.iter().any(|entry| {
+        matches!(entry, Entry::Property(prop)
+            if &*prop.name != "default" && !has_modifier(&prop.modifiers, Modifier::Local))
+    });
+    if is_listing && assigns {
+        return Err(Error::Eval(
+            "Object of type `Listing` cannot have a property (other than `default`).".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// The scope name an untyped `new { ... }` element of a `Listing<T>` is
