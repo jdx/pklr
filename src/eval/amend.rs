@@ -3,6 +3,9 @@
 use super::listing::bind_listing_member;
 use super::*;
 
+/// What every undefined-property message ends with.
+const UNDEFINED_SUFFIX: &str = "but its value is undefined.";
+
 impl Evaluator {
     /// Rewrite assignments of untyped `new` on an instance to amend the
     /// corresponding property of its class default object.
@@ -730,7 +733,7 @@ impl Evaluator {
         let has_stale_undefined = |source: &ObjectSource, map: &ObjectMap| {
             source.poisoned_members.as_deref().is_some_and(|members| {
                 members.iter().any(|(name, member)| {
-                    map.contains_key(&**name) && member.message == undefined_property_message(name)
+                    map.contains_key(&**name) && member.message.ends_with(UNDEFINED_SUFFIX)
                 })
             })
         };
@@ -746,7 +749,7 @@ impl Evaluator {
                 .cloned()
                 .unwrap_or_default();
             poisoned.retain(|name, member| {
-                !(map.contains_key(&**name) && member.message == undefined_property_message(name))
+                !(map.contains_key(&**name) && member.message.ends_with(UNDEFINED_SUFFIX))
             });
             poisoned.extend(type_failures);
             source.poisoned_members = Some(Arc::new(poisoned));
@@ -1998,6 +2001,9 @@ pub(super) fn amended_function(arity: usize, function: Value, body: &Body, scope
         Some(Value::Object(identities, _)) => (**identities).clone(),
         _ => ObjectMap::default(),
     };
+    // A marker from an enclosing capture goes stale when a nested scope
+    // rebinds the name as an inherited member; only the current ones stay.
+    markers.retain(|key, _| !key.starts_with(CAPTURED_DECLARED));
     for name in scope.flatten_declared() {
         if captured.contains_key(&*name) {
             markers.insert(format!("{CAPTURED_DECLARED}{name}").into(), Value::Null);

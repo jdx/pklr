@@ -1513,17 +1513,20 @@ pub(super) fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
             "Class" => is_class_value(val),
             "Map" => {
                 matches!(val, Value::Object(..))
+                    && !is_module_value(val)
                     && !is_class_value(val)
                     && !is_untyped_dynamic_object(val)
             }
             // An object without a source is a `Map`.
             "Mapping" => {
                 matches!(val, Value::Object(_, Some(_)))
+                    && !is_module_value(val)
                     && !is_class_value(val)
                     && !is_untyped_dynamic_object(val)
             }
             "Dynamic" => {
                 matches!(val, Value::Object(_, Some(_)))
+                    && !is_module_value(val)
                     && !is_class_value(val)
                     && !is_mapping_object(val)
             }
@@ -1551,8 +1554,16 @@ pub(super) fn value_is_type(val: &Value, ty: &crate::parser::TypeExpr) -> bool {
             // Check the base type, ignore type parameters
             match name.trim_start_matches('*') {
                 "List" | "Listing" | "Set" => matches!(val, Value::List(_)),
-                "Map" | "Mapping" => {
+                "Map" => {
                     matches!(val, Value::Object(..))
+                        && !is_module_value(val)
+                        && !is_class_value(val)
+                        && !is_untyped_dynamic_object(val)
+                }
+                // A `Map` has no object source; a `Mapping` does.
+                "Mapping" => {
+                    matches!(val, Value::Object(_, Some(_)))
+                        && !is_module_value(val)
                         && !is_class_value(val)
                         && !is_untyped_dynamic_object(val)
                 }
@@ -1678,6 +1689,10 @@ fn is_untyped_dynamic_object(val: &Value) -> bool {
 
 /// Whether `val` is an instance of a class or a module, which is `Typed`:
 /// not a `Map`, `Dynamic`, `Mapping` or `Class`.
+fn is_module_value(val: &Value) -> bool {
+    matches!(val, Value::Object(_, Some(source)) if source.is_module)
+}
+
 fn is_typed_object(val: &Value) -> bool {
     matches!(val, Value::Object(_, Some(source))
         if source.is_module
