@@ -16,7 +16,10 @@ pub use ast::{
     Annotation, BinOp, Body, Entry, Expr, ForGenerator, Import, LocalBindings, Modifier, Module,
     Property, StringInterpPart, TraceSite, TypeExpr, UnOp, WhenGenerator,
 };
-use ast::{check_signature, erase_type_parameters, infers_new, type_expr_runtime_name};
+use ast::{
+    check_signature, erase_type_parameters, infers_new, type_expr_constrained_name,
+    type_expr_runtime_name,
+};
 pub(crate) use ast::{has_untyped_result_new, infer_method_return_new, rewrite_untyped_result_new};
 use checks::*;
 use cursor::*;
