@@ -366,3 +366,20 @@ toMap = reflect.Class(List).methods["toMap"].parameters.keys.toList()
     assert_eq!(result["filter"], json!([]));
     assert_eq!(result["toMap"], json!(["keyExtractor", "valueExtractor"]));
 }
+
+#[test]
+fn an_import_shared_with_an_annotation_keeps_the_fields_it_reads() {
+    let result = with_files(
+        &[("ann.pkl", "message = \"hi\"\nother = 1\n")],
+        r#"
+import "pkl:reflect"
+import "ann.pkl" as ann
+used = ann.other
+@Deprecated { message = ann.message }
+class C {}
+message = reflect.Class(C).annotations[0].message
+"#,
+    );
+    assert_eq!(result["message"], json!("hi"));
+    assert_eq!(result["used"], json!(1));
+}

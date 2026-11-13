@@ -70,20 +70,20 @@ impl Evaluator {
         Ok(module)
     }
 
-    /// The names the annotations of the module's classes and type aliases
-    /// read, which its entries do not carry.
-    fn declaration_annotation_roots(&self, module: &Module) -> HashSet<Name> {
+    /// The annotations of the module's classes and type aliases as entries
+    /// for import analysis, which its own entries do not carry.
+    fn declaration_annotation_entries(&self, module: &Module) -> Vec<Entry> {
         let key = Arc::as_ptr(&module.body) as usize;
         let Some((body, declarations)) = self.parsed_declarations.get(&key) else {
-            return HashSet::default();
+            return Vec::new();
         };
         if !body
             .upgrade()
             .is_some_and(|b| Arc::ptr_eq(&b, &module.body))
         {
-            return HashSet::default();
+            return Vec::new();
         }
-        let entries: Vec<Entry> = declarations
+        declarations
             .iter()
             .flat_map(|declaration| &declaration.annotations)
             .map(|annotation| {
@@ -93,8 +93,7 @@ impl Evaluator {
                     Vec::new(),
                 ))
             })
-            .collect();
-        referenced_roots(&entries)
+            .collect()
     }
 
     pub(super) fn eval_module(
@@ -517,12 +516,12 @@ impl Evaluator {
         let requested_output_fields = requested_fields
             .as_ref()
             .map(|fields| expand_requested_fields(&module.body, fields, &inherited_builtins));
-        let analysis_entries =
+        let mut analysis_entries =
             analysis_entries_for_requested_fields(&module.body, requested_output_fields.as_ref());
+        // What the annotations of a class or type alias read counts as used.
+        analysis_entries.extend(self.declaration_annotation_entries(module));
         let mut referenced_imports = referenced_roots(&analysis_entries);
         referenced_imports.extend(inherited_references);
-        // Imports that only the annotations of a class or type alias use.
-        referenced_imports.extend(self.declaration_annotation_roots(module));
         let import_field_uses = import_field_uses(&analysis_entries);
 
         let mut inherited_local_paths: Vec<PathBuf> = Vec::new();
