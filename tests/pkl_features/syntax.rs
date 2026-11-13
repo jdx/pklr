@@ -3376,8 +3376,10 @@ fn module_self_reads_see_members_evaluated_so_far() {
 
 #[test]
 fn dynamic_member_predicates_do_not_bind_listing_members() {
+    // The element is a nested `Dynamic`, which has no `length`, so the
+    // predicate reads the outer `length`.
     let v = eval(
-        "local length = 5\nbase = new Dynamic { 1; 2 }\nres = (base) { [[length == 5]] = 9 }\n",
+        "local length = 5\nbase = new Listing { new Dynamic { 1; 2 } }\nres = (base) { [[length == 5]] = 9 }\n",
     );
-    assert_eq!(v["res"], serde_json::json!([9, 9]));
+    assert_eq!(v["res"], serde_json::json!([9]));
 }
