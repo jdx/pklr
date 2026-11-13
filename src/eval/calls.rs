@@ -61,6 +61,21 @@ impl Evaluator {
         None
     }
 
+    /// `receiver?.method(args)` on a non-null receiver that may be a `Class` or
+    /// the `pkl:reflect` module: it resolves as `receiver.method(args)` does.
+    #[inline(never)]
+    fn null_safe_special_call(
+        &mut self,
+        receiver: &Expr,
+        method: &str,
+        args: &[Expr],
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<Value> {
+        let call = Expr::Field(Box::new(receiver.clone()), method.to_string());
+        self.eval_call(&call, args, scope, depth)
+    }
+
     pub(super) fn eval_call(
         &mut self,
         func_expr: &Expr,
@@ -182,10 +197,10 @@ impl Evaluator {
                     _ => {}
                 }
             }
-            if let Some(result) =
-                self.special_receiver_call(obj_expr, &obj, method, args, &evaled_args, scope, depth)
+            if matches!(&obj, Value::Object(_, Some(source))
+                if source.kind == ObjectKind::Class || source.type_identity.is_some())
             {
-                return *result;
+                return self.null_safe_special_call(obj_expr, method, args, scope, depth);
             }
             if let Some(result) = self.eval_method_call(&obj, method, &evaled_args, depth)? {
                 return Ok(result);
