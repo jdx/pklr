@@ -439,7 +439,9 @@ impl Evaluator {
                 Ok(Some(Value::List(ListValue::new(ListKind::Set, seen))))
             }
             (Value::List(items), "toMap")
-                if matches!(items.kind(), ListKind::List | ListKind::Set) && args.len() == 2 =>
+                if matches!(items.kind(), ListKind::List | ListKind::Set)
+                    && !items.is_bytes()
+                    && args.len() == 2 =>
             {
                 self.list_to_map(items, args, depth).map(Some)
             }

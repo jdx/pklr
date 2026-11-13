@@ -757,8 +757,10 @@ impl Evaluator {
             if uri.starts_with("pkl:") {
                 return true;
             }
+            // A remote base is not followed here; assume it may reach the
+            // standard library rather than reject members it might declare.
             if uri.contains("://") {
-                return false;
+                return true;
             }
             let Ok(base_path) = self.resolve_local_path(&from, &uri) else {
                 return false;

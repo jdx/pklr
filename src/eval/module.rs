@@ -429,6 +429,8 @@ impl Evaluator {
                 // ones an amending module can assign.
                 if !prop.is_method
                     && &*prop.name != "output"
+                    // An unresolved base also yields no members; only judge a
+                    // base that declared some.
                     && (!late_inherited_properties.is_empty() || !base_obj.is_empty())
                     && !base_obj.contains_key(prop.name.as_ref())
                     && !late_inherited_properties
