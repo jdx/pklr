@@ -431,7 +431,13 @@ impl Evaluator {
     /// `value.toString()`, as string interpolation uses it: a class that
     /// defines `toString()` gets to choose its text.
     pub(super) fn value_to_string(&mut self, value: &Value, depth: usize) -> Result<String> {
-        if let Value::Object(members, _) = value {
+        if let Value::Object(members, source) = value {
+            if source
+                .as_ref()
+                .is_some_and(|source| source.kind == ObjectKind::Reference)
+            {
+                return self.reference_to_string(value, depth);
+            }
             if is_builtin_regex_match(value)
                 && let Some(Value::String(s)) = members.get("value")
             {

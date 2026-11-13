@@ -1800,6 +1800,7 @@ impl Evaluator {
                             Ok(defaults) => {
                                 scope.set_member_poison(name, None);
                                 scope.declare(name, defaults.clone());
+                                self.register_reference_class(&defaults);
                                 // The live `this`/`module` hold the class as a
                                 // declared member too, so rendering them skips it.
                                 module_props_insert(

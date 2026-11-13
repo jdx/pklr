@@ -259,7 +259,7 @@ fn module_file_name(namespace: &str) -> &str {
 /// A class's `toString()`: `Int` for a standard library class and
 /// `module#Class` otherwise, naming the module by its file. (pkl names a
 /// module with a `module` declaration by that name instead.)
-fn class_display_name(source: &ObjectSource) -> String {
+pub(crate) fn class_display_name(source: &ObjectSource) -> String {
     // A module's class shows as the module's name.
     if let Some(name) = source
         .type_identity
@@ -362,6 +362,13 @@ fn render(value: &Value, explicit: bool, out: &mut String) {
                 _ => out.push_str("TypeAlias"),
             }
         }
+        Value::Object(map, Some(source)) if source.kind == ObjectKind::Reference => {
+            out.push_str(&crate::eval::reference::render_text(map, |value| {
+                let mut text = String::new();
+                render(value, true, &mut text);
+                text
+            }));
+        }
         Value::Object(map, source) => {
             if explicit {
                 out.push_str("new ");
@@ -386,6 +393,7 @@ fn render(value: &Value, explicit: bool, out: &mut String) {
                 out.push_str(
                     if matches!(member, Value::Object(_, source)
                         if !source.as_deref().is_some_and(|s| s.kind == ObjectKind::Class
+                            || s.kind == ObjectKind::Reference
                             || s.type_identity.as_deref() == Some("pkl:base#TypeAlias")))
                         || matches!(member, Value::List(items) if is_braced_list(items))
                     {

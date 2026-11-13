@@ -518,6 +518,11 @@ impl Evaluator {
                 }
                 let obj = self.eval_field_base(obj_expr, field, scope, depth)?;
                 self.raise_failed_members(&obj, field)?;
+                if let Value::Object(_, Some(source)) = &obj
+                    && source.kind == ObjectKind::Reference
+                {
+                    return self.reference_member(&obj, field, scope);
+                }
                 // Objects resolve their own members below; built-in values
                 // answer from the standard library.
                 if !matches!(obj, Value::Object(..))
@@ -651,6 +656,9 @@ impl Evaluator {
                 self.raise_failed_members(&obj, field)?;
                 match &obj {
                     Value::Null => Ok(Value::Null),
+                    Value::Object(_, Some(source)) if source.kind == ObjectKind::Reference => {
+                        self.reference_member(&obj, field, scope)
+                    }
                     Value::Object(..)
                         if field == "simpleName" && class_simple_name(&obj).is_some() =>
                     {
@@ -705,6 +713,11 @@ impl Evaluator {
                 let key = self.eval_expr(key_expr, scope, depth + 1)?;
                 if self.failed_seen {
                     self.raise_failed_at(&obj, &key)?;
+                }
+                if let Value::Object(_, Some(source)) = &obj
+                    && source.kind == ObjectKind::Reference
+                {
+                    return self.reference_subscript(&obj, &key);
                 }
                 if let Some(result) = stdlib::index(&obj, &key) {
                     return result;
