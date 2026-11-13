@@ -425,6 +425,23 @@ impl Evaluator {
                 if has_modifier(&prop.modifiers, Modifier::Local) {
                     continue;
                 }
+                // The amended module is a class: its properties are the only
+                // ones an amending module can assign.
+                if !prop.is_method
+                    && &*prop.name != "output"
+                    && (!late_inherited_properties.is_empty() || !base_obj.is_empty())
+                    && !base_obj.contains_key(prop.name.as_ref())
+                    && !late_inherited_properties
+                        .iter()
+                        .any(|inherited| inherited.name == prop.name)
+                    && !self.inherits_stdlib_module(module, path)
+                {
+                    let module_name = self.amended_module_name(module, path);
+                    return Err(Error::Eval(format!(
+                        "Cannot find property `{}` in module `{module_name}`.",
+                        prop.name
+                    )));
+                }
                 if has_modifier(&prop.modifiers, Modifier::Fixed) {
                     return Err(Error::Eval(
                         "Modifier `fixed` is not applicable to object members.".into(),
@@ -771,6 +788,15 @@ impl Evaluator {
             // plain property is not, even when the property has no value.
             let mut inherited_type_failures =
                 self.inherited_type_failures(body, &scope, &synthesized_inherited_types, depth)?;
+            if !late_inherited_properties.is_empty() {
+                self.plain_override_type_failures(
+                    body,
+                    &late_inherited_properties,
+                    &scope,
+                    depth,
+                    &mut inherited_type_failures,
+                );
+            }
 
             // Values are evaluated before these late inherited checks. Carry a
             // constrained member's failure through direct and transitive reads
@@ -1021,6 +1047,49 @@ impl Evaluator {
             }
         }
         Ok(inherited_type_failures)
+    }
+
+    /// An amending or extending module assigns plain values to properties the
+    /// base module declared with a type. Check each such value against the
+    /// inherited type; the failure stays attached to the member.
+    fn plain_override_type_failures(
+        &mut self,
+        body: &Body,
+        inherited: &[Arc<Property>],
+        scope: &Scope,
+        depth: usize,
+        failures: &mut IndexMap<Name, String>,
+    ) {
+        for entry in body.iter() {
+            let Entry::Property(prop) = entry else {
+                continue;
+            };
+            if prop.type_ann.is_some()
+                || prop.is_method
+                || prop.value.is_none()
+                || has_modifier(&prop.modifiers, Modifier::Local)
+                || !scope.is_declared(&prop.name)
+            {
+                continue;
+            }
+            let Some(ty) = inherited.iter().rev().find_map(|parent| {
+                (parent.name == prop.name && !has_modifier(&parent.modifiers, Modifier::Local))
+                    .then_some(parent.type_ann.as_ref())
+                    .flatten()
+            }) else {
+                continue;
+            };
+            if type_has_constraint(ty, scope) || !type_is_runtime_checkable(ty, scope) {
+                continue;
+            }
+            let Some(value) = scope.get(&prop.name) else {
+                continue;
+            };
+            if matches!(self.eval_type_check(value, ty, scope, depth + 1), Ok(false)) {
+                let message = self.type_mismatch_message(ty, value, Some(&prop.name), scope);
+                failures.insert(prop.name.clone(), message);
+            }
+        }
     }
 
     /// Add to `inherited_type_failures` every effective property whose
@@ -2724,7 +2793,7 @@ mod late_binding_pass_tests {
     /// each captured scope holds on every pass.
     #[test]
     fn a_chain_no_quiet_pass_can_end_never_compares_by_data() {
-        let child = "amends \"Template.pkl\"\nbase = 10\n";
+        let child = "amends \"Template.pkl\"\nf30 = (x) -> x + 1\n";
         let (json, passes) = evaluate_amendment(&chain_of_lambdas_reading_the_module(30), child);
         assert_eq!(json["res"], 2);
         // The template's own pass and pass 0 of the amending module, then a pass for

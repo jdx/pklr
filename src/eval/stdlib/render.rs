@@ -310,8 +310,17 @@ fn render(value: &Value, explicit: bool, out: &mut String) {
             }
             out.push('}');
         }
+        Value::List(items) if items.int_seq_bounds().is_some() => {
+            let (start, end, step) = items.int_seq_bounds().unwrap_or_default();
+            out.push_str(&format!("IntSeq({start}, {end})"));
+            if step != 1 {
+                out.push_str(&format!(".step({step})"));
+            }
+        }
         Value::List(items) => {
-            out.push_str(if items.kind() == ListKind::Set {
+            out.push_str(if items.is_bytes() {
+                "Bytes("
+            } else if items.kind() == ListKind::Set {
                 "Set("
             } else {
                 "List("

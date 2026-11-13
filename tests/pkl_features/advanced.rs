@@ -2297,7 +2297,7 @@ fn direct_package_relatives_survive_across_offline_evaluators() {
             let body = if request.starts_with("GET /Config.pkl ") {
                 "amends \"./Base.pkl\"\nanswer = 42\n"
             } else if request.starts_with("GET /Base.pkl ") {
-                "base = 41\n"
+                "base = 41\nanswer = 0\n"
             } else {
                 panic!("unexpected request: {request}");
             };

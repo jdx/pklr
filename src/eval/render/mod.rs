@@ -247,6 +247,8 @@ pub(crate) enum Kind {
     RenderDirective,
     /// An `IntSeq`.
     IntSeq,
+    /// A `Bytes`.
+    Bytes,
     /// A `Pair`.
     Pair,
     /// A `Class`.
@@ -281,6 +283,7 @@ impl Kind {
             },
             Kind::RenderDirective => "RenderDirective".into(),
             Kind::IntSeq => "IntSeq".into(),
+            Kind::Bytes => "Bytes".into(),
             Kind::Pair => "Pair".into(),
             Kind::Class => "Class".into(),
             Kind::TypeAlias => "TypeAlias".into(),
@@ -328,6 +331,7 @@ pub(crate) fn kind_of(value: &Value) -> Kind {
         Value::Regex(_) => Kind::Regex,
         Value::Lambda(..) => Kind::Function,
         Value::List(items) if items.kind() == ListKind::List && items.is_int_seq() => Kind::IntSeq,
+        Value::List(items) if items.kind() == ListKind::List && items.is_bytes() => Kind::Bytes,
         Value::List(_) => Kind::Listing,
         Value::Object(map, None) => {
             if let Some(kind) = builtin_object_kind(map) {
@@ -671,6 +675,7 @@ impl Converters {
             Kind::Mapping => self.class("Mapping").or_else(|| self.class("Map")),
             Kind::Dynamic => self.class("Dynamic"),
             Kind::IntSeq => self.class("IntSeq"),
+            Kind::Bytes => self.class("Bytes"),
             Kind::Pair => self.class("Pair"),
             Kind::Class => self.class("Class"),
             Kind::TypeAlias => self.class("TypeAlias"),
@@ -1301,6 +1306,10 @@ fn display_value_at(value: &Value, depth: usize, max: usize) -> String {
         }
         (Kind::Regex, Value::Regex(regex)) => format!("Regex({:?})", regex.pattern()),
         (kind @ Kind::Function, _) => format!("new {} {{}}", kind.pkl_class(value)),
+        (Kind::Bytes, Value::List(items)) => {
+            let bytes: Vec<String> = items.iter().map(display_value).collect();
+            format!("Bytes({})", bytes.join(", "))
+        }
         (Kind::IntSeq, Value::List(items)) if items.int_seq_bounds().is_some() => {
             let (start, end, step) = items.int_seq_bounds().unwrap_or_default();
             if step == 1 {

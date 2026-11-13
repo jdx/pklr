@@ -1918,7 +1918,7 @@ fn concrete_module_must_implement_inherited_abstract_property() {
 
     std::fs::write(
         &child,
-        "extends \"Base.pkl\"\nrequired = List(\"implemented\")\n",
+        "extends \"Base.pkl\"\nrequired { \"implemented\" }\n",
     )
     .unwrap();
     let json = pklr::EvaluatorBuilder::new().eval_to_json(&child).unwrap();
@@ -8100,11 +8100,11 @@ res4 = test.catch(() -> new Mapping { ...Set(10, 20) })
     );
     assert_eq!(
         val["res3"],
-        "Cannot spread value of type `List` into object of type `Mapping`.\nValue: List(1, 2, 3)"
+        "Cannot spread value of type `List` into object of type `Mapping`. Value: List(1, 2, 3)"
     );
     assert_eq!(
         val["res4"],
-        "Cannot spread value of type `Set` into object of type `Mapping`.\nValue: Set(10, 20)"
+        "Cannot spread value of type `Set` into object of type `Mapping`. Value: Set(10, 20)"
     );
 }
 
@@ -8193,4 +8193,31 @@ fn replacing_an_amended_mapping_entry_drops_its_old_body_amendments() {
     );
     assert_eq!(v["r"], serde_json::json!({"z": 3}));
     assert_eq!(v["n"], 1);
+}
+
+#[test]
+fn amending_module_rejects_properties_the_base_lacks() {
+    let dir = std::env::temp_dir().join(format!("pklr_amend_unknown_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("base.pkl"), "a = 1\n").unwrap();
+    std::fs::write(dir.join("child.pkl"), "amends \"base.pkl\"\nb = 2\n").unwrap();
+    let r = pklr::eval_to_json(&dir.join("child.pkl"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let msg = format!("{:?}", r.unwrap_err());
+    assert!(msg.contains("Cannot find property `b` in module"), "{msg}");
+}
+
+#[test]
+fn list_to_map_with_key_and_value_functions() {
+    let v = eval(
+        "r = List(1, 2).toMap((x) -> \"k\\(x)\", (x) -> x * 10)\ns = Set(3).toMap((x) -> x, (x) -> x)",
+    );
+    assert_eq!(v["r"], serde_json::json!({"k1": 10, "k2": 20}));
+    assert_eq!(v["s"], serde_json::json!({"3": 3}));
+}
+
+#[test]
+fn map_spread_into_listing_is_rejected() {
+    let e = eval_fails("x = new Listing { ...Map(1, 2) }");
+    assert!(e.contains("Cannot spread"), "{e}");
 }

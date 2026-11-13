@@ -293,6 +293,7 @@ pub(super) fn get_class(value: &Value) -> Result<Value> {
         Value::Object(_, None) => return Err(get_class_unsupported("a Map or a computed Dynamic")),
         Value::List(items) => match items.kind() {
             ListKind::List if items.is_int_seq() => ("IntSeq", None),
+            ListKind::List if items.is_bytes() => ("Bytes", None),
             ListKind::List => ("List", None),
             ListKind::Listing => ("Listing", None),
             ListKind::Set => ("Set", None),

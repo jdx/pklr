@@ -1118,6 +1118,7 @@ pub(super) fn pkl_class_name(value: &Value) -> String {
         Value::Object(_, source) => object_class_name(source.as_deref(), None),
         Value::List(items) => match items.kind() {
             ListKind::List if items.is_int_seq() => "IntSeq".to_string(),
+            ListKind::List if items.is_bytes() => "Bytes".to_string(),
             ListKind::List => "List".to_string(),
             ListKind::Listing => "Listing".to_string(),
             ListKind::Set => "Set".to_string(),
@@ -1469,11 +1470,14 @@ pub(super) fn list_is_type(list: &crate::value::ListValue, name: &str) -> bool {
     match name {
         "Any" | "unknown" => true,
         // An `IntSeq` is its own class, not a `List`.
-        "List" => kind == ListKind::List && !list.is_int_seq(),
+        "List" => kind == ListKind::List && !list.is_int_seq() && !list.is_bytes(),
         "IntSeq" => list.is_int_seq(),
+        "Bytes" => list.is_bytes(),
         "Listing" => kind == ListKind::Listing,
         "Set" => kind == ListKind::Set,
-        "Collection" => matches!(kind, ListKind::List | ListKind::Set) && !list.is_int_seq(),
+        "Collection" => {
+            matches!(kind, ListKind::List | ListKind::Set) && !list.is_int_seq() && !list.is_bytes()
+        }
         "Dynamic" => kind == ListKind::Dynamic,
         "Object" => matches!(kind, ListKind::Listing | ListKind::Dynamic),
         _ => false,

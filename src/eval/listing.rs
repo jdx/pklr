@@ -575,6 +575,14 @@ pub(super) fn listing_spread_values(value: Value) -> Result<Arc<Vec<Value>>> {
     match value {
         Value::List(values) => Ok(Arc::new(values.to_vec())),
         Value::Object(members, _) if members.is_empty() => Ok(Arc::default()),
+        // A `Map` is no object to spread: it has no source.
+        value @ Value::Object(_, None) => Err(stdlib::error_with_values(
+            format!(
+                "Cannot spread value of type `{}` into object of type `Listing`.",
+                pkl_class_name(&value)
+            ),
+            &[("Value", &value)],
+        )),
         Value::Object(_, source) => {
             let members = if source.is_some_and(|s| s.kind == ObjectKind::Mapping) {
                 "entries"

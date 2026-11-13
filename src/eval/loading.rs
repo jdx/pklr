@@ -743,6 +743,37 @@ impl Evaluator {
         name
     }
 
+    /// Whether a module in the amends or extends chain of `module` is a
+    /// standard library module, whose members this evaluator does not list.
+    pub(super) fn inherits_stdlib_module(&mut self, module: &Module, path: &Path) -> bool {
+        let mut current = (
+            module.amends.clone().or_else(|| module.extends.clone()),
+            path.to_path_buf(),
+        );
+        for _ in 0..self.max_depth {
+            let (Some(uri), from) = current else {
+                return false;
+            };
+            if uri.starts_with("pkl:") {
+                return true;
+            }
+            if uri.contains("://") {
+                return false;
+            }
+            let Ok(base_path) = self.resolve_local_path(&from, &uri) else {
+                return false;
+            };
+            let Ok(base) = self.parse_file(&base_path) else {
+                return false;
+            };
+            current = (
+                base.amends.clone().or_else(|| base.extends.clone()),
+                base_path,
+            );
+        }
+        false
+    }
+
     /// Reject a module that amends or extends itself.
     pub(super) fn check_not_self(
         &mut self,
