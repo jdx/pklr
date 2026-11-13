@@ -6,6 +6,7 @@
 
 use super::*;
 
+mod collections;
 #[allow(dead_code)] // Activated when the compatibility formatter is migrated.
 mod dragon;
 mod fdlibm;
@@ -16,6 +17,7 @@ pub(crate) mod render;
 pub(crate) mod string;
 mod units;
 
+pub(super) use collections::{collection_arg, collection_property, resource_property};
 pub(crate) use numbers::{
     binary_op, logical_left, logical_not, logical_right, negate, units_equal,
 };
@@ -50,7 +52,7 @@ pub(super) fn typed_object(type_name: &str, members: ObjectMap) -> Value {
         is_open: false,
         is_abstract: false,
         type_name: Some(type_name.to_string()),
-        type_identity: matches!(type_name, "RegexMatch" | "Pair")
+        type_identity: matches!(type_name, "RegexMatch" | "Pair" | "Resource")
             .then(|| format!("pkl:base#{type_name}")),
         parent_type_names: Vec::new(),
         parent_type_identities: Vec::new(),

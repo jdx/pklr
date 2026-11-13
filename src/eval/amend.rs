@@ -3,6 +3,9 @@
 use super::listing::bind_listing_member;
 use super::*;
 
+/// What every undefined-property message ends with.
+const UNDEFINED_SUFFIX: &str = "but its value is undefined.";
+
 impl Evaluator {
     /// Rewrite assignments of untyped `new` on an instance to amend the
     /// corresponding property of its class default object.
@@ -730,7 +733,7 @@ impl Evaluator {
         let has_stale_undefined = |source: &ObjectSource, map: &ObjectMap| {
             source.poisoned_members.as_deref().is_some_and(|members| {
                 members.iter().any(|(name, member)| {
-                    map.contains_key(&**name) && member.message == undefined_property_message(name)
+                    map.contains_key(&**name) && member.message.ends_with(UNDEFINED_SUFFIX)
                 })
             })
         };
@@ -746,7 +749,7 @@ impl Evaluator {
                 .cloned()
                 .unwrap_or_default();
             poisoned.retain(|name, member| {
-                !(map.contains_key(&**name) && member.message == undefined_property_message(name))
+                !(map.contains_key(&**name) && member.message.ends_with(UNDEFINED_SUFFIX))
             });
             poisoned.extend(type_failures);
             source.poisoned_members = Some(Arc::new(poisoned));
@@ -1013,6 +1016,29 @@ impl Evaluator {
             return Err(member_predicates_unsupported());
         }
         let mut expanded = Vec::with_capacity(entries.len());
+        // An index the amendment defines twice, by `[0]` and a predicate or by
+        // two predicates, is a conflicting override.
+        let mut defined: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        for entry in entries.iter() {
+            if let Entry::DynProperty(index, _) = entry {
+                // An index written as an expression, such as `[1 - 1]`, counts
+                // by its value; one that fails is reported where it is defined.
+                let index = match index {
+                    Expr::Int(index) => Some(*index),
+                    other => match self.eval_expr(other, scope, depth + 1) {
+                        Ok(Value::Int(index)) => Some(index),
+                        _ => None,
+                    },
+                };
+                if let Some(index) = index
+                    && !defined.insert(index)
+                {
+                    return Err(Error::Eval(format!(
+                        "Duplicate definition of member `{index}`."
+                    )));
+                }
+            }
+        }
         for entry in entries.iter() {
             let Entry::Predicate(cond, value) = entry else {
                 expanded.push(entry.clone());
@@ -1030,6 +1056,11 @@ impl Evaluator {
                     bind_listing_receiver(&mut cond_scope, item);
                 }
                 if expect_bool(&self.eval_expr(cond, &cond_scope, depth + 1)?)? {
+                    if !defined.insert(index as i64) {
+                        return Err(Error::Eval(format!(
+                            "Duplicate definition of member `{index}`."
+                        )));
+                    }
                     expanded.push(Entry::DynProperty(Expr::Int(index as i64), value.clone()));
                 }
             }
@@ -2014,6 +2045,9 @@ pub(super) fn amended_function(arity: usize, function: Value, body: &Body, scope
         Some(Value::Object(identities, _)) => (**identities).clone(),
         _ => ObjectMap::default(),
     };
+    // A marker from an enclosing capture goes stale when a nested scope
+    // rebinds the name as an inherited member; only the current ones stay.
+    markers.retain(|key, _| !key.starts_with(CAPTURED_DECLARED));
     for name in scope.flatten_declared() {
         if captured.contains_key(&*name) {
             markers.insert(format!("{CAPTURED_DECLARED}{name}").into(), Value::Null);

@@ -546,7 +546,7 @@ fn resource_value(uri: &str, bytes: &[u8]) -> Value {
         Value::String(String::from_utf8_lossy(bytes).into()),
     );
     map.insert("base64".into(), Value::String(base64(bytes).into()));
-    Value::Object(Arc::new(map), None)
+    super::stdlib::typed_object("Resource", map)
 }
 fn base64(bytes: &[u8]) -> String {
     const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

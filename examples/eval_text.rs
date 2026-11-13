@@ -14,8 +14,14 @@ fn main() -> ExitCode {
     match pklr::EvaluatorBuilder::new().eval_to_text(std::path::Path::new(&path)) {
         Ok(text) => {
             // Not print!: a closed pipe must not panic (a panic reads as a crash).
-            let _ = std::io::stdout().write_all(text.as_bytes());
-            ExitCode::SUCCESS
+            match std::io::stdout().write_all(text.as_bytes()) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+                Err(err) => {
+                    eprintln!("error writing output: {err}");
+                    ExitCode::from(3)
+                }
+            }
         }
         Err(err) => {
             eprintln!("{err}");

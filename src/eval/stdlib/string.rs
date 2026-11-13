@@ -327,7 +327,7 @@ pub(super) fn base64_decode(s: &str) -> std::result::Result<Vec<u8>, String> {
     Ok(out)
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(super) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -408,6 +408,33 @@ pub(crate) fn subscript(s: &Arc<str>, index: &Value) -> Result<Value> {
     }
 }
 
+/// A `Bytes` value.
+pub(super) fn bytes_value(bytes: Vec<u8>) -> Value {
+    let items: Vec<Value> = bytes
+        .into_iter()
+        .map(|b| Value::Int(i64::from(b)))
+        .collect();
+    Value::List(ListValue::from(items).into_bytes())
+}
+
+/// The name of a `Charset`, or pkl's type error for another value.
+pub(super) fn charset_arg(value: &Value) -> Result<&'static str> {
+    if let Value::String(s) = value {
+        match &**s {
+            "UTF-8" => return Ok("UTF-8"),
+            "UTF-16" => return Ok("UTF-16"),
+            "ISO-8859-1" => return Ok("ISO-8859-1"),
+            _ => {}
+        }
+    }
+    Err(error_with_values(
+        "Expected value of type `\"UTF-8\"|\"UTF-16\"|\"ISO-8859-1\"`, but got `".to_string()
+            + &render_value_limited(value, ERROR_VALUE_LIMIT)
+            + "`.",
+        &[],
+    ))
+}
+
 pub(super) fn property(s: &Arc<str>, name: &str) -> Option<Result<Value>> {
     let value = match name {
         "length" => Value::Int(s.chars().count() as i64),
@@ -440,6 +467,11 @@ pub(super) fn property(s: &Arc<str>, name: &str) -> Option<Result<Value>> {
             Value::Int(i64::from_le_bytes(first))
         }
         "base64" => string_value(base64_encode(s.as_bytes())),
+        "base64DecodedBytes" => {
+            return Some(base64_decode(s).map(bytes_value).map_err(|message| {
+                error_with_values(message, &[("String", &Value::String(Arc::clone(s)))])
+            }));
+        }
         "base64Decoded" => {
             return Some(
                 base64_decode(s)
@@ -486,6 +518,7 @@ impl Evaluator {
             | "replaceFirstMapped" | "replaceLastMapped" | "replaceAllMapped" | "padStart"
             | "padEnd" | "splitLimit" => 2,
             "replaceRange" => 3,
+            "encodeToBytes" => 1,
             _ => return None,
         };
         Some(
@@ -522,6 +555,24 @@ impl Evaluator {
                 Ok((from, to)) => string_value(&s[from..to]),
                 Err(_) => Value::Null,
             },
+            "encodeToBytes" => {
+                let charset = charset_arg(a.value(0)?)?;
+                let encoded: Vec<u8> = match charset {
+                    "UTF-8" => s.as_bytes().to_vec(),
+                    // Java's "UTF-16" writes a big-endian byte order mark first.
+                    "UTF-16" => [0xfeff]
+                        .into_iter()
+                        .chain(s.encode_utf16().collect::<Vec<_>>())
+                        .flat_map(u16::to_be_bytes)
+                        .collect(),
+                    // Characters Latin-1 cannot hold become `?`.
+                    _ => s
+                        .chars()
+                        .map(|c| u8::try_from(u32::from(c)).unwrap_or(b'?'))
+                        .collect(),
+                };
+                bytes_value(encoded)
+            }
             "repeat" => {
                 let count = a.int(0)?;
                 if count < 0 {

@@ -119,6 +119,8 @@ pub struct Evaluator {
     /// the lambda runs, from the modules that declared them.
     deferred_const: HashMap<usize, (Arc<Expr>, Arc<str>)>,
     leaked_this: Option<Value>,
+    /// Bodies (by address) being evaluated as a class's property defaults.
+    class_template_bodies: Vec<usize>,
     /// Whether any [`Value::Failed`] member was made, so reads that look for
     /// failed members can be skipped until one exists.
     failed_seen: bool,

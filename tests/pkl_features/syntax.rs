@@ -3547,3 +3547,161 @@ r = g.apply("Q").apply()
     assert_eq!(json["r"]["name"], "P");
     assert_eq!(json["r"]["x"], "Q");
 }
+
+#[test]
+fn generic_mapping_does_not_match_a_map() {
+    let json = eval(
+        r#"
+a = Map(1, "one") is Mapping<Int, String>
+b = Map(1, "one") is Map<Int, String>
+c = new Mapping { [1] = "one" } is Mapping<Int, String>
+"#,
+    );
+    assert_eq!(json["a"], false);
+    assert_eq!(json["b"], true);
+    assert_eq!(json["c"], true);
+}
+
+#[test]
+fn module_is_typed() {
+    let json = eval(
+        r#"
+a = module is Typed
+b = this is Typed
+c = (module as Typed) != null
+"#,
+    );
+    assert_eq!(json["a"], true);
+    assert_eq!(json["b"], true);
+    assert_eq!(json["c"], true);
+}
+
+#[test]
+fn module_is_typed_in_unions_and_annotations() {
+    let json = eval(
+        r#"
+a = module is Typed|String
+b = (module as Typed|Int) != null
+function f(m: Typed) = 1
+c = f(module)
+d = module is Dynamic
+e = module is Map
+"#,
+    );
+    assert_eq!(json["a"], true);
+    assert_eq!(json["b"], true);
+    assert_eq!(json["c"], 1);
+    assert_eq!(json["d"], false);
+    assert_eq!(json["e"], false);
+}
+
+#[test]
+fn module_is_not_a_mapping_or_map() {
+    let json = eval(
+        r#"
+a = module is Mapping
+b = module is Mapping<String, Int>
+c = module is Map<String, Int>
+d = module is Map
+function f(m: Typed) = 1
+e = f(module)
+"#,
+    );
+    for key in ["a", "b", "c", "d"] {
+        assert_eq!(json[key], false, "{key}");
+    }
+    assert_eq!(json["e"], 1);
+    assert!(eval_fails("a = module as Mapping").contains("Mapping"));
+    assert!(eval_fails("function h(m: Mapping) = 1\nr = h(module)").contains("Mapping"));
+}
+
+#[test]
+fn module_is_not_typed_when_typed_is_a_user_alias() {
+    let json = eval(
+        r#"
+typealias Typed = String
+a = module is Typed
+"#,
+    );
+    assert_eq!(json["a"], false);
+}
+
+#[test]
+fn constraint_map_is_not_a_module() {
+    let json = eval(
+        r#"
+a = Map(1, "one") is Map(this is Typed)
+b = Map(1, "one") is Map(this is Map)
+"#,
+    );
+    assert_eq!(json["a"], false);
+    assert_eq!(json["b"], true);
+    let err = eval_fails(r#"a = Map(1, "one") as Map(this is Typed)"#);
+    assert!(err.contains("this is Typed"), "{err}");
+}
+
+#[test]
+fn long_alias_chain_is_a_valid_supertype() {
+    let json = eval(
+        "open class Foo { value = 7 }\ntypealias A1 = Foo\ntypealias A2 = A1\ntypealias A3 = A2\ntypealias A4 = A3\ntypealias A5 = A4\ntypealias A6 = A5\ntypealias A7 = A6\ntypealias A8 = A7\ntypealias A9 = A8\ntypealias A10 = A9\ntypealias A11 = A10\ntypealias A12 = A11\ntypealias A13 = A12\ntypealias A14 = A13\ntypealias A15 = A14\ntypealias A16 = A15\ntypealias A17 = A16\ntypealias A18 = A17\ntypealias A19 = A18\ntypealias A20 = A19\nclass Baz extends A20 {}\nx = new Baz {}.value\n",
+    );
+    assert_eq!(json["x"], 7);
+}
+
+#[test]
+fn alias_target_resolves_where_the_alias_is_declared() {
+    let json = eval(
+        "open class Base { v = 1 }\ntypealias Parent = Base\nclass Child extends Parent {}\nx = new Child {}.v\n",
+    );
+    assert_eq!(json["x"], 1);
+    let err = eval_fails("typealias A = B\ntypealias B = A\nclass C extends A\n");
+    assert!(err.contains("must not be cyclic"), "{err}");
+}
+
+#[test]
+fn class_instance_defers_a_member_that_reads_an_unset_property() {
+    let json = eval(
+        r#"
+class App { m: Int; x = m + 1 }
+local base = new App {}
+result = (base) { m = 3 }
+"#,
+    );
+    assert_eq!(json["result"]["m"], 3);
+    assert_eq!(json["result"]["x"], 4);
+    let err = eval_fails("class App { m: Int; x = m + 1 }\nr = new App {}.x\n");
+    assert!(err.contains("`x`") || err.contains("`m`"), "{err}");
+}
+
+#[test]
+fn member_reading_a_hidden_unset_property_reports_the_read() {
+    let err = eval_fails("class App { hidden m: Int; x = m + 1 }\nr = new App {}\n");
+    assert!(
+        err.contains("Tried to read property `m` but its value is undefined"),
+        "{err}"
+    );
+    let json = eval(
+        r#"
+class App { hidden m: Int; x = m + 1 }
+local base = new App {}
+result = (base) { m = 3 }
+"#,
+    );
+    assert_eq!(json["result"]["x"], 4);
+}
+
+#[test]
+fn deferred_member_reports_the_property_it_read() {
+    let err =
+        eval_fails("class App { hidden a: Int; hidden b: Int; x = b + 1 }\nr = new App {}.x\n");
+    assert!(err.contains("property `b`"), "{err}");
+    let err = eval_fails("class App { hidden a: Int; c: Int; x = c + 1 }\nr = new App { a = 1 }\n");
+    assert!(err.contains("property `c`"), "{err}");
+    let err = eval_fails(
+        "class App { hidden a: Int; c: Int; x = c + 1; y = a }\nr = new App { c = 1 }\n",
+    );
+    assert!(err.contains("property `a`"), "{err}");
+    let json =
+        eval("class App { hidden a: Int; hidden b: Int; x = b + 1 }\nr = new App { b = 1 }\n");
+    assert_eq!(json["r"]["x"], 2);
+}
