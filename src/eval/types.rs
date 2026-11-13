@@ -1305,10 +1305,10 @@ pub(super) fn error_type_expr(ty: &crate::parser::TypeExpr) -> String {
             format!("{}<{}>", name.trim_start_matches('*'), args.join(", "))
         }
         // pkl names the class of a constrained generic, without its arguments.
-        TypeExpr::Constrained(base, _, _) => {
+        TypeExpr::Constrained(base, _, form) => {
             let base = base.trim_start_matches('*');
             // A literal type (`"<"`) or a quoted name is not a generic.
-            let generic = if base.starts_with(['"', '`']) {
+            let generic = if base.starts_with('"') || matches!(form, BaseForm::Quoted) {
                 None
             } else {
                 base.split_once('<')

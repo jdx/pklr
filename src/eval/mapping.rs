@@ -530,8 +530,8 @@ pub(super) fn mapping_value_type_from_name(name: &str) -> Option<String> {
     let mut depth = 0usize;
     for (index, ch) in inner.char_indices() {
         match ch {
-            '<' => depth += 1,
-            '>' => depth = depth.saturating_sub(1),
+            '<' | '(' => depth += 1,
+            '>' | ')' => depth = depth.saturating_sub(1),
             ',' if depth == 0 => {
                 let value_type = inner[index + 1..].trim();
                 return Some(

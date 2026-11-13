@@ -211,3 +211,16 @@ fn list_single_rest_and_or_null_members() {
         "{error}"
     );
 }
+
+// Expectation compared with `pkl eval` 0.32.2.
+#[test]
+fn constrained_mapping_keeps_value_defaults_with_a_comma_in_its_key_constraint() {
+    let json = eval(
+        r#"
+class Node { x = 1 }
+class H { m: Mapping<String(length.isBetween(1, 3)), Node>(true) }
+h = new H { m { ["a"] {} } }
+"#,
+    );
+    assert_eq!(json["h"]["m"]["a"]["x"], 1);
+}
