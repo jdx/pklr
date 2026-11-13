@@ -805,7 +805,12 @@ impl Evaluator {
                     // Bind every local in declaration order so later locals and
                     // entries can reference it (e.g. a non-lambda local that
                     // calls a lambda local defined just above it).
-                    let val = self.eval_expr(expr, &entry_scope, depth)?;
+                    let mixin = prop
+                        .type_ann
+                        .as_ref()
+                        .and_then(|ty| crate::parser::mixin_typed_new(expr, ty));
+                    let val =
+                        self.eval_expr(mixin.as_ref().unwrap_or(expr), &entry_scope, depth)?;
                     entry_scope.declare(&prop.name, val);
                     if matches!(expr, crate::parser::Expr::Lambda(..)) {
                         // Lambda evaluation only captures the current scope; it

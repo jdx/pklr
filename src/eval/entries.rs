@@ -104,7 +104,11 @@ impl Evaluator {
             let mut value = match &prop.type_ann {
                 Some(ty) if parser::has_untyped_result_new(expr) && !type_is_any(ty) => {
                     let mut inferred = expr.clone();
-                    parser::infer_method_return_new(&mut inferred, ty);
+                    if let Some(mixin) = parser::mixin_typed_new(expr, ty) {
+                        inferred = mixin;
+                    } else {
+                        parser::infer_method_return_new(&mut inferred, ty);
+                    }
                     self.eval_expr(&inferred, scope, depth)?
                 }
                 _ => self.eval_expr(expr, scope, depth)?,
@@ -881,20 +885,28 @@ impl Evaluator {
                         match const_message {
                             Some(message) => Err(Error::Eval(message)),
                             None => {
-                                self.eval_expr(expr, &active_scope, cx.depth)
-                                    .and_then(|value| {
-                                        // A declared type is checked when the local
-                                        // is read, so a mismatch poisons it.
-                                        match &prop.type_ann {
-                                            Some(ty) => self.check_local_value(
-                                                value,
-                                                ty,
-                                                &active_scope,
-                                                cx.depth,
-                                            ),
-                                            None => Ok(value),
-                                        }
-                                    })
+                                let mixin = prop
+                                    .type_ann
+                                    .as_ref()
+                                    .and_then(|ty| parser::mixin_typed_new(expr, ty));
+                                self.eval_expr(
+                                    mixin.as_ref().unwrap_or(expr),
+                                    &active_scope,
+                                    cx.depth,
+                                )
+                                .and_then(|value| {
+                                    // A declared type is checked when the local
+                                    // is read, so a mismatch poisons it.
+                                    match &prop.type_ann {
+                                        Some(ty) => self.check_local_value(
+                                            value,
+                                            ty,
+                                            &active_scope,
+                                            cx.depth,
+                                        ),
+                                        None => Ok(value),
+                                    }
+                                })
                             }
                         }
                     };

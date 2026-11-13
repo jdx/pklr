@@ -1986,6 +1986,20 @@ fn pcf_converters_skip_pair_members_and_tell_map_from_mapping() {
     );
 }
 
+#[test]
+fn untyped_new_for_a_mixin_typed_local_is_a_mixin() {
+    let json = eval(
+        r#"local m: Mixin<Dynamic> = new { a = 1 }
+x = (new Dynamic { b = 0 } |> m).a
+y = new Mapping {
+  local n: Mixin<ValueRenderer> = new { converters { [String] = (s) -> "y" } }
+  ["k"] = (new PcfRenderer {} |> n).converters.length
+}["k"]"#,
+    );
+    assert_eq!(json["x"], 1);
+    assert_eq!(json["y"], 1);
+}
+
 #[cfg(feature = "native-io")]
 #[test]
 fn amending_a_module_does_not_repeat_the_elements_of_an_inherited_member() {

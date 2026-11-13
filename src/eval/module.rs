@@ -1732,8 +1732,13 @@ impl Evaluator {
                         if has_modifier(&prop.modifiers, Modifier::Local)
                             && prop.value.is_some() =>
                     {
+                        let value_expr = prop.value.as_ref().unwrap();
+                        let mixin = prop
+                            .type_ann
+                            .as_ref()
+                            .and_then(|ty| crate::parser::mixin_typed_new(value_expr, ty));
                         let evaluated = self
-                            .eval_expr(prop.value.as_ref().unwrap(), scope, depth)
+                            .eval_expr(mixin.as_ref().unwrap_or(value_expr), scope, depth)
                             .and_then(|value| {
                                 // A declared type is checked when the local is
                                 // read, so a mismatch poisons it.
