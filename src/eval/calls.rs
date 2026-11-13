@@ -12,10 +12,10 @@ impl Evaluator {
         }
         // A module body binds `this` to a source-less object that does not
         // name its class; the module does.
-        let receiver = if matches!(scope.get("this"), Some(Value::Object(_, Some(_)))) {
-            "this"
-        } else {
+        let receiver = if matches!(scope.get("this"), Some(Value::Object(_, None)) | None) {
             "module"
+        } else {
+            "this"
         };
         let call = Expr::Field(Box::new(Expr::Ident(receiver.into())), "getClass".into());
         self.eval_call(&call, &[], scope, depth)
